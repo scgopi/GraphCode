@@ -58,6 +58,8 @@ pub const Action = enum {
     remote_project_info,
     close_project,
     remove_project,
+    move_project,
+    trash_project,
     delete_project_loops,
     new_quick_chat,
 };
@@ -66,7 +68,7 @@ pub const Callback = *const fn (?*anyopaque, Action, Target) void;
 
 pub fn requiresConfirmation(action: Action) bool {
     return action == .delete_node or action == .delete_edge or action == .delete_quick_chat or
-        action == .remove_project or action == .delete_project_loops;
+        action == .remove_project or action == .trash_project or action == .delete_project_loops;
 }
 
 pub fn shouldApply(action: Action, confirmed: bool) bool {
@@ -103,6 +105,8 @@ const ids = struct {
     const remote_project_info = 5145;
     const close_project = 5146;
     const remove_project = 5147;
+    const move_project = 5149;
+    const trash_project = 5151;
     const delete_project_loops = 5148;
     const new_quick_chat = 5150;
 };
@@ -132,6 +136,10 @@ pub fn show(
                 append(menu, ids.reveal_project, "Show in Explorer");
             separator(menu);
             append(menu, ids.close_project, "Close Project");
+            if (!project.remote) {
+                append(menu, ids.move_project, "Move Project...");
+                append(menu, ids.trash_project, "Move to Recycle Bin...");
+            }
             append(menu, ids.remove_project, "Remove from GraphCode...");
             append(menu, ids.delete_project_loops, "Delete All Loops...");
         },
@@ -212,6 +220,8 @@ fn actionForCommand(command: c_int) Action {
         ids.remote_project_info => .remote_project_info,
         ids.close_project => .close_project,
         ids.remove_project => .remove_project,
+        ids.move_project => .move_project,
+        ids.trash_project => .trash_project,
         ids.delete_project_loops => .delete_project_loops,
         ids.new_quick_chat => .new_quick_chat,
         else => .none,
@@ -264,6 +274,7 @@ test "destructive context actions cannot bypass a cancelled confirmation" {
     try std.testing.expect(!shouldApply(.delete_edge, false));
     try std.testing.expect(!shouldApply(.delete_quick_chat, false));
     try std.testing.expect(!shouldApply(.remove_project, false));
+    try std.testing.expect(!shouldApply(.trash_project, false));
     try std.testing.expect(!shouldApply(.delete_project_loops, false));
     try std.testing.expect(shouldApply(.rename_node, false));
 }
@@ -295,5 +306,7 @@ test "project context commands expose ingress management and safe destructive ac
     try std.testing.expectEqual(Action.open_project, actionForCommand(ids.open_project));
     try std.testing.expectEqual(Action.project_settings, actionForCommand(ids.project_settings));
     try std.testing.expectEqual(Action.remove_project, actionForCommand(ids.remove_project));
+    try std.testing.expectEqual(Action.move_project, actionForCommand(ids.move_project));
+    try std.testing.expectEqual(Action.trash_project, actionForCommand(ids.trash_project));
     try std.testing.expectEqual(Action.delete_project_loops, actionForCommand(ids.delete_project_loops));
 }

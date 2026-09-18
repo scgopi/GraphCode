@@ -773,6 +773,11 @@ class Node final : public IRawElementProviderSimple,
       const int parent = row.parent;
       const wchar_t *prefix =
           row.identity.rfind("sidebar-section:", 0) == 0 ? L"sidebar-section-" :
+          row.identity.rfind("needs-you-header:", 0) == 0 ? L"needs-you-header-" :
+          row.identity.rfind("needs-you-row:", 0) == 0 ? L"needs-you-row-" :
+          row.identity.rfind("activity-header:", 0) == 0 ? L"activity-header-" :
+          row.identity.rfind("activity-row:", 0) == 0 ? L"activity-row-" :
+          row.identity.rfind("activity-control:", 0) == 0 ? L"activity-control-" :
           row.identity.rfind("project-new-loop:", 0) == 0 ? L"project-new-loop-" :
           row.identity.rfind("project-disclosure:", 0) == 0 ? L"project-disclosure-" :
           row.identity.rfind("quick-chats-header:", 0) == 0 ? L"quick-chats-header-" :
@@ -801,6 +806,9 @@ class Node final : public IRawElementProviderSimple,
       const Row &row = state_->rows.at(id_);
       const bool action =
           row.identity.rfind("sidebar-section:", 0) == 0 ||
+          row.identity.rfind("needs-you-header:", 0) == 0 ||
+          row.identity.rfind("activity-header:", 0) == 0 ||
+          row.identity.rfind("activity-control:", 0) == 0 ||
           row.identity.rfind("project-new-loop:", 0) == 0 ||
           row.identity.rfind("project-disclosure:", 0) == 0 ||
           row.identity.rfind("quick-chats-header:", 0) == 0 ||

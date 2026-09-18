@@ -22,11 +22,15 @@ pub const Node = struct {
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
     subgraph_json: []u8 = &.{},
+    created_at: i64 = 0,
 };
 
 pub const ActivityEvent = struct {
     title: []u8,
     state: []u8,
+    project_path: []u8 = &.{},
+    node_id: []u8 = &.{},
+    timestamp: i64 = 0,
 };
 
 pub const QuickChat = struct {
@@ -179,6 +183,8 @@ pub const Model = struct {
         for (self.activity.items) |event| {
             self.allocator.free(event.title);
             self.allocator.free(event.state);
+            self.allocator.free(event.project_path);
+            self.allocator.free(event.node_id);
         }
         self.activity.deinit();
         for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
@@ -887,16 +893,37 @@ pub const Model = struct {
                 self.allocator.free(title);
                 continue;
             };
-            const event = ActivityEvent{ .title = title, .state = state };
+            const project_path = self.allocator.dupe(u8, next.project.path) catch {
+                self.allocator.free(title);
+                self.allocator.free(state);
+                continue;
+            };
+            const node_id = self.allocator.dupe(u8, node.id) catch {
+                self.allocator.free(title);
+                self.allocator.free(state);
+                self.allocator.free(project_path);
+                continue;
+            };
+            const event = ActivityEvent{
+                .title = title,
+                .state = state,
+                .project_path = project_path,
+                .node_id = node_id,
+                .timestamp = std.time.timestamp(),
+            };
             self.activity.insert(0, event) catch {
                 self.allocator.free(event.title);
                 self.allocator.free(event.state);
+                self.allocator.free(event.project_path);
+                self.allocator.free(event.node_id);
                 continue;
             };
             if (self.activity.items.len > 32) {
                 const removed = self.activity.pop() orelse continue;
                 self.allocator.free(removed.title);
                 self.allocator.free(removed.state);
+                self.allocator.free(removed.project_path);
+                self.allocator.free(removed.node_id);
             }
         }
     }
@@ -989,6 +1016,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
         .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
         .subgraph_json = try allocator.dupe(u8, node.subgraph_json),
+        .created_at = node.created_at,
     };
 }
 
@@ -1047,6 +1075,7 @@ fn decodeNodes(
             .model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", ""),
             .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
             .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
+            .created_at = @intFromFloat(jsonFloat(scalar_object, "createdAt") orelse 0),
             .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
             .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
             .subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph"),

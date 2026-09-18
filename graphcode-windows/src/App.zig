@@ -132,6 +132,10 @@ const UiaDynamicTarget = union(enum) {
     quick_chats_header,
     quick_chats_disclosure,
     new_quick_chat,
+    needs_you_header,
+    needs_you: usize,
+    activity_header,
+    activity: usize,
     recent_project: []const u8,
     open_project: []const u8,
     project_new_loop: []const u8,
@@ -1746,6 +1750,15 @@ pub const App = struct {
                         self.client.sendForgetProject(stable.path);
                         self.setStatus("Removing project from GraphCode...");
                     },
+                    .move_project => self.revealProjectPath(stable.path),
+                    .trash_project => {
+                        if (!GraphContextMenu.confirm(
+                            self.window.hwnd,
+                            "Move Project to Recycle Bin",
+                            "Move this project folder to the Windows Recycle Bin?\n\nThe project will also be removed from GraphCode.",
+                        )) return;
+                        self.trashProjectPath(stable.path);
+                    },
                     .delete_project_loops => {
                         self.deleteProjectLoops(stable.path);
                     },
@@ -1871,6 +1884,35 @@ pub const App = struct {
             c.SW_SHOWNORMAL,
         );
         self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open Explorer" else "Opened project in Explorer");
+    }
+
+    fn trashProjectPath(self: *App, path: []const u8) void {
+        const raw = std.unicode.utf8ToUtf16LeAlloc(self.allocator, path) catch {
+            self.setStatus("Unable to encode project path");
+            return;
+        };
+        defer self.allocator.free(raw);
+        const from = self.allocator.alloc(u16, raw.len + 2) catch return;
+        defer self.allocator.free(from);
+        @memcpy(from[0..raw.len], raw);
+        from[raw.len] = 0;
+        from[raw.len + 1] = 0;
+        var operation: c.SHFILEOPSTRUCTW = .{
+            .hwnd = self.window.hwnd,
+            .wFunc = c.FO_DELETE,
+            .pFrom = from.ptr,
+            .pTo = null,
+            .fFlags = c.FOF_ALLOWUNDO | c.FOF_NOCONFIRMATION | c.FOF_SILENT,
+            .fAnyOperationsAborted = 0,
+            .hNameMappings = null,
+            .lpszProgressTitle = null,
+        };
+        if (c.SHFileOperationW(&operation) != 0 or operation.fAnyOperationsAborted != 0) {
+            self.setStatus("Project was not moved to the Recycle Bin");
+            return;
+        }
+        self.client.sendForgetProject(path);
+        self.setStatus("Project moved to the Recycle Bin");
     }
 
     fn showRemoteProjectInfo(self: *App, path: []const u8) void {
@@ -3081,6 +3123,36 @@ pub const App = struct {
                 else => {},
             }
         }
+        if (self.model.attention_entries.items.len != 0) {
+            const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
+            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1,
+                .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
+            for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
+                const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
+                defer self.allocator.free(identity);
+                const name = std.fmt.allocPrint(self.allocator, "{s} - {s}", .{ entry.node.title, Sidebar.attentionReason(entry.node) }) catch return;
+                defer self.allocator.free(name);
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1,
+                    .{ .left = 18, .top = section + 30 + @as(i32, @intCast(index * 34)), .right = 232, .bottom = section + 60 + @as(i32, @intCast(index * 34)) },
+                    self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+            }
+        }
+        if (self.model.activity.items.len != 0) {
+            const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
+            const activity_top = section + 30 + @as(i32, @intCast(@min(self.model.attentionCount(), 4) * 34)) + 18;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1,
+                .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
+            for (self.model.activity.items[0..@min(self.model.activity.items.len, 4)], 0..) |event, index| {
+                const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ event.project_path, event.node_id }) catch return;
+                defer self.allocator.free(identity);
+                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1,
+                    .{ .left = 18 + @as(i32, @intCast(index * 116)), .top = activity_top + 24, .right = 130 + @as(i32, @intCast(index * 116)), .bottom = activity_top + 58 }, false, true) catch return;
+            }
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1,
+                .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1,
+                .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
+        }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
                 if (self.model.open_composite_id) |parent_id| {
@@ -3195,6 +3267,8 @@ pub const App = struct {
             .{ .identity = "quick-chats-header:quick-chats", .target = .quick_chats_header },
             .{ .identity = "quick-chats-disclosure:quick-chats", .target = .quick_chats_disclosure },
             .{ .identity = "quick-chat-new:quick-chats", .target = .new_quick_chat },
+            .{ .identity = "needs-you-header:needs-you", .target = .needs_you_header },
+            .{ .identity = "activity-header:activity", .target = .activity_header },
         };
         for (static_targets) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) target = candidate.target;
@@ -3284,6 +3358,30 @@ pub const App = struct {
                 target = .{ .quick_chat = chat.id };
             }
         }
+        for (self.model.attention_entries.items, 0..) |entry, index| {
+            const identity = std.fmt.allocPrint(self.allocator, "needs-you-row:{s}:{s}", .{ entry.project_path, entry.node.id }) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .needs_you = index };
+            }
+        }
+        for (self.model.activity.items, 0..) |event, index| {
+            const identity = std.fmt.allocPrint(self.allocator, "activity-row:{s}:{s}", .{ event.project_path, event.node_id }) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .activity = index };
+            }
+        }
+        for ([_][]const u8{ "scroll-left", "scroll-right" }) |control| {
+            const identity = std.fmt.allocPrint(self.allocator, "activity-control:{s}", .{control}) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .activity = if (std.mem.eql(u8, control, "scroll-left")) 0 else 1 };
+            }
+        }
         const resolved = target orelse return false;
         switch (resolved) {
             .local_section => self.sidebar_state.local_collapsed = !self.sidebar_state.local_collapsed,
@@ -3296,6 +3394,19 @@ pub const App = struct {
             },
             .quick_chats_disclosure => self.sidebar_state.chats_collapsed = !self.sidebar_state.chats_collapsed,
             .new_quick_chat => self.createQuickChat(),
+            .needs_you_header => {},
+            .needs_you => |index| {
+                if (index >= self.model.attention_entries.items.len) return false;
+                const entry = self.model.attention_entries.items[index];
+                if (self.selectProject(entry.project_path)) _ = self.model.setSelectedID(entry.node.id);
+            },
+            .activity_header => {},
+            .activity => |index| {
+                if (index < self.model.activity.items.len) {
+                    const event = self.model.activity.items[index];
+                    if (self.selectProject(event.project_path)) _ = self.model.setSelectedID(event.node_id);
+                }
+            },
             .recent_project => |path| self.openProject(path),
             .open_project => |path| {
                 if (self.selectProject(path)) {
@@ -4033,6 +4144,25 @@ fn onWindowMessage(
                 app.update_lock.unlock();
                 if (Sidebar.updateBannerAt(x, y, routing.canvas.bottom, update_available, app.ingress_error.len != 0)) {
                     app.showCurrentUpdateOffer();
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.attentionRowAt(
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    &app.sidebar_state,
+                    app.sidebar_scroll,
+                )) |attention_index| {
+                    if (attention_index < app.model.attention_entries.items.len) {
+                        const entry = app.model.attention_entries.items[attention_index];
+                        if (app.selectProject(entry.project_path)) {
+                            _ = app.model.setSelectedID(entry.node.id);
+                            app.setStatus("Needs-you loop selected");
+                            app.syncAccessibility();
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        }
+                    }
                     result.* = 0;
                     return true;
                 }

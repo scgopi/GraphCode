@@ -384,6 +384,56 @@ try {
     Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
              ($projectRow.Current.BoundingRectangle.Height -gt 0)) "dynamic project row has empty bounds"
   }
+  $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^needs-you-row-'
+  })
+  $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  })
+  $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-control-'
+  })
+  $needsYouHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^needs-you-header-'
+  })
+  $activityHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-header-'
+  })
+  if ($needsYouRows.Count -gt 0 -or $needsYouHeaders.Count -gt 0) {
+    Require ($needsYouHeaders.Count -eq 1) "Needs-you rows omitted their stable header"
+    Require ($needsYouHeaders[0].Current.Name -eq "Needs you") "Needs-you header name changed"
+  }
+  if ($activityRows.Count -gt 0 -or $activityControls.Count -gt 0 -or $activityHeaders.Count -gt 0) {
+    Require ($activityHeaders.Count -eq 1) "Activity controls omitted their stable header"
+    Require ($activityHeaders[0].Current.Name -eq "Activity") "Activity header name changed"
+  }
+  if ($needsYouRows.Count -gt 0) {
+    Require ($needsYouRows.Count -le 4) "Needs-you exposed more than four sidebar rows"
+    $needsYouIds = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+    Require (($needsYouIds | Where-Object { $_ -notmatch '^needs-you-row-[0-9]+$' }).Count -eq 0) `
+      "Needs-you rows did not use stable dynamic IDs"
+    foreach ($row in $needsYouRows) {
+      Require ($row.Current.Name.Length -gt 0) "Needs-you row omitted its name"
+      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+               ($row.Current.BoundingRectangle.Height -gt 0)) "Needs-you row has empty bounds"
+    }
+  }
+  if ($activityRows.Count -gt 0) {
+    Require ($activityRows.Count -le 4) "Activity exposed more than four sidebar rows"
+    $activityIds = @($activityRows | ForEach-Object { $_.Current.AutomationId })
+    Require (($activityIds | Where-Object { $_ -notmatch '^activity-row-[0-9]+$' }).Count -eq 0) `
+      "Activity rows did not use stable dynamic IDs"
+    foreach ($row in $activityRows) {
+      Require ($row.Current.Name.Length -gt 0) "Activity row omitted its name"
+      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+               ($row.Current.BoundingRectangle.Height -gt 0)) "Activity row has empty bounds"
+    }
+  }
+  foreach ($control in $activityControls) {
+    Require (($control.Current.BoundingRectangle.Width -gt 0) -and
+             ($control.Current.BoundingRectangle.Height -gt 0)) "Activity control has empty bounds"
+    $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
   $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   $null = $projectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $projectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -1653,6 +1703,11 @@ try {
     actionPatterns = @($actions.Keys | Sort-Object)
     surfaceActionPatterns = @($surfaceActionPatterns.Keys | Sort-Object)
     dynamicProjectRows = $projectRowIds
+    needsYouRows = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+    needsYouHeader = @($needsYouHeaders | ForEach-Object { $_.Current.AutomationId })
+    activityRows = @($activityRows | ForEach-Object { $_.Current.AutomationId })
+    activityHeader = @($activityHeaders | ForEach-Object { $_.Current.AutomationId })
+    activityControls = @($activityControls | ForEach-Object { $_.Current.AutomationId })
     dynamicLoopRows = $loopIds
     dynamicProjectCards = $projectCardIds
     dynamicQuickChatCards = $quickChatCardIds
