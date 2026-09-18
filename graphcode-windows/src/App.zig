@@ -411,9 +411,9 @@ pub const App = struct {
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
         defer if (uia_gate) |value| self.allocator.free(value);
         if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1")) {
-        self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
-        if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
-        if (self.workspace) |workspace| try workspace.startInputWorker();
+            self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+            if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
+            if (self.workspace) |workspace| try workspace.startInputWorker();
         }
         self.layoutWorkspace();
         if (!envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) self.requestUpdateCheck(false);
@@ -1226,33 +1226,33 @@ pub const App = struct {
     }
 
     fn requestUpdateCheck(self: *App, user_initiated: bool) void {
-            self.update_lock.lock();
-            self.update_generation += 1;
-            self.update_user_initiated = user_initiated;
-            self.update_pending = true;
-            if (self.update_thread != null) {
-                self.update_cancel.store(true, .release);
-                self.update_lock.unlock();
-                return;
-            }
-            self.update_pending = false;
-            self.update_cancel.store(false, .release);
+        self.update_lock.lock();
+        self.update_generation += 1;
+        self.update_user_initiated = user_initiated;
+        self.update_pending = true;
+        if (self.update_thread != null) {
+            self.update_cancel.store(true, .release);
             self.update_lock.unlock();
-            self.launchUpdateCheck();
+            return;
+        }
+        self.update_pending = false;
+        self.update_cancel.store(false, .release);
+        self.update_lock.unlock();
+        self.launchUpdateCheck();
     }
 
     fn launchUpdateCheck(self: *App) void {
+        self.update_lock.lock();
+        self.update_done = false;
+        self.update_cancel.store(false, .release);
+        self.update_lock.unlock();
+        self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
             self.update_lock.lock();
-            self.update_done = false;
-            self.update_cancel.store(false, .release);
+            self.update_done = true;
             self.update_lock.unlock();
-            self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
-                self.update_lock.lock();
-                self.update_done = true;
-                self.update_lock.unlock();
-                self.setStatus("Update check could not start");
-                return;
-            };
+            self.setStatus("Update check could not start");
+            return;
+        };
     }
 
     fn updateWorker(self: *App) void {
@@ -1293,28 +1293,28 @@ pub const App = struct {
     }
 
     fn finishUpdateCheck(self: *App) void {
+        self.update_lock.lock();
+        const done = self.update_done;
+        self.update_lock.unlock();
+        if (!done) return;
+        if (self.update_thread) |thread| {
+            thread.join();
+            self.update_thread = null;
             self.update_lock.lock();
-            const done = self.update_done;
+            const pending = self.update_pending;
+            self.update_pending = false;
+            const label = self.update_state.label();
+            const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
+            const version = self.update_version;
+            const release_url = self.update_release_url;
             self.update_lock.unlock();
-            if (!done) return;
-            if (self.update_thread) |thread| {
-                thread.join();
-                self.update_thread = null;
-                self.update_lock.lock();
-                const pending = self.update_pending;
-                self.update_pending = false;
-                const label = self.update_state.label();
-                const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
-                const version = self.update_version;
-                const release_url = self.update_release_url;
-                self.update_lock.unlock();
-                if (pending) {
-                    self.launchUpdateCheck();
-                } else {
-                    self.setStatus(label);
-                    if (present_offer) self.showAvailableUpdate(version, release_url);
-                }
+            if (pending) {
+                self.launchUpdateCheck();
+            } else {
+                self.setStatus(label);
+                if (present_offer) self.showAvailableUpdate(version, release_url);
             }
+        }
     }
 
     fn showAvailableUpdate(self: *App, version: []const u8, release_url: []const u8) void {
@@ -1987,7 +1987,6 @@ pub const App = struct {
             for (graph.nodes.items) |node| {
                 if (node.worktree_path.len != 0) bindings.append(.{ .path = node.worktree_path }) catch {};
             }
-
         }
         const inspection = WorktreeStatus.inspect(self.allocator, path, bindings.items) catch |err| {
             self.setStatus(switch (err) {
@@ -2159,7 +2158,10 @@ pub const App = struct {
         }) catch return;
         self.worktree_inspection = inspection;
         self.worktree_dialog = WorktreeDialog.Dialog.init(
-            self.allocator, project, inspection.entries.items, .{ .allow_reclaim = true },
+            self.allocator,
+            project,
+            inspection.entries.items,
+            .{ .allow_reclaim = true },
         ) catch null;
         if (envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) {
             self.update_lock.lock();
@@ -2228,7 +2230,12 @@ pub const App = struct {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
         const removed = WorktreeStatus.reclaimSelectedWithPolicy(
-            self.allocator, path, selected_list.items, bindings.items, policy, true,
+            self.allocator,
+            path,
+            selected_list.items,
+            bindings.items,
+            policy,
+            true,
         ) catch |err| {
             self.reclaim_confirmation_armed = false;
             self.setStatus(switch (err) {
@@ -3125,33 +3132,26 @@ pub const App = struct {
         }
         if (self.model.attention_entries.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
-            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1,
-                .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
             for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
                 defer self.allocator.free(identity);
                 const name = std.fmt.allocPrint(self.allocator, "{s} - {s}", .{ entry.node.title, Sidebar.attentionReason(entry.node) }) catch return;
                 defer self.allocator.free(name);
-                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1,
-                    .{ .left = 18, .top = section + 30 + @as(i32, @intCast(index * 34)), .right = 232, .bottom = section + 60 + @as(i32, @intCast(index * 34)) },
-                    self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + @as(i32, @intCast(index * 34)), .right = 232, .bottom = section + 60 + @as(i32, @intCast(index * 34)) }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
             }
         }
         if (self.model.activity.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
             const activity_top = section + 30 + @as(i32, @intCast(@min(self.model.attentionCount(), 4) * 34)) + 18;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1,
-                .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
             for (self.model.activity.items[0..@min(self.model.activity.items.len, 4)], 0..) |event, index| {
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ event.project_path, event.node_id }) catch return;
                 defer self.allocator.free(identity);
-                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1,
-                    .{ .left = 18 + @as(i32, @intCast(index * 116)), .top = activity_top + 24, .right = 130 + @as(i32, @intCast(index * 116)), .bottom = activity_top + 58 }, false, true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1, .{ .left = 18 + @as(i32, @intCast(index * 116)), .top = activity_top + 24, .right = 130 + @as(i32, @intCast(index * 116)), .bottom = activity_top + 58 }, false, true) catch return;
             }
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1,
-                .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1,
-                .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
         }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
@@ -4001,22 +4001,22 @@ fn onWindowMessage(
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
-                        if (TerminalWorkspace.loopBarActionAt(
-                            rail_left,
-                            Tokens.header_height,
-                            client.right - Tokens.loop_detail_width,
-                            x,
-                            y,
-                            isResolvedLoopState(node.state),
-                        )) |action| {
-                            switch (action) {
-                                .stop => app.stopSelectedNode(),
-                                .show_graph => app.handleAction(.show_graph),
+                            if (TerminalWorkspace.loopBarActionAt(
+                                rail_left,
+                                Tokens.header_height,
+                                client.right - Tokens.loop_detail_width,
+                                x,
+                                y,
+                                isResolvedLoopState(node.state),
+                            )) |action| {
+                                switch (action) {
+                                    .stop => app.stopSelectedNode(),
+                                    .show_graph => app.handleAction(.show_graph),
+                                }
+                                _ = c.InvalidateRect(hwnd, null, 0);
+                                result.* = 0;
+                                return true;
                             }
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
-                        }
                         }
                     }
                 }
@@ -4167,102 +4167,107 @@ fn onWindowMessage(
                     return true;
                 }
                 if (Sidebar.rowAt(
-                    x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
-                    app.sidebar_scroll, workspace_top, &app.sidebar_state,
+                    x,
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    app.sidebar_scroll,
+                    workspace_top,
+                    &app.sidebar_state,
                 )) |row| {
                     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
-                switch (row.kind) {
-                    .local_heading => app.sidebar_state.local_collapsed = !app.sidebar_state.local_collapsed,
-                    .remote_heading => app.sidebar_state.remote_collapsed = !app.sidebar_state.remote_collapsed,
-                    .project => app.openProject(app.model.recent_projects.items[row.index].path),
-                    .open_project => if (row.project_path) |path| {
-                        if (x >= 198 and row.has_children) {
-                            app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
-                            app.clampSidebarScroll();
-                            app.syncAccessibility();
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
-                        }
-                        if (x >= 174 and x < 198) {
-                            if (app.selectProject(path)) app.createNode();
-                            result.* = 0;
-                            return true;
-                        }
-                        if (app.selectProject(path)) {
-                            app.surface = .project;
-                            app.workspace_controls.panel_visible = false;
-                            app.layoutWorkspace();
-                            app.clearEdgeSelection();
-                            app.rebindWorkspace(path);
-                        }
-                    },
-                    .overview => app.openGlobalOverview(),
-                    .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
-                        if (row.index < graph.nodes.items.len) {
+                    switch (row.kind) {
+                        .local_heading => app.sidebar_state.local_collapsed = !app.sidebar_state.local_collapsed,
+                        .remote_heading => app.sidebar_state.remote_collapsed = !app.sidebar_state.remote_collapsed,
+                        .project => app.openProject(app.model.recent_projects.items[row.index].path),
+                        .open_project => if (row.project_path) |path| {
                             if (x >= 198 and row.has_children) {
-                                app.sidebar_state.toggleNode(graph.nodes.items[row.index].id) catch app.setStatus("Sidebar state could not be updated");
-                                if (app.sidebar_store) |*store| store.save(&app.sidebar_state) catch app.setStatus("Sidebar expansion could not be saved");
+                                app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
                                 app.clampSidebarScroll();
                                 app.syncAccessibility();
                                 _ = c.InvalidateRect(hwnd, null, 0);
                                 result.* = 0;
                                 return true;
                             }
-                            if (!app.selectProject(path)) return true;
-                            app.surface = .workspace;
-                            app.workspace_controls.panel_visible = true;
+                            if (x >= 174 and x < 198) {
+                                if (app.selectProject(path)) app.createNode();
+                                result.* = 0;
+                                return true;
+                            }
+                            if (app.selectProject(path)) {
+                                app.surface = .project;
+                                app.workspace_controls.panel_visible = false;
+                                app.layoutWorkspace();
+                                app.clearEdgeSelection();
+                                app.rebindWorkspace(path);
+                            }
+                        },
+                        .overview => app.openGlobalOverview(),
+                        .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
+                            if (row.index < graph.nodes.items.len) {
+                                if (x >= 198 and row.has_children) {
+                                    app.sidebar_state.toggleNode(graph.nodes.items[row.index].id) catch app.setStatus("Sidebar state could not be updated");
+                                    if (app.sidebar_store) |*store| store.save(&app.sidebar_state) catch app.setStatus("Sidebar expansion could not be saved");
+                                    app.clampSidebarScroll();
+                                    app.syncAccessibility();
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                }
+                                if (!app.selectProject(path)) return true;
+                                app.surface = .workspace;
+                                app.workspace_controls.panel_visible = true;
+                                app.layoutWorkspace();
+                                app.layoutEmptyStateControls();
+                                app.clearEdgeSelection();
+                                app.rebindWorkspace(path);
+                                const selected_graph = app.model.graph orelse return true;
+                                if (row.index >= selected_graph.nodes.items.len) return true;
+                                _ = app.selectNodeIndex(row.index);
+                                if (app.workspace) |workspace| {
+                                    workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
+                                        app.setStatus("Unable to open selected loop");
+                                    };
+                                    workspace.focus(0);
+                                }
+                            }
+                        },
+                        .worktree => if (app.worktree_inspection) |inspection| {
+                            if (ctrl) {
+                                _ = app.toggleWorktreeRow(row.index);
+                            } else {
+                                _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
+                            }
+                            app.ensureWorktreeVisible(row.index);
+                        },
+                        .quick_chat_overview => {
+                            if (x >= 198 and app.model.quick_chats.items.len != 0) {
+                                app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
+                                app.clampSidebarScroll();
+                                app.syncAccessibility();
+                                _ = c.InvalidateRect(hwnd, null, 0);
+                                result.* = 0;
+                                return true;
+                            }
+                            if (x >= 174 and x < 198) {
+                                app.createQuickChat();
+                                result.* = 0;
+                                return true;
+                            }
+                            app.surface = .quick_chats;
+                            app.workspace_controls.panel_visible = false;
                             app.layoutWorkspace();
                             app.layoutEmptyStateControls();
-                            app.clearEdgeSelection();
-                            app.rebindWorkspace(path);
-                            const selected_graph = app.model.graph orelse return true;
-                            if (row.index >= selected_graph.nodes.items.len) return true;
-                            _ = app.selectNodeIndex(row.index);
-                            if (app.workspace) |workspace| {
-                                workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
-                                    app.setStatus("Unable to open selected loop");
-                                };
-                                workspace.focus(0);
-                            }
-                        }
-                    },
-                    .worktree => if (app.worktree_inspection) |inspection| {
-                        if (ctrl) {
-                            _ = app.toggleWorktreeRow(row.index);
-                        } else {
-                            _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
-                        }
-                        app.ensureWorktreeVisible(row.index);
-                    },
-                    .quick_chat_overview => {
-                        if (x >= 198 and app.model.quick_chats.items.len != 0) {
-                            app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
-                            app.clampSidebarScroll();
-                            app.syncAccessibility();
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
-                        }
-                        if (x >= 174 and x < 198) {
-                            app.createQuickChat();
-                            result.* = 0;
-                            return true;
-                        }
-                        app.surface = .quick_chats;
-                        app.workspace_controls.panel_visible = false;
-                        app.layoutWorkspace();
-                        app.layoutEmptyStateControls();
-                    },
-                    .quick_chat => if (row.index < app.model.quick_chats.items.len) {
-                        app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
-                        app.setStatus("Opening quick chat...");
-                    },
-                }
-                app.clampSidebarScroll();
-                app.syncAccessibility();
-                _ = c.InvalidateRect(hwnd, null, 0);
-                result.* = 0;
+                        },
+                        .quick_chat => if (row.index < app.model.quick_chats.items.len) {
+                            app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
+                            app.setStatus("Opening quick chat...");
+                        },
+                    }
+                    app.clampSidebarScroll();
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
                     return true;
                 }
             }

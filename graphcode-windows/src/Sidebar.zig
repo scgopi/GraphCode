@@ -201,11 +201,11 @@ pub fn draw(
             .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 const selected = if (model.selected_project_path) |selected_path|
                     std.mem.eql(u8, selected_path, path)
-                else false;
+                else
+                    false;
                 drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 18, row.top, 9, 0x007A7A7A);
                 drawText(hdc, allocator, if (summary.project.isRemote()) "R" else "L", 31, row.top + 1, 9, 0x007A7A7A);
-                drawText(hdc, allocator, summary.project.name, 44, row.top, 13,
-                    if (selected) 0x00FFFFFF else 0x00D0D0D0);
+                drawText(hdc, allocator, summary.project.name, 44, row.top, 13, if (selected) 0x00FFFFFF else 0x00D0D0D0);
                 if (hover_y >= row.top and hover_y < row.top + 24) {
                     drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
                     if (row.has_children) drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
@@ -232,8 +232,7 @@ pub fn draw(
                 if (selected and WorktreeStatus.decision(entry) == .reclaimable)
                     fill(hdc, rect(12, row.top - 3, Tokens.sidebar_width - 12, row.top + 25), 0x003A3A44);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10,
-                    if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
                 drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 18, row.top, 9, 0x007A7A7A);
@@ -282,7 +281,6 @@ pub fn draw(
                 }
             }
         }
-
     }
     if (ingress_error.len != 0) {
         const bounds = errorFooterRect(viewport_bottom);
@@ -343,24 +341,24 @@ fn attentionContext(model: *const GraphModel.Model, entry: GraphModel.AttentionE
     for (model.graphs.items) |graph| {
         if (std.mem.eql(u8, graph.project.path, entry.project_path)) return graph.project.name;
     }
-
-    pub fn attentionReason(node: GraphModel.Node) []const u8 {
-        if (std.mem.eql(u8, node.state, "failed")) return "Failed — action needed";
-        if (std.mem.eql(u8, node.state, "stalled")) return "Stalled — action needed";
-        if (std.mem.eql(u8, node.presence, "awaitingInput")) return "Awaiting your input";
-        if (std.mem.eql(u8, node.state, "blocked")) return "Blocked — upstream unavailable";
-        return compactState(node.state);
-    }
-
-    fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
-        if (created_at <= 0 or now <= created_at) return allocator.dupe(u8, "—");
-        const seconds = now - created_at;
-        if (seconds < 60) return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
-        if (seconds < 3600) return std.fmt.allocPrint(allocator, "{d}m", .{@divTrunc(seconds, 60)});
-        if (seconds < 86400) return std.fmt.allocPrint(allocator, "{d}h", .{@divTrunc(seconds, 3600)});
-        return std.fmt.allocPrint(allocator, "{d}d", .{@divTrunc(seconds, 86400)});
-    }
     return compactState(entry.node.state);
+}
+
+pub fn attentionReason(node: GraphModel.Node) []const u8 {
+    if (std.mem.eql(u8, node.state, "failed")) return "Failed - action needed";
+    if (std.mem.eql(u8, node.state, "stalled")) return "Stalled - action needed";
+    if (std.mem.eql(u8, node.presence, "awaitingInput")) return "Awaiting your input";
+    if (std.mem.eql(u8, node.state, "blocked")) return "Blocked - upstream unavailable";
+    return compactState(node.state);
+}
+
+fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
+    if (created_at <= 0 or now <= created_at) return allocator.dupe(u8, "-");
+    const seconds = now - created_at;
+    if (seconds < 60) return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+    if (seconds < 3600) return std.fmt.allocPrint(allocator, "{d}m", .{@divTrunc(seconds, 60)});
+    if (seconds < 86400) return std.fmt.allocPrint(allocator, "{d}h", .{@divTrunc(seconds, 3600)});
+    return std.fmt.allocPrint(allocator, "{d}d", .{@divTrunc(seconds, 86400)});
 }
 
 pub fn loopRowTop(project_count: usize, index: usize) i32 {
@@ -848,7 +846,6 @@ test "shared sidebar layout routes every loop row after project rows and scroll"
         try std.testing.expectEqual(RowKind.loop, row.kind);
         try std.testing.expectEqual(index, row.index);
     }
-
 }
 
 test "multi-project rows share render and hit-test offsets with project identity" {
