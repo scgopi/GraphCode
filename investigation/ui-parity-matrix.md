@@ -94,7 +94,7 @@ Statuses:
 | Create chat | Visible New Chat controls | Empty and populated Quick Chats canvases expose the New Chat action in the macOS placements. The live UIA gate invokes the populated canvas action and the sidebar/header action; the existing empty-state walkthrough invokes the centered empty-state action | Validated |
 | Rename chat | Single title prompt from row/card | Uses a dedicated single-title modal from the card/keyboard action, trims input, and rejects empty titles | Validated |
 | Delete chat | Named confirmation explaining session/scrollback deletion | Uses a named warning that explains terminal-session and scrollback removal, defaults to cancellation, and only sends deletion after confirmation | Validated |
-| Chat workspace | Opens a persistent terminal workspace | Opening a Quick Chat now exposes a bounded, selected `Quick Chat terminal workspace` UIA surface while the existing terminal panel remains persistent. Focused implementation and accessibility checks pass; the broader UIA walkthrough remains timing-sensitive and can stop at the existing project-row/New Loop or Quick Chat workspace assertion even though the implementation is stable | Validated |
+| Chat workspace | Opens a persistent terminal workspace | Opening a Quick Chat now exposes a bounded, selected `Quick Chat terminal workspace` UIA surface while the existing terminal panel remains persistent. The full native UIA walkthrough verifies the card invocation and workspace transition without duplicating loop-workspace implementation | Validated |
 
 ## Loop terminal workspace
 
