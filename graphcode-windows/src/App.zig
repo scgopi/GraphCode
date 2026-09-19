@@ -4481,6 +4481,29 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_ACTIVATE => {
+            // DefWindowProc's default WM_ACTIVATE handling restores keyboard focus to whichever
+            // child HWND last held it -- which can be a hidden terminal surface, since that child
+            // (not this top-level window) is what actually receives OS focus when winghostty grabs
+            // it. Run default processing first so unrelated activation bookkeeping still happens,
+            // then reassert our own focus policy so a hidden workspace terminal can never win that
+            // restoration race and keep stealing focus away from the rest of the app's chrome.
+            const activated = (wparam & 0xffff) != c.WA_INACTIVE;
+            result.* = c.DefWindowProcW(hwnd, message, wparam, lparam);
+            if (activated) {
+                if (app.workspace) |workspace| {
+                    if (app.surface == .workspace or app.workspace_controls.panel_visible) {
+                        workspace.focus(workspace.active_surface);
+                    } else {
+                        workspace.blurAll();
+                        _ = c.SetFocus(hwnd);
+                    }
+                } else {
+                    _ = c.SetFocus(hwnd);
+                }
+            }
+            return true;
+        },
         c.WM_CLOSE => {
             if (app.exit_requested) {
                 _ = c.DestroyWindow(hwnd);
