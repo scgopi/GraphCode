@@ -2823,9 +2823,14 @@ pub const App = struct {
                 panel_height,
             );
             // When the workspace has no visible presence at all (neither the full surface nor the
-            // picture-in-picture panel), release focus from any live terminal surface so it can't
-            // keep holding native Win32 keyboard focus away from the rest of the app's chrome.
-            if (!full_workspace and panel_height == 0) workspace.blurAll();
+            // picture-in-picture panel), release focus from any live terminal surface and hand
+            // native Win32 keyboard focus back to the main window so a terminal can't keep
+            // holding OS focus/foreground away from the rest of the app's chrome.
+            if (!full_workspace and panel_height == 0) {
+                workspace.blurAll();
+                _ = c.SetForegroundWindow(self.window.hwnd);
+                _ = c.SetFocus(self.window.hwnd);
+            }
         }
     }
 
