@@ -4549,7 +4549,13 @@ fn onWindowMessage(
             if (app.model.graph) |graph| {
                 var client: c.RECT = undefined;
                 _ = c.GetClientRect(hwnd, &client);
-                const canvas_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                const canvas_render_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                const canvas_bounds = c.RECT{
+                    .left = canvas_render_bounds.left,
+                    .top = canvas_render_bounds.top,
+                    .right = canvas_render_bounds.right,
+                    .bottom = canvas_render_bounds.bottom,
+                };
                 const next_connector = GraphCanvas.hitTestConnector(graph.nodes.items, hover_x, hover_y, &app.canvas, canvas_bounds);
                 if (next_connector != app.canvas.hovered_connector) {
                     app.canvas.hovered_connector = next_connector;
