@@ -11,6 +11,7 @@ pub const State = struct {
     chats_collapsed: bool = false,
     collapsed_projects: std.StringHashMapUnmanaged(void) = .empty,
     expanded_nodes: std.StringHashMapUnmanaged(void) = .empty,
+    root_order: std.ArrayListUnmanaged([]u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) State {
         return .{ .allocator = allocator };
@@ -19,6 +20,8 @@ pub const State = struct {
     pub fn deinit(self: *State) void {
         freeSet(self.allocator, &self.collapsed_projects);
         freeSet(self.allocator, &self.expanded_nodes);
+        for (self.root_order.items) |id| self.allocator.free(id);
+        self.root_order.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -43,11 +46,30 @@ pub const State = struct {
         self.expanded_nodes = .empty;
     }
 
+    pub fn reorderRoots(self: *State, roots: []const []const u8) !void {
+        var seen = std.StringHashMapUnmanaged(void){};
+        defer freeSet(self.allocator, &seen);
+        for (roots) |root| {
+            if (root.len == 0 or seen.contains(root)) return error.InvalidRootOrder;
+            try seen.put(self.allocator, try self.allocator.dupe(u8, root), {});
+        }
+        var next: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (next.items) |id| self.allocator.free(id);
+            next.deinit(self.allocator);
+        }
+        for (roots) |root| try next.append(self.allocator, try self.allocator.dupe(u8, root));
+        for (self.root_order.items) |id| self.allocator.free(id);
+        self.root_order.deinit(self.allocator);
+        self.root_order = next;
+    }
+
     pub fn encode(self: *const State, allocator: std.mem.Allocator) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
         var iterator = self.expanded_nodes.keyIterator();
         while (iterator.next()) |id| try result.writer(allocator).print("expanded\t{s}\n", .{id.*});
+        for (self.root_order.items) |id| try result.writer(allocator).print("root\t{s}\n", .{id});
         return result.toOwnedSlice(allocator);
     }
 
@@ -58,6 +80,12 @@ pub const State = struct {
             const id = line["expanded\t".len..];
             if (id.len != 0 and !self.expanded_nodes.contains(id))
                 try self.expanded_nodes.put(self.allocator, try self.allocator.dupe(u8, id), {});
+        }
+        var roots = std.mem.splitScalar(u8, data, '\n');
+        while (roots.next()) |line| {
+            if (!std.mem.startsWith(u8, line, "root\t")) continue;
+            const id = line["root\t".len..];
+            if (id.len != 0) try self.root_order.append(self.allocator, try self.allocator.dupe(u8, id));
         }
     }
 };
@@ -173,11 +201,11 @@ pub fn draw(
             .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 const selected = if (model.selected_project_path) |selected_path|
                     std.mem.eql(u8, selected_path, path)
-                else false;
+                else
+                    false;
                 drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 18, row.top, 9, 0x007A7A7A);
                 drawText(hdc, allocator, if (summary.project.isRemote()) "R" else "L", 31, row.top + 1, 9, 0x007A7A7A);
-                drawText(hdc, allocator, summary.project.name, 44, row.top, 13,
-                    if (selected) 0x00FFFFFF else 0x00D0D0D0);
+                drawText(hdc, allocator, summary.project.name, 44, row.top, 13, if (selected) 0x00FFFFFF else 0x00D0D0D0);
                 if (hover_y >= row.top and hover_y < row.top + 24) {
                     drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
                     if (row.has_children) drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
@@ -190,7 +218,10 @@ pub fn draw(
                     if (row.depth != 0) drawText(hdc, allocator, ">", 28 + indent, row.top, 9, 0x006A6A6A);
                     fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
                     drawText(hdc, allocator, node.title, 39 + indent, row.top, 11, 0x00E6E6E6);
-                    drawText(hdc, allocator, compactState(node.state), 168, row.top, 9, stateColor(node.state));
+                    drawText(hdc, allocator, compactState(node.state), 150, row.top, 9, stateColor(node.state));
+                    const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch null;
+                    defer if (elapsed) |value| allocator.free(value);
+                    if (elapsed) |value| drawText(hdc, allocator, value, 168, row.top, 9, 0x008E8E93);
                     if (row.has_children and hover_y >= row.top and hover_y < row.top + 24)
                         drawText(hdc, allocator, if (state.isNodeExpanded(node.id)) "v" else ">", 204, row.top, 9, 0x00B8B8B8);
                 }
@@ -201,8 +232,7 @@ pub fn draw(
                 if (selected and WorktreeStatus.decision(entry) == .reclaimable)
                     fill(hdc, rect(12, row.top - 3, Tokens.sidebar_width - 12, row.top + 25), 0x003A3A44);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10,
-                    if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
                 drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 18, row.top, 9, 0x007A7A7A);
@@ -229,17 +259,29 @@ pub fn draw(
         if (model.attention_entries.items.len != 0) {
             for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)]) |entry| {
                 drawText(hdc, allocator, entry.node.title, 24, attention_y, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, attentionContext(model, entry), 24, attention_y + 15, 9, stateColor(entry.node.state));
+                drawText(hdc, allocator, attentionReason(entry.node), 24, attention_y + 15, 9, stateColor(entry.node.state));
                 attention_y += 34;
             }
         } else {
             for (model.attention.items[0..@min(model.attention.items.len, 4)]) |node| {
                 drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, compactState(node.state), 24, attention_y + 15, 9, stateColor(node.state));
+                drawText(hdc, allocator, attentionReason(node), 24, attention_y + 15, 9, stateColor(node.state));
                 attention_y += 34;
             }
         }
-
+    }
+    if (model.activity.items.len != 0) {
+        const attention_rows = @min(model.attentionCount(), 4);
+        const activity_y = section_y + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
+        drawText(hdc, allocator, "Activity", 18, activity_y, 11, 0x00B8B8B8);
+        var x: i32 = 24;
+        for (model.activity.items[0..@min(model.activity.items.len, 4)]) |event| {
+            const stamp = std.fmt.allocPrint(allocator, "{d}m", .{@max(0, @divTrunc(std.time.timestamp() - event.timestamp, 60))}) catch null;
+            defer if (stamp) |value| allocator.free(value);
+            drawText(hdc, allocator, event.title, x, activity_y + 18, 10, 0x00E6E6E6);
+            drawText(hdc, allocator, stamp orelse "", x, activity_y + 32, 9, stateColor(event.state));
+            x += 116;
+        }
     }
     if (ingress_error.len != 0) {
         const bounds = errorFooterRect(viewport_bottom);
@@ -301,6 +343,23 @@ fn attentionContext(model: *const GraphModel.Model, entry: GraphModel.AttentionE
         if (std.mem.eql(u8, graph.project.path, entry.project_path)) return graph.project.name;
     }
     return compactState(entry.node.state);
+}
+
+pub fn attentionReason(node: GraphModel.Node) []const u8 {
+    if (std.mem.eql(u8, node.state, "failed")) return "Failed - action needed";
+    if (std.mem.eql(u8, node.state, "stalled")) return "Stalled - action needed";
+    if (std.mem.eql(u8, node.presence, "awaitingInput")) return "Awaiting your input";
+    if (std.mem.eql(u8, node.state, "blocked")) return "Blocked - upstream unavailable";
+    return compactState(node.state);
+}
+
+fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
+    if (created_at <= 0 or now <= created_at) return allocator.dupe(u8, "-");
+    const seconds = now - created_at;
+    if (seconds < 60) return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+    if (seconds < 3600) return std.fmt.allocPrint(allocator, "{d}m", .{@divTrunc(seconds, 60)});
+    if (seconds < 86400) return std.fmt.allocPrint(allocator, "{d}h", .{@divTrunc(seconds, 3600)});
+    return std.fmt.allocPrint(allocator, "{d}d", .{@divTrunc(seconds, 86400)});
 }
 
 pub fn loopRowTop(project_count: usize, index: usize) i32 {
@@ -659,6 +718,20 @@ pub fn contentBottom(model: *const GraphModel.Model, inspection: ?*const Worktre
         @as(i32, @intCast(@min(model.attentionCount(), 4))) * 34;
 }
 
+pub fn attentionRowAt(
+    y: i32,
+    model: *const GraphModel.Model,
+    inspection: ?*const WorktreeStatus.Inspection,
+    state: ?*const State,
+    scroll_offset: i32,
+) ?usize {
+    if (model.attentionCount() == 0) return null;
+    const top = sidebarSectionBottom(model, inspection, state) - scroll_offset + 30;
+    if (y < top) return null;
+    const index: usize = @intCast(@divTrunc(y - top, 34));
+    return if (index < @min(model.attentionCount(), 4)) index else null;
+}
+
 pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection, state: ?*const State) i32 {
     var rows = appendRows(std.heap.page_allocator, model, inspection, 0, state) catch return Tokens.header_height;
     defer rows.deinit(std.heap.page_allocator);
@@ -725,6 +798,17 @@ test "worktree row hit testing selects only visible rows" {
     try std.testing.expectEqual(@as(i32, worktreeRowTop(3, 0, 0) - worktreeRowTop(1, 0, 0)), 48);
 }
 
+test "root reorder validates uniqueness and replaces order atomically" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.reorderRoots(&.{ "root-a", "root-b" });
+    try std.testing.expectEqual(@as(usize, 2), state.root_order.items.len);
+    try std.testing.expectEqualStrings("root-a", state.root_order.items[0]);
+    try std.testing.expectError(error.InvalidRootOrder, state.reorderRoots(&.{ "root-a", "root-a" }));
+    try std.testing.expectEqualStrings("root-a", state.root_order.items[0]);
+    try std.testing.expectEqualStrings("root-b", state.root_order.items[1]);
+}
+
 test "shared sidebar layout routes every loop row after project rows and scroll" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
@@ -763,7 +847,6 @@ test "shared sidebar layout routes every loop row after project rows and scroll"
         try std.testing.expectEqual(RowKind.loop, row.kind);
         try std.testing.expectEqual(index, row.index);
     }
-
 }
 
 test "multi-project rows share render and hit-test offsets with project identity" {

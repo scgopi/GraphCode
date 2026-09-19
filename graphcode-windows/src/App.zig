@@ -132,6 +132,10 @@ const UiaDynamicTarget = union(enum) {
     quick_chats_header,
     quick_chats_disclosure,
     new_quick_chat,
+    needs_you_header,
+    needs_you: usize,
+    activity_header,
+    activity: usize,
     recent_project: []const u8,
     open_project: []const u8,
     project_new_loop: []const u8,
@@ -146,6 +150,10 @@ const UiaDynamicTarget = union(enum) {
     },
     active_loop: usize,
     composite_back,
+    reclaim_offer: struct {
+        path: []const u8,
+        action: GraphCanvas.ReclaimAction,
+    },
     quick_chat: []const u8,
     workspace_show_graph,
     workspace_stop,
@@ -1038,6 +1046,35 @@ pub const App = struct {
         self.client.sendRenameNode(project_path, updated_graph.nodes.items[updated_index].id, title_value);
     }
 
+    fn editSelectedNodeDetails(self: *App) void {
+        const graph = self.model.graph orelse return;
+        const index = self.model.selectedIndex() orelse return;
+        if (index >= graph.nodes.items.len) return;
+        const node = graph.nodes.items[index];
+        var update = NativeForms.update(self.window.hwnd, self.allocator, .{
+            .goal_summary = if (node.goal_summary.len == 0) null else node.goal_summary,
+            .goal_predicate = if (node.goal_predicate.len == 0) null else node.goal_predicate,
+            .poll_interval_seconds = node.poll_interval_seconds,
+            .stall_after_seconds = node.stall_after_seconds,
+            .metric_command = if (node.metric_command.len == 0) null else node.metric_command,
+            .metric_direction = if (node.metric_direction.len == 0) null else node.metric_direction,
+            .trigger_prompt = if (node.trigger_prompt.len == 0) null else node.trigger_prompt,
+            .check_description = if (node.check_description.len == 0) null else node.check_description,
+            .model_tier = if (node.model_tier.len == 0) null else node.model_tier,
+        }) catch {
+            self.setStatus("Unable to open node details form");
+            return;
+        } orelse return;
+        defer update.deinit(self.allocator);
+        const current_graph = self.model.graph orelse return;
+        if (!std.mem.eql(u8, current_graph.project.path, graph.project.path)) return;
+        const current_index = GraphModel.findNodeIndexByID(current_graph.nodes.items, node.id) orelse {
+            self.setStatus("Loop changed while editing details");
+            return;
+        };
+        self.client.sendUpdateNodeForm(current_graph.project.path, current_graph.nodes.items[current_index].id, update);
+    }
+
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
@@ -1237,33 +1274,33 @@ pub const App = struct {
     }
 
     fn requestUpdateCheck(self: *App, user_initiated: bool) void {
-            self.update_lock.lock();
-            self.update_generation += 1;
-            self.update_user_initiated = user_initiated;
-            self.update_pending = true;
-            if (self.update_thread != null) {
-                self.update_cancel.store(true, .release);
-                self.update_lock.unlock();
-                return;
-            }
-            self.update_pending = false;
-            self.update_cancel.store(false, .release);
+        self.update_lock.lock();
+        self.update_generation += 1;
+        self.update_user_initiated = user_initiated;
+        self.update_pending = true;
+        if (self.update_thread != null) {
+            self.update_cancel.store(true, .release);
             self.update_lock.unlock();
-            self.launchUpdateCheck();
+            return;
+        }
+        self.update_pending = false;
+        self.update_cancel.store(false, .release);
+        self.update_lock.unlock();
+        self.launchUpdateCheck();
     }
 
     fn launchUpdateCheck(self: *App) void {
+        self.update_lock.lock();
+        self.update_done = false;
+        self.update_cancel.store(false, .release);
+        self.update_lock.unlock();
+        self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
             self.update_lock.lock();
-            self.update_done = false;
-            self.update_cancel.store(false, .release);
+            self.update_done = true;
             self.update_lock.unlock();
-            self.update_thread = std.Thread.spawn(.{}, updateWorker, .{self}) catch {
-                self.update_lock.lock();
-                self.update_done = true;
-                self.update_lock.unlock();
-                self.setStatus("Update check could not start");
-                return;
-            };
+            self.setStatus("Update check could not start");
+            return;
+        };
     }
 
     fn updateWorker(self: *App) void {
@@ -1304,28 +1341,28 @@ pub const App = struct {
     }
 
     fn finishUpdateCheck(self: *App) void {
+        self.update_lock.lock();
+        const done = self.update_done;
+        self.update_lock.unlock();
+        if (!done) return;
+        if (self.update_thread) |thread| {
+            thread.join();
+            self.update_thread = null;
             self.update_lock.lock();
-            const done = self.update_done;
+            const pending = self.update_pending;
+            self.update_pending = false;
+            const label = self.update_state.label();
+            const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
+            const version = self.update_version;
+            const release_url = self.update_release_url;
             self.update_lock.unlock();
-            if (!done) return;
-            if (self.update_thread) |thread| {
-                thread.join();
-                self.update_thread = null;
-                self.update_lock.lock();
-                const pending = self.update_pending;
-                self.update_pending = false;
-                const label = self.update_state.label();
-                const present_offer = self.update_state.shouldPresentOffer(self.update_user_initiated);
-                const version = self.update_version;
-                const release_url = self.update_release_url;
-                self.update_lock.unlock();
-                if (pending) {
-                    self.launchUpdateCheck();
-                } else {
-                    self.setStatus(label);
-                    if (present_offer) self.showAvailableUpdate(version, release_url);
-                }
+            if (pending) {
+                self.launchUpdateCheck();
+            } else {
+                self.setStatus(label);
+                if (present_offer) self.showAvailableUpdate(version, release_url);
             }
+        }
     }
 
     fn showAvailableUpdate(self: *App, version: []const u8, release_url: []const u8) void {
@@ -1761,6 +1798,15 @@ pub const App = struct {
                         self.client.sendForgetProject(stable.path);
                         self.setStatus("Removing project from GraphCode...");
                     },
+                    .move_project => self.revealProjectPath(stable.path),
+                    .trash_project => {
+                        if (!GraphContextMenu.confirm(
+                            self.window.hwnd,
+                            "Move Project to Recycle Bin",
+                            "Move this project folder to the Windows Recycle Bin?\n\nThe project will also be removed from GraphCode.",
+                        )) return;
+                        self.trashProjectPath(stable.path);
+                    },
                     .delete_project_loops => {
                         self.deleteProjectLoops(stable.path);
                     },
@@ -1777,6 +1823,7 @@ pub const App = struct {
                 const index = GraphModel.findNodeIndexByID(graph.nodes.items, stable.id) orelse return;
                 if (!self.selectNodeIndex(index)) return;
                 switch (action) {
+                    .edit_node => self.editSelectedNodeDetails(),
                     .rename_node => self.editSelectedNode(),
                     .stop_node => self.stopSelectedNode(),
                     .delete_node => self.deleteSelectedNode(),
@@ -1888,6 +1935,35 @@ pub const App = struct {
         self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open Explorer" else "Opened project in Explorer");
     }
 
+    fn trashProjectPath(self: *App, path: []const u8) void {
+        const raw = std.unicode.utf8ToUtf16LeAlloc(self.allocator, path) catch {
+            self.setStatus("Unable to encode project path");
+            return;
+        };
+        defer self.allocator.free(raw);
+        const from = self.allocator.alloc(u16, raw.len + 2) catch return;
+        defer self.allocator.free(from);
+        @memcpy(from[0..raw.len], raw);
+        from[raw.len] = 0;
+        from[raw.len + 1] = 0;
+        var operation: c.SHFILEOPSTRUCTW = .{
+            .hwnd = self.window.hwnd,
+            .wFunc = c.FO_DELETE,
+            .pFrom = from.ptr,
+            .pTo = null,
+            .fFlags = c.FOF_ALLOWUNDO | c.FOF_NOCONFIRMATION | c.FOF_SILENT,
+            .fAnyOperationsAborted = 0,
+            .hNameMappings = null,
+            .lpszProgressTitle = null,
+        };
+        if (c.SHFileOperationW(&operation) != 0 or operation.fAnyOperationsAborted != 0) {
+            self.setStatus("Project was not moved to the Recycle Bin");
+            return;
+        }
+        self.client.sendForgetProject(path);
+        self.setStatus("Project moved to the Recycle Bin");
+    }
+
     fn showRemoteProjectInfo(self: *App, path: []const u8) void {
         const message = std.fmt.allocPrint(
             self.allocator,
@@ -1960,7 +2036,6 @@ pub const App = struct {
             for (graph.nodes.items) |node| {
                 if (node.worktree_path.len != 0) bindings.append(.{ .path = node.worktree_path }) catch {};
             }
-
         }
         const inspection = WorktreeStatus.inspect(self.allocator, path, bindings.items) catch |err| {
             self.setStatus(switch (err) {
@@ -2132,7 +2207,10 @@ pub const App = struct {
         }) catch return;
         self.worktree_inspection = inspection;
         self.worktree_dialog = WorktreeDialog.Dialog.init(
-            self.allocator, project, inspection.entries.items, .{ .allow_reclaim = true },
+            self.allocator,
+            project,
+            inspection.entries.items,
+            .{ .allow_reclaim = true },
         ) catch null;
         if (envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) {
             self.update_lock.lock();
@@ -2201,7 +2279,12 @@ pub const App = struct {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
         const removed = WorktreeStatus.reclaimSelectedWithPolicy(
-            self.allocator, path, selected_list.items, bindings.items, policy, true,
+            self.allocator,
+            path,
+            selected_list.items,
+            bindings.items,
+            policy,
+            true,
         ) catch |err| {
             self.reclaim_confirmation_armed = false;
             self.setStatus(switch (err) {
@@ -3108,6 +3191,35 @@ pub const App = struct {
                 else => {},
             }
         }
+        if (self.model.attention_entries.items.len != 0) {
+            const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
+            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
+            for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
+                const row_offset = @as(i32, @intCast(index)) * 34;
+                const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
+                defer self.allocator.free(identity);
+                const name = std.fmt.allocPrint(self.allocator, "{s} - {s}", .{ entry.node.title, Sidebar.attentionReason(entry.node) }) catch return;
+                owned_identities.append(name) catch {
+                    self.allocator.free(name);
+                    return;
+                };
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+            }
+        }
+        if (self.model.activity.items.len != 0) {
+            const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
+            const attention_rows = @min(self.model.attentionCount(), 4);
+            const activity_top = section + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
+            for (self.model.activity.items[0..@min(self.model.activity.items.len, 4)], 0..) |event, index| {
+                const row_offset = @as(i32, @intCast(index)) * 116;
+                const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ event.project_path, event.node_id }) catch return;
+                defer self.allocator.free(identity);
+                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1, .{ .left = 18 + row_offset, .top = activity_top + 24, .right = 130 + row_offset, .bottom = activity_top + 58 }, false, true) catch return;
+            }
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
+        }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
                 if (self.model.open_composite_id) |parent_id| {
@@ -3133,6 +3245,11 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
+                    if (GraphCanvas.hasReclaimOffer(node, if (self.worktree_inspection) |*value| value else null, self.kept_worktree_paths.items)) {
+                        const offer = GraphCanvas.reclaimOfferBounds(bounds);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, offer.reclaim, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "keep", key, "Keep", 4, offer.keep, false, false) catch return;
+                    }
                 }
                 if (self.surface == .workspace) {
                     if (self.workspace) |workspace| {
@@ -3251,6 +3368,8 @@ pub const App = struct {
             .{ .identity = "quick-chats-header:quick-chats", .target = .quick_chats_header },
             .{ .identity = "quick-chats-disclosure:quick-chats", .target = .quick_chats_disclosure },
             .{ .identity = "quick-chat-new:quick-chats", .target = .new_quick_chat },
+            .{ .identity = "needs-you-header:needs-you", .target = .needs_you_header },
+            .{ .identity = "activity-header:activity", .target = .activity_header },
         };
         for (static_targets) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) target = candidate.target;
@@ -3291,6 +3410,10 @@ pub const App = struct {
                 defer self.allocator.free(overview_identity);
                 const project_card_identity = std.fmt.allocPrint(self.allocator, "project-card:{s}", .{key}) catch return false;
                 defer self.allocator.free(project_card_identity);
+                const reclaim_identity = std.fmt.allocPrint(self.allocator, "reclaim:{s}", .{key}) catch return false;
+                defer self.allocator.free(reclaim_identity);
+                const keep_identity = std.fmt.allocPrint(self.allocator, "keep:{s}", .{key}) catch return false;
+                defer self.allocator.free(keep_identity);
                 const loop_disclosure_identity = std.fmt.allocPrint(self.allocator, "loop-disclosure:{s}", .{key}) catch return false;
                 defer self.allocator.free(loop_disclosure_identity);
                 if (Accessibility.worktreeIdentityPayload(sidebar_identity) == payload or
@@ -3299,6 +3422,14 @@ pub const App = struct {
                 {
                     if (target != null) return false;
                     target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
+                }
+                if (Accessibility.worktreeIdentityPayload(reclaim_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .reclaim_offer = .{ .path = node.worktree_path, .action = .reclaim } };
+                }
+                if (Accessibility.worktreeIdentityPayload(keep_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .reclaim_offer = .{ .path = node.worktree_path, .action = .keep } };
                 }
                 if (Accessibility.worktreeIdentityPayload(loop_disclosure_identity) == payload) {
                     if (target != null) return false;
@@ -3379,6 +3510,30 @@ pub const App = struct {
                 }
             }
         }
+        for (self.model.attention_entries.items, 0..) |entry, index| {
+            const identity = std.fmt.allocPrint(self.allocator, "needs-you-row:{s}:{s}", .{ entry.project_path, entry.node.id }) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .needs_you = index };
+            }
+        }
+        for (self.model.activity.items, 0..) |event, index| {
+            const identity = std.fmt.allocPrint(self.allocator, "activity-row:{s}:{s}", .{ event.project_path, event.node_id }) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .activity = index };
+            }
+        }
+        for ([_][]const u8{ "scroll-left", "scroll-right" }) |control| {
+            const identity = std.fmt.allocPrint(self.allocator, "activity-control:{s}", .{control}) catch return false;
+            defer self.allocator.free(identity);
+            if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                if (target != null) return false;
+                target = .{ .activity = if (std.mem.eql(u8, control, "scroll-left")) 0 else 1 };
+            }
+        }
         const resolved = target orelse return false;
         switch (resolved) {
             .local_section => self.sidebar_state.local_collapsed = !self.sidebar_state.local_collapsed,
@@ -3391,6 +3546,19 @@ pub const App = struct {
             },
             .quick_chats_disclosure => self.sidebar_state.chats_collapsed = !self.sidebar_state.chats_collapsed,
             .new_quick_chat => self.createQuickChat(),
+            .needs_you_header => {},
+            .needs_you => |index| {
+                if (index >= self.model.attention_entries.items.len) return false;
+                const entry = self.model.attention_entries.items[index];
+                if (self.selectProject(entry.project_path)) _ = self.model.setSelectedID(entry.node.id);
+            },
+            .activity_header => {},
+            .activity => |index| {
+                if (index < self.model.activity.items.len) {
+                    const event = self.model.activity.items[index];
+                    if (self.selectProject(event.project_path)) _ = self.model.setSelectedID(event.node_id);
+                }
+            },
             .recent_project => |path| self.openProject(path),
             .open_project => |path| {
                 if (self.selectProject(path)) {
@@ -3418,6 +3586,10 @@ pub const App = struct {
                 self.openSelectedNode();
             },
             .composite_back => self.closeCompositeGroup(),
+            .reclaim_offer => |offer| switch (offer.action) {
+                .reclaim => self.reclaimWorktreeOffer(offer.path),
+                .keep => self.keepWorktreeOffer(offer.path),
+            },
             .quick_chat => |id| {
                 self.client.sendOpenQuickChat(id);
                 self.setStatus("Opening quick chat...");
@@ -3992,6 +4164,12 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             }
+            if (app.model.attentionCount() != 0 and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
+                app.handleAction(.cycle_attention);
+                _ = c.InvalidateRect(hwnd, null, 0);
+                result.* = 0;
+                return true;
+            }
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
             const workspace_top = if (app.surface == .workspace and app.workspace_controls.panel_visible)
                 Tokens.header_height
@@ -4004,22 +4182,22 @@ fn onWindowMessage(
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
-                        if (TerminalWorkspace.loopBarActionAt(
-                            rail_left,
-                            Tokens.header_height,
-                            client.right - Tokens.loop_detail_width,
-                            x,
-                            y,
-                            isResolvedLoopState(node.state),
-                        )) |action| {
-                            switch (action) {
-                                .stop => app.stopSelectedNode(),
-                                .show_graph => app.handleAction(.show_graph),
+                            if (TerminalWorkspace.loopBarActionAt(
+                                rail_left,
+                                Tokens.header_height,
+                                client.right - Tokens.loop_detail_width,
+                                x,
+                                y,
+                                isResolvedLoopState(node.state),
+                            )) |action| {
+                                switch (action) {
+                                    .stop => app.stopSelectedNode(),
+                                    .show_graph => app.handleAction(.show_graph),
+                                }
+                                _ = c.InvalidateRect(hwnd, null, 0);
+                                result.* = 0;
+                                return true;
                             }
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
-                        }
                         }
                     }
                 }
@@ -4068,7 +4246,25 @@ fn onWindowMessage(
                 }
                 switch (app.surface) {
                     .overview => {
-                        if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
+                        var lane_action: ?GraphCanvas.OverviewLaneAction = null;
+                        for (app.model.graphs.items, 0..) |_, graph_index| {
+                            if (GraphCanvas.overviewLaneActionAt(&app.model, graph_index, x, y, bounds, &app.canvas)) |action| {
+                                lane_action = action;
+                                if (action == .inspect_worktrees) {
+                                    if (app.selectProject(app.model.graphs.items[graph_index].project.path)) app.inspectWorktrees();
+                                } else if (app.selectProject(app.model.graphs.items[graph_index].project.path)) {
+                                    app.surface = .project;
+                                    app.workspace_controls.panel_visible = false;
+                                    app.layoutWorkspace();
+                                    app.layoutEmptyStateControls();
+                                    app.rebindWorkspace(app.model.graphs.items[graph_index].project.path);
+                                }
+                                break;
+                            }
+                        }
+                        if (lane_action != null) {
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
                             if (app.selectProject(graph.project.path)) {
                                 app.surface = .workspace;
@@ -4155,103 +4351,127 @@ fn onWindowMessage(
                     result.* = 0;
                     return true;
                 }
-                if (Sidebar.rowAt(
-                    x, y, &app.model, if (app.worktree_inspection) |*value| value else null,
-                    app.sidebar_scroll, workspace_top, &app.sidebar_state,
-                )) |row| {
-                    const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
-                switch (row.kind) {
-                    .local_heading => app.sidebar_state.local_collapsed = !app.sidebar_state.local_collapsed,
-                    .remote_heading => app.sidebar_state.remote_collapsed = !app.sidebar_state.remote_collapsed,
-                    .project => app.openProject(app.model.recent_projects.items[row.index].path),
-                    .open_project => if (row.project_path) |path| {
-                        if (x >= 198 and row.has_children) {
-                            app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
-                            app.clampSidebarScroll();
+                if (Sidebar.attentionRowAt(
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    &app.sidebar_state,
+                    app.sidebar_scroll,
+                )) |attention_index| {
+                    if (attention_index < app.model.attention_entries.items.len) {
+                        const entry = app.model.attention_entries.items[attention_index];
+                        if (app.selectProject(entry.project_path)) {
+                            _ = app.model.setSelectedID(entry.node.id);
+                            app.setStatus("Needs-you loop selected");
                             app.syncAccessibility();
                             _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
                         }
-                        if (x >= 174 and x < 198) {
-                            if (app.selectProject(path)) app.createNode();
-                            result.* = 0;
-                            return true;
-                        }
-                        if (app.selectProject(path)) {
-                            app.surface = .project;
-                            app.workspace_controls.panel_visible = false;
-                            app.layoutWorkspace();
-                            app.clearEdgeSelection();
-                            app.rebindWorkspace(path);
-                        }
-                    },
-                    .overview => app.openGlobalOverview(),
-                    .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
-                        if (row.index < graph.nodes.items.len) {
+                    }
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.rowAt(
+                    x,
+                    y,
+                    &app.model,
+                    if (app.worktree_inspection) |*value| value else null,
+                    app.sidebar_scroll,
+                    workspace_top,
+                    &app.sidebar_state,
+                )) |row| {
+                    const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
+                    switch (row.kind) {
+                        .local_heading => app.sidebar_state.local_collapsed = !app.sidebar_state.local_collapsed,
+                        .remote_heading => app.sidebar_state.remote_collapsed = !app.sidebar_state.remote_collapsed,
+                        .project => app.openProject(app.model.recent_projects.items[row.index].path),
+                        .open_project => if (row.project_path) |path| {
                             if (x >= 198 and row.has_children) {
-                                app.sidebar_state.toggleNode(graph.nodes.items[row.index].id) catch app.setStatus("Sidebar state could not be updated");
-                                if (app.sidebar_store) |*store| store.save(&app.sidebar_state) catch app.setStatus("Sidebar expansion could not be saved");
+                                app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
                                 app.clampSidebarScroll();
                                 app.syncAccessibility();
                                 _ = c.InvalidateRect(hwnd, null, 0);
                                 result.* = 0;
                                 return true;
                             }
-                            if (!app.selectProject(path)) return true;
-                            app.surface = .workspace;
-                            app.workspace_controls.panel_visible = true;
+                            if (x >= 174 and x < 198) {
+                                if (app.selectProject(path)) app.createNode();
+                                result.* = 0;
+                                return true;
+                            }
+                            if (app.selectProject(path)) {
+                                app.surface = .project;
+                                app.workspace_controls.panel_visible = false;
+                                app.layoutWorkspace();
+                                app.clearEdgeSelection();
+                                app.rebindWorkspace(path);
+                            }
+                        },
+                        .overview => app.openGlobalOverview(),
+                        .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
+                            if (row.index < graph.nodes.items.len) {
+                                if (x >= 198 and row.has_children) {
+                                    app.sidebar_state.toggleNode(graph.nodes.items[row.index].id) catch app.setStatus("Sidebar state could not be updated");
+                                    if (app.sidebar_store) |*store| store.save(&app.sidebar_state) catch app.setStatus("Sidebar expansion could not be saved");
+                                    app.clampSidebarScroll();
+                                    app.syncAccessibility();
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                }
+                                if (!app.selectProject(path)) return true;
+                                app.surface = .workspace;
+                                app.workspace_controls.panel_visible = true;
+                                app.layoutWorkspace();
+                                app.layoutEmptyStateControls();
+                                app.clearEdgeSelection();
+                                app.rebindWorkspace(path);
+                                const selected_graph = app.model.graph orelse return true;
+                                if (row.index >= selected_graph.nodes.items.len) return true;
+                                _ = app.selectNodeIndex(row.index);
+                                if (app.workspace) |workspace| {
+                                    workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
+                                        app.setStatus("Unable to open selected loop");
+                                    };
+                                    workspace.focus(0);
+                                }
+                            }
+                        },
+                        .worktree => if (app.worktree_inspection) |inspection| {
+                            if (ctrl) {
+                                _ = app.toggleWorktreeRow(row.index);
+                            } else {
+                                _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
+                            }
+                            app.ensureWorktreeVisible(row.index);
+                        },
+                        .quick_chat_overview => {
+                            if (x >= 198 and app.model.quick_chats.items.len != 0) {
+                                app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
+                                app.clampSidebarScroll();
+                                app.syncAccessibility();
+                                _ = c.InvalidateRect(hwnd, null, 0);
+                                result.* = 0;
+                                return true;
+                            }
+                            if (x >= 174 and x < 198) {
+                                app.createQuickChat();
+                                result.* = 0;
+                                return true;
+                            }
+                            app.surface = .quick_chats;
+                            app.workspace_controls.panel_visible = false;
                             app.layoutWorkspace();
                             app.layoutEmptyStateControls();
-                            app.clearEdgeSelection();
-                            app.rebindWorkspace(path);
-                            const selected_graph = app.model.graph orelse return true;
-                            if (row.index >= selected_graph.nodes.items.len) return true;
-                            _ = app.selectNodeIndex(row.index);
-                            if (app.workspace) |workspace| {
-                                workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
-                                    app.setStatus("Unable to open selected loop");
-                                };
-                                workspace.focus(0);
-                            }
-                        }
-                    },
-                    .worktree => if (app.worktree_inspection) |inspection| {
-                        if (ctrl) {
-                            _ = app.toggleWorktreeRow(row.index);
-                        } else {
-                            _ = app.selectWorktreeRow(inspection.entries.items[row.index].path);
-                        }
-                        app.ensureWorktreeVisible(row.index);
-                    },
-                    .quick_chat_overview => {
-                        if (x >= 198 and app.model.quick_chats.items.len != 0) {
-                            app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
-                            app.clampSidebarScroll();
-                            app.syncAccessibility();
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                            result.* = 0;
-                            return true;
-                        }
-                        if (x >= 174 and x < 198) {
-                            app.createQuickChat();
-                            result.* = 0;
-                            return true;
-                        }
-                        app.surface = .quick_chats;
-                        app.workspace_controls.panel_visible = false;
-                        app.layoutWorkspace();
-                        app.layoutEmptyStateControls();
-                    },
-                    .quick_chat => if (row.index < app.model.quick_chats.items.len) {
-                        app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
-                        app.setStatus("Opening quick chat...");
-                    },
-                }
-                app.clampSidebarScroll();
-                app.syncAccessibility();
-                _ = c.InvalidateRect(hwnd, null, 0);
-                result.* = 0;
+                        },
+                        .quick_chat => if (row.index < app.model.quick_chats.items.len) {
+                            app.client.sendOpenQuickChat(app.model.quick_chats.items[row.index].id);
+                            app.setStatus("Opening quick chat...");
+                        },
+                    }
+                    app.clampSidebarScroll();
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
                     return true;
                 }
             }
@@ -4422,6 +4642,7 @@ fn onWindowMessage(
         },
         c.WM_MOUSEMOVE => {
             const hover_y = mouseY(lparam);
+            const hover_x = mouseX(lparam);
             const next_hover = if (mouseX(lparam) >= 0 and mouseX(lparam) < Tokens.sidebar_width) hover_y else -1;
             if (next_hover != app.sidebar_hover_y) {
                 app.sidebar_hover_y = next_hover;
@@ -4443,6 +4664,22 @@ fn onWindowMessage(
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
+            }
+            if (app.model.graph) |graph| {
+                var client: c.RECT = undefined;
+                _ = c.GetClientRect(hwnd, &client);
+                const canvas_render_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                const canvas_bounds = c.RECT{
+                    .left = canvas_render_bounds.left,
+                    .top = canvas_render_bounds.top,
+                    .right = canvas_render_bounds.right,
+                    .bottom = canvas_render_bounds.bottom,
+                };
+                const next_connector = GraphCanvas.hitTestConnector(graph.nodes.items, hover_x, hover_y, &app.canvas, canvas_bounds);
+                if (next_connector != app.canvas.hovered_connector) {
+                    app.canvas.hovered_connector = next_connector;
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                }
             }
         },
         c.WM_MOUSEWHEEL => {

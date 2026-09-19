@@ -31,6 +31,9 @@ pub const Node = struct {
 pub const ActivityEvent = struct {
     title: []u8,
     state: []u8,
+    project_path: []u8 = &.{},
+    node_id: []u8 = &.{},
+    timestamp: i64 = 0,
 };
 
 pub const QuickChat = struct {
@@ -183,6 +186,8 @@ pub const Model = struct {
         for (self.activity.items) |event| {
             self.allocator.free(event.title);
             self.allocator.free(event.state);
+            self.allocator.free(event.project_path);
+            self.allocator.free(event.node_id);
         }
         self.activity.deinit();
         for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
@@ -572,61 +577,61 @@ pub const Model = struct {
     }
 
     fn decodeQuickChats(self: *Model, frame: []const u8, kind: Wire.EventKind) !void {
-            if (kind == .quick_chats) {
-                for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
-                self.quick_chats.clearRetainingCapacity();
-            }
-            const marker = switch (kind) {
-                .quick_chats => "\"quickChatsListed\"",
-                .quick_chat_changed => "\"quickChatChanged\"",
-                .quick_chat_deleted => "\"quickChatDeleted\"",
-                .quick_chat_activity => "\"quickChatActivity\"",
-                else => return,
-            };
-            const start = std.mem.indexOf(u8, frame, marker) orelse return;
-            if (kind == .quick_chat_deleted) {
-                const id = Wire.jsonString(frame[start..], "quickChatDeleted") orelse return;
-                var index: usize = 0;
-                while (index < self.quick_chats.items.len) : (index += 1) {
-                    if (std.mem.eql(u8, self.quick_chats.items[index].id, id)) {
-                        const removed = self.quick_chats.orderedRemove(index);
-                        freeQuickChat(self.allocator, removed);
-                        return;
-                    }
-                }
-                return;
-            }
-            const open = indexOfByte(frame, start, if (kind == .quick_chats) '[' else '{') orelse return;
-            const close = findClosing(frame, open, if (kind == .quick_chats) '[' else '{', if (kind == .quick_chats) ']' else '}') orelse return;
-            if (kind == .quick_chats) {
-                var cursor = open + 1;
-                while (cursor < close) {
-                    const object_start = indexOfByte(frame, cursor, '{') orelse break;
-                    if (object_start >= close) break;
-                    const object_end = findClosing(frame, object_start, '{', '}') orelse break;
-                    try self.upsertQuickChat(frame[object_start .. object_end + 1]);
-                    cursor = object_end + 1;
-                }
-            } else if (kind == .quick_chat_activity) {
-                const object = frame[open .. close + 1];
-                const id = Wire.jsonString(object, "id") orelse return;
-                const activity_start = std.mem.indexOf(u8, object, "\"activity\"") orelse return;
-                const activity_open = indexOfByte(object, activity_start, '{') orelse return;
-                const activity_close = findClosing(object, activity_open, '{', '}') orelse return;
-                const activity_object = object[activity_open .. activity_close + 1];
-                const sequence = Wire.jsonNumber(activity_object, "sequence") orelse 0;
-                const activity = Wire.jsonString(activity_object, "text") orelse "";
-                for (self.quick_chats.items) |*chat| {
-                    if (std.mem.eql(u8, chat.id, id) and sequence >= chat.activity_sequence) {
-                        self.allocator.free(chat.activity);
-                        chat.activity = try self.allocator.dupe(u8, activity);
-                        chat.activity_sequence = sequence;
-                    }
-                }
-            } else {
-                try self.upsertQuickChat(frame[open .. close + 1]);
-            }
+        if (kind == .quick_chats) {
+            for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
+            self.quick_chats.clearRetainingCapacity();
         }
+        const marker = switch (kind) {
+            .quick_chats => "\"quickChatsListed\"",
+            .quick_chat_changed => "\"quickChatChanged\"",
+            .quick_chat_deleted => "\"quickChatDeleted\"",
+            .quick_chat_activity => "\"quickChatActivity\"",
+            else => return,
+        };
+        const start = std.mem.indexOf(u8, frame, marker) orelse return;
+        if (kind == .quick_chat_deleted) {
+            const id = Wire.jsonString(frame[start..], "quickChatDeleted") orelse return;
+            var index: usize = 0;
+            while (index < self.quick_chats.items.len) : (index += 1) {
+                if (std.mem.eql(u8, self.quick_chats.items[index].id, id)) {
+                    const removed = self.quick_chats.orderedRemove(index);
+                    freeQuickChat(self.allocator, removed);
+                    return;
+                }
+            }
+            return;
+        }
+        const open = indexOfByte(frame, start, if (kind == .quick_chats) '[' else '{') orelse return;
+        const close = findClosing(frame, open, if (kind == .quick_chats) '[' else '{', if (kind == .quick_chats) ']' else '}') orelse return;
+        if (kind == .quick_chats) {
+            var cursor = open + 1;
+            while (cursor < close) {
+                const object_start = indexOfByte(frame, cursor, '{') orelse break;
+                if (object_start >= close) break;
+                const object_end = findClosing(frame, object_start, '{', '}') orelse break;
+                try self.upsertQuickChat(frame[object_start .. object_end + 1]);
+                cursor = object_end + 1;
+            }
+        } else if (kind == .quick_chat_activity) {
+            const object = frame[open .. close + 1];
+            const id = Wire.jsonString(object, "id") orelse return;
+            const activity_start = std.mem.indexOf(u8, object, "\"activity\"") orelse return;
+            const activity_open = indexOfByte(object, activity_start, '{') orelse return;
+            const activity_close = findClosing(object, activity_open, '{', '}') orelse return;
+            const activity_object = object[activity_open .. activity_close + 1];
+            const sequence = Wire.jsonNumber(activity_object, "sequence") orelse 0;
+            const activity = Wire.jsonString(activity_object, "text") orelse "";
+            for (self.quick_chats.items) |*chat| {
+                if (std.mem.eql(u8, chat.id, id) and sequence >= chat.activity_sequence) {
+                    self.allocator.free(chat.activity);
+                    chat.activity = try self.allocator.dupe(u8, activity);
+                    chat.activity_sequence = sequence;
+                }
+            }
+        } else {
+            try self.upsertQuickChat(frame[open .. close + 1]);
+        }
+    }
 
     fn upsertQuickChat(self: *Model, object: []const u8) !void {
         const id = duplicateJsonString(self.allocator, object, "id") catch return;
@@ -690,7 +695,8 @@ pub const Model = struct {
         }
         const was_selected = if (self.selected_project_path) |path|
             std.mem.eql(u8, path, graph.project.path)
-        else self.graph == null;
+        else
+            self.graph == null;
         const prior_node_id: ?[]const u8 = if (was_selected) self.selected_node_id else null;
         self.recordActivity(graph);
         try self.upsertSummary(&graph);
@@ -863,23 +869,29 @@ pub const Model = struct {
     }
 
     fn rebuildAttention(self: *Model) void {
-            for (self.attention.items) |node| freeNode(self.allocator, node);
-            self.attention.clearRetainingCapacity();
-            for (self.attention_entries.items) |entry| freeAttentionEntry(self.allocator, entry);
-            self.attention_entries.clearRetainingCapacity();
-            for (self.graphs.items) |summary| {
-                for (summary.nodes.items) |node| {
-                    if (!needsAttention(node) and !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
-                    const node_copy = cloneNode(self.allocator, node) catch continue;
-                    const entry = AttentionEntry{ .project_path = self.allocator.dupe(u8, summary.project.path) catch { freeNode(self.allocator, node_copy); continue; }, .node = node_copy };
-                    self.attention_entries.append(entry) catch { freeAttentionEntry(self.allocator, entry); continue; };
-                    const compat = cloneNode(self.allocator, node) catch continue;
-                    self.attention.append(compat) catch freeNode(self.allocator, compat);
-                }
+        for (self.attention.items) |node| freeNode(self.allocator, node);
+        self.attention.clearRetainingCapacity();
+        for (self.attention_entries.items) |entry| freeAttentionEntry(self.allocator, entry);
+        self.attention_entries.clearRetainingCapacity();
+        for (self.graphs.items) |summary| {
+            for (summary.nodes.items) |node| {
+                if (!needsAttention(node) and !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
+                const node_copy = cloneNode(self.allocator, node) catch continue;
+                const entry = AttentionEntry{ .project_path = self.allocator.dupe(u8, summary.project.path) catch {
+                    freeNode(self.allocator, node_copy);
+                    continue;
+                }, .node = node_copy };
+                self.attention_entries.append(entry) catch {
+                    freeAttentionEntry(self.allocator, entry);
+                    continue;
+                };
+                const compat = cloneNode(self.allocator, node) catch continue;
+                self.attention.append(compat) catch freeNode(self.allocator, compat);
             }
-            std.sort.heap(AttentionEntry, self.attention_entries.items, {}, compareAttentionEntry);
-            std.sort.heap(Node, self.attention.items, {}, compareAttentionNode);
         }
+        std.sort.heap(AttentionEntry, self.attention_entries.items, {}, compareAttentionEntry);
+        std.sort.heap(Node, self.attention.items, {}, compareAttentionNode);
+    }
 
     fn recordActivity(self: *Model, next: Graph) void {
         const previous = self.graphFor(next.project.path) orelse return;
@@ -891,16 +903,37 @@ pub const Model = struct {
                 self.allocator.free(title);
                 continue;
             };
-            const event = ActivityEvent{ .title = title, .state = state };
+            const project_path = self.allocator.dupe(u8, next.project.path) catch {
+                self.allocator.free(title);
+                self.allocator.free(state);
+                continue;
+            };
+            const node_id = self.allocator.dupe(u8, node.id) catch {
+                self.allocator.free(title);
+                self.allocator.free(state);
+                self.allocator.free(project_path);
+                continue;
+            };
+            const event = ActivityEvent{
+                .title = title,
+                .state = state,
+                .project_path = project_path,
+                .node_id = node_id,
+                .timestamp = std.time.timestamp(),
+            };
             self.activity.insert(0, event) catch {
                 self.allocator.free(event.title);
                 self.allocator.free(event.state);
+                self.allocator.free(event.project_path);
+                self.allocator.free(event.node_id);
                 continue;
             };
             if (self.activity.items.len > 32) {
                 const removed = self.activity.pop() orelse continue;
                 self.allocator.free(removed.title);
                 self.allocator.free(removed.state);
+                self.allocator.free(removed.project_path);
+                self.allocator.free(removed.node_id);
             }
         }
     }

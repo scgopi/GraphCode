@@ -384,6 +384,56 @@ try {
     Require (($projectRow.Current.BoundingRectangle.Width -gt 0) -and
              ($projectRow.Current.BoundingRectangle.Height -gt 0)) "dynamic project row has empty bounds"
   }
+  $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^needs-you-row-'
+  })
+  $activityRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-row-'
+  })
+  $activityControls = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-control-'
+  })
+  $needsYouHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^needs-you-header-'
+  })
+  $activityHeaders = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^activity-header-'
+  })
+  if ($needsYouRows.Count -gt 0 -or $needsYouHeaders.Count -gt 0) {
+    Require ($needsYouHeaders.Count -eq 1) "Needs-you rows omitted their stable header"
+    Require ($needsYouHeaders[0].Current.Name -eq "Needs you") "Needs-you header name changed"
+  }
+  if ($activityRows.Count -gt 0 -or $activityControls.Count -gt 0 -or $activityHeaders.Count -gt 0) {
+    Require ($activityHeaders.Count -eq 1) "Activity controls omitted their stable header"
+    Require ($activityHeaders[0].Current.Name -eq "Activity") "Activity header name changed"
+  }
+  if ($needsYouRows.Count -gt 0) {
+    Require ($needsYouRows.Count -le 4) "Needs-you exposed more than four sidebar rows"
+    $needsYouIds = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+    Require (($needsYouIds | Where-Object { $_ -notmatch '^needs-you-row-[0-9]+$' }).Count -eq 0) `
+      "Needs-you rows did not use stable dynamic IDs"
+    foreach ($row in $needsYouRows) {
+      Require ($row.Current.Name.Length -gt 0) "Needs-you row omitted its name"
+      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+               ($row.Current.BoundingRectangle.Height -gt 0)) "Needs-you row has empty bounds"
+    }
+  }
+  if ($activityRows.Count -gt 0) {
+    Require ($activityRows.Count -le 4) "Activity exposed more than four sidebar rows"
+    $activityIds = @($activityRows | ForEach-Object { $_.Current.AutomationId })
+    Require (($activityIds | Where-Object { $_ -notmatch '^activity-row-[0-9]+$' }).Count -eq 0) `
+      "Activity rows did not use stable dynamic IDs"
+    foreach ($row in $activityRows) {
+      Require ($row.Current.Name.Length -gt 0) "Activity row omitted its name"
+      Require (($row.Current.BoundingRectangle.Width -gt 0) -and
+               ($row.Current.BoundingRectangle.Height -gt 0)) "Activity row has empty bounds"
+    }
+  }
+  foreach ($control in $activityControls) {
+    Require (($control.Current.BoundingRectangle.Width -gt 0) -and
+             ($control.Current.BoundingRectangle.Height -gt 0)) "Activity control has empty bounds"
+    $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
   $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   $null = $projectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $projectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -510,7 +560,24 @@ try {
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
   $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
-  $graphChildIds = @($projectCardIds + @($connectionAlert.Current.AutomationId) + $canvasActionIds)
+  $reclaimOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reclaim" }) | Select-Object -First 1
+  $keepOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Keep" }) | Select-Object -First 1
+  Require ($null -ne $reclaimOffer) "resolved card with a reclaimable worktree omitted its Reclaim descendant"
+  Require ($null -ne $keepOffer) "resolved card with a reclaimable worktree omitted its Keep descendant"
+  Require (($reclaimOffer.Current.BoundingRectangle.Width -gt 0) -and
+           ($reclaimOffer.Current.BoundingRectangle.Height -gt 0)) "Reclaim descendant had empty bounds"
+  Require (($keepOffer.Current.BoundingRectangle.Width -gt 0) -and
+           ($keepOffer.Current.BoundingRectangle.Height -gt 0)) "Keep descendant had empty bounds"
+  $null = $reclaimOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $null = $keepOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  # The Reclaim/Keep descendants for a resolved card are siblings placed immediately
+  # after that card, so derive the expected order from the live tree (as with Loops
+  # and Projects above) instead of assuming cards and the offer are contiguous blocks.
+  $graphChildIds = @(Get-DirectChildren $graph $rawWalker |
+    ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
+  $expectedGraphIds = @($projectCardIds + @($connectionAlert.Current.AutomationId, $reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId) + $canvasActionIds)
+  Require ((@($graphChildIds | Sort-Object) -join ",") -eq (@($expectedGraphIds | Sort-Object) -join ",")) `
+    "Graph exposed unexpected or missing children: $($graphChildIds -join ',')"
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
   $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -1690,6 +1757,11 @@ try {
     actionPatterns = @($actions.Keys | Sort-Object)
     surfaceActionPatterns = @($surfaceActionPatterns.Keys | Sort-Object)
     dynamicProjectRows = $projectRowIds
+    needsYouRows = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+    needsYouHeader = @($needsYouHeaders | ForEach-Object { $_.Current.AutomationId })
+    activityRows = @($activityRows | ForEach-Object { $_.Current.AutomationId })
+    activityHeader = @($activityHeaders | ForEach-Object { $_.Current.AutomationId })
+    activityControls = @($activityControls | ForEach-Object { $_.Current.AutomationId })
     dynamicLoopRows = $loopIds
     dynamicProjectCards = $projectCardIds
     dynamicQuickChatCards = $quickChatCardIds
