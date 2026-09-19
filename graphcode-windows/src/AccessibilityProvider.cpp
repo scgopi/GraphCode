@@ -779,6 +779,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-new:", 0) == 0 ? L"quick-chat-new-" :
           row.identity.rfind("quick-chats-disclosure:", 0) == 0 ? L"quick-chats-disclosure-" :
           row.identity.rfind("quick-chat-row:", 0) == 0 ? L"quick-chat-row-" :
+          row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :

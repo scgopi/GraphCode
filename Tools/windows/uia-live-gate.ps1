@@ -281,6 +281,8 @@ $oldFixture = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_FIXTURE_ROWS"
 $oldDaemonPipe = [Environment]::GetEnvironmentVariable("GRAPHCODE_DAEMON_PIPE")
 $oldSupportDirectory = [Environment]::GetEnvironmentVariable("GRAPHCODE_SUPPORT_DIR")
 $oldResetSidebar = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_RESET_SIDEBAR")
+$oldUpdateAvailable = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_UPDATE_AVAILABLE")
+$oldShowUpdate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHOW_UPDATE")
 $process = $null
 $settingsProcess = $null
 $status = $null
@@ -305,6 +307,8 @@ try {
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
   $env:GRAPHCODE_UIA_GATE = "1"
   $env:GRAPHCODE_UIA_CONNECTION_FAILURE = "1"
+  $env:GRAPHCODE_UIA_UPDATE_AVAILABLE = "1"
+  $env:GRAPHCODE_UIA_SHOW_UPDATE = "1"
   $env:USERNAME = "GraphCodeUIAGate"
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
@@ -353,6 +357,50 @@ try {
   $controlWalker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
   $shellWindow = $process.MainWindowHandle
   $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+  $updateDialog = $desktop.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode Update Available"
+    ))
+  )
+  Require ($null -ne $updateDialog) "update offer dialog did not appear"
+  Start-Sleep -Milliseconds 250
+  $updateDialog = $desktop.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode Update Available"
+    ))
+  )
+  $installButton = $updateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "Install"
+    ))
+  )
+  $releaseNotesButton = $updateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "Release Notes"
+    ))
+  )
+  $laterButton = $updateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "Later"
+    ))
+  )
+  Require (($null -ne $installButton) -and (-not $installButton.Current.IsEnabled)) `
+    "update offer did not expose a disabled Install action"
+  Require (($null -ne $releaseNotesButton) -and ($null -ne $laterButton)) `
+    "update offer did not expose Release Notes and Later actions"
+  Require ([GraphCodeUiaGateState]::SendCommand([IntPtr]$updateDialog.Current.NativeWindowHandle, 9703)) `
+    "update offer Later action could not be invoked"
+  Start-Sleep -Milliseconds 150
   $status = Find-FragmentById $root "status" $controlWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
@@ -556,6 +604,10 @@ try {
   })
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
+  $surfaceActionPatterns["canvas-primary-action"].Invoke()
+  Start-Sleep -Milliseconds 150
+  Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Creating quick chat...") `
+    "Populated Quick Chats canvas omitted its New Chat action"
   $quickChatRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^quick-chat-row-'
   })
@@ -603,6 +655,15 @@ try {
   Start-Sleep -Milliseconds 150
   Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Opening quick chat...") `
     "Quick Chat invocation did not perform its expected action"
+  $graph = Find-FragmentById $root "graph" $rawWalker
+  $quickChatWorkspace = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^quick-chat-workspace-' -and
+    $_.Current.Name -eq "Quick Chat terminal workspace"
+  }) | Select-Object -First 1
+  Require ($null -ne $quickChatWorkspace) "Quick Chat invocation did not expose its terminal workspace"
+  Require (($quickChatWorkspace.Current.BoundingRectangle.Width -gt 0) -and
+           ($quickChatWorkspace.Current.BoundingRectangle.Height -gt 0)) `
+    "Quick Chat terminal workspace has empty bounds"
   $surfaceActionPatterns["zoom-in"].Invoke()
   $surfaceActionPatterns["actual-size"].Invoke()
   $surfaceActionPatterns["zoom-out"].Invoke()
@@ -1750,4 +1811,10 @@ try {
   if ($null -eq $oldResetSidebar) {
     Remove-Item Env:GRAPHCODE_UIA_RESET_SIDEBAR -ErrorAction SilentlyContinue
   } else { $env:GRAPHCODE_UIA_RESET_SIDEBAR = $oldResetSidebar }
+  if ($null -eq $oldUpdateAvailable) {
+    Remove-Item Env:GRAPHCODE_UIA_UPDATE_AVAILABLE -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_UPDATE_AVAILABLE = $oldUpdateAvailable }
+  if ($null -eq $oldShowUpdate) {
+    Remove-Item Env:GRAPHCODE_UIA_SHOW_UPDATE -ErrorAction SilentlyContinue
+  } else { $env:GRAPHCODE_UIA_SHOW_UPDATE = $oldShowUpdate }
 }
