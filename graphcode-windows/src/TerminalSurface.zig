@@ -819,6 +819,18 @@ pub const Workspace = struct {
         self.pollRecreates();
     }
 
+    /// Releases native Win32 keyboard focus from every live terminal surface. Callers must
+    /// invoke this whenever the workspace stops being the visible surface (e.g. navigating back
+    /// to the project overview) so a background terminal never keeps holding OS focus and
+    /// starving unrelated chrome (sidebar rows, dialogs) of it.
+    pub fn blurAll(self: *Workspace) void {
+        for (&self.surfaces) |*slot| {
+            if (slot.surface) |surface| {
+                _ = c.winghostty_surface_set_focus(surface, 0);
+            }
+        }
+    }
+
     pub fn focus(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
         if (self.syncing_focus or self.syncing_topology) return;

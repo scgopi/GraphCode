@@ -2822,6 +2822,10 @@ pub const App = struct {
                     (if (full_workspace) Tokens.loop_detail_width else 0)),
                 panel_height,
             );
+            // When the workspace has no visible presence at all (neither the full surface nor the
+            // picture-in-picture panel), release focus from any live terminal surface so it can't
+            // keep holding native Win32 keyboard focus away from the rest of the app's chrome.
+            if (!full_workspace and panel_height == 0) workspace.blurAll();
         }
     }
 
