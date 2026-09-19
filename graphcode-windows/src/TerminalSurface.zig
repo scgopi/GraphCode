@@ -178,6 +178,7 @@ pub const Workspace = struct {
     layout_origin_y: i32 = 0,
     layout_width: i32 = 960,
     layout_height: i32 = 250,
+    collapsed: bool = false,
     project_path: []u8 = &.{},
     syncing_topology: bool = false,
     syncing_focus: bool = false,
@@ -657,6 +658,7 @@ pub const Workspace = struct {
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
+        self.collapsed = false;
         self.layout_origin_x = origin_x;
         self.layout_origin_y = origin_y;
         self.layout_width = width;
@@ -815,6 +817,15 @@ pub const Workspace = struct {
     }
 
     pub fn poll(self: *Workspace) void {
+        // While the workspace is collapsed (not visible as either the full surface or the
+        // picture-in-picture panel), skip draining terminal output entirely. Feeding output
+        // notifies winghostty's own accessibility layer via
+        // winghostty_surface_notify_accessibility_text() on every read, and that notification is
+        // independent of our set_focus(0)/set_visible(0) calls -- it kept re-asserting the
+        // terminal as the UIA-focused element even after every Win32-level focus fix, because a
+        // live shell session simply never stops producing output. zmx buffers output for detached
+        // sessions server-side, so it's safe to stop draining the local attach pipe while hidden.
+        if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
         self.pollRecreates();
     }
@@ -837,6 +848,7 @@ pub const Workspace = struct {
     /// terminal surface even at a degenerate size, which is exactly the behavior callers leaving
     /// the workspace surface need to avoid.
     pub fn collapse(self: *Workspace) void {
+        self.collapsed = true;
         self.layout_origin_x = 0;
         self.layout_origin_y = 0;
         self.layout_width = 0;
