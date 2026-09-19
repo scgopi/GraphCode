@@ -3138,7 +3138,10 @@ pub const App = struct {
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
                 defer self.allocator.free(identity);
                 const name = std.fmt.allocPrint(self.allocator, "{s} - {s}", .{ entry.node.title, Sidebar.attentionReason(entry.node) }) catch return;
-                defer self.allocator.free(name);
+                owned_identities.append(name) catch {
+                    self.allocator.free(name);
+                    return;
+                };
                 self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
             }
         }
