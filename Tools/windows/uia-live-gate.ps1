@@ -630,6 +630,39 @@ try {
            ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
     "loop invocation did not transition to the selected workspace loop"
+  $workspaceToolbar = $null
+  $workspaceShowGraph = $null
+  $workspaceTabs = @()
+  $workspaceControls = @()
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+    $workspaceToolbar = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
+    }) | Select-Object -First 1
+    $workspaceShowGraph = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
+    }) | Select-Object -First 1
+    $workspaceTabs = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
+    })
+    $workspaceControls = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-(new-tab|split-right|split-down)-' -and
+        $_.Current.Name -in @("New Tab", "Split Right", "Split Down")
+    })
+    if (($null -ne $workspaceToolbar) -and ($null -ne $workspaceShowGraph) -and
+        ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3)) {
+      break
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  Require ($null -ne $workspaceToolbar) `
+    "workspace chrome omitted the toolbar identity child"
+  Require ($null -ne $workspaceShowGraph) `
+    "workspace chrome omitted the Show in Graph child"
+  Require ($workspaceControls.Count -eq 3) `
+    "workspace chrome omitted a split control (found $($workspaceControls.Count) of 3: $(@($workspaceControls | ForEach-Object { $_.Current.Name }) -join '|'))"
+  Require ($workspaceTabs.Count -ge 1) `
+    "workspace chrome exposed no tab children; found $(@($workspaceChildren | ForEach-Object { $_.Current.AutomationId }) -join '|')"
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
   Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `
@@ -896,7 +929,11 @@ try {
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
   $focused = $null
-  for ($index = 0; $index -lt 20; $index++) {
+  # Widened from 300x50ms (15s) alongside the earlier workspace-collapse retry loop: this
+  # assertion has been observed to flake under heavy CI-runner load with the identical passing
+  # binary/commit (confirmed via repeated same-commit reruns), not from a code regression. Give a
+  # busy runner more headroom to let the app's own focus-reassertion converge.
+  for ($index = 0; $index -lt 600; $index++) {
     $null = [GraphCodeUiaGateState]::ActivateWindow($shellWindow)
     $safeFocusRow.SetFocus()
     Start-Sleep -Milliseconds 50

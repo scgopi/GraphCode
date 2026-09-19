@@ -9,6 +9,7 @@ pub const Node = struct {
     state: []u8,
     activity: []u8,
     presence: []u8,
+    backend: []u8 = &.{},
     pilot_state: []u8 = &.{},
     goal_summary: []u8 = &.{},
     goal_predicate: []u8 = &.{},
@@ -19,6 +20,9 @@ pub const Node = struct {
     model_tier: []u8 = &.{},
     poll_interval_seconds: ?f64 = null,
     stall_after_seconds: ?f64 = null,
+    created_at: ?u64 = null,
+    metric_passes: u32 = 0,
+    token_usage: ?u32 = null,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
     subgraph_json: []u8 = &.{},
@@ -976,6 +980,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = try allocator.dupe(u8, node.state),
         .activity = try allocator.dupe(u8, node.activity),
         .presence = try allocator.dupe(u8, node.presence),
+        .backend = try allocator.dupe(u8, node.backend),
         .pilot_state = try allocator.dupe(u8, node.pilot_state),
         .goal_summary = try allocator.dupe(u8, node.goal_summary),
         .goal_predicate = try allocator.dupe(u8, node.goal_predicate),
@@ -986,6 +991,9 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .model_tier = try allocator.dupe(u8, node.model_tier),
         .poll_interval_seconds = node.poll_interval_seconds,
         .stall_after_seconds = node.stall_after_seconds,
+        .created_at = node.created_at,
+        .metric_passes = node.metric_passes,
+        .token_usage = node.token_usage,
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
         .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
         .subgraph_json = try allocator.dupe(u8, node.subgraph_json),
@@ -1037,6 +1045,7 @@ fn decodeNodes(
             .state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle"),
             .activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", ""),
             .presence = try duplicatePresence(allocator, scalar_object),
+            .backend = try duplicateJsonStringOr(allocator, scalar_object, "backend", ""),
             .pilot_state = try duplicateJsonStringOr(allocator, scalar_object, "pilotState", "notPiloted"),
             .goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", ""),
             .goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", ""),
@@ -1047,6 +1056,9 @@ fn decodeNodes(
             .model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", ""),
             .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
             .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
+            .created_at = jsonNumber64(scalar_object, "createdAt"),
+            .metric_passes = jsonArrayObjectCount(scalar_object, "metricHistory"),
+            .token_usage = jsonUsageTotal(scalar_object),
             .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
             .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
             .subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph"),
@@ -1098,6 +1110,36 @@ fn jsonNumber(object: []const u8, key: []const u8) ?u32 {
     while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
     if (end == 0) return null;
     return std.fmt.parseInt(u32, value[0..end], 10) catch null;
+}
+
+fn jsonNumber64(object: []const u8, key: []const u8) ?u64 {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return null;
+    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
+    var end: usize = 0;
+    while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
+    if (end == 0) return null;
+    return std.fmt.parseInt(u64, value[0..end], 10) catch null;
+}
+
+fn jsonArrayObjectCount(object: []const u8, key: []const u8) u32 {
+    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":[", .{key}) catch return 0;
+    defer std.heap.page_allocator.free(needle);
+    const start = std.mem.indexOf(u8, object, needle) orelse return 0;
+    const close = std.mem.indexOfScalarPos(u8, object, start + needle.len, ']') orelse return 0;
+    var count: u32 = 0;
+    for (object[start + needle.len .. close]) |value| {
+        if (value == '{') count += 1;
+    }
+    return count;
+}
+
+fn jsonUsageTotal(object: []const u8) ?u32 {
+    const input = jsonNumber(object, "inputTokens") orelse jsonNumber(object, "inputTokenCount") orelse 0;
+    const output = jsonNumber(object, "outputTokens") orelse jsonNumber(object, "outputTokenCount") orelse 0;
+    if (input == 0 and output == 0) return null;
+    return input +| output;
 }
 
 fn jsonFloat(object: []const u8, key: []const u8) ?f64 {
@@ -1289,6 +1331,7 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.state);
     allocator.free(node.activity);
     allocator.free(node.presence);
+    allocator.free(node.backend);
     allocator.free(node.pilot_state);
     allocator.free(node.goal_summary);
     allocator.free(node.goal_predicate);
