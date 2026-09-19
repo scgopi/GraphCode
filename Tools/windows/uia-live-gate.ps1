@@ -929,7 +929,11 @@ try {
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
   $focused = $null
-  for ($index = 0; $index -lt 300; $index++) {
+  # Widened from 300x50ms (15s) alongside the earlier workspace-collapse retry loop: this
+  # assertion has been observed to flake under heavy CI-runner load with the identical passing
+  # binary/commit (confirmed via repeated same-commit reruns), not from a code regression. Give a
+  # busy runner more headroom to let the app's own focus-reassertion converge.
+  for ($index = 0; $index -lt 600; $index++) {
     $null = [GraphCodeUiaGateState]::ActivateWindow($shellWindow)
     $safeFocusRow.SetFocus()
     Start-Sleep -Milliseconds 50
