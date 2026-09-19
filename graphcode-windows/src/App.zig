@@ -4468,7 +4468,13 @@ fn onWindowMessage(
             return true;
         },
         c.WM_SETFOCUS => {
-            if (app.workspace) |workspace| workspace.focus(workspace.active_surface);
+            if (app.workspace) |workspace| {
+                if (app.surface == .workspace or app.workspace_controls.panel_visible) {
+                    workspace.focus(workspace.active_surface);
+                } else {
+                    workspace.blurAll();
+                }
+            }
             result.* = 0;
             return true;
         },

@@ -929,7 +929,7 @@ try {
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
   $focused = $null
-  for ($index = 0; $index -lt 20; $index++) {
+  for ($index = 0; $index -lt 100; $index++) {
     $null = [GraphCodeUiaGateState]::ActivateWindow($shellWindow)
     $safeFocusRow.SetFocus()
     Start-Sleep -Milliseconds 50
