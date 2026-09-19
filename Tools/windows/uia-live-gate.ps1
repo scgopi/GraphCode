@@ -560,7 +560,18 @@ try {
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
   $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
-  $graphChildIds = @($projectCardIds + @($connectionAlert.Current.AutomationId) + $canvasActionIds)
+  $reclaimOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reclaim" }) | Select-Object -First 1
+  $keepOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Keep" }) | Select-Object -First 1
+  Require ($null -ne $reclaimOffer) "resolved card with a reclaimable worktree omitted its Reclaim descendant"
+  Require ($null -ne $keepOffer) "resolved card with a reclaimable worktree omitted its Keep descendant"
+  Require (($reclaimOffer.Current.BoundingRectangle.Width -gt 0) -and
+           ($reclaimOffer.Current.BoundingRectangle.Height -gt 0)) "Reclaim descendant had empty bounds"
+  Require (($keepOffer.Current.BoundingRectangle.Width -gt 0) -and
+           ($keepOffer.Current.BoundingRectangle.Height -gt 0)) "Keep descendant had empty bounds"
+  $null = $reclaimOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $null = $keepOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $reclaimOfferIds = @($reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId)
+  $graphChildIds = @($projectCardIds + @($connectionAlert.Current.AutomationId) + $canvasActionIds + $reclaimOfferIds)
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
   $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
