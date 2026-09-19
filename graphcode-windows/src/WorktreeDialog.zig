@@ -43,6 +43,7 @@ pub const Dialog = struct {
 
     pub fn toggle(self: *Dialog, index: usize) bool {
         if (index >= self.rows.items.len) return false;
+        if (!WorktreeStatus.sweepSelectable(self.rows.items[index].entry)) return false;
         self.rows.items[index].selected = !self.rows.items[index].selected;
         self.confirmation_armed = false;
         return true;
@@ -81,7 +82,7 @@ pub const Dialog = struct {
         if (!self.policy.allow_reclaim) return error.PolicyDisabled;
         if (self.selectedCount() == 0) return error.UnsafeSelection;
         for (self.rows.items) |row| {
-            if (row.selected and WorktreeStatus.decision(row.entry) != .reclaimable)
+            if (row.selected and !WorktreeStatus.sweepSelectable(row.entry))
                 return error.UnsafeSelection;
         }
         self.confirmation_armed = true;
@@ -99,6 +100,13 @@ pub const Dialog = struct {
     pub fn revealSelected(self: *const Dialog) !WorktreeStatus.ExplorerArgs {
         for (self.rows.items) |row| if (row.selected) return WorktreeStatus.explorerArgs(row.entry.path);
         return error.EmptyProjectPath;
+    }
+
+    pub fn selectedDiscardsFiles(self: *const Dialog) bool {
+        for (self.rows.items) |row| {
+            if (row.selected and WorktreeStatus.discardsFiles(row.entry)) return true;
+        }
+        return false;
     }
 };
 
@@ -140,4 +148,16 @@ test "confirmed multi-select is consumable exactly once" {
     try dialog.armConfirmation();
     try dialog.consumeConfirmation();
     try std.testing.expectError(error.ConfirmationRequired, dialog.consumeConfirmation());
+}
+
+test "dirty rows are selectable but require the destructive confirmation gate" {
+    var entries = [_]WorktreeStatus.Entry{
+        .{ .path = @constCast("C:\\dirty"), .branch = @constCast("dirty"), .dirty = true },
+    };
+    var dialog = try Dialog.init(std.testing.allocator, "C:\\project", &entries, .{ .allow_reclaim = true });
+    defer dialog.deinit();
+    try std.testing.expect(dialog.toggle(0));
+    try std.testing.expect(dialog.selectedDiscardsFiles());
+    try dialog.armConfirmation();
+    try std.testing.expect(dialog.canConfirm());
 }

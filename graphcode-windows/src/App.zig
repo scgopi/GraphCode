@@ -1237,12 +1237,26 @@ pub const App = struct {
             self.setStatus("A clone is already running");
             return;
         }
-        self.clone_operation = RepositoryDialogs.CloneOperation.start(self.allocator, draft) catch {
+        const operation = RepositoryDialogs.CloneOperation.start(self.allocator, draft) catch {
             self.setIngressError("Clone could not start");
             self.setStatus("Clone could not start");
             return;
         };
-        self.setStatus("Cloning repository… (Ctrl+Shift+X cancels)");
+        defer operation.deinit();
+        const clone_status = RepositoryDialogs.showCloneProgress(self.window.hwnd, self.allocator, operation) catch {
+            operation.cancel();
+            self.setIngressError("Clone progress sheet could not open");
+            self.setStatus("Clone progress sheet could not open");
+            return;
+        };
+        switch (clone_status) {
+            .finished => self.setStatus("Repository cloned"),
+            .cancelled => self.setStatus("Clone cancelled"),
+            else => {
+                self.setIngressError("Clone failed");
+                self.setStatus("Clone failed");
+            },
+        }
     }
 
     fn cancelClone(self: *App) void {
@@ -1425,11 +1439,15 @@ pub const App = struct {
             self.setStatus(@errorName(err));
             return;
         };
-        RepositoryDialogs.validateRemoteConnection(self.allocator, draft) catch |err| {
-            self.setIngressError(@errorName(err));
-            self.setStatus(@errorName(err));
+        if (!(RepositoryDialogs.showRemoteValidation(self.window.hwnd, self.allocator, draft) catch {
+            self.setIngressError("SSH validation could not start");
+            self.setStatus("SSH validation could not start");
             return;
-        };
+        })) {
+            self.setIngressError("SSH connection validation failed");
+            self.setStatus("SSH connection validation failed");
+            return;
+        }
         RepositoryDialogs.saveRemoteConfig(self.allocator, draft) catch {
             self.setIngressError("SSH validated but remote configuration could not be saved");
             self.setStatus("SSH validated but remote configuration could not be saved");
@@ -2101,7 +2119,7 @@ pub const App = struct {
         var selected = std.array_list.Managed([]const u8).init(self.allocator);
         defer selected.deinit();
         for (current_inspection.entries.items[0..@min(current_inspection.entries.items.len, result.count)], 0..) |entry, index| {
-            if (result.selected[index] and WorktreeStatus.decision(entry) == .reclaimable)
+            if (result.selected[index] and WorktreeStatus.sweepSelectable(entry))
                 selected.append(entry.path) catch {
                     self.setStatus("Unable to collect Worktree Sweep selection");
                     return;
@@ -2118,13 +2136,14 @@ pub const App = struct {
         };
         var explicit_policy = WorktreeStatus.Policy{};
         explicit_policy.applyResolveAction(.remove);
-        const removed = WorktreeStatus.reclaimSelectedWithPolicy(
+        const removed = WorktreeStatus.reclaimSelectedWithPolicyMode(
             self.allocator,
             project_path,
             selected.items,
             bindings.items,
             explicit_policy,
-            true,
+            result.destructive_confirmed,
+            result.destructive_confirmed,
         ) catch |err| {
             self.setStatus(switch (err) {
                 error.UnsafeSelection => "Worktree Sweep blocked an unsafe selection",
@@ -2498,18 +2517,15 @@ pub const App = struct {
             dialog.policy
         else
             WorktreeStatus.loadPolicy(self.allocator, project_path);
-        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, initial) catch {
+        const policy = NativeForms.worktreePolicy(self.window.hwnd, self.allocator, project_path, initial) catch {
             self.setStatus("Unable to open worktree policy editor");
             return;
         } orelse {
             self.setStatus("Worktree policy edit cancelled");
             return;
         };
-        self.saveWorktreePolicy(policy) catch {
-            self.setStatus("Unable to save project settings");
-            return;
-        };
-        self.setStatus("Project settings saved");
+        if (self.worktree_dialog) |*dialog| dialog.setPolicy(policy);
+        self.setStatus("Project settings updated");
     }
 
     fn saveCurrentWorktreePolicy(self: *App) void {
@@ -3807,7 +3823,15 @@ fn onWindowMessage(
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
             const hdc = c.BeginPaint(hwnd, &paint);
-            const inspection = if (app.worktree_inspection) |*value| value else null;
+            const inspection = if (app.worktree_inspection) |*value| blk: {
+                const policy = WorktreeStatus.loadPolicy(app.allocator, value.project_path);
+                const summary = WorktreeStatus.summarize(value.entries.items);
+                var bytes: u64 = 0;
+                for (value.entries.items) |entry| bytes += entry.size_bytes;
+                const threshold_bytes = @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024;
+                if (summary.total >= policy.notice_count or bytes >= threshold_bytes) break :blk value;
+                break :blk null;
+            } else null;
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
