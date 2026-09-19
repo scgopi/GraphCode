@@ -102,6 +102,12 @@ struct GraphcodeCommands: Commands {
         .disabled(!hasRestartableLoop)
       Button("Restart All Sessions…") { store.send(.sessionRestart(.allTapped)) }
         .disabled(store.projects.isEmpty)
+
+      Divider()
+
+      Button("Send Message to All Loops…") { store.send(.sessionRestart(.broadcastTapped)) }
+        .keyboardShortcut("m", modifiers: [.command, .shift])
+        .disabled(!store.projects.contains { $0.graph.liveLoopCount > 0 })
     }
 
     CommandMenu("Terminal") {

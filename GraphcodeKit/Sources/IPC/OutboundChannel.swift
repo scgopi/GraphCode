@@ -58,6 +58,9 @@ final class OutboundChannel: @unchecked Sendable {
   /// A non-socket cannot block a writer the way a peer that stopped reading can, so a
   /// plain `write` is both correct and sufficient there.
   private let isSocket: Bool
+  /// The file the descriptor referred to when the channel was made — see
+  /// `OutboundChannels.open`, which replaces a channel whose number now names another.
+  let identity: FileIdentity?
   /// Which connection this is, for the log — descriptor numbers are reused within
   /// minutes, so a line keyed on `fd` alone cannot name a client. The registry passes
   /// the connection's id (its first eight characters), the same `id=` its `connect`
@@ -82,6 +85,7 @@ final class OutboundChannel: @unchecked Sendable {
     var typeSize = socklen_t(MemoryLayout<Int32>.size)
     isSocket =
       getsockopt(fileDescriptor, SOL_SOCKET, SO_TYPE, &socketType, &typeSize) == 0
+    identity = FileIdentity(of: fileDescriptor)
     Self.armAgainstSIGPIPE(fileDescriptor)
     Self.boundBlockingSends(on: fileDescriptor)
     // Captured strongly on purpose: the channel must outlive the registry's reference to
@@ -449,6 +453,10 @@ public enum OutboundChannels {
   /// channel whose write failed can outlive its connection and be inherited by the next
   /// one to be given that number — which would then find every send refused and be
   /// dropped as disconnected the moment it arrived.
+  /// So is a live one whose number now names a different file: a descriptor closed
+  /// with `close(2)` instead of `close` below leaves its channel behind, and the next
+  /// socket given that number would otherwise inherit a writer built for whatever the
+  /// number used to be — for a file, a blocking `write` that never reports a stall.
   /// `backlogBudget` is `nil` for the standard budget; tests inject a small one so the
   /// valve can be exercised without moving megabytes through a socket.
   public static func open(
@@ -456,7 +464,9 @@ public enum OutboundChannels {
   ) {
     lock.lock()
     let existing = channels[fileDescriptor]
-    guard existing?.isAlive != true else {
+    if let existing, existing.isAlive,
+      existing.identity == FileIdentity(of: fileDescriptor)
+    {
       lock.unlock()
       return
     }
@@ -509,5 +519,21 @@ public enum OutboundChannels {
     // inside a `write` on a descriptor number about to be handed to the next `accept`.
     channel.closeAndWait()
     posixClose(fileDescriptor)
+  }
+}
+
+/// Which open file a descriptor refers to — device, inode and type from `fstat`. A
+/// descriptor number is reused; this is not, for as long as the file is open.
+struct FileIdentity: Equatable {
+  let device: UInt64
+  let inode: UInt64
+  let type: UInt32
+
+  init?(of fileDescriptor: Int32) {
+    var info = stat()
+    guard fstat(fileDescriptor, &info) == 0 else { return nil }
+    device = UInt64(truncatingIfNeeded: info.st_dev)
+    inode = UInt64(truncatingIfNeeded: info.st_ino)
+    type = UInt32(truncatingIfNeeded: info.st_mode) & UInt32(S_IFMT)
   }
 }

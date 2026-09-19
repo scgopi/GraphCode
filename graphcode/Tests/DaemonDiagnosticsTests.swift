@@ -12,26 +12,27 @@ import Testing
 /// stays within its bound.
 @Suite(.serialized)
 struct DaemonDiagnosticsTests {
-  /// Every line the shared log records while `body` runs.
-  private func recording(_ body: () async throws -> Void) async rethrows -> [String] {
-    final class Lines: @unchecked Sendable {
-      private let lock = NSLock()
-      private var lines: [String] = []
-      func append(_ line: String) {
-        lock.lock()
-        lines.append(line)
-        lock.unlock()
-      }
-      var all: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return lines
-      }
+  final class Lines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ line: String) {
+      lock.lock()
+      lines.append(line)
+      lock.unlock()
     }
+    var all: [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return lines
+    }
+  }
+
+  /// Every line the shared log records while `body` runs — which can watch them arrive.
+  private func recording(_ body: (Lines) async throws -> Void) async rethrows -> [String] {
     let lines = Lines()
     let tap = DaemonLog.shared.tap { lines.append($0) }
     defer { DaemonLog.shared.untap(tap) }
-    try await body()
+    try await body(lines)
     return lines.all
   }
 
@@ -89,15 +90,25 @@ struct DaemonDiagnosticsTests {
     }
 
     let deafID = UUID()
-    let lines = try await recording {
+    let deafFD = String(deaf[0])
+    let lines = try await recording { recorded in
       await store.addConnection(id: UUID(), fileDescriptor: reading[0])
       await store.addConnection(id: deafID, fileDescriptor: deaf[0])
       _ = try await frame(from: reading[1])
       await store.handle(.renameNode(store.graph.nodes[0].id, title: "Renamed"))
       _ = try await frame(from: reading[1])
-      // Past the stall threshold, so the deaf channel's writer has named itself — its
-      // write never completes, and a line only at completion would never come.
-      try await Task.sleep(for: .milliseconds(600))
+      // Until the deaf channel's writer has named itself — its write never completes, and
+      // a line only at completion would never come. Awaited rather than slept for: past
+      // the 250ms threshold the writer thread still has to be scheduled to say so, and a
+      // fixed 600ms lost that race under a loaded full-suite run.
+      let deadline = ContinuousClock.now + .seconds(5)
+      while ContinuousClock.now < deadline,
+        !recorded.all.map(fields).contains(where: {
+          $0["event"] == "write-stall" && $0["fd"] == deafFD
+        })
+      {
+        try await Task.sleep(for: .milliseconds(20))
+      }
     }
 
     let broadcast = try #require(
@@ -107,7 +118,6 @@ struct DaemonDiagnosticsTests {
     #expect(Int(broadcast["bytes"] ?? "") ?? 0 > 4096)
     #expect(broadcast["encode_ms"] != nil)
 
-    let deafFD = String(deaf[0])
     let stalled = lines.map(fields).filter { line in
       line["event"] == "write-stall" && line["fd"] == deafFD
     }

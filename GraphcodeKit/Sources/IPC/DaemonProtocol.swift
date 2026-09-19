@@ -183,6 +183,11 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// mid-turn. Optional so frames from clients that predate the flag decode as the
   /// immediate send they always were.
   case messageNode(UUID, text: String, from: UUID?, followUp: Bool?)
+  /// `messageNode` for every live loop at once, composites' workers included — the Loop
+  /// menu's Send Message to All Loops…. Only sessions that can be typed into now are
+  /// addressed: a broadcast is to whoever is here, so a loop that isn't live is left out
+  /// rather than staged. A sending loop is not told its own message.
+  case broadcastMessage(text: String, from: UUID?)
   /// Drop a note onto the project's Mailroom — the shared, unaddressed board (`graphcode
   /// mail post`) any loop can write to for *whoever comes next*, without naming a
   /// recipient or drawing an edge first. `topic` groups threads for watchers; `from` is

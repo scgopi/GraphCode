@@ -826,7 +826,8 @@ public actor GraphStore {
 
   private static func allowsDrainRecoveryWhileHandling(_ command: GraphCommand) -> Bool {
     switch command {
-    case .messageNode, .memoNode, .mailroomPost, .mailroomInbox, .mailroomWatch:
+    case .messageNode, .broadcastMessage, .memoNode, .mailroomPost, .mailroomInbox,
+      .mailroomWatch:
       return true
     default:
       return false
@@ -1008,6 +1009,8 @@ public actor GraphStore {
 
     case .messageNode(let nodeID, let text, let from, let followUp):
       await deliverAdHocMessage(to: nodeID, text: text, from: from, followUp: followUp ?? false)
+    case .broadcastMessage(let text, let from):
+      await broadcastMessage(text, from: from)
     case .mailroomPost(let text, let topic, let from):
       await mailroomPost(text: text, topic: topic, from: from)
 
@@ -2341,11 +2344,11 @@ public actor GraphStore {
   /// note to the room from a note to a peer. Written as `.letter`, which is what keeps
   /// a talkative graph inside its own budget instead of evicting the notes.
   private func recordMailroomCommunication(
-    from senderID: UUID?, to target: LoopNode, text: String, topic: String
+    from senderID: UUID?, to addressee: String, text: String, topic: String
   ) {
     guard onMailroomEnabled?() == true else { return }
     let sender = senderID.flatMap { graph.nodes[id: $0]?.title } ?? "a human"
-    var body = "@\(target.title): \(text)"
+    var body = "@\(addressee): \(text)"
     if body.utf8.count > MailroomPost.maxBodyBytes {
       // Room for the ellipsis itself, or the "1024-byte bound" would be 1026 in the
       // worst case.
@@ -3113,7 +3116,8 @@ public actor GraphStore {
       if record.hasPrefix("\(source.title): ") {
         record.removeFirst("\(source.title): ".count)
       }
-      recordMailroomCommunication(from: source.id, to: target, text: record, topic: "direct")
+      recordMailroomCommunication(
+        from: source.id, to: target.title, text: record, topic: "direct")
       graph.edges[id: edgeID]?.fireCount += 1
     }
   }
@@ -3216,7 +3220,7 @@ public actor GraphStore {
         var record = parts.joined(separator: " ")
         if let payload { record += " " + payload }
         recordMailroomCommunication(
-          from: source.id, to: target, text: record, topic: "handoff")
+          from: source.id, to: target.title, text: record, topic: "handoff")
       }
       if let payload {
         parts.append(payload)
@@ -3295,7 +3299,7 @@ public actor GraphStore {
     // that already exists, and recording it would have the board record itself.
     if mirror {
       recordMailroomCommunication(
-        from: senderID, to: target, text: trimmed, topic: "direct")
+        from: senderID, to: target.title, text: trimmed, topic: "direct")
     }
     // Attributed when the sender is a loop in this graph, the way a message edge names
     // its source — the target should know who's talking without guessing.
@@ -3361,6 +3365,43 @@ public actor GraphStore {
           + "it will read it when it next wakes")
       return
     }
+  }
+
+  /// `GraphCommand.broadcastMessage`, as one operation over the whole tree rather than a
+  /// recursion through `runInSubGraph`: a child store would write its own letter and raise
+  /// its own summary, so a graph with two composites got three letters and a banner per
+  /// level. Workers are sent to with this graph's path, the one piloting launched their
+  /// sessions with. The sends run concurrently for the reason `restart`'s kills do: each
+  /// one is paced in chunks, and a dozen in sequence would hold this actor for as long as
+  /// they add up to. A send that fails is staged to that loop's memory, as
+  /// `deliverAdHocMessage` does.
+  private func broadcastMessage(_ text: String, from senderID: UUID?) async {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      announceError("broadcast not sent: empty message")
+      return
+    }
+    let targets = graph.broadcastTargets.filter { $0.id != senderID }
+    guard !targets.isEmpty, let onDeliverMessage else { return }
+    recordMailroomCommunication(from: senderID, to: "all", text: trimmed, topic: "direct")
+    let sender = senderID.flatMap { id in graph.nodesAtAnyDepth.first { $0.id == id }?.title }
+    let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
+    let path = graph.project.path
+    let delivered = await withTaskGroup(of: (UUID, Bool).self) { group in
+      for target in targets {
+        group.addTask { (target.id, await onDeliverMessage(target, message, path)) }
+      }
+      var results: [UUID: Bool] = [:]
+      for await (id, landed) in group { results[id] = landed }
+      return results
+    }
+    let missed = targets.filter { delivered[$0.id] != true }
+    guard !missed.isEmpty else { return }
+    for target in missed { recordMemory(target.id, "while you were away: \(message)") }
+    announceError(
+      "broadcast reached \(targets.count - missed.count) of \(targets.count) loops — staged to "
+        + "the memory of \(missed.map(\.title).joined(separator: ", ")); they will read it "
+        + "when they next wake")
   }
 
   /// Long enough for a relaunched session to exist and start its agent's boot, short
