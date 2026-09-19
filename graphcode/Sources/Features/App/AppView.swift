@@ -178,6 +178,13 @@ struct AppView: View {
         "Its terminal session is ended and every edge touching it is removed. "
           + "This can't be undone.")
     }
+    .sheet(
+      isPresented: Binding(
+        get: { store.sessionRestart.broadcastDraft != nil },
+        set: { if !$0 { store.send(.sessionRestart(.broadcastCancelled)) } })
+    ) {
+      BroadcastMessageFormView(store: store)
+    }
     .confirmationDialog(
       "Restart every session?",
       isPresented: Binding(

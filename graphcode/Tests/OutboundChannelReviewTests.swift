@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 
 import Testing
@@ -93,6 +94,47 @@ struct OutboundChannelReviewTests {
   /// The valve counts the frame it just appended, so one snapshot larger than the budget
   /// trips it on a queue of one. Every client would then be dropped on the broadcast it
   /// joined for, and the daemon would have no client left it can serve.
+  /// A descriptor closed behind the registry's back — `close(2)` rather than
+  /// `OutboundChannels.close`, as tests over `/dev/null` do — left its channel live, and the
+  /// next socket given that number inherited a channel built for a file: a plain blocking
+  /// `write` that never names a stall. That was the flaky
+  /// `DaemonDiagnosticsTests.aSlowSubscriberIsNamedByTheWriteThatWaitedOnIt`.
+  @Test
+  func aDescriptorReusedBehindTheRegistrysBackGetsAChannelOfItsOwn() async throws {
+    let reused = open("/dev/null", O_WRONLY)
+    OutboundChannels.open(reused)
+    let (socket, peer) = makeSocketPair()
+    // Set before the swap: a failing run must not end the test host on SIGPIPE.
+    var on: Int32 = 1
+    setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    var small: Int32 = 4096
+    setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &small, socklen_t(MemoryLayout<Int32>.size))
+    // `dup2` closes the file and puts the socket on its number in one step, so nothing
+    // running in parallel can take the number in between.
+    #expect(dup2(socket, reused) == reused)
+    close(socket)
+    let stalls = LockIsolated(0)
+    let tap = DaemonLog.shared.tap { line in
+      if line.contains("event=write-stall"), line.contains(" fd=\(reused) ") {
+        stalls.withValue { $0 += 1 }
+      }
+    }
+    defer {
+      DaemonLog.shared.untap(tap)
+      close(peer)
+      OutboundChannels.close(reused)
+    }
+
+    OutboundChannels.open(reused)
+    OutboundChannels.send(frame("unread"), to: reused)
+    let deadline = ContinuousClock.now + .seconds(5)
+    while ContinuousClock.now < deadline, stalls.value == 0 {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+
+    #expect(stalls.value == 1)
+  }
+
   @Test
   func oneFrameLargerThanTheBudgetIsNotABacklog() throws {
     let (daemon, client) = makeSocketPair()
