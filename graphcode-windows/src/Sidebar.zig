@@ -268,18 +268,19 @@ pub fn draw(
                 drawText(hdc, allocator, attentionReason(node), 24, attention_y + 15, 9, stateColor(node.state));
                 attention_y += 34;
             }
-            if (model.activity.items.len != 0) {
-                const activity_y = section_y + 30 + @as(i32, @intCast(@min(model.attentionCount(), 4) * 34)) + 18;
-                drawText(hdc, allocator, "Activity", 18, activity_y, 11, 0x00B8B8B8);
-                var x: i32 = 24;
-                for (model.activity.items[0..@min(model.activity.items.len, 4)]) |event| {
-                    const stamp = std.fmt.allocPrint(allocator, "{d}m", .{@max(0, @divTrunc(std.time.timestamp() - event.timestamp, 60))}) catch null;
-                    defer if (stamp) |value| allocator.free(value);
-                    drawText(hdc, allocator, event.title, x, activity_y + 18, 10, 0x00E6E6E6);
-                    drawText(hdc, allocator, stamp orelse "", x, activity_y + 32, 9, stateColor(event.state));
-                    x += 116;
-                }
-            }
+        }
+    }
+    if (model.activity.items.len != 0) {
+        const attention_rows = @min(model.attentionCount(), 4);
+        const activity_y = section_y + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
+        drawText(hdc, allocator, "Activity", 18, activity_y, 11, 0x00B8B8B8);
+        var x: i32 = 24;
+        for (model.activity.items[0..@min(model.activity.items.len, 4)]) |event| {
+            const stamp = std.fmt.allocPrint(allocator, "{d}m", .{@max(0, @divTrunc(std.time.timestamp() - event.timestamp, 60))}) catch null;
+            defer if (stamp) |value| allocator.free(value);
+            drawText(hdc, allocator, event.title, x, activity_y + 18, 10, 0x00E6E6E6);
+            drawText(hdc, allocator, stamp orelse "", x, activity_y + 32, 9, stateColor(event.state));
+            x += 116;
         }
     }
     if (ingress_error.len != 0) {

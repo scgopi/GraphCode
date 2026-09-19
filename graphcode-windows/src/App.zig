@@ -3134,21 +3134,24 @@ pub const App = struct {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
             self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
             for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
+                const row_offset = @as(i32, @intCast(index)) * 34;
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
                 defer self.allocator.free(identity);
                 const name = std.fmt.allocPrint(self.allocator, "{s} - {s}", .{ entry.node.title, Sidebar.attentionReason(entry.node) }) catch return;
                 defer self.allocator.free(name);
-                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + @as(i32, @intCast(index * 34)), .right = 232, .bottom = section + 60 + @as(i32, @intCast(index * 34)) }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
             }
         }
         if (self.model.activity.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
-            const activity_top = section + 30 + @as(i32, @intCast(@min(self.model.attentionCount(), 4) * 34)) + 18;
+            const attention_rows = @min(self.model.attentionCount(), 4);
+            const activity_top = section + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
             for (self.model.activity.items[0..@min(self.model.activity.items.len, 4)], 0..) |event, index| {
+                const row_offset = @as(i32, @intCast(index)) * 116;
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ event.project_path, event.node_id }) catch return;
                 defer self.allocator.free(identity);
-                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1, .{ .left = 18 + @as(i32, @intCast(index * 116)), .top = activity_top + 24, .right = 130 + @as(i32, @intCast(index * 116)), .bottom = activity_top + 58 }, false, true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "activity-row", identity, event.title, 1, .{ .left = 18 + row_offset, .top = activity_top + 24, .right = 130 + row_offset, .bottom = activity_top + 58 }, false, true) catch return;
             }
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .left = 184, .top = activity_top, .right = 206, .bottom = activity_top + 24 }, false, true) catch return;
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .left = 208, .top = activity_top, .right = 230, .bottom = activity_top + 24 }, false, true) catch return;
