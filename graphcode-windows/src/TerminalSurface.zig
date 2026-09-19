@@ -832,6 +832,18 @@ pub const Workspace = struct {
         }
     }
 
+    /// Collapses the workspace to a zero-size, unfocused, hidden state without going through
+    /// resize()/syncTopology() -- syncTopology() unconditionally re-focuses the active pane's
+    /// terminal surface even at a degenerate size, which is exactly the behavior callers leaving
+    /// the workspace surface need to avoid.
+    pub fn collapse(self: *Workspace) void {
+        self.layout_origin_x = 0;
+        self.layout_origin_y = 0;
+        self.layout_width = 0;
+        self.layout_height = 0;
+        self.blurAll();
+    }
+
     pub fn focus(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
         if (self.syncing_focus or self.syncing_topology) return;
