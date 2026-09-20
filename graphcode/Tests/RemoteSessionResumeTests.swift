@@ -214,7 +214,12 @@ struct RemoteSessionResumeTests {
       ZmxSessionLauncher.remoteDeliveryScript(
         forNode: nil, at: location, settings: GraphcodeSettings()))
 
-    #expect(!script.contains("printf"))
+    // `printf` does appear in the fragment now — a failed delivery reports its reason to
+    // the host's dial log — so assert the rule this line has always stood for rather than
+    // its old proxy: no shell write in here targets the stamp.
+    #expect(
+      script.components(separatedBy: "printf").dropFirst()
+        .allSatisfy { $0.contains("dials.log") })
 
     // Not a manifest entry — the manifest is the one token that base64-decodes to JSON.
     let files = try #require(

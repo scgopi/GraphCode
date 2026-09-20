@@ -103,9 +103,17 @@ public enum RemoteGraphAccess {
   /// host, or `nil` when there's nothing to send. One `python3 -c` with a base64 JSON
   /// manifest rather than heredocs or scp: a single argument survives every quoting
   /// layer between here and the remote shell, needs no extra ssh round-trip, and
-  /// content can't collide with a delimiter. Neutered with `|| true` because delivery
-  /// must never block the launch it precedes — a session without its briefing is the
-  /// old behaviour, which works.
+  /// content can't collide with a delimiter. Neutered because delivery must never block
+  /// the launch it precedes — a session without its briefing is the old behaviour, which
+  /// works.
+  ///
+  /// **Neutered is not silent.** It used to be: the fragment ended `>/dev/null 2>&1
+  /// || true`, and when `f6b8af41` left the embedded python with an unbalanced `exec(`,
+  /// every delivery raised `SyntaxError` and threw the evidence away. Remote hosts got
+  /// nothing at all for five days and no machine on either end held a word about it.
+  /// Failure is still non-fatal here, but its stderr now reaches the host's own dial log
+  /// as `delivery install failed <reason>`, which is the difference between a five-day
+  /// mystery and a one-line answer.
   ///
   /// `receipt` is a path and content written **after** every manifest entry has landed,
   /// as proof that the whole delivery succeeded.
@@ -165,9 +173,25 @@ public enum RemoteGraphAccess {
       + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
     var argv = ["python3", "-c", program, json.base64EncodedString()]
     if let receipt { argv += [receipt.path, receipt.content] }
-    return argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
-      + " >/dev/null 2>&1" + (neutered ? " || true" : "")
+    let install = argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+    // stderr into a variable, stdout to `/dev/null` — `2>&1 >/dev/null` in that order,
+    // so the substitution keeps the diagnosis and drops the noise.
+    return "gc_di_err=$(\(install) 2>&1 >/dev/null); gc_di_rc=$?; "
+      + "if [ \"$gc_di_rc\" -ne 0 ]; then "
+      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | tr '\\n\\t' '  ' | tail -c \(errorDetailBytes)); "
+      + DialLog.fragment(
+        session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")
+      + "; fi; "
+      + (neutered ? "true" : "[ \"$gc_di_rc\" -eq 0 ]")
   }
+
+  /// How much of a failed delivery's stderr reaches the dial log — the **last** bytes,
+  /// not the first. A python traceback opens with frames and interpreter paths and ends
+  /// with the line that names the fault, so keeping the head throws away the answer:
+  /// measured, `NotADirectoryError` fell outside the first 400 bytes of the very failure
+  /// this was written to explain. A bound at all because the log is a diagnosis, not a
+  /// transcript, and it shares a budget with every dial on the host.
+  static let errorDetailBytes = 400
 
   /// Installs bridge state through the SSH command's stdin. Only the byte count and
   /// SHA-256 digest appear in the remote command; the capability-bearing JSON never

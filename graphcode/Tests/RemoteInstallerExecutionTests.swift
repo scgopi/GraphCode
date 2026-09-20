@@ -114,4 +114,42 @@ struct RemoteInstallerExecutionTests {
       RemoteGraphAccess.installerScript(files: [doomed: "goal"], neutered: false))
     #expect(try run(reporting, home: home) != 0)
   }
+
+  @Test(.enabled(if: hasPython3))
+  func aFailedDeliveryLeavesItsReasonInTheHostsDialLog() throws {
+    // Silence is what cost five days: the installer raised SyntaxError into /dev/null,
+    // so neither machine held a word about why every remote host was empty. Non-fatal
+    // is right; traceless is not.
+    let home = try scratchHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let blocker = home.appendingPathComponent("blocker")
+    try "x".write(to: blocker, atomically: true, encoding: .utf8)
+    let script = try #require(
+      RemoteGraphAccess.installerScript(files: ["~/blocker/nested/PROMPT.md": "goal"]))
+
+    #expect(try run(script, home: home) == 0)
+
+    let log = home.appendingPathComponent(".graphcode/dials.log")
+    let entry = try #require(try? String(contentsOf: log, encoding: .utf8))
+    #expect(entry.contains("delivery install failed"))
+    // The python's own words, not just that something went wrong.
+    #expect(entry.contains("NotADirectoryError") || entry.contains("Errno 20"))
+    // One line per entry, or every reader that splits on newlines mis-parses the log.
+    #expect(entry.split(separator: "\n").count == 1)
+  }
+
+  @Test(.enabled(if: hasPython3))
+  func aSucceedingDeliveryWritesNoDialLogNoise() throws {
+    // The sweep dials every host every minute. A line per healthy delivery would bury
+    // the one that matters under the ones that don't.
+    let home = try scratchHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let script = try #require(
+      RemoteGraphAccess.installerScript(files: [RemoteGraphAccess.cliInstallPath: "shim"]))
+
+    #expect(try run(script, home: home) == 0)
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: home.appendingPathComponent(".graphcode/dials.log").path))
+  }
 }

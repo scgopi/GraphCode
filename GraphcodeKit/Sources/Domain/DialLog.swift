@@ -34,6 +34,28 @@ public enum DialLog {
       + ">> \(log); } 2>/dev/null || true"
   }
 
+  /// `fragment`, with the contents of a shell variable appended as a trailing detail —
+  /// for the one caller that has something to say beyond which branch it took: a failed
+  /// delivery, whose whole problem was leaving no trace of *why*.
+  ///
+  /// The value rides as a `printf` **argument** rather than inside the format, unlike
+  /// `session`, `dial` and `event`. Those are literals this codebase controls; this one
+  /// is an error message from a remote python, and a `%s` or a stray backslash in it
+  /// would otherwise reformat the line it is being written to. Callers are responsible
+  /// for flattening newlines out of the variable first — the log is one line per entry,
+  /// and every reader of it splits on them.
+  public static func fragment(
+    session: String, dial: String, event: String, detailVariable: String
+  ) -> String {
+    let log = logExpression
+    return "{ mkdir -p \"$HOME/.graphcode\"; "
+      + "gc_dl=$(wc -c < \(log) 2>/dev/null || echo 0); "
+      + "[ \"${gc_dl:-0}\" -gt \(maxBytes) ] "
+      + "&& { tail -n \(keptLines) \(log) > \(log).tmp && mv \(log).tmp \(log); }; "
+      + "printf '%s \(session) \(dial) \(event) %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" "
+      + "\"$\(detailVariable)\" >> \(log); } 2>/dev/null || true"
+  }
+
   /// The same line from Swift, for the launches the daemon decides locally rather than
   /// in a remote shell. Best-effort by the same rule: failure to log must never fail a
   /// launch.
