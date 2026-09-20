@@ -215,11 +215,19 @@ struct RemoteSessionResumeTests {
         forNode: nil, at: location, settings: GraphcodeSettings()))
 
     // `printf` does appear in the fragment now — a failed delivery reports its reason to
-    // the host's dial log — so assert the rule this line has always stood for rather than
-    // its old proxy: no shell write in here targets the stamp.
+    // the host's dial log — so this asserts the rule the old `!contains("printf")` line
+    // stood for: no shell redirect in here names the stamp. Checking the *redirect* and
+    // not merely "every printf mentions dials.log" is deliberate; the loose form passes a
+    // rogue `printf 'stamp' > …/.shim-stamp;` because the text after it picks up
+    // `dials.log` from the next fragment's own trim.
+    for redirect in [">", ">>"] {
+      #expect(!script.contains("\(redirect) \(RemoteGraphAccess.shimStampPath)"))
+      #expect(!script.contains("\(redirect)\(RemoteGraphAccess.shimStampPath)"))
+    }
+    // And the only thing any redirect in the fragment appends to is the dial log.
     #expect(
-      script.components(separatedBy: "printf").dropFirst()
-        .allSatisfy { $0.contains("dials.log") })
+      script.components(separatedBy: ">> ").dropFirst()
+        .allSatisfy { $0.hasPrefix(DialLog.logExpression) })
 
     // Not a manifest entry — the manifest is the one token that base64-decodes to JSON.
     let files = try #require(

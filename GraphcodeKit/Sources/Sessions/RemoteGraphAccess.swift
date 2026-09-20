@@ -178,7 +178,9 @@ public enum RemoteGraphAccess {
     // so the substitution keeps the diagnosis and drops the noise.
     return "gc_di_err=$(\(install) 2>&1 >/dev/null); gc_di_rc=$?; "
       + "if [ \"$gc_di_rc\" -ne 0 ]; then "
-      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | tr '\\n\\t' '  ' | tail -c \(errorDetailBytes)); "
+      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | tr -d '\\r' | tr '\\n\\t' '  ' "
+      + "| tail -c \(errorDetailBytes) | iconv -c -f UTF-8 -t UTF-8 2>/dev/null); "
+      + "[ -n \"$gc_di_err\" ] || gc_di_err=\"rc=$gc_di_rc\"; "
       + DialLog.fragment(
         session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")
       + "; fi; "
@@ -189,9 +191,23 @@ public enum RemoteGraphAccess {
   /// not the first. A python traceback opens with frames and interpreter paths and ends
   /// with the line that names the fault, so keeping the head throws away the answer:
   /// measured, `NotADirectoryError` fell outside the first 400 bytes of the very failure
-  /// this was written to explain. A bound at all because the log is a diagnosis, not a
-  /// transcript, and it shares a budget with every dial on the host.
-  static let errorDetailBytes = 400
+  /// this was written to explain.
+  ///
+  /// The size is **derived, not chosen**, and `DialLogBoundTests` locks it: `DialLog`
+  /// trims by keeping its last `keptLines` lines, so a line longer than
+  /// `maxBytes / keptLines` breaks its own bound — the trim can never get the file back
+  /// under `maxBytes`, and from then on every append by every loop on the host re-reads
+  /// and rewrites the whole thing. At 400 bytes it did exactly that: 5000 × 445 = 2.2 MB
+  /// against a 1 MB cap. Deriving it means raising `keptLines` can never silently
+  /// reintroduce that, and what is left still carries the part that names the fault.
+  static let errorDetailBytes =
+    DialLog.maxBytes / DialLog.keptLines - dialLineOverhead
+
+  /// The fixed part of a delivery-failure line — timestamp, the three literal fields,
+  /// and the spaces between them — measured rather than guessed so the budget above
+  /// cannot drift from the line it is budgeting for.
+  static let dialLineOverhead =
+    "2026-09-20T21:38:23Z delivery install failed ".utf8.count
 
   /// Installs bridge state through the SSH command's stdin. Only the byte count and
   /// SHA-256 digest appear in the remote command; the capability-bearing JSON never
