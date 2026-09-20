@@ -70,6 +70,14 @@ struct NodeDraftForm: View {
     .sheet(item: $store.templates.pendingSave) { _ in
       TemplateSaveSheet(store: store)
     }
+    // ⌘V with a picture on the pasteboard. Caught at the dialog rather than at the
+    // field: the focused `TextField`'s own editor takes the keystroke and can only
+    // accept text, so a pasted screenshot would land nowhere and read as the dialog
+    // ignoring it. Off while the template picker has the body — that sheet's ⌘V
+    // belongs to its search field.
+    .catchingPastedImages(isEnabled: !store.templates.isPickerOpen) { payload in
+      store.send(.draftAttachment(.imageArrived(payload)))
+    }
   }
 
   private var header: some View {

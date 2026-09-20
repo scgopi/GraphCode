@@ -1494,6 +1494,14 @@ public enum ZmxSessionLauncher {
       }
     }
     if let worktree = node.worktreeBinding?.worktreePath { paths.append(worktree) }
+    // Codex and Copilot verify paths, and a prompt naming an image the session is denied
+    // reads as the agent ignoring its instructions — the same failure the briefing's
+    // `--add-dir` exists to prevent. Granted from the paths themselves rather than from
+    // the memory directory, so an attachment that came from somewhere else still works.
+    for attachment in node.attachments {
+      let directory = URL(fileURLWithPath: attachment.path).deletingLastPathComponent().path
+      if !paths.contains(directory) { paths.append(directory) }
+    }
     return paths
   }
 

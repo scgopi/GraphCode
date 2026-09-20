@@ -67,6 +67,20 @@ public enum NodeMemory {
       .appendingPathComponent(nodeID.uuidString, isDirectory: true)
   }
 
+  /// Where images attached to a node's brief are kept (`PromptAttachment`).
+  ///
+  /// Inside the node's memory directory deliberately: `remove` already wipes that when
+  /// the node is deleted, so an attachment cannot outlive the loop it was for, and a
+  /// path-verifying backend is granted one directory rather than two.
+  public static func attachmentsDirectory(
+    forProjectPath projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
+  ) -> URL {
+    directory(forProjectPath: projectPath, nodeID: nodeID, baseURL: baseURL)
+      .appendingPathComponent(attachmentsDirectoryName, isDirectory: true)
+  }
+
+  public static let attachmentsDirectoryName = "attachments"
+
   public static func logURL(
     forProjectPath projectPath: String, nodeID: UUID, baseURL: URL = SupportDirectory.url
   ) -> URL {
