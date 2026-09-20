@@ -179,7 +179,16 @@ public enum RemoteGraphAccess {
     return "gc_di_err=$(\(install) 2>&1 >/dev/null); gc_di_rc=$?; "
       + "if [ \"$gc_di_rc\" -ne 0 ]; then "
       + "gc_di_err=$(printf '%s' \"$gc_di_err\" | tr -d '\\r' | tr '\\n\\t' '  ' "
-      + "| tail -c \(errorDetailBytes) | iconv -c -f UTF-8 -t UTF-8 2>/dev/null); "
+      + "| tail -c \(errorDetailBytes)); "
+      // A byte-wise `tail` lands mid-character sooner or later, and one orphan
+      // continuation byte makes `grep` and `sed` fail on the *whole* log under a UTF-8
+      // locale — every other dial on the host hidden by the line meant to explain one.
+      // `iconv -c` drops the partial character; where it doesn't exist (musl, busybox —
+      // it lives in glibc's libc-bin) the fallback strips high bytes outright, which
+      // costs a non-ASCII path its accents and keeps the log readable, which is the
+      // property that matters.
+      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null "
+      + "|| printf '%s' \"$gc_di_err\" | LC_ALL=C tr -d '\\200-\\377'); "
       + "[ -n \"$gc_di_err\" ] || gc_di_err=\"rc=$gc_di_rc\"; "
       + DialLog.fragment(
         session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")
@@ -203,11 +212,17 @@ public enum RemoteGraphAccess {
   static let errorDetailBytes =
     DialLog.maxBytes / DialLog.keptLines - dialLineOverhead
 
-  /// The fixed part of a delivery-failure line — timestamp, the three literal fields,
-  /// and the spaces between them — measured rather than guessed so the budget above
-  /// cannot drift from the line it is budgeting for.
+  /// The fixed part of a delivery-failure line **as it lands on disk** — timestamp, the
+  /// three literal fields, the spaces between them, and the newline that terminates it.
+  ///
+  /// The terminator is the point. `wc -c`, which is what the trim measures the file
+  /// with, counts it; the first version of this budget did not, so a line computed as
+  /// exactly 209 bytes was 210 on disk and 5000 of them came to 1,050,000 against a
+  /// 1,048,576 cap — the same permanent-trim bug this constant exists to prevent,
+  /// reintroduced by one byte. Writing the literal with its `\n` keeps the two
+  /// measurements the same measurement.
   static let dialLineOverhead =
-    "2026-09-20T21:38:23Z delivery install failed ".utf8.count
+    "2026-09-20T21:38:23Z delivery install failed \n".utf8.count
 
   /// Installs bridge state through the SSH command's stdin. Only the byte count and
   /// SHA-256 digest appear in the remote command; the capability-bearing JSON never

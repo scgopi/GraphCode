@@ -32,8 +32,11 @@ struct DialLogBoundTests {
   @Test
   func theOverheadMatchesTheLineItBudgetsFor() {
     // The overhead constant is a measured string; if the fragment's fields change, the
-    // budget must move with them rather than stay a stale number.
-    let rendered = "2026-09-20T21:38:23Z delivery install failed "
+    // budget must move with them rather than stay a stale number. The `\n` is part of
+    // the measurement, not decoration — `wc -c`, which the trim measures the file with,
+    // counts it, and leaving it out here is precisely how a 210-byte line passed a
+    // 209-byte bound.
+    let rendered = "2026-09-20T21:38:23Z delivery install failed \n"
     #expect(RemoteGraphAccess.dialLineOverhead == rendered.utf8.count)
     let fragment = DialLog.fragment(
       session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")

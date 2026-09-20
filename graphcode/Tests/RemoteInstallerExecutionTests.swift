@@ -163,6 +163,31 @@ struct RemoteInstallerExecutionTests {
   }
 
   @Test(.enabled(if: hasPython3))
+  func aLoggedFailureLineFitsTheTrimBudgetOnDisk() throws {
+    // Measured from the file, not recomputed. `DialLogBoundTests` checks the arithmetic,
+    // and arithmetic is exactly how this went wrong: the first budget left out the
+    // trailing newline, the test that was written to lock it left the newline out the
+    // same way, and a 210-byte line passed a 209-byte bound. Whatever the emitted
+    // fragment really writes has to fit, terminator and all.
+    let home = try scratchHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    // A deep path, so the traceback is far longer than the budget and the cut is real.
+    let deep = "~/blocker/" + String(repeating: "nested/", count: 40) + "PROMPT.md"
+    let blocker = home.appendingPathComponent("blocker")
+    try "x".write(to: blocker, atomically: true, encoding: .utf8)
+    let script = try #require(RemoteGraphAccess.installerScript(files: [deep: "goal"]))
+
+    #expect(try run(script, home: home) == 0)
+
+    let log = home.appendingPathComponent(".graphcode/dials.log")
+    let written = try #require(try? Data(contentsOf: log))
+    #expect(!written.isEmpty)
+    #expect(written.count <= DialLog.maxBytes / DialLog.keptLines, "line is \(written.count) bytes")
+    // And `keptLines` of them really do fit under the cap the trim measures against.
+    #expect(DialLog.keptLines * written.count <= DialLog.maxBytes)
+  }
+
+  @Test(.enabled(if: hasPython3))
   func aFailureWithNoStderrStillRecordsItsExitCode() throws {
     // A killed installer — an OOM on a small box against a 105 KB argv — exits non-zero
     // with nothing on stderr. The one datum always available must not be dropped.
