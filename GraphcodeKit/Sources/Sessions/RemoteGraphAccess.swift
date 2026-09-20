@@ -129,8 +129,17 @@ public enum RemoteGraphAccess {
   ///
   /// No `makedirs` for the receipt: it is only reached once the shim it vouches for has
   /// been written, and that write created the directory.
+  ///
+  /// `neutered` is what makes the `|| true` above optional. It holds for everything a
+  /// session can rediscover or do without — the shim, the briefing, the wake digest —
+  /// but not for a prompt that has moved to a file: there the delivery *is* the
+  /// instructions, and a launch that proceeds without it starts an agent whose entire
+  /// brief is a pointer at a file that isn't there. That caller
+  /// (`ZmxSessionLauncher.remotePromptDelivery`) chains the launch behind this command's
+  /// exit status instead, so a failed delivery costs a retry rather than a blind pass.
   public static func installerScript(
-    files: [String: String], receipt: (path: String, content: String)? = nil
+    files: [String: String], receipt: (path: String, content: String)? = nil,
+    neutered: Bool = true
   ) -> String? {
     guard !files.isEmpty else { return nil }
     let manifest = files.mapValues { Data($0.utf8).base64EncodedString() }
@@ -157,7 +166,7 @@ public enum RemoteGraphAccess {
     var argv = ["python3", "-c", program, json.base64EncodedString()]
     if let receipt { argv += [receipt.path, receipt.content] }
     return argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
-      + " >/dev/null 2>&1 || true"
+      + " >/dev/null 2>&1" + (neutered ? " || true" : "")
   }
 
   /// Installs bridge state through the SSH command's stdin. Only the byte count and
