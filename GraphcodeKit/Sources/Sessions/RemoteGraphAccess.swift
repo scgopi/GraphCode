@@ -160,7 +160,7 @@ public enum RemoteGraphAccess {
       + " else:\\n"
       + "  with open(os.path.expanduser(p),\"wb\") as f: f.write(b)\\n"
       + "  os.chmod(os.path.expanduser(p),0o755 if p.endswith(\"/graphcode\") else 0o644)\\n"
-      + "')'); "
+      + "'); "
       + "[w(p,c) for p,c in sorted(m.items())]; "
       + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
     var argv = ["python3", "-c", program, json.base64EncodedString()]
