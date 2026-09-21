@@ -12,8 +12,14 @@ import Foundation
 /// decisions, but they die with the scrollback.
 ///
 /// Bounded before every append: past `maxBytes` the file is trimmed to its last
-/// `keptLines` lines (~5000 lines is roughly 400 KB of these), so a reconnect loop
-/// that waits all night cannot eat a disk.
+/// `keptLines` lines, so a reconnect loop that waits all night cannot eat a disk.
+///
+/// That bound is a *line-count* trim standing in for a byte budget, which only holds
+/// while a line stays under `maxBytes / keptLines` — 209 bytes. A longer one breaks it
+/// permanently: the trim keeps 5000 lines, 5000 long lines are still over `maxBytes`,
+/// so every later append by every loop on the host re-reads and rewrites the whole file
+/// and never gets under. Anything writing a variable-length field here must size it
+/// against that budget rather than pick a number.
 public enum DialLog {
   public static let maxBytes = 1_048_576
   public static let keptLines = 5000
@@ -25,13 +31,48 @@ public enum DialLog {
   /// format, which is fine for the values this codebase passes (session names are
   /// `graphcode-<uuid>`, the rest are literals here) and would not be for user text.
   public static func fragment(session: String, dial: String, event: String) -> String {
-    let log = logExpression
-    return "{ mkdir -p \"$HOME/.graphcode\"; "
-      + "gc_dl=$(wc -c < \(log) 2>/dev/null || echo 0); "
-      + "[ \"${gc_dl:-0}\" -gt \(maxBytes) ] "
-      + "&& { tail -n \(keptLines) \(log) > \(log).tmp && mv \(log).tmp \(log); }; "
+    "{ mkdir -p \"$HOME/.graphcode\"; " + trimFragment
       + "printf '%s \(session) \(dial) \(event)\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" "
-      + ">> \(log); } 2>/dev/null || true"
+      + ">> \(logExpression); } 2>/dev/null || true"
+  }
+
+  /// The bound, as both fragments run it: trim to the last `keptLines` when the file has
+  /// grown past `maxBytes`.
+  ///
+  /// The scratch file is per-process (`$$`). It used to be a fixed `dials.log.tmp`, which
+  /// is a race every loop on a host shares: two dials trimming at once both redirect into
+  /// the same name and both `mv` it, and the second `mv` publishes a file the first was
+  /// still writing — measured at 40 concurrent fragments, a 5000-line log came out with
+  /// 34 lines, which is the launch history gone. It was survivable only because trimming
+  /// was rare; a per-process name makes each writer's file its own and the `mv` that
+  /// publishes it atomic.
+  private static var trimFragment: String {
+    let log = logExpression
+    return "gc_dl=$(wc -c < \(log) 2>/dev/null || echo 0); "
+      + "[ \"${gc_dl:-0}\" -gt \(maxBytes) ] "
+      + "&& { tail -n \(keptLines) \(log) > \(log).$$.tmp "
+      + "&& mv \(log).$$.tmp \(log); }; "
+  }
+
+  /// `fragment`, with the contents of a shell variable appended as a trailing detail —
+  /// for the one caller that has something to say beyond which branch it took: a failed
+  /// delivery, whose whole problem was leaving no trace of *why*.
+  ///
+  /// The value rides as a `printf` **argument** rather than inside the format, unlike
+  /// `session`, `dial` and `event`. Those are literals this codebase controls; this one
+  /// is an error message from a remote python, and a `%s` or a stray backslash in it
+  /// would otherwise reformat the line it is being written to. Callers are responsible
+  /// for flattening newlines out of the variable first — the log is one line per entry,
+  /// and every reader of it splits on them.
+  /// Callers are also responsible for keeping the value inside the per-line budget the
+  /// trim depends on — see `RemoteGraphAccess.errorDetailBytes`, which derives its size
+  /// from `maxBytes / keptLines` for exactly that reason.
+  public static func fragment(
+    session: String, dial: String, event: String, detailVariable: String
+  ) -> String {
+    "{ mkdir -p \"$HOME/.graphcode\"; " + trimFragment
+      + "printf '%s \(session) \(dial) \(event) %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" "
+      + "\"$\(detailVariable)\" >> \(logExpression); } 2>/dev/null || true"
   }
 
   /// The same line from Swift, for the launches the daemon decides locally rather than

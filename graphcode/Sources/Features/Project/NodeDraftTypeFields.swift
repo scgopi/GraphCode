@@ -15,8 +15,8 @@ struct SketchDraftFields: View {
       help: "No done check, no cadence — it works with you until you promote it or close it.",
       fromTemplate: store.templateSetFields.contains(.brief)
     ) {
-      DraftProseField(
-        placeholder: "e.g. where does the usage cap get read from?",
+      DraftBriefField(
+        store: store, placeholder: "e.g. where does the usage cap get read from?",
         text: $store.draftSketchNote, takesFocusRequest: store.templateFocus(.brief),
         onTokenJump: store.tokenJump)
     }
@@ -39,8 +39,8 @@ struct GoalDraftFields: View {
         help: "In your own words. The loop is told this, and works toward it.",
         fromTemplate: store.templateSetFields.contains(.brief)
       ) {
-        DraftProseField(
-          placeholder: "the crash rate is back under 1%", text: $store.draftGoal,
+        DraftBriefField(
+          store: store, placeholder: "the crash rate is back under 1%", text: $store.draftGoal,
           takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }
 
@@ -205,8 +205,8 @@ struct TimedDraftFields: View {
         label: "What to do each time",
         fromTemplate: store.templateSetFields.contains(.brief)
       ) {
-        DraftProseField(
-          placeholder: "Check for new crash reports and triage anything new",
+        DraftBriefField(
+          store: store, placeholder: "Check for new crash reports and triage anything new",
           text: $store.draftTimedTask, takesFocusRequest: store.templateFocus(.brief),
           onTokenJump: store.tokenJump)
       }
@@ -281,8 +281,8 @@ struct TurnDraftFields: View {
         label: "First instruction",
         fromTemplate: store.templateSetFields.contains(.brief)
       ) {
-        DraftProseField(
-          placeholder: "Port the settings screen to the new design system",
+        DraftBriefField(
+          store: store, placeholder: "Port the settings screen to the new design system",
           text: $store.draftFirstInstruction,
           takesFocusRequest: store.templateFocus(.brief), onTokenJump: store.tokenJump)
       }

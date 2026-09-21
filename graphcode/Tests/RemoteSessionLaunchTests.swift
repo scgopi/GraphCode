@@ -425,3 +425,94 @@ struct RemoteSessionLaunchTests {
     #expect(paths == ["/home/dev/widget"])
   }
 }
+
+/// The oversized-prompt delivery for a remote launch. A separate extension only
+/// because the suite is at swiftlint's `type_body_length` limit.
+extension RemoteSessionLaunchTests {
+  /// A goal far past the typed line, so the launch sheds it to `PROMPT.md`.
+  private static let oversizedGoal = String(
+    repeating: "Resolve the conflict before moving on. ", count: 103)
+
+  @Test
+  func anOversizedRemotePromptGetsItsOwnUnneuteredDelivery() throws {
+    // The reported failure: a Codespace loop booted with its entire brief being
+    // "your instructions are at ~/.graphcode/…/PROMPT.md", and that file was not there.
+    // The prompt used to ride the same `|| true` manifest as the 45 KB shim and the
+    // briefing, so any failure in that one command launched an agent with nothing to do.
+    let node = LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: Self.oversizedGoal))
+    defer { NodeMemory.remove(projectPath: location.projectPath, nodeID: node.id) }
+    let report = ZmxSessionLauncher.ShedPromptReport()
+    let arguments = try #require(
+      ZmxSessionLauncher.arguments(
+        forNode: node, projectPath: location.projectPath, settings: GraphcodeSettings(),
+        shedPrompt: report))
+    let promptPath = RemoteGraphAccess.promptPath(
+      forProjectPath: location.projectPath, nodeID: node.id)
+    // The argv really is a pointer rather than the goal, which is what makes the file
+    // load-bearing in the first place.
+    #expect(arguments.last?.contains(promptPath) == true)
+    #expect(report.remotePath == promptPath)
+
+    let delivery = try #require(ZmxSessionLauncher.remotePromptDelivery(report, forNode: node))
+    // Alone in its own manifest: sharing the shim's ~105 KB one is what put it a single
+    // failure away from a launch that could not use it.
+    #expect(deliveredPaths(in: delivery) == [promptPath])
+    // `2>&1 || true` is the neutered installer's own tail — the dial log that follows
+    // keeps its `|| true`, which is the log being best-effort, not the delivery.
+    #expect(!delivery.contains("2>&1 || true"))
+    #expect(delivery.contains("prompt-undelivered"))
+  }
+
+  @Test
+  func theOversizedPromptLandsBeforeTheLaunchAndGatesIt() throws {
+    let node = LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: Self.oversizedGoal))
+    defer { NodeMemory.remove(projectPath: location.projectPath, nodeID: node.id) }
+    let script = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: node, at: location, settings: GraphcodeSettings())?.last)
+
+    // The delivery's failure log is the one token unique to it, so it anchors the
+    // ordering: written, then `&&`, then the run that depends on it. The *last* `'run'`
+    // is the fresh branch — the resume branch above it types one too, and needs no
+    // prompt, having a conversation to pick back up.
+    let delivery = try #require(script.range(of: "prompt-undelivered"))
+    let run = try #require(script.range(of: "'run'", options: .backwards))
+    #expect(delivery.upperBound < run.lowerBound)
+    #expect(script[delivery.upperBound..<run.lowerBound].contains("&&"))
+  }
+
+  @Test
+  func aPromptThatFitsTheTypedLineIsDeliveredNowhere() throws {
+    // The ordinary case pays nothing: no second installer, no extra gate on the launch.
+    let node = LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
+    defer { NodeMemory.remove(projectPath: location.projectPath, nodeID: node.id) }
+    let script = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: node, at: location, settings: GraphcodeSettings())?.last)
+
+    #expect(!script.contains(NodeMemory.promptFileName))
+    #expect(!script.contains("prompt-undelivered"))
+  }
+
+  @Test
+  func theBestEffortManifestNeverCarriesThePrompt() throws {
+    // Regression guard for the split: a neutered channel must not be what a launch
+    // depends on, however convenient it is to add one more file to it.
+    let node = LoopNode(
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: Self.oversizedGoal))
+    defer { NodeMemory.remove(projectPath: location.projectPath, nodeID: node.id) }
+    _ = ZmxSessionLauncher.arguments(
+      forNode: node, projectPath: location.projectPath, settings: GraphcodeSettings())
+    let promptFile = NodeMemory.directory(
+      forProjectPath: location.projectPath, nodeID: node.id
+    ).appendingPathComponent(NodeMemory.promptFileName)
+    try #require(FileManager.default.fileExists(atPath: promptFile.path))
+
+    let files = ZmxSessionLauncher.remoteDeliveryFiles(
+      forNode: node, at: location, settings: GraphcodeSettings())
+    #expect(!files.keys.contains { $0.hasSuffix(NodeMemory.promptFileName) })
+  }
+}

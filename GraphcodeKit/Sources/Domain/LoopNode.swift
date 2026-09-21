@@ -78,6 +78,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// it agreed to — and so the prompt stays derivable from the node instead of being a
   /// sentence nobody can re-read.
   public var pausesBeforeWritesOnly: Bool
+  /// Images attached to whichever field holds this loop's brief (`PromptAttachment`).
+  /// Their paths replace the `[image #N]` placeholders in `sessionPrompt`.
+  public var attachments: [PromptAttachment]
   /// The stop condition a goal-based node was handed (`.goalBased`) — see
   /// docs/01-loop-taxonomy.md#goal-based--you-hand-off-the-stop-condition.
   public var goal: GoalSpec?
@@ -217,6 +220,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     heartbeatIntervalSeconds: Double? = nil,
     firstInstruction: String? = nil,
     pausesBeforeWritesOnly: Bool = false,
+    attachments: [PromptAttachment] = [],
     goal: GoalSpec? = nil,
     backend: CLISessionBackendKind = .claudeCode,
     modelTier: ModelTier? = nil,
@@ -246,6 +250,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     self.heartbeatIntervalSeconds = heartbeatIntervalSeconds
     self.firstInstruction = firstInstruction
     self.pausesBeforeWritesOnly = pausesBeforeWritesOnly
+    self.attachments = attachments
     self.goal = goal
     self.backend = backend
     self.modelTier = modelTier
@@ -313,10 +318,18 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     switch loopType {
     case .sketch:
       // The starting note, when there is one. A blank note means the session opens
-      // quiet and waits — asking nothing up front is what the type is for.
-      let note = firstInstruction?.trimmingCharacters(in: .whitespaces) ?? ""
+      // quiet and waits — asking nothing up front is what the type is for. An attached
+      // image is itself something to say, so a note that is only a picture still opens.
+      let note =
+        PromptAttachments.resolving(firstInstruction, attachments: attachments)?
+        .trimmingCharacters(in: .whitespaces) ?? ""
       return note.isEmpty ? nil : note
     case .timeBased:
+      // Placeholders are swapped for paths before anything reads the prompt as a
+      // directive: `/loop <interval> <task>` takes the rest of the line as the task, so
+      // a path inside it travels into every scheduled pass.
+      let triggerPrompt = PromptAttachments.resolving(
+        self.triggerPrompt, attachments: attachments)
       // Copilot's `/every` submits its first prompt only after the interval elapses, so
       // a directive-led opening armed correctly and then sat idle — and the typed
       // first-pass workaround raced the composer. The reliable channel is the opening
@@ -335,7 +348,9 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
         interval.isFinite,
         interval > 0
       {
-        let task = heartbeatTask ?? ""
+        // `heartbeatTask` reads the stored prompt, so it needs resolving of its own —
+        // the shadowed local above does not reach inside it.
+        let task = PromptAttachments.resolving(heartbeatTask, attachments: attachments) ?? ""
         return "Run one pass of this task now: \(task) Then stay in the session — every "
           + "\(Int(interval))s you will receive a [graphcode] heartbeat message, and each "
           + "one is your cue to run the next pass. Do not schedule your own /loop, wakeup, "
@@ -352,16 +367,22 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
         + "\(task) Do not schedule your own /loop, wakeup, or cron for it — the "
         + "orchestrator holds the timer. Stay in the session between heartbeats."
     case .goalBased:
-      guard let prompt = goal?.sessionPrompt(directive: backend.capabilities.goalDirective)
-      else { return nil }
+      // Resolved on the summary rather than on the composed prompt: `/goal` takes the
+      // rest of the line as its condition, and a path appended past the predicate and
+      // the metric would become part of what an evaluator judges.
+      guard var goal else { return nil }
+      goal.summary =
+        PromptAttachments.resolving(goal.summary, attachments: attachments) ?? goal.summary
+      let prompt = goal.sessionPrompt(directive: backend.capabilities.goalDirective)
       // A backend whose verdict the daemon cannot read resolves a goal with no predicate
       // only when its session reports it met. The briefing says so, but a session follows
       // its prompt first: OpenCode and pi loops finished their work and never reported.
-      guard !backend.recordsGoalVerdict, goal?.effectivePredicate == nil else { return prompt }
+      guard !backend.recordsGoalVerdict, goal.effectivePredicate == nil else { return prompt }
       return prompt + " " + Self.reportDoneSentence
     case .turnBased:
       return Self.turnBasedPrompt(
-        instruction: firstInstruction, check: checkDescription,
+        instruction: PromptAttachments.resolving(firstInstruction, attachments: attachments),
+        check: checkDescription,
         beforeWritesOnly: pausesBeforeWritesOnly)
     case .composite: return nil
     }
@@ -564,7 +585,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case worktreeBinding, subGraph, pilotState, usage, metricHistory, createdBy
     case lastMailroomRead, mailroomWatch
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
-    case summary, board, heartbeatIntervalSeconds, stallReason
+    case summary, board, heartbeatIntervalSeconds, stallReason, attachments
     case createdFromTemplateID, templateFollow, sessionRestarts, launchFailure, resolution
     case pendingCompletion, goalSetAt
   }
@@ -586,6 +607,10 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // turn, which is what `false` says.
     pausesBeforeWritesOnly =
       try container.decodeIfPresent(Bool.self, forKey: .pausesBeforeWritesOnly) ?? false
+    // Absent from graphs saved before attachments existed, which is what an empty
+    // list says.
+    attachments =
+      try container.decodeIfPresent([PromptAttachment].self, forKey: .attachments) ?? []
     goal = try container.decodeIfPresent(GoalSpec.self, forKey: .goal)
     backend =
       try container.decodeIfPresent(CLISessionBackendKind.self, forKey: .backend) ?? .claudeCode

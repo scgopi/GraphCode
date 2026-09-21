@@ -68,6 +68,9 @@ public struct NodeDraft: Codable, Equatable, Sendable {
   ///
   /// `nil` for anything a human created, which is the truth: the form is not a loop.
   public var createdBy: UUID?
+  /// Images the human attached to the brief — see `PromptAttachment`. The bytes are
+  /// already on disk by the time a draft carries one; this is only where they are.
+  public var attachments: [PromptAttachment]
   /// Which template the brief came from — attribution, carried to the node.
   public var createdFromTemplateID: UUID?
   /// The template a **timed or composite** draft follows — see
@@ -90,6 +93,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     worktree: WorktreeRef? = nil,
     subGraph: LoopGraph? = nil,
     createdBy: UUID? = nil,
+    attachments: [PromptAttachment] = [],
     createdFromTemplateID: UUID? = nil,
     templateFollow: TemplateFollow? = nil
   ) {
@@ -107,6 +111,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
     self.worktree = worktree
     self.subGraph = subGraph
     self.createdBy = createdBy
+    self.attachments = attachments
     self.createdFromTemplateID = createdFromTemplateID
     self.templateFollow = templateFollow
   }
@@ -202,6 +207,7 @@ public struct NodeDraft: Codable, Equatable, Sendable {
       heartbeatIntervalSeconds: heartbeatIntervalSeconds,
       firstInstruction: firstInstruction,
       pausesBeforeWritesOnly: pausesBeforeWritesOnly,
+      attachments: attachments,
       goal: goal,
       backend: effectiveBackend,
       modelTier: modelTier,
@@ -225,7 +231,7 @@ extension NodeDraft {
   private enum CodingKeys: String, CodingKey {
     case id, title, loopType, checkDescription, triggerPrompt, goal, backend, modelTier
     case worktree, subGraph, createdBy, firstInstruction, pausesBeforeWritesOnly
-    case heartbeatIntervalSeconds
+    case heartbeatIntervalSeconds, attachments
     case createdFromTemplateID, templateFollow
   }
 
@@ -253,6 +259,10 @@ extension NodeDraft {
     worktree = try container.decodeIfPresent(WorktreeRef.self, forKey: .worktree)
     subGraph = try container.decodeIfPresent(LoopGraph.self, forKey: .subGraph)
     createdBy = try container.decodeIfPresent(UUID.self, forKey: .createdBy)
+    // Absent from every draft a CLI that predates attachments sends, which is what an
+    // empty list says.
+    attachments =
+      try container.decodeIfPresent([PromptAttachment].self, forKey: .attachments) ?? []
     createdFromTemplateID =
       try container.decodeIfPresent(UUID.self, forKey: .createdFromTemplateID)
     templateFollow =

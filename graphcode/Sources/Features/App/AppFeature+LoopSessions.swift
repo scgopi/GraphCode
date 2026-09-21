@@ -3,7 +3,8 @@ import Foundation
 import GraphcodeKit
 
 /// The Loop menu's verbs on a session — Stop Loop, Restart Session, Restart All
-/// Sessions… — and the pane exit that resolves a loop. Restart kills a loop's `zmx` session and bring it back on the same transcript
+/// Sessions…, Send Message to All Loops… — and the pane exit that resolves a loop.
+/// Restart kills a loop's `zmx` session and bring it back on the same transcript
 /// (`GraphCommand.restartNode`), for the day `zmx` or a backend CLI was replaced under
 /// every running loop. Stop lives here too because it is the same shape (a menu item, a
 /// daemon command) and `AppFeature.swift` is at its lint budget.
@@ -17,6 +18,8 @@ import GraphcodeKit
 /// session and resolve the very loop it was meant to bring back.
 struct SessionRestart: Equatable {
   var isConfirmingAll = false
+  /// The Send Message to All Loops… sheet's text; `nil` while the sheet is down.
+  var broadcastDraft: String?
   /// The workspace closed for a restart, to be remounted once the daemon confirms.
   var pendingReopen: PendingReopen?
   /// A loop the daemon stopped because its CLI is not on PATH — see `LaunchFailure`.
@@ -49,6 +52,10 @@ struct SessionRestart: Equatable {
     case allTapped
     case allConfirmed
     case allCancelled
+    case broadcastTapped
+    case broadcastDraftChanged(String)
+    case broadcastConfirmed
+    case broadcastCancelled
     case launchFailureNoticeDismissed
   }
 }
@@ -132,6 +139,32 @@ extension AppFeature {
           }
         }
 
+      case .sessionRestart(.broadcastTapped):
+        state.sessionRestart.broadcastDraft = ""
+        return .none
+
+      case .sessionRestart(.broadcastDraftChanged(let text)):
+        guard state.sessionRestart.broadcastDraft != nil else { return .none }
+        state.sessionRestart.broadcastDraft = text
+        return .none
+
+      case .sessionRestart(.broadcastCancelled):
+        state.sessionRestart.broadcastDraft = nil
+        return .none
+
+      case .sessionRestart(.broadcastConfirmed):
+        let text = (state.sessionRestart.broadcastDraft ?? "")
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return .none }
+        state.sessionRestart.broadcastDraft = nil
+        let paths = state.projects.filter { $0.graph.liveLoopCount > 0 }.map(\.id)
+        return .run { _ in
+          for path in paths {
+            try? await orchestratorClient.send(
+              .graphCommand(projectPath: path, command: .broadcastMessage(text: text, from: nil)))
+          }
+        }
+
       case .sessionRestart(.launchFailureNoticeDismissed):
         state.sessionRestart.launchFailureNotice = nil
         return .none
@@ -209,4 +242,8 @@ extension AppFeature {
       LoopWorkspaceRail.loadSeenMailroomPost(forProjectPath: projectPath)
     state.selectedProjectPath = projectPath
   }
+}
+
+extension LoopGraph {
+  var liveLoopCount: Int { broadcastTargets.count }
 }

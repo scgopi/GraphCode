@@ -773,6 +773,11 @@ class Node final : public IRawElementProviderSimple,
       const int parent = row.parent;
       const wchar_t *prefix =
           row.identity.rfind("sidebar-section:", 0) == 0 ? L"sidebar-section-" :
+          row.identity.rfind("needs-you-header:", 0) == 0 ? L"needs-you-header-" :
+          row.identity.rfind("needs-you-row:", 0) == 0 ? L"needs-you-row-" :
+          row.identity.rfind("activity-header:", 0) == 0 ? L"activity-header-" :
+          row.identity.rfind("activity-row:", 0) == 0 ? L"activity-row-" :
+          row.identity.rfind("activity-control:", 0) == 0 ? L"activity-control-" :
           row.identity.rfind("project-new-loop:", 0) == 0 ? L"project-new-loop-" :
           row.identity.rfind("project-disclosure:", 0) == 0 ? L"project-disclosure-" :
           row.identity.rfind("quick-chats-header:", 0) == 0 ? L"quick-chats-header-" :
@@ -781,6 +786,15 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-row:", 0) == 0 ? L"quick-chat-row-" :
           row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
+          row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
+          row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :
+          row.identity.rfind("workspace-show-graph:", 0) == 0 ? L"workspace-show-graph-" :
+          row.identity.rfind("workspace-stop:", 0) == 0 ? L"workspace-stop-" :
+          row.identity.rfind("workspace-tab-close:", 0) == 0 ? L"workspace-tab-close-" :
+          row.identity.rfind("workspace-tab:", 0) == 0 ? L"workspace-tab-" :
+          row.identity.rfind("workspace-new-tab:", 0) == 0 ? L"workspace-new-tab-" :
+          row.identity.rfind("workspace-split-right:", 0) == 0 ? L"workspace-split-right-" :
+          row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
           parent == 3 ? L"worktree-row-" : L"canvas-card-";
@@ -802,6 +816,9 @@ class Node final : public IRawElementProviderSimple,
       const Row &row = state_->rows.at(id_);
       const bool action =
           row.identity.rfind("sidebar-section:", 0) == 0 ||
+          row.identity.rfind("needs-you-header:", 0) == 0 ||
+          row.identity.rfind("activity-header:", 0) == 0 ||
+          row.identity.rfind("activity-control:", 0) == 0 ||
           row.identity.rfind("project-new-loop:", 0) == 0 ||
           row.identity.rfind("project-disclosure:", 0) == 0 ||
           row.identity.rfind("quick-chats-header:", 0) == 0 ||

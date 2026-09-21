@@ -33,6 +33,7 @@ pub const Target = union(enum) {
 
 pub const Action = enum {
     none,
+    edit_node,
     rename_node,
     stop_node,
     delete_node,
@@ -58,6 +59,7 @@ pub const Action = enum {
     remote_project_info,
     close_project,
     remove_project,
+    move_project,
     trash_project,
     delete_project_loops,
     new_quick_chat,
@@ -79,6 +81,7 @@ pub fn canEditEdge(edge_id: []const u8) bool {
 }
 
 const ids = struct {
+    const edit_node = 5100;
     const rename_node = 5101;
     const stop_node = 5102;
     const delete_node = 5103;
@@ -104,7 +107,8 @@ const ids = struct {
     const remote_project_info = 5145;
     const close_project = 5146;
     const remove_project = 5147;
-    const trash_project = 5149;
+    const move_project = 5149;
+    const trash_project = 5151;
     const delete_project_loops = 5148;
     const new_quick_chat = 5150;
 };
@@ -134,8 +138,11 @@ pub fn show(
                 append(menu, ids.reveal_project, "Show in Explorer");
             separator(menu);
             append(menu, ids.close_project, "Close Project");
+            if (!project.remote) {
+                append(menu, ids.move_project, "Move Project...");
+                append(menu, ids.trash_project, "Move to Recycle Bin...");
+            }
             append(menu, ids.remove_project, "Remove from GraphCode...");
-            if (!project.remote) append(menu, ids.trash_project, "Move Folder to Recycle Bin...");
             append(menu, ids.delete_project_loops, "Delete All Loops...");
         },
         .node => |node| {
@@ -151,8 +158,7 @@ pub fn show(
                 appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
                 separator(menu);
             }
-            append(menu, ids.message_node, "Message");
-            append(menu, ids.memo_node, "Memo");
+            append(menu, ids.edit_node, "Edit Details...");
             append(menu, ids.rename_node, "Rename...");
             append(menu, ids.stop_node, "Stop");
             append(menu, ids.delete_node, "Delete Loop...");
@@ -194,8 +200,7 @@ fn actionForCommand(command: c_int) Action {
         ids.stop_node => .stop_node,
         ids.delete_node => .delete_node,
         ids.open_terminal => .open_terminal,
-        ids.message_node => .message_node,
-        ids.memo_node => .memo_node,
+        ids.edit_node => .edit_node,
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
         ids.arm_composite => .arm_composite,
@@ -215,6 +220,7 @@ fn actionForCommand(command: c_int) Action {
         ids.remote_project_info => .remote_project_info,
         ids.close_project => .close_project,
         ids.remove_project => .remove_project,
+        ids.move_project => .move_project,
         ids.trash_project => .trash_project,
         ids.delete_project_loops => .delete_project_loops,
         ids.new_quick_chat => .new_quick_chat,
@@ -300,6 +306,7 @@ test "project context commands expose ingress management and safe destructive ac
     try std.testing.expectEqual(Action.open_project, actionForCommand(ids.open_project));
     try std.testing.expectEqual(Action.project_settings, actionForCommand(ids.project_settings));
     try std.testing.expectEqual(Action.remove_project, actionForCommand(ids.remove_project));
+    try std.testing.expectEqual(Action.move_project, actionForCommand(ids.move_project));
     try std.testing.expectEqual(Action.trash_project, actionForCommand(ids.trash_project));
     try std.testing.expectEqual(Action.delete_project_loops, actionForCommand(ids.delete_project_loops));
 }

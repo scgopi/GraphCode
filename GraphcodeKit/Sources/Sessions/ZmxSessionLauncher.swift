@@ -1150,6 +1150,15 @@ public enum ZmxSessionLauncher {
     ["get", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName]
   }
 
+  /// Where `arguments(forNode:)` records a prompt it moved to a file, for a remote launch
+  /// that has to put the file on the host before the pointer at it means anything.
+  final class ShedPromptReport {
+    /// The `~/`-relative path the pointer names, set only for a remote project.
+    var remotePath: String?
+    /// The bytes that path must hold — the same text written to the local copy.
+    var text: String?
+  }
+
   /// The `zmx` argv for a node, or `nil` when there's no prompt to run.
   ///
   /// `zmx run <name> -d <cmd…>` creates the session if it doesn't exist and runs `cmd`
@@ -1160,9 +1169,16 @@ public enum ZmxSessionLauncher {
   /// `zmx` shell-quotes every argument before typing the command into the session's shell
   /// (`util.shellQuote`, a standard shlex-style single-quote escape), so it reaches
   /// `claude` as exactly one word no matter what quotes, `$(…)`, or `;` it contains.
+  ///
+  /// `shedPrompt` is how a *remote* caller learns that the argv it just got is a pointer
+  /// rather than a prompt, and what has to be on the host for it to mean anything. A
+  /// mutable box rather than a richer return type because the shed branch returns from
+  /// half a dozen places and only two of them are pointered; every other caller passes
+  /// nothing and is unaffected.
   static func arguments(
     forNode node: LoopNode, projectPath: String? = nil,
-    settings: GraphcodeSettings = GraphcodeSettingsStore.load()
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    shedPrompt: ShedPromptReport? = nil
   ) -> [String]? {
     guard let prompt = node.sessionPrompt(forProjectPath: projectPath), !prompt.isEmpty else {
       return nil
@@ -1322,10 +1338,17 @@ public enum ZmxSessionLauncher {
         let promptFile = NodeMemory.writePrompt(
           filePrompt, projectPath: projectPath, nodeID: node.id)
       else { return unbriefedCommand }
+      let remotePromptPath =
+        remote == nil
+        ? nil : RemoteGraphAccess.promptPath(forProjectPath: projectPath, nodeID: node.id)
       let plainPointer = NodeMemory.promptPointer(
-        toPromptAt: remote == nil
-          ? promptFile.path
-          : RemoteGraphAccess.promptPath(forProjectPath: projectPath, nodeID: node.id))
+        toPromptAt: remotePromptPath ?? promptFile.path)
+      // Called on the returns that type a pointer rather than the prompt itself — those,
+      // and only those, leave a remote launch owing the host a file.
+      func reportShedPrompt() {
+        shedPrompt?.remotePath = remotePromptPath
+        shedPrompt?.text = filePrompt
+      }
       let directive = node.backend.capabilities.goalDirective
       let promptDirectory =
         remote == nil
@@ -1342,13 +1365,17 @@ public enum ZmxSessionLauncher {
       for pointer in pointers {
         let pointeredCommand = shed(
           prompt: pointer, briefingPath: briefingPath, extraPath: promptDirectory)
-        if Self.fitsInATypedCommandLine(pointeredCommand) { return pointeredCommand }
+        if Self.fitsInATypedCommandLine(pointeredCommand) {
+          reportShedPrompt()
+          return pointeredCommand
+        }
       }
       // Deep support-directory paths can push briefing plus pointer past the line even
       // now. Only then does the briefing go, keeping whichever prompt form is shorter.
       if Self.fitsInATypedCommandLine(unbriefedCommand) { return unbriefedCommand }
       let shortestLed = Self.directiveLedPointer(
         plainPointer, prompt: singleLine, directive: directive, headLength: 0)
+      reportShedPrompt()
       return shed(prompt: shortestLed, briefingPath: nil, extraPath: promptDirectory)
     }
     return command
@@ -1467,6 +1494,14 @@ public enum ZmxSessionLauncher {
       }
     }
     if let worktree = node.worktreeBinding?.worktreePath { paths.append(worktree) }
+    // Codex and Copilot verify paths, and a prompt naming an image the session is denied
+    // reads as the agent ignoring its instructions — the same failure the briefing's
+    // `--add-dir` exists to prevent. Granted from the paths themselves rather than from
+    // the memory directory, so an attachment that came from somewhere else still works.
+    for attachment in node.attachments {
+      let directory = URL(fileURLWithPath: attachment.path).deletingLastPathComponent().path
+      if !paths.contains(directory) { paths.append(directory) }
+    }
     return paths
   }
 
@@ -1584,16 +1619,23 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
     bridgeState: RemoteBridgeWireState? = nil
   ) -> [String]? {
+    let shedPrompt = ShedPromptReport()
     guard
       let zmxArguments = arguments(
-        forNode: node, projectPath: location.projectPath, settings: settings)
+        forNode: node, projectPath: location.projectPath, settings: settings,
+        shedPrompt: shedPrompt)
     else { return nil }
     // The remote twin of the local alive check: raw existence (`zmx get`) answers for a
     // husk too — the wrapper shell stays at its prompt after the command inside exits —
     // so an ensure keyed on it could never revive a dead remote loop (#215). Only a
     // listed session whose task has not ended counts as alive here.
     let check = aliveCheckCommand(zmxPath: "zmx", forNode: node)
-    let run = remoteQuotedCommand(["zmx"] + zmxArguments)
+    // The launch, behind the delivery of the one file it cannot do without. Nothing is
+    // prefixed when the prompt was typed in full, which is the ordinary case.
+    let launchCommand = remoteQuotedCommand(["zmx"] + zmxArguments)
+    let run =
+      remotePromptDelivery(shedPrompt, forNode: node)
+      .map { "\($0) && \(launchCommand)" } ?? launchCommand
     // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
     // goal behind a per-session folder-trust dialog that nobody is present to answer,
     // so a fresh remote Copilot loop booted to an idle screen with its goal parked
@@ -1781,6 +1823,36 @@ public enum ZmxSessionLauncher {
       receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
   }
 
+  /// The delivery for a prompt that moved to a file (issue #57), as its own command
+  /// chained *into* the fresh launch — `nil` when the prompt was typed in full.
+  ///
+  /// It does not ride `remoteDeliveryScript`'s manifest, and the split is the fix rather
+  /// than tidiness. That manifest is one `python3` carrying the 45 KB shim, the briefing
+  /// and the wake digest — ~105 KB of base64 in a single argv string, against a Linux
+  /// `MAX_ARG_STRLEN` of 128 KiB — and it ends in `|| true`, deliberately, because a
+  /// session without its briefing is still a session. A session without its *prompt* is
+  /// not: shedding now moves the prompt to a file before it drops the briefing (#345), so
+  /// far more remote loops launch pointered, and any failure in that one best-effort
+  /// command left the agent booting with its entire brief being a path that isn't there.
+  ///
+  /// So the prompt travels alone, in a command small enough not to share that fate, and
+  /// un-neutered: the `&&` in the caller means a delivery that fails takes the launch
+  /// with it. The node then stays honestly not-running and the next liveness sweep
+  /// retries, which is the same posture `startRemote` already takes on a dial that fails.
+  static func remotePromptDelivery(
+    _ shedPrompt: ShedPromptReport, forNode node: LoopNode
+  ) -> String? {
+    guard let path = shedPrompt.remotePath, let text = shedPrompt.text else { return nil }
+    guard let install = RemoteGraphAccess.installerScript(files: [path: text], neutered: false)
+    else { return nil }
+    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
+    // Logged on the remote host's dial log rather than swallowed: a launch that never
+    // happens is invisible otherwise, and this is exactly the failure that used to
+    // surface only as an agent reporting that its instructions do not exist.
+    let log = DialLog.fragment(session: name, dial: "ensure", event: "prompt-undelivered")
+    return "{ \(install) || { \(log); false; }; }"
+  }
+
   /// `remoteDeliveryScript`'s manifest: home-relative path → content. Copilot's copy of the
   /// briefing (`SessionBriefing.copilotInstructionsFile`) goes only to a Copilot session,
   /// named by `node` or, for the app's attach, by `backend`.
@@ -1806,16 +1878,9 @@ public enum ZmxSessionLauncher {
         files[RemoteGraphAccess.wakePath(forProjectPath: location.projectPath, nodeID: node.id)] =
           wake
       }
-      // An oversized prompt travels the same way (issue #57): `arguments(forNode:)` has
-      // already written the local copy by the time the ensure dial builds this script.
-      let promptURL = NodeMemory.directory(
-        forProjectPath: location.projectPath, nodeID: node.id
-      ).appendingPathComponent(NodeMemory.promptFileName)
-      if let promptText = try? String(contentsOf: promptURL, encoding: .utf8) {
-        files[
-          RemoteGraphAccess.promptPath(forProjectPath: location.projectPath, nodeID: node.id)] =
-          promptText
-      }
+      // An oversized prompt (issue #57) is deliberately *not* here: it is the one file a
+      // launch cannot start without, so it travels un-neutered in the create branch
+      // instead — see `remotePromptDelivery`.
     }
     return files
   }

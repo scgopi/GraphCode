@@ -14,6 +14,7 @@ const input_write_timeout_ms: c.DWORD = 50;
 const max_surfaces: usize = 32;
 
 pub const ChromeAction = enum { new_tab, split_right, split_down };
+pub const TabAction = enum { select, close };
 pub const LoopBarAction = enum { stop, show_graph };
 
 pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool) ?LoopBarAction {
@@ -25,15 +26,35 @@ pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved
 }
 
 fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
-    if (y < origin_y + 3 or y >= origin_y + Tokens.tab_bar_height - 3) return null;
-    const left = @max(origin_x, origin_x + width - 220);
-    if (x < left or x >= origin_x + width - 4) return null;
-    return switch (@divTrunc(x - left, 72)) {
-        0 => .new_tab,
-        1 => .split_right,
-        2 => .split_down,
-        else => null,
-    };
+    for (0..3) |index| {
+        const bounds = chromeControlBounds(origin_x, origin_y, width, index);
+        if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) {
+            return switch (index) {
+                0 => .new_tab,
+                1 => .split_right,
+                2 => .split_down,
+                else => null,
+            };
+        }
+    }
+    return null;
+}
+
+fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, index: usize) c.RECT {
+    const left = @max(origin_x, origin_x + width - 220) + @as(i32, @intCast(index)) * 72;
+    return .{ .left = left, .top = origin_y + 3, .right = left + 68, .bottom = origin_y + Tokens.tab_bar_height - 3 };
+}
+
+fn tabBounds(origin_x: i32, origin_y: i32, index: usize) c.RECT {
+    const left = origin_x + @as(i32, @intCast(index)) * 120;
+    return .{ .left = left, .top = origin_y + 4, .right = left + 112, .bottom = origin_y + Tokens.tab_bar_height - 4 };
+}
+
+fn tabActionForBounds(origin_x: i32, origin_y: i32, index: usize, x: i32, y: i32) ?TabAction {
+    const bounds = tabBounds(origin_x, origin_y, index);
+    if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom) return null;
+    if (x >= bounds.right - 24) return .close;
+    return .select;
 }
 
 pub const WorkspaceKeyCallback = *const fn (
@@ -157,6 +178,7 @@ pub const Workspace = struct {
     layout_origin_y: i32 = 0,
     layout_width: i32 = 960,
     layout_height: i32 = 250,
+    collapsed: bool = false,
     project_path: []u8 = &.{},
     syncing_topology: bool = false,
     syncing_focus: bool = false,
@@ -604,6 +626,23 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    pub fn canCloseTab(self: *const Workspace) bool {
+        return self.layout.tabs.items.len > 1;
+    }
+
+    pub fn closeTab(self: *Workspace, index: usize) !void {
+        if (!self.canCloseTab() or index >= self.layout.tabs.items.len) return error.CannotCloseLastTab;
+        try self.layout.selectTab(index);
+        const target_id = self.layout.tabs.items[index].id;
+        while (self.layout.selected()) |tab| {
+            if (tab.id != target_id or tab.panes.items.len == 0) break;
+            try self.closeFocusedPane();
+            if (self.layout.tabs.items.len <= 1 or index >= self.layout.tabs.items.len) break;
+            if (self.layout.tabs.items[index].id != target_id) break;
+            try self.layout.selectTab(index);
+        }
+    }
+
     pub fn persistLayout(self: *Workspace) !void {
         if (self.persisting_layout) return;
         self.persisting_layout = true;
@@ -619,6 +658,7 @@ pub const Workspace = struct {
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
+        self.collapsed = false;
         self.layout_origin_x = origin_x;
         self.layout_origin_y = origin_y;
         self.layout_width = width;
@@ -634,6 +674,16 @@ pub const Workspace = struct {
             x,
             y,
         );
+    }
+
+    pub fn tabActionAt(self: *const Workspace, x: i32, y: i32) ?struct { index: usize, action: TabAction } {
+        if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return null;
+        const controls_left = self.chromeControlsLeft();
+        if (x < self.layout_origin_x or x >= controls_left) return null;
+        const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
+        if (index >= self.layout.tabs.items.len) return null;
+        const action = tabActionForBounds(self.layout_origin_x, self.layout_origin_y, index, x, y) orelse return null;
+        return .{ .index = index, .action = action };
     }
 
     fn chromeControlsLeft(self: *const Workspace) i32 {
@@ -656,25 +706,18 @@ pub const Workspace = struct {
         for (self.layout.tabs.items, 0..) |tab, index| {
             const left = self.layout_origin_x + @as(i32, @intCast(index)) * 120;
             if (left + 112 > controls_left) break;
-            const bounds = c.RECT{
-                .left = left,
-                .top = tab_bar.top + 4,
-                .right = left + 112,
-                .bottom = tab_bar.bottom - 4,
-            };
+            const bounds = tabBounds(self.layout_origin_x, self.layout_origin_y, index);
             fillRect(hdc, bounds, if (index == self.layout.selected_tab) 0x00345D8C else 0x00262626);
-            drawUtf8(hdc, tabLabel(tab, index), bounds.left + 8, bounds.top + 5, 11, 0x00E6E6E6);
+            fillRect(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 9, .right = bounds.left + 14, .bottom = bounds.top + 15 }, tabIndicatorColor(self, tab));
+            drawUtf8(hdc, tabLabel(tab, index), bounds.left + 19, bounds.top + 4, 10, 0x00E6E6E6);
+            var shortcut: [16]u8 = undefined;
+            const shortcut_text = std.fmt.bufPrint(&shortcut, "Ctrl+{d}", .{index + 1}) catch "";
+            drawUtf8(hdc, shortcut_text, bounds.left + 19, bounds.top + 14, 8, 0x008A8A8A);
+            drawUtf8(hdc, "x", bounds.right - 17, bounds.top + 7, 11, if (self.canCloseTab()) 0x00C8C8CC else 0x005A5A5A);
         }
-
         const labels = [_][]const u8{ "New Tab", "Split R", "Split D" };
         for (labels, 0..) |label, index| {
-            const left = controls_left + @as(i32, @intCast(index)) * 72;
-            const bounds = c.RECT{
-                .left = left,
-                .top = tab_bar.top + 3,
-                .right = left + 68,
-                .bottom = tab_bar.bottom - 3,
-            };
+            const bounds = chromeControlBounds(self.layout_origin_x, self.layout_origin_y, self.layout_width, index);
             fillRect(hdc, bounds, 0x00262626);
             drawUtf8(hdc, label, bounds.left + 7, bounds.top + 5, 10, 0x00D8D8D8);
         }
@@ -703,6 +746,7 @@ pub const Workspace = struct {
                 if (index == self.active_surface) 0x00E6E6E6 else 0x008A8A8A,
             );
             drawUtf8(hdc, "zmx session", left + 54, pane_top + 5, 9, 0x007A7A7A);
+            drawUtf8(hdc, if (launches_agent) "backend: agent" else "backend: shell", left + 142, pane_top + 5, 8, 0x007A7A7A);
             if (index == self.active_surface) {
                 fillRect(hdc, .{ .left = left, .top = pane_top + Tokens.pane_header_height - 2, .right = right, .bottom = pane_top + Tokens.pane_header_height }, Tokens.pane_focus_tint);
             }
@@ -719,6 +763,10 @@ pub const Workspace = struct {
         loop_type: []const u8,
         state: []const u8,
         activity: []const u8,
+        backend: []const u8,
+        created_at: ?u64,
+        metric_passes: u32,
+        token_usage: ?u32,
         resolved: bool,
     ) void {
         const top = Tokens.header_height;
@@ -729,10 +777,20 @@ pub const Workspace = struct {
             .right = left + 18,
             .bottom = top + 35,
         }, loopTypeAccent(loop_type));
-        drawUtf8(hdc, title, left + 27, top + 7, 13, 0x00F2F2F7);
+        drawUtf8(hdc, title, left + 27, top + 5, 13, 0x00F2F2F7);
         drawUtf8(hdc, state, left + 190, top + 8, 10, stateAccent(state));
         const live_line = if (activity.len != 0) activity else project_name;
-        drawUtf8(hdc, live_line, left + 27, top + 25, 10, 0x008E8E93);
+        drawUtf8(hdc, live_line, left + 27, top + 24, 10, 0x008E8E93);
+        var usage: [32]u8 = undefined;
+        const usage_text = if (token_usage) |value| std.fmt.bufPrint(&usage, "{d} tokens", .{value}) catch "usage n/a" else "usage n/a";
+        var detail: [256]u8 = undefined;
+        const detail_text = std.fmt.bufPrint(&detail, "{s}  ·  {s}  ·  pass {d}  ·  {s}", .{
+            if (backend.len != 0) backend else "backend n/a",
+            if (created_at != null) elapsedLabel(created_at.?) else "elapsed n/a",
+            metric_passes,
+            usage_text,
+        }) catch "workspace metadata unavailable";
+        drawUtf8(hdc, detail_text, left + 260, top + 10, 9, 0x008E8E93);
         if (!resolved) {
             fillRect(hdc, .{ .left = right - 196, .top = top + 10, .right = right - 112, .bottom = top + 36 }, 0x00303035);
             drawUtf8(hdc, "Stop loop", right - 184, top + 17, 10, 0x00D8D8DC);
@@ -742,9 +800,60 @@ pub const Workspace = struct {
         _ = allocator;
     }
 
+    pub fn paintWorkspaceToolbar(
+        hdc: c.HDC,
+        allocator: std.mem.Allocator,
+        left: i32,
+        right: i32,
+        project_name: []const u8,
+        project_path: []const u8,
+    ) void {
+        fillRect(hdc, .{ .left = left, .top = 0, .right = right, .bottom = Tokens.header_height }, Tokens.window_tone);
+        drawUtf8(hdc, "Workspace", left + 16, 8, 11, 0x008E8E93);
+        drawUtf8(hdc, project_name, left + 92, 7, 15, 0x00FFFFFF);
+        drawUtf8(hdc, if (std.mem.startsWith(u8, project_path, "ssh://")) "Remote repository" else "Local folder", left + 260, 10, 10, 0x008E8E93);
+        drawUtf8(hdc, "Selected loop", right - 210, 10, 10, 0x008E8E93);
+        _ = allocator;
+    }
+
     pub fn poll(self: *Workspace) void {
+        // While the workspace is collapsed (not visible as either the full surface or the
+        // picture-in-picture panel), skip draining terminal output entirely. Feeding output
+        // notifies winghostty's own accessibility layer via
+        // winghostty_surface_notify_accessibility_text() on every read, and that notification is
+        // independent of our set_focus(0)/set_visible(0) calls -- it kept re-asserting the
+        // terminal as the UIA-focused element even after every Win32-level focus fix, because a
+        // live shell session simply never stops producing output. zmx buffers output for detached
+        // sessions server-side, so it's safe to stop draining the local attach pipe while hidden.
+        if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
         self.pollRecreates();
+    }
+
+    /// Releases native Win32 keyboard focus from every live terminal surface and hides them.
+    /// Callers must invoke this whenever the workspace stops being the visible surface (e.g.
+    /// navigating back to the project overview) so a background terminal never keeps holding OS
+    /// focus/foreground and starving unrelated chrome (sidebar rows, dialogs) of it.
+    pub fn blurAll(self: *Workspace) void {
+        for (&self.surfaces) |*slot| {
+            if (slot.surface) |surface| {
+                _ = c.winghostty_surface_set_focus(surface, 0);
+                _ = c.winghostty_surface_set_visible(surface, 0);
+            }
+        }
+    }
+
+    /// Collapses the workspace to a zero-size, unfocused, hidden state without going through
+    /// resize()/syncTopology() -- syncTopology() unconditionally re-focuses the active pane's
+    /// terminal surface even at a degenerate size, which is exactly the behavior callers leaving
+    /// the workspace surface need to avoid.
+    pub fn collapse(self: *Workspace) void {
+        self.collapsed = true;
+        self.layout_origin_x = 0;
+        self.layout_origin_y = 0;
+        self.layout_width = 0;
+        self.layout_height = 0;
+        self.blurAll();
     }
 
     pub fn focus(self: *Workspace, index: usize) void {
@@ -1638,6 +1747,28 @@ fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {
     return "shell";
 }
 
+fn tabIndicatorColor(workspace: *const Workspace, tab: WorkspaceLayout.Tab) u32 {
+    for (tab.panes.items) |pane| {
+        for (workspace.surfaces) |surface| {
+            if (!std.mem.eql(u8, surface.session_name, pane.id)) continue;
+            if (surface.destroying or surface.destroyed) return 0x005F5FFF;
+            if (surface.surface != null) return 0x006BD58D;
+        }
+    }
+    return 0x00C8C8CC;
+}
+
+fn elapsedLabel(created_at: u64) []const u8 {
+    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
+    const now = std.time.milliTimestamp();
+    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
+    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
+    const seconds = elapsed_ms / 1000;
+    if (seconds < 60) return "elapsed <1m";
+    if (seconds < 3600) return "elapsed <1h";
+    return "elapsed >1h";
+}
+
 fn loopTypeAccent(loop_type: []const u8) u32 {
     if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
     if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
@@ -1782,7 +1913,14 @@ test "workspace chrome actions occupy distinct visible buttons" {
     try std.testing.expectEqual(ChromeAction.new_tab, chromeActionForBounds(220, 34, 800, 804, 44).?);
     try std.testing.expectEqual(ChromeAction.split_right, chromeActionForBounds(220, 34, 800, 876, 44).?);
     try std.testing.expectEqual(ChromeAction.split_down, chromeActionForBounds(220, 34, 800, 948, 44).?);
+    try std.testing.expect(chromeActionForBounds(220, 34, 800, 868, 44) == null);
     try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, 700, 44));
+}
+
+test "workspace tab chrome separates selection and close affordances" {
+    try std.testing.expectEqual(TabAction.select, tabActionForBounds(220, 34, 0, 228, 42).?);
+    try std.testing.expectEqual(TabAction.close, tabActionForBounds(220, 34, 0, 320, 42).?);
+    try std.testing.expect(tabActionForBounds(220, 34, 0, 340, 42) == null);
 }
 
 test "loop bar actions expose stop only for active loops" {

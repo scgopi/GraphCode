@@ -103,9 +103,17 @@ public enum RemoteGraphAccess {
   /// host, or `nil` when there's nothing to send. One `python3 -c` with a base64 JSON
   /// manifest rather than heredocs or scp: a single argument survives every quoting
   /// layer between here and the remote shell, needs no extra ssh round-trip, and
-  /// content can't collide with a delimiter. Neutered with `|| true` because delivery
-  /// must never block the launch it precedes — a session without its briefing is the
-  /// old behaviour, which works.
+  /// content can't collide with a delimiter. Neutered because delivery must never block
+  /// the launch it precedes — a session without its briefing is the old behaviour, which
+  /// works.
+  ///
+  /// **Neutered is not silent.** It used to be: the fragment ended `>/dev/null 2>&1
+  /// || true`, and when `f6b8af41` left the embedded python with an unbalanced `exec(`,
+  /// every delivery raised `SyntaxError` and threw the evidence away. Remote hosts got
+  /// nothing at all for five days and no machine on either end held a word about it.
+  /// Failure is still non-fatal here, but its stderr now reaches the host's own dial log
+  /// as `delivery install failed <reason>`, which is the difference between a five-day
+  /// mystery and a one-line answer.
   ///
   /// `receipt` is a path and content written **after** every manifest entry has landed,
   /// as proof that the whole delivery succeeded.
@@ -129,8 +137,17 @@ public enum RemoteGraphAccess {
   ///
   /// No `makedirs` for the receipt: it is only reached once the shim it vouches for has
   /// been written, and that write created the directory.
+  ///
+  /// `neutered` is what makes the `|| true` above optional. It holds for everything a
+  /// session can rediscover or do without — the shim, the briefing, the wake digest —
+  /// but not for a prompt that has moved to a file: there the delivery *is* the
+  /// instructions, and a launch that proceeds without it starts an agent whose entire
+  /// brief is a pointer at a file that isn't there. That caller
+  /// (`ZmxSessionLauncher.remotePromptDelivery`) chains the launch behind this command's
+  /// exit status instead, so a failed delivery costs a retry rather than a blind pass.
   public static func installerScript(
-    files: [String: String], receipt: (path: String, content: String)? = nil
+    files: [String: String], receipt: (path: String, content: String)? = nil,
+    neutered: Bool = true
   ) -> String? {
     guard !files.isEmpty else { return nil }
     let manifest = files.mapValues { Data($0.utf8).base64EncodedString() }
@@ -151,14 +168,61 @@ public enum RemoteGraphAccess {
       + " else:\\n"
       + "  with open(os.path.expanduser(p),\"wb\") as f: f.write(b)\\n"
       + "  os.chmod(os.path.expanduser(p),0o755 if p.endswith(\"/graphcode\") else 0o644)\\n"
-      + "')'); "
+      + "'); "
       + "[w(p,c) for p,c in sorted(m.items())]; "
       + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
     var argv = ["python3", "-c", program, json.base64EncodedString()]
     if let receipt { argv += [receipt.path, receipt.content] }
-    return argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
-      + " >/dev/null 2>&1 || true"
+    let install = argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+    // stderr into a variable, stdout to `/dev/null` — `2>&1 >/dev/null` in that order,
+    // so the substitution keeps the diagnosis and drops the noise.
+    return "gc_di_err=$(\(install) 2>&1 >/dev/null); gc_di_rc=$?; "
+      + "if [ \"$gc_di_rc\" -ne 0 ]; then "
+      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | tr -d '\\r' | tr '\\n\\t' '  ' "
+      + "| tail -c \(errorDetailBytes)); "
+      // A byte-wise `tail` lands mid-character sooner or later, and one orphan
+      // continuation byte makes `grep` and `sed` fail on the *whole* log under a UTF-8
+      // locale — every other dial on the host hidden by the line meant to explain one.
+      // `iconv -c` drops the partial character; where it doesn't exist (musl, busybox —
+      // it lives in glibc's libc-bin) the fallback strips high bytes outright, which
+      // costs a non-ASCII path its accents and keeps the log readable, which is the
+      // property that matters.
+      + "gc_di_err=$(printf '%s' \"$gc_di_err\" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null "
+      + "|| printf '%s' \"$gc_di_err\" | LC_ALL=C tr -d '\\200-\\377'); "
+      + "[ -n \"$gc_di_err\" ] || gc_di_err=\"rc=$gc_di_rc\"; "
+      + DialLog.fragment(
+        session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")
+      + "; fi; "
+      + (neutered ? "true" : "[ \"$gc_di_rc\" -eq 0 ]")
   }
+
+  /// How much of a failed delivery's stderr reaches the dial log — the **last** bytes,
+  /// not the first. A python traceback opens with frames and interpreter paths and ends
+  /// with the line that names the fault, so keeping the head throws away the answer:
+  /// measured, `NotADirectoryError` fell outside the first 400 bytes of the very failure
+  /// this was written to explain.
+  ///
+  /// The size is **derived, not chosen**, and `DialLogBoundTests` locks it: `DialLog`
+  /// trims by keeping its last `keptLines` lines, so a line longer than
+  /// `maxBytes / keptLines` breaks its own bound — the trim can never get the file back
+  /// under `maxBytes`, and from then on every append by every loop on the host re-reads
+  /// and rewrites the whole thing. At 400 bytes it did exactly that: 5000 × 445 = 2.2 MB
+  /// against a 1 MB cap. Deriving it means raising `keptLines` can never silently
+  /// reintroduce that, and what is left still carries the part that names the fault.
+  static let errorDetailBytes =
+    DialLog.maxBytes / DialLog.keptLines - dialLineOverhead
+
+  /// The fixed part of a delivery-failure line **as it lands on disk** — timestamp, the
+  /// three literal fields, the spaces between them, and the newline that terminates it.
+  ///
+  /// The terminator is the point. `wc -c`, which is what the trim measures the file
+  /// with, counts it; the first version of this budget did not, so a line computed as
+  /// exactly 209 bytes was 210 on disk and 5000 of them came to 1,050,000 against a
+  /// 1,048,576 cap — the same permanent-trim bug this constant exists to prevent,
+  /// reintroduced by one byte. Writing the literal with its `\n` keeps the two
+  /// measurements the same measurement.
+  static let dialLineOverhead =
+    "2026-09-20T21:38:23Z delivery install failed \n".utf8.count
 
   /// Installs bridge state through the SSH command's stdin. Only the byte count and
   /// SHA-256 digest appear in the remote command; the capability-bearing JSON never

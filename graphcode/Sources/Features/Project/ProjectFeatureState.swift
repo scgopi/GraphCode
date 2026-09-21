@@ -78,6 +78,7 @@ extension ProjectFeature.State {
       // Attribution only — the card can say where the brief came from. The follow
       // travels too, for the two types that follow: timed and composite re-read the
       // template on their next run; goal, turn and main snapshot at creation.
+      attachments: draftAttachments.items,
       createdFromTemplateID: templates.applied?.id,
       templateFollow: {
         guard let applied = templates.applied,
@@ -107,6 +108,19 @@ extension ProjectFeature.State {
     case .timeBased: return draftTimedTask
     case .turnBased: return draftFirstInstruction
     case .composite: return draftTitle
+    }
+  }
+
+  /// `currentBriefText`'s counterpart — where an image's `[image #N]` placeholder is
+  /// written, so it lands in the field the human is actually filling in. A composite
+  /// has no prose field, and nothing writes one.
+  mutating func setBriefText(_ text: String) {
+    switch draftLoopType {
+    case .sketch: draftSketchNote = text
+    case .goalBased: draftGoal = text
+    case .timeBased: draftTimedTask = text
+    case .turnBased: draftFirstInstruction = text
+    case .composite: break
     }
   }
 

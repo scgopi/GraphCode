@@ -656,9 +656,14 @@ function Invoke-Task([string] $name) {
       if ($LASTEXITCODE -ne 0) {
         throw "Tray daemon executable tests failed with exit code $LASTEXITCODE"
       }
+      $zmxExecutable = Join-Path $zmxRoot "zig-out\bin\zmx.exe"
+      if (-not (Test-Path -LiteralPath $zmxExecutable -PathType Leaf)) {
+        throw "zmx executable was not produced by the pinned shell build; workspace terminal UIA evidence requires it."
+      }
       Invoke-Native "Native UI Automation live gate" {
         & (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") `
-          -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe")
+          -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `
+          -Zmx $zmxExecutable
       }
     }
     "packaging" {

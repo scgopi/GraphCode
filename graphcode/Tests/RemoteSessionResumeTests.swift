@@ -214,7 +214,25 @@ struct RemoteSessionResumeTests {
       ZmxSessionLauncher.remoteDeliveryScript(
         forNode: nil, at: location, settings: GraphcodeSettings()))
 
-    #expect(!script.contains("printf"))
+    // `printf` does appear in the fragment now — a failed delivery reports its reason to
+    // the host's dial log — so this asserts the rule the old `!contains("printf")` line
+    // stood for: no shell redirect in here names the stamp. Checking the *redirect* and
+    // not merely "every printf mentions dials.log" is deliberate; the loose form passes a
+    // rogue `printf 'stamp' > …/.shim-stamp;` because the text after it picks up
+    // `dials.log` from the next fragment's own trim.
+    // Matching the literal tilde spelling is not enough: `$HOME/.graphcode/...` is this
+    // codebase's own spelling for that directory (`DialLog.logExpression` uses it), so a
+    // future author writing the stamp the way the dial log is written would walk past a
+    // literal check. Nor is `"> " + path`, which two spaces or an fd defeat. This matches
+    // any redirect at any target ending in the stamp's name — and does not flag the real
+    // fragment, where `.shim-stamp` appears only as a quoted argv token.
+    #expect(
+      script.range(
+        of: #"[0-9]?>>?\s*[^\s;|&]*\.shim-stamp"#, options: .regularExpression) == nil)
+    // And the only thing any append in the fragment targets is the dial log.
+    #expect(
+      script.components(separatedBy: ">> ").dropFirst()
+        .allSatisfy { $0.hasPrefix(DialLog.logExpression) })
 
     // Not a manifest entry — the manifest is the one token that base64-decodes to JSON.
     let files = try #require(

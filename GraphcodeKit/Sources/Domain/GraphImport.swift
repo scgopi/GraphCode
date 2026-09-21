@@ -220,6 +220,10 @@ public enum GraphImportPlanner {
       heartbeatIntervalSeconds: node.heartbeatIntervalSeconds,
       firstInstruction: node.firstInstruction,
       pausesBeforeWritesOnly: node.pausesBeforeWritesOnly,
+      // Dropped for the same reason the worktree binding is, and one more: an
+      // attachment's file lives under the *exporting* node's id, which the remap above
+      // has just changed. Both halves of the path would be wrong.
+      attachments: [],
       goal: node.goal,
       backend: node.backend,
       modelTier: node.modelTier,
