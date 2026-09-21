@@ -104,6 +104,24 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr GetFocus();
   [DllImport("user32.dll")]
   private static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  private static extern bool BringWindowToTop(IntPtr window);
+  [DllImport("kernel32.dll")]
+  private static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")]
+  private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetWindowTextLength(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern bool ShowWindow(IntPtr window, int command);
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetActiveWindow(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
   public static IntPtr FindChild(IntPtr parent, string className) {
     return FindWindowEx(parent, IntPtr.Zero, className, null);
   }
@@ -143,7 +161,8 @@ public static class GraphCodeUiaGateState {
     return PostMessage(window, 0x0111, new UIntPtr(0x8000000000001008UL), IntPtr.Zero);
   }
   public static bool PostKeyboard(IntPtr window, uint key) {
-    return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero);
+    return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero) &&
+      PostMessage(window, 0x0101, (UIntPtr)key, IntPtr.Zero);
   }
   public static bool SendReturn(IntPtr window) {
     if (window == IntPtr.Zero) return false;
@@ -161,12 +180,78 @@ public static class GraphCodeUiaGateState {
   }
   public static bool FocusControl(IntPtr parent, IntPtr control) {
     if (parent == IntPtr.Zero || control == IntPtr.Zero) return false;
-    SetForegroundWindow(parent);
-    SetFocus(control);
-    return GetFocus() == control;
+    ActivateWindow(parent);
+    uint parentThread = GetWindowThreadProcessId(parent, out _);
+    uint currentThread = GetCurrentThreadId();
+    bool attached = currentThread != parentThread &&
+      AttachThreadInput(currentThread, parentThread, true);
+    try {
+      SetFocus(control);
+      return IsForegroundWindow(parent) && GetFocus() == control;
+    } finally {
+      if (attached) AttachThreadInput(currentThread, parentThread, false);
+    }
   }
   public static bool ActivateWindow(IntPtr window) {
-    return window != IntPtr.Zero && SetForegroundWindow(window);
+    if (window == IntPtr.Zero) return false;
+    IntPtr foreground = GetForegroundWindow();
+    uint foregroundThread = foreground == IntPtr.Zero ? 0 :
+      GetWindowThreadProcessId(foreground, out _);
+    uint targetThread = GetWindowThreadProcessId(window, out _);
+    uint currentThread = GetCurrentThreadId();
+    bool attachForeground = foregroundThread != 0 &&
+      currentThread != foregroundThread &&
+      AttachThreadInput(currentThread, foregroundThread, true);
+    bool attachTarget = currentThread != targetThread &&
+      AttachThreadInput(currentThread, targetThread, true);
+    try {
+      ShowWindow(window, 9);
+      BringWindowToTop(window);
+      keybd_event(0x12, 0, 0, UIntPtr.Zero);
+      keybd_event(0x12, 0, 0x0002, UIntPtr.Zero);
+      SetActiveWindow(window);
+      SetForegroundWindow(window);
+      return IsForegroundWindow(window);
+    } finally {
+      if (attachTarget) AttachThreadInput(currentThread, targetThread, false);
+      if (attachForeground) AttachThreadInput(currentThread, foregroundThread, false);
+    }
+  }
+  public static bool IsForegroundWindow(IntPtr window) {
+    return window != IntPtr.Zero && GetForegroundWindow() == window;
+  }
+  public static IntPtr CurrentForegroundWindow() {
+    return GetForegroundWindow();
+  }
+  public static uint WindowProcessId(IntPtr window) {
+    if (window == IntPtr.Zero) return 0;
+    uint processId;
+    GetWindowThreadProcessId(window, out processId);
+    return processId;
+  }
+  public static string WindowClass(IntPtr window) {
+    if (window == IntPtr.Zero) return "";
+    var text = new StringBuilder(256);
+    GetClassName(window, text, text.Capacity);
+    return text.ToString();
+  }
+  public static string WindowTitle(IntPtr window) {
+    if (window == IntPtr.Zero) return "";
+    int length = GetWindowTextLength(window);
+    var text = new StringBuilder(length + 1);
+    GetWindowText(window, text, text.Capacity);
+    return text.ToString();
+  }
+  public static void HideWindow(IntPtr window) {
+    if (window != IntPtr.Zero) ShowWindow(window, 0);
+  }
+  public static void HideProcessWindows(uint processId) {
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId) HideWindow(window);
+      return true;
+    }, IntPtr.Zero);
   }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
@@ -192,6 +277,118 @@ public static class GraphCodeUiaGateState {
 
 function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
+}
+
+function Format-WindowHandle([IntPtr] $handle) {
+  return "0x$($handle.ToInt64().ToString('x'))"
+}
+
+function Format-AutomationElement(
+  [System.Windows.Automation.AutomationElement] $element
+) {
+  if ($null -eq $element) {
+    return "unavailable"
+  }
+  try {
+    return "$($element.Current.AutomationId):$($element.Current.Name)"
+  } catch {
+    return "unavailable:$($_.Exception.Message)"
+  }
+}
+
+function Get-FocusDiagnostics([IntPtr] $expectedWindow) {
+  $foreground = [GraphCodeUiaGateState]::CurrentForegroundWindow()
+  $foregroundProcessId = [GraphCodeUiaGateState]::WindowProcessId($foreground)
+  $foregroundProcess = if ($foregroundProcessId -ne 0) {
+    Get-Process -Id $foregroundProcessId -ErrorAction SilentlyContinue
+  } else {
+    $null
+  }
+  $focusedDescription = "unavailable"
+  try {
+    $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+    $focusedDescription = "automationId='$($focusedElement.Current.AutomationId)' name='$($focusedElement.Current.Name)' processId=$($focusedElement.Current.ProcessId)"
+  } catch {
+    $focusedDescription = "error='$($_.Exception.Message)'"
+  }
+  return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription}"
+}
+
+function Hide-TestProviderZmxWindows {
+  if (-not $env:GRAPHCODE_ZMX) { return }
+  $providerZmx = [IO.Path]::GetFullPath($env:GRAPHCODE_ZMX)
+  foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+      Where-Object {
+        $_.Name -match "(?i)^zmx(?:\.exe)?$" -and
+        (([string]$_.ExecutablePath) -eq $providerZmx -or
+         ([string]$_.CommandLine) -like "*$providerZmx*")
+      })) {
+    [GraphCodeUiaGateState]::HideProcessWindows([uint32]$process.ProcessId)
+  }
+  $foreground = [GraphCodeUiaGateState]::CurrentForegroundWindow()
+  $foregroundTitle = [GraphCodeUiaGateState]::WindowTitle($foreground)
+  if ($foregroundTitle -eq $providerZmx -or
+      $foregroundTitle -like "*\zmx.exe") {
+    [GraphCodeUiaGateState]::HideWindow($foreground)
+  }
+}
+
+function Test-FocusedElementIdentity(
+  [System.Windows.Automation.AutomationElement] $candidate,
+  [System.Windows.Automation.AutomationElement] $expected,
+  [string] $expectedAutomationId
+) {
+  if ($null -eq $candidate -or $null -eq $expected) { return $false }
+  try {
+    if ($expectedAutomationId -and
+        $candidate.Current.AutomationId -eq $expectedAutomationId) {
+      return $true
+    }
+    if ($expected.Current.NativeWindowHandle -ne 0 -and
+        $candidate.Current.NativeWindowHandle -eq $expected.Current.NativeWindowHandle) {
+      return $true
+    }
+    return (Get-RuntimeIdentity $candidate) -eq (Get-RuntimeIdentity $expected)
+  } catch {
+    return $false
+  }
+}
+
+function Retain-FocusWithRetry(
+  [IntPtr] $window,
+  [System.Windows.Automation.AutomationElement] $element,
+  [string] $expectedAutomationId,
+  [string] $label,
+  [int] $Attempts = 600
+) {
+  $candidate = $null
+  Hide-TestProviderZmxWindows
+  Start-Sleep -Milliseconds 250
+  Write-Host "UIA_FOCUS_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
+  for ($index = 0; $index -lt $Attempts; $index++) {
+    Hide-TestProviderZmxWindows
+    $activated = [GraphCodeUiaGateState]::ActivateWindow($window)
+    Start-Sleep -Milliseconds 50
+    try {
+      $element.SetFocus()
+    } catch {
+      $null = [GraphCodeUiaGateState]::FocusControl(
+        $window, [IntPtr]$element.Current.NativeWindowHandle
+      )
+    }
+    Start-Sleep -Milliseconds 50
+    try {
+      $candidate = [System.Windows.Automation.AutomationElement]::FocusedElement
+    } catch {
+      $candidate = $null
+    }
+    if ($activated -and
+        [GraphCodeUiaGateState]::IsForegroundWindow($window) -and
+        (Test-FocusedElementIdentity $candidate $element $expectedAutomationId)) {
+      return [pscustomobject]@{ Focused = $candidate; Candidate = $candidate }
+    }
+  }
+  return [pscustomobject]@{ Focused = $null; Candidate = $candidate }
 }
 
 function Get-DirectChildren(
@@ -1056,22 +1253,9 @@ try {
   Require ($null -ne $currentSafe) "safe worktree row disappeared before focus: $(@($currentRowsBeforeFocus | ForEach-Object { $_.Current.AutomationId }) -join ',')"
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
   Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
-  $focused = $null
-  # Widened from 300x50ms (15s) alongside the earlier workspace-collapse retry loop: this
-  # assertion has been observed to flake under heavy CI-runner load with the identical passing
-  # binary/commit (confirmed via repeated same-commit reruns), not from a code regression. Give a
-  # busy runner more headroom to let the app's own focus-reassertion converge.
-  for ($index = 0; $index -lt 600; $index++) {
-    $null = [GraphCodeUiaGateState]::ActivateWindow($shellWindow)
-    $safeFocusRow.SetFocus()
-    Start-Sleep -Milliseconds 50
-    $candidate = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($candidate.Current.AutomationId -eq $safeRowId) {
-      $focused = $candidate
-      break
-    }
-  }
-  Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$($candidate.Current.AutomationId):$($candidate.Current.Name)"
+  $focusResult = Retain-FocusWithRetry $shellWindow $safeFocusRow $safeRowId "before-retention"
+  $focused = $focusResult.Focused
+  Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$(Format-AutomationElement $focusResult.Candidate); $(Get-FocusDiagnostics $shellWindow)"
   Require ($focused.Current.AutomationId -eq $safeRowId) "focus source identity was '$($focused.Current.AutomationId)', expected '$safeRowId'"
   Require ((Get-RuntimeIdentity $focused) -eq (Get-RuntimeIdentity $safeFocusRow)) "focus runtime identity changed"
   for ($index = 0; $index -lt 20 -and -not [GraphCodeUiaGateState]::FocusObserved; $index++) {
@@ -1730,9 +1914,10 @@ try {
   Require ($null -ne $backendButton) "Product Settings backend control became unavailable"
   Require ([GraphCodeUiaGateState]::SendCommand($settingsWindow, 6112)) `
     "Product Settings backend fixture mutation was rejected"
-  $null = [GraphCodeUiaGateState]::FocusControl(
-    $settingsWindow, [IntPtr]$backendButton.Current.NativeWindowHandle
-  )
+  $backendFocus = Retain-FocusWithRetry `
+    $settingsWindow $backendButton $backendButton.Current.AutomationId `
+    "product-settings-return"
+  Require ($null -ne $backendFocus.Focused) "Product Settings backend control could not retain foreground focus; focused=$(Format-AutomationElement $backendFocus.Candidate); $(Get-FocusDiagnostics $settingsWindow)"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$backendButton.Current.NativeWindowHandle, 0x0D
   )) "Product Settings focused control rejected Return"
@@ -1773,9 +1958,10 @@ try {
     ))
   )
   Require ($null -ne $cancelModel) "Product Settings omitted its model picker on reopen"
-  $null = [GraphCodeUiaGateState]::FocusControl(
-    $cancelWindow, [IntPtr]$cancelModel.Current.NativeWindowHandle
-  )
+  $cancelFocus = Retain-FocusWithRetry `
+    $cancelWindow $cancelModel $cancelModel.Current.AutomationId `
+    "product-settings-escape"
+  Require ($null -ne $cancelFocus.Focused) "Product Settings model control could not retain foreground focus; focused=$(Format-AutomationElement $cancelFocus.Candidate); $(Get-FocusDiagnostics $cancelWindow)"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$cancelModel.Current.NativeWindowHandle, 0x1B
   )) "Product Settings focused control rejected Escape"

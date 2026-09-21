@@ -195,6 +195,26 @@ try {
   if ($runnerSource -notmatch '(?s)Pinned GraphCode Windows shell build and smoke.*?Native UI Automation live gate.*?uia-live-gate\.ps1') {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
+  $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  if ($uiaLiveGateSource -notmatch 'AttachThreadInput' -or
+  $uiaLiveGateSource -notmatch 'keybd_event\(0x12, 0, 0, UIntPtr\.Zero\)' -or
+  $uiaLiveGateSource -notmatch 'SetActiveWindow\(window\)' -or
+  $uiaLiveGateSource -notmatch 'PostMessage\(window, 0x0101, \(UIntPtr\)key, IntPtr\.Zero\)' -or
+  $uiaLiveGateSource -notmatch '\[DllImport\("kernel32\.dll"\)\]\s*private static extern uint GetCurrentThreadId' -or
+      $uiaLiveGateSource -notmatch 'IsForegroundWindow\(\$window\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_FOCUS_DIAGNOSTICS' -or
+      $uiaLiveGateSource -notmatch '(?s)function Hide-TestProviderZmxWindows.*?\[string\]\$_\.ExecutablePath\)\s+-eq\s+\$providerZmx.*?HideProcessWindows.*?HideWindow\(\$foreground\)' -or
+      $uiaLiveGateSource -notmatch 'function Retain-FocusWithRetry' -or
+      $uiaLiveGateSource -notmatch 'Test-FocusedElementIdentity \$candidate \$element \$expectedAutomationId' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::ActivateWindow\(\$window\)' -or
+      $uiaLiveGateSource -notmatch '\$element\.SetFocus\(\)' -or
+      $uiaLiveGateSource -notmatch 'Retain-FocusWithRetry \$shellWindow \$safeFocusRow \$safeRowId "before-retention"' -or
+      $uiaLiveGateSource -notmatch '\$backendFocus = Retain-FocusWithRetry' -or
+      $uiaLiveGateSource -notmatch 'Product Settings backend control could not retain foreground focus' -or
+      $uiaLiveGateSource -notmatch '\$cancelFocus = Retain-FocusWithRetry' -or
+      $uiaLiveGateSource -notmatch 'Product Settings model control could not retain foreground focus') {
+    throw "RED: UIA live gate does not prove foreground ownership before accepting row focus"
+  }
   $shellTests = Get-Content (Join-Path $PSScriptRoot "WindowsShell.Tests.ps1") -Raw
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
