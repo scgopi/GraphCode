@@ -1157,8 +1157,8 @@ pub const App = struct {
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, initial) catch {
-                self.setStatus("Unable to open node form");
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, initial) catch |err| {
+                self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
             defer draft.deinit(self.allocator);
@@ -1187,8 +1187,8 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, current, true) catch {
-                self.setStatus("Unable to open node form");
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, current, true) catch |err| {
+                self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
             switch (result) {
@@ -1214,6 +1214,34 @@ pub const App = struct {
                 },
             }
         }
+    }
+
+    fn nodeFormErrorStatus(err: anyerror) []const u8 {
+        return switch (err) {
+            error.EmptyTitle,
+            error.MissingSource,
+            error.MissingTarget,
+            error.SameEndpoint,
+            error.UnsupportedLoopType,
+            error.UnsupportedEdgeKind,
+            error.UnsupportedEdgeCondition,
+            error.UnsupportedTransform,
+            error.UnsupportedBackend,
+            error.UnsupportedModelTier,
+            error.UnsupportedMetricDirection,
+            error.InvalidGoal,
+            error.InvalidWorktree,
+            error.InvalidSubgraph,
+            error.InvalidCreatedBy,
+            error.InvalidCycleGuard,
+            error.InvalidNumericInput,
+            error.MissingFirstInstruction,
+            error.MissingTriggerPrompt,
+            error.EmptyJumpQuery,
+            error.TooManyAttachments,
+            => "Invalid node form",
+            else => "Unable to open node form",
+        };
     }
 
     fn editSelectedNode(self: *App) void {
@@ -5778,6 +5806,21 @@ test "jump matching ranks exact results across projects" {
     try std.testing.expectEqual(@as(usize, 1), prefix.project_index);
     try std.testing.expectEqual(@as(usize, 0), prefix.node_index);
     try std.testing.expectEqual(@as(u8, 2), prefix.score);
+}
+
+test "node form validation errors keep the validation status" {
+    try std.testing.expectEqualStrings(
+        "Invalid node form",
+        App.nodeFormErrorStatus(error.MissingFirstInstruction),
+    );
+    try std.testing.expectEqualStrings(
+        "Invalid node form",
+        App.nodeFormErrorStatus(error.TooManyAttachments),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to open node form",
+        App.nodeFormErrorStatus(error.FormCreationFailed),
+    );
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {
