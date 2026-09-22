@@ -1,9 +1,11 @@
 const std = @import("std");
 const App = @import("App.zig").App;
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
 const build_options = @import("build_options");
 
 pub fn main() !void {
+    Win32.enablePerMonitorDpiAwareness();
     const allocator = std.heap.c_allocator;
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

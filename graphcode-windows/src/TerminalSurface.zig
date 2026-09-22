@@ -4,6 +4,7 @@ const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
+const Dpi = @import("Dpi.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -140,6 +141,18 @@ pub const Surface = struct {
     parser: ParserState = .normal,
     csi_value: usize = 0,
     csi_have_value: bool = false,
+    // Runtime DPI state reported back by winghostty for this specific surface (via
+    // on_dpi_changed/on_metrics_changed), as opposed to Workspace.dpi, which is what
+    // this app last told winghostty the monitor DPI is. Kept per-surface since each
+    // pane can in principle straddle a per-monitor DPI boundary independently.
+    dpi: u32 = Dpi.base_dpi,
+    reported_font_scale: f32 = 1.0,
+    cell_metrics: c.winghostty_cell_metrics = std.mem.zeroes(c.winghostty_cell_metrics),
+    // The most recent text-selection range winghostty reported for this surface
+    // (start/end are its own internal buffer offsets). Previously discarded entirely
+    // by onAccessibilitySelection; kept here so a UIA text pattern for the embedded
+    // terminal has real selection data to expose instead of none at all.
+    accessibility_selection: ?struct { start: u64, end: u64 } = null,
 };
 
 pub fn surfaceIdentityMatches(surface: *const Surface, project_path: []const u8, session: []const u8) bool {
@@ -185,6 +198,11 @@ pub const Workspace = struct {
     syncing_topology: bool = false,
     syncing_focus: bool = false,
     persisting_layout: bool = false,
+    // The monitor DPI this workspace last propagated to its live terminal surfaces
+    // (see setDpi()). Drives both the font_scale given to new surfaces created via
+    // surfaceOptions() and the DPI/font-scale pushed to already-live surfaces when
+    // the host window moves across a DPI boundary.
+    dpi: u32 = Dpi.base_dpi,
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !*Workspace {
         const workspace = try allocator_.create(Workspace);
@@ -668,6 +686,28 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    /// Propagates a real, runtime monitor DPI (from the host window's WM_DPICHANGED)
+    /// down to every live terminal surface, using the two operations winghostty
+    /// actually exposes for this: `winghostty_surface_notify_dpi_changed` (so the
+    /// surface's own DPI-aware internals, e.g. its own child-window DPI query,
+    /// observe the new value) and `winghostty_surface_set_font_scale` (the officially
+    /// supported knob for how large winghostty renders its own glyphs). Deliberately
+    /// does not also scale `options.input.cell_width`/`cell_height` -- those stay at
+    /// their 96-DPI logical baseline in surfaceOptions() so the DPI ratio is applied
+    /// exactly once, through font_scale, rather than twice (once here and again by
+    /// winghostty recomputing cell metrics from the scaled font).
+    pub fn setDpi(self: *Workspace, dpi: u32) void {
+        const normalized = Dpi.normalize(dpi);
+        if (normalized == self.dpi) return;
+        self.dpi = normalized;
+        const font_scale = Dpi.fontScale(normalized);
+        for (&self.surfaces) |*slot| {
+            const surface = slot.surface orelse continue;
+            _ = c.winghostty_surface_notify_dpi_changed(surface, normalized);
+            _ = c.winghostty_surface_set_font_scale(surface, font_scale);
+        }
+    }
+
     pub fn chromeActionAt(self: *const Workspace, x: i32, y: i32) ?ChromeAction {
         return chromeActionForBounds(
             self.layout_origin_x,
@@ -1068,7 +1108,10 @@ pub const Workspace = struct {
         options.visible = 1;
         options.focus = if (index == self.active_surface) 1 else 0;
         options.theme = c.WINGHOSTTY_THEME_DARK;
-        options.font_scale = 1.0;
+        // Use the workspace's last-known runtime monitor DPI so a surface created
+        // after a DPI change (e.g. a new split/tab opened post-move) starts scaled
+        // correctly instead of always assuming 96 DPI/100%.
+        options.font_scale = Dpi.fontScale(self.dpi);
         options.user_data = @ptrCast(self);
         options.callbacks.on_exit = @ptrCast(&onExit);
         options.callbacks.on_title = @ptrCast(&onTitle);
@@ -1545,23 +1588,31 @@ fn onFatalError(
 }
 
 fn onDpiChanged(user_data: ?*anyopaque, surface: *c.winghostty_surface, dpi: u32, scale: f32) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = dpi;
-    _ = scale;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    // winghostty reports the DPI/scale it has already adopted internally for this
+    // surface (e.g. after its own per-monitor DPI query or in response to
+    // Workspace.setDpi()'s notify_dpi_changed call). Record it per-surface, rather
+    // than discarding it, so callers (tests, future UIA/geometry consumers) can
+    // observe what each live pane actually believes its DPI/scale is instead of only
+    // ever seeing the workspace-wide value the app last pushed down.
+    slot.dpi = Dpi.normalize(dpi);
+    slot.reported_font_scale = scale;
 }
 
 fn onMetricsChanged(user_data: ?*anyopaque, surface: *c.winghostty_surface, metrics: *const c.winghostty_cell_metrics) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = metrics;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    // As with DPI above, keep the host's own recomputed cell metrics (font/cell
+    // width/height, baseline) instead of discarding them, since they reflect the
+    // actual glyph geometry winghostty is now rendering at the current font_scale.
+    slot.cell_metrics = metrics.*;
 }
 
 fn onAccessibilitySelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, start: u64, end: u64) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = start;
-    _ = end;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    slot.accessibility_selection = .{ .start = start, .end = end };
 }
 
 fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_key_event) callconv(.c) void {

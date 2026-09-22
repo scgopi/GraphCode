@@ -383,6 +383,12 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
+        // Seed the real startup DPI now that a window handle exists, rather than
+        // waiting on the first WM_DPICHANGED. Without this a per-monitor-aware
+        // process that launches directly on a scaled (>100%) monitor would still
+        // render its first frame -- including any terminal surfaces created below
+        // -- assuming 96 DPI/100% until the user actually moves it.
+        self.dpi = Win32.dpiForWindow(self.window.hwnd);
         self.tray.test_hook_enabled = self.tray_test_hook_enabled;
         self.tray.add(self.window.hwnd) catch self.setStatus("System tray unavailable; GraphCode remains open");
         const endpoint = self.client.currentEndpointName(self.allocator) catch &.{};
@@ -455,6 +461,11 @@ pub const App = struct {
             (uia_gate_zmx != null and uia_gate_zmx.?.len > 0))
         {
             self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+            // Seed the workspace with the real startup DPI captured above so the
+            // very first surfaceOptions() (used for the first pane in this
+            // workspace) already requests the correct font_scale instead of always
+            // starting at 96 DPI/100%.
+            if (self.workspace) |workspace| workspace.dpi = Dpi.normalize(self.dpi);
             if (self.workspace) |workspace| workspace.setKeyCallback(self, &onWorkspaceKey);
             if (self.workspace) |workspace| try workspace.startInputWorker();
         }
@@ -4376,6 +4387,10 @@ fn onWindowMessage(
         c.WM_DPICHANGED => {
             const dpi = @as(u32, @intCast(wparam & 0xffff));
             app.dpi = Dpi.normalize(dpi);
+            // Propagate the real per-monitor DPI down to every live terminal surface
+            // (font_scale + winghostty_surface_notify_dpi_changed) using the runtime
+            // value Windows just reported, rather than assuming a fixed scale.
+            if (app.workspace) |workspace| workspace.setDpi(app.dpi);
             if (lparam != 0) {
                 const suggested = Win32.messagePointer(*const c.RECT, lparam);
                 _ = c.SetWindowPos(

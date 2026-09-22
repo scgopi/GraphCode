@@ -6,7 +6,12 @@ terminal text needed for deterministic review without building the Windows UI.
 
 `manifest.json` cites the existing GraphCode screenshot, `Theme.swift`, card
 presentation, canvas, sidebar, workspace, and parity sources. The four DPI entries are
-layout variants, not screenshots tied to a particular machine.
+layout variants, not screenshots tied to a particular machine: `Tools/windows/visual-baseline.ps1`
+reimplements `graphcode-windows/src/Dpi.zig`'s exact scaling formula and reads real
+control-metric base values straight out of `graphcode-windows/src/DesignTokens.zig`, so
+each variant's scaled geometry for GraphCode-owned regions (`regionGeometry`) is
+checked against the real per-monitor DPI values (96/120/144/192), not just asserted to
+be present.
 
 The GraphCode-owned regions are safe for screenshot comparison. Terminal rendering,
 input, IME, clipboard, resize, and accessibility remain live Winghostty functional

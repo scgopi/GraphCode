@@ -185,17 +185,6 @@ $directions = @(
 Assert-Contract ($directions -contains "horizontal") "horizontal split fixture is missing"
 Assert-Contract ($directions -contains "vertical") "vertical split fixture is missing"
 
-$dpi = @($manifest.dpiVariants)
-foreach ($variantID in @("100", "125", "150", "200")) {
-  Assert-Contract (@($dpi | Where-Object id -eq $variantID).Count -eq 1) `
-    "DPI variant is missing: $variantID"
-}
-foreach ($variant in $dpi) {
-  Assert-Contract ($variant.scale -gt 0) "DPI scale must be positive: $($variant.id)"
-  Assert-Contract ($variant.viewport.width -gt 0 -and $variant.viewport.height -gt 0) `
-    "DPI viewport must be positive: $($variant.id)"
-}
-
 $regions = @($manifest.regions)
 $deterministicIDs = @($manifest.renderingBoundary.deterministicScreenshotRegions)
 $liveIDs = @($manifest.renderingBoundary.liveWinghosttyFunctionalTests)
@@ -214,6 +203,76 @@ foreach ($id in $liveIDs) {
   Assert-Contract ($region.Count -eq 1 -and $region[0].owner -eq "Winghostty" -and
     $region[0].kind -eq "live-functional") `
     "live region is not Winghostty-owned: $id"
+}
+
+# --- DPI geometry: reproducible per-region control-metric checks ---------------
+#
+# The four DPI variants below are layout math, not literal screen pixels: this repo
+# cannot deterministically rasterize a live Win32 window in CI (the terminal surface
+# itself is explicitly out of scope for pixel comparison; see renderingBoundary
+# above). Instead this reproduces graphcode-windows/src/Dpi.zig's exact
+# scale()/rounding formula against the *real* control-metric constants read straight
+# out of graphcode-windows/src/DesignTokens.zig, so a change to either the DPI math
+# or a token's base pixel value is caught here without needing to build or run the
+# Windows shell.
+function Get-ScaledPixels([int] $value, [int] $dpi, [int] $baseDpi = 96) {
+  # Mirrors Dpi.scale()'s @divTrunc((value * dpi + baseDpi / 2), baseDpi): truncating
+  # (round-half-up for positive operands) integer division, not floating point.
+  return [Math]::Truncate(($value * $dpi + [Math]::Truncate($baseDpi / 2)) / $baseDpi)
+}
+# Self-check against Dpi.zig's own fixed-point unit test cases (`scale(100, 120) ==
+# 125`, `scale(100, 144) == 150`) so a mistaken reimplementation here fails loudly
+# instead of silently validating the wrong formula.
+Assert-Contract ((Get-ScaledPixels 100 96) -eq 100) "DPI scale reimplementation drifted from Dpi.zig at 96 DPI"
+Assert-Contract ((Get-ScaledPixels 100 120) -eq 125) "DPI scale reimplementation drifted from Dpi.zig at 120 DPI"
+Assert-Contract ((Get-ScaledPixels 100 144) -eq 150) "DPI scale reimplementation drifted from Dpi.zig at 144 DPI"
+
+$designTokensPath = Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig"
+Assert-Contract (Test-Path -LiteralPath $designTokensPath) `
+  "DesignTokens.zig is missing: $designTokensPath"
+$designTokensText = Get-Content -LiteralPath $designTokensPath -Raw
+function Get-DesignToken([string] $name) {
+  $match = [regex]::Match($designTokensText, "(?m)^pub const $([regex]::Escape($name)): i32 = (-?\d+);")
+  Assert-Contract $match.Success "DesignTokens.zig no longer defines i32 constant: $name"
+  return [int] $match.Groups[1].Value
+}
+
+$dpi = @($manifest.dpiVariants)
+$expectedDpiByVariant = @{ "100" = 96; "125" = 120; "150" = 144; "200" = 192 }
+foreach ($variantID in @("100", "125", "150", "200")) {
+  Assert-Contract (@($dpi | Where-Object id -eq $variantID).Count -eq 1) `
+    "DPI variant is missing: $variantID"
+}
+foreach ($variant in $dpi) {
+  Assert-Contract ($variant.scale -gt 0) "DPI scale must be positive: $($variant.id)"
+  Assert-Contract ($variant.viewport.width -gt 0 -and $variant.viewport.height -gt 0) `
+    "DPI viewport must be positive: $($variant.id)"
+  Assert-Contract ($variant.dpi -eq $expectedDpiByVariant[[string] $variant.id]) `
+    "DPI variant does not use the real Windows per-monitor DPI value: $($variant.id)"
+  Assert-Contract ([Math]::Abs(($variant.dpi / 96.0) - $variant.scale) -lt 0.0001) `
+    "DPI variant scale is inconsistent with its raw dpi value: $($variant.id)"
+}
+
+$regionGeometry = @($manifest.regionGeometry)
+Assert-Contract ($regionGeometry.Count -ge 4) "region geometry coverage is incomplete"
+foreach ($entry in $regionGeometry) {
+  Assert-Contract ($deterministicIDs -contains $entry.regionID) `
+    "region geometry must target a GraphCode-owned deterministic region, not a live Winghostty region: $($entry.regionID)"
+  Assert-Contract ($entry.token -match "^DesignTokens\.[A-Za-z_][A-Za-z0-9_]*$") `
+    "region geometry token is not a DesignTokens constant reference: $($entry.token)"
+  $tokenName = $entry.token -replace "^DesignTokens\.", ""
+  $basePixels = Get-DesignToken $tokenName
+  Assert-Contract ($basePixels -gt 0) "region geometry token must be a positive base metric: $($entry.token)"
+  $previousPixels = 0
+  foreach ($variant in $dpi) {
+    $scaledPixels = Get-ScaledPixels $basePixels $variant.dpi
+    Assert-Contract ($scaledPixels -ge $previousPixels) `
+      "region geometry must not shrink as DPI increases: $($entry.token) at $($variant.id)%"
+    $previousPixels = $scaledPixels
+  }
+  # 100% must reproduce the token's own base (96 DPI) pixel value exactly.
+  Assert-Contract ((Get-ScaledPixels $basePixels 96) -eq $basePixels) `
+    "region geometry 100% variant must equal the token's base pixel value: $($entry.token)"
 }
 
 foreach ($snapshot in @($manifest.terminalSnapshots)) {

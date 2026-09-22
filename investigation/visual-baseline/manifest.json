@@ -309,10 +309,16 @@
     ]
   },
   "dpiVariants": [
-    { "id": "100", "scale": 1.0, "viewport": { "width": 1600, "height": 1000 } },
-    { "id": "125", "scale": 1.25, "viewport": { "width": 1280, "height": 800 } },
-    { "id": "150", "scale": 1.5, "viewport": { "width": 1066, "height": 666 } },
-    { "id": "200", "scale": 2.0, "viewport": { "width": 800, "height": 500 } }
+    { "id": "100", "dpi": 96, "scale": 1.0, "viewport": { "width": 1600, "height": 1000 } },
+    { "id": "125", "dpi": 120, "scale": 1.25, "viewport": { "width": 1280, "height": 800 } },
+    { "id": "150", "dpi": 144, "scale": 1.5, "viewport": { "width": 1066, "height": 666 } },
+    { "id": "200", "dpi": 192, "scale": 2.0, "viewport": { "width": 800, "height": 500 } }
+  ],
+  "regionGeometry": [
+    { "regionID": "sidebar", "token": "DesignTokens.sidebar_width" },
+    { "regionID": "terminal-workspace-chrome", "token": "DesignTokens.tab_bar_height" },
+    { "regionID": "terminal-workspace-chrome", "token": "DesignTokens.pane_header_height" },
+    { "regionID": "terminal-workspace-chrome", "token": "DesignTokens.loop_bar_height" }
   ],
   "regions": [
     {

@@ -24,6 +24,23 @@ pub fn unscale(value: i32, dpi: u32) i32 {
     return @intCast(scaled);
 }
 
+/// The font/UI scale factor a DPI-aware host (e.g. a winghostty terminal surface)
+/// should apply so its glyph rendering matches the monitor's DPI: 1.0 at 96 DPI
+/// (100%), 1.25 at 120 DPI (125%), etc. This is the single source of truth for
+/// terminal DPI scaling so callers never also pre-scale cell/font metrics
+/// themselves, which would double-apply the DPI ratio.
+pub fn fontScale(dpi: u32) f32 {
+    return @as(f32, @floatFromInt(normalize(dpi))) / @as(f32, @floatFromInt(base_dpi));
+}
+
+test "font scale matches the standard Windows DPI steps" {
+    try std.testing.expectEqual(@as(f32, 1.0), fontScale(96));
+    try std.testing.expectEqual(@as(f32, 1.25), fontScale(120));
+    try std.testing.expectEqual(@as(f32, 1.5), fontScale(144));
+    try std.testing.expectEqual(@as(f32, 2.0), fontScale(192));
+    try std.testing.expectEqual(@as(f32, 1.0), fontScale(0));
+}
+
 test "DPI scaling rounds at the native boundary" {
     try std.testing.expectEqual(@as(i32, 100), scale(100, 96));
     try std.testing.expectEqual(@as(i32, 125), scale(100, 120));
