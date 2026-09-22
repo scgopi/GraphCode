@@ -20,6 +20,7 @@ pub const Command = enum(u16) {
     clone_repository = 4106,
     remote_repository = 4107,
     new_quick_chat = 4108,
+    codespace_repository = 4109,
     jump_loop = 4201,
     review_attention = 4202,
     next_loop = 4203,
@@ -185,6 +186,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(add_folder, "Open Folder...\tCtrl+O", @intFromEnum(Command.open_folder));
     append(add_folder, "Clone Repository...\tCtrl+Shift+C", @intFromEnum(Command.clone_repository));
     append(add_folder, "Add Remote Repository...\tCtrl+Shift+R", @intFromEnum(Command.remote_repository));
+    append(add_folder, "Add Codespace...\tCtrl+Shift+K", @intFromEnum(Command.codespace_repository));
     separator(add_folder);
     appendPopup(add_folder, "Recent Folders", recent_folders);
     appendPopup(file, "Add Folder", add_folder);
@@ -294,8 +296,10 @@ fn updateRecentFolderMenu(hwnd: c.HWND, recent_folders: []const RecentFolderItem
     if (file == null) return;
     const add_folder = c.GetSubMenu(file, 0);
     if (add_folder == null) return;
-    const recent = c.GetSubMenu(add_folder, 4);
-    if (recent == null) return;
+    // Located rather than indexed: the Add Folder popup grows an entry whenever a new
+    // ingress lands, and a hard-coded position silently retargeted this rebuild at the
+    // wrong item the last time it did.
+    const recent = findSubMenu(add_folder) orelse return;
     var count = c.GetMenuItemCount(recent);
     while (count > 0) : (count -= 1) {
         _ = c.DeleteMenu(recent, @intCast(count - 1), c.MF_BYPOSITION);
@@ -307,6 +311,16 @@ fn updateRecentFolderMenu(hwnd: c.HWND, recent_folders: []const RecentFolderItem
     for (recent_folders[0..@min(recent_folders.len, recent_folder_command_limit - recent_folder_command_base + 1)], 0..) |project, index| {
         append(recent, project.name, recent_folder_command_base + index);
     }
+}
+
+fn findSubMenu(menu: c.HMENU) c.HMENU {
+    const count = c.GetMenuItemCount(menu);
+    var index: i32 = 0;
+    while (index < count) : (index += 1) {
+        const child = c.GetSubMenu(menu, index);
+        if (child != null) return child;
+    }
+    return null;
 }
 
 fn setEnabled(hwnd: c.HWND, command: Command, enabled: bool) void {

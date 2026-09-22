@@ -61,8 +61,17 @@ pub const Project = struct {
     path: []u8,
     name: []u8,
 
+    /// Both remote schemes count: a Codespace is `codespace://<name><path>` rather
+    /// than `ssh://`, because gh's tunnel — not a host ssh can dial — owns the
+    /// connection. Everything above the dial treats the two identically, which is why
+    /// the sidebar, canvas, and terminal chrome all branch on this one predicate.
     pub fn isRemote(self: Project) bool {
-        return std.mem.startsWith(u8, self.path, "ssh://");
+        return std.mem.startsWith(u8, self.path, "ssh://") or
+            std.mem.startsWith(u8, self.path, "codespace://");
+    }
+
+    pub fn isCodespace(self: Project) bool {
+        return std.mem.startsWith(u8, self.path, "codespace://");
     }
 
     pub fn isGlobal(self: Project) bool {
@@ -1519,6 +1528,16 @@ test "project identity derives remote and global from Codable paths" {
     try std.testing.expect(!global.isRemote());
     try std.testing.expect(!local.isRemote());
     try std.testing.expect(!local.isGlobal());
+
+    const codespace = Project{
+        .path = @constCast("codespace://dev-widget-x5jq4w/workspaces/widget"),
+        .name = @constCast("widget"),
+    };
+    try std.testing.expect(codespace.isRemote());
+    try std.testing.expect(codespace.isCodespace());
+    try std.testing.expect(!codespace.isGlobal());
+    try std.testing.expect(!codespace.isLocalFilesystem());
+    try std.testing.expect(!remote.isCodespace());
 }
 
 test "multi-project fixture retains both summaries and selection identity" {

@@ -196,6 +196,8 @@ foreach ($path in @(
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
     "src\Wire.zig",
+    "src\Codespaces.zig",
+    "src\WindowsCodespaceDialog.zig",
     "src\FrameBuffer.zig",
     "..\Tools\windows\Stub-Daemon.ps1",
     "fixtures\daemon-v2-hello.json",
@@ -290,10 +292,51 @@ $appSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\App.zig") -Raw
 Assert-Contract ($appSource -match "GraphCanvas\.paint[\s\S]+workspace\.paintChrome\(hdc\)") `
   "WM_PAINT must render both the GraphCode canvas and terminal workspace chrome"
 
+$codespaceDialogSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\WindowsCodespaceDialog.zig") -Raw
+$codespaceClientSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\Codespaces.zig") -Raw
+$graphModelSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\GraphModel.zig") -Raw
+
+Assert-Contract ($mainWindowSource -match 'Add Codespace\.\.\.\\tCtrl\+Shift\+K') `
+  "the Add Folder menu must offer codespace ingress next to the other repository sources"
+Assert-Contract ($mainWindowSource -notmatch 'GetSubMenu\(add_folder, \d+\)') `
+  "the recent folders submenu must be located, not indexed, so new ingress entries cannot retarget it"
+Assert-Contract ($appSource -match 'codespace_repository => self\.addCodespaceRepository\(\)') `
+  "the codespace command must reach the codespace ingress path"
+Assert-Contract ($appSource -match 'Codespaces\.projectURI[\s\S]{0,400}sendOpenProject\(project_path\)') `
+  "an accepted codespace must open as a codespace:// project through the existing daemon openProject call"
+Assert-Contract ($graphModelSource -match 'startsWith\(u8, self\.path, "codespace://"\)') `
+  "codespace projects must group with remote projects rather than as local filesystem paths"
+Assert-Contract ($codespaceClientSource -match 'BatchMode=yes') `
+  "codespace validation must never wait on an interactive ssh prompt"
+Assert-Contract ($codespaceClientSource -match 'github_pat_' -and $codespaceClientSource -match 'fn sanitizeMessage') `
+  "surfaced gh output must be redacted before it can reach a status line or log"
+Assert-Contract ($codespaceClientSource -match 'gh auth refresh -h github\.com -s codespace') `
+  "a missing codespace scope must tell the human the exact command that fixes it"
+Assert-Contract ($codespaceDialogSource -match 'WM_CTLCOLORLISTBOX' -and $codespaceDialogSource -match 'WM_CTLCOLOREDIT') `
+  "the codespace sheet must paint its list and fields dark like the rest of the shell"
+Assert-Contract ($codespaceDialogSource -match 'IsDialogMessageW') `
+  "the codespace sheet must remain keyboard navigable"
+
 $zig = Resolve-TestZig
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Wire.zig } finally { Pop-Location }
+}
+Invoke-Native "Codespace client executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Codespaces.zig } finally { Pop-Location }
+}
+Invoke-Native "Codespace ingress dialog executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsCodespaceDialog.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
 }
 Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot

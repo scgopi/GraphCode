@@ -24,6 +24,7 @@ pub const Action = enum {
     clone_repository,
     cancel_clone,
     remote_repository,
+    codespace_repository,
     onboarding,
     cycle_attention,
     inspect_worktrees,
@@ -60,6 +61,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (ctrl and shift and key == 'C') return .clone_repository;
     if (ctrl and shift and key == 'X') return .cancel_clone;
     if (ctrl and shift and key == 'R') return .remote_repository;
+    if (ctrl and shift and key == 'K') return .codespace_repository;
     if (ctrl and key == 'R' and !shift) return .reconnect;
     if (ctrl and key == 'N') return .create_node;
     if (ctrl and key == 'O') return .open_folder;
@@ -131,6 +133,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .clone_repository => allocator.dupe(u8, "Clone HTTPS repository"),
         .cancel_clone => allocator.dupe(u8, "Cancel clone"),
         .remote_repository => allocator.dupe(u8, "Add SSH repository"),
+        .codespace_repository => allocator.dupe(u8, "Add GitHub Codespace"),
         .onboarding => allocator.dupe(u8, "GraphCode onboarding"),
         .cycle_attention => allocator.dupe(u8, "Review next loop needing you"),
         .inspect_worktrees => allocator.dupe(u8, "Inspect worktrees"),
@@ -203,6 +206,8 @@ test "canvas destructive and rename keyboard equivalents are explicit" {
 test "modifier-specific actions win over base shortcuts" {
     try std.testing.expectEqual(Action.product_settings, keyAction(',', true, true));
     try std.testing.expectEqual(Action.remote_repository, keyAction('R', true, true));
+    try std.testing.expectEqual(Action.codespace_repository, keyAction('K', true, true));
+    try std.testing.expectEqual(Action.none, keyAction('K', true, false));
     try std.testing.expectEqual(Action.clone_repository, keyAction('C', true, true));
     try std.testing.expectEqual(Action.reconnect, keyAction('R', true, false));
     try std.testing.expectEqual(Action.edit_worktree_policy, keyAction('P', true, true));

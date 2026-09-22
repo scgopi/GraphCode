@@ -24,6 +24,8 @@ const Tray = TrayModule.Tray;
 const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
 const ProductSettings = @import("WindowsProductSettings.zig");
 const RepositoryDialogs = @import("WindowsRepositoryDialogs.zig");
+const CodespaceDialog = @import("WindowsCodespaceDialog.zig");
+const Codespaces = @import("Codespaces.zig");
 const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
 const UpdateOfferDialog = @import("UpdateOfferDialog.zig");
@@ -1608,6 +1610,39 @@ pub const App = struct {
         self.setStatus("SSH repository connected; reconnect requested");
     }
 
+    fn addCodespaceRepository(self: *App) void {
+        self.clearIngressError();
+        var paths = std.array_list.Managed([]const u8).init(self.allocator);
+        defer paths.deinit();
+        for (self.model.graphs.items) |graph| {
+            if (graph.project.isLocalFilesystem()) {
+                paths.append(graph.project.path) catch break;
+            }
+        }
+        var accepted = CodespaceDialog.open(self.window.hwnd, self.allocator, paths.items) catch {
+            self.setIngressError("Unable to open the codespace dialog");
+            self.setStatus("Unable to open the codespace dialog");
+            return;
+        } orelse return;
+        defer accepted.deinit(self.allocator);
+
+        const fields = Codespaces.Fields{ .name = accepted.name, .path = accepted.path };
+        Codespaces.saveConfig(self.allocator, fields) catch {
+            self.setIngressError("Codespace validated but its configuration could not be saved");
+            self.setStatus("Codespace validated but its configuration could not be saved");
+            return;
+        };
+        const project_path = Codespaces.projectURI(self.allocator, fields) catch {
+            self.setIngressError("Unable to encode the codespace repository");
+            self.setStatus("Unable to encode the codespace repository");
+            return;
+        };
+        defer self.allocator.free(project_path);
+        _ = self.client.sendOpenProject(project_path);
+        self.client.reconnect();
+        self.setStatus("Codespace connected; reconnect requested");
+    }
+
     fn jumpToNode(self: *App) void {
         if (self.model.graphs.items.len == 0) {
             self.setStatus("No graph is open");
@@ -2984,6 +3019,7 @@ pub const App = struct {
             .clone_repository => self.cloneRepository(),
             .cancel_clone => self.cancelClone(),
             .remote_repository => self.addRemoteRepository(),
+            .codespace_repository => self.addCodespaceRepository(),
             .onboarding => {
                 const initial_backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
                 const backend = Onboarding.show(self.window.hwnd, self.allocator, initial_backend) catch {
@@ -4257,6 +4293,7 @@ fn onWindowMessage(
                     .open_folder => app.openFolder(),
                     .clone_repository => app.handleAction(.clone_repository),
                     .remote_repository => app.handleAction(.remote_repository),
+                    .codespace_repository => app.handleAction(.codespace_repository),
                     .new_quick_chat => app.handleAction(.quick_chat),
                     .open_global_overview => app.openGlobalOverview(),
                     .worktrees => app.handleAction(.inspect_worktrees),

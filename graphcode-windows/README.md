@@ -28,6 +28,16 @@ actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
 
+Repository ingress covers four sources: a local folder, an HTTPS clone, an SSH
+remote (`Ctrl+Shift+R`), and a GitHub Codespace (`Ctrl+Shift+K`). The codespace
+sheet asks the GitHub CLI for the account's codespaces, validates the chosen
+workspace path by dialing through `gh codespace ssh` before it closes, and then
+opens the result as a `codespace://` project through the same daemon
+`openProject` call every other source uses. It needs `gh` on the machine, an
+authenticated account, and the `codespace` token scope — without the scope,
+discovery reports the exact `gh auth refresh -h github.com -s codespace` command
+that grants it.
+
 Parity actions are reachable without App-specific view coupling: `Ctrl+P` opens
 the searchable jump/palette form, `Ctrl+Up`/`Ctrl+Down` navigate by stable
 project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
