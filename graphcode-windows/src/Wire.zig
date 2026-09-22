@@ -48,6 +48,15 @@ pub const CommandKind = enum {
     graph_command,
 };
 
+/// Project relocation is intentionally unavailable until the daemon owns the
+/// filesystem move and can report validation, conflict, and rollback results.
+pub const project_relocation_unavailable_reason =
+    "Project relocation is unavailable: the daemon wire contract has no authoritative moveProject command.";
+
+pub fn supportsProjectRelocation() bool {
+    return false;
+}
+
 pub fn commandName(kind: CommandKind) []const u8 {
     return switch (kind) {
         .list_recent_projects => "listRecentProjects",
@@ -1118,6 +1127,15 @@ test "project lifecycle commands preserve Swift Codable labels" {
     const delete = try commandDeleteProjectGraph(allocator, "C:\\work\\graph");
     defer allocator.free(delete);
     try std.testing.expectEqualStrings("{\"deleteProjectGraph\":{\"path\":\"C:\\\\work\\\\graph\"}}", delete);
+}
+
+test "project relocation stays fail-closed without an authoritative daemon command" {
+    try std.testing.expect(!supportsProjectRelocation());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        project_relocation_unavailable_reason,
+        "moveProject",
+    ) != null);
 }
 
 test "typed node and edge forms retain every supported field on the wire" {

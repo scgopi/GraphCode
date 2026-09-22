@@ -1934,7 +1934,7 @@ pub const App = struct {
                         self.client.sendForgetProject(stable.path);
                         self.setStatus("Removing project from GraphCode...");
                     },
-                    .move_project => self.revealProjectPath(stable.path),
+                    .move_project => self.setStatus(Wire.project_relocation_unavailable_reason),
                     .trash_project => {
                         if (stable.remote) return;
                         if (!GraphContextMenu.confirm(

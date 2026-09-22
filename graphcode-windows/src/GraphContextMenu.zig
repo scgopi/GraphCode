@@ -1,4 +1,5 @@
 const c = @import("Win32.zig").c;
+const Wire = @import("Wire.zig");
 
 pub const NodeTarget = struct {
     project_path: []const u8,
@@ -139,7 +140,12 @@ pub fn show(
             separator(menu);
             append(menu, ids.close_project, "Close Project");
             if (!project.remote) {
-                append(menu, ids.move_project, "Move Project...");
+                appendEnabled(
+                    menu,
+                    ids.move_project,
+                    "Move Project... (unavailable: daemon support required)",
+                    Wire.supportsProjectRelocation(),
+                );
                 append(menu, ids.trash_project, "Move to Recycle Bin...");
             }
             append(menu, ids.remove_project, "Remove from GraphCode...");
@@ -309,4 +315,13 @@ test "project context commands expose ingress management and safe destructive ac
     try std.testing.expectEqual(Action.move_project, actionForCommand(ids.move_project));
     try std.testing.expectEqual(Action.trash_project, actionForCommand(ids.trash_project));
     try std.testing.expectEqual(Action.delete_project_loops, actionForCommand(ids.delete_project_loops));
+}
+
+test "project relocation is visibly unavailable rather than an Explorer alias" {
+    try std.testing.expect(!Wire.supportsProjectRelocation());
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        Wire.project_relocation_unavailable_reason,
+        "authoritative moveProject command",
+    ) != null);
 }
