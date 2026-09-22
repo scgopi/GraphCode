@@ -1790,6 +1790,41 @@ test "surface identity cannot leak a session across project paths" {
     try std.testing.expect(!surfaceIdentityMatches(&second, "C:\\work\\first", "node-1"));
 }
 
+fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
+    return Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = @constCast(""),
+        .cwd = @constCast(""),
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "dpi-regression-test"),
+        .layout_path = @constCast(""),
+        .project_key = @constCast(""),
+    };
+}
+
+test "onDpiChanged callback adopts the surface's real reported dpi and font scale" {
+    // Regression coverage for the defect fixed in this change: onDpiChanged previously
+    // discarded its dpi/scale parameters entirely (`_ = dpi; _ = scale;`), so a live
+    // terminal surface never adopted winghostty's own post-DPI-change report and a
+    // caller had no way to observe the surface's real per-surface DPI/scale.
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+
+    const fake_surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+    workspace.surfaces[0].surface = fake_surface;
+
+    // Before any report, the slot still holds its construction-time baseline.
+    try std.testing.expectEqual(@as(u32, Dpi.base_dpi), workspace.surfaces[0].dpi);
+    try std.testing.expectEqual(@as(f32, 1.0), workspace.surfaces[0].reported_font_scale);
+
+    onDpiChanged(@ptrCast(&workspace), fake_surface, 192, 2.0);
+
+    try std.testing.expectEqual(@as(u32, 192), workspace.surfaces[0].dpi);
+    try std.testing.expectEqual(@as(f32, 2.0), workspace.surfaces[0].reported_font_scale);
+}
+
 fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
     const brush = c.CreateSolidBrush(color);
     if (brush == null) return;
