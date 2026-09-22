@@ -748,12 +748,14 @@ test "gh scope failure carries its own remediation" {
 }
 
 test "surfaced gh output never carries a credential or control characters" {
-    const raw = "denied for gho_0123456789abcdefABCDEF token\r\nand github_pat_11ABCDE_secretpart too";
+    // Synthetic literals, not credentials: only the prefix and the shape matter to
+    // the redactor, so the fixture spells out that it is an example.
+    const raw = "denied for gho_EXAMPLENOTAREALTOKEN0000 token\r\nand github_pat_11EXAMPLE_notarealsecret too";
     const safe = try sanitizeMessage(std.testing.allocator, raw);
     defer std.testing.allocator.free(safe);
     try std.testing.expect(std.mem.indexOf(u8, safe, "gho_") == null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "github_pat_") == null);
-    try std.testing.expect(std.mem.indexOf(u8, safe, "secretpart") == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "notarealsecret") == null);
     try std.testing.expect(std.mem.indexOf(u8, safe, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOfAny(u8, safe, "\r\n") == null);
 
