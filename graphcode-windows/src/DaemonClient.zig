@@ -393,6 +393,14 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendDetachTemplate(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
+        const command = Wire.commandGraphDetachTemplate(self.allocator, project_path, node_id) catch {
+            self.publishState(self.connectionState(), "detach template command encoding failed");
+            return;
+        };
+        self.sendCommand(command);
+    }
+
     pub fn sendSidebarRootOrder(
         self: *DaemonClient,
         project_path: []const u8,

@@ -35,12 +35,13 @@ const DialogState = struct {
     tile_field_index: ?usize = null,
     tile_buttons: [max_tiles]c.HWND = .{null} ** max_tiles,
     tile_count: usize = 0,
+    template_options: []const []const u8 = &.{},
 };
 
 const max_tiles = 8;
 const tile_base_id = 9600;
 
-const Kind = enum { node, edge, update, settings, jump, worktree_policy, worktree_sweep };
+const Kind = enum { node, edge, update, settings, jump, template_picker, worktree_policy, worktree_sweep };
 const InputKind = enum { edit, readonly, combo, checkbox, tiles };
 const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform };
 const Choice = struct { label: []const u8, value: []const u8, description: []const u8 = "", accent: u32 = Tokens.canvas_selection };
@@ -175,6 +176,7 @@ pub fn node(
         freeValues(state);
         allocator.destroy(state);
     }
+
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, initial.loop_type);
     state.values[2] = try allocator.dupe(u8, initial.check_description);
@@ -198,6 +200,28 @@ pub fn node(
     for (0..20) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
     if (!(try show(state, "Create or edit node", &.{}))) return null;
     return try buildNodeDraft(allocator, &state.values, initial);
+}
+
+/// A native, keyboard-searchable list of saved templates. The editable combo
+/// provides standard type-ahead search, Up/Down selection, Enter acceptance,
+/// and UI Automation ComboBox semantics without introducing a custom canvas.
+pub fn templatePicker(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    options: []const []const u8,
+) !?usize {
+    if (options.len == 0) return null;
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .template_picker, .parent = parent, .template_options = options };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
+    state.values[0] = try allocator.dupe(u8, "0");
+    if (!(try show(state, "Choose a saved template", &.{}))) return null;
+    const selected = std.fmt.parseUnsigned(usize, state.values[0], 10) catch return error.InvalidTemplateSelection;
+    if (selected >= options.len) return error.InvalidTemplateSelection;
+    return selected;
 }
 
 fn buildNodeDraft(
@@ -754,7 +778,7 @@ fn configureFields(state: *DialogState) void {
         .edge => 10,
         .update => 9,
         .settings => 2,
-        .jump => 1,
+        .jump, .template_picker => 1,
         .worktree_policy => 0,
         .worktree_sweep => state.field_count,
     };
@@ -786,6 +810,9 @@ fn configureFields(state: *DialogState) void {
             state.choice_groups[5] = .optional_metric_direction;
             state.input_kinds[8] = .combo;
             state.choice_groups[8] = .model_tier;
+        },
+        .template_picker => {
+            state.input_kinds[0] = .combo;
         },
         else => {},
     }
@@ -848,6 +875,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
         .update => update_labels[index],
         .settings => settings_labels[index],
         .jump => "Loop title or ID",
+        .template_picker => "Saved templates — type to search, then use Up/Down and Enter",
         .worktree_policy, .worktree_sweep => "",
     };
 }
@@ -1137,7 +1165,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             c.WS_EX_CLIENTEDGE,
             std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX").ptr,
             null,
-            style | @as(c.DWORD, @intCast(c.CBS_DROPDOWNLIST)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)),
+            style | @as(c.DWORD, @intCast(if (state.kind == .template_picker) c.CBS_DROPDOWN else c.CBS_DROPDOWNLIST)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)),
             18,
             0,
             530,
@@ -1184,6 +1212,14 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
     switch (state.input_kinds[index]) {
         .tiles => {},
         .combo => {
+            if (state.kind == .template_picker) {
+                for (state.template_options) |option| {
+                    const wide = utf8ToWideZ(state.allocator, option) catch continue;
+                    defer state.allocator.free(wide);
+                    _ = c.SendMessageW(input, c.CB_ADDSTRING, 0, @intCast(@intFromPtr(wide.ptr)));
+                }
+                _ = c.SendMessageW(input, c.CB_SETCURSEL, 0, 0);
+            } else
             if (isEndpointCombo(state, index)) {
                 for (state.edge_endpoints) |endpoint| {
                     const label = std.fmt.allocPrint(state.allocator, "{s} — {s}", .{ endpoint.title, endpoint.id }) catch continue;
@@ -1439,11 +1475,15 @@ fn readValue(state: *DialogState, index: usize) void {
             const selected = c.SendMessageW(state.edits[index], c.CB_GETCURSEL, 0, 0);
             if (selected < 0) return;
             const selected_index: usize = @intCast(selected);
-            const next = if (isEndpointCombo(state, index) and selected_index < state.edge_endpoints.len)
-                state.edge_endpoints[selected_index].id
-            else
-                choiceValue(state.choice_groups[index], selected_index, state.values[index]);
-            const value = state.allocator.dupe(u8, next) catch return;
+            const value: []u8 = if (state.kind == .template_picker)
+                std.fmt.allocPrint(state.allocator, "{d}", .{selected_index}) catch return
+            else blk: {
+                const next = if (isEndpointCombo(state, index) and selected_index < state.edge_endpoints.len)
+                    state.edge_endpoints[selected_index].id
+                else
+                    choiceValue(state.choice_groups[index], selected_index, state.values[index]);
+                break :blk state.allocator.dupe(u8, next) catch return;
+            };
             state.allocator.free(state.values[index]);
             state.values[index] = value;
         },

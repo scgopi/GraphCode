@@ -28,6 +28,7 @@ pub const Node = struct {
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
     subgraph_json: []u8 = &.{},
+    follows_template: bool = false,
 };
 
 pub const ActivityEvent = struct {
@@ -1043,6 +1044,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .worktree_path = try allocator.dupe(u8, node.worktree_path),
         .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
         .subgraph_json = try allocator.dupe(u8, node.subgraph_json),
+        .follows_template = node.follows_template,
     };
 }
 
@@ -1111,9 +1113,19 @@ fn decodeNodes(
             .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
             .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
             .subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph"),
+            .follows_template = hasNonNullJsonField(scalar_object, "templateFollow"),
         });
         cursor = end + 1;
     }
+
+}
+
+fn hasNonNullJsonField(object: []const u8, key: []const u8) bool {
+    const marker = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return false;
+    defer std.heap.page_allocator.free(marker);
+    const start = std.mem.indexOf(u8, object, marker) orelse return false;
+    const value = std.mem.trimLeft(u8, object[start + marker.len ..], " \t\r\n");
+    return !std.mem.startsWith(u8, value, "null");
 }
 
 fn decodeEdges(
@@ -1480,6 +1492,22 @@ test "stub graph snapshot decodes two actionable nodes" {
     );
     try std.testing.expectEqualStrings("busy", graph.nodes.items[0].presence);
     try std.testing.expectEqualStrings("idle", graph.nodes.items[1].presence);
+}
+
+test "template-following nodes retain their detach eligibility" {
+    const allocator = std.testing.allocator;
+    var nodes = std.array_list.Managed(Node).init(allocator);
+    defer {
+        for (nodes.items) |node| freeNode(allocator, node);
+        nodes.deinit();
+    }
+    try decodeNodes(
+        allocator,
+        \\[{"id":"11111111-1111-4111-8111-111111111111","title":"Template loop","loopType":"turnBased","state":{"idle":{}},"pausesBeforeWritesOnly":false,"pilotState":"notPiloted","templateFollow":{"id":"22222222-2222-4222-8222-222222222222"}}]
+    ,
+        &nodes,
+    );
+    try std.testing.expect(nodes.items[0].follows_template);
 }
 
 test "reordered graph fixture preserves nonsequential edge IDs" {

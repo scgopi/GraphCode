@@ -7,6 +7,7 @@ pub const NodeTarget = struct {
     composite: bool = false,
     can_arm: bool = false,
     unwired: bool = false,
+    follows_template: bool = false,
 };
 
 pub const EdgeTarget = struct {
@@ -44,6 +45,8 @@ pub const Action = enum {
     open_composite,
     pilot_composite,
     arm_composite,
+    save_node_template,
+    detach_template,
     wire_node,
     mark_entry,
     edit_edge,
@@ -92,6 +95,8 @@ const ids = struct {
     const open_composite = 5113;
     const pilot_composite = 5107;
     const arm_composite = 5108;
+    const save_node_template = 5114;
+    const detach_template = 5115;
     const wire_node = 5109;
     const mark_entry = 5112;
     const edit_edge = 5110;
@@ -177,6 +182,8 @@ pub fn show(
                 separator(menu);
             }
             append(menu, ids.edit_node, "Edit Details...\tCtrl+E");
+            append(menu, ids.save_node_template, "Save as Template...");
+            if (node.follows_template) append(menu, ids.detach_template, "Detach from Template");
             append(menu, ids.rename_node, "Rename...\tF2");
             append(menu, ids.stop_node, "Stop\tCtrl+S");
             append(menu, ids.delete_node, "Delete Loop...\tDelete");
@@ -222,6 +229,8 @@ fn actionForCommand(command: c_int) Action {
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
         ids.arm_composite => .arm_composite,
+        ids.save_node_template => .save_node_template,
+        ids.detach_template => .detach_template,
         ids.wire_node => .wire_node,
         ids.mark_entry => .mark_entry,
         ids.edit_edge => .edit_edge,
@@ -285,6 +294,8 @@ test "context actions remain stable when graph IDs are reordered" {
     try std.testing.expectEqual(Action.arm_composite, actionForCommand(ids.arm_composite));
     try std.testing.expectEqual(Action.wire_node, actionForCommand(ids.wire_node));
     try std.testing.expectEqual(Action.mark_entry, actionForCommand(ids.mark_entry));
+    try std.testing.expectEqual(Action.save_node_template, actionForCommand(ids.save_node_template));
+    try std.testing.expectEqual(Action.detach_template, actionForCommand(ids.detach_template));
 }
 
 test "destructive context actions cannot bypass a cancelled confirmation" {

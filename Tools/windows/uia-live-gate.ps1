@@ -594,6 +594,7 @@ $oldShowUpdate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHOW_UPDAT
 $oldIngressError = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_INGRESS_ERROR")
 $oldDaemonCommandLog = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_DAEMON_COMMAND_LOG")
 $oldShellExecuteLog = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_SHELL_EXECUTE_LOG")
+$oldLocalAppData = [Environment]::GetEnvironmentVariable("LOCALAPPDATA")
 $process = $null
 $settingsProcess = $null
 $status = $null
@@ -615,6 +616,7 @@ $settingsPath = $null
 $settingsErrorPath = $null
 $daemonCommandLogPath = $null
 $shellExecuteLogPath = $null
+$templateDirectory = $null
 try {
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -631,6 +633,14 @@ try {
   Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
   $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $daemonCommandLogPath
   $env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG = $shellExecuteLogPath
+  $templateDirectory = Join-Path ([IO.Path]::GetTempPath()) "graphcode-uia-templates-$PID"
+  $env:LOCALAPPDATA = $templateDirectory
+  $savedTemplates = Join-Path $templateDirectory "GraphCode\templates"
+  New-Item -ItemType Directory -Path $savedTemplates -Force | Out-Null
+  [IO.File]::WriteAllText(
+    (Join-Path $savedTemplates "uia-release-review.md"),
+    "---`nid: 11111111-1111-4111-8111-111111111111`nname: UIA release review`nshape: turn`n---`nReview the release diff.`n"
+  )
   $settingsDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-product-settings-$PID"
   $settingsPath = Join-Path $settingsDirectory "settings.json"
   $settingsErrorPath = Join-Path $settingsDirectory "stderr.log"
@@ -889,6 +899,24 @@ try {
   Require (Ensure-ShellForeground $shellWindow "project-row New Loop") `
     "GraphCode shell did not reacquire foreground before invoking project-row New Loop"
   $projectNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $templatePickerCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Choose a saved template"
+    ))
+  )
+  $templatePicker = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $templatePickerCondition `
+    -label "project-row New Loop template picker" `
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
+  Require ($null -ne $templatePicker) "project-row New Loop did not expose the saved template picker"
+  Require ([GraphCodeUiaGateState]::PostKeyboard(
+    [IntPtr]$templatePicker.Current.NativeWindowHandle, 0x0D
+  )) "template picker rejected keyboard application"
   $sidebarNodeForm = $null
   $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
@@ -2432,6 +2460,9 @@ try {
   if ($shellExecuteLogPath) {
     Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
   }
+  if ($templateDirectory) {
+    Remove-Item -LiteralPath $templateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+  }
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
   if ($null -eq $oldCwd) { Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue }
@@ -2470,4 +2501,7 @@ try {
   if ($null -eq $oldShellExecuteLog) {
     Remove-Item Env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG -ErrorAction SilentlyContinue
   } else { $env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG = $oldShellExecuteLog }
+  if ($null -eq $oldLocalAppData) {
+    Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+  } else { $env:LOCALAPPDATA = $oldLocalAppData }
 }

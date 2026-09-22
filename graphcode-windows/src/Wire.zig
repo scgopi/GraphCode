@@ -593,6 +593,10 @@ pub fn commandGraphArmComposite(allocator: std.mem.Allocator, project_path: []co
     return graphUnaryUUID(allocator, project_path, "armComposite", node_id);
 }
 
+pub fn commandGraphDetachTemplate(allocator: std.mem.Allocator, project_path: []const u8, node_id: []const u8) ![]u8 {
+    return graphUnaryUUID(allocator, project_path, "detachTemplate", node_id);
+}
+
 pub fn commandGraphRefreshUsage(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
     const path = try quoteJson(allocator, project_path); defer allocator.free(path);
     return std.fmt.allocPrint(allocator,
@@ -1082,6 +1086,12 @@ test "graph commands match Swift Codable associated-value shapes" {
     try std.testing.expectEqualStrings(
         "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"stopNode\":{\"_0\":\"11111111-1111-4111-8111-111111111111\"}}}}",
         stop,
+    );
+    const detach_template = try commandGraphDetachTemplate(allocator, project, node);
+    defer allocator.free(detach_template);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"detachTemplate\":{\"_0\":\"11111111-1111-4111-8111-111111111111\"}}}}",
+        detach_template,
     );
     try std.testing.expectError(
         error.UnsupportedGraphAction,
