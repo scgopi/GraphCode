@@ -36,6 +36,8 @@ const DialogState = struct {
     tile_buttons: [max_tiles]c.HWND = .{null} ** max_tiles,
     tile_count: usize = 0,
     template_options: []const []const u8 = &.{},
+    templates_available: bool = false,
+    template_requested: bool = false,
 };
 
 const max_tiles = 8;
@@ -55,6 +57,7 @@ const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm")
 const ok_id = 1;
 const cancel_id = 2;
 const reveal_id = 3;
+const templates_id = 4;
 
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
@@ -170,8 +173,33 @@ pub fn node(
     allocator: std.mem.Allocator,
     initial: Forms.NodeDraft,
 ) !?Forms.NodeDraft {
+    return switch (try nodeWithTemplates(parent, allocator, initial, false)) {
+        .draft => |draft| draft,
+        .cancelled, .templates => null,
+    };
+}
+
+pub const NodeResult = union(enum) {
+    cancelled,
+    draft: Forms.NodeDraft,
+    templates: Forms.NodeDraft,
+};
+
+/// Opens the normal node form. Saved templates are an explicit secondary action,
+/// mirroring macOS's Templates control rather than intercepting New Loop.
+pub fn nodeWithTemplates(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    initial: Forms.NodeDraft,
+    templates_available: bool,
+) !NodeResult {
     const state = try allocator.create(DialogState);
-    state.* = .{ .allocator = allocator, .kind = .node, .parent = parent };
+    state.* = .{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = parent,
+        .templates_available = templates_available,
+    };
     defer {
         freeValues(state);
         allocator.destroy(state);
@@ -198,8 +226,11 @@ pub fn node(
     state.values[18] = try allocator.dupe(u8, initial.subgraph_json);
     state.values[19] = try allocator.dupe(u8, initial.created_by);
     for (0..20) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
-    if (!(try show(state, "Create or edit node", &.{}))) return null;
-    return try buildNodeDraft(allocator, &state.values, initial);
+    if (!(try show(state, "Create or edit node", &.{}))) {
+        if (!state.template_requested) return .cancelled;
+        return .{ .templates = try buildNodeDraftUnchecked(allocator, &state.values, initial) };
+    }
+    return .{ .draft = try buildNodeDraft(allocator, &state.values, initial) };
 }
 
 /// A native, keyboard-searchable list of saved templates. The editable combo
@@ -225,6 +256,17 @@ pub fn templatePicker(
 }
 
 fn buildNodeDraft(
+    allocator: std.mem.Allocator,
+    values: []const []u8,
+    initial: Forms.NodeDraft,
+) !Forms.NodeDraft {
+    var result = try buildNodeDraftUnchecked(allocator, values, initial);
+    errdefer result.deinit(allocator);
+    try Forms.validateNode(result);
+    return result;
+}
+
+fn buildNodeDraftUnchecked(
     allocator: std.mem.Allocator,
     values: []const []u8,
     initial: Forms.NodeDraft,
@@ -264,7 +306,6 @@ fn buildNodeDraft(
     result.copilot_permissions = initial.copilot_permissions;
     result.briefing_enabled = initial.briefing_enabled;
     result.activity_enabled = initial.activity_enabled;
-    try Forms.validateNode(result);
     return result;
 }
 
@@ -949,6 +990,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
             createButton(safe_hwnd, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 478, client.bottom - 38);
+            if (value.kind == .node and value.templates_available)
+                createButton(safe_hwnd, "Templates", templates_id, 300, client.bottom - 38);
             if (value.kind == .worktree_sweep) createButton(safe_hwnd, "Show in Explorer", reveal_id, 300, client.bottom - 38);
             createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
             return 0;
@@ -976,6 +1019,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             _ = c.GetClientRect(safe_hwnd, &client);
             _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(ok_id)), 478, client.bottom - 38, 70, 26, 1);
             _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(cancel_id)), 393, client.bottom - 38, 70, 26, 1);
+            if (value.kind == .node and value.templates_available)
+                _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(templates_id)), 300, client.bottom - 38, 82, 26, 1);
             if (value.validation != null) _ = c.MoveWindow(value.validation, 18, client.bottom - 42, 360, 34, 1);
             if (value.kind != .worktree_policy) layoutForm(safe_hwnd, value);
             updateScrollBar(safe_hwnd, value);
@@ -1062,6 +1107,12 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     _ = c.ShellExecuteW(safe_hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr, wide.ptr, null, c.SW_SHOWNORMAL);
                     break;
                 }
+                return 0;
+            }
+            if (command == templates_id and value.kind == .node and value.templates_available) {
+                readValues(value);
+                value.template_requested = true;
+                applyModalCommand(value, .cancel);
                 return 0;
             }
             if (command == cancel_id) {

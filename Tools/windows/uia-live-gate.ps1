@@ -899,6 +899,34 @@ try {
   Require (Ensure-ShellForeground $shellWindow "project-row New Loop") `
     "GraphCode shell did not reacquire foreground before invoking project-row New Loop"
   $projectNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $sidebarNodeForm = $null
+  $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
+    ))
+  )
+  $sidebarNodeForm = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $sidebarNodeFormCondition `
+    -label "project-row New Loop node form" `
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
+  Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
+  $templatesButton = $sidebarNodeForm.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Templates"
+    ))
+  )
+  Require ($null -ne $templatesButton) "node form omitted the explicit Templates action"
+  Require ($templatesButton.Current.AutomationId -eq "4") `
+    "Templates action did not expose its stable native command identity"
+  Require ([GraphCodeUiaGateState]::PostCommand(
+    [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle, 4
+  )) "Templates action rejected invocation"
   $templatePickerCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
@@ -917,15 +945,6 @@ try {
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$templatePicker.Current.NativeWindowHandle, 0x0D
   )) "template picker rejected keyboard application"
-  $sidebarNodeForm = $null
-  $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
-    ))
-  )
   $sidebarNodeForm = Wait-ForDesktopElement `
     -desktop $desktop `
     -condition $sidebarNodeFormCondition `

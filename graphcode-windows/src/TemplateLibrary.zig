@@ -55,6 +55,22 @@ pub fn apply(draft: *Forms.NodeDraft, template: Template, allocator: std.mem.All
     }
 }
 
+/// Applies to a draft returned by NativeForms, whose editable values are all
+/// allocator-owned. This preserves other in-progress form edits without leaking
+/// the values that the selected template replaces.
+pub fn applyOwned(draft: *Forms.NodeDraft, template: Template, allocator: std.mem.Allocator) !void {
+    const shape = normalizeShape(template.shape);
+    try replaceOwned(allocator, &draft.loop_type, shape);
+    try replaceOwned(allocator, &draft.title, template.name);
+    if (std.mem.eql(u8, shape, "goalBased")) {
+        try replaceOwned(allocator, &draft.goal_summary, template.body);
+    } else if (std.mem.eql(u8, shape, "timeBased")) {
+        try replaceOwned(allocator, &draft.trigger_prompt, template.body);
+    } else {
+        try replaceOwned(allocator, &draft.first_instruction, template.body);
+    }
+}
+
 pub fn fromDraft(allocator: std.mem.Allocator, name: []const u8, draft: Forms.NodeDraft) !Template {
     const body = switch (draft.loop_type[0]) {
         'g' => draft.goal_summary,
@@ -173,6 +189,12 @@ fn validShape(shape: []const u8) bool {
 
 fn replace(allocator: std.mem.Allocator, target: *[]const u8, value: []const u8) !void {
     const copy = try allocator.dupe(u8, value);
+    target.* = copy;
+}
+
+fn replaceOwned(allocator: std.mem.Allocator, target: *[]const u8, value: []const u8) !void {
+    const copy = try allocator.dupe(u8, value);
+    allocator.free(target.*);
     target.* = copy;
 }
 

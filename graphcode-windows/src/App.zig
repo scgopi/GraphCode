@@ -1136,7 +1136,7 @@ pub const App = struct {
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
         const settings = self.product_settings orelse return;
-        var initial = Forms.NodeDraft{
+        const initial = Forms.NodeDraft{
             .title = "",
             .backend = settings.default_backend,
             .model_tier = settings.default_model,
@@ -1150,42 +1150,72 @@ pub const App = struct {
             return;
         };
         defer templates.deinit();
-        if (templates.templates.items.len != 0) {
-            var labels = std.array_list.Managed([]const u8).init(self.allocator);
-            defer {
-                for (labels.items) |label| self.allocator.free(label);
-                labels.deinit();
-            }
-            for (templates.templates.items) |template| {
-                const label = std.fmt.allocPrint(self.allocator, "{s} — {s}", .{ template.name, template.body }) catch {
-                    self.setStatus("Unable to prepare saved template list");
-                    return;
-                };
-                labels.append(label) catch {
-                    self.allocator.free(label);
-                    self.setStatus("Unable to prepare saved template list");
-                    return;
-                };
-            }
-            const selected = NativeForms.templatePicker(self.window.hwnd, self.allocator, labels.items) catch {
-                self.setStatus("Unable to open saved template picker");
+        if (templates.templates.items.len == 0) {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, initial) catch {
+                self.setStatus("Unable to open node form");
+                return;
+            } orelse return;
+            defer draft.deinit(self.allocator);
+            Forms.validateNode(draft) catch {
+                self.setStatus("Invalid node form");
                 return;
             };
-            if (selected) |index| TemplateLibrary.apply(&initial, templates.templates.items[index], self.allocator) catch {
-                self.setStatus("Unable to apply selected template");
+            self.client.sendCreateNodeDraft(path, draft);
+            return;
+        }
+
+        var labels = std.array_list.Managed([]const u8).init(self.allocator);
+        defer {
+            for (labels.items) |label| self.allocator.free(label);
+            labels.deinit();
+        }
+        for (templates.templates.items) |template| {
+            const label = std.fmt.allocPrint(self.allocator, "{s} — {s}", .{ template.name, template.body }) catch {
+                self.setStatus("Unable to prepare saved template list");
+                return;
+            };
+            labels.append(label) catch {
+                self.allocator.free(label);
+                self.setStatus("Unable to prepare saved template list");
                 return;
             };
         }
-        var draft = NativeForms.node(self.window.hwnd, self.allocator, initial) catch {
-            self.setStatus("Unable to open node form");
-            return;
-        } orelse return;
-        defer draft.deinit(self.allocator);
-        Forms.validateNode(draft) catch {
-            self.setStatus("Invalid node form");
-            return;
-        };
-        self.client.sendCreateNodeDraft(path, draft);
+
+        var current = initial;
+        var owns_current = false;
+        defer if (owns_current) current.deinit(self.allocator);
+        while (true) {
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, current, true) catch {
+                self.setStatus("Unable to open node form");
+                return;
+            };
+            switch (result) {
+                .cancelled => return,
+                .draft => |draft| {
+                    var submitted = draft;
+                    defer submitted.deinit(self.allocator);
+                    Forms.validateNode(submitted) catch {
+                        self.setStatus("Invalid node form");
+                        return;
+                    };
+                    self.client.sendCreateNodeDraft(path, submitted);
+                    return;
+                },
+                .templates => |draft| {
+                    if (owns_current) current.deinit(self.allocator);
+                    current = draft;
+                    owns_current = true;
+                    const selected = NativeForms.templatePicker(self.window.hwnd, self.allocator, labels.items) catch {
+                        self.setStatus("Unable to open saved template picker");
+                        return;
+                    };
+                    if (selected) |index| TemplateLibrary.applyOwned(&current, templates.templates.items[index], self.allocator) catch {
+                        self.setStatus("Unable to apply selected template");
+                        return;
+                    };
+                },
+            }
+        }
     }
 
     fn editSelectedNode(self: *App) void {
