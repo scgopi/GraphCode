@@ -306,7 +306,13 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     defer provider.deinit();
     try std.testing.expectEqual(Role.navigation, provider.elements.items[1].role);
     try std.testing.expect(provider.hasPattern(2, .selection));
-    try std.testing.expect(provider.hasPattern(18, .text));
+    try std.testing.expect(provider.hasPattern(22, .text));
+    try std.testing.expect(!provider.hasPattern(22, .invoke));
+    try std.testing.expectEqual(Role.menu_item, provider.elements.items[22].role);
+    try std.testing.expectEqualStrings(
+        "Move project unavailable: daemon support required",
+        provider.elements.items[22].name,
+    );
     try std.testing.expectEqual(@as(?usize, 3), provider.nextFocus(2));
     try std.testing.expectEqual(@as(?usize, 4), provider.nextFocus(3));
 }
