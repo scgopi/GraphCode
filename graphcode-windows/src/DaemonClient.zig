@@ -363,13 +363,21 @@ pub const DaemonClient = struct {
         project_path: []const u8,
         draft: Forms.NodeDraft,
     ) void {
-        var node_id: [36]u8 = undefined;
-        self.mutex.lock();
-        const sequence = self.next_draft;
-        self.next_draft +%= 1;
-        self.mutex.unlock();
-        makeRequestID(&node_id, sequence);
-        const command = Wire.commandGraphCreateNodeFull(self.allocator, project_path, &node_id, draft) catch {
+        var generated_id: [36]u8 = undefined;
+        // A draft that ingested an attachment already chose its id before the dialog
+        // opened (`Forms.generateDraftId`, threaded through `NativeForms.node`) — the
+        // attachment bytes are already filed under that id on disk, so the node this
+        // creates has to carry the same one. Everything else keeps the historical
+        // generate-at-send-time id.
+        const node_id: []const u8 = if (draft.node_id.len != 0) draft.node_id else blk: {
+            self.mutex.lock();
+            const sequence = self.next_draft;
+            self.next_draft +%= 1;
+            self.mutex.unlock();
+            makeRequestID(&generated_id, sequence);
+            break :blk &generated_id;
+        };
+        const command = Wire.commandGraphCreateNodeFull(self.allocator, project_path, node_id, draft) catch {
             self.publishState(self.connectionState(), "create node command encoding failed");
             return;
         };

@@ -65,6 +65,7 @@ final class GraphCommandInteropTests: XCTestCase {
     XCTAssertEqual(draft.id, UUID(uuidString: "22222222-2222-4222-8222-222222222222"))
     XCTAssertNil(draft.backend)
     XCTAssertEqual(draft.firstInstruction, "work")
+    XCTAssertTrue(draft.attachments.isEmpty)
 
     let graph = try JSONDecoder().decode(LoopGraph.self, from: fixture("swift-loopgraph-valid.json"))
     XCTAssertEqual(graph.id, UUID(uuidString: "11111111-1111-4111-8111-111111111111"))
@@ -76,6 +77,21 @@ final class GraphCommandInteropTests: XCTestCase {
       try JSONDecoder().decode(
         LoopGraph.self,
         from: Data(#"{"nodes":[],"edges":[]}"#.utf8)))
+  }
+
+  func testNodeDraftWithAttachmentsFixtureDecodesToSwiftPromptAttachment() throws {
+    let draft = try JSONDecoder().decode(
+      NodeDraft.self, from: fixture("swift-node-draft-with-attachments-valid.json"))
+    XCTAssertEqual(draft.id, UUID(uuidString: "22222222-2222-4222-8222-222222222222"))
+    XCTAssertEqual(draft.firstInstruction, "look at [image #1]")
+    XCTAssertEqual(draft.attachments.count, 1)
+    XCTAssertEqual(draft.attachments[0].id, UUID(uuidString: "aaaaaaaa-1111-4111-8111-111111111111"))
+    XCTAssertEqual(
+      draft.attachments[0].path,
+      "C:\\Users\\me\\.graphcode\\memory\\my-project\\22222222-2222-4222-8222-222222222222\\attachments\\attachment-1.png")
+    XCTAssertEqual(
+      PromptAttachments.resolving(draft.firstInstruction, attachments: draft.attachments),
+      "look at C:\\Users\\me\\.graphcode\\memory\\my-project\\22222222-2222-4222-8222-222222222222\\attachments\\attachment-1.png")
   }
 
   func testPopulatedLoopGraphFixturesDecodeOrRejectInSwift() throws {

@@ -52,6 +52,10 @@ pub fn build(b: *std.Build) !void {
         .flags = &.{ "-DUNICODE", "-D_UNICODE" },
     });
     exe.addCSourceFile(.{
+        .file = b.path("src/FilePicker.c"),
+        .flags = &.{ "-DUNICODE", "-D_UNICODE" },
+    });
+    exe.addCSourceFile(.{
         .file = b.path("src/AccessibilityProvider.cpp"),
         .flags = &.{ "-Wno-unused-command-line-argument" },
     });

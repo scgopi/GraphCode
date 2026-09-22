@@ -327,6 +327,7 @@ pub fn commandGraphCreateNodeFull(
     const subgraph = try safeSubgraphJson(allocator, draft.subgraph_json);
     defer allocator.free(subgraph);
     const created_by = if (Forms.isUuid(draft.created_by)) try quoteJson(allocator, draft.created_by) else try allocator.dupe(u8, "null"); defer allocator.free(created_by);
+    const attachments = try attachmentsJson(allocator, draft); defer allocator.free(attachments);
     return std.mem.concat(allocator, u8, &.{
         "{\"graphCommand\":{\"projectPath\":", path, ",\"command\":{\"createNode\":{\"_0\":{\"id\":",
         id, ",\"title\":", title, ",\"loopType\":", lt, ",\"checkDescription\":", check,
@@ -334,8 +335,31 @@ pub fn commandGraphCreateNodeFull(
         ",\"pausesBeforeWritesOnly\":", if (draft.pauses_before_writes_only) "true" else "false",
         ",\"goal\":", goal, ",\"backend\":", backend, ",\"modelTier\":", tier,
         ",\"worktree\":", worktree, ",\"subGraph\":", subgraph, ",\"createdBy\":", created_by,
+        ",\"attachments\":", attachments,
         "}}}}}",
     });
+}
+
+/// `[{"id":"...","path":"..."}, ...]`, matching Swift `PromptAttachment`'s Codable shape
+/// exactly. Always an array (never `null`) so a client old enough to have no attachment
+/// UI and a client that ingested zero files are indistinguishable on the wire — both
+/// send `[]`, which `NodeDraft`'s decoder already treats the same as a field it never saw.
+fn attachmentsJson(allocator: std.mem.Allocator, draft: Forms.NodeDraft) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+    try output.appendSlice("[");
+    for (draft.attachment_paths[0..draft.attachment_count], draft.attachment_ids[0..draft.attachment_count], 0..) |path, id, index| {
+        if (index != 0) try output.appendSlice(",");
+        const quoted_id = try quoteJson(allocator, id); defer allocator.free(quoted_id);
+        const quoted_path = try quoteJson(allocator, path); defer allocator.free(quoted_path);
+        try output.appendSlice("{\"id\":");
+        try output.appendSlice(quoted_id);
+        try output.appendSlice(",\"path\":");
+        try output.appendSlice(quoted_path);
+        try output.appendSlice("}");
+    }
+    try output.appendSlice("]");
+    return output.toOwnedSlice();
 }
 
 fn nullableString(allocator: std.mem.Allocator, value: ?[]const u8) ![]u8 {
@@ -1179,6 +1203,7 @@ test "typed node and edge forms retain every supported field on the wire" {
     defer allocator.free(inherited);
     try std.testing.expect(std.mem.indexOf(u8, inherited, "\"backend\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, inherited, "\"createdBy\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inherited, "\"attachments\":[]") != null);
     const edge = try commandGraphCreateEdgeFull(allocator, "C:\\work\\graph", "a", "b", .{
         .from = "a",
         .to = "b",
@@ -1192,6 +1217,23 @@ test "typed node and edge forms retain every supported field on the wire" {
     defer allocator.free(edge);
     for ([_][]const u8{ "onFailure", "template", "payload", "maxIterations", "spawnTargetProjectPath" }) |field|
         try std.testing.expect(std.mem.indexOf(u8, edge, field) != null);
+}
+
+test "node drafts with attachments encode PromptAttachment-shaped entries" {
+    const allocator = std.testing.allocator;
+    var draft = Forms.NodeDraft{ .title = "With attachments", .first_instruction = "look at [image #1]" };
+    draft.attachment_count = 2;
+    draft.attachment_ids[0] = "aaaaaaaa-1111-4111-8111-111111111111";
+    draft.attachment_paths[0] = "C:\\Users\\me\\.graphcode\\memory\\slug\\node\\attachments\\attachment-1.png";
+    draft.attachment_ids[1] = "bbbbbbbb-2222-4222-8222-222222222222";
+    draft.attachment_paths[1] = "C:\\Users\\me\\.graphcode\\memory\\slug\\node\\attachments\\attachment-2.txt";
+    const command = try commandGraphCreateNodeFull(allocator, "C:\\work\\graph", "11111111-1111-4111-8111-111111111111", draft);
+    defer allocator.free(command);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        command,
+        "\"attachments\":[{\"id\":\"aaaaaaaa-1111-4111-8111-111111111111\",\"path\":\"C:\\\\Users\\\\me\\\\.graphcode\\\\memory\\\\slug\\\\node\\\\attachments\\\\attachment-1.png\"},{\"id\":\"bbbbbbbb-2222-4222-8222-222222222222\",\"path\":\"C:\\\\Users\\\\me\\\\.graphcode\\\\memory\\\\slug\\\\node\\\\attachments\\\\attachment-2.txt\"}]",
+    ) != null);
 }
 
 test "quick chat commands match shared Codable labels" {

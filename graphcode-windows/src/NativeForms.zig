@@ -1,9 +1,12 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
+const DraftAttachments = @import("DraftAttachments.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+
+extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, max_files: c.DWORD) callconv(.c) c_int;
 
 const DialogState = struct {
     allocator: std.mem.Allocator,
@@ -38,10 +41,29 @@ const DialogState = struct {
     template_options: []const []const u8 = &.{},
     templates_available: bool = false,
     template_requested: bool = false,
+    // Attachments live outside the fixed-index field system entirely (see the
+    // "Attachments" comment above `createAttachmentsSection`): they are the one node
+    // field with a variable-length, user-editable list of entries rather than a single
+    // scalar value, and the field-index arrays above are sized/labelled per `Kind` in
+    // ways that assume one value per index.
+    attachment_project_path: []const u8 = "",
+    attachment_draft_id: []const u8 = "",
+    attachment_dir: []u8 = &.{},
+    attachment_names: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
+    attachment_paths: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
+    attachment_ids: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
+    attachment_count: usize = 0,
+    attachment_label: c.HWND = null,
+    attachment_listbox: c.HWND = null,
+    attachment_attach_button: c.HWND = null,
+    attachment_remove_button: c.HWND = null,
+    attachment_help: c.HWND = null,
 };
 
 const max_tiles = 8;
 const tile_base_id = 9600;
+const attachment_attach_id = 4;
+const attachment_remove_id = 5;
 
 const Kind = enum { node, edge, update, settings, jump, template_picker, worktree_policy, worktree_sweep };
 const InputKind = enum { edit, readonly, combo, checkbox, tiles };
@@ -171,9 +193,11 @@ fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
 pub fn node(
     parent: c.HWND,
     allocator: std.mem.Allocator,
+    project_path: []const u8,
+    draft_id: []const u8,
     initial: Forms.NodeDraft,
 ) !?Forms.NodeDraft {
-    return switch (try nodeWithTemplates(parent, allocator, initial, false)) {
+    return switch (try nodeWithTemplates(parent, allocator, project_path, draft_id, initial, false)) {
         .draft => |draft| draft,
         .cancelled, .templates => null,
     };
@@ -190,6 +214,8 @@ pub const NodeResult = union(enum) {
 pub fn nodeWithTemplates(
     parent: c.HWND,
     allocator: std.mem.Allocator,
+    project_path: []const u8,
+    draft_id: []const u8,
     initial: Forms.NodeDraft,
     templates_available: bool,
 ) !NodeResult {
@@ -200,7 +226,16 @@ pub fn nodeWithTemplates(
         .parent = parent,
         .templates_available = templates_available,
     };
+    state.attachment_project_path = project_path;
+    state.attachment_draft_id = draft_id;
+    var attachments_transferred = false;
     defer {
+        // A cancelled dialog leaves nothing behind for the daemon to clean up — the
+        // draft id it was staged under is never going to become a real node — so the
+        // client has to take the same responsibility macOS's `cancelNodeForm` does.
+        if (!state.result and !attachments_transferred and state.attachment_dir.len != 0)
+            DraftAttachments.discardAll(state.attachment_dir);
+        freeAttachmentState(state);
         freeValues(state);
         allocator.destroy(state);
     }
@@ -226,11 +261,19 @@ pub fn nodeWithTemplates(
     state.values[18] = try allocator.dupe(u8, initial.subgraph_json);
     state.values[19] = try allocator.dupe(u8, initial.created_by);
     for (0..20) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    try restoreStagedAttachments(state, initial);
     if (!(try show(state, "Create or edit node", &.{}))) {
         if (!state.template_requested) return .cancelled;
-        return .{ .templates = try buildNodeDraftUnchecked(allocator, &state.values, initial) };
+        const draft = try buildNodeDraftUnchecked(allocator, state, initial);
+        attachments_transferred = true;
+        return .{ .templates = draft };
     }
-    return .{ .draft = try buildNodeDraft(allocator, &state.values, initial) };
+    return .{ .draft = buildNodeDraft(allocator, state, initial) catch |err| {
+        // The user pressed Create, but validation rejected the draft, so no node will
+        // claim this staged directory.
+        if (state.attachment_dir.len != 0) DraftAttachments.discardAll(state.attachment_dir);
+        return err;
+    } };
 }
 
 /// A native, keyboard-searchable list of saved templates. The editable combo
@@ -255,12 +298,33 @@ pub fn templatePicker(
     return selected;
 }
 
+fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void {
+    if (initial.attachment_count == 0) return;
+    const support = try DraftAttachments.supportDirectory(state.allocator);
+    defer state.allocator.free(support);
+    state.attachment_dir = try DraftAttachments.attachmentsDirectory(
+        state.allocator,
+        support,
+        state.attachment_project_path,
+        state.attachment_draft_id,
+    );
+    for (0..initial.attachment_count) |index| {
+        state.attachment_paths[index] = try state.allocator.dupe(u8, initial.attachment_paths[index]);
+        state.attachment_ids[index] = try state.allocator.dupe(u8, initial.attachment_ids[index]);
+        state.attachment_names[index] = try state.allocator.dupe(
+            u8,
+            std.fs.path.basename(initial.attachment_paths[index]),
+        );
+    }
+    state.attachment_count = initial.attachment_count;
+}
+
 fn buildNodeDraft(
     allocator: std.mem.Allocator,
-    values: []const []u8,
+    state: *const DialogState,
     initial: Forms.NodeDraft,
 ) !Forms.NodeDraft {
-    var result = try buildNodeDraftUnchecked(allocator, values, initial);
+    var result = try buildNodeDraftUnchecked(allocator, state, initial);
     errdefer result.deinit(allocator);
     try Forms.validateNode(result);
     return result;
@@ -268,9 +332,10 @@ fn buildNodeDraft(
 
 fn buildNodeDraftUnchecked(
     allocator: std.mem.Allocator,
-    values: []const []u8,
+    state: *const DialogState,
     initial: Forms.NodeDraft,
 ) !Forms.NodeDraft {
+    const values = &state.values;
     const goal_based = std.mem.eql(u8, values[1], "goalBased");
     const poll_interval = if (goal_based)
         parseRequiredFloat(values[8]) catch return error.InvalidNumericInput
@@ -306,6 +371,19 @@ fn buildNodeDraftUnchecked(
     result.copilot_permissions = initial.copilot_permissions;
     result.briefing_enabled = initial.briefing_enabled;
     result.activity_enabled = initial.activity_enabled;
+    // Only carried when at least one file was staged: an unattached node keeps the
+    // legacy empty `node_id`, so `DaemonClient.sendCreateNodeDraft` still generates a
+    // fresh one at send time exactly as it always has, and the dialog's would-be draft
+    // directory (never created, since nothing was ever ingested into it) is simply
+    // abandoned rather than referenced by a node that has no reason to expect it.
+    if (state.attachment_count != 0) {
+        result.node_id = try allocator.dupe(u8, state.attachment_draft_id);
+        for (0..state.attachment_count) |index| {
+            result.attachment_paths[index] = try allocator.dupe(u8, state.attachment_paths[index]);
+            result.attachment_ids[index] = try allocator.dupe(u8, state.attachment_ids[index]);
+        }
+        result.attachment_count = state.attachment_count;
+    }
     return result;
 }
 
@@ -984,6 +1062,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             } else {
                 createStatic(safe_hwnd, value, formIntro(value.kind), 18, 12, 530, 34, &value.intro);
                 for (0..value.field_count) |index| createField(safe_hwnd, value, index);
+                if (value.kind == .node) createAttachmentsSection(safe_hwnd, value);
                 createStatic(safe_hwnd, value, "", 18, 0, 320, 34, &value.validation);
                 layoutForm(safe_hwnd, value);
             }
@@ -1119,6 +1198,15 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 applyModalCommand(value, .cancel);
                 return 0;
             }
+            if (value.kind == .node and command == attachment_attach_id and notification == c.BN_CLICKED) {
+                attachFiles(safe_hwnd, value);
+                layoutForm(safe_hwnd, value);
+                return 0;
+            }
+            if (value.kind == .node and command == attachment_remove_id and notification == c.BN_CLICKED) {
+                removeSelectedAttachment(value);
+                return 0;
+            }
         },
         c.WM_CLOSE => {
             applyModalCommand(value, .close);
@@ -1162,6 +1250,250 @@ fn endpointIndex(endpoints: []const EdgeEndpoint, value: []const u8) usize {
 
 fn inputControlHeight(kind: InputKind) i32 {
     return if (kind == .combo) 180 else 24;
+}
+
+// Attachments: unlike every other node field, this one is a variable-length list the
+// user builds up by repeatedly invoking a native file picker, not a single scalar bound
+// to `state.values[index]` — so it is laid out as its own section appended after the
+// generic field loop (`layoutForm`/`contentHeight`) rather than folded into the
+// fixed-index field system `createField`/`InputKind` drive everything else through.
+// This keeps every existing field index (and the worktree/subgraph/createdBy
+// pass-through slots at 14-19) completely untouched.
+const attachment_section_height: i32 = 132;
+const attachment_listbox_id = 6;
+
+fn attachmentsVisible(state: *const DialogState) bool {
+    return state.kind == .node and !std.mem.eql(u8, state.values[1], "proactive");
+}
+
+/// Which node field a `[image #N]` placeholder is inserted into/removed from — the
+/// one free-text field actually shown for the loop type currently selected. Composite
+/// ("proactive") loops have no such field, matching macOS hiding attachments entirely
+/// for that loop type.
+fn briefFieldIndex(state: *const DialogState) ?usize {
+    if (std.mem.eql(u8, state.values[1], "turnBased")) return 4;
+    if (std.mem.eql(u8, state.values[1], "timeBased")) return 3;
+    if (std.mem.eql(u8, state.values[1], "goalBased")) return 6;
+    return null;
+}
+
+fn createAttachmentsSection(hwnd: c.HWND, state: *DialogState) void {
+    createStatic(hwnd, state, "Attachments", 18, 0, 530, 18, &state.attachment_label);
+    state.attachment_listbox = c.CreateWindowExW(
+        c.WS_EX_CLIENTEDGE,
+        std.unicode.utf8ToUtf16LeStringLiteral("LISTBOX").ptr,
+        null,
+        @as(c.DWORD, @intCast(c.WS_CHILD)) | @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
+            @as(c.DWORD, @intCast(c.WS_TABSTOP)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)) |
+            @as(c.DWORD, @intCast(c.LBS_NOTIFY)),
+        18,
+        0,
+        392,
+        84,
+        hwnd,
+        childId(attachment_listbox_id),
+        c.GetModuleHandleW(null),
+        null,
+    );
+    state.attachment_attach_button = createButtonLabelled(hwnd, "Attach…", attachment_attach_id, 422, 0, 126, 26);
+    state.attachment_remove_button = createButtonLabelled(hwnd, "Remove", attachment_remove_id, 422, 30, 126, 26);
+    createStatic(
+        hwnd,
+        state,
+        "Up to 8 files, 10 MB each. Copied into node storage when you press Create.",
+        18,
+        0,
+        530,
+        18,
+        &state.attachment_help,
+    );
+}
+
+fn createButtonLabelled(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, width: i32, height: i32) c.HWND {
+    const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return null;
+    defer std.heap.c_allocator.free(wide);
+    return c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
+        wide.ptr,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP,
+        x,
+        y,
+        width,
+        height,
+        hwnd,
+        childId(id),
+        c.GetModuleHandleW(null),
+        null,
+    );
+}
+
+fn layoutAttachmentsSection(state: *DialogState, top: i32) void {
+    const shown = attachmentsVisible(state);
+    const command = if (shown) c.SW_SHOW else c.SW_HIDE;
+    for ([_]c.HWND{ state.attachment_label, state.attachment_listbox, state.attachment_attach_button, state.attachment_remove_button, state.attachment_help }) |control|
+        _ = c.ShowWindow(control, command);
+    if (!shown) return;
+    _ = c.MoveWindow(state.attachment_label, 18, top, 530, 18, 1);
+    _ = c.MoveWindow(state.attachment_listbox, 18, top + 18, 392, 84, 1);
+    _ = c.MoveWindow(state.attachment_attach_button, 422, top + 18, 126, 26, 1);
+    _ = c.MoveWindow(state.attachment_remove_button, 422, top + 48, 126, 26, 1);
+    _ = c.MoveWindow(state.attachment_help, 18, top + 106, 530, 18, 1);
+}
+
+fn refreshAttachmentListbox(state: *DialogState) void {
+    if (state.attachment_listbox == null) return;
+    _ = c.SendMessageW(state.attachment_listbox, c.LB_RESETCONTENT, 0, 0);
+    for (0..state.attachment_count) |index| {
+        const size = fileSizeBytes(state.attachment_paths[index]);
+        const size_text = WorktreeStatus.sizeText(state.allocator, size) catch continue;
+        defer state.allocator.free(size_text);
+        const line = std.fmt.allocPrint(state.allocator, "{s} ({s})", .{ state.attachment_names[index], size_text }) catch continue;
+        defer state.allocator.free(line);
+        const wide = utf8ToWideZ(state.allocator, line) catch continue;
+        defer state.allocator.free(wide);
+        _ = c.SendMessageW(state.attachment_listbox, c.LB_ADDSTRING, 0, @intCast(@intFromPtr(wide.ptr)));
+    }
+}
+
+fn fileSizeBytes(path: []const u8) u64 {
+    const file = std.fs.cwd().openFile(path, .{}) catch return 0;
+    defer file.close();
+    const stat = file.stat() catch return 0;
+    return stat.size;
+}
+
+fn ensureAttachmentsDirectory(state: *DialogState) ![]const u8 {
+    if (state.attachment_dir.len == 0) {
+        const support = try DraftAttachments.supportDirectory(state.allocator);
+        defer state.allocator.free(support);
+        state.attachment_dir = try DraftAttachments.attachmentsDirectory(
+            state.allocator,
+            support,
+            state.attachment_project_path,
+            state.attachment_draft_id,
+        );
+    }
+    return state.attachment_dir;
+}
+
+fn attachmentErrorReason(err: DraftAttachments.IngestError) []const u8 {
+    return switch (err) {
+        error.UnsupportedFileType => "That file type isn't supported for attachments.",
+        error.FileTooLarge => "That file is larger than the 10 MB attachment limit.",
+        error.EmptyFile => "That file is empty.",
+        error.SourceUnreadable => "That file couldn't be read.",
+        error.DestinationUnwritable => "Unable to save the attachment.",
+        error.TooManyAttachments => "Up to 8 attachments per node.",
+        error.OutOfMemory => "Out of memory while attaching the file.",
+    };
+}
+
+fn insertAttachmentToken(state: *DialogState, number: usize) void {
+    const index = briefFieldIndex(state) orelse return;
+    if (state.edits[index] == null) return;
+    const placeholder = DraftAttachments.token(state.allocator, number) catch return;
+    defer state.allocator.free(placeholder);
+    var buffer: [8192]u16 = undefined;
+    const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));
+    const current = std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(length)]) catch return;
+    defer state.allocator.free(current);
+    const trimmed = std.mem.trim(u8, current, " \t\r\n");
+    const next = if (trimmed.len == 0)
+        state.allocator.dupe(u8, placeholder) catch return
+    else
+        std.fmt.allocPrint(state.allocator, "{s} {s}", .{ trimmed, placeholder }) catch return;
+    defer state.allocator.free(next);
+    const wide = utf8ToWideZ(state.allocator, next) catch return;
+    defer state.allocator.free(wide);
+    _ = c.SetWindowTextW(state.edits[index], wide.ptr);
+}
+
+fn removeAttachmentToken(state: *DialogState, number: usize) void {
+    const index = briefFieldIndex(state) orelse return;
+    if (state.edits[index] == null) return;
+    var buffer: [8192]u16 = undefined;
+    const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));
+    const current = std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(length)]) catch return;
+    defer state.allocator.free(current);
+    const updated = DraftAttachments.removing(state.allocator, current, number, state.attachment_count) catch return;
+    defer state.allocator.free(updated);
+    const wide = utf8ToWideZ(state.allocator, updated) catch return;
+    defer state.allocator.free(wide);
+    _ = c.SetWindowTextW(state.edits[index], wide.ptr);
+}
+
+/// Runs the native multi-select picker, then ingests every path it returned in order —
+/// each success adds one `attachment-<n>.<ext>` file plus a `[image #n]` token in the
+/// brief field; each failure surfaces its reason in the validation line without
+/// aborting the rest of the batch.
+fn attachFiles(hwnd: c.HWND, state: *DialogState) void {
+    if (state.attachment_count >= DraftAttachments.max_attachments) {
+        setStaticText(state, state.validation, "Up to 8 attachments per node.");
+        return;
+    }
+    const remaining = DraftAttachments.max_attachments - state.attachment_count;
+    const stride: usize = 260;
+    const buffer = state.allocator.alloc(u16, remaining * stride) catch return;
+    defer state.allocator.free(buffer);
+    @memset(buffer, 0);
+    const picked = graphcode_pick_files(hwnd, buffer.ptr, @intCast(stride), @intCast(remaining));
+    if (picked <= 0) return;
+    const dir = ensureAttachmentsDirectory(state) catch {
+        setStaticText(state, state.validation, "Unable to prepare attachment storage.");
+        return;
+    };
+    var added = false;
+    var index: usize = 0;
+    while (index < @as(usize, @intCast(picked)) and state.attachment_count < DraftAttachments.max_attachments) : (index += 1) {
+        const slot = buffer[index * stride .. index * stride + stride];
+        const length = std.mem.indexOfScalar(u16, slot, 0) orelse slot.len;
+        const path_utf8 = std.unicode.utf16LeToUtf8Alloc(state.allocator, slot[0..length]) catch continue;
+        defer state.allocator.free(path_utf8);
+        const number = state.attachment_count + 1;
+        const dest_path = DraftAttachments.ingest(state.allocator, path_utf8, dir, number) catch |err| {
+            setStaticText(state, state.validation, attachmentErrorReason(err));
+            continue;
+        };
+        var id_buffer: [36]u8 = undefined;
+        Forms.generateDraftId(&id_buffer);
+        const id = state.allocator.dupe(u8, &id_buffer) catch {
+            state.allocator.free(dest_path);
+            continue;
+        };
+        const name = state.allocator.dupe(u8, std.fs.path.basename(path_utf8)) catch {
+            state.allocator.free(dest_path);
+            state.allocator.free(id);
+            continue;
+        };
+        state.attachment_paths[state.attachment_count] = dest_path;
+        state.attachment_ids[state.attachment_count] = id;
+        state.attachment_names[state.attachment_count] = name;
+        state.attachment_count += 1;
+        added = true;
+        insertAttachmentToken(state, number);
+    }
+    if (added) refreshAttachmentListbox(state);
+}
+
+fn removeSelectedAttachment(state: *DialogState) void {
+    if (state.attachment_listbox == null) return;
+    const selected = c.SendMessageW(state.attachment_listbox, c.LB_GETCURSEL, 0, 0);
+    if (selected < 0) return;
+    const index: usize = @intCast(selected);
+    if (index >= state.attachment_count) return;
+    removeAttachmentToken(state, index + 1);
+    state.allocator.free(state.attachment_names[index]);
+    state.allocator.free(state.attachment_paths[index]);
+    state.allocator.free(state.attachment_ids[index]);
+    var i = index;
+    while (i + 1 < state.attachment_count) : (i += 1) {
+        state.attachment_names[i] = state.attachment_names[i + 1];
+        state.attachment_paths[i] = state.attachment_paths[i + 1];
+        state.attachment_ids[i] = state.attachment_ids[i + 1];
+    }
+    state.attachment_count -= 1;
+    refreshAttachmentListbox(state);
 }
 
 /// Teaching tiles: one owner-drawn, tab-stop BUTTON per loop-type choice,
@@ -1347,6 +1679,7 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         }
         y += rowHeight(state, index);
     }
+    if (state.kind == .node) layoutAttachmentsSection(state, y - state.scroll_offset);
     updateScrollBar(hwnd, state);
 }
 
@@ -1372,6 +1705,7 @@ fn contentHeight(state: *const DialogState) i32 {
     for (0..state.field_count) |index| {
         if (state.visible[index]) y += rowHeight(state, index);
     }
+    if (state.kind == .node and attachmentsVisible(state)) y += attachment_section_height;
     return y + 12;
 }
 
@@ -1708,6 +2042,13 @@ fn freeValues(state: *DialogState) void {
     for (&state.display_labels) |value| if (value.len != 0) state.allocator.free(value);
 }
 
+fn freeAttachmentState(state: *DialogState) void {
+    for (state.attachment_names[0..state.attachment_count]) |value| state.allocator.free(value);
+    for (state.attachment_paths[0..state.attachment_count]) |value| state.allocator.free(value);
+    for (state.attachment_ids[0..state.attachment_count]) |value| state.allocator.free(value);
+    if (state.attachment_dir.len != 0) state.allocator.free(state.attachment_dir);
+}
+
 fn utf8ToWideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
     const raw = try std.unicode.utf8ToUtf16LeAlloc(allocator, value);
     defer allocator.free(raw);
@@ -1795,12 +2136,12 @@ test "guided choices map human labels to stable wire values" {
 }
 
 test "node draft builder preserves every hidden initial field" {
-    var values: [20][]u8 = .{@constCast("")} ** 20;
-    values[1] = @constCast("turnBased");
-    values[4] = @constCast("Start here");
-    values[5] = @constCast("false");
-    values[8] = @constCast("60");
-    values[11] = @constCast("maximize");
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("turnBased");
+    state.values[4] = @constCast("Start here");
+    state.values[5] = @constCast("false");
+    state.values[8] = @constCast("60");
+    state.values[11] = @constCast("maximize");
     const initial = Forms.NodeDraft{
         .title = "before",
         .worktree_repository = "D:\\repo",
@@ -1814,7 +2155,7 @@ test "node draft builder preserves every hidden initial field" {
         .briefing_enabled = false,
         .activity_enabled = true,
     };
-    var draft = try buildNodeDraft(std.testing.allocator, &values, initial);
+    var draft = try buildNodeDraft(std.testing.allocator, &state, initial);
     defer draft.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings(initial.worktree_repository, draft.worktree_repository);
     try std.testing.expectEqualStrings(initial.worktree_id, draft.worktree_id);
@@ -1824,14 +2165,83 @@ test "node draft builder preserves every hidden initial field" {
     try std.testing.expectEqualStrings(initial.claude_permissions, draft.claude_permissions);
     try std.testing.expectEqual(initial.briefing_enabled, draft.briefing_enabled);
     try std.testing.expectEqual(initial.activity_enabled, draft.activity_enabled);
+    try std.testing.expectEqual(@as(usize, 0), draft.attachment_count);
+    try std.testing.expectEqual(@as(usize, 0), draft.node_id.len);
 
-    var hidden_values = values;
-    hidden_values[8] = @constCast("not-a-number");
-    hidden_values[9] = @constCast("also-invalid");
-    var hidden_draft = try buildNodeDraft(std.testing.allocator, &hidden_values, initial);
+    var hidden_state = state;
+    hidden_state.values[8] = @constCast("not-a-number");
+    hidden_state.values[9] = @constCast("also-invalid");
+    var hidden_draft = try buildNodeDraft(std.testing.allocator, &hidden_state, initial);
     defer hidden_draft.deinit(std.testing.allocator);
     try std.testing.expectEqual(initial.poll_interval_seconds, hidden_draft.poll_interval_seconds);
     try std.testing.expectEqual(initial.stall_after_seconds, hidden_draft.stall_after_seconds);
+}
+
+test "node draft builder carries staged attachments and the draft id onto the wire draft" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("turnBased");
+    state.values[4] = @constCast("look at [image #1]");
+    state.values[5] = @constCast("false");
+    state.values[8] = @constCast("60");
+    state.values[11] = @constCast("maximize");
+    state.attachment_draft_id = "11111111-1111-4111-8111-111111111111";
+    state.attachment_count = 1;
+    state.attachment_paths[0] = @constCast("C:\\Users\\me\\.graphcode\\memory\\slug\\11111111-1111-4111-8111-111111111111\\attachments\\attachment-1.png");
+    state.attachment_ids[0] = @constCast("aaaaaaaa-1111-4111-8111-111111111111");
+    var draft = try buildNodeDraft(std.testing.allocator, &state, .{ .title = "before" });
+    defer draft.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", draft.node_id);
+    try std.testing.expectEqual(@as(usize, 1), draft.attachment_count);
+    try std.testing.expectEqualStrings(state.attachment_paths[0], draft.attachment_paths[0]);
+    try std.testing.expectEqualStrings(state.attachment_ids[0], draft.attachment_ids[0]);
+}
+
+test "template handoff retains staged attachments in the unchecked draft" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("turnBased");
+    state.values[4] = @constCast("review [image #1]");
+    state.values[5] = @constCast("false");
+    state.values[8] = @constCast("60");
+    state.values[11] = @constCast("maximize");
+    state.attachment_draft_id = "11111111-1111-4111-8111-111111111111";
+    state.attachment_count = 1;
+    state.attachment_paths[0] = @constCast("C:\\memory\\project\\11111111-1111-4111-8111-111111111111\\attachments\\attachment-1.png");
+    state.attachment_ids[0] = @constCast("aaaaaaaa-1111-4111-8111-111111111111");
+
+    // The Templates action returns this unchecked draft to App, which applies the
+    // selected template and reopens the form before the checked Create result.
+    var handoff = try buildNodeDraftUnchecked(std.testing.allocator, &state, .{ .title = "before" });
+    defer handoff.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(state.attachment_draft_id, handoff.node_id);
+    try std.testing.expectEqual(@as(usize, 1), handoff.attachment_count);
+    try std.testing.expectEqualStrings(state.attachment_paths[0], handoff.attachment_paths[0]);
+    try std.testing.expectEqualStrings(state.attachment_ids[0], handoff.attachment_ids[0]);
+
+    var reopened = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    reopened.attachment_project_path = "C:\\project";
+    reopened.attachment_draft_id = handoff.node_id;
+    defer freeAttachmentState(&reopened);
+    try restoreStagedAttachments(&reopened, handoff);
+    try std.testing.expectEqual(@as(usize, 1), reopened.attachment_count);
+    try std.testing.expectEqualStrings(handoff.attachment_paths[0], reopened.attachment_paths[0]);
+    try std.testing.expectEqualStrings(handoff.attachment_ids[0], reopened.attachment_ids[0]);
+}
+
+test "attachments are hidden for composite loops and mapped to the shown brief field" {
+    var state = DialogState{ .allocator = undefined, .kind = .node, .parent = null };
+    state.values[1] = @constCast("turnBased");
+    try std.testing.expect(attachmentsVisible(&state));
+    try std.testing.expectEqual(@as(?usize, 4), briefFieldIndex(&state));
+
+    state.values[1] = @constCast("timeBased");
+    try std.testing.expectEqual(@as(?usize, 3), briefFieldIndex(&state));
+
+    state.values[1] = @constCast("goalBased");
+    try std.testing.expectEqual(@as(?usize, 6), briefFieldIndex(&state));
+
+    state.values[1] = @constCast("proactive");
+    try std.testing.expect(!attachmentsVisible(&state));
+    try std.testing.expectEqual(@as(?usize, null), briefFieldIndex(&state));
 }
 
 test "conditional graph fields and validation follow selected types" {
@@ -1936,7 +2346,7 @@ test "tile rows reserve full teaching-tile height while other rows stay compact"
     try std.testing.expectEqual(@as(i32, 54), fieldTop(&state, 0).?);
     try std.testing.expectEqual(@as(i32, 118), fieldTop(&state, 1).?);
     try std.testing.expectEqual(@as(i32, 118 + tile_row_height), fieldTop(&state, 2).?);
-    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + 12), contentHeight(&state));
+    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + attachment_section_height + 12), contentHeight(&state));
 }
 
 test "blendColor tints toward the overlay color proportionally to strength" {

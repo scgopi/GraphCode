@@ -26,6 +26,21 @@ pub const NodeDraft = struct {
     copilot_permissions: []const u8 = "allowEverything",
     briefing_enabled: bool = true,
     activity_enabled: bool = false,
+    /// The id this node will be created with, chosen by the client before the New Node
+    /// dialog opens rather than by `DaemonClient.sendCreateNodeDraft` at send time — the
+    /// same reason Swift `NodeDraft.id` is client-chosen (see that type's doc comment):
+    /// an attachment written while the dialog is still open has to be filed under the
+    /// id the node will actually carry. Empty means "let the client generate one at send
+    /// time", which is every draft that never touched the attachments field.
+    node_id: []const u8 = "",
+    /// Paths already written to disk under `node_id`'s attachment directory
+    /// (`DraftAttachments.attachmentsDirectory`) — the Windows equivalent of Swift
+    /// `NodeDraft.attachments`. Bounded at `DraftAttachments.max_attachments`, unlike the
+    /// macOS list, because this is a fixed-size native form field rather than a
+    /// scrolling SwiftUI stack.
+    attachment_paths: [8][]const u8 = .{&.{}} ** 8,
+    attachment_ids: [8][]const u8 = .{&.{}} ** 8,
+    attachment_count: usize = 0,
     pub fn deinit(self: *NodeDraft, allocator: std.mem.Allocator) void {
         freeSlice(allocator, self.title);
         freeSlice(allocator, self.loop_type);
@@ -44,8 +59,34 @@ pub const NodeDraft = struct {
         freeSlice(allocator, self.worktree_branch);
         freeSlice(allocator, self.subgraph_json);
         freeSlice(allocator, self.created_by);
+        freeSlice(allocator, self.node_id);
+        for (self.attachment_paths[0..self.attachment_count]) |path| freeSlice(allocator, path);
+        for (self.attachment_ids[0..self.attachment_count]) |id| freeSlice(allocator, id);
     }
 };
+
+/// A `[[0-9a-f]{8}-...]` version-4-shaped id, generated the same way
+/// `DaemonClient.zig`'s own `makeRequestID` does — a nanosecond timestamp rather than a
+/// cryptographic random source, because these ids only ever need to be unique within one
+/// running client, never unguessable. Exposed here (rather than kept private to
+/// `DaemonClient.zig`) so a draft's id can be chosen before its dialog opens, which is
+/// what lets an attachment picked mid-dialog be filed under the id the node will
+/// actually carry.
+///
+/// Mixed with a process-lifetime counter, not the timestamp alone: two calls close
+/// enough together can land on the same nanosecond reading on lower-resolution clocks,
+/// which would hand two different attachment directories the same name.
+var draft_id_sequence = std.atomic.Value(u64).init(0);
+
+pub fn generateDraftId(buffer: *[36]u8) void {
+    const timestamp: u64 = @intCast(std.time.nanoTimestamp());
+    const sequence = draft_id_sequence.fetchAdd(1, .monotonic);
+    _ = std.fmt.bufPrint(
+        buffer,
+        "00000000-0000-4000-8000-{x:0>12}",
+        .{(timestamp ^ sequence) & 0xffffffffffff},
+    ) catch unreachable;
+}
 
 pub const EdgeDraft = struct {
     from: []const u8,
@@ -124,6 +165,7 @@ pub const FormError = error{
     MissingFirstInstruction,
     MissingTriggerPrompt,
     EmptyJumpQuery,
+    TooManyAttachments,
 };
 
 pub const untitled_fallback = "New Loop";
@@ -173,6 +215,10 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
         return error.InvalidWorktree;
     if (draft.subgraph_json.len != 0) try validateSubgraphJson(draft.subgraph_json);
     if (draft.created_by.len != 0 and !isUuid(draft.created_by)) return error.InvalidCreatedBy;
+    // `DraftAttachments.max_attachments` — kept as a literal rather than an import so
+    // this validator has no dependency on the file-picker/ingestion module; both sides
+    // agree on 8 because that's the fixed-size array `NodeDraft.attachment_paths` is.
+    if (draft.attachment_count > 8) return error.TooManyAttachments;
 }
 
 pub fn validateSubgraphJson(value: []const u8) FormError!void {
@@ -690,6 +736,19 @@ test "node and edge forms reject invalid drafts explicitly" {
     try validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"id\":\"33333333-3333-4333-8333-333333333333\",\"project\":{\"path\":\"C:\\\\work\\\\subgraph\",\"name\":\"subgraph\",\"lastOpenedAt\":1767225600},\"nodes\":[],\"edges\":[]}", .created_by = "11111111-1111-4111-8111-111111111111" });
     try std.testing.expectError(error.InvalidSubgraph, validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"nodes\":[]}" }));
     try std.testing.expectError(error.InvalidCreatedBy, validateNode(.{ .title = "Loop", .created_by = "not-a-uuid" }));
+    var over_capacity = NodeDraft{ .title = "Loop", .attachment_count = 9 };
+    try std.testing.expectError(error.TooManyAttachments, validateNode(over_capacity));
+    over_capacity.attachment_count = 0;
+}
+
+test "generateDraftId produces a version-4-shaped, distinct id each call" {
+    var first: [36]u8 = undefined;
+    var second: [36]u8 = undefined;
+    generateDraftId(&first);
+    generateDraftId(&second);
+    try std.testing.expect(isUuid(&first));
+    try std.testing.expect(isUuid(&second));
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
 
 test "node updates preserve unchanged fields and allow stall clear sentinel" {
