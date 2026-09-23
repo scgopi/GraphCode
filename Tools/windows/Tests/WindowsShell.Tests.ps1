@@ -562,10 +562,6 @@ Invoke-Native "Sidebar navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Navigation.zig } finally { Pop-Location }
 }
-Invoke-Native "Quick chats executable tests" {
-  Push-Location $shellRoot
-  try { & $zig test src\QuickChats.zig } finally { Pop-Location }
-}
 Invoke-Native "Workspace controls executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorkspaceControls.zig } finally { Pop-Location }
@@ -669,60 +665,28 @@ Invoke-Native "App shell executable tests" {
 }
 
 # Structural anti-drift guard (issue #424): every graphcode-windows\src\*.zig file
-# that declares at least one `test "..."` block must be executed by one of the
-# `zig test` invocations above. Add the new file's name here as part of wiring it
-# in; forgetting either step (the invocation or this list) fails this guard
-# instead of letting the tests silently never run. This check runs last, after
-# every other invocation above, so a real regression in an individual file's
-# tests is reported before this contract-only failure short-circuits the run.
+# that declares at least one `test "..."` block must actually be executed by one of
+# the `zig test` invocations above. This check runs last, after every other
+# invocation, so a real regression in an individual file's tests is reported before
+# this contract-only failure short-circuits the run.
 #
-# GraphContextMenu.zig and MainWindow.zig were wired by in-flight issue #418
-# (PR #422, merged as 06e092e) after this guard was first added here; #422
-# added the zig test invocations and the source-list entries above but never
-# touched this list, since it did not exist on main when #422 was authored.
-# Listed here after rebasing onto main so the guard reflects reality post-merge.
+# The wired set is DERIVED from this script's own `zig test` invocations rather than
+# from a hand-maintained list. A hand-maintained list is a second source of truth
+# that can drift from the invocations it claims to describe: deleting an invocation
+# while leaving its name in the list would silently stop executing those tests and
+# still pass the guard -- exactly the regression #424 exists to prevent. Deriving the
+# set from the invocations themselves makes the guard observe reality instead of a
+# description of it, and removes the second place to forget when wiring a new file.
+$guardScriptText = Get-Content -LiteralPath $PSCommandPath -Raw
 $wiredTestFiles = @(
-  "Wire.zig",
-  "Codespaces.zig",
-  "WindowsCodespaceDialog.zig",
-  "Forms.zig",
-  "Win32.zig",
-  "NativeForms.zig",
-  "UpdateOfferPresentation.zig",
-  "GraphContextMenu.zig",
-  "MainWindow.zig",
-  "JumpPalette.zig",
-  "WindowsOnboarding.zig",
-  "WindowsProductSettings.zig",
-  "WindowsUpdates.zig",
-  "FrameBuffer.zig",
-  "DaemonClient.zig",
-  "DaemonSupervisor.zig",
-  "WorkspaceLayout.zig",
-  "InputRouter.zig",
-  "TerminalSurface.zig",
-  "GraphModel.zig",
-  "CanvasInput.zig",
-  "GraphCanvas.zig",
-  "WorktreeStatus.zig",
-  "DraftAttachments.zig",
-  "WorktreeDialog.zig",
-  "Dpi.zig",
-  "TemplateLibrary.zig",
-  "WorkspaceLifecycle.zig",
-  "Navigation.zig",
-  "QuickChats.zig",
-  "WorkspaceControls.zig",
-  "Sidebar.zig",
-  "WindowsRepositoryDialogs.zig",
-  "GdiGradient.zig",
-  "AppFont.zig",
-  "GdiplusAA.zig",
-  "UpdateOfferDialog.zig",
-  "WindowsNativeDialogs.zig",
-  "Accessibility.zig",
-  "App.zig"
-)
+  ($guardScriptText -split "`r?`n") |
+    Where-Object { $_ -match '\$zig test' } |
+    ForEach-Object { [regex]::Matches($_, 'src\\([A-Za-z0-9_]+)\.zig') } |
+    ForEach-Object { "$($_.Groups[1].Value).zig" }
+) | Sort-Object -Unique
+if ($wiredTestFiles.Count -eq 0) {
+  throw "Windows shell contract: the anti-drift guard derived zero `zig test` invocations from $PSCommandPath, so it cannot verify anything (see issue #424)."
+}
 $missingTestFiles = @(
   Get-ChildItem -LiteralPath (Join-Path $shellRoot "src") -Filter "*.zig" -File |
     Where-Object {
@@ -735,5 +699,5 @@ if ($missingTestFiles.Count -ne 0) {
   throw "Windows shell contract: the following src\*.zig files contain test blocks but are not wired into any zig test invocation in WindowsShell.Tests.ps1 (see issue #424): $($missingTestFiles -join ', ')"
 }
 
-Write-Output "Windows shell scaffold contract: PASS"
+Write-Output "Windows shell scaffold contract: PASS ($($wiredTestFiles.Count) source files executed)"
 exit 0

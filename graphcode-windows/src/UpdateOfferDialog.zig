@@ -18,9 +18,40 @@ const State = struct {
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeUpdateOffer");
-const install_id = 9701;
-const release_notes_id = 9702;
-const later_id = 9703;
+const install_id: u16 = 9701;
+const release_notes_id: u16 = 9702;
+const later_id: u16 = 9703;
+
+pub const ButtonSpec = struct {
+    label: []const u8,
+    id: u16,
+    x: i32,
+    width: i32,
+    enabled: bool,
+    action: Action,
+};
+
+const button_row_y: i32 = 190;
+
+/// The dialog's button row. `windowProc` creates exactly these controls and
+/// routes WM_COMMAND through `actionForCommand`, so these specs are the
+/// presented behaviour rather than a parallel description of it.
+pub const buttons = [_]ButtonSpec{
+    .{ .label = "Install", .id = install_id, .x = 18, .width = 140, .enabled = false, .action = .install_unavailable },
+    .{ .label = "Release Notes", .id = release_notes_id, .x = 160, .width = 140, .enabled = true, .action = .release_notes },
+    .{ .label = "Later", .id = later_id, .x = 470, .width = 110, .enabled = true, .action = .later },
+};
+
+/// Action taken when the dialog is dismissed without pressing a button.
+pub const dismiss_action: Action = .later;
+
+pub fn actionForCommand(command: u16) ?Action {
+    for (buttons) |spec| {
+        if (spec.id == command) return spec.action;
+    }
+    return null;
+}
+
 var active = false;
 var active_state: State = undefined;
 
@@ -98,31 +129,19 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             createStatic(hwnd, active_state.allocator, version_text, 18, 46, 560, 24);
             createStatic(hwnd, active_state.allocator, "Release Notes opens the verified GraphCode release page.", 18, 76, 560, 24);
             createStatic(hwnd, active_state.allocator, active_state.reason, 18, 106, 560, 44);
-            createButton(hwnd, "Install", install_id, 18, 190, false);
-            createButton(hwnd, "Release Notes", release_notes_id, 160, 190, true);
-            createButton(hwnd, "Later", later_id, 470, 190, true);
+            for (buttons) |spec| createButton(hwnd, spec);
             return 0;
         },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
-            if (command == install_id) {
-                active_state.action = .install_unavailable;
-                requestClose(hwnd);
-                return 0;
-            }
-            if (command == release_notes_id) {
-                active_state.action = .release_notes;
-                requestClose(hwnd);
-                return 0;
-            }
-            if (command == later_id) {
-                active_state.action = .later;
+            if (actionForCommand(command)) |action| {
+                active_state.action = action;
                 requestClose(hwnd);
                 return 0;
             }
         },
         c.WM_CLOSE => {
-            active_state.action = .later;
+            active_state.action = dismiss_action;
             requestClose(hwnd);
             return 0;
         },
@@ -164,32 +183,32 @@ fn createStatic(
     AppFont.apply(control, AppFont.control_size, false);
 }
 
-fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, enabled: bool) void {
-    const wide = wideZ(std.heap.c_allocator, text) catch return;
+fn createButton(hwnd: c.HWND, spec: ButtonSpec) void {
+    const wide = wideZ(std.heap.c_allocator, spec.label) catch return;
     defer std.heap.c_allocator.free(wide);
-    const disabled_style: c.DWORD = if (enabled) 0 else @as(c.DWORD, @intCast(c.WS_DISABLED));
+    const disabled_style: c.DWORD = if (spec.enabled) 0 else @as(c.DWORD, @intCast(c.WS_DISABLED));
     const style: c.DWORD = @as(c.DWORD, @intCast(c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON)) | disabled_style;
     const button = c.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
         wide.ptr,
         style,
-        x,
-        y,
-        if (id == later_id) 110 else 140,
+        spec.x,
+        button_row_y,
+        spec.width,
         30,
         hwnd,
-        controlId(id),
+        controlId(spec.id),
         c.GetModuleHandleW(null),
         null,
     ) orelse return;
     AppFont.apply(button, AppFont.control_size, false);
-    _ = c.EnableWindow(button, if (enabled) 1 else 0);
+    _ = c.EnableWindow(button, if (spec.enabled) 1 else 0);
 }
 
-fn controlId(value: usize) c.HMENU {
+fn controlId(value: u16) c.HMENU {
     @setRuntimeSafety(false);
-    return @ptrFromInt(value);
+    return @ptrFromInt(@as(usize, value));
 }
 
 fn wideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
@@ -202,7 +221,47 @@ fn wideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
 }
 
 test "update offer keeps install unavailable while preserving explicit actions" {
-    try std.testing.expectEqual(Action.later, .later);
-    try std.testing.expectEqual(Action.release_notes, .release_notes);
-    try std.testing.expectEqual(Action.install_unavailable, .install_unavailable);
+    // The Install button must be presented but not actionable: an in-app
+    // installer does not exist yet, and offering an enabled control would
+    // promise behaviour the app cannot deliver.
+    const install = buttons[0];
+    try std.testing.expectEqualStrings("Install", install.label);
+    try std.testing.expect(!install.enabled);
+    try std.testing.expectEqual(Action.install_unavailable, install.action);
+
+    // The two actions the app can honour stay enabled.
+    for (buttons[1..]) |spec| {
+        try std.testing.expect(spec.enabled);
+        try std.testing.expect(spec.action != .install_unavailable);
+    }
+
+    // Exactly one disabled button, so a future edit cannot quietly disable
+    // Release Notes or Later and still satisfy the assertions above.
+    var enabled_count: usize = 0;
+    for (buttons) |spec| {
+        if (spec.enabled) enabled_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), enabled_count);
+}
+
+test "update offer routes every button command to its declared action" {
+    for (buttons) |spec| {
+        try std.testing.expectEqual(spec.action, actionForCommand(spec.id).?);
+    }
+    // Unrecognised commands must not resolve to an action; windowProc relies on
+    // null to fall through to DefWindowProcW.
+    try std.testing.expectEqual(@as(?Action, null), actionForCommand(0));
+    try std.testing.expectEqual(@as(?Action, null), actionForCommand(install_id + 100));
+}
+
+test "update offer button command ids are distinct" {
+    for (buttons, 0..) |spec, i| {
+        for (buttons[i + 1 ..]) |other| {
+            try std.testing.expect(spec.id != other.id);
+        }
+    }
+}
+
+test "dismissing the update offer defers rather than implying an install" {
+    try std.testing.expectEqual(Action.later, dismiss_action);
 }

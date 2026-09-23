@@ -1237,6 +1237,11 @@ test "node drafts with attachments encode PromptAttachment-shaped entries" {
 }
 
 test "quick chat commands match shared Codable labels" {
+    try std.testing.expectEqualStrings("listQuickChats", commandName(.list_quick_chats));
+    try std.testing.expectEqualStrings("createQuickChat", commandName(.create_quick_chat));
+    try std.testing.expectEqualStrings("openQuickChat", commandName(.open_quick_chat));
+    try std.testing.expectEqualStrings("renameQuickChat", commandName(.rename_quick_chat));
+    try std.testing.expectEqualStrings("deleteQuickChat", commandName(.delete_quick_chat));
     const allocator = std.testing.allocator;
     const list = try commandListQuickChats(allocator);
     defer allocator.free(list);
