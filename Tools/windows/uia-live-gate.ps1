@@ -126,6 +126,8 @@ public static class GraphCodeUiaGateState {
   [DllImport("user32.dll")]
   private static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll")]
+  private static extern bool IsWindowEnabled(IntPtr window);
+  [DllImport("user32.dll")]
   private static extern int GetMenuItemCount(IntPtr menu);
   [DllImport("user32.dll")]
   private static extern uint GetMenuItemID(IntPtr menu, int position);
@@ -328,6 +330,13 @@ public static class GraphCodeUiaGateState {
   }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
+  }
+  // A modal disables its owner for as long as it is up. Win32 refuses a caption
+  // close against a WS_DISABLED window, so the owner must be observed enabled
+  // again before a close can be attributed to the shell rather than to a modal
+  // that has not finished tearing down.
+  public static bool WindowIsEnabled(IntPtr window) {
+    return IsWindowEnabled(window);
   }
   public static bool PostMouseButtonAt(IntPtr window, uint message, int x, int y) {
     IntPtr lparam = (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
@@ -2771,7 +2780,19 @@ try {
   Require ($null -ne $selectedWorkspaceCard) "activity navigation did not select the targeted loop"
   if ($SidebarParityOnly) { return }
 
-  Require $process.CloseMainWindow() "shell refused caption close"
+  # A modal that is still tearing down leaves its owner WS_DISABLED, and Win32
+  # refuses a caption close against a disabled window. Observe the owner enabled
+  # first so a failure here means "the shell refused a close it should have
+  # accepted" rather than "a modal had not finished tearing down yet".
+  $ownerEnabled = $false
+  for ($index = 0; $index -lt 100 -and -not $ownerEnabled; $index++) {
+    $ownerEnabled = [GraphCodeUiaGateState]::WindowIsEnabled($shellWindow)
+    if (-not $ownerEnabled) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $ownerEnabled `
+    "shell main window was still WS_DISABLED before caption close $(Get-FocusDiagnostics $shellWindow)"
+  Require $process.CloseMainWindow() `
+    "shell refused caption close $(Get-FocusDiagnostics $shellWindow)"
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "caption close terminated the tray-resident shell"

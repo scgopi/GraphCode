@@ -2,6 +2,7 @@ const std = @import("std");
 const CanvasInput = @import("CanvasInput.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 
 pub const Settings = struct {
     allocator: std.mem.Allocator,
@@ -294,9 +295,7 @@ pub fn open(parent_address: usize, allocator: std.mem.Allocator, current: Settin
         }
     }
     const accepted = settings_state.accepted;
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     settings_active = false;
     if (!accepted) return null;
     return @as(?Settings, try Settings.parse(allocator, &.{

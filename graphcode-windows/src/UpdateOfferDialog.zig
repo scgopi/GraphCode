@@ -1,6 +1,7 @@
 const std = @import("std");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 const AppFont = @import("AppFont.zig");
 
 pub const Action = enum {
@@ -99,9 +100,7 @@ pub fn show(
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     state = active_state;
     active = false;
     return state.action;

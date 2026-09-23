@@ -1,6 +1,7 @@
 const std = @import("std");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
 
@@ -675,9 +676,7 @@ fn openRepositoryDialog(
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     if (repository_dialog_state.clone_parent) |path| allocator.free(path);
     repository_dialog_active = false;
     if (!repository_dialog_state.accepted) return null;
@@ -1118,9 +1117,7 @@ fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult 
         _ = c.DispatchMessageW(&message);
     }
     _ = c.KillTimer(hwnd, operation_timer_id);
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(operation_dialog_state.parent, 1);
-    _ = c.SetActiveWindow(operation_dialog_state.parent);
+    ModalTeardown.dismiss(hwnd, operation_dialog_state.parent);
     if (operation_dialog_state.cancelled) return .cancelled;
     if (operation_dialog_state.clone) |operation| {
         return switch (operation.poll() orelse .failed) {

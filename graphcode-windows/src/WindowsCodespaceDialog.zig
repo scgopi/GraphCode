@@ -16,6 +16,7 @@
 const std = @import("std");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
 const Codespaces = @import("Codespaces.zig");
@@ -317,9 +318,7 @@ pub fn open(
     }
 
     _ = c.KillTimer(hwnd, timer_id);
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     if (!dialog_state.accepted) return null;
     const accepted = model.fields() orelse return null;
     const name = try allocator.dupe(u8, accepted.name);

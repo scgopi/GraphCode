@@ -1,6 +1,7 @@
 const std = @import("std");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 const AppFont = @import("AppFont.zig");
 
 pub const Entry = struct {
@@ -186,9 +187,7 @@ pub fn show(
         _ = c.DispatchMessageW(&message);
     }
     const selected = if (dialog.accepted) dialog.state.selectedEntry() else null;
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     if (quit_code) |value| c.PostQuitMessage(@intCast(value));
     const entry = selected orelse return null;
     return .{

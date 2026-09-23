@@ -5,6 +5,7 @@ const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 
 extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, max_files: c.DWORD) callconv(.c) c_int;
 
@@ -744,9 +745,7 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     // Destroy the modal window from the owner thread after dispatch returns.
     // Calling DestroyWindow from the window procedure can violate the C
     // callback handle alignment contract on some Zig/Win32 combinations.
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(state.parent, 1);
-    _ = c.SetActiveWindow(state.parent);
+    ModalTeardown.dismiss(hwnd, state.parent);
     state.* = active_state_storage;
     if (quit_code) |value| c.PostQuitMessage(@intCast(value));
     return state.result;

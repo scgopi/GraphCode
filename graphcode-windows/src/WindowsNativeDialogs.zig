@@ -1,6 +1,7 @@
 const std = @import("std");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 const AppFont = @import("AppFont.zig");
 
 pub const Result = struct {
@@ -118,9 +119,7 @@ pub fn textWithDescription(
         _ = c.TranslateMessage(&message);
         _ = c.DispatchMessageW(&message);
     }
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     active = false;
     if (!active_state.accepted) {
         freeStateValues(&active_state);

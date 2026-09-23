@@ -2,6 +2,7 @@ const std = @import("std");
 const CanvasInput = @import("CanvasInput.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const ModalTeardown = @import("ModalTeardown.zig");
 
 pub const page_count: u8 = 4;
 
@@ -140,9 +141,7 @@ pub fn show(parent: c.HWND, allocator: std.mem.Allocator, initial_backend: []con
         _ = c.DispatchMessageW(&message);
     }
     const backend = active_state.backend;
-    _ = c.DestroyWindow(hwnd);
-    _ = c.EnableWindow(parent, 1);
-    _ = c.SetActiveWindow(parent);
+    ModalTeardown.dismiss(hwnd, parent);
     active = false;
     return backend;
 }
