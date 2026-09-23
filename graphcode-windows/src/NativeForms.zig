@@ -25,6 +25,7 @@ const DialogState = struct {
     field_count: usize = 0,
     intro: c.HWND = null,
     validation: c.HWND = null,
+    recap: c.HWND = null,
     values: [256][]u8 = .{&.{}} ** 256,
     initial_values: [256][]u8 = .{&.{}} ** 256,
     display_labels: [256][]u8 = .{&.{}} ** 256,
@@ -48,6 +49,7 @@ const DialogState = struct {
     // ways that assume one value per index.
     attachment_project_path: []const u8 = "",
     attachment_draft_id: []const u8 = "",
+    node_worktree_choices: []const WorktreeChoice = &.{},
     attachment_dir: []u8 = &.{},
     attachment_names: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
     attachment_paths: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
@@ -70,6 +72,11 @@ const InputKind = enum { edit, readonly, combo, checkbox, tiles };
 const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform };
 const Choice = struct { label: []const u8, value: []const u8, description: []const u8 = "", accent: u32 = Tokens.canvas_selection };
 pub const EdgeEndpoint = struct { id: []const u8, title: []const u8 };
+pub const WorktreeChoice = struct {
+    path: []const u8,
+    branch: []const u8,
+    is_default: bool,
+};
 pub const WorktreeSweepResult = struct {
     selected: [256]bool = .{false} ** 256,
     count: usize = 0,
@@ -208,9 +215,10 @@ pub fn node(
     allocator: std.mem.Allocator,
     project_path: []const u8,
     draft_id: []const u8,
+    worktree_choices: []const WorktreeChoice,
     initial: Forms.NodeDraft,
 ) !?Forms.NodeDraft {
-    return switch (try nodeWithTemplates(parent, allocator, project_path, draft_id, initial, false)) {
+    return switch (try nodeWithTemplates(parent, allocator, project_path, draft_id, worktree_choices, initial, false)) {
         .draft => |draft| draft,
         .cancelled, .templates => null,
     };
@@ -229,6 +237,7 @@ pub fn nodeWithTemplates(
     allocator: std.mem.Allocator,
     project_path: []const u8,
     draft_id: []const u8,
+    worktree_choices: []const WorktreeChoice,
     initial: Forms.NodeDraft,
     templates_available: bool,
 ) !NodeResult {
@@ -238,6 +247,7 @@ pub fn nodeWithTemplates(
         .kind = .node,
         .parent = parent,
         .templates_available = templates_available,
+        .node_worktree_choices = worktree_choices,
     };
     state.attachment_project_path = project_path;
     state.attachment_draft_id = draft_id;
@@ -267,13 +277,14 @@ pub fn nodeWithTemplates(
     state.values[11] = try allocator.dupe(u8, initial.metric_direction);
     state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
     state.values[13] = try allocator.dupe(u8, initial.model_tier);
-    state.values[14] = try allocator.dupe(u8, initial.worktree_repository);
-    state.values[15] = try allocator.dupe(u8, initial.worktree_id);
-    state.values[16] = try allocator.dupe(u8, initial.worktree_path);
-    state.values[17] = try allocator.dupe(u8, initial.worktree_branch);
-    state.values[18] = try allocator.dupe(u8, initial.subgraph_json);
-    state.values[19] = try allocator.dupe(u8, initial.created_by);
-    for (0..20) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    state.values[14] = try worktreeSelectionText(allocator, worktree_choices, initial.worktree_path);
+    state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
+    state.values[16] = try allocator.dupe(u8, initial.worktree_id);
+    state.values[17] = try allocator.dupe(u8, initial.worktree_path);
+    state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
+    state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
+    state.values[20] = try allocator.dupe(u8, initial.created_by);
+    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
     try restoreStagedAttachments(state, initial);
     if (!(try show(state, "Create or edit node", &.{}))) {
         if (!state.template_requested) return .cancelled;
@@ -349,6 +360,7 @@ fn buildNodeDraftUnchecked(
     initial: Forms.NodeDraft,
 ) !Forms.NodeDraft {
     const values = &state.values;
+    const selected_worktree = selectedWorktreeChoice(state);
     const goal_based = std.mem.eql(u8, values[1], "goalBased");
     const poll_interval = if (goal_based)
         parseRequiredFloat(values[8]) catch return error.InvalidNumericInput
@@ -374,10 +386,11 @@ fn buildNodeDraftUnchecked(
     result.metric_direction = try allocator.dupe(u8, values[11]);
     result.backend = if (std.mem.trim(u8, values[12], " \t\r\n").len == 0) null else try allocator.dupe(u8, values[12]);
     result.model_tier = try allocator.dupe(u8, values[13]);
-    result.worktree_repository = try allocator.dupe(u8, initial.worktree_repository);
-    result.worktree_id = try allocator.dupe(u8, initial.worktree_id);
-    result.worktree_path = try allocator.dupe(u8, initial.worktree_path);
-    result.worktree_branch = try allocator.dupe(u8, initial.worktree_branch);
+    const preserves_initial_worktree = state.node_worktree_choices.len == 0;
+    result.worktree_repository = try allocator.dupe(u8, if (selected_worktree != null) state.attachment_project_path else if (preserves_initial_worktree) initial.worktree_repository else "");
+    result.worktree_id = try allocator.dupe(u8, if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) initial.worktree_id else "");
+    result.worktree_path = try allocator.dupe(u8, if (selected_worktree) |choice| choice.path else if (preserves_initial_worktree) initial.worktree_path else "");
+    result.worktree_branch = try allocator.dupe(u8, if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) initial.worktree_branch else "");
     result.subgraph_json = try allocator.dupe(u8, initial.subgraph_json);
     result.created_by = try allocator.dupe(u8, initial.created_by);
     result.claude_permissions = initial.claude_permissions;
@@ -905,7 +918,7 @@ fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, c
 
 fn configureFields(state: *DialogState) void {
     state.field_count = switch (state.kind) {
-        .node => 14,
+        .node => 15,
         .edge => 10,
         .update => 9,
         .settings => 2,
@@ -925,6 +938,7 @@ fn configureFields(state: *DialogState) void {
             state.choice_groups[12] = .backend;
             state.input_kinds[13] = .combo;
             state.choice_groups[13] = .model_tier;
+            state.input_kinds[14] = .combo;
         },
         .edge => {
             state.input_kinds[0] = if (state.lock_edge_endpoints) .readonly else .combo;
@@ -987,7 +1001,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
         "What should it do each time?",              "First instruction",                  "Pause only before writing files",
         "What does done look like?",                 "Done check command (optional)",      "Check every (seconds)",
         "Declare stalled after (seconds, optional)", "Progress metric command (optional)", "When is the metric better?",
-        "Agent",                                     "Model",
+        "Agent",                                     "Model",                                     "Branch",
     };
     const edge_labels = [_][]const u8{
         "Source loop identity",                          "Target loop identity", "What should this connection do?", "When does it fire?",
@@ -1027,6 +1041,7 @@ fn fieldHelp(kind: Kind, index: usize) []const u8 {
         7 => "Exit 0 means done.",
         10 => "A command that prints one number.",
         12 => "Use the workspace default unless this loop needs a specific agent.",
+        14 => "This folder creates no worktree binding. Existing branches are shown only after Worktrees has inspected this project.",
         else => "",
     };
     if (kind == .edge) return switch (index) {
@@ -1075,6 +1090,11 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 createStatic(safe_hwnd, value, formIntro(value.kind), 18, 12, 530, 34, &value.intro);
                 for (0..value.field_count) |index| createField(safe_hwnd, value, index);
                 if (value.kind == .node) createAttachmentsSection(safe_hwnd, value);
+                if (showsRecap(value.kind)) {
+                    const recap = recapText(value);
+                    defer if (recap.len != 0) value.allocator.free(recap);
+                    createStatic(safe_hwnd, value, recap, 18, 0, 530, 34, &value.recap);
+                }
                 createStatic(safe_hwnd, value, "", 18, 0, 320, 34, &value.validation);
                 layoutForm(safe_hwnd, value);
             }
@@ -1161,11 +1181,15 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 readValue(value, command - 9100);
                 updateConditionalVisibility(value);
                 setStaticText(value, value.validation, "");
+                refreshRecap(value);
                 layoutForm(safe_hwnd, value);
                 return 0;
             }
-            if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120)
+            if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120) {
+                readValue(value, command - 9100);
                 setStaticText(value, value.validation, "");
+                refreshRecap(value);
+            }
             if (value.kind == .worktree_policy and
                 (notification == c.EN_CHANGE or notification == c.BN_CLICKED) and
                 command >= 9100 and command < 9200)
@@ -1251,6 +1275,44 @@ fn createStatic(hwnd: c.HWND, state: *DialogState, text: []const u8, x: i32, y: 
 
 fn isEndpointCombo(state: *const DialogState, index: usize) bool {
     return state.kind == .edge and !state.lock_edge_endpoints and index < 2;
+}
+
+fn isNodeWorktreeCombo(state: *const DialogState, index: usize) bool {
+    return state.kind == .node and index == 14;
+}
+
+fn worktreeSelectionText(
+    allocator: std.mem.Allocator,
+    choices_value: []const WorktreeChoice,
+    initial_path: []const u8,
+) ![]u8 {
+    for (choices_value, 0..) |choice, index| {
+        if (std.mem.eql(u8, choice.path, initial_path)) return std.fmt.allocPrint(allocator, "{d}", .{index + 1});
+    }
+    return allocator.dupe(u8, "0");
+}
+
+fn selectedWorktreeChoice(state: *const DialogState) ?WorktreeChoice {
+    const selection = std.fmt.parseUnsigned(usize, state.values[14], 10) catch return null;
+    if (selection == 0 or selection > state.node_worktree_choices.len) return null;
+    return state.node_worktree_choices[selection - 1];
+}
+
+fn createNodeWorktreeChoices(hwnd: c.HWND, state: *DialogState, input: c.HWND) void {
+    _ = hwnd;
+    const local = utf8ToWideZ(state.allocator, "This folder") catch return;
+    defer state.allocator.free(local);
+    _ = c.SendMessageW(input, c.CB_ADDSTRING, 0, @intCast(@intFromPtr(local.ptr)));
+    for (state.node_worktree_choices) |choice| {
+        const suffix: []const u8 = if (choice.is_default) " (default)" else "";
+        const label = std.fmt.allocPrint(state.allocator, "{s}{s}", .{ choice.branch, suffix }) catch continue;
+        defer state.allocator.free(label);
+        const wide = utf8ToWideZ(state.allocator, label) catch continue;
+        defer state.allocator.free(wide);
+        _ = c.SendMessageW(input, c.CB_ADDSTRING, 0, @intCast(@intFromPtr(wide.ptr)));
+    }
+    const selection = std.fmt.parseUnsigned(usize, state.values[14], 10) catch 0;
+    _ = c.SendMessageW(input, c.CB_SETCURSEL, selection, 0);
 }
 
 fn endpointIndex(endpoints: []const EdgeEndpoint, value: []const u8) usize {
@@ -1624,6 +1686,8 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
                     _ = c.SendMessageW(input, c.CB_ADDSTRING, 0, @intCast(@intFromPtr(wide.ptr)));
                 }
                 _ = c.SendMessageW(input, c.CB_SETCURSEL, endpointIndex(state.edge_endpoints, state.values[index]), 0);
+            } else if (isNodeWorktreeCombo(state, index)) {
+                createNodeWorktreeChoices(hwnd, state, input);
             } else {
                 for (choices(state.choice_groups[index])) |choice| {
                     const wide = utf8ToWideZ(state.allocator, choice.label) catch continue;
@@ -1656,6 +1720,34 @@ fn setStaticText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
 
 fn rowHeight(state: *const DialogState, index: usize) i32 {
     return if (state.input_kinds[index] == .tiles) tile_row_height else 64;
+}
+
+fn showsRecap(kind: Kind) bool {
+    return kind == .node or kind == .edge or kind == .update;
+}
+
+fn recapText(state: *const DialogState) []const u8 {
+    const title = switch (state.kind) {
+        .node => Forms.resolvedTitle(state.values[0]),
+        .edge => state.values[2],
+        .update => if (hasUpdateChanges(state)) "changed fields" else "no changes yet",
+        else => "",
+    };
+    const detail = switch (state.kind) {
+        .node => state.values[1],
+        .edge => state.values[3],
+        .update => "review before saving",
+        else => "",
+    };
+    return std.fmt.allocPrint(state.allocator, "Recap: {s} — {s}", .{ title, detail }) catch
+        state.allocator.dupe(u8, "Recap unavailable") catch &.{};
+}
+
+fn refreshRecap(state: *DialogState) void {
+    if (!showsRecap(state.kind) or state.recap == null) return;
+    const recap = recapText(state);
+    defer if (recap.len != 0) state.allocator.free(recap);
+    setStaticText(state, state.recap, recap);
 }
 
 fn fieldTop(state: *const DialogState, target: usize) ?i32 {
@@ -1691,7 +1783,14 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         }
         y += rowHeight(state, index);
     }
-    if (state.kind == .node) layoutAttachmentsSection(state, y - state.scroll_offset);
+    if (state.kind == .node) {
+        layoutAttachmentsSection(state, y - state.scroll_offset);
+        if (attachmentsVisible(state)) y += attachment_section_height;
+    }
+    if (showsRecap(state.kind)) {
+        _ = c.ShowWindow(state.recap, c.SW_SHOW);
+        _ = c.MoveWindow(state.recap, 18, y - state.scroll_offset, 530, 34, 1);
+    }
     updateScrollBar(hwnd, state);
 }
 
@@ -1718,6 +1817,7 @@ fn contentHeight(state: *const DialogState) i32 {
         if (state.visible[index]) y += rowHeight(state, index);
     }
     if (state.kind == .node and attachmentsVisible(state)) y += attachment_section_height;
+    if (showsRecap(state.kind)) y += 34;
     return y + 12;
 }
 
@@ -1872,7 +1972,7 @@ fn readValue(state: *DialogState, index: usize) void {
             const selected = c.SendMessageW(state.edits[index], c.CB_GETCURSEL, 0, 0);
             if (selected < 0) return;
             const selected_index: usize = @intCast(selected);
-            const value: []u8 = if (state.kind == .template_picker)
+            const value: []u8 = if (state.kind == .template_picker or isNodeWorktreeCombo(state, index))
                 std.fmt.allocPrint(state.allocator, "{d}", .{selected_index}) catch return
             else blk: {
                 const next = if (isEndpointCombo(state, index) and selected_index < state.edge_endpoints.len)
@@ -1946,6 +2046,8 @@ fn validationReason(state: *DialogState) ?[]const u8 {
             const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch
                 return "Enter a valid stall timeout, or leave it blank.";
             const backend: ?[]const u8 = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else state.values[12];
+            const selected_worktree = selectedWorktreeChoice(state);
+            const preserves_initial_worktree = state.node_worktree_choices.len == 0;
             Forms.validateNode(.{
                 .title = state.values[0],
                 .loop_type = state.values[1],
@@ -1961,12 +2063,12 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                 .metric_direction = state.values[11],
                 .backend = backend,
                 .model_tier = state.values[13],
-                .worktree_repository = state.values[14],
-                .worktree_id = state.values[15],
-                .worktree_path = state.values[16],
-                .worktree_branch = state.values[17],
-                .subgraph_json = state.values[18],
-                .created_by = state.values[19],
+                .worktree_repository = if (selected_worktree != null) state.attachment_project_path else if (preserves_initial_worktree) state.values[15] else "",
+                .worktree_id = if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) state.values[16] else "",
+                .worktree_path = if (selected_worktree) |choice| choice.path else if (preserves_initial_worktree) state.values[17] else "",
+                .worktree_branch = if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) state.values[18] else "",
+                .subgraph_json = state.values[19],
+                .created_by = state.values[20],
             }) catch |err| return formErrorReason(err);
         },
         .edge => {
@@ -2160,6 +2262,54 @@ test "guided choices map human labels to stable wire values" {
     try std.testing.expectEqual(@as(usize, 1), endpointIndex(&endpoints, "node-b"));
     try std.testing.expectEqual(@as(i32, 180), inputControlHeight(.combo));
     try std.testing.expectEqual(@as(i32, 24), inputControlHeight(.checkbox));
+}
+
+test "form recap describes the pending node, edge, and update" {
+    var node_state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    node_state.values[0] = @constCast("Ship the picker");
+    node_state.values[1] = @constCast("goalBased");
+    const node_recap = recapText(&node_state);
+    defer std.testing.allocator.free(node_recap);
+    try std.testing.expect(std.mem.indexOf(u8, node_recap, "Ship the picker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, node_recap, "goalBased") != null);
+
+    var edge_state = DialogState{ .allocator = std.testing.allocator, .kind = .edge, .parent = null };
+    edge_state.values[2] = @constCast("handoff");
+    edge_state.values[3] = @constCast("onSuccess");
+    const edge_recap = recapText(&edge_state);
+    defer std.testing.allocator.free(edge_recap);
+    try std.testing.expect(std.mem.indexOf(u8, edge_recap, "handoff") != null);
+    try std.testing.expect(std.mem.indexOf(u8, edge_recap, "onSuccess") != null);
+
+    var update_state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    update_state.field_count = 9;
+    update_state.values[0] = @constCast("changed goal");
+    update_state.initial_values[0] = @constCast("");
+    const update_recap = recapText(&update_state);
+    defer std.testing.allocator.free(update_recap);
+    try std.testing.expect(std.mem.indexOf(u8, update_recap, "changed fields") != null);
+}
+
+test "node worktree picker has an honest empty state and binds only real choices" {
+    const empty = try worktreeSelectionText(std.testing.allocator, &.{}, "");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("0", empty);
+
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\worktrees\\main", .branch = "main", .is_default = true },
+        .{ .path = "C:\\repo\\worktrees\\fix", .branch = "fix/picker", .is_default = false },
+    };
+    const selected = try worktreeSelectionText(std.testing.allocator, &choices_value, choices_value[1].path);
+    defer std.testing.allocator.free(selected);
+    try std.testing.expectEqualStrings("2", selected);
+
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.node_worktree_choices = &choices_value;
+    state.values[14] = @constCast("2");
+    const selected_choice = selectedWorktreeChoice(&state).?;
+    try std.testing.expectEqualStrings("fix/picker", selected_choice.branch);
+    state.values[14] = @constCast("0");
+    try std.testing.expect(selectedWorktreeChoice(&state) == null);
 }
 
 test "node draft builder preserves every hidden initial field" {
@@ -2373,7 +2523,7 @@ test "tile rows reserve full teaching-tile height while other rows stay compact"
     try std.testing.expectEqual(@as(i32, 54), fieldTop(&state, 0).?);
     try std.testing.expectEqual(@as(i32, 118), fieldTop(&state, 1).?);
     try std.testing.expectEqual(@as(i32, 118 + tile_row_height), fieldTop(&state, 2).?);
-    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + attachment_section_height + 12), contentHeight(&state));
+    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + attachment_section_height + 34 + 12), contentHeight(&state));
 }
 
 test "blendColor tints toward the overlay color proportionally to strength" {
