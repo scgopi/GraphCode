@@ -67,6 +67,12 @@ installation and uninstall no longer require a source checkout or build tools.
 Opt-in signed packages
 bind the complete payload with a publisher-pinned Authenticode catalog; see
 `Tools\windows\PACKAGING.md`, including setup-script verification before execution.
+`Tools\windows\release.ps1` and `.github\workflows\windows-release.yml` add the
+maintainer-triggered path that builds such a package and can attach it to an
+existing release; its "Publishing a Windows release" section lists the signing
+secrets. That plumbing does not itself sign anything: with no signing secrets
+configured it produces a clearly labeled unsigned development artifact that it
+refuses to publish without an explicit opt-in.
 There is not yet a published production-signed installer or
 an automatic install/relaunch path in the native updater.
 

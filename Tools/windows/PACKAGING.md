@@ -202,6 +202,82 @@ production publisher trust. `Packaging.Scheduler.Tests.ps1` exercises an owned
 idle task through native stop/delete and verifies the actual missing-task
 HRESULT without suppressing account or permission errors.
 
+## Publishing a Windows release
+
+`Tools/windows/release.ps1` is the only supported path from `package.ps1` to a
+GitHub release asset, and `.github/workflows/windows-release.yml` is the only
+thing that runs it in CI.
+
+Like the macOS DMG — which a maintainer builds locally with `make release-dmg`
+and attaches with `gh release create` — Windows publication is deliberately
+manual. The workflow has a single `workflow_dispatch` trigger and never fires on
+a tag push or on a published release. Its inputs are the existing release `tag`,
+`publish` (default `false`), and `allow_unsigned_publish` (default `false`). The
+built artifact is always uploaded as a workflow artifact, so a build can be
+inspected without touching any release.
+
+```powershell
+pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3
+pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -Publish
+```
+
+The tag supplies the package version (`v1.2.3` and `1.2.3-beta1` are accepted;
+`dev` versions and anything that is not a release version are refused before
+anything is built). `release.ps1` then builds through `package.ps1`, re-runs
+`package.ps1 -Command Verify` — pinned to the expected publisher when signing —
+reads the built package's own `metadata.json`, and **refuses to continue if the
+package's declared signing state contradicts what the run actually did**.
+
+Locally, `Tools\windows\stage-swift-products.ps1` produces the Swift half of the
+release inputs (`graphcoded.exe`, `graphcode.exe`, and the Swift runtime DLLs in
+`.build\windows\release`); `package.ps1` builds the versioned shell itself from
+the pinned providers.
+
+### Asset names
+
+| Build | Asset | Publishable |
+|---|---|---|
+| signed | `graphcode-windows-x86_64.zip` + `.sha256` | yes |
+| unsigned | `graphcode-windows-x86_64-unsigned.zip` + `.sha256` | only with `allow_unsigned_publish` |
+
+The signed name is versionless, matching `graphcode-macos-arm64.dmg`, so
+`releases/latest/download/graphcode-windows-x86_64.zip` resolves. An unsigned
+development build can never occupy that name.
+
+### Secrets that enable signing
+
+Set these as repository secrets (**Settings → Secrets and variables → Actions →
+New repository secret**). No certificate material is stored in this repository.
+
+| Secret | Format | Required |
+|---|---|---|
+| `WINDOWS_SIGNING_CERTIFICATE` | Base64 text of a PFX holding the code-signing certificate **and** its private key (`[Convert]::ToBase64String([IO.File]::ReadAllBytes('signing.pfx'))`) | yes |
+| `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` | That PFX's password | yes |
+| `WINDOWS_SIGNING_THUMBPRINT` | The certificate's SHA-1 thumbprint, exactly 40 hexadecimal characters (`package.ps1` validates `^[0-9a-fA-F]{40}$`) | yes |
+| `WINDOWS_SIGNING_TIMESTAMP_URL` | RFC 3161 timestamp service `https://` URL | recommended |
+
+The PFX is required because release jobs run on ephemeral GitHub-hosted runners,
+which have no certificate store to pre-provision. The workflow imports it into
+`Cert:\CurrentUser\My`, **requires the imported certificate's own thumbprint to
+equal `WINDOWS_SIGNING_THUMBPRINT`**, passes only that thumbprint to
+`package.ps1 -SignCertificate`, and removes both the imported certificate and the
+decoded PFX before the job ends. A mismatched or malformed thumbprint aborts
+before anything is built.
+
+With **none** of the signing secrets configured the workflow still succeeds and
+produces the unsigned development artifact described above. Supplying only
+*some* of them is a hard failure rather than a silent downgrade to unsigned, so a
+misconfigured secret can never be mistaken for a signed release.
+
+`Release.Tests.ps1` covers tag resolution, unsigned labeling and its publication
+gate, incomplete signing material, thumbprint pinning and certificate cleanup,
+the signing-state honesty gate, build/upload failure propagation, and the
+workflow's own triggers, action pinning, and input defaults. It runs first under
+`validate.ps1 -Task packaging` and needs no certificate, network access, or real
+build; its signed path uses an ephemeral self-signed certificate that it removes
+again. Publishing plumbing is not production-signing evidence: no certificate
+exists yet, and no Windows asset has been published.
+
 ## Retained provider sources
 
 Both exact public provider pins have the annotated source-retention tag
