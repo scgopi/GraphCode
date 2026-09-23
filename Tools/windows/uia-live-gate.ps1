@@ -123,6 +123,71 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr SetActiveWindow(IntPtr window);
   [DllImport("user32.dll")]
   private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern int GetMenuItemCount(IntPtr menu);
+  [DllImport("user32.dll")]
+  private static extern uint GetMenuItemID(IntPtr menu, int position);
+  [DllImport("user32.dll")]
+  private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
+  private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
+  public static IntPtr FindPopupMenuWindow(uint processId) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner != processId) return true;
+      var actualClass = new StringBuilder(256);
+      GetClassName(window, actualClass, actualClass.Capacity);
+      if (!String.Equals(actualClass.ToString(), "#32768", StringComparison.Ordinal)) return true;
+      if (!IsWindowVisible(window)) return true;
+      result = window;
+      return false;
+    }, IntPtr.Zero);
+    return result;
+  }
+  // MN_GETHMENU. The live UIA tree exposes a popup menu only as an empty Pane
+  // with no MenuItem children, so the menu itself is read through the Win32
+  // menu API against the real HMENU the shell handed to TrackPopupMenu.
+  public static IntPtr PopupMenuHandle(IntPtr popup) {
+    if (popup == IntPtr.Zero) return IntPtr.Zero;
+    return SendMessage(popup, 0x01E1, UIntPtr.Zero, IntPtr.Zero);
+  }
+  public static int PopupMenuItemCount(IntPtr menu) {
+    if (menu == IntPtr.Zero) return -1;
+    return GetMenuItemCount(menu);
+  }
+  public static uint PopupMenuItemId(IntPtr menu, int position) {
+    if (menu == IntPtr.Zero) return 0;
+    return GetMenuItemID(menu, position);
+  }
+  public static string PopupMenuItemText(IntPtr menu, int position) {
+    if (menu == IntPtr.Zero) return "";
+    var text = new StringBuilder(512);
+    GetMenuString(menu, (uint)position, text, text.Capacity, 0x0400);
+    return text.ToString();
+  }
+  public static uint PopupMenuItemState(IntPtr menu, int position) {
+    if (menu == IntPtr.Zero) return 0xFFFFFFFF;
+    return GetMenuState(menu, (uint)position, 0x0400);
+  }
+  // MainWindow.wm_uia_context_menu (WM_APP + 44).
+  public static bool PostContextMenu(IntPtr window, uint target) {
+    return PostMessage(window, 0x802C, (UIntPtr)target, IntPtr.Zero);
+  }
+  public static bool DismissPopupMenu(IntPtr popup, IntPtr owner) {
+    bool posted = popup != IntPtr.Zero &&
+      PostMessage(popup, 0x0100, (UIntPtr)0x1B, IntPtr.Zero);
+    if (!posted && owner != IntPtr.Zero) {
+      SendMessage(owner, 0x001F, UIntPtr.Zero, IntPtr.Zero);
+    }
+    return posted;
+  }
+  public static void CancelPopupMenu(IntPtr owner) {
+    if (owner != IntPtr.Zero) PostMessage(owner, 0x001F, UIntPtr.Zero, IntPtr.Zero);
+  }
   public static IntPtr FindChild(IntPtr parent, string className) {
     return FindWindowEx(parent, IntPtr.Zero, className, null);
   }
@@ -316,6 +381,83 @@ function Get-FocusDiagnostics([IntPtr] $expectedWindow) {
     $focusedDescription = "error='$($_.Exception.Message)'"
   }
   return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription}"
+}
+
+function Wait-ForPopupMenu(
+  [System.Diagnostics.Process] $process,
+  [IntPtr] $ownerWindow,
+  [string] $label,
+  [int] $TimeoutMilliseconds = 5000,
+  [int] $PollMilliseconds = 50
+) {
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $popup = [IntPtr]::Zero
+  while ([DateTime]::UtcNow -lt $deadline -and $popup -eq [IntPtr]::Zero) {
+    $process.Refresh()
+    if ($process.HasExited) {
+      throw "shell exited with code $($process.ExitCode) while opening the $label context menu"
+    }
+    $popup = [GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$process.Id)
+    if ($popup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds $PollMilliseconds }
+  }
+  if ($popup -eq [IntPtr]::Zero) {
+    Write-Host "UIA_POPUP_DIAGNOSTICS label=$label $(Get-FocusDiagnostics $ownerWindow)"
+  }
+  return $popup
+}
+
+function Get-PopupMenuItems([IntPtr] $popup) {
+  $menu = [GraphCodeUiaGateState]::PopupMenuHandle($popup)
+  if ($menu -eq [IntPtr]::Zero) { return @() }
+  $count = [GraphCodeUiaGateState]::PopupMenuItemCount($menu)
+  if ($count -lt 0) { return @() }
+  $items = @()
+  for ($position = 0; $position -lt $count; $position++) {
+    $state = [GraphCodeUiaGateState]::PopupMenuItemState($menu, $position)
+    $items += [PSCustomObject]@{
+      Position  = $position
+      Id        = [GraphCodeUiaGateState]::PopupMenuItemId($menu, $position)
+      Text      = [GraphCodeUiaGateState]::PopupMenuItemText($menu, $position)
+      State     = $state
+      # MF_GRAYED (0x1) and MF_DISABLED (0x2) both render an unavailable item.
+      Enabled   = (($state -band 0x3) -eq 0)
+      Separator = (($state -band 0x800) -ne 0)
+    }
+  }
+  return $items
+}
+
+function Format-PopupMenuItems($items) {
+  if ($null -eq $items -or @($items).Count -eq 0) { return "<none>" }
+  return (@($items) | ForEach-Object {
+    "[$($_.Position)] id=$($_.Id) enabled=$($_.Enabled) separator=$($_.Separator) '$($_.Text)'"
+  }) -join '; '
+}
+
+function Close-PopupMenu(
+  [System.Diagnostics.Process] $process,
+  [IntPtr] $popup,
+  [IntPtr] $ownerWindow,
+  [string] $label,
+  [int] $TimeoutMilliseconds = 3000,
+  [int] $PollMilliseconds = 50
+) {
+  $null = [GraphCodeUiaGateState]::DismissPopupMenu($popup, $ownerWindow)
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $cancelled = $false
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$process.Id) -eq [IntPtr]::Zero) {
+      return $true
+    }
+    if (-not $cancelled -and [DateTime]::UtcNow -gt $deadline.AddMilliseconds(-1500)) {
+      # Escape did not take: fall back to cancelling the owner's modal loop.
+      [GraphCodeUiaGateState]::CancelPopupMenu($ownerWindow)
+      $cancelled = $true
+    }
+    Start-Sleep -Milliseconds $PollMilliseconds
+  }
+  Write-Host "UIA_POPUP_DISMISS_DIAGNOSTICS label=$label cancelSent=$cancelled $(Get-FocusDiagnostics $ownerWindow)"
+  return $false
 }
 
 function Wait-ForDesktopElement(
@@ -2088,18 +2230,85 @@ try {
     "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
 
   $moveProjectUnavailableReason = "Project relocation is unavailable: the daemon wire contract has no authoritative moveProject command."
-  # The live native project right-click context menu (GraphContextMenu.zig,
-  # a real Win32 TrackPopupMenu) always renders "Move Project... (unavailable:
-  # daemon support required)" grayed via MF_GRAYED -- see the direct,
-  # deterministic proof of that exact item's id/text/enabled state in
-  # GraphContextMenu.zig's "the real Move Project menu item is disabled with
-  # its explicit reason inline" test, which exercises the very function
-  # show() uses to build the popup. This harness has no existing capability
-  # to open/inspect a transient native Win32 popup menu live (no action in
-  # this gate does; TrackPopupMenu blocks the message loop while displayed),
-  # so instead we assert the two behaviors this gate CAN observe live: that
-  # invoking the stale/legacy command path never opens Explorer, and that it
-  # surfaces the exact unavailable-status reason.
+  $moveProjectMenuText = "Move Project... (unavailable: daemon support required)"
+  # Live proof of what the native project right-click menu actually renders.
+  # GraphContextMenu.zig builds a real Win32 TrackPopupMenu; the gate asks the
+  # shell to open that exact menu (MainWindow.wm_uia_context_menu -> the same
+  # GraphContextMenu.show() the mouse path calls) and then reads the live HMENU.
+  # Note the observation channel: a popup menu surfaces in the UIA tree only as
+  # an empty Pane with no MenuItem children, so item identity, text, and the
+  # MF_GRAYED state are read through MN_GETHMENU and the Win32 menu API against
+  # the menu the shell itself handed to TrackPopupMenu. The shell thread stays
+  # blocked in the menu's own modal loop while we inspect, which is why the menu
+  # is requested asynchronously and dismissed deterministically afterwards.
+  $projectPopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $projectPopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "project context menu") `
+      "GraphCode shell did not reacquire foreground before the project context menu"
+    Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 1)) `
+      "project context menu request was rejected"
+    $projectPopup = Wait-ForPopupMenu $process $shellWindow "project"
+  }
+  Require ($projectPopup -ne [IntPtr]::Zero) `
+    "project context menu never opened a native popup window"
+  $projectMenuItems = @(Get-PopupMenuItems $projectPopup)
+  $projectMenuDescription = Format-PopupMenuItems $projectMenuItems
+  $projectMenuClosed = Close-PopupMenu $process $projectPopup $shellWindow "project"
+  Require $projectMenuClosed `
+    "project context menu did not dismiss, leaving the shell blocked in its modal loop"
+  $process.Refresh()
+  Require (-not $process.HasExited) `
+    "shell exited with code $($process.ExitCode) while its context menu was inspected"
+  Require ($projectMenuItems.Count -gt 0) `
+    "project context menu exposed no live items: $projectMenuDescription"
+  $projectMenuLabels = @($projectMenuItems | Where-Object { -not $_.Separator } |
+    ForEach-Object { $_.Text })
+  foreach ($expectedLabel in @(
+    "Open Project", "New Loop...`tCtrl+N", "Worktrees...", "Project Settings...",
+    "Show in Explorer", "Close Project", "Move to Recycle Bin...",
+    "Remove from GraphCode...", "Delete All Loops..."
+  )) {
+    Require ($projectMenuLabels -contains $expectedLabel) `
+      "project context menu omitted '$expectedLabel': $projectMenuDescription"
+  }
+  $moveProjectItem = @($projectMenuItems | Where-Object { $_.Id -eq 5149 }) | Select-Object -First 1
+  Require ($null -ne $moveProjectItem) `
+    "project context menu omitted the Move Project item (command 5149): $projectMenuDescription"
+  Require ($moveProjectItem.Text -eq $moveProjectMenuText) `
+    "project context menu Move item text drifted: '$($moveProjectItem.Text)'"
+  Require (-not $moveProjectItem.Enabled) `
+    "project context menu rendered Move Project as available: $projectMenuDescription"
+  $liveStatusAfterMenu = Find-FragmentById $root "status" $rawWalker
+  Require ($null -ne $liveStatusAfterMenu) `
+    "shell UIA tree stopped answering after its context menu was dismissed"
+
+  # Remote projects must not offer local-filesystem relocation at all. This is a
+  # negative assertion that can fail: the same show() switch appends Move and
+  # Move to Recycle Bin only when the project is local.
+  $remotePopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $remotePopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "remote project context menu") `
+      "GraphCode shell did not reacquire foreground before the remote project context menu"
+    Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 2)) `
+      "remote project context menu request was rejected"
+    $remotePopup = Wait-ForPopupMenu $process $shellWindow "remote project"
+  }
+  Require ($remotePopup -ne [IntPtr]::Zero) `
+    "remote project context menu never opened a native popup window"
+  $remoteMenuItems = @(Get-PopupMenuItems $remotePopup)
+  $remoteMenuDescription = Format-PopupMenuItems $remoteMenuItems
+  Require (Close-PopupMenu $process $remotePopup $shellWindow "remote project") `
+    "remote project context menu did not dismiss, leaving the shell blocked in its modal loop"
+  Require (@($remoteMenuItems | Where-Object { $_.Id -eq 5145 }).Count -eq 1) `
+    "remote project context menu omitted Remote Connection Info: $remoteMenuDescription"
+  Require (@($remoteMenuItems | Where-Object { $_.Id -in @(5149, 5151, 5144) }).Count -eq 0) `
+    "remote project context menu offered local-only relocation or Explorer actions: $remoteMenuDescription"
+  $process.Refresh()
+  Require (-not $process.HasExited) `
+    "shell exited with code $($process.ExitCode) after the remote project context menu"
+
+  # The stale/legacy Move command path must still refuse to alias Explorer and
+  # must surface the explicit unavailable reason.
   Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 17)) `
     "project Move fixture mutation was rejected"

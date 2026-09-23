@@ -47,6 +47,13 @@ const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
+/// Deterministic targets and screen position used only by the live UIA gate's
+/// context-menu hook (`MainWindow.wm_uia_context_menu`).
+const uia_context_menu_project_path = "C:\\GraphCode\\fixture";
+const uia_context_menu_remote_project_path = "ssh://builder/GraphCode";
+const uia_context_menu_x: i32 = 160;
+const uia_context_menu_y: i32 = 160;
+
 const InputBounds = struct {
     rail_left: i32,
     workspace_top: i32,
@@ -2051,6 +2058,52 @@ pub const App = struct {
             self,
             &onContextAction,
         );
+    }
+
+    /// Gate-only hook that opens a real native context menu so the live UIA
+    /// gate can inspect what `TrackPopupMenu` actually renders. It calls the
+    /// same `GraphContextMenu.show()` the mouse path calls with the same
+    /// target data; only hit-test routing is bypassed. A watchdog timer ends
+    /// the menu if the harness never dismisses it, so a wedged popup can never
+    /// block the shell thread for the life of the process.
+    fn showUiaContextMenu(self: *App, target_kind: c.WPARAM) void {
+        if (!envFlag("GRAPHCODE_UIA_GATE")) return;
+        const hwnd = self.window.hwnd;
+        const target: GraphContextMenu.Target = switch (target_kind) {
+            1 => .{ .project = .{ .path = uia_context_menu_project_path, .remote = false } },
+            2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true } },
+            3 => blk: {
+                const graph = self.model.graph orelse return;
+                if (graph.nodes.items.len == 0) return;
+                break :blk .{ .node = .{
+                    .project_path = graph.project.path,
+                    .id = graph.nodes.items[0].id,
+                    .composite = std.mem.eql(u8, graph.nodes.items[0].loop_type, "composite") or
+                        std.mem.eql(u8, graph.nodes.items[0].loop_type, "proactive"),
+                    .can_arm = std.mem.eql(u8, graph.nodes.items[0].pilot_state, "piloted"),
+                    .unwired = self.nodeIsUnwired(graph.nodes.items[0].id),
+                    .follows_template = graph.nodes.items[0].follows_template,
+                } };
+            },
+            4 => .background,
+            5 => .quick_chats,
+            else => return,
+        };
+        _ = c.SetTimer(
+            hwnd,
+            MainWindow.menu_watchdog_timer_id,
+            MainWindow.menu_watchdog_interval_ms,
+            null,
+        );
+        GraphContextMenu.show(
+            hwnd,
+            target,
+            uia_context_menu_x,
+            uia_context_menu_y,
+            self,
+            &onContextAction,
+        );
+        _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
     }
 
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
@@ -4866,7 +4919,12 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_TIMER => if (wparam == MainWindow.timer_id) {
+        c.WM_TIMER => if (wparam == MainWindow.menu_watchdog_timer_id) {
+            _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
+            _ = c.EndMenu();
+            result.* = 0;
+            return true;
+        } else if (wparam == MainWindow.timer_id) {
             app.smoke_tick += 1;
             if (!app.tray.added and app.smoke_tick % 10 == 0) {
                 app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
@@ -5001,6 +5059,11 @@ fn onWindowMessage(
         },
         MainWindow.wm_uia_fixture_mutate => {
             app.mutateUiaFixture(wparam);
+            result.* = 0;
+            return true;
+        },
+        MainWindow.wm_uia_context_menu => {
+            app.showUiaContextMenu(wparam);
             result.* = 0;
             return true;
         },

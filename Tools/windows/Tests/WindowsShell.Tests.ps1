@@ -379,6 +379,20 @@ Invoke-Native "Update offer modal deferral executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\UpdateOfferPresentation.zig } finally { Pop-Location }
 }
+Invoke-Native "Context menu and gate fixture message executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\GraphContextMenu.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    if ($LASTEXITCODE -ne 0) { return }
+    & $zig test src\MainWindow.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
 Invoke-Native "Jump palette executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

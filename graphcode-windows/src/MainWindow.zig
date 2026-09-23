@@ -169,6 +169,13 @@ pub const timer_id: usize = 41;
 pub const wm_app_tick: c.UINT = c.WM_APP + 41;
 pub var restore_message: c.UINT = 0;
 pub const wm_uia_fixture_mutate: c.UINT = c.WM_APP + 42;
+pub const wm_uia_context_menu: c.UINT = c.WM_APP + 44;
+
+/// Watchdog that ends a gate-opened popup menu if the harness never dismisses
+/// it. `TrackPopupMenu` runs its own modal loop, so without this a wedged
+/// popup would block the shell thread for the lifetime of the process.
+pub const menu_watchdog_timer_id: usize = 43;
+pub const menu_watchdog_interval_ms: c.UINT = 10000;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsShell");
 
@@ -458,8 +465,15 @@ test "workspace commands use a dedicated command range" {
     try std.testing.expectEqual(Command.workspace_new, commandFromId(4800).?);
 }
 
-test "native menu labels are NUL terminated UTF-16" {
-    const wide = try toWideZ(std.testing.allocator, "Clone Repository…");
+test "gate fixture messages and timers never collide with shell traffic" {
+    try std.testing.expect(wm_uia_context_menu != wm_app_tick);
+    try std.testing.expect(wm_uia_context_menu != wm_uia_fixture_mutate);
+    try std.testing.expect(wm_uia_context_menu > c.WM_APP);
+    try std.testing.expect(menu_watchdog_timer_id != timer_id);
+    try std.testing.expect(menu_watchdog_interval_ms > 0);
+}
+
+test "native menu labels are NUL terminated UTF-16" {    const wide = try toWideZ(std.testing.allocator, "Clone Repository…");
     defer std.testing.allocator.free(wide);
     try std.testing.expectEqual(@as(u16, 0), wide[wide.len]);
     try std.testing.expect(wide.len > "Clone Repository".len);

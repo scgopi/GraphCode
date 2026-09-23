@@ -247,6 +247,32 @@ try {
     throw "RED: UIA live gate New Loop invocation is not preceded by verified foreground recovery at every site"
   }
   $shellTests = Get-Content (Join-Path $PSScriptRoot "WindowsShell.Tests.ps1") -Raw
+  if ($uiaLiveGateSource -notmatch 'function Wait-ForPopupMenu' -or
+      $uiaLiveGateSource -notmatch 'function Get-PopupMenuItems' -or
+      $uiaLiveGateSource -notmatch 'function Close-PopupMenu' -or
+      $uiaLiveGateSource -notmatch 'FindPopupMenuWindow' -or
+      $uiaLiveGateSource -notmatch 'SendMessage\(popup, 0x01E1, UIntPtr\.Zero, IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch 'PostMessage\(window, 0x802C, \(UIntPtr\)target, IntPtr\.Zero\)') {
+    throw "RED: UIA live gate cannot open, read, or dismiss a native TrackPopupMenu popup"
+  }
+  if ($uiaLiveGateSource -notmatch '\$moveProjectMenuText = "Move Project\.\.\. \(unavailable: daemon support required\)"' -or
+      $uiaLiveGateSource -notmatch '(?s)PostContextMenu\(\$shellWindow, 1\).*?Wait-ForPopupMenu \$process \$shellWindow "project"' -or
+      $uiaLiveGateSource -notmatch 'Require \(-not \$moveProjectItem\.Enabled\)' -or
+      $uiaLiveGateSource -notmatch '\$moveProjectItem\.Text -eq \$moveProjectMenuText' -or
+      $uiaLiveGateSource -notmatch '(?s)PostContextMenu\(\$shellWindow, 2\).*?\$_\.Id -in @\(5149, 5151, 5144\)' -or
+      $uiaLiveGateSource -notmatch 'project context menu did not dismiss, leaving the shell blocked in its modal loop') {
+    throw "RED: UIA live gate does not assert the live project context menu's disabled Move item and deterministic dismissal"
+  }
+  if ($shellTests -notmatch '(?s)Context menu and gate fixture message executable tests.*?zig test src\\GraphContextMenu\.zig' -or
+      $shellTests -notmatch '(?s)Context menu and gate fixture message executable tests.*?zig test src\\MainWindow\.zig') {
+    throw "RED: Windows shell validation does not run the context menu and gate fixture message tests"
+  }
+  $appSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\App.zig") -Raw
+  if ($appSource -notmatch 'fn showUiaContextMenu' -or
+      $appSource -notmatch 'MainWindow\.wm_uia_context_menu => \{' -or
+      $appSource -notmatch '(?s)wparam == MainWindow\.menu_watchdog_timer_id.*?c\.EndMenu\(\)') {
+    throw "RED: the shell cannot open a gate-requested context menu, or an abandoned popup can block its message loop forever"
+  }
   if ($shellTests -notmatch '(?s)Windows update feed executable tests.*?zig test src\\WindowsUpdates\.zig.*?-lwinhttp') {
     throw "RED: Windows shell validation does not run the native updater tests"
   }
