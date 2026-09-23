@@ -73,11 +73,15 @@ jobs:
           GRAPHCODE_SIGNING_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_THUMBPRINT }}
           GRAPHCODE_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
         run: |
-          $arguments = @(
-            "-Tag", $env:RELEASE_TAG,
-            "-OutputDirectory", ".build/windows/release-publish")
-          if ($env:RELEASE_PUBLISH -eq "true") { $arguments += "-Publish" }
-          if ($env:RELEASE_ALLOW_UNSIGNED_PUBLISH -eq "true") { $arguments += "-AllowUnsignedPublish" }
+          # A hashtable, not an array: array splatting passes its elements
+          # positionally, so @("-Tag", $tag) reaches release.ps1 with "-Tag"
+          # itself bound to -Tag and the real tag bound to -OutputDirectory.
+          $arguments = @{
+            Tag = $env:RELEASE_TAG
+            OutputDirectory = ".build/windows/release-publish"
+          }
+          if ($env:RELEASE_PUBLISH -eq "true") { $arguments["Publish"] = $true }
+          if ($env:RELEASE_ALLOW_UNSIGNED_PUBLISH -eq "true") { $arguments["AllowUnsignedPublish"] = $true }
           ./Tools/windows/release.ps1 @arguments
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -86,3 +90,4 @@ jobs:
           name: graphcode-windows-x86_64
           path: .build/windows/release-publish/publish/
           if-no-files-found: warn
+

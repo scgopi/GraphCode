@@ -339,9 +339,102 @@ exit 0
     }
   }
   Write-Output "Release workflow contract: PASS"
+
+  # 9. The workflow's own invocation actually binds release.ps1's parameters.
+  # Contract 8 only proves the workflow mentions the script. It cannot catch a
+  # call that reaches the script with everything bound to the wrong parameter,
+  # which is what array splatting does: @("-Tag", $tag) is passed positionally,
+  # so "-Tag" itself lands in $Tag. This runs the workflow's real argument
+  # construction against a probe that reports what it received.
+  $workflowLines = $workflow -split "\r?\n"
+  $packageBlock = $null
+  for ($i = 0; $i -lt $workflowLines.Count; $i++) {
+    if ($workflowLines[$i] -notmatch "^(?<indent>\s*)run:\s*\|\s*$") { continue }
+    $keyIndent = $Matches["indent"].Length
+    $body = @()
+    for ($j = $i + 1; $j -lt $workflowLines.Count; $j++) {
+      $line = $workflowLines[$j]
+      if ($line.Trim().Length -eq 0) { $body += ""; continue }
+      $indent = $line.Length - $line.TrimStart().Length
+      if ($indent -le $keyIndent) { break }
+      $body += $line
+    }
+    if (($body -join "`n") -match "release\.ps1") {
+      $packageBlock = ($body -join "`n")
+      break
+    }
+  }
+  if (-not $packageBlock) { throw "the release workflow no longer invokes release.ps1 from a run block" }
+
+  $probe = Join-Path $fixture "invocation-probe.ps1"
+  $probeLog = Join-Path $fixture "invocation-probe.json"
+  # Mirrors release.ps1's own parameter block, including the several optional
+  # [string] parameters that let a positionally-splatted array bind silently
+  # instead of failing outright.
+  @'
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)][string] $Tag,
+  [string] $OutputDirectory,
+  [string] $WinghosttyRoot,
+  [string] $ZmxRoot,
+  [string] $Zig0152,
+  [string] $Zig0160,
+  [string] $PackageScript,
+  [string] $GitHubCli = "gh",
+  [switch] $Publish,
+  [switch] $AllowUnsignedPublish
+)
+([ordered]@{
+  tag = $Tag
+  outputDirectory = $OutputDirectory
+  publish = [bool] $Publish
+  allowUnsignedPublish = [bool] $AllowUnsignedPublish
+} | ConvertTo-Json -Compress) | Set-Content -LiteralPath $env:GRAPHCODE_PROBE_LOG -Encoding utf8
+'@ | Set-Content -LiteralPath $probe -Encoding utf8
+
+  # Run the workflow's own lines, with the script path redirected at the probe.
+  $harness = $packageBlock -replace "\./Tools/windows/release\.ps1", "& `$probeScript"
+  foreach ($case in @(
+      @{ publish = "false"; unsigned = "false" },
+      @{ publish = "true"; unsigned = "true" })) {
+    Remove-Item -LiteralPath $probeLog -ErrorAction SilentlyContinue
+    $env:GRAPHCODE_PROBE_LOG = $probeLog
+    $env:RELEASE_TAG = "v0.1.74"
+    $env:RELEASE_PUBLISH = $case.publish
+    $env:RELEASE_ALLOW_UNSIGNED_PUBLISH = $case.unsigned
+    $script = "`$probeScript = `"$probe`"`n" + $harness
+    $scriptFile = Join-Path $fixture "invocation-harness.ps1"
+    Set-Content -LiteralPath $scriptFile -Value $script -Encoding utf8
+    $probeOutput = & pwsh -NoProfile -File $scriptFile 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $probeLog)) {
+      throw "the release workflow's invocation of release.ps1 failed: $probeOutput"
+    }
+    $received = Get-Content -LiteralPath $probeLog -Raw | ConvertFrom-Json
+    if ($received.tag -ne "v0.1.74") {
+      throw ("the release workflow bound the wrong value to -Tag: '" + $received.tag +
+        "' (array splatting passes elements positionally; use a hashtable)")
+    }
+    if ($received.outputDirectory -notlike "*release-publish*") {
+      throw "the release workflow bound the wrong value to -OutputDirectory: '$($received.outputDirectory)'"
+    }
+    $wantPublish = $case.publish -eq "true"
+    $wantUnsigned = $case.unsigned -eq "true"
+    if ($received.publish -ne $wantPublish -or $received.allowUnsignedPublish -ne $wantUnsigned) {
+      throw ("the release workflow did not forward the publishing switches: " +
+        ($received | ConvertTo-Json -Compress))
+    }
+  }
+  foreach ($name in @("GRAPHCODE_PROBE_LOG", "RELEASE_TAG", "RELEASE_PUBLISH",
+      "RELEASE_ALLOW_UNSIGNED_PUBLISH")) {
+    Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
+  }
+  Write-Output "Release workflow invocation binding: PASS"
 } finally {
   foreach ($name in @("GRAPHCODE_STUB_LOG", "GRAPHCODE_STUB_SIGNING_LABEL",
-      "GRAPHCODE_STUB_BUILD_FAILS", "GRAPHCODE_STUB_GH_FAILS")) {
+      "GRAPHCODE_STUB_BUILD_FAILS", "GRAPHCODE_STUB_GH_FAILS",
+      "GRAPHCODE_PROBE_LOG", "RELEASE_TAG", "RELEASE_PUBLISH",
+      "RELEASE_ALLOW_UNSIGNED_PUBLISH")) {
     Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
   }
   if (Test-Path -LiteralPath $fixture) {
