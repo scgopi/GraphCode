@@ -74,7 +74,7 @@ function Get-AuthenticodeSignature([string] $FilePath) {
 
 try {
   $signed = [pscustomobject]@{ signing = "signed" }
-  $unsigned = [pscustomobject]@{ signing = "UNSIGNED (development artifact; not code signed)" }
+  $unsigned = [pscustomobject]@{ signing = "UNSIGNED (not code signed)" }
   $root = New-TestPackage
   Assert-Rejected "rewritten DLL and manifest" {
     Add-Content (Join-Path $root "bin\swiftCore.dll") "tampered"

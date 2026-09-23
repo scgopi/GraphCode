@@ -22,10 +22,10 @@ daemon endpoint must become reachable or the previous installation is restored.
 The daemon's actual `%USERPROFILE%\.graphcode` data directory is preserved by
 uninstall unless `-RemoveUserData` is explicitly requested.
 
-Unsigned artifacts are explicitly marked `UNSIGNED (development artifact; not
-code signed)` in `metadata.json` and `SIGNING.txt`. Their checksums detect
-corruption, not publisher authenticity. They remain accepted for development
-unless `-TrustedSignerThumbprint` is supplied.
+Unsigned artifacts are explicitly marked `UNSIGNED (not code signed)` in
+`metadata.json` and `SIGNING.txt`. This is also the current Windows release
+format. Their checksums detect corruption, not publisher authenticity. They
+remain accepted unless `-TrustedSignerThumbprint` is supplied.
 
 ## Standalone setup without a checkout
 
@@ -46,9 +46,9 @@ powershell.exe -NoProfile -File .\extracted\GraphCode\GraphCode-Setup.ps1 `
   -Command Install
 ```
 
-For signed releases, authenticate the setup script **before executing it**, as
-shown under Signed setup bootstrap below. A script cannot establish its own
-authenticity after it has already started running.
+Optional signed packages can authenticate the setup script **before executing
+it**, as shown under Signed setup bootstrap below. A script cannot establish its
+own authenticity after it has already started running.
 
 The default install root is `%LOCALAPPDATA%\GraphCode\current`. Setup creates
 the per-user Start menu shortcut, user PATH entry, and current-user scheduled
@@ -175,11 +175,11 @@ Use the same bootstrap for `Verify`, `Upgrade`, and `Uninstall`, changing only
 the final command and any explicit package/install-root arguments. The setup's
 publisher check does not replace the catalog and complete payload verification.
 
-Use a trusted RFC 3161 timestamp service via `-SignTimestampUrl` for releases.
-Certificate provisioning, publisher-pin distribution/rotation, timestamp service
-selection, provider release-ref retention, and publication remain release-owner
-prerequisites. The bundled setup is not a published, production-signed installer
-and does not enable automatic download/install/relaunch in the native updater.
+If a downstream build opts into Authenticode, use a trusted RFC 3161 timestamp
+service via `-SignTimestampUrl`. Certificate provisioning and publisher-pin
+distribution/rotation are not GraphCode Windows release prerequisites. The
+bundled setup does not enable automatic download/install/relaunch in the native
+updater.
 Older EXE-only signed packages without a catalog are deliberately rejected.
 
 `Packaging.Signing.Tests.ps1` exercises real Windows catalogs and tampering of
@@ -212,9 +212,8 @@ Like the macOS DMG — which a maintainer builds locally with `make release-dmg`
 and attaches with `gh release create` — Windows publication is deliberately
 manual. The workflow has a single `workflow_dispatch` trigger and never fires on
 a tag push or on a published release. Its inputs are the existing release `tag`,
-`publish` (default `false`), and `allow_unsigned_publish` (default `false`). The
-built artifact is always uploaded as a workflow artifact, so a build can be
-inspected without touching any release.
+and `publish` (default `false`). The built artifact is always uploaded as a
+workflow artifact, so a build can be inspected without touching any release.
 
 ```powershell
 pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3
@@ -224,9 +223,9 @@ pwsh -NoProfile -File Tools\windows\release.ps1 -Tag v1.2.3 -Publish
 The tag supplies the package version (`v1.2.3` and `1.2.3-beta1` are accepted;
 `dev` versions and anything that is not a release version are refused before
 anything is built). `release.ps1` then builds through `package.ps1`, re-runs
-`package.ps1 -Command Verify` — pinned to the expected publisher when signing —
-reads the built package's own `metadata.json`, and **refuses to continue if the
-package's declared signing state contradicts what the run actually did**.
+`package.ps1 -Command Verify`, reads the built package's own `metadata.json`, and
+**refuses to continue unless the package reports the standard unsigned release
+state**.
 
 Locally, `Tools\windows\stage-swift-products.ps1` produces the Swift half of the
 release inputs (`graphcoded.exe`, `graphcode.exe`, and the Swift runtime DLLs in
@@ -235,48 +234,22 @@ the pinned providers.
 
 ### Asset names
 
-| Build | Asset | Publishable |
-|---|---|---|
-| signed | `graphcode-windows-x86_64.zip` + `.sha256` | yes |
-| unsigned | `graphcode-windows-x86_64-unsigned.zip` + `.sha256` | only with `allow_unsigned_publish` |
+The release asset is `graphcode-windows-x86_64.zip` with a `.sha256` sidecar,
+matching the versionless macOS asset convention so
+`releases/latest/download/graphcode-windows-x86_64.zip` resolves. The package's
+`metadata.json` and `SIGNING.txt` continue to say explicitly that it is unsigned.
 
-The signed name is versionless, matching `graphcode-macos-arm64.dmg`, so
-`releases/latest/download/graphcode-windows-x86_64.zip` resolves. An unsigned
-development build can never occupy that name.
+Low-level `package.ps1` support for `-SignCertificate`,
+`-SignTimestampUrl`, and `-TrustedSignerThumbprint` remains available for
+downstream or future use and is covered by the signing-specific packaging tests.
+The release workflow deliberately does not consume certificate secrets or make
+signing a publication requirement.
 
-### Secrets that enable signing
-
-Set these as repository secrets (**Settings → Secrets and variables → Actions →
-New repository secret**). No certificate material is stored in this repository.
-
-| Secret | Format | Required |
-|---|---|---|
-| `WINDOWS_SIGNING_CERTIFICATE` | Base64 text of a PFX holding the code-signing certificate **and** its private key (`[Convert]::ToBase64String([IO.File]::ReadAllBytes('signing.pfx'))`) | yes |
-| `WINDOWS_SIGNING_CERTIFICATE_PASSWORD` | That PFX's password | yes |
-| `WINDOWS_SIGNING_THUMBPRINT` | The certificate's SHA-1 thumbprint, exactly 40 hexadecimal characters (`package.ps1` validates `^[0-9a-fA-F]{40}$`) | yes |
-| `WINDOWS_SIGNING_TIMESTAMP_URL` | RFC 3161 timestamp service `https://` URL | recommended |
-
-The PFX is required because release jobs run on ephemeral GitHub-hosted runners,
-which have no certificate store to pre-provision. The workflow imports it into
-`Cert:\CurrentUser\My`, **requires the imported certificate's own thumbprint to
-equal `WINDOWS_SIGNING_THUMBPRINT`**, passes only that thumbprint to
-`package.ps1 -SignCertificate`, and removes both the imported certificate and the
-decoded PFX before the job ends. A mismatched or malformed thumbprint aborts
-before anything is built.
-
-With **none** of the signing secrets configured the workflow still succeeds and
-produces the unsigned development artifact described above. Supplying only
-*some* of them is a hard failure rather than a silent downgrade to unsigned, so a
-misconfigured secret can never be mistaken for a signed release.
-
-`Release.Tests.ps1` covers tag resolution, unsigned labeling and its publication
-gate, incomplete signing material, thumbprint pinning and certificate cleanup,
-the signing-state honesty gate, build/upload failure propagation, and the
-workflow's own triggers, action pinning, and input defaults. It runs first under
-`validate.ps1 -Task packaging` and needs no certificate, network access, or real
-build; its signed path uses an ephemeral self-signed certificate that it removes
-again. Publishing plumbing is not production-signing evidence: no certificate
-exists yet, and no Windows asset has been published.
+`Release.Tests.ps1` covers tag resolution, standard asset naming, honest unsigned
+metadata, direct publication, unexpected signing-state rejection, build/upload
+failure propagation, and the workflow's own triggers, action pinning, and
+parameter binding. It runs first under `validate.ps1 -Task packaging` and needs
+no certificate, network access, or real build.
 
 ## Retained provider sources
 

@@ -64,17 +64,14 @@ event checks. `Tools\windows\package.ps1` builds and verifies self-contained ZIP
 packages and supports per-user install/upgrade/rollback. Each ZIP includes a
 standalone `GraphCode-Setup.ps1` for Windows PowerShell 5.1 or PowerShell 7, so
 installation and uninstall no longer require a source checkout or build tools.
-Opt-in signed packages
-bind the complete payload with a publisher-pinned Authenticode catalog; see
-`Tools\windows\PACKAGING.md`, including setup-script verification before execution.
 `Tools\windows\release.ps1` and `.github\workflows\windows-release.yml` add the
-maintainer-triggered path that builds such a package and can attach it to an
-existing release; its "Publishing a Windows release" section lists the signing
-secrets. That plumbing does not itself sign anything: with no signing secrets
-configured it produces a clearly labeled unsigned development artifact that it
-refuses to publish without an explicit opt-in.
-There is not yet a published production-signed installer or
-an automatic install/relaunch path in the native updater.
+maintainer-triggered path that builds, verifies, and can attach the standard
+unsigned Windows ZIP to an existing release. Package metadata and `SIGNING.txt`
+state that the artifact is not code signed; the SHA-256 sidecar detects download
+corruption but does not authenticate the publisher. Optional Authenticode
+packaging support remains documented in `Tools\windows\PACKAGING.md`, but it is
+not a release prerequisite. There is not yet an automatic install/relaunch path
+in the native updater.
 
 ## Update checks
 

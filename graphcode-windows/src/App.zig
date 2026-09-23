@@ -1638,14 +1638,14 @@ pub const App = struct {
             self.window.hwnd,
             self.allocator,
             version,
-            "In-app Windows installation is unavailable until a published, signed Windows artifact exists.",
+            "In-app Windows installation is not implemented yet. Download the Windows ZIP from the release page.",
         ) catch {
             self.setStatus("Unable to prepare the update offer");
             return;
         };
         switch (action) {
             .later => self.setStatus("Update offer deferred"),
-            .install_unavailable => self.setStatus("Install is unavailable until a signed Windows artifact is published"),
+            .install_unavailable => self.setStatus("In-app installation is not implemented; download the Windows ZIP"),
             .release_notes => {
                 const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
                     self.setStatus("Unable to encode the release URL");

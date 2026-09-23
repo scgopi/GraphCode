@@ -71,7 +71,7 @@ function Write-Metadata([string] $root, [string] $version) {
     hostAssets = @(Get-ChildItem -LiteralPath (Join-Path $root "bin") -File -ErrorAction SilentlyContinue |
       Where-Object { $_.Name -match "winghostty|host" } | ForEach-Object { "bin/$($_.Name)" })
     providerPins = $pins
-    signing = if ($SignCertificate) { "signed" } else { "UNSIGNED (development artifact; not code signed)" }
+    signing = if ($SignCertificate) { "signed" } else { "UNSIGNED (not code signed)" }
     userData = "%USERPROFILE%/.graphcode (preserved by uninstall)"
     providerProvenance = "provider-provenance.json"
     setup = "GraphCode-Setup.ps1"

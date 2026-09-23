@@ -17,11 +17,6 @@ on:
         required: false
         type: boolean
         default: false
-      allow_unsigned_publish:
-        description: "Allow attaching a clearly labeled UNSIGNED development artifact"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -49,29 +44,14 @@ jobs:
         shell: pwsh
         run: ./Tools/windows/stage-swift-products.ps1
 
-      - name: Mask the declared signing thumbprint
-        shell: pwsh
-        env:
-          GRAPHCODE_SIGNING_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_THUMBPRINT }}
-        run: |
-          if ($env:GRAPHCODE_SIGNING_THUMBPRINT) {
-            Write-Host "::add-mask::$env:GRAPHCODE_SIGNING_THUMBPRINT"
-          }
-
-      # With none of the signing secrets configured this step still succeeds and
-      # produces graphcode-windows-x86_64-unsigned.zip, which release.ps1 will
-      # not attach to a release unless allow_unsigned_publish was requested.
+      # Windows releases are currently distributed as unsigned ZIP packages.
+      # package.ps1 records that state explicitly in package metadata.
       - name: Package the Windows release artifact
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_PUBLISH: ${{ inputs.publish }}
-          RELEASE_ALLOW_UNSIGNED_PUBLISH: ${{ inputs.allow_unsigned_publish }}
-          GRAPHCODE_SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE }}
-          GRAPHCODE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-          GRAPHCODE_SIGNING_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_THUMBPRINT }}
-          GRAPHCODE_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
         run: |
           # A hashtable, not an array: array splatting passes its elements
           # positionally, so @("-Tag", $tag) reaches release.ps1 with "-Tag"
@@ -81,7 +61,6 @@ jobs:
             OutputDirectory = ".build/windows/release-publish"
           }
           if ($env:RELEASE_PUBLISH -eq "true") { $arguments["Publish"] = $true }
-          if ($env:RELEASE_ALLOW_UNSIGNED_PUBLISH -eq "true") { $arguments["AllowUnsignedPublish"] = $true }
           ./Tools/windows/release.ps1 @arguments
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -90,4 +69,3 @@ jobs:
           name: graphcode-windows-x86_64
           path: .build/windows/release-publish/publish/
           if-no-files-found: warn
-
