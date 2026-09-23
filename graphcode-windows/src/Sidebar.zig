@@ -425,7 +425,7 @@ pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32
 pub fn worktreeRowTopForModel(model: *const GraphModel.Model, loop_count: usize, index: usize) i32 {
     const layout = Layout{
         .base = Tokens.header_height + 78,
-        .project_count = model.recent_projects.items.len,
+        .project_count = visibleProjectCount(model),
         .project_heading_count = projectHeadingCount(model),
         .loop_count = loop_count,
         .worktree_count = 0,
@@ -504,7 +504,7 @@ pub fn appendRows(
     }
     if (!local_collapsed) {
         for (model.recent_projects.items, 0..) |project, index| {
-            if (project.isRemote() or isProjectOpen(model, project.path)) continue;
+            if (!projectIsVisibleInSection(model, project, .local)) continue;
             try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
             top += 24;
         }
@@ -515,13 +515,18 @@ pub fn appendRows(
     }
     if (!remote_collapsed) {
         for (model.recent_projects.items, 0..) |project, index| {
-            if (!project.isRemote() or isProjectOpen(model, project.path)) continue;
+            if (!projectIsVisibleInSection(model, project, .remote)) continue;
             try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
             top += 24;
         }
     }
     try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
     top += 62;
+    for (model.open_projects.items, 0..) |project, index| {
+        if (hasGraphForProject(model, project.path)) continue;
+        try rows.append(allocator, .{ .kind = .open_project, .index = index, .top = top, .project_path = project.path });
+        top += 62;
+    }
     if (model.graphs.items.len != 0 or model.graph != null) {
         if (model.graphs.items.len != 0) {
             for (model.graphs.items, 0..) |summary, graph_index| {
@@ -572,7 +577,7 @@ pub fn appendRows(
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
     var loop_count: usize = 0;
-    var graph_section_height: i32 = 62;
+    var graph_section_height: i32 = 62 + @as(i32, @intCast(openProjectPlaceholderCount(model) * 62));
     if (model.graphs.items.len != 0) {
         for (model.graphs.items) |summary| {
             loop_count += summary.nodes.items.len;
@@ -580,12 +585,12 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
         }
     } else if (model.graph) |graph| {
         loop_count = graph.nodes.items.len;
-        graph_section_height = 124 + @as(i32, @intCast(graph.nodes.items.len * 24));
+        graph_section_height += 62 + @as(i32, @intCast(graph.nodes.items.len * 24));
     }
 
     return .{
         .base = Tokens.header_height + 78,
-        .project_count = model.recent_projects.items.len,
+        .project_count = visibleProjectCount(model),
         .project_heading_count = projectHeadingCount(model),
         .loop_count = loop_count,
         .worktree_count = if (inspection) |value| value.entries.items.len else 0,
@@ -598,7 +603,8 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
 
 pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
     var top = Tokens.header_height + 78 +
-        @as(i32, @intCast((model.recent_projects.items.len + projectHeadingCount(model)) * 24)) + 36;
+        @as(i32, @intCast((visibleProjectCount(model) + projectHeadingCount(model)) * 24)) +
+        @as(i32, @intCast(openProjectPlaceholderCount(model) * 62)) + 36;
     for (model.graphs.items[0..@min(graph_index, model.graphs.items.len)]) |summary| {
         top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
     }
@@ -614,7 +620,8 @@ pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_in
 
 pub fn sharedWorktreeTop(model: *const GraphModel.Model, index: usize) i32 {
     var top = Tokens.header_height + 78 +
-        @as(i32, @intCast((model.recent_projects.items.len + projectHeadingCount(model)) * 24)) + 36;
+        @as(i32, @intCast((visibleProjectCount(model) + projectHeadingCount(model)) * 24)) +
+        @as(i32, @intCast(openProjectPlaceholderCount(model) * 62)) + 36;
     for (model.graphs.items) |summary| {
         top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
     }
@@ -644,18 +651,57 @@ pub fn rowAt(
 }
 
 fn hasLocalProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| if (!project.isRemote() and !isProjectOpen(model, project.path)) return true;
+    for (model.recent_projects.items) |project| {
+        if (projectIsVisibleInSection(model, project, .local)) return true;
+    }
     return false;
 }
 
 fn hasRemoteProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| if (project.isRemote() and !isProjectOpen(model, project.path)) return true;
+    for (model.recent_projects.items) |project| {
+        if (projectIsVisibleInSection(model, project, .remote)) return true;
+    }
     return false;
+}
+
+const ProjectSection = enum { local, remote };
+
+fn projectIsVisibleInSection(
+    model: *const GraphModel.Model,
+    project: GraphModel.Project,
+    section: ProjectSection,
+) bool {
+    if (isProjectOpen(model, project.path)) return false;
+    return project.isRemote() == (section == .remote);
+}
+
+fn visibleProjectCount(model: *const GraphModel.Model) usize {
+    var count: usize = 0;
+    for (model.recent_projects.items) |project| {
+        if (projectIsVisibleInSection(model, project, if (project.isRemote()) .remote else .local)) count += 1;
+    }
+    return count;
 }
 
 fn projectHeadingCount(model: *const GraphModel.Model) usize {
     return @as(usize, @intFromBool(hasLocalProjects(model))) +
         @as(usize, @intFromBool(hasRemoteProjects(model)));
+}
+
+fn hasGraphForProject(model: *const GraphModel.Model, path: []const u8) bool {
+    for (model.graphs.items) |graph| {
+        if (std.mem.eql(u8, graph.project.path, path)) return true;
+    }
+    if (model.graph) |graph| return std.mem.eql(u8, graph.project.path, path);
+    return false;
+}
+
+fn openProjectPlaceholderCount(model: *const GraphModel.Model) usize {
+    var count: usize = 0;
+    for (model.open_projects.items) |project| {
+        if (!hasGraphForProject(model, project.path)) count += 1;
+    }
+    return count;
 }
 
 fn isProjectOpen(model: *const GraphModel.Model, path: []const u8) bool {
@@ -1090,7 +1136,8 @@ pub fn hitTestProject(x: i32, y: i32, model: *const GraphModel.Model, scroll_off
 pub fn hitTestOverviewLoop(x: i32, y: i32, model: *const GraphModel.Model, scroll_offset: i32, viewport_bottom: i32) ?usize {
     if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
     const top = Tokens.header_height + 78 +
-        @as(i32, @intCast(model.recent_projects.items.len * 24)) - scroll_offset;
+        @as(i32, @intCast((visibleProjectCount(model) + projectHeadingCount(model)) * 24)) -
+        scroll_offset;
     if (model.graph == null and model.graphs.items.len == 0 or y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 24));
     if (index >= layoutFor(model, null).loop_count) return null;
@@ -1337,12 +1384,14 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
         .branch = @constCast("branch"),
     });
     const short_max = maxScroll(&model, &inspection, 400, null);
-    const expected_short = sidebarSectionBottom(&model, &inspection, null) + 30 + 4 * 34 - 400;
+    // Activity adds its section gap, control row, and card below Needs You.
+    const expected_short = sidebarSectionBottom(&model, &inspection, null) + 30 + 4 * 34 + 18 + 24 + 34 - 400;
     try std.testing.expectEqual(expected_short, short_max);
     const activity_only_max = maxScroll(&model, &inspection, 400, null);
     try std.testing.expectEqual(short_max, activity_only_max);
     var scroll: i32 = 0;
-    for (0..10) |_| scroll = clampScroll(scroll + 40, short_max);
+    // Overshoot comfortably so this assertion always exercises clamping.
+    for (0..40) |_| scroll = clampScroll(scroll + 40, short_max);
     try std.testing.expectEqual(short_max, scroll);
     while (model.activity.items.len > 1) {
         const event = model.activity.pop() orelse break;
@@ -1368,7 +1417,7 @@ test "sidebar scroll clamps overflow, shrink, and resize" {
     }
     inspection.entries.shrinkRetainingCapacity(2);
     const reduced_max = maxScroll(&model, &inspection, 500, null);
-    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection, null) + 30 + 1 * 34 - 500, 0);
+    const expected_reduced = @max(sidebarSectionBottom(&model, &inspection, null) + 30 + 1 * 34 + 18 + 24 + 34 - 500, 0);
     try std.testing.expectEqual(expected_reduced, reduced_max);
     scroll = clampScroll(scroll, reduced_max);
     try std.testing.expectEqual(reduced_max, scroll);
