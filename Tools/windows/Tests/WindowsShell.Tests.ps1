@@ -370,70 +370,6 @@ Invoke-Native "Accessibility contract executable tests" {
   try { & $zig test src\Accessibility.zig } finally { Pop-Location }
 }
 
-# Structural anti-drift guard (issue #424): every graphcode-windows\src\*.zig file
-# that declares at least one `test "..."` block must be executed by one of the
-# `zig test` invocations below. Add the new file's name here as part of wiring it
-# in; forgetting either step (the invocation or this list) fails this guard
-# instead of letting the tests silently never run.
-#
-# GraphContextMenu.zig and MainWindow.zig are intentionally NOT listed: they are
-# being wired in by in-flight work on issue #418 (branch
-# coneilen-microsoft-context-menu-uia-automation / PR #422) to avoid a duplicate
-# harness entry. Until that work lands, this guard is EXPECTED to report exactly
-# those two files as missing - that is this guard doing its job, not a bug in
-# this change. Once #418 lands (before or after this PR), the guard will pass
-# because their entries will exist.
-$wiredTestFiles = @(
-  "Wire.zig",
-  "Codespaces.zig",
-  "WindowsCodespaceDialog.zig",
-  "Forms.zig",
-  "Win32.zig",
-  "NativeForms.zig",
-  "JumpPalette.zig",
-  "WindowsOnboarding.zig",
-  "WindowsProductSettings.zig",
-  "WindowsUpdates.zig",
-  "FrameBuffer.zig",
-  "DaemonClient.zig",
-  "DaemonSupervisor.zig",
-  "WorkspaceLayout.zig",
-  "InputRouter.zig",
-  "TerminalSurface.zig",
-  "GraphModel.zig",
-  "CanvasInput.zig",
-  "GraphCanvas.zig",
-  "WorktreeStatus.zig",
-  "DraftAttachments.zig",
-  "WorktreeDialog.zig",
-  "Dpi.zig",
-  "TemplateLibrary.zig",
-  "WorkspaceLifecycle.zig",
-  "Navigation.zig",
-  "QuickChats.zig",
-  "WorkspaceControls.zig",
-  "Sidebar.zig",
-  "WindowsRepositoryDialogs.zig",
-  "GdiGradient.zig",
-  "AppFont.zig",
-  "GdiplusAA.zig",
-  "UpdateOfferDialog.zig",
-  "WindowsNativeDialogs.zig",
-  "Accessibility.zig",
-  "App.zig"
-)
-$missingTestFiles = @(
-  Get-ChildItem -LiteralPath (Join-Path $shellRoot "src") -Filter "*.zig" -File |
-    Where-Object {
-      ((Get-Content -LiteralPath $_.FullName -Raw) -match '(?m)^test "') -and
-        ($wiredTestFiles -notcontains $_.Name)
-    } |
-    ForEach-Object { $_.Name }
-)
-if ($missingTestFiles.Count -ne 0) {
-  throw "Windows shell contract: the following src\*.zig files contain test blocks but are not wired into any zig test invocation in WindowsShell.Tests.ps1 (see issue #424): $($missingTestFiles -join ', ')"
-}
-
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Wire.zig } finally { Pop-Location }
@@ -787,6 +723,72 @@ Invoke-NativeQuarantined "App shell executable tests" {
   } finally { Pop-Location }
 } $sidebarLayoutOpenProjectKnownFailures ($sidebarLayoutOpenProjectReason +
   " App.zig imports Sidebar.zig, so the same three pre-existing failures surface here too.")
+
+# Structural anti-drift guard (issue #424): every graphcode-windows\src\*.zig file
+# that declares at least one `test "..."` block must be executed by one of the
+# `zig test` invocations above. Add the new file's name here as part of wiring it
+# in; forgetting either step (the invocation or this list) fails this guard
+# instead of letting the tests silently never run. This check runs last, after
+# every other invocation above, so a real regression in an individual file's
+# tests is reported before this contract-only failure short-circuits the run.
+#
+# GraphContextMenu.zig and MainWindow.zig are intentionally NOT listed: they are
+# being wired in by in-flight work on issue #418 (branch
+# coneilen-microsoft-context-menu-uia-automation / PR #422) to avoid a duplicate
+# harness entry. Until that work lands, this guard is EXPECTED to report exactly
+# those two files as missing - that is this guard doing its job, not a bug in
+# this change. Once #418 lands (before or after this PR), the guard will pass
+# because their entries will exist.
+$wiredTestFiles = @(
+  "Wire.zig",
+  "Codespaces.zig",
+  "WindowsCodespaceDialog.zig",
+  "Forms.zig",
+  "Win32.zig",
+  "NativeForms.zig",
+  "JumpPalette.zig",
+  "WindowsOnboarding.zig",
+  "WindowsProductSettings.zig",
+  "WindowsUpdates.zig",
+  "FrameBuffer.zig",
+  "DaemonClient.zig",
+  "DaemonSupervisor.zig",
+  "WorkspaceLayout.zig",
+  "InputRouter.zig",
+  "TerminalSurface.zig",
+  "GraphModel.zig",
+  "CanvasInput.zig",
+  "GraphCanvas.zig",
+  "WorktreeStatus.zig",
+  "DraftAttachments.zig",
+  "WorktreeDialog.zig",
+  "Dpi.zig",
+  "TemplateLibrary.zig",
+  "WorkspaceLifecycle.zig",
+  "Navigation.zig",
+  "QuickChats.zig",
+  "WorkspaceControls.zig",
+  "Sidebar.zig",
+  "WindowsRepositoryDialogs.zig",
+  "GdiGradient.zig",
+  "AppFont.zig",
+  "GdiplusAA.zig",
+  "UpdateOfferDialog.zig",
+  "WindowsNativeDialogs.zig",
+  "Accessibility.zig",
+  "App.zig"
+)
+$missingTestFiles = @(
+  Get-ChildItem -LiteralPath (Join-Path $shellRoot "src") -Filter "*.zig" -File |
+    Where-Object {
+      ((Get-Content -LiteralPath $_.FullName -Raw) -match '(?m)^test "') -and
+        ($wiredTestFiles -notcontains $_.Name)
+    } |
+    ForEach-Object { $_.Name }
+)
+if ($missingTestFiles.Count -ne 0) {
+  throw "Windows shell contract: the following src\*.zig files contain test blocks but are not wired into any zig test invocation in WindowsShell.Tests.ps1 (see issue #424): $($missingTestFiles -join ', ')"
+}
 
 Write-Output "Windows shell scaffold contract: PASS"
 exit 0
