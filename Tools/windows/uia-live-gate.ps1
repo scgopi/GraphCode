@@ -135,8 +135,6 @@ public static class GraphCodeUiaGateState {
   private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMenuStringW")]
   private static extern int GetMenuString(IntPtr menu, uint item, StringBuilder text, int max, uint flags);
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetMenu(IntPtr window);
   // The File/Loop/Terminal/Workspace/View/Help bar is a real SetMenu menu bar,
   // not a TrackPopupMenu popup, so (unlike the popup context menu below) its
   // live enabled state is readable directly through the Win32 menu API against
