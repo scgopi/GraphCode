@@ -581,13 +581,13 @@ $sidebarLayoutOpenProjectKnownFailures = @(
   "Sidebar.test.sidebar scroll clamps overflow, shrink, and resize",
   "Sidebar.test.recent project rows exclude folders already open in the projects list"
 )
-$sidebarLayoutOpenProjectReason = "pre-existing Sidebar.zig layout bug (issue #424 first-run finding): " +
+$sidebarLayoutOpenProjectReason = "pre-existing Sidebar.zig layout bug, filed as issue #428: " +
   "layoutFor()/projectSectionHeight() and related offsets count every recent_projects " +
   "entry as a rendered 24px project row, but appendRows() skips rendering a project " +
   "that is already open (isProjectOpen), so row/scroll math disagrees with the actual " +
   "rendered rows whenever an open project is also present in recent_projects. Real " +
   "product bug in Sidebar.zig; not fixed here because this PR must not modify " +
-  "Sidebar.zig source. Reported for a separate fix."
+  "Sidebar.zig source. See #428 for the fix."
 
 Invoke-Native "Worktree status executable tests" {
   Push-Location $shellRoot
