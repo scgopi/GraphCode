@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -350,12 +351,32 @@ public static class GraphCodeUiaGateState {
   public static bool WindowIsEnabled(IntPtr window) {
     return IsWindowEnabled(window);
   }
+  // Real client-coordinate mouse messages posted directly to the target window,
+  // matching the same WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP messages the OS
+  // delivers for genuine mouse input, without moving the shared desktop's real
+  // cursor (multiple fleet sessions share this desktop). PostMouseButtonAt sets
+  // the MK_LBUTTON flag in wParam, matching the wParam a real WM_LBUTTONDOWN/UP
+  // carries; ClickAt below (and its existing sidebar-update-banner caller) keep
+  // working unchanged since App.zig's click handling only decodes the lParam
+  // x/y, not the button-state bits in wParam.
+  private static IntPtr MouseLParam(int x, int y) {
+    return (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
+  }
   public static bool PostMouseButtonAt(IntPtr window, uint message, int x, int y) {
-    IntPtr lparam = (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
-    return PostMessage(window, message, UIntPtr.Zero, lparam);
+    return PostMessage(window, message, (UIntPtr)0x0001, MouseLParam(x, y));
   }
   public static bool ClickAt(IntPtr window, int x, int y) {
     return PostMouseButtonAt(window, 0x0201, x, y) && PostMouseButtonAt(window, 0x0202, x, y);
+  }
+  public static bool PostMouseMoveAt(IntPtr window, int clientX, int clientY) {
+    return PostMessage(window, 0x0200, UIntPtr.Zero, MouseLParam(clientX, clientY));
+  }
+  public static IntPtr SendMouseButtonAt(IntPtr window, uint message, int clientX, int clientY) {
+    return SendMessage(window, message, (UIntPtr)0x0001, MouseLParam(clientX, clientY));
+  }
+  public static bool PostMouseClickAt(IntPtr window, int clientX, int clientY) {
+    return PostMouseButtonAt(window, 0x0201, clientX, clientY) &&
+      PostMouseButtonAt(window, 0x0202, clientX, clientY);
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
   // no UIA identity of their own, so a genuine click requires the real live client
@@ -388,6 +409,20 @@ public static class GraphCodeUiaGateState {
   // Sending it here reproduces the exact real trigger, not a shortcut.
   public static void RefreshNativeMenuFromLiveModel(IntPtr window, IntPtr menu) {
     SendMessage(window, 0x0117, (UIntPtr)(ulong)menu.ToInt64(), IntPtr.Zero);
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct ScreenPoint { public int X; public int Y; }
+  [DllImport("user32.dll")]
+  private static extern bool ScreenToClient(IntPtr window, ref ScreenPoint point);
+  [DllImport("user32.dll")]
+  private static extern bool IsIconic(IntPtr window);
+  public static bool IsWindowMinimized(IntPtr window) { return IsIconic(window); }
+  public static bool ScreenToClientPoint(IntPtr window, int screenX, int screenY, out int clientX, out int clientY) {
+    var point = new ScreenPoint { X = screenX, Y = screenY };
+    bool ok = ScreenToClient(window, ref point);
+    clientX = point.X;
+    clientY = point.Y;
+    return ok;
   }
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
@@ -717,17 +752,42 @@ function Ensure-ShellForeground(
   return $acquired
 }
 
+# A raw TreeWalker walk across a live window can transiently throw a COMException
+# (observed as "Could not open the process token" / E_UNEXPECTED) for a brief window
+# right after a new native HWND (e.g. an embedded terminal host) has appeared, or an
+# ElementNotAvailableException ("the parent window has closed") for a brief window
+# right after a native HWND-hosted view (e.g. worktree inspection) has just been torn
+# down but the OS's UI Automation proxy for it has not finished catching up. Both are
+# a documented class of UIA flakiness unrelated to any specific assertion's
+# correctness. Retry a small, bounded number of times to give a genuinely-transient
+# case a chance to resolve; if the element is still unavailable afterwards, its
+# backing native window really is gone, so treat it as contributing no children and
+# let the caller's broader search continue through the tree's other, still-live
+# branches instead of aborting the whole walk.
 function Get-DirectChildren(
   [System.Windows.Automation.AutomationElement] $element,
   [System.Windows.Automation.TreeWalker] $walker
 ) {
-  $children = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
-  $child = $walker.GetFirstChild($element)
-  while ($null -ne $child) {
-    $children.Add($child)
-    $child = $walker.GetNextSibling($child)
+  $attempt = 0
+  while ($true) {
+    try {
+      $children = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
+      $child = $walker.GetFirstChild($element)
+      while ($null -ne $child) {
+        $children.Add($child)
+        $child = $walker.GetNextSibling($child)
+      }
+      return @($children.ToArray())
+    } catch [System.Windows.Automation.ElementNotAvailableException] {
+      $attempt++
+      if ($attempt -ge 3) { return @() }
+      Start-Sleep -Milliseconds 150
+    } catch [System.Runtime.InteropServices.COMException] {
+      $attempt++
+      if ($attempt -ge 4) { throw }
+      Start-Sleep -Milliseconds 150
+    }
   }
-  return @($children.ToArray())
 }
 
 function Assert-Ids([string[]] $actual, [string[]] $expected, [string] $label) {
@@ -744,6 +804,7 @@ function Find-FragmentById(
   [string] $automationId,
   [System.Windows.Automation.TreeWalker] $walker
 ) {
+  if ($null -eq $root) { return $null }
   $pending = New-Object System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]
   $pending.Enqueue($root)
   while ($pending.Count -gt 0) {
@@ -787,6 +848,63 @@ function Wait-ForGraphChildren(
     Start-Sleep -Milliseconds $delayMs
   }
   return [pscustomobject]@{ Graph = $liveGraph; Items = $observed }
+}
+
+# A surface transition (navigating destinations, opening/closing a native
+# HWND-hosted inspection view) can leave the accessibility tree in a brief,
+# genuinely-transient state where a fragment that is about to exist (or that
+# briefly disappeared mid-rebuild) isn't found by a single BFS pass. Retry the
+# whole search a bounded number of times before treating it as truly absent.
+function Find-FragmentByIdWithRetry(
+  [System.Windows.Automation.AutomationElement] $root,
+  [string] $automationId,
+  [System.Windows.Automation.TreeWalker] $walker,
+  [int] $maxAttempts = 20
+) {
+  for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+    $found = Find-FragmentById $root $automationId $walker
+    if ($null -ne $found) { return $found }
+    Start-Sleep -Milliseconds 150
+  }
+  return $null
+}
+
+# Captures a small region of the real rendered desktop (screen coordinates) around
+# a point and reports whether any sampled pixel is within `tolerance` of `expected`
+# in each RGB channel. Used as genuine visual evidence for canvas painting (hover
+# handles, grid lines) that has no dedicated UIA element to query.
+function Test-ScreenPixelNear(
+  [int] $screenX,
+  [int] $screenY,
+  [System.Drawing.Color] $expected,
+  [int] $radius = 6,
+  [int] $tolerance = 24
+) {
+  $left = $screenX - $radius
+  $top = $screenY - $radius
+  $size = New-Object System.Drawing.Size(($radius * 2 + 1), ($radius * 2 + 1))
+  $bitmap = New-Object System.Drawing.Bitmap($size.Width, $size.Height)
+  try {
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $graphics.CopyFromScreen($left, $top, 0, 0, $size)
+    } finally {
+      $graphics.Dispose()
+    }
+    for ($x = 0; $x -lt $size.Width; $x++) {
+      for ($y = 0; $y -lt $size.Height; $y++) {
+        $pixel = $bitmap.GetPixel($x, $y)
+        if (([Math]::Abs([int]$pixel.R - [int]$expected.R) -le $tolerance) -and
+            ([Math]::Abs([int]$pixel.G - [int]$expected.G) -le $tolerance) -and
+            ([Math]::Abs([int]$pixel.B - [int]$expected.B) -le $tolerance)) {
+          return $true
+        }
+      }
+    }
+    return $false
+  } finally {
+    $bitmap.Dispose()
+  }
 }
 
 function Assert-FragmentLinks(
@@ -908,10 +1026,13 @@ try {
   $policyDirectoryExisted = Test-Path -LiteralPath $policyDirectory
   $policyExisted = Test-Path -LiteralPath $policyPath
   if ($policyExisted) { $policyContents = [IO.File]::ReadAllBytes($policyPath) }
+  $shellErrorPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-shell-stderr-$PID.log"
   if ($ArgumentList.Count -gt 0) {
-    $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal
+    $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal `
+      -RedirectStandardError $shellErrorPath
   } else {
-    $process = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal
+    $process = Start-Process -FilePath $Shell -PassThru -WindowStyle Normal `
+      -RedirectStandardError $shellErrorPath
   }
 
   $root = $null
@@ -1462,6 +1583,59 @@ try {
     "Graph exposed unexpected or missing children: $($graphChildIds -join ',')"
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
+
+  # Canvas attention rail: GraphCanvas.hitTestAttentionRail covers a full-width band
+  # with no dedicated UIA element of its own (only the per-card "Reply" action above
+  # is exposed to UIA). Its client rect is
+  # (sidebar_width+20, header_height+12, width-20, header_height+43); since the graph
+  # fragment's own bounds already start at client (sidebar_width, header_height) and
+  # extend to client (width, ...), that reduces to the screen rect
+  # (graph.Left+20, graph.Top+12, graph.Right-20, graph.Top+43) with no sidebar_width
+  # or header_height constants needed. This posts a real WM_LBUTTONDOWN+UP inside
+  # that rect and verifies the resulting selection change through the same
+  # SelectionItemPattern already exercised for the loop cards, exercising the exact
+  # App.zig .review_attention -> selectNextAttention() routing a physical mouse click
+  # on the rail would drive.
+  # Refresh the cached top-level window handle immediately before issuing any raw
+  # PostMessage-based mouse synthesis below: $shellWindow was captured once right
+  # after launch (line ~902) via $process.MainWindowHandle, which .NET does not
+  # auto-refresh, and by this point in the gate the shell has been through several
+  # dialog open/close and surface-switch round-trips. Re-resolving it here (rather
+  # than trusting the long-stale value) is required for PostMessage to reach the
+  # window that is actually currently on screen.
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $attentionSelection0 = $projectCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  $attentionSelection1 = $projectCards[1].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  $attentionSelection0.Select()
+  Start-Sleep -Milliseconds 150
+  Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
+    "could not establish a deterministic starting selection before the attention rail check"
+  $railScreenX = [int](($graph.Current.BoundingRectangle.Left + $graph.Current.BoundingRectangle.Right) / 2)
+  $railScreenY = [int]$graph.Current.BoundingRectangle.Top + 27
+  $railClientX = 0
+  $railClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow, $railScreenX, $railScreenY, [ref]$railClientX, [ref]$railClientY
+  )) "could not map the attention rail to client coordinates"
+  $null = Ensure-ShellForeground $shellWindow "before-attention-rail-click"
+  Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0201, $railClientX, $railClientY)) `
+    "attention rail click was rejected"
+  [GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $railClientX, $railClientY) | Out-Null
+  for ($attempt = 0; $attempt -lt 40 -and (-not $attentionSelection1.Current.IsSelected); $attempt++) {
+    Start-Sleep -Milliseconds 100
+  }
+  Require ($attentionSelection1.Current.IsSelected -and (-not $attentionSelection0.Current.IsSelected)) `
+    "attention rail click did not cycle selection onto the NEEDS YOU card"
+
+  # Restore the deterministic starting selection consumed by later gate steps below
+  # (this block only needed to prove the rail cycles selection; it must not leak a
+  # different selection into subsequent, pre-existing assertions).
+  $attentionSelection0.Select()
+  Start-Sleep -Milliseconds 150
+  Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
+    "could not restore starting selection after the attention rail check"
+
   $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $compositeProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^canvas-card-' } `
@@ -1488,6 +1662,104 @@ try {
   Require (($restoredProjectCards.Count -eq 2) -and
            ((@($restoredProjectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
     "Composite Back did not restore the parent project canvas"
+
+  # Connector handles: GraphCanvas.drawNode paints a highlighted (0x00FFCD7A COLORREF
+  # -> RGB 0x7ACDFF, light blue) hover handle at the outgoing connector position
+  # (card.Right, card's vertical midpoint) with no dedicated UIA element, and
+  # drag-to-connect is driven entirely by raw WM_LBUTTONDOWN/WM_MOUSEMOVE/
+  # WM_LBUTTONUP messages in App.zig (hitTestConnector on down, updateEdgeDrag on
+  # move, hitTest + createEdgeBetweenIDs on up). This derives both the connector and
+  # the target card's screen positions from the already UIA-exposed card bounds,
+  # synthesizes real pointer messages for both the hover and the full drag, and
+  # treats the resulting native "Create or edit edge" dialog's locked From/To fields
+  # as the ground truth evidence that the drop routed to the correct source/target
+  # loop IDs.
+  $connectorSourceCard = @($restoredProjectCards | Where-Object { $_.Current.Name -eq "UIA loop A" })[0]
+  $connectorTargetCard = @($restoredProjectCards | Where-Object { $_.Current.Name -eq "UIA loop B" })[0]
+  Require (($null -ne $connectorSourceCard) -and ($null -ne $connectorTargetCard)) `
+    "missing project cards before the connector handle check"
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $connectorScreenX = [int]$connectorSourceCard.Current.BoundingRectangle.Right
+  $connectorScreenY = [int](($connectorSourceCard.Current.BoundingRectangle.Top + $connectorSourceCard.Current.BoundingRectangle.Bottom) / 2)
+  $connectorClientX = 0
+  $connectorClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow, $connectorScreenX, $connectorScreenY, [ref]$connectorClientX, [ref]$connectorClientY
+  )) "could not map the source loop's outgoing connector to client coordinates"
+  $null = Ensure-ShellForeground $shellWindow "before-connector-hover"
+  $expectedConnectorHoverColor = [System.Drawing.Color]::FromArgb(0x7A, 0xCD, 0xFF)
+  $connectorHoverObserved = $false
+  for ($attempt = 0; $attempt -lt 20 -and (-not $connectorHoverObserved); $attempt++) {
+    Require ([GraphCodeUiaGateState]::PostMouseMoveAt($shellWindow, $connectorClientX, $connectorClientY)) `
+      "connector hover mouse-move message was rejected"
+    Start-Sleep -Milliseconds 100
+    $connectorHoverObserved = Test-ScreenPixelNear -screenX $connectorScreenX -screenY $connectorScreenY -expected $expectedConnectorHoverColor
+  }
+  Require $connectorHoverObserved `
+    "hovering the outgoing connector did not paint the hover connector handle at (${connectorScreenX},${connectorScreenY})"
+  $connectorTargetScreenX = [int](($connectorTargetCard.Current.BoundingRectangle.Left + $connectorTargetCard.Current.BoundingRectangle.Right) / 2)
+  $connectorTargetScreenY = [int](($connectorTargetCard.Current.BoundingRectangle.Top + $connectorTargetCard.Current.BoundingRectangle.Bottom) / 2)
+  $connectorTargetClientX = 0
+  $connectorTargetClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow, $connectorTargetScreenX, $connectorTargetScreenY, [ref]$connectorTargetClientX, [ref]$connectorTargetClientY
+  )) "could not map the target loop card body to client coordinates"
+  Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0201, $connectorClientX, $connectorClientY)) `
+    "connector drag mouse-down message was rejected"
+  Require ([GraphCodeUiaGateState]::PostMouseMoveAt($shellWindow, $connectorTargetClientX, $connectorTargetClientY)) `
+    "connector drag mouse-move message was rejected"
+  Start-Sleep -Milliseconds 100
+  Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $connectorTargetClientX, $connectorTargetClientY)) `
+    "connector drag mouse-up message was rejected"
+  $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit edge"
+    ))
+  )
+  $edgeDialog = Wait-ForDesktopElement `
+    -desktop $desktop `
+    -condition $edgeDialogCondition `
+    -label "connector drag Create or edit edge dialog" `
+    -diagnosticWindow $shellWindow `
+    -RecoverForeground
+  Require ($null -ne $edgeDialog) "dragging from the connector to the target card did not open the Create or edit edge dialog"
+  # NativeForms.zig's edge dialog renders locked From/To endpoints as ES_READONLY
+  # Edit controls, but this app's custom UIA provider (AccessibilityProvider.cpp)
+  # exposes native dialog fields generically as ControlType.Pane elements carrying
+  # their text in the Name property (automationId 9100/9101 for From/To) rather than
+  # bridging them as ControlType.Edit with a ValuePattern.
+  $edgeFromElement = $edgeDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9100"
+    ))
+  )
+  $edgeToElement = $edgeDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "9101"
+    ))
+  )
+  Require (($null -ne $edgeFromElement) -and ($null -ne $edgeToElement)) `
+    "Create or edit edge dialog did not expose its locked From/To fields"
+  $edgeFromValue = $edgeFromElement.Current.Name
+  $edgeToValue = $edgeToElement.Current.Name
+  Require ($edgeFromValue -eq "11111111-1111-4111-8111-111111111111") `
+    "connector drag did not lock the From endpoint to the dragged source loop: $edgeFromValue"
+  Require ($edgeToValue -eq "22222222-2222-4222-8222-222222222222") `
+    "connector drag did not lock the To endpoint to the dropped target loop: $edgeToValue"
+  Require ([GraphCodeUiaGateState]::PostClose([IntPtr]$edgeDialog.Current.NativeWindowHandle)) `
+    "Create or edit edge dialog rejected cancellation"
+  Require (Wait-ForDesktopElementGone `
+    -desktop $desktop `
+    -condition $edgeDialogCondition `
+    -label "connector drag Create or edit edge dialog close" `
+    -diagnosticWindow $shellWindow) "Create or edit edge dialog did not close after cancellation"
+
   $surfaceActionPatterns = @{}
   foreach ($id in @($navigationIds + $canvasActionIds)) {
     $element = Find-FragmentById $root $id $rawWalker
@@ -1505,11 +1777,89 @@ try {
   $overviewCards = @($overviewProbe.Items)
   Require (($overviewCards.Count -eq 2) -and
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
+
+  # Folder lanes/bands: the lane's Open and Worktrees actions have no dedicated UIA
+  # elements (GraphCanvas.overviewLaneActionAt is a pure hit test painted by GDI), so
+  # this derives their real screen position from the synchronized card geometry
+  # (GraphCanvas.overviewCardBounds places row 0 at lane.top + 46, and with the lane
+  # width clamped to bounds.right - bounds.left - 48 for windows wider than 808px,
+  # lane.right = graph.Right - 24, matching overviewLaneActionAt's Open/Worktrees
+  # button rects) and posts real WM_LBUTTONDOWN/UP client-coordinate clicks at those
+  # points, exercising the exact App.zig click routing a physical mouse would drive.
+  # A genuine surface transition (not merely re-invoking the same overview paint) is
+  # proven by the card's BoundingRectangle.Top moving away from the lane-grid
+  # position ($laneGridCardTop, captured immediately before the click) to the
+  # free-form project-canvas layout.
+  Require ([int]$graph.Current.BoundingRectangle.Width -gt 808) `
+    "shell window too narrow to use the wide-window overview lane geometry formula"
+  $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $laneOpenScreenX = [int]$graph.Current.BoundingRectangle.Right - 128
+  $laneOpenScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
+  $laneOpenClientX = 0
+  $laneOpenClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow, $laneOpenScreenX, $laneOpenScreenY, [ref]$laneOpenClientX, [ref]$laneOpenClientY
+  )) "could not map the overview lane Open action to client coordinates"
+  $null = Ensure-ShellForeground $shellWindow "before-lane-open-click"
+  Require ([GraphCodeUiaGateState]::PostMouseClickAt($shellWindow, $laneOpenClientX, $laneOpenClientY)) `
+    "overview lane Open click was rejected"
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    Start-Sleep -Milliseconds 100
+    $laneOpenedCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+    })
+    if (($laneOpenedCards.Count -eq 2) -and
+        ($laneOpenedCards[0].Current.BoundingRectangle.Top -ne $laneGridCardTop)) { break }
+  }
+  $laneOpenSucceeded = ($laneOpenedCards.Count -eq 2) -and
+           ((@($laneOpenedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
+           ($laneOpenedCards[0].Current.BoundingRectangle.Top -ne $laneGridCardTop)
+  Require $laneOpenSucceeded "overview lane Open click did not route to the project canvas layout"
+  Start-Sleep -Milliseconds 200
+  $surfaceActionPatterns["overview-destination"].Invoke()
+  Start-Sleep -Milliseconds 250
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph) "missing graph fragment after returning from the project canvas layout"
+  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+  })
+  Require ($overviewCards.Count -eq 2) "overview did not restore synchronized cards before the Worktrees lane check"
+  $laneWorktreesScreenX = [int]$graph.Current.BoundingRectangle.Right - 69
+  $laneWorktreesScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
+  $worktrees = Find-FragmentById $root "worktrees" $rawWalker
+  Require ($null -ne $worktrees) "missing Worktrees fragment before the overview lane Worktrees check"
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $laneWorktreesClientX = 0
+  $laneWorktreesClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow, $laneWorktreesScreenX, $laneWorktreesScreenY, [ref]$laneWorktreesClientX, [ref]$laneWorktreesClientY
+  )) "could not map the overview lane Worktrees action to client coordinates"
+  $null = Ensure-ShellForeground $shellWindow "before-lane-worktrees-click"
+  Require ([GraphCodeUiaGateState]::PostMouseClickAt($shellWindow, $laneWorktreesClientX, $laneWorktreesClientY)) `
+    "overview lane Worktrees click was rejected"
+  $laneWorktreeRows = @()
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    Start-Sleep -Milliseconds 100
+    $laneWorktreeRows = @(Get-DirectChildren $worktrees $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^worktree-row-'
+    })
+    if ($laneWorktreeRows.Count -gt 0) { break }
+  }
+  Require ($laneWorktreeRows.Count -gt 0) "overview lane Worktrees click did not open worktree inspection"
+  $surfaceActionPatterns["overview-destination"].Invoke()
+  Start-Sleep -Milliseconds 500
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph) "missing graph fragment after returning from worktree inspection"
+
   $surfaceActionPatterns["quick-chats-destination"].Invoke()
   $quickChatProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA chat ' } `
     { param($items) $items.Count -eq 2 }
   $graph = $quickChatProbe.Graph
+  Require ($null -ne $graph) "missing graph fragment after switching to the Quick Chats destination"
   $quickChatCards = @($quickChatProbe.Items)
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
@@ -1560,15 +1910,34 @@ try {
   Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Creating quick chat...") `
     "Quick Chats New Chat action did not execute"
   $quickChatCardIds = @($quickChatCards | ForEach-Object { $_.Current.AutomationId })
-  $quickChatCards[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  Require ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Opening quick chat...") `
-    "Quick Chat invocation did not perform its expected action"
-  $graph = Find-FragmentById $root "graph" $rawWalker
-  $quickChatWorkspace = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^quick-chat-workspace-' -and
-    $_.Current.Name -eq "Quick Chat terminal workspace"
-  }) | Select-Object -First 1
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph) "missing graph fragment before invoking a Quick Chat card"
+  $refreshedQuickChatCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -eq $quickChatCardIds[0]
+  })
+  Require ($refreshedQuickChatCards.Count -eq 1) "Quick Chat card disappeared after the New Chat action"
+  $refreshedQuickChatCards[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $sawOpeningStatus = $false
+  for ($attempt = 0; $attempt -lt 150; $attempt++) {
+    if ((Find-FragmentById $root "status" $rawWalker).Current.Name -eq "Opening quick chat...") {
+      $sawOpeningStatus = $true
+      break
+    }
+    Start-Sleep -Milliseconds 20
+  }
+  Require $sawOpeningStatus "Quick Chat invocation did not perform its expected action"
+  $quickChatWorkspace = $null
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $quickChatWorkspace = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^quick-chat-workspace-' -and
+      $_.Current.Name -eq "Quick Chat terminal workspace"
+    }) | Select-Object -First 1
+    if (($null -ne $quickChatWorkspace) -and
+        ($quickChatWorkspace.Current.BoundingRectangle.Width -gt 0) -and
+        ($quickChatWorkspace.Current.BoundingRectangle.Height -gt 0)) { break }
+    Start-Sleep -Milliseconds 50
+  }
   Require ($null -ne $quickChatWorkspace) "Quick Chat invocation did not expose its terminal workspace"
   Require (($quickChatWorkspace.Current.BoundingRectangle.Width -gt 0) -and
            ($quickChatWorkspace.Current.BoundingRectangle.Height -gt 0)) `
@@ -1579,6 +1948,11 @@ try {
   $surfaceActionPatterns["fit-canvas"].Invoke()
   Start-Sleep -Milliseconds 250
   $process.Refresh()
+  if ($process.HasExited) {
+    if (Test-Path -LiteralPath $shellErrorPath) {
+      Get-Content -LiteralPath $shellErrorPath | Write-Host
+    }
+  }
   Require (-not $process.HasExited) "surface UIA actions terminated the shell"
   $activeProjectRow = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^open-project-' -and $_.Current.Name -eq "UIA project"
@@ -1593,6 +1967,8 @@ try {
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  Require ($null -ne $graph) "missing graph fragment after dynamic project/loop invocation"
   $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
   })

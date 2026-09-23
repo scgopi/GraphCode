@@ -1889,6 +1889,45 @@ test "overview and quick chat hit testing follows rendered cards" {
     try std.testing.expect(hitTestQuickChat(3, bounds.left - 1, chat.top, &state, bounds) == null);
 }
 
+test "cross-project overview stacks every open folder as its own lane" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const frameA =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Loop A1","state":"running"},{"id":"a2","title":"Loop A2","state":"running"}],"edges":[]}}}
+    ;
+    const frameB =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Loop B1","state":"running"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frameA);
+    _ = try model.updateFromFrame(frameB);
+    try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
+    var state = CanvasState{};
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
+    const laneA = overviewLaneBounds(&model, 0, bounds, &state);
+    const laneB = overviewLaneBounds(&model, 1, bounds, &state);
+    // Every open folder renders as its own lane on the shared canvas: the second
+    // project's lane must start strictly below the first project's lane (not
+    // overlap it), by at least that lane's rendered height plus the inter-lane gap.
+    try std.testing.expect(laneB.top >= laneA.bottom + 20);
+    try std.testing.expectEqual(laneA.left, laneB.left);
+    try std.testing.expectEqual(laneA.right, laneB.right);
+    // Hit testing must resolve a click in the second lane to the second project's
+    // graph index, proving the lanes are independently addressable, not just
+    // visually stacked.
+    const cardB = overviewCardBounds(&model, 1, 0, bounds, &state);
+    const hit = hitTestOverview(&model, cardB.left + 4, cardB.top + 4, &state, bounds) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), hit.graph_index);
+    try std.testing.expectEqual(@as(usize, 0), hit.node_index);
+    // Each lane exposes its own Open/Worktrees action targets, independently
+    // positioned per-lane rather than a single shared control.
+    const laneAOpen = overviewLaneActionAt(&model, 0, laneA.right - 100, laneA.top + 20, bounds, &state);
+    const laneBOpen = overviewLaneActionAt(&model, 1, laneB.right - 100, laneB.top + 20, bounds, &state);
+    try std.testing.expectEqual(OverviewLaneAction.open_project, laneAOpen orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(OverviewLaneAction.open_project, laneBOpen orelse return error.TestUnexpectedResult);
+}
+
 test "overview and quick chat geometry applies pan and zoom consistently" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();

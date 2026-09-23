@@ -27,6 +27,7 @@ extern fn gc_uia_create(hwnd: c.HWND) ?*NativeProvider;
 extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
 extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
+extern fn gc_uia_set_canvas_bounds(provider: *NativeProvider, left: c_int, top: c_int, right: c_int, bottom: c_int) c.HRESULT;
 extern fn gc_uia_update(
     provider: *NativeProvider,
     status: [*:0]const u8,
@@ -245,6 +246,15 @@ pub const Provider = struct {
         const status_z = self.allocator.dupeZ(u8, status) catch return;
         defer self.allocator.free(status_z);
         _ = gc_uia_set_status(native, status_z.ptr);
+    }
+    /// Reports the real, current client-relative rect of the rendered canvas
+    /// so the "graph" fixed UIA element (id 4) exposes accurate
+    /// BoundingRectangle geometry for automation and testing, instead of a
+    /// disconnected placeholder rect.
+    pub fn syncCanvasBounds(self: *Provider, bounds: c.RECT) void {
+        if (!builtin.link_libc) return;
+        const native = self.native_provider orelse return;
+        _ = gc_uia_set_canvas_bounds(native, bounds.left, bounds.top, bounds.right, bounds.bottom);
     }
     pub fn add(self: *Provider, element: Element) !usize {
         const index = self.elements.items.len;

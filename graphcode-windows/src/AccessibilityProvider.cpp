@@ -3,6 +3,7 @@
 #include <UIAutomation.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -43,6 +44,11 @@ struct State {
   bool allow_reclaim = false;
   bool confirm_each_reclaim = true;
   bool active = true;
+  // Real, current client-relative rect of the rendered canvas ("graph" fixed
+  // element, id_ == 4). Populated by gc_uia_set_canvas_bounds; until the app
+  // reports one, get_BoundingRectangle falls back to a placeholder rect.
+  RECT canvas_bounds{};
+  bool has_canvas_bounds = false;
 };
 
 static std::wstring wide(const char *value) {
@@ -275,6 +281,8 @@ class Node final : public IRawElementProviderSimple,
     HWND hwnd = nullptr;
     RECT dynamic_bounds{};
     bool has_dynamic_bounds = false;
+    RECT canvas_bounds{};
+    bool has_canvas_bounds = false;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
@@ -282,6 +290,9 @@ class Node final : public IRawElementProviderSimple,
       if (isRowKey(id_)) {
         dynamic_bounds = state_->rows.at(id_).bounds;
         has_dynamic_bounds = true;
+      } else if (id_ == 4 && state_->has_canvas_bounds) {
+        canvas_bounds = state_->canvas_bounds;
+        has_canvas_bounds = true;
       }
     }
     RECT rect{};
@@ -297,6 +308,14 @@ class Node final : public IRawElementProviderSimple,
       value->top = origin.y + dynamic_bounds.top;
       value->width = dynamic_bounds.right - dynamic_bounds.left;
       value->height = dynamic_bounds.bottom - dynamic_bounds.top;
+    } else if (has_canvas_bounds) {
+      // The "graph" fixed element (id_ == 4) reflects the real, current
+      // rendered canvas rect once the app has reported one, instead of the
+      // disconnected placeholder rect used before any report arrives.
+      value->left = origin.x + canvas_bounds.left;
+      value->top = origin.y + canvas_bounds.top;
+      value->width = canvas_bounds.right - canvas_bounds.left;
+      value->height = canvas_bounds.bottom - canvas_bounds.top;
     } else if (id_ == 14 || id_ == 15) {
       value->left = origin.x + 8;
       value->top = origin.y + (id_ == 14 ? 142 : 358);
@@ -628,6 +647,24 @@ class Node final : public IRawElementProviderSimple,
       if (status_changed) status_node = retainElementLocked(6);
     }
     raiseStatusChanged(status_node, old_status, new_status);
+  }
+  void setCanvasBounds(int left, int top, int right, int bottom) {
+    Node *graph_node = nullptr;
+    bool changed = false;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!state_->active) return;
+      const RECT next{left, top, right, bottom};
+      changed = !state_->has_canvas_bounds || memcmp(&state_->canvas_bounds, &next, sizeof(RECT)) != 0;
+      state_->canvas_bounds = next;
+      state_->has_canvas_bounds = true;
+      if (changed) graph_node = retainElementLocked(4);
+    }
+    if (graph_node) {
+      UiaRaiseAutomationPropertyChangedEvent(
+          graph_node, UIA_BoundingRectanglePropertyId, VARIANT{}, VARIANT{});
+      graph_node->Release();
+    }
   }
   void shutdown() {
     if (id_ != 0) return;
@@ -1028,5 +1065,12 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
 extern "C" HRESULT gc_uia_set_status(IRawElementProviderSimple *provider, const char *status) {
   if (!provider) return E_INVALIDARG;
   static_cast<Node *>(provider)->setStatus(status);
+  return S_OK;
+}
+
+extern "C" HRESULT gc_uia_set_canvas_bounds(IRawElementProviderSimple *provider, int left, int top,
+                                             int right, int bottom) {
+  if (!provider) return E_INVALIDARG;
+  static_cast<Node *>(provider)->setCanvasBounds(left, top, right, bottom);
   return S_OK;
 }
