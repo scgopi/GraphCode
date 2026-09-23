@@ -2176,10 +2176,28 @@ pub const App = struct {
     /// success. `"GraphCodeNativeForm"` is `NativeForms.zig`'s private window
     /// class name, mirrored here rather than exported since only the class
     /// identity (not any internal state) is needed to find the window.
+    ///
+    /// Scoped to the *current thread's* windows via `EnumThreadWindows` rather
+    /// than the system-wide `FindWindowW`: the live gate runs multiple shell
+    /// instances at once (workspace-lifecycle switch/create, fixture shells),
+    /// and a system-wide search could post `WM_CLOSE` to a form belonging to a
+    /// different process, cancelling work another part of the gate is mid-way
+    /// through asserting against. `presentUiaForm` runs on this window's
+    /// message-loop thread and `NativeForms.show` blocks that same thread, so
+    /// the form is always created on the thread that armed the watchdog.
     fn dismissWedgedUiaForm() void {
+        _ = c.EnumThreadWindows(c.GetCurrentThreadId(), dismissWedgedUiaFormCallback, 0);
+    }
+
+    fn dismissWedgedUiaFormCallback(hwnd: c.HWND, lparam: c.LPARAM) callconv(.winapi) c.BOOL {
+        _ = lparam;
+        var class_buffer: [64]u16 = undefined;
+        const len: usize = @intCast(c.GetClassNameW(hwnd, &class_buffer, class_buffer.len));
         const form_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm");
-        const hwnd = c.FindWindowW(form_class_name.ptr, null);
-        if (hwnd != null) _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0);
+        if (len == form_class_name.len and std.mem.eql(u16, class_buffer[0..len], form_class_name)) {
+            _ = c.PostMessageW(hwnd, c.WM_CLOSE, 0, 0);
+        }
+        return 1;
     }
 
     fn ensureUiaFixtureProject(self: *App, min_nodes: usize) void {
