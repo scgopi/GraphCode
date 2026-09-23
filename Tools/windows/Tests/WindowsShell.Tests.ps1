@@ -581,13 +581,20 @@ $sidebarLayoutOpenProjectKnownFailures = @(
   "Sidebar.test.sidebar scroll clamps overflow, shrink, and resize",
   "Sidebar.test.recent project rows exclude folders already open in the projects list"
 )
-$sidebarLayoutOpenProjectReason = "pre-existing Sidebar.zig layout bug, filed as issue #428: " +
-  "layoutFor()/projectSectionHeight() and related offsets count every recent_projects " +
-  "entry as a rendered 24px project row, but appendRows() skips rendering a project " +
-  "that is already open (isProjectOpen), so row/scroll math disagrees with the actual " +
-  "rendered rows whenever an open project is also present in recent_projects. Real " +
-  "product bug in Sidebar.zig; not fixed here because this PR must not modify " +
-  "Sidebar.zig source. See #428 for the fix."
+$sidebarLayoutOpenProjectReason = "two of these three are a pre-existing Sidebar.zig layout " +
+  "bug filed as issue #428 ('shared sidebar layout routes every loop row after project " +
+  "rows and scroll' and 'recent project rows exclude folders already open in the " +
+  "projects list'): layoutFor()/projectSectionHeight() and related offsets count every " +
+  "recent_projects entry as a rendered 24px project row, but appendRows() skips " +
+  "rendering a project that is already open (isProjectOpen), so row/scroll math " +
+  "disagrees with the actual rendered rows whenever an open project is also present in " +
+  "recent_projects. Real product bug in Sidebar.zig; not fixed here because this PR must " +
+  "not modify Sidebar.zig source. See #428 for the fix (PR #430 in flight). The third " +
+  "('sidebar scroll clamps overflow, shrink, and resize', expected 334 / found 410) is a " +
+  "separate, stale test expectation, not a product defect: the 76px delta is exactly the " +
+  "Activity block height that contentBottom reserves and paint() renders, which the " +
+  "test's oracle simply omitted. Quarantined alongside the other two rather than fixed " +
+  "here because this PR must not modify Sidebar.zig source, including its test blocks."
 
 Invoke-Native "Worktree status executable tests" {
   Push-Location $shellRoot
@@ -732,13 +739,11 @@ Invoke-NativeQuarantined "App shell executable tests" {
 # every other invocation above, so a real regression in an individual file's
 # tests is reported before this contract-only failure short-circuits the run.
 #
-# GraphContextMenu.zig and MainWindow.zig are intentionally NOT listed: they are
-# being wired in by in-flight work on issue #418 (branch
-# coneilen-microsoft-context-menu-uia-automation / PR #422) to avoid a duplicate
-# harness entry. Until that work lands, this guard is EXPECTED to report exactly
-# those two files as missing - that is this guard doing its job, not a bug in
-# this change. Once #418 lands (before or after this PR), the guard will pass
-# because their entries will exist.
+# GraphContextMenu.zig and MainWindow.zig were wired by in-flight issue #418
+# (PR #422, merged as 06e092e) after this guard was first added here; #422
+# added the zig test invocations and the source-list entries above but never
+# touched this list, since it did not exist on main when #422 was authored.
+# Listed here after rebasing onto main so the guard reflects reality post-merge.
 $wiredTestFiles = @(
   "Wire.zig",
   "Codespaces.zig",
@@ -747,6 +752,8 @@ $wiredTestFiles = @(
   "Win32.zig",
   "NativeForms.zig",
   "UpdateOfferPresentation.zig",
+  "GraphContextMenu.zig",
+  "MainWindow.zig",
   "JumpPalette.zig",
   "WindowsOnboarding.zig",
   "WindowsProductSettings.zig",
