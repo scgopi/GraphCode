@@ -2665,6 +2665,12 @@ try {
     focusFallbackSource = [GraphCodeUiaGateState]::FocusSourceAutomationId
     providerTeardownSafe = $retainedProviderSafe
     connectionFailureBannerPassed = $true
+    contextMenuItemCount = $projectMenuItems.Count
+    contextMenuMoveProjectText = $moveProjectItem.Text
+    contextMenuMoveProjectEnabled = $moveProjectItem.Enabled
+    contextMenuMoveProjectState = ("0x{0:x}" -f $moveProjectItem.State)
+    contextMenuDismissed = $projectMenuClosed
+    remoteContextMenuItemCount = $remoteMenuItems.Count
   } | ConvertTo-Json -Compress
 } finally {
   if ($stressJob) {
