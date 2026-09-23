@@ -52,8 +52,14 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "could not pin isolated zmx provider" }
   if (-not (Test-Path (Join-Path $testZmxRoot "build.zig"))) { throw "isolated pinned zmx provider is incomplete" }
   Copy-Item (Join-Path $zmxRoot "zig-pkg") (Join-Path $testZmxRoot "zig-pkg") -Recurse -Force
+  # uucode's generator runs with its dependency directory as cwd. Zig 0.16 can
+  # otherwise emit a relative .zig-cache executable path and resolve it from
+  # that cwd, looking two levels too shallow and failing with FileNotFound.
+  $zmxCache = Join-Path $fixture "zmx-zig-cache"
   Push-Location $testZmxRoot
-  try { & $zig0160 build -Dtarget=x86_64-windows-gnu } finally { Pop-Location }
+  try {
+    & $zig0160 build -Dtarget=x86_64-windows-gnu --cache-dir $zmxCache
+  } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "could not build isolated pinned zmx provider" }
   Push-Location (Join-Path $repoRoot "graphcode-windows")
   try {
