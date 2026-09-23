@@ -64,8 +64,8 @@ const DialogState = struct {
 
 const max_tiles = 8;
 const tile_base_id = 9600;
-const attachment_attach_id = 4;
-const attachment_remove_id = 5;
+const attachment_attach_id = 8;
+const attachment_remove_id = 9;
 
 const Kind = enum { node, edge, update, settings, jump, template_picker, worktree_policy, worktree_sweep };
 const InputKind = enum { edit, readonly, combo, checkbox, tiles };
@@ -2262,6 +2262,9 @@ test "guided choices map human labels to stable wire values" {
     try std.testing.expectEqual(@as(usize, 1), endpointIndex(&endpoints, "node-b"));
     try std.testing.expectEqual(@as(i32, 180), inputControlHeight(.combo));
     try std.testing.expectEqual(@as(i32, 24), inputControlHeight(.checkbox));
+    try std.testing.expect(attachment_attach_id != templates_id);
+    try std.testing.expect(attachment_remove_id != templates_id);
+    try std.testing.expect(attachment_attach_id != attachment_remove_id);
 }
 
 test "form recap describes the pending node, edge, and update" {

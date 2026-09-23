@@ -177,6 +177,10 @@ public static class GraphCodeUiaGateState {
   public static bool PostContextMenu(IntPtr window, uint target) {
     return PostMessage(window, 0x802C, (UIntPtr)target, IntPtr.Zero);
   }
+  // MainWindow.wm_uia_present_form (WM_APP + 45).
+  public static bool PostPresentForm(IntPtr window, uint form) {
+    return PostMessage(window, 0x802D, (UIntPtr)form, IntPtr.Zero);
+  }
   public static bool DismissPopupMenu(IntPtr popup, IntPtr owner) {
     bool posted = popup != IntPtr.Zero &&
       PostMessage(popup, 0x0100, (UIntPtr)0x1B, IntPtr.Zero);
@@ -1215,6 +1219,17 @@ try {
     -diagnosticWindow $shellWindow `
     -RecoverForeground
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
+  $nodeFormElements = @($sidebarNodeForm.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $nodeFormContent = @($nodeFormElements | ForEach-Object { $_.Current.Name }) -join "`n"
+  Require ($nodeFormContent -match "Recap:") `
+    "node form omitted its pre-submit recap"
+  $attachButton = @($nodeFormElements | Where-Object {
+    $_.Current.Name -match "^Attach" -and "$($_.Current.AutomationId)" -eq "8"
+  }) | Select-Object -First 1
+  Require ($null -ne $attachButton) "node form omitted its uniquely addressed native attachment picker action"
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle
   )) "project-row New Loop form rejected cancellation"
@@ -1223,6 +1238,126 @@ try {
     -condition $sidebarNodeFormCondition `
     -label "project-row New Loop node form close" `
     -diagnosticWindow $shellWindow) "project-row New Loop form did not close after cancellation"
+  foreach ($ingress in @(
+    [pscustomobject]@{
+      Command = 4106
+      Title = "Clone Repository"
+      Labels = @("Repository URL", "Destination folder", "Branch (optional)", "Depth (optional)")
+      Error = "Enter the HTTPS repository URL."
+    },
+    [pscustomobject]@{
+      Command = 4107
+      Title = "Add SSH Repository"
+      Labels = @("Host", "User", "Port", "Absolute repository path")
+      Error = "Enter the host, user, port, and repository path."
+    }
+  )) {
+    Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, $ingress.Command)) `
+      "$($ingress.Title) command was rejected"
+    $ingressCondition = New-Object System.Windows.Automation.AndCondition(
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $ingress.Title
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Window
+      ))
+    )
+    $ingressDialog = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $ingressCondition `
+      -label $ingress.Title `
+      -diagnosticWindow $shellWindow `
+      -RecoverForeground
+    Require ($null -ne $ingressDialog) "$($ingress.Title) did not open its native sheet"
+    $ingressContent = @($ingressDialog.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_.Current.Name }) -join "`n"
+    foreach ($label in $ingress.Labels) {
+      Require ($ingressContent -match [regex]::Escape($label)) `
+        "$($ingress.Title) omitted '$label'"
+    }
+    Require ([GraphCodeUiaGateState]::SendCommand(
+      [IntPtr]$ingressDialog.Current.NativeWindowHandle, 1
+    )) "$($ingress.Title) rejected its primary action"
+    Start-Sleep -Milliseconds 100
+    $validationContent = @($ingressDialog.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_.Current.Name }) -join "`n"
+    Require ($validationContent -match [regex]::Escape($ingress.Error)) `
+      "$($ingress.Title) did not expose its inline validation failure"
+    Require ([GraphCodeUiaGateState]::PostClose(
+      [IntPtr]$ingressDialog.Current.NativeWindowHandle
+    )) "$($ingress.Title) rejected cancellation"
+    Require (Wait-ForDesktopElementGone `
+      -desktop $desktop `
+      -condition $ingressCondition `
+      -label "$($ingress.Title) close" `
+      -diagnosticWindow $shellWindow) "$($ingress.Title) did not close after cancellation"
+    # Let DialogBoxParamW return to the shell message loop before posting the
+    # next modal command.
+    Start-Sleep -Milliseconds 100
+  }
+  foreach ($nativeForm in @(
+    [pscustomobject]@{
+      Id = 1
+      Title = "Create or edit edge"
+      Required = @("Source loop identity", "Target loop identity", "Recap:")
+    },
+    [pscustomobject]@{
+      Id = 2
+      Title = "Project Settings"
+      Required = @("Remove: automatically remove safe landed worktrees.", "GB", "worktrees")
+    },
+    [pscustomobject]@{
+      Id = 3
+      Title = "Worktrees - UIA project (2 total, 1 safe, 1 look, 0 in use, 0 B)"
+      Required = @("SAFE TO REMOVE", "LOOK BEFORE REMOVING", "Remove Selected")
+    }
+  )) {
+    Require ([GraphCodeUiaGateState]::PostPresentForm($shellWindow, $nativeForm.Id)) `
+      "$($nativeForm.Title) fixture request was rejected"
+    $nativeFormCondition = New-Object System.Windows.Automation.AndCondition(
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $nativeForm.Title
+      )),
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Window
+      ))
+    )
+    $nativeFormWindow = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $nativeFormCondition `
+      -label $nativeForm.Title `
+      -diagnosticWindow $shellWindow `
+      -RecoverForeground
+    Require ($null -ne $nativeFormWindow) "$($nativeForm.Title) did not open"
+    $nativeFormContent = @($nativeFormWindow.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ) | ForEach-Object { $_.Current.Name }) -join "`n"
+    foreach ($required in $nativeForm.Required) {
+      Require ($nativeFormContent -match [regex]::Escape($required)) `
+        "$($nativeForm.Title) omitted '$required'"
+    }
+    Require ([GraphCodeUiaGateState]::PostClose(
+      [IntPtr]$nativeFormWindow.Current.NativeWindowHandle
+    )) "$($nativeForm.Title) rejected cancellation"
+    Require (Wait-ForDesktopElementGone `
+      -desktop $desktop `
+      -condition $nativeFormCondition `
+      -label "$($nativeForm.Title) close" `
+      -diagnosticWindow $shellWindow) "$($nativeForm.Title) did not close after cancellation"
+  }
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
   $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   foreach ($row in $loopRows) {
