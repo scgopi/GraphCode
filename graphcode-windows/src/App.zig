@@ -1138,13 +1138,10 @@ pub const App = struct {
     }
 
     /// A single selectable branch/worktree for the node-creation form's
-    /// prospective picker. Projected from `WorktreeStatus.Entry`; `is_default`
-    /// marks the entry whose branch matches the inspection's default branch.
-    pub const WorktreeChoice = struct {
-        path: []const u8,
-        branch: []const u8,
-        is_default: bool,
-    };
+    /// prospective picker. Reuses NativeForms.WorktreeChoice (rather than a
+    /// duplicate type) so App can hand its projection straight to
+    /// NativeForms.node/nodeWithTemplates without a conversion.
+    pub const WorktreeChoice = NativeForms.WorktreeChoice;
 
     /// Projects `self.worktree_inspection` into the caller-owned list of
     /// existing worktree/branch choices a node-creation picker can offer.
@@ -1190,13 +1187,22 @@ pub const App = struct {
             .briefing_enabled = settings.briefing,
             .activity_enabled = settings.activity,
         };
+        // Allocated once and shared by both the plain and templated forms below
+        // so a project with no worktree inspection yet (or none at all, e.g.
+        // graphcode://global) degrades to the same explicit empty picker either
+        // form would otherwise have to special-case on its own.
+        const choices = self.worktreeChoicesForNodeForm(self.allocator) catch {
+            self.setStatus("Unable to prepare worktree choices");
+            return;
+        };
+        defer self.allocator.free(choices);
         var templates = TemplateLibrary.load(self.allocator, path) catch {
             self.setStatus("Unable to load saved templates");
             return;
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, initial) catch |err| {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
@@ -1226,7 +1232,7 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, current, true) catch |err| {
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, current, true) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
