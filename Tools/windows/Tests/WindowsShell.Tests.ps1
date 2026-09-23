@@ -159,48 +159,6 @@ function Invoke-Native([string] $description, [scriptblock] $command) {
   }
 }
 
-function Get-FailingZigTestNames([string[]] $lines) {
-  $names = @()
-  foreach ($line in $lines) {
-    if ($line -match '^\d+/\d+\s+(.+?)\.\.\.(.*)$') {
-      if ($Matches[2].Trim() -ne "OK") { $names += $Matches[1].Trim() }
-    }
-  }
-  return $names
-}
-
-# Wraps a zig-test invocation for a file with pre-existing, explicitly known
-# failures (see issue #424). Any failure NOT in $knownFailures still fails the
-# build; only the exact named tests are tolerated, with the reason surfaced in
-# the log so quarantine status stays visible rather than silent.
-function Invoke-NativeQuarantined(
-  [string] $description,
-  [scriptblock] $command,
-  [string[]] $knownFailures,
-  [string] $reason
-) {
-  Write-Host "==> $description"
-  $rawOutput = @(& $command 2>&1)
-  $exitCode = $LASTEXITCODE
-  $lines = $rawOutput | ForEach-Object { $_.ToString() }
-  $lines | ForEach-Object { Write-Host $_ }
-  $failing = Get-FailingZigTestNames $lines
-  if ($exitCode -eq 0) {
-    if ($failing.Count -gt 0) {
-      throw "$description reported failing test output but exited 0; treat the exit-code/output mismatch itself as a failure: $($failing -join '; ')"
-    }
-    return
-  }
-  $unexpected = @($failing | Where-Object { $knownFailures -notcontains $_ })
-  if ($unexpected.Count -gt 0) {
-    throw "$description failed with unexpected test failures (not in the known quarantine list): $($unexpected -join '; ')"
-  }
-  if ($failing.Count -eq 0) {
-    throw "$description failed with exit code $exitCode but no individual test failure could be parsed from its output"
-  }
-  Write-Host "==> ${description}: quarantined pre-existing failure(s) [$($failing -join '; ')] - $reason"
-}
-
 function Resolve-TestZig {
   if ($ZigExecutable -and (Test-Path -LiteralPath $ZigExecutable -PathType Leaf)) {
     return (Resolve-Path -LiteralPath $ZigExecutable).Path
@@ -576,26 +534,6 @@ Invoke-Native "Graph canvas executable tests" {
   } finally { Pop-Location }
 }
 
-$sidebarLayoutOpenProjectKnownFailures = @(
-  "Sidebar.test.shared sidebar layout routes every loop row after project rows and scroll",
-  "Sidebar.test.sidebar scroll clamps overflow, shrink, and resize",
-  "Sidebar.test.recent project rows exclude folders already open in the projects list"
-)
-$sidebarLayoutOpenProjectReason = "two of these three are a pre-existing Sidebar.zig layout " +
-  "bug filed as issue #428 ('shared sidebar layout routes every loop row after project " +
-  "rows and scroll' and 'recent project rows exclude folders already open in the " +
-  "projects list'): layoutFor()/projectSectionHeight() and related offsets count every " +
-  "recent_projects entry as a rendered 24px project row, but appendRows() skips " +
-  "rendering a project that is already open (isProjectOpen), so row/scroll math " +
-  "disagrees with the actual rendered rows whenever an open project is also present in " +
-  "recent_projects. Real product bug in Sidebar.zig; not fixed here because this PR must " +
-  "not modify Sidebar.zig source. See #428 for the fix (PR #430 in flight). The third " +
-  "('sidebar scroll clamps overflow, shrink, and resize', expected 334 / found 410) is a " +
-  "separate, stale test expectation, not a product defect: the 76px delta is exactly the " +
-  "Activity block height that contentBottom reserves and paint() renders, which the " +
-  "test's oracle simply omitted. Quarantined alongside the other two rather than fixed " +
-  "here because this PR must not modify Sidebar.zig source, including its test blocks."
-
 Invoke-Native "Worktree status executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorktreeStatus.zig } finally { Pop-Location }
@@ -632,7 +570,7 @@ Invoke-Native "Workspace controls executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\WorkspaceControls.zig } finally { Pop-Location }
 }
-Invoke-NativeQuarantined "Sidebar executable tests" {
+Invoke-Native "Sidebar executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
   if (-not $winghosttyRoot) {
@@ -643,7 +581,7 @@ Invoke-NativeQuarantined "Sidebar executable tests" {
   try {
     & $zig test src\Sidebar.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
-} $sidebarLayoutOpenProjectKnownFailures $sidebarLayoutOpenProjectReason
+}
 Invoke-Native "Windows repository dialogs executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
@@ -716,7 +654,7 @@ Invoke-Native "Native dialog field contract executable tests" {
     & $zig test src\WindowsNativeDialogs.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
   } finally { Pop-Location }
 }
-Invoke-NativeQuarantined "App shell executable tests" {
+Invoke-Native "App shell executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
   if (-not $winghosttyRoot) {
@@ -728,8 +666,7 @@ Invoke-NativeQuarantined "App shell executable tests" {
     & $zig test src\App.zig src\AccessibilityProvider.cpp `
       -target x86_64-windows-msvc -lc -luser32 -lgdi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
   } finally { Pop-Location }
-} $sidebarLayoutOpenProjectKnownFailures ($sidebarLayoutOpenProjectReason +
-  " App.zig imports Sidebar.zig, so the same three pre-existing failures surface here too.")
+}
 
 # Structural anti-drift guard (issue #424): every graphcode-windows\src\*.zig file
 # that declares at least one `test "..."` block must be executed by one of the
