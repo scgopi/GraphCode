@@ -95,7 +95,6 @@ function Resolve-SwiftExecutable {
 
 function Initialize-SwiftEnvironment([string] $swift) {
   $toolBin = Split-Path $swift
-  $env:PATH = "$toolBin;$env:PATH"
 
   if ($swift -match "^(.*)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
     $swiftRoot = $Matches[1]
@@ -111,9 +110,24 @@ function Initialize-SwiftEnvironment([string] $swift) {
         $env:PATH = "$runtime;$env:PATH"
       }
     }
+    $env:PATH = "$toolBin;$env:PATH"
     if (Test-Path $sdk) {
       $env:SDKROOT = $sdk
     }
+  } else {
+    $env:PATH = "$toolBin;$env:PATH"
+  }
+
+  # Swift selects the Windows SDK shipped with its pinned toolchain. Inherited
+  # Visual Studio developer-prompt variables can redirect ClangImporter to a
+  # different UCRT/MSVC installation and hide Swift's `_complex`/`ucrt` modules.
+  foreach ($name in @(
+      "INCLUDE", "LIB", "LIBPATH",
+      "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsVersion",
+      "VSINSTALLDIR", "VisualStudioVersion",
+      "WindowsSdkDir", "WindowsSDKVersion",
+      "UniversalCRTSdkDir", "UCRTVersion")) {
+    Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
   }
 }
 

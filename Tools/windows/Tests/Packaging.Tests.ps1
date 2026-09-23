@@ -71,10 +71,17 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "could not build versioned GraphCode Windows artifact" }
   $fixtureBin = Join-Path $fixture "nested space\unicode-日本\bin"
   New-Item -ItemType Directory -Force -Path $fixtureBin | Out-Null
-  $release = Join-Path $repoRoot ".build\windows\release-artifact"
-  if (-not (Test-Path (Join-Path $release "graphcoded.exe"))) {
-    $release = Join-Path $repoRoot ".build\x86_64-unknown-windows-msvc\release"
+  $release = $null
+  foreach ($candidate in @(
+      (Join-Path $repoRoot ".build\windows\release"),
+      (Join-Path $repoRoot ".build\windows\release-artifact"),
+      (Join-Path $repoRoot ".build\x86_64-unknown-windows-msvc\release"))) {
+    if (Test-Path (Join-Path $candidate "graphcoded.exe")) {
+      $release = $candidate
+      break
+    }
   }
+  if (-not $release) { throw "staged Swift release products were not found" }
   foreach ($name in @("graphcode-windows.exe", "graphcoded.exe", "graphcode.exe")) {
     $candidate = if ($name -eq "graphcode-windows.exe") {
       Join-Path $repoRoot "graphcode-windows\zig-out\bin\$name"
@@ -93,13 +100,18 @@ try {
     throw "untrusted provider input was accepted: $untrusted"
   }
   Invoke-Package "Build" @{ InputDirectory = $fixtureBin; OutputDirectory = $out; Version = "1.2.3"; WinghosttyRoot = $wingRoot; ZmxRoot = $testZmxRoot; Zig0152 = $zig0152; Zig0160 = $zig0160 }
-  $trustedZmxHash = (Get-FileHash (Join-Path $testZmxRoot "zig-out\bin\zmx.exe") -Algorithm SHA256).Hash
-  Set-Content (Join-Path $testZmxRoot "zig-out\bin\zmx.exe") stale-provider-output
+  $providerZmx = Join-Path $testZmxRoot "zig-out\bin\zmx.exe"
+  Set-Content $providerZmx stale-provider-output
+  $staleZmxHash = (Get-FileHash $providerZmx -Algorithm SHA256).Hash
   Invoke-Package "Build" @{ InputDirectory = $fixtureBin; OutputDirectory = $out; Version = "1.2.3"; WinghosttyRoot = $wingRoot; ZmxRoot = $testZmxRoot; Zig0152 = $zig0152; Zig0160 = $zig0160 }
-  if ((Get-FileHash (Join-Path $testZmxRoot "zig-out\bin\zmx.exe") -Algorithm SHA256).Hash -ne $trustedZmxHash) {
+  $rebuiltZmxHash = (Get-FileHash $providerZmx -Algorithm SHA256).Hash
+  if ($rebuiltZmxHash -eq $staleZmxHash) {
     throw "provider packaging did not rebuild stale ignored output"
   }
   $artifact = Join-Path $out "GraphCode-1.2.3-windows-x86_64"
+  if ((Get-FileHash (Join-Path $artifact "bin\zmx.exe") -Algorithm SHA256).Hash -ne $rebuiltZmxHash) {
+    throw "provider packaging did not use the rebuilt zmx artifact"
+  }
   $zip = "$artifact.zip"
   Invoke-Package "Verify" @{ Package = $zip }
   Invoke-Package "Install" @{ Package = $zip; InstallRoot = $install; NoScheduledTask = $true }

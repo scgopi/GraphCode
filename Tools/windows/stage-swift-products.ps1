@@ -54,7 +54,44 @@ function Resolve-SwiftRuntimeDirectory([string] $swift) {
   throw "Swift runtime DLL directory was not found for $swift"
 }
 
+function Initialize-SwiftBuildEnvironment([string] $swift) {
+  $toolBin = Split-Path $swift
+  $runtime = Resolve-SwiftRuntimeDirectory $swift
+  $env:PATH = "$toolBin;$runtime;$env:PATH"
+
+  if ($swift -notmatch "^(.*)\\Toolchains\\([^\\]+)\\usr\\bin\\swift\.exe$") {
+    throw "Swift toolchain path does not expose its matching Windows SDK: $swift"
+  }
+  $swiftRoot = $Matches[1]
+  $version = $Matches[2].Split("+")[0]
+  $sdk = Join-Path $swiftRoot "Platforms\$version\Windows.platform\Developer\SDKs\Windows.sdk"
+  if (-not (Test-Path -LiteralPath $sdk -PathType Container)) {
+    throw "Swift Windows SDK was not found for $swift"
+  }
+  $env:SDKROOT = $sdk
+
+  # Swift ships and selects its own Windows SDK. An inherited Visual Studio
+  # developer prompt can point ClangImporter at a different UCRT/MSVC version,
+  # producing misleading "missing required modules: '_complex', 'ucrt'" errors.
+  foreach ($name in @(
+      "INCLUDE", "LIB", "LIBPATH",
+      "VCINSTALLDIR", "VCToolsInstallDir", "VCToolsVersion",
+      "VSINSTALLDIR", "VisualStudioVersion",
+      "WindowsSdkDir", "WindowsSDKVersion",
+      "UniversalCRTSdkDir", "UCRTVersion")) {
+    Remove-Item -LiteralPath "env:$name" -ErrorAction SilentlyContinue
+  }
+
+  # SwiftPM uses bare repositories for its local cache. Git installations with
+  # safe.bareRepository=explicit otherwise reject dependency resolution.
+  $env:GIT_CONFIG_COUNT = "1"
+  $env:GIT_CONFIG_KEY_0 = "safe.bareRepository"
+  $env:GIT_CONFIG_VALUE_0 = "all"
+}
+
 $swift = Resolve-Swift
+$runtime = Resolve-SwiftRuntimeDirectory $swift
+Initialize-SwiftBuildEnvironment $swift
 $swiftBin = Split-Path $swift
 $build = Join-Path $swiftBin "swift-build.exe"
 foreach ($product in @("graphcoded", "graphcode")) {
@@ -73,7 +110,7 @@ foreach ($name in @("graphcoded.exe", "graphcode.exe")) {
   }
   Copy-Item -LiteralPath $produced -Destination (Join-Path $Destination $name) -Force
 }
-Get-ChildItem -LiteralPath (Resolve-SwiftRuntimeDirectory $swift) -Filter *.dll |
+Get-ChildItem -LiteralPath $runtime -Filter *.dll |
   Copy-Item -Destination $Destination -Force
 
 Write-Host "Staged Swift release products in $Destination"

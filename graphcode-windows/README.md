@@ -58,6 +58,20 @@ pwsh -NoProfile -File Tools\windows\validate.ps1 `
   -SwiftExecutable $env:GRAPHCODE_SWIFT633
 ```
 
+To build the complete release inputs and verify packaging from a developer
+shell (including a Visual Studio Developer Command Prompt), use:
+
+```powershell
+. .\.graphcode-tools\environment.ps1
+pwsh -NoProfile -File Tools\windows\stage-swift-products.ps1
+pwsh -NoProfile -File Tools\windows\validate.ps1 -Task packaging
+```
+
+The Swift scripts select the SDK and runtime that ship with the pinned Swift
+toolchain and ignore inherited Visual Studio `INCLUDE`/`LIB` settings. This
+prevents mixed VS/Swift SDK environments from producing false missing-module
+errors for `_complex` or `ucrt`.
+
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, real provider build, and native UI Automation live
 event checks. `Tools\windows\package.ps1` builds and verifies self-contained ZIP

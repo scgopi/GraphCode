@@ -138,17 +138,22 @@ function Build-Package {
       Require (@(git -C $spec.root status --porcelain).Count -eq 0) "$($spec.name) provider worktree is dirty"
       $zig = if ($spec.name -eq "winghostty") { $Zig0152 } else { $Zig0160 }
       Require (Test-Path $zig -PathType Leaf) "pinned Zig executable is missing for $($spec.name)"
+      $providerArtifact = Join-Path $spec.root ($spec.source -replace "/", "\")
+      Remove-Item -LiteralPath $providerArtifact -Force -ErrorAction SilentlyContinue
       Push-Location $spec.root
       try {
         $buildArgs = if ($spec.name -eq "winghostty") {
           @("build", "-Demit-win32-host=true")
         } else {
-          @("build", "-Dtarget=x86_64-windows-gnu")
+          # uucode runs its generator from the dependency directory. Zig 0.16
+          # otherwise resolves the relative .zig-cache executable path from
+          # that cwd and fails to launch the generated tool.
+          $zmxCache = Join-Path $staging "zmx-zig-cache"
+          @("build", "-Dtarget=x86_64-windows-gnu", "--cache-dir", $zmxCache)
         }
         & $zig @buildArgs
         Require ($LASTEXITCODE -eq 0) "$($spec.name) pinned rebuild failed"
       } finally { Pop-Location }
-      $providerArtifact = Join-Path $spec.root ($spec.source -replace "/", "\")
       Require (Test-Path $providerArtifact -PathType Leaf) "$($spec.name) provider artifact is missing"
       $destination = Join-Path $root ($spec.destination -replace "/", "\")
       New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
