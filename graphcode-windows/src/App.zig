@@ -5083,7 +5083,7 @@ fn onWindowMessage(
         c.WM_TIMER => if (wparam == MainWindow.menu_watchdog_timer_id) {
             _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
             _ = c.EndMenu();
-            dismissWedgedUiaForm();
+            App.dismissWedgedUiaForm();
             result.* = 0;
             return true;
         } else if (wparam == MainWindow.timer_id) {
