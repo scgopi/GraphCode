@@ -746,6 +746,7 @@ $wiredTestFiles = @(
   "Forms.zig",
   "Win32.zig",
   "NativeForms.zig",
+  "UpdateOfferPresentation.zig",
   "JumpPalette.zig",
   "WindowsOnboarding.zig",
   "WindowsProductSettings.zig",
