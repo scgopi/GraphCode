@@ -369,7 +369,7 @@ test "UIA contract exposes named roles patterns and deterministic focus order" {
     try std.testing.expectEqual(@as(?usize, worktrees), provider.nextFocus(loops));
 }
 
-test "default contract ids exist in the native fixed element table" {
+test "default contract ids match the native fixed element table" {
     const native_source = @embedFile("AccessibilityProvider.cpp");
     const table_start_marker = "static const wchar_t *ids[] = {";
     const table_start = std.mem.indexOf(u8, native_source, table_start_marker) orelse
@@ -387,6 +387,25 @@ test "default contract ids exist in the native fixed element table" {
         errdefer std.debug.print("defaultContract id has no native fixed element: {s}\n", .{element.id});
         try std.testing.expect(std.mem.indexOf(u8, table, needle) != null);
     }
+
+    var native_ids = std.array_list.Managed([]const u8).init(std.testing.allocator);
+    defer native_ids.deinit();
+    var remaining = table;
+    while (std.mem.indexOf(u8, remaining, "L\"")) |id_start| {
+        const id_tail = remaining[id_start + 2 ..];
+        const id_end = std.mem.indexOfScalar(u8, id_tail, '"') orelse
+            return error.NativeAutomationIdTableMalformed;
+        const native_id = id_tail[0..id_end];
+        for (native_ids.items) |existing| {
+            errdefer std.debug.print("native fixed element id is duplicated: {s}\n", .{native_id});
+            try std.testing.expect(!std.mem.eql(u8, existing, native_id));
+        }
+        try native_ids.append(native_id);
+        errdefer std.debug.print("native fixed element has no defaultContract id: {s}\n", .{native_id});
+        try std.testing.expect(provider.indexOfId(native_id) != null);
+        remaining = id_tail[id_end + 1 ..];
+    }
+    try std.testing.expectEqual(provider.elements.items.len, native_ids.items.len);
 }
 
 test "status and error announcements are retained for screen readers" {
