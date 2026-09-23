@@ -113,14 +113,18 @@ pub const Dialog = struct {
 test "multi-select requires explicit confirmation and fails closed" {
     var entries = [_]WorktreeStatus.Entry{
         .{ .path = @constCast("C:\\safe ☃"), .branch = @constCast("safe"), .pushed = true, .landed = true },
-        .{ .path = @constCast("C:\\dirty"), .branch = @constCast("dirty"), .dirty = true, .pushed = true, .landed = true },
+        .{ .path = @constCast("C:\\locked"), .branch = @constCast("locked"), .locked = true, .pushed = true, .landed = true },
     };
     var dialog = try Dialog.init(std.testing.allocator, "C:\\project", &entries, .{});
     defer dialog.deinit();
     try std.testing.expect(dialog.toggle(0));
     try std.testing.expectError(error.PolicyDisabled, dialog.armConfirmation());
     dialog.policy.allow_reclaim = true;
-    try std.testing.expect(dialog.toggle(1));
+    // toggle() already refuses to select a locked row, so force the selection bit
+    // directly to prove armConfirmation() is independently fail-closed rather than
+    // relying solely on the toggle-level guard.
+    try std.testing.expect(!dialog.toggle(1));
+    dialog.rows.items[1].selected = true;
     try std.testing.expectError(error.UnsafeSelection, dialog.armConfirmation());
 }
 

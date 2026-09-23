@@ -6070,7 +6070,13 @@ test "edge drop source remains valid across synchronous capture cancellation" {
         .client = undefined,
         .daemon = undefined,
         .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
     app.edge_drag_source_id = try allocator.dupe(u8, "source-node");
     app.canvas.beginEdgeDrag(app.edge_drag_source_id, 10, 10);
 
