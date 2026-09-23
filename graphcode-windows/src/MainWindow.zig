@@ -81,6 +81,12 @@ pub const WorkspaceItem = struct {
 pub const MenuState = struct {
     has_project: bool,
     can_worktrees: bool,
+    /// A worktree inspection has been run (the Worktrees dialog is open), so
+    /// commands that mutate its policy have somewhere to save to.
+    worktree_dialog_open: bool,
+    /// At least one reclaimable worktree row is currently selected, either in
+    /// the Worktrees dialog or via the sidebar's single-selection shortcut.
+    worktree_row_selected: bool,
     has_workspace: bool,
     has_attention: bool,
     can_close_tab: bool,
@@ -293,10 +299,14 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     updateWorkspaceMenu(hwnd, state.workspaces);
     setEnabled(hwnd, .open_global_overview, true);
     setEnabled(hwnd, .worktrees, state.can_worktrees);
-    setEnabled(hwnd, .reclaim_worktrees, state.can_worktrees);
-    setEnabled(hwnd, .reveal_worktree, state.can_worktrees);
+    // Reclaim and reveal act on whichever row is currently selected, and save
+    // writes to the dialog's in-memory policy: gray them out instead of
+    // surfacing a "select a row first"/"open Worktrees first" status message
+    // for a command that was reachable but could never have succeeded.
+    setEnabled(hwnd, .reclaim_worktrees, state.can_worktrees and state.worktree_row_selected);
+    setEnabled(hwnd, .reveal_worktree, state.can_worktrees and state.worktree_row_selected);
     setEnabled(hwnd, .edit_worktree_policy, state.can_worktrees);
-    setEnabled(hwnd, .save_worktree_policy, state.can_worktrees);
+    setEnabled(hwnd, .save_worktree_policy, state.can_worktrees and state.worktree_dialog_open);
     setEnabled(hwnd, .jump_loop, state.has_project);
     setEnabled(hwnd, .review_attention, state.has_attention);
     setEnabled(hwnd, .next_loop, state.has_project);
@@ -396,6 +406,16 @@ fn setEnabled(hwnd: c.HWND, command: Command, enabled: bool) void {
     _ = c.EnableMenuItem(c.GetMenu(hwnd), @intFromEnum(command), flags);
 }
 
+/// Re-enables Check for Updates on its own, without touching any other menu
+/// item or rebuilding the Recent Folders/Workspace submenus. The background
+/// update check's completion is observed on a general-purpose timer tick that
+/// can land while another menu/context-menu interaction is mid-flight, so a
+/// full `updateMenu` (which appends/removes submenu items) is not safe to run
+/// there; toggling this single command by id is.
+pub fn setUpdateCheckEnabled(hwnd: c.HWND, enabled: bool) void {
+    setEnabled(hwnd, .check_updates, enabled);
+}
+
 fn setChecked(hwnd: c.HWND, command: Command, checked: bool) void {
     const flags: c.UINT = @intCast(@as(i32, c.MF_BYCOMMAND) |
         if (checked) @as(i32, c.MF_CHECKED) else @as(i32, c.MF_UNCHECKED));
@@ -458,6 +478,64 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
     try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
+fn testWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+// Regression test for the Update-command re-enable bug: a real background
+// update check completes almost instantly, but `finishUpdateCheck` only
+// refreshed menu state through `updateNativeChrome`, which is gated on
+// daemon connectivity and can leave "Check for Updates" permanently
+// disabled. `setUpdateCheckEnabled` must flip the *actual* native menu bit
+// for the command by itself, independent of any other menu state, using a
+// real HMENU/HWND rather than an in-memory model, so this exercises the
+// genuine Win32 EnableMenuItem/GetMenuState round trip the shell relies on.
+test "setUpdateCheckEnabled toggles only the Check for Updates command's real menu bit" {
+    const test_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeMainWindowTestClass");
+    var wc = std.mem.zeroes(c.WNDCLASSEXW);
+    wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+    wc.lpfnWndProc = testWindowProc;
+    wc.hInstance = c.GetModuleHandleW(null);
+    wc.lpszClassName = test_class_name;
+    // Registration can already exist if this test runs more than once in the
+    // same process; either outcome leaves the class name usable below.
+    _ = c.RegisterClassExW(&wc);
+
+    const hwnd = c.CreateWindowExW(
+        0,
+        test_class_name,
+        std.unicode.utf8ToUtf16LeStringLiteral("GraphCode MainWindow test"),
+        c.WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        wc.hInstance,
+        null,
+    ) orelse return error.SkipZigTest;
+    defer _ = c.DestroyWindow(hwnd);
+
+    try installMenu(hwnd);
+
+    const menu = c.GetMenu(hwnd);
+    const command_id: c.UINT = @intFromEnum(Command.check_updates);
+
+    setUpdateCheckEnabled(hwnd, false);
+    const disabled_state = c.GetMenuState(menu, command_id, c.MF_BYCOMMAND);
+    try std.testing.expect((disabled_state & c.MF_GRAYED) != 0);
+
+    setUpdateCheckEnabled(hwnd, true);
+    const enabled_state = c.GetMenuState(menu, command_id, c.MF_BYCOMMAND);
+    try std.testing.expect((enabled_state & c.MF_GRAYED) == 0);
+
+    // The toggle must be scoped to just this one command: an unrelated
+    // command's enable state must be untouched by either call above.
+    const worktrees_state = c.GetMenuState(menu, @intFromEnum(Command.worktrees), c.MF_BYCOMMAND);
+    try std.testing.expect((worktrees_state & c.MF_GRAYED) == 0);
 }
 
 test "recent folder commands use a dedicated command range" {

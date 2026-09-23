@@ -184,6 +184,10 @@ const UiaDynamicTarget = union(enum) {
     workspace_tab: usize,
     workspace_tab_close: usize,
     workspace_switch: usize,
+    header_attention,
+    header_worktree,
+    header_jump,
+    header_toggle_panel,
 };
 
 pub const App = struct {
@@ -1652,6 +1656,20 @@ pub const App = struct {
                 } else {
                     self.setStatus(label);
                     completed_offer = present_offer;
+                    // Re-enable Check for Updates immediately: the general
+                    // chrome refresh elsewhere in the timer tick is gated on
+                    // daemon connectivity, but Check for Updates has nothing
+                    // to do with the project daemon and must re-enable the
+                    // moment the background thread is observed to have
+                    // finished, whether or not a project connection exists.
+                    // Use the single-item toggle rather than the full
+                    // updateNativeChrome rebuild, since this can land
+                    // mid-interaction (e.g. a context menu already tracking)
+                    // and rebuilding the Recent Folders/Workspace submenus
+                    // there is not safe. (Skipped on the `pending` branch
+                    // above: a fresh check just launched, so it must stay
+                    // disabled.)
+                    MainWindow.setUpdateCheckEnabled(self.window.hwnd, true);
                 }
             }
         }
@@ -2838,6 +2856,18 @@ pub const App = struct {
         self.setStatus("UIA fixture inspection ready");
     }
 
+    /// True once there is a worktree row the reveal/reclaim commands could
+    /// actually act on: either the sidebar's single-selection shortcut has a
+    /// path, or the Worktrees dialog itself has a checked row. Mirrors the
+    /// menu's contextual enablement in MainWindow.updateMenu so a command
+    /// that is enabled can always make progress instead of only reporting
+    /// "select a row first".
+    fn worktreeRowSelected(self: *const App) bool {
+        if (self.selected_worktree_path.len != 0) return true;
+        if (self.worktree_dialog) |dialog| return dialog.selectedCount() != 0;
+        return false;
+    }
+
     fn reclaimWorktrees(self: *App) void {
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
@@ -2852,9 +2882,7 @@ pub const App = struct {
             self.setStatus("No project selected for worktree reclaim");
             return;
         }
-        if (self.selected_worktree_path.len == 0 and
-            (self.worktree_dialog == null or self.worktree_dialog.?.selectedCount() == 0))
-        {
+        if (!self.worktreeRowSelected()) {
             self.setStatus("Select a worktree row before reclaiming");
             return;
         }
@@ -3769,6 +3797,8 @@ pub const App = struct {
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
             .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
+            .worktree_dialog_open = self.worktree_dialog != null,
+            .worktree_row_selected = self.worktreeRowSelected(),
             .has_workspace = self.workspace != null and self.model.graph != null,
             .has_attention = self.model.attentionCount() != 0,
             .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
@@ -3840,6 +3870,39 @@ pub const App = struct {
             &self.sidebar_state,
         ) catch return;
         defer sidebar_rows.deinit(self.allocator);
+        // The native header bar (attention chip, reclaimable-worktree chip,
+        // jump affordance, contextual loop-panel toggle) is drawn on every
+        // destination via GraphCanvas.paint's unconditional header() call, so
+        // it is exposed here unconditionally too, mirroring the same
+        // gating GraphCanvas.headerActionAt uses for hit-testing. Parent
+        // group 1 (rather than 4, the Graph canvas group these chips visually
+        // sit above) matches the existing precedent set by
+        // needs-you-header/activity-header/activity-filter below: those are
+        // likewise global chrome rather than literal project rows, and
+        // reusing group 1 avoids polluting the Graph element's exact,
+        // exhaustively-asserted child set with chrome that isn't part of the
+        // canvas.
+        if (self.model.attentionCount() != 0) {
+            self.appendAccessibilityElement(&elements, &owned_identities, "header-attention", "needs-you", "Review what needs you", 1, GraphCanvas.headerAttentionRect(), false, true) catch return;
+        }
+        if (self.worktree_inspection != null) {
+            self.appendAccessibilityElement(&elements, &owned_identities, "header-worktree", "worktrees", "Reclaimable worktrees", 1, GraphCanvas.headerWorktreeRect(), false, true) catch return;
+        }
+        self.appendAccessibilityElement(&elements, &owned_identities, "header-jump", "jump", "Jump to Loop", 1, GraphCanvas.headerJumpRect(client.right), false, true) catch return;
+        if (self.model.currentGraph() != null) {
+            self.appendAccessibilityElement(
+                &elements,
+                &owned_identities,
+                "header-toggle-panel",
+                "control",
+                if (self.surface == .workspace) "Hide loop panel" else "Loop panel",
+                1,
+                GraphCanvas.headerPanelRect(client.right),
+                false,
+                true,
+            ) catch return;
+        }
+
         for (sidebar_rows.items) |row| {
             const bounds = c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 };
             switch (row.kind) {
@@ -4221,6 +4284,10 @@ pub const App = struct {
             .{ .identity = "activity-filter:attention", .target = .activity_filter },
             .{ .identity = "activity-control:scroll-left", .target = .activity_left },
             .{ .identity = "activity-control:scroll-right", .target = .activity_right },
+            .{ .identity = "header-attention:needs-you", .target = .header_attention },
+            .{ .identity = "header-worktree:worktrees", .target = .header_worktree },
+            .{ .identity = "header-jump:jump", .target = .header_jump },
+            .{ .identity = "header-toggle-panel:control", .target = .header_toggle_panel },
         };
         for (static_targets) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) target = candidate.target;
@@ -4485,6 +4552,10 @@ pub const App = struct {
                 if (index >= list.items.len) return false;
                 self.launchWorkspace(list.items[index].path);
             },
+            .header_attention => self.handleAction(.cycle_attention),
+            .header_worktree => self.inspectWorktrees(),
+            .header_jump => self.handleAction(.jump_next),
+            .header_toggle_panel => self.handleAction(.toggle_panel),
         }
         self.clampSidebarScroll();
         self.syncAccessibility();
@@ -6156,6 +6227,69 @@ test "worktree choices for node form project real entries and the default branch
     try std.testing.expect(choices[0].is_default);
     try std.testing.expectEqualStrings("feature/x", choices[1].branch);
     try std.testing.expect(!choices[1].is_default);
+}
+
+test "worktree row selected reflects sidebar and dialog selection honestly" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+
+    // Neither the sidebar shortcut nor a dialog has a selection.
+    try std.testing.expect(!app.worktreeRowSelected());
+
+    // The sidebar's single-selection shortcut has a path, with no dialog open.
+    app.selected_worktree_path = try allocator.dupe(u8, "C:\\repo\\wt-main");
+    try std.testing.expect(app.worktreeRowSelected());
+    allocator.free(app.selected_worktree_path);
+    app.selected_worktree_path = &.{};
+
+    // A dialog is open but nothing is checked in it yet.
+    var dialog = try WorktreeDialog.Dialog.init(allocator, "C:\\repo", &.{
+        .{ .path = try allocator.dupe(u8, "C:\\repo\\wt-main"), .branch = try allocator.dupe(u8, "main") },
+    }, .{});
+    defer {
+        for (dialog.rows.items) |row| {
+            allocator.free(row.entry.path);
+            allocator.free(row.entry.branch);
+        }
+        dialog.deinit();
+    }
+    app.worktree_dialog = dialog;
+    try std.testing.expect(!app.worktreeRowSelected());
+
+    // Checking a row in the dialog makes it selected even with no sidebar path.
+    _ = app.worktree_dialog.?.toggle(0);
+    try std.testing.expect(app.worktreeRowSelected());
+}
+
+test "header UIA identities hash to distinct payloads" {
+    // The native header bar's four chips (attention, worktree notice, jump,
+    // contextual loop-panel toggle) are dispatched by matching a hashed UIA
+    // identity against applyUiaDynamicInvoke's static_targets table. A hash
+    // collision here would silently route one chip's activation to another.
+    const identities = [_][]const u8{
+        "header-attention:needs-you",
+        "header-worktree:worktrees",
+        "header-jump:jump",
+        "header-toggle-panel:control",
+        "needs-you-header:needs-you",
+        "activity-header:activity",
+    };
+    for (identities, 0..) |lhs, i| {
+        for (identities[i + 1 ..]) |rhs| {
+            try std.testing.expect(Accessibility.worktreeIdentityPayload(lhs) != Accessibility.worktreeIdentityPayload(rhs));
+        }
+    }
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {

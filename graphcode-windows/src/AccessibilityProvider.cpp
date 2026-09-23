@@ -838,6 +838,10 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           row.identity.rfind("workspace-switch:", 0) == 0 ? L"workspace-switch-" :
           row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
+          row.identity.rfind("header-attention:", 0) == 0 ? L"header-attention-" :
+          row.identity.rfind("header-worktree:", 0) == 0 ? L"header-worktree-" :
+          row.identity.rfind("header-jump:", 0) == 0 ? L"header-jump-" :
+          row.identity.rfind("header-toggle-panel:", 0) == 0 ? L"header-toggle-panel-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
           parent == 3 ? L"worktree-row-" : L"canvas-card-";
