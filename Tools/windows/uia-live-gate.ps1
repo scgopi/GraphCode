@@ -325,6 +325,45 @@ public static class GraphCodeUiaGateState {
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
+  public static bool PostMouseButtonAt(IntPtr window, uint message, int x, int y) {
+    IntPtr lparam = (IntPtr)(((y & 0xFFFF) << 16) | (x & 0xFFFF));
+    return PostMessage(window, message, UIntPtr.Zero, lparam);
+  }
+  public static bool ClickAt(IntPtr window, int x, int y) {
+    return PostMouseButtonAt(window, 0x0201, x, y) && PostMouseButtonAt(window, 0x0202, x, y);
+  }
+  // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
+  // no UIA identity of their own, so a genuine click requires the real live client
+  // height rather than an assumed window size.
+  public static int ClientHeight(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
+    return rect.Bottom - rect.Top;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")]
+  private static extern bool GetClientRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetMenu(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetSubMenu(IntPtr menu, int position);
+  public static IntPtr NativeMenu(IntPtr window) {
+    return window == IntPtr.Zero ? IntPtr.Zero : GetMenu(window);
+  }
+  public static IntPtr NativeSubMenu(IntPtr menu, int position) {
+    return menu == IntPtr.Zero ? IntPtr.Zero : GetSubMenu(menu, position);
+  }
+  // App.zig only rebuilds recent_folders (and the rest of the native chrome)
+  // from the live GraphModel on WM_INITMENUPOPUP - the same message real
+  // Windows sends right before a menu bar popup is displayed. Reading the
+  // HMENU without first sending this leaves it holding whatever was current
+  // the last time a menu was actually opened (or, at startup, an empty
+  // "No recent folders" placeholder installed before the fixture loaded).
+  // Sending it here reproduces the exact real trigger, not a shortcut.
+  public static void RefreshNativeMenuFromLiveModel(IntPtr window, IntPtr menu) {
+    SendMessage(window, 0x0117, (UIntPtr)(ulong)menu.ToInt64(), IntPtr.Zero);
+  }
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
   }
@@ -408,6 +447,15 @@ function Wait-ForPopupMenu(
 
 function Get-PopupMenuItems([IntPtr] $popup) {
   $menu = [GraphCodeUiaGateState]::PopupMenuHandle($popup)
+  return Get-NativeMenuItems $menu
+}
+
+# Same Win32 menu API read as Get-PopupMenuItems, but against an HMENU already in
+# hand (e.g. from GetMenu/GetSubMenu) rather than one discovered through
+# MN_GETHMENU against an ephemeral TrackPopupMenu popup window. The persistent
+# native menu bar (Add Folder / Recent Folders) is never an ephemeral popup, so
+# its structure is read directly this way with no popup window to wait for.
+function Get-NativeMenuItems([IntPtr] $menu) {
   if ($menu -eq [IntPtr]::Zero) { return @() }
   $count = [GraphCodeUiaGateState]::PopupMenuItemCount($menu)
   if ($count -lt 0) { return @() }
@@ -913,6 +961,57 @@ try {
   Require (($connectionAlert.Current.BoundingRectangle.Width -gt 0) -and
            ($connectionAlert.Current.BoundingRectangle.Height -gt 0)) `
     "connection failure banner had empty bounds"
+
+  # Sidebar update banner: the existing update-offer assertion above opens the
+  # dialog through GRAPHCODE_UIA_SHOW_UPDATE, which calls showCurrentUpdateOffer()
+  # directly and never exercises Sidebar.updateBannerAt's pixel hit-test or the
+  # real WM_LBUTTONDOWN click-routing in App.zig. Sidebar.updateBannerRect has no
+  # UIA identity of its own, so this replicates its formula against the shell's
+  # live client height (viewport_bottom = client height - the activity strip,
+  # which is the workspace-controls state still in effect this early in the run:
+  # panel hidden, activity strip visible, no ingress error yet) and posts a real
+  # synthetic click at that computed point, rather than asserting the bypass path.
+  $updateBannerClientHeight = [GraphCodeUiaGateState]::ClientHeight($shellWindow)
+  Require ($updateBannerClientHeight -gt 0) `
+    "shell reported zero client height before the sidebar update banner click"
+  $updateBannerViewportBottom = $updateBannerClientHeight - 48
+  $updateBannerTop = $updateBannerViewportBottom - 92
+  $updateBannerBottom = $updateBannerViewportBottom - 42
+  $updateBannerClickX = 108
+  $updateBannerClickY = [int](($updateBannerTop + $updateBannerBottom) / 2)
+  Require (($updateBannerClickY -gt 34) -and ($updateBannerClickY -lt $updateBannerViewportBottom)) `
+    "computed sidebar update banner click point fell outside the live sidebar rail"
+  Require ([GraphCodeUiaGateState]::ClickAt($shellWindow, $updateBannerClickX, $updateBannerClickY)) `
+    "synthetic click on the sidebar update banner's live pixel geometry was rejected"
+  $clickedUpdateDialog = $null
+  for ($index = 0; $index -lt 20 -and $null -eq $clickedUpdateDialog; $index++) {
+    Start-Sleep -Milliseconds 100
+    $clickedUpdateDialog = $desktop.FindFirst(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        "GraphCode Update Available"
+      ))
+    )
+  }
+  Require ($null -ne $clickedUpdateDialog) `
+    "a real click on the sidebar update banner's live geometry did not open the update offer dialog"
+  $clickedUpdateVersion = $clickedUpdateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode 9.9.9-test"
+    ))
+  )
+  Require ($null -ne $clickedUpdateVersion) `
+    "update offer dialog opened by the banner click omitted the offered version text"
+  Require ([GraphCodeUiaGateState]::SendCommand([IntPtr]$clickedUpdateDialog.Current.NativeWindowHandle, 9703)) `
+    "update offer opened via the banner click could not be dismissed via Later"
+  Start-Sleep -Milliseconds 150
+  $process.Refresh()
+  Require (-not $process.HasExited) `
+    "shell exited with code $($process.ExitCode) after a genuine click on the sidebar update banner"
+
   $navigationIds = @("overview-destination", "quick-chats-destination")
   $canvasActionIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas")
   $projectRows = @(Get-DirectChildren $projects $rawWalker | Where-Object { $_.Current.AutomationId -match '^project-row-' })
@@ -2229,6 +2328,177 @@ try {
   Require ($reorderCommand -match '"sidebarNodesReordered"') `
     "sidebar root reorder did not use the sidebar-order daemon command: $reorderCommand"
 
+  # Loop context menu: sidebar loop rows and canvas node hit-tests share this
+  # exact GraphContextMenu .node target (App.zig's WM_RBUTTONUP handler builds
+  # the identical Target for both). Read via the same MN_GETHMENU + Win32 menu
+  # API pattern as the project context menu above, across the plain-wired
+  # (target 3), composite (target 6), and unwired (target 7) variants that
+  # GraphContextMenu.show() renders differently for a .node target. Target 7
+  # resolves the "UIA loop C" node the sidebar-reorder mutation above already
+  # added to the fixture graph, so no extra fixture mutation is needed here.
+
+  # Target 3: node0 ("UIA loop A") is a plain wired, non-composite loop -
+  # Open Group/Pilot Once/Arm Schedule and Wire it up/Mark as entry must all
+  # be absent, and there is no template to detach from.
+  $plainLoopPopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $plainLoopPopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "plain loop context menu") `
+      "GraphCode shell did not reacquire foreground before the plain loop context menu"
+    Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)) `
+      "plain loop context menu request was rejected"
+    $plainLoopPopup = Wait-ForPopupMenu $process $shellWindow "plain loop"
+  }
+  Require ($plainLoopPopup -ne [IntPtr]::Zero) "plain loop context menu never opened a native popup window"
+  $plainLoopItems = @(Get-PopupMenuItems $plainLoopPopup)
+  $plainLoopDescription = Format-PopupMenuItems $plainLoopItems
+  Require (Close-PopupMenu $process $plainLoopPopup $shellWindow "plain loop") `
+    "plain loop context menu did not dismiss, leaving the shell blocked in its modal loop"
+  $process.Refresh()
+  Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the plain loop context menu was inspected"
+  $plainLoopLabels = @($plainLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
+  foreach ($expectedLabel in @(
+    "Open Terminal`tEnter", "Edit Details...`tCtrl+E", "Save as Template...",
+    "Rename...`tF2", "Stop`tCtrl+S", "Delete Loop...`tDelete"
+  )) {
+    Require ($plainLoopLabels -contains $expectedLabel) `
+      "plain loop context menu omitted '$expectedLabel': $plainLoopDescription"
+  }
+  foreach ($absentId in @(5113, 5107, 5108, 5109, 5112, 5115)) {
+    Require (@($plainLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
+      "plain loop context menu unexpectedly offered command $absentId (composite/unwired/template-only): $plainLoopDescription"
+  }
+
+  # Target 6: node1 ("UIA loop B") is a composite/proactive loop with
+  # pilotState left at its "notPiloted" default, so Arm Schedule must render
+  # present but disabled (MF_GRAYED) alongside Open Group and Pilot Once.
+  $compositeLoopPopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $compositeLoopPopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "composite loop context menu") `
+      "GraphCode shell did not reacquire foreground before the composite loop context menu"
+    Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 6)) `
+      "composite loop context menu request was rejected"
+    $compositeLoopPopup = Wait-ForPopupMenu $process $shellWindow "composite loop"
+  }
+  Require ($compositeLoopPopup -ne [IntPtr]::Zero) "composite loop context menu never opened a native popup window"
+  $compositeLoopItems = @(Get-PopupMenuItems $compositeLoopPopup)
+  $compositeLoopDescription = Format-PopupMenuItems $compositeLoopItems
+  Require (Close-PopupMenu $process $compositeLoopPopup $shellWindow "composite loop") `
+    "composite loop context menu did not dismiss, leaving the shell blocked in its modal loop"
+  $process.Refresh()
+  Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the composite loop context menu was inspected"
+  $compositeLoopLabels = @($compositeLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
+  foreach ($expectedLabel in @(
+    "Open Terminal`tEnter", "Open Group", "Pilot Once", "Arm Schedule",
+    "Edit Details...`tCtrl+E", "Save as Template...", "Rename...`tF2",
+    "Stop`tCtrl+S", "Delete Loop...`tDelete"
+  )) {
+    Require ($compositeLoopLabels -contains $expectedLabel) `
+      "composite loop context menu omitted '$expectedLabel': $compositeLoopDescription"
+  }
+  $armScheduleItem = @($compositeLoopItems | Where-Object { $_.Id -eq 5108 }) | Select-Object -First 1
+  Require ($null -ne $armScheduleItem) "composite loop context menu omitted Arm Schedule (command 5108): $compositeLoopDescription"
+  Require (-not $armScheduleItem.Enabled) `
+    "composite loop context menu rendered Arm Schedule as available for a loop that is not piloted: $compositeLoopDescription"
+  foreach ($absentId in @(5109, 5112)) {
+    Require (@($compositeLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
+      "composite loop context menu unexpectedly offered unwired-only command $absentId : $compositeLoopDescription"
+  }
+
+  # Target 7: the "UIA loop C" node added by the sidebar-reorder mutation above
+  # has no edges and is not a declared entry, so it is genuinely unwired -
+  # Wire it up/Mark as entry must be present and Open Group/Pilot Once/Arm
+  # Schedule must be absent since it is not a composite loop.
+  $unwiredLoopPopup = [IntPtr]::Zero
+  for ($attempt = 1; $attempt -le 3 -and $unwiredLoopPopup -eq [IntPtr]::Zero; $attempt++) {
+    Require (Ensure-ShellForeground $shellWindow "unwired loop context menu") `
+      "GraphCode shell did not reacquire foreground before the unwired loop context menu"
+    Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 7)) `
+      "unwired loop context menu request was rejected"
+    $unwiredLoopPopup = Wait-ForPopupMenu $process $shellWindow "unwired loop"
+  }
+  Require ($unwiredLoopPopup -ne [IntPtr]::Zero) "unwired loop context menu never opened a native popup window"
+  $unwiredLoopItems = @(Get-PopupMenuItems $unwiredLoopPopup)
+  $unwiredLoopDescription = Format-PopupMenuItems $unwiredLoopItems
+  Require (Close-PopupMenu $process $unwiredLoopPopup $shellWindow "unwired loop") `
+    "unwired loop context menu did not dismiss, leaving the shell blocked in its modal loop"
+  $process.Refresh()
+  Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the unwired loop context menu was inspected"
+  $unwiredLoopLabels = @($unwiredLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
+  foreach ($expectedLabel in @(
+    "Open Terminal`tEnter", "Wire it up", "Mark as entry",
+    "Edit Details...`tCtrl+E", "Save as Template...", "Rename...`tF2",
+    "Stop`tCtrl+S", "Delete Loop...`tDelete"
+  )) {
+    Require ($unwiredLoopLabels -contains $expectedLabel) `
+      "unwired loop context menu omitted '$expectedLabel': $unwiredLoopDescription"
+  }
+  foreach ($absentId in @(5113, 5107, 5108)) {
+    Require (@($unwiredLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
+      "unwired loop context menu unexpectedly offered composite-only command $absentId : $unwiredLoopDescription"
+  }
+  $liveStatusAfterLoopMenus = Find-FragmentById $root "status" $rawWalker
+  Require ($null -ne $liveStatusAfterLoopMenus) `
+    "shell UIA tree stopped answering after the loop context menus were dismissed"
+
+  # Add Folder menu / Recent Folders submenu: this is the persistent native menu
+  # bar installed once by MainWindow.installMenu and kept attached via SetMenu,
+  # not an ephemeral TrackPopupMenu popup, so its structure is read directly off
+  # the live HMENU via GetMenu/GetSubMenu rather than through PostContextMenu +
+  # MN_GETHMENU. The File menu's first item is always the Add Folder popup and
+  # Add Folder's items are always installed in this fixed order, so indices are
+  # a faithful, non-fragile read of installMenu's real construction.
+  $nativeMenuBar = [GraphCodeUiaGateState]::NativeMenu($shellWindow)
+  Require ($nativeMenuBar -ne [IntPtr]::Zero) "shell did not expose a native menu bar"
+  $fileMenu = [GraphCodeUiaGateState]::NativeSubMenu($nativeMenuBar, 0)
+  Require ($fileMenu -ne [IntPtr]::Zero) "native menu bar omitted the File submenu"
+  $addFolderMenu = [GraphCodeUiaGateState]::NativeSubMenu($fileMenu, 0)
+  Require ($addFolderMenu -ne [IntPtr]::Zero) "File menu omitted the Add Folder submenu"
+  # App.zig only repopulates recent_folders (and the rest of native chrome)
+  # from the live GraphModel when it observes WM_INITMENUPOPUP - the real
+  # message Windows sends right before displaying a menu bar popup. Send it
+  # for real here so the HMENU we are about to read reflects the fixture's
+  # recentProjectsListed event instead of the pre-fixture placeholder.
+  [GraphCodeUiaGateState]::RefreshNativeMenuFromLiveModel($shellWindow, $fileMenu)
+  $addFolderItems = @(Get-NativeMenuItems $addFolderMenu)
+  $addFolderDescription = Format-PopupMenuItems $addFolderItems
+  $addFolderLabels = @($addFolderItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
+  foreach ($expectedLabel in @(
+    "Open Folder...`tCtrl+O", "Clone Repository...`tCtrl+Shift+C",
+    "Add Remote Repository...`tCtrl+Shift+R", "Add Codespace...`tCtrl+Shift+K",
+    "Recent Folders"
+  )) {
+    Require ($addFolderLabels -contains $expectedLabel) `
+      "Add Folder menu omitted '$expectedLabel': $addFolderDescription"
+  }
+  $recentFoldersMenu = [GraphCodeUiaGateState]::NativeSubMenu($addFolderMenu, 5)
+  Require ($recentFoldersMenu -ne [IntPtr]::Zero) "Add Folder menu omitted the Recent Folders submenu"
+  $recentFolderItems = @(Get-NativeMenuItems $recentFoldersMenu)
+  $recentFolderDescription = Format-PopupMenuItems $recentFolderItems
+  $recentFolderLabels = @($recentFolderItems | ForEach-Object { $_.Text })
+  Require (($recentFolderLabels -join '|') -eq 'Fixture local|Fixture remote') `
+    "Recent Folders submenu did not walk through the fixture's recent projects in order: $recentFolderDescription"
+  $recentFolderRemote = @($recentFolderItems | Where-Object { $_.Text -eq 'Fixture remote' }) | Select-Object -First 1
+  Require (($null -ne $recentFolderRemote) -and ($recentFolderRemote.Id -eq 4701)) `
+    "Recent Folders submenu did not use the stable recent_folder_command_base + index identity: $recentFolderDescription"
+  # Complete the walkthrough by actually invoking the "Fixture remote" entry
+  # through the real WM_COMMAND route (isRecentFolderCommand -> openProject),
+  # not just reading its label. openProject's only synchronous effect here is
+  # DaemonClient.setSubscription, which does not itself emit a recorded daemon
+  # command (that only happens once sendOpenProject reaches a connected
+  # client) - so under this gate's deliberate connection-failure fixture there
+  # is no wire-level command to observe. What this genuinely proves is that
+  # the live command id routes into the real handler without crashing the
+  # shell; it does not prove the daemon eventually receives an open request.
+  Require ([GraphCodeUiaGateState]::SendCommand($shellWindow, [uint32]$recentFolderRemote.Id)) `
+    "invoking the Recent Folders 'Fixture remote' entry was rejected"
+  Start-Sleep -Milliseconds 200
+  $process.Refresh()
+  Require (-not $process.HasExited) `
+    "shell exited with code $($process.ExitCode) after invoking the Recent Folders 'Fixture remote' entry"
+  $liveStatusAfterRecentFolders = Find-FragmentById $root "status" $rawWalker
+  Require ($null -ne $liveStatusAfterRecentFolders) `
+    "shell UIA tree stopped answering after the Recent Folders submenu walkthrough"
+
   $moveProjectUnavailableReason = "Project relocation is unavailable: the daemon wire contract has no authoritative moveProject command."
   $moveProjectMenuText = "Move Project... (unavailable: daemon support required)"
   # Live proof of what the native project right-click menu actually renders.
@@ -2689,9 +2959,23 @@ try {
   if ($focusEventRegistered) {
     [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
   }
-  if ($process -and -not $process.HasExited) {
-    $process.Kill()
-    $process.WaitForExit()
+  if ($process) {
+    # The shell spawns zmx.exe subprocesses for its terminal backend, but
+    # Kill() only terminates the shell itself - Windows does not cascade to
+    # children. Left uncleaned, every aborted/crashed run (this gate or a
+    # concurrent one on a shared machine) leaks a zmx.exe that never exits,
+    # and those orphans accumulate across runs/sessions until UIA calls
+    # against the *current* shell start failing under the resulting
+    # foreground/process-token contention. Capture the shell's real children
+    # before killing it so we can reap them too.
+    $orphanCandidates = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($process.Id) AND Name='zmx.exe'" -ErrorAction SilentlyContinue)
+    if (-not $process.HasExited) {
+      $process.Kill()
+      $process.WaitForExit()
+    }
+    foreach ($orphan in $orphanCandidates) {
+      Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue
+    }
   }
   if ($settingsProcess -and -not $settingsProcess.HasExited) {
     $settingsProcess.Kill()

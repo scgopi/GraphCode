@@ -1631,6 +1631,60 @@ test "sidebar loop presentation preserves type and terminal states" {
     try std.testing.expectEqual(@as(u32, 0x005F5FFF), stateColor("failed"));
 }
 
+test "elapsedText renders a compact age and its unit boundaries honestly" {
+    const allocator = std.testing.allocator;
+    const base: i64 = 788918400;
+
+    // Invalid/degenerate createdAt values must not be presented as an age.
+    const not_created = try elapsedText(allocator, 0, base + 1000);
+    defer allocator.free(not_created);
+    try std.testing.expectEqualStrings("-", not_created);
+
+    const negative_created = try elapsedText(allocator, -5, base + 1000);
+    defer allocator.free(negative_created);
+    try std.testing.expectEqualStrings("-", negative_created);
+
+    const not_yet_created = try elapsedText(allocator, base + 1000, base + 999);
+    defer allocator.free(not_yet_created);
+    try std.testing.expectEqualStrings("-", not_yet_created);
+
+    const same_instant = try elapsedText(allocator, base + 1000, base + 1000);
+    defer allocator.free(same_instant);
+    try std.testing.expectEqualStrings("-", same_instant);
+
+    // Seconds stay seconds up to the 59s/60s boundary, where the unit flips to minutes.
+    const fifty_nine_seconds = try elapsedText(allocator, base, base + 59);
+    defer allocator.free(fifty_nine_seconds);
+    try std.testing.expectEqualStrings("59s", fifty_nine_seconds);
+
+    const sixty_seconds = try elapsedText(allocator, base, base + 60);
+    defer allocator.free(sixty_seconds);
+    try std.testing.expectEqualStrings("1m", sixty_seconds);
+
+    // Minutes stay minutes up to the 3599s/3600s boundary, where the unit flips to hours.
+    const fifty_nine_minutes = try elapsedText(allocator, base, base + 3599);
+    defer allocator.free(fifty_nine_minutes);
+    try std.testing.expectEqualStrings("59m", fifty_nine_minutes);
+
+    const one_hour = try elapsedText(allocator, base, base + 3600);
+    defer allocator.free(one_hour);
+    try std.testing.expectEqualStrings("1h", one_hour);
+
+    // Hours stay hours up to the 86399s/86400s boundary, where the unit flips to days.
+    const twenty_three_hours = try elapsedText(allocator, base, base + 86399);
+    defer allocator.free(twenty_three_hours);
+    try std.testing.expectEqualStrings("23h", twenty_three_hours);
+
+    const one_day = try elapsedText(allocator, base, base + 86400);
+    defer allocator.free(one_day);
+    try std.testing.expectEqualStrings("1d", one_day);
+
+    // Multi-day ages keep truncating to whole days rather than rolling into weeks.
+    const ten_days = try elapsedText(allocator, base, base + 86400 * 10 + 3599);
+    defer allocator.free(ten_days);
+    try std.testing.expectEqualStrings("10d", ten_days);
+}
+
 test "update banner is a bounded footer action" {
     const bounds = updateBannerRect(700, false);
     try std.testing.expect(updateBannerAt(bounds.left, bounds.top, 700, true, false));

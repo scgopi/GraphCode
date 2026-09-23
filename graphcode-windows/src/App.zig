@@ -2087,6 +2087,41 @@ pub const App = struct {
             },
             4 => .background,
             5 => .quick_chats,
+            // Sidebar-parity-only targets: expose the composite and unwired
+            // loop-menu variants that target 3 (the plain wired first node)
+            // cannot reach, so the live gate can assert every menu shape
+            // GraphContextMenu.show() renders for a `.node` target.
+            6 => blk: {
+                const graph = self.model.graph orelse return;
+                if (graph.nodes.items.len < 2) return;
+                const node = graph.nodes.items[1];
+                break :blk .{ .node = .{
+                    .project_path = graph.project.path,
+                    .id = node.id,
+                    .composite = std.mem.eql(u8, node.loop_type, "composite") or
+                        std.mem.eql(u8, node.loop_type, "proactive"),
+                    .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
+                    .unwired = self.nodeIsUnwired(node.id),
+                    .follows_template = node.follows_template,
+                } };
+            },
+            7 => blk: {
+                const graph = self.model.graph orelse return;
+                const index = GraphModel.findNodeIndexByID(
+                    graph.nodes.items,
+                    "77777777-7777-4777-8777-777777777777",
+                ) orelse return;
+                const node = graph.nodes.items[index];
+                break :blk .{ .node = .{
+                    .project_path = graph.project.path,
+                    .id = node.id,
+                    .composite = std.mem.eql(u8, node.loop_type, "composite") or
+                        std.mem.eql(u8, node.loop_type, "proactive"),
+                    .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
+                    .unwired = self.nodeIsUnwired(node.id),
+                    .follows_template = node.follows_template,
+                } };
+            },
             else => return,
         };
         _ = c.SetTimer(
