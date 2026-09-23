@@ -42,8 +42,8 @@ extern fn gc_uia_update(
     confirm_each_reclaim: c_int,
 ) c.HRESULT;
 
-pub const Role = enum { window, navigation, list, list_item, button, card, menu, menu_item, text, terminal, status, dialog };
-pub const Pattern = enum { invoke, selection, selection_item, expand_collapse, scroll, value, text };
+pub const Role = enum { window, navigation, list, list_item, button, checkbox, card, menu, menu_item, text, terminal, status, dialog };
+pub const Pattern = enum { invoke, selection, selection_item, expand_collapse, scroll, value, text, toggle };
 pub const Element = struct {
     id: []const u8,
     name: []const u8,
@@ -80,6 +80,9 @@ pub const uia_zoom_out_command: usize = 23;
 pub const uia_actual_size_command: usize = 24;
 pub const uia_zoom_in_command: usize = 25;
 pub const uia_fit_command: usize = 26;
+pub const uia_workspace_new_command: usize = 27;
+pub const uia_workspace_rename_command: usize = 28;
+pub const uia_workspace_delete_command: usize = 29;
 pub const uia_dynamic_invoke_tag: usize = 0x8000000000000000;
 pub const uia_dynamic_invoke_mask: usize = 0xC000000000000000;
 
@@ -264,41 +267,44 @@ pub const Provider = struct {
         for (self.elements.items[index].patterns) |candidate| if (candidate == pattern) return true;
         return false;
     }
+    pub fn indexOfId(self: *const Provider, id: []const u8) ?usize {
+        for (self.elements.items, 0..) |element, index| {
+            if (std.mem.eql(u8, element.id, id)) return index;
+        }
+        return null;
+    }
 };
 
 pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     var provider = Provider.init(allocator);
     errdefer provider.deinit();
-    const window = try provider.add(.{ .id = "window", .name = "GraphCode Windows", .role = .window });
-    const sidebar = try provider.add(.{ .id = "sidebar", .name = "Navigation", .role = .navigation, .parent = window });
-    _ = try provider.add(.{ .id = "projects", .name = "Projects", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
-    _ = try provider.add(.{ .id = "loops", .name = "Loops", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
-    _ = try provider.add(.{ .id = "worktrees", .name = "Worktrees", .role = .list, .parent = sidebar, .focusable = true, .patterns = &.{ .selection, .scroll } });
+    const window = try provider.add(.{ .id = "graphcode-root", .name = "GraphCode UIA Root", .role = .window });
+    const projects = try provider.add(.{ .id = "projects", .name = "Projects", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
+    _ = try provider.add(.{ .id = "loops", .name = "Loops", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
+    _ = try provider.add(.{ .id = "worktrees", .name = "Worktrees", .role = .list, .parent = window, .focusable = true, .patterns = &.{.selection} });
     const graph = try provider.add(.{ .id = "graph", .name = "Graph", .role = .navigation, .parent = window });
-    _ = try provider.add(.{ .id = "graph-card", .name = "Graph card", .role = .card, .parent = graph, .focusable = true, .patterns = &.{ .selection, .invoke } });
-    _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = sidebar, .focusable = true, .patterns = &.{.invoke} });
+    const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window });
+    _ = try provider.add(.{ .id = "status", .name = "Status", .role = .status, .parent = window });
+    _ = try provider.add(.{ .id = "inspect-worktrees", .name = "Inspect worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "reclaim-worktrees", .name = "Reclaim selected worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "reveal-worktree", .name = "Reveal in Explorer", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "edit-worktree-policy", .name = "Edit worktree policy", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "save-worktree-policy", .name = "Save worktree policy", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "allow-reclaim", .name = "Allow reclaim", .role = .checkbox, .parent = menu, .patterns = &.{ .invoke, .toggle } });
+    _ = try provider.add(.{ .id = "confirm-each-reclaim", .name = "Confirm each reclaim", .role = .checkbox, .parent = menu, .patterns = &.{ .invoke, .toggle } });
+    _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Loop or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-out", .name = "Zoom out", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "actual-size", .name = "Actual size", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-in", .name = "Zoom in", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "fit-canvas", .name = "Fit canvas", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
-    const menu = try provider.add(.{ .id = "actions", .name = "Actions", .role = .menu, .parent = window, .focusable = true, .patterns = &.{.expand_collapse} });
-    _ = try provider.add(.{ .id = "inspect-worktrees", .name = "Inspect worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "reclaim-worktrees", .name = "Reclaim selected worktrees", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "reveal-worktree", .name = "Reveal in Explorer", .role = .menu_item, .parent = menu, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "terminal-a", .name = "Terminal A", .role = .terminal, .parent = window, .focusable = true, .patterns = &.{ .text, .scroll } });
-    _ = try provider.add(.{ .id = "terminal-b", .name = "Terminal B", .role = .terminal, .parent = window, .focusable = true, .patterns = &.{ .text, .scroll } });
-    _ = try provider.add(.{ .id = "status", .name = "Status", .role = .status, .parent = window });
-    _ = try provider.add(.{ .id = "errors", .name = "Errors", .role = .status, .parent = window });
-    _ = try provider.add(.{ .id = "move-project-unavailable", .name = "Move project unavailable: daemon support required", .role = .menu_item, .parent = menu, .patterns = &.{.text} });
     const workspaces = try provider.add(.{
         .id = "workspaces",
         .name = "Workspaces",
         .role = .menu,
         .parent = window,
-        .focusable = true,
-        .patterns = &.{ .selection, .expand_collapse },
+        .patterns = &.{.selection},
     });
     _ = try provider.add(.{
         .id = "workspace-new",
@@ -343,27 +349,44 @@ pub fn log(announcement: Announcement) void {
 test "UIA contract exposes named roles patterns and deterministic focus order" {
     var provider = try defaultContract(std.testing.allocator);
     defer provider.deinit();
-    try std.testing.expectEqual(Role.navigation, provider.elements.items[1].role);
-    try std.testing.expect(provider.hasPattern(2, .selection));
-    try std.testing.expect(provider.hasPattern(22, .text));
-    try std.testing.expect(!provider.hasPattern(22, .invoke));
-    try std.testing.expectEqual(Role.menu_item, provider.elements.items[22].role);
-    try std.testing.expectEqualStrings("move-project-unavailable", provider.elements.items[22].id);
-    try std.testing.expectEqualStrings(
-        "Move project unavailable: daemon support required",
-        provider.elements.items[22].name,
-    );
-    try std.testing.expectEqualStrings("workspaces", provider.elements.items[23].id);
-    try std.testing.expect(provider.hasPattern(23, .selection));
-    try std.testing.expect(provider.hasPattern(23, .expand_collapse));
-    try std.testing.expectEqualStrings("workspace-new", provider.elements.items[24].id);
-    try std.testing.expect(provider.hasPattern(24, .invoke));
-    try std.testing.expectEqualStrings("workspace-rename", provider.elements.items[25].id);
-    try std.testing.expect(provider.hasPattern(25, .invoke));
-    try std.testing.expectEqualStrings("workspace-delete", provider.elements.items[26].id);
-    try std.testing.expect(provider.hasPattern(26, .invoke));
-    try std.testing.expectEqual(@as(?usize, 3), provider.nextFocus(2));
-    try std.testing.expectEqual(@as(?usize, 4), provider.nextFocus(3));
+    const projects = provider.indexOfId("projects").?;
+    const loops = provider.indexOfId("loops").?;
+    const worktrees = provider.indexOfId("worktrees").?;
+    const graph = provider.indexOfId("graph").?;
+    const workspaces = provider.indexOfId("workspaces").?;
+    const workspace_new = provider.indexOfId("workspace-new").?;
+    const workspace_rename = provider.indexOfId("workspace-rename").?;
+    const workspace_delete = provider.indexOfId("workspace-delete").?;
+    try std.testing.expectEqual(Role.list, provider.elements.items[projects].role);
+    try std.testing.expect(provider.hasPattern(projects, .selection));
+    try std.testing.expectEqual(Role.navigation, provider.elements.items[graph].role);
+    try std.testing.expectEqual(Role.menu, provider.elements.items[workspaces].role);
+    try std.testing.expect(provider.hasPattern(workspaces, .selection));
+    try std.testing.expect(provider.hasPattern(workspace_new, .invoke));
+    try std.testing.expect(provider.hasPattern(workspace_rename, .invoke));
+    try std.testing.expect(provider.hasPattern(workspace_delete, .invoke));
+    try std.testing.expectEqual(@as(?usize, loops), provider.nextFocus(projects));
+    try std.testing.expectEqual(@as(?usize, worktrees), provider.nextFocus(loops));
+}
+
+test "default contract ids exist in the native fixed element table" {
+    const native_source = @embedFile("AccessibilityProvider.cpp");
+    const table_start_marker = "static const wchar_t *ids[] = {";
+    const table_start = std.mem.indexOf(u8, native_source, table_start_marker) orelse
+        return error.NativeAutomationIdTableMissing;
+    const table_tail = native_source[table_start + table_start_marker.len ..];
+    const table_end = std.mem.indexOf(u8, table_tail, "};") orelse
+        return error.NativeAutomationIdTableMissing;
+    const table = table_tail[0..table_end];
+
+    var provider = try defaultContract(std.testing.allocator);
+    defer provider.deinit();
+    for (provider.elements.items) |element| {
+        const needle = try std.fmt.allocPrint(std.testing.allocator, "L\"{s}\"", .{element.id});
+        defer std.testing.allocator.free(needle);
+        errdefer std.debug.print("defaultContract id has no native fixed element: {s}\n", .{element.id});
+        try std.testing.expect(std.mem.indexOf(u8, table, needle) != null);
+    }
 }
 
 test "status and error announcements are retained for screen readers" {

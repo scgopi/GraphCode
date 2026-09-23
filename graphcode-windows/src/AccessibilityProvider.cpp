@@ -99,7 +99,8 @@ class Node final : public IRawElementProviderSimple,
       *out = static_cast<IRawElementProviderFragmentRoot *>(this);
     else if (iid == __uuidof(IInvokeProvider) && supportsInvoke())
       *out = static_cast<IInvokeProvider *>(this);
-    else if (iid == __uuidof(ISelectionProvider) && id_ >= 1 && id_ <= 4)
+    else if (iid == __uuidof(ISelectionProvider) &&
+             ((id_ >= 1 && id_ <= 4) || id_ == 21))
       *out = static_cast<ISelectionProvider *>(this);
     else if (iid == __uuidof(ISelectionItemProvider) && isAvailableRow())
       *out = static_cast<ISelectionItemProvider *>(this);
@@ -132,7 +133,8 @@ class Node final : public IRawElementProviderSimple,
     *value = nullptr;
     if (id == UIA_InvokePatternId && supportsInvoke())
       *value = static_cast<IInvokeProvider *>(this);
-    else if (id == UIA_SelectionPatternId && id_ >= 1 && id_ <= 4)
+    else if (id == UIA_SelectionPatternId &&
+             ((id_ >= 1 && id_ <= 4) || id_ == 21))
       *value = static_cast<ISelectionProvider *>(this);
     else if (id == UIA_SelectionItemPatternId && isAvailableRow())
       *value = static_cast<ISelectionItemProvider *>(this);
@@ -391,7 +393,8 @@ class Node final : public IRawElementProviderSimple,
                          id_ == 10 ? 9 : id_ == 11 ? 10 : id_ == 12 ? 12 :
                          id_ == 13 ? 13 : id_ == 14 ? 20 : id_ == 15 ? 21 :
                          id_ == 16 ? 22 : id_ == 17 ? 23 : id_ == 18 ? 24 :
-                         id_ == 19 ? 25 : 26;
+                         id_ == 19 ? 25 : id_ == 20 ? 26 : id_ == 22 ? 27 :
+                         id_ == 23 ? 28 : 29;
     PostMessageW(hwnd, WM_COMMAND, command, 0);
     return S_OK;
   }
@@ -410,7 +413,8 @@ class Node final : public IRawElementProviderSimple,
     std::vector<Node *> selected;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
-      if (!isAvailableLocked() || id_ < 1 || id_ > 4) {
+      if (!isAvailableLocked() ||
+          !((id_ >= 1 && id_ <= 4) || id_ == 21)) {
         *value = nullptr;
         return UIA_E_ELEMENTNOTAVAILABLE;
       }
@@ -646,7 +650,7 @@ class Node final : public IRawElementProviderSimple,
   bool retired_ = false;
 
   bool supportsInvoke() const {
-    if (id_ == 0 || (id_ >= 7 && id_ <= 20)) return true;
+    if ((id_ >= 7 && id_ <= 20) || (id_ >= 22 && id_ <= 24)) return true;
     std::lock_guard<std::mutex> lock(state_->mutex);
     const auto row = state_->rows.find(id_);
     return row != state_->rows.end() && row->second.invokable;
@@ -699,6 +703,8 @@ class Node final : public IRawElementProviderSimple,
     if (id_ >= 7 && id_ <= 13) return 5;
     if (id_ == 14 || id_ == 15) return 1;
     if (id_ >= 16 && id_ <= 20) return 4;
+    if (id_ == 21) return 0;
+    if (id_ >= 22 && id_ <= 24) return 21;
     return -1;
   }
   int64_t firstChildLocked() const {
@@ -710,10 +716,11 @@ class Node final : public IRawElementProviderSimple,
     if (id_ == 5) return 7;
     if (id_ == 1) return 14;
     if (id_ == 4) return 16;
+    if (id_ == 21) return 22;
     return -1;
   }
   int64_t lastChildLocked() const {
-    if (id_ == 0) return 6;
+    if (id_ == 0) return 21;
     if (id_ == 2 || id_ == 3) {
       for (auto current = state_->row_order.rbegin(); current != state_->row_order.rend(); ++current)
         if (state_->rows.at(*current).parent == id_) return *current;
@@ -721,6 +728,11 @@ class Node final : public IRawElementProviderSimple,
     if (id_ == 5) return 13;
     if (id_ == 1) return 15;
     if (id_ == 4) return 20;
+    if (id_ == 21) {
+      for (auto current = state_->row_order.rbegin(); current != state_->row_order.rend(); ++current)
+        if (state_->rows.at(*current).parent == id_) return *current;
+      return 24;
+    }
     return -1;
   }
   int64_t siblingLocked(int delta) const {
@@ -732,6 +744,7 @@ class Node final : public IRawElementProviderSimple,
       const auto current = std::find(siblings.begin(), siblings.end(), id_);
       if (current == siblings.end()) return -1;
       const auto index = current - siblings.begin() + delta;
+      if (index < 0 && parent == 21) return 24;
       if (index < 0) return -1;
       if (index >= static_cast<ptrdiff_t>(siblings.size())) {
         return parent == 1 ? 14 : parent == 4 ? 16 : -1;
@@ -739,9 +752,11 @@ class Node final : public IRawElementProviderSimple,
       return siblings[static_cast<size_t>(index)];
     }
     if (id_ >= 1 && id_ <= 6) {
+      if (id_ == 6 && delta > 0) return 21;
       const int64_t next = id_ + delta;
       return next >= 1 && next <= 6 ? next : -1;
     }
+    if (id_ == 21) return delta < 0 ? 6 : -1;
     if (id_ >= 7 && id_ <= 13) {
       const int64_t next = id_ + delta;
       return next >= 7 && next <= 13 ? next : -1;
@@ -762,6 +777,14 @@ class Node final : public IRawElementProviderSimple,
       const int64_t next = id_ + delta;
       return next >= 16 && next <= 20 ? next : -1;
     }
+    if (id_ >= 22 && id_ <= 24) {
+      if (id_ == 24 && delta > 0) {
+        for (int64_t key : state_->row_order)
+          if (state_->rows.at(key).parent == 21) return key;
+      }
+      const int64_t next = id_ + delta;
+      return next >= 22 && next <= 24 ? next : -1;
+    }
     return -1;
   }
   std::wstring nameLocked() const {
@@ -772,9 +795,10 @@ class Node final : public IRawElementProviderSimple,
         L"Status", L"Inspect worktrees", L"Reclaim selected worktrees", L"Reveal in Explorer",
         L"Edit worktree policy", L"Save worktree policy", L"Allow reclaim", L"Confirm each reclaim",
         L"Graph", L"Quick Chats", L"New Loop or Chat", L"Zoom out",
-        L"Actual size", L"Zoom in", L"Fit canvas",
+        L"Actual size", L"Zoom in", L"Fit canvas", L"Workspaces",
+        L"New Workspace", L"Rename Workspace", L"Delete Workspace",
     };
-    return names[id_ >= 0 && id_ <= 20 ? id_ : 0];
+    return names[id_ >= 0 && id_ <= 24 ? id_ : 0];
   }
   std::wstring automationIdLocked() const {
     if (isRowKey(id_)) {
@@ -812,6 +836,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-new-tab:", 0) == 0 ? L"workspace-new-tab-" :
           row.identity.rfind("workspace-split-right:", 0) == 0 ? L"workspace-split-right-" :
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
+          row.identity.rfind("workspace-switch:", 0) == 0 ? L"workspace-switch-" :
           row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
@@ -823,9 +848,10 @@ class Node final : public IRawElementProviderSimple,
         L"status", L"inspect-worktrees", L"reclaim-worktrees", L"reveal-worktree",
         L"edit-worktree-policy", L"save-worktree-policy", L"allow-reclaim", L"confirm-each-reclaim",
         L"overview-destination", L"quick-chats-destination", L"canvas-primary-action",
-        L"zoom-out", L"actual-size", L"zoom-in", L"fit-canvas",
+        L"zoom-out", L"actual-size", L"zoom-in", L"fit-canvas", L"workspaces",
+        L"workspace-new", L"workspace-rename", L"workspace-delete",
     };
-    return ids[id_ >= 0 && id_ <= 20 ? id_ : 0];
+    return ids[id_ >= 0 && id_ <= 24 ? id_ : 0];
   }
   CONTROLTYPEID controlTypeLocked() const {
     if (id_ == 0) return UIA_WindowControlTypeId;
@@ -850,9 +876,10 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("loop-disclosure:", 0) == 0;
       return row.parent == 4 || action ? UIA_ButtonControlTypeId : UIA_ListItemControlTypeId;
     }
-    if ((id_ >= 7 && id_ <= 11) || (id_ >= 14 && id_ <= 20)) return UIA_ButtonControlTypeId;
+    if ((id_ >= 7 && id_ <= 11) || (id_ >= 14 && id_ <= 20) ||
+        (id_ >= 22 && id_ <= 24)) return UIA_ButtonControlTypeId;
     if (id_ == 12 || id_ == 13) return UIA_CheckBoxControlTypeId;
-    if (id_ == 5) return UIA_MenuControlTypeId;
+    if (id_ == 5 || id_ == 21) return UIA_MenuControlTypeId;
     if (id_ == 6) return UIA_StatusBarControlTypeId;
     return UIA_PaneControlTypeId;
   }

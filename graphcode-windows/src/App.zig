@@ -3904,7 +3904,7 @@ pub const App = struct {
                 elements.append(.{
                     .identity = identity,
                     .name = workspace.name,
-                    .parent = 5,
+                    .parent = 21,
                     .selected = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
                     .eligible = true,
                     .invokable = true,
@@ -4667,6 +4667,9 @@ fn onWindowMessage(
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
+                Accessibility.uia_workspace_new_command => app.createWorkspace(),
+                Accessibility.uia_workspace_rename_command => app.renameWorkspace(),
+                Accessibility.uia_workspace_delete_command => app.deleteWorkspace(),
                 else => if (wparam >= 1000 and wparam < 2000) {
                     _ = app.toggleWorktreeRow(@intCast(wparam - 1000));
                 },

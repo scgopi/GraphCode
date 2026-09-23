@@ -318,6 +318,10 @@ Assert-Contract ($codespaceDialogSource -match 'IsDialogMessageW') `
   "the codespace sheet must remain keyboard navigable"
 
 $zig = Resolve-TestZig
+Invoke-Native "Accessibility contract executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Accessibility.zig } finally { Pop-Location }
+}
 Invoke-Native "Wire executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Wire.zig } finally { Pop-Location }

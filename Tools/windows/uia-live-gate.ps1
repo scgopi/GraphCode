@@ -681,7 +681,7 @@ try {
   }
   if ($null -eq $root) { throw "shell did not expose graphcode-root through WM_GETOBJECT" }
 
-  $expectedRootIds = @("projects", "loops", "worktrees", "graph", "actions", "status")
+  $expectedRootIds = @("projects", "loops", "worktrees", "graph", "actions", "status", "workspaces")
   $rawWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   $controlWalker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
   $shellWindow = $process.MainWindowHandle
@@ -733,6 +733,28 @@ try {
   $status = Find-FragmentById $root "status" $controlWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
+
+  $workspaces = Find-FragmentById $root "workspaces" $rawWalker
+  Require ($null -ne $workspaces) "Workspace lifecycle menu was not exposed"
+  $null = $workspaces.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $workspaceLifecycle = @(
+    @{ Id = "workspace-new"; Name = "New Workspace" },
+    @{ Id = "workspace-rename"; Name = "Rename Workspace" },
+    @{ Id = "workspace-delete"; Name = "Delete Workspace" }
+  )
+  foreach ($expected in $workspaceLifecycle) {
+    $element = Find-FragmentById $workspaces $expected.Id $rawWalker
+    Require (($null -ne $element) -and ($element.Current.Name -eq $expected.Name)) `
+      "$($expected.Name) was not exposed under the Workspace lifecycle menu"
+    $null = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
+  $workspaceSwitches = @(Get-DirectChildren $workspaces $rawWalker |
+    Where-Object { $_.Current.AutomationId -match '^workspace-switch-' })
+  Require ($workspaceSwitches.Count -ge 1) "Workspace lifecycle menu did not expose the current workspace"
+  $expectedWorkspaceIds = @($workspaceLifecycle.Id) +
+    @($workspaceSwitches | ForEach-Object { $_.Current.AutomationId })
+  $null = @(Assert-FragmentLinks $workspaces $rawWalker $expectedWorkspaceIds "RawView Workspaces")
+  $null = @(Assert-FragmentLinks $workspaces $controlWalker $expectedWorkspaceIds "ControlView Workspaces")
 
   $projects = Find-FragmentById $root "projects" $rawWalker
   $loops = Find-FragmentById $root "loops" $rawWalker
