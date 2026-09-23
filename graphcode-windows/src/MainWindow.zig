@@ -170,6 +170,12 @@ pub const wm_app_tick: c.UINT = c.WM_APP + 41;
 pub var restore_message: c.UINT = 0;
 pub const wm_uia_fixture_mutate: c.UINT = c.WM_APP + 42;
 pub const wm_uia_context_menu: c.UINT = c.WM_APP + 44;
+/// Gate-only hook that presents one of a fixed set of native modal forms
+/// (edge creation, worktree policy/project settings, worktree sweep) with
+/// deterministic fixture data so the live UIA gate can reach forms that are
+/// otherwise only invoked from real user flows. `wparam` selects the form:
+/// 1 = edge creation, 2 = worktree policy, 3 = worktree sweep.
+pub const wm_uia_present_form: c.UINT = c.WM_APP + 45;
 
 /// Watchdog that ends a gate-opened popup menu if the harness never dismisses
 /// it. `TrackPopupMenu` runs its own modal loop, so without this a wedged
@@ -469,6 +475,10 @@ test "gate fixture messages and timers never collide with shell traffic" {
     try std.testing.expect(wm_uia_context_menu != wm_app_tick);
     try std.testing.expect(wm_uia_context_menu != wm_uia_fixture_mutate);
     try std.testing.expect(wm_uia_context_menu > c.WM_APP);
+    try std.testing.expect(wm_uia_present_form != wm_app_tick);
+    try std.testing.expect(wm_uia_present_form != wm_uia_fixture_mutate);
+    try std.testing.expect(wm_uia_present_form != wm_uia_context_menu);
+    try std.testing.expect(wm_uia_present_form > c.WM_APP);
     try std.testing.expect(menu_watchdog_timer_id != timer_id);
     try std.testing.expect(menu_watchdog_interval_ms > 0);
 }
