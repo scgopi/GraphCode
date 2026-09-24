@@ -890,16 +890,41 @@ function Get-DirectChildren(
         # otherwise indistinguishable from this exception alone. Best-effort:
         # swallow any failure describing process state so the real exception
         # is still the one that propagates.
+        $diagnosticHasExited = $false
+        $diagnosticExitCode = $null
         try {
           if ($process) {
             $process.Refresh()
-            $exitDetail = if ($process.HasExited) { "true exitCode=$($process.ExitCode)" } else { "false" }
+            $diagnosticHasExited = $process.HasExited
+            if ($diagnosticHasExited) {
+              try {
+                $diagnosticExitCode = $process.ExitCode
+              } catch {
+                $diagnosticExitCode = $null
+              }
+            }
+            $exitDetail = if ($diagnosticHasExited) {
+              "true exitCode=$(if ($null -eq $diagnosticExitCode) { 'unavailable' } else { $diagnosticExitCode })"
+            } else {
+              "false"
+            }
             $windows = [GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id)
             $windowsText = if ($windows.Count -gt 0) { $windows -join ";" } else { "(none)" }
             Write-Host "UIA_GETCHILDREN_EXHAUSTED hasExited=$exitDetail topLevelWindows=$windowsText"
           }
         } catch {
           Write-Host "UIA_GETCHILDREN_EXHAUSTED process state unavailable: $($_.Exception.Message)"
+        }
+        if ($diagnosticHasExited) {
+          try {
+            if ($shellErrorPath -and (Test-Path -LiteralPath $shellErrorPath)) {
+              Write-Host "UIA_GETCHILDREN_SHELL_STDERR_BEGIN"
+              Get-Content -LiteralPath $shellErrorPath | Write-Host
+              Write-Host "UIA_GETCHILDREN_SHELL_STDERR_END"
+            }
+          } catch {
+            Write-Host "UIA_GETCHILDREN_SHELL_STDERR unavailable: $($_.Exception.Message)"
+          }
         }
         throw
       }
@@ -2229,7 +2254,20 @@ try {
   $activeLoopRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 250
   $process.Refresh()
-  Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
+  $dynamicInvocationHasExited = $process.HasExited
+  $dynamicInvocationExitCode = $null
+  if ($dynamicInvocationHasExited) {
+    try {
+      $dynamicInvocationExitCode = $process.ExitCode
+    } catch {
+      $dynamicInvocationExitCode = $null
+    }
+    if (Test-Path -LiteralPath $shellErrorPath) {
+      Get-Content -LiteralPath $shellErrorPath | Write-Host
+    }
+  }
+  $dynamicInvocationExitText = if ($null -eq $dynamicInvocationExitCode) { "unavailable" } else { $dynamicInvocationExitCode }
+  Require (-not $dynamicInvocationHasExited) "dynamic project or loop invocation crashed the shell (exit $dynamicInvocationExitText)"
   # This dynamic project/loop invocation was observed on a loaded CI runner both
   # exhausting Find-FragmentByIdWithRetry's default 20-attempt/3s budget re-fetching
   # "graph" itself, and - separately - remounting graph's "canvas-card-" children a
