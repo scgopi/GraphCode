@@ -785,9 +785,22 @@ function Get-DirectChildren(
         $child = $walker.GetNextSibling($child)
       }
       return @($children.ToArray())
-    } catch [System.Runtime.InteropServices.COMException] {
+    } catch {
+      # Diagnostic-only: log every exception this hits, regardless of type, before
+      # deciding whether to retry. A prior CI run threw here with an uncaught,
+      # unlogged exception ("Unrecognized error.", ~17s into the gate, well after
+      # the one-time provider-settle wait already succeeded on its first attempt) -
+      # without this, it is impossible to tell whether it was a genuine
+      # COMException that exhausted the 4-attempt/450ms retry budget, or a
+      # differently-typed exception that never matched the typed catch this
+      # replaced and so was never retried at all. The retry POLICY is unchanged:
+      # only COMException is retried, capped at 4 attempts, everything else (and
+      # an exhausted COMException) still throws immediately.
+      $hresult = if ($_.Exception.InnerException) { $_.Exception.InnerException.HResult } else { $_.Exception.HResult }
+      $isComException = $_.Exception -is [System.Runtime.InteropServices.COMException]
       $attempt++
-      if ($attempt -ge 4) { throw }
+      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt type=$($_.Exception.GetType().FullName) hresult=0x$($hresult.ToString('X8')) retried=$isComException message=$($_.Exception.Message)"
+      if ((-not $isComException) -or ($attempt -ge 4)) { throw }
       Start-Sleep -Milliseconds 150
     }
   }
