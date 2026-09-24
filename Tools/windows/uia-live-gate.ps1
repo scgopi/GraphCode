@@ -1060,23 +1060,35 @@ try {
 
   # The freshly-launched shell's UI Automation provider can still be settling
   # immediately after graphcode-root first responds to WM_GETOBJECT: a tree walk in
-  # this window can throw a COMException ("Catastrophic failure"/"Unrecognized
-  # error", both observed on CI) even though Get-DirectChildren's own bounded
-  # per-call retry (4 attempts, ~600ms) is exhausted before the provider settles.
-  # Rather than growing that per-call budget - which is paid on every one of the
-  # ~35 Find-FragmentById call sites for the rest of the run - absorb the one-time
+  # this window can throw ("Catastrophic failure (E_UNEXPECTED)" and separately
+  # "Unrecognized error" have both been observed on CI, ~11s into the gate, before
+  # any assertion runs) even though Get-DirectChildren's own bounded per-call retry
+  # (4 attempts, ~600ms) is exhausted before the provider settles. Rather than
+  # growing that per-call budget - which is paid on every one of the ~35
+  # Find-FragmentById call sites for the rest of the run - absorb the one-time
   # startup race here, once, with a longer budget before any real assertion begins.
+  # Catch broadly (not just COMException) and log the concrete exception type/HRESULT
+  # on each failed attempt: two different error messages have already been observed
+  # for what looks like the same race, so this is diagnostic evidence for next time
+  # rather than an assumption about which exception type will show up.
   $providerSettled = $false
-  for ($settleAttempt = 0; $settleAttempt -lt 30; $settleAttempt++) {
+  $lastSettleException = $null
+  for ($settleAttempt = 0; $settleAttempt -lt 60; $settleAttempt++) {
     try {
       $null = @($rawWalker.GetFirstChild($root))
       $providerSettled = $true
       break
-    } catch [System.Runtime.InteropServices.COMException] {
+    } catch {
+      $lastSettleException = $_
+      $hresult = if ($_.Exception.InnerException) { $_.Exception.InnerException.HResult } else { $_.Exception.HResult }
+      Write-Host "UIA_PROVIDER_SETTLE_RETRY attempt=$settleAttempt type=$($_.Exception.GetType().FullName) hresult=0x$($hresult.ToString('X8')) message=$($_.Exception.Message)"
       Start-Sleep -Milliseconds 250
     }
   }
-  Require $providerSettled "shell UI Automation provider did not settle after graphcode-root appeared"
+  $settleFailureDetail = if ($null -ne $lastSettleException) {
+    " (last: $($lastSettleException.Exception.GetType().FullName): $($lastSettleException.Exception.Message))"
+  } else { "" }
+  Require $providerSettled "shell UI Automation provider did not settle after graphcode-root appeared$settleFailureDetail"
 
   $desktop = [System.Windows.Automation.AutomationElement]::RootElement
   $updateDialog = $desktop.FindFirst(
