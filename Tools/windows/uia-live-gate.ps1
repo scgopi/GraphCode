@@ -2472,6 +2472,58 @@ try {
     "Check for Updates status text never left the checking state"
   Require ($checkUpdatesFinalStatus -match "(?i)update") `
     "Check for Updates completion status omitted any update-check outcome; saw '$checkUpdatesFinalStatus'"
+  $settledUpdateDialogCondition = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty,
+      "GraphCode Update Available"
+    )),
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [System.Windows.Automation.ControlType]::Window
+    ))
+  )
+  if ($checkUpdatesFinalStatus -match "(?i)update available") {
+    # finishUpdateCheck re-enables the menu command immediately before
+    # synchronously presenting the available-update modal. The enabled bit
+    # therefore means the background request settled, not that its resulting
+    # modal interaction is finished. Handle that real result before continuing
+    # so later shell assertions never race a correctly disabled modal owner.
+    $settledUpdateDialog = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "manual update-check offer" `
+      -diagnosticWindow $shellWindow
+    Require ($null -ne $settledUpdateDialog) `
+      "Check for Updates reported an available update but did not present its offer"
+    Require ([GraphCodeUiaGateState]::SendCommand(
+      [IntPtr]$settledUpdateDialog.Current.NativeWindowHandle, 9703
+    )) "Check for Updates offer could not be dismissed via Later"
+    Require (Wait-ForDesktopElementGone `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "manual update-check offer close" `
+      -diagnosticWindow $shellWindow) `
+      "Check for Updates offer did not close after Later"
+  } else {
+    $unexpectedUpdateDialog = Wait-ForDesktopElement `
+      -desktop $desktop `
+      -condition $settledUpdateDialogCondition `
+      -label "unexpected manual update-check offer" `
+      -diagnosticWindow $shellWindow `
+      -TimeoutMilliseconds 1000
+    Require ($null -eq $unexpectedUpdateDialog) `
+      "Check for Updates presented an offer despite reporting '$checkUpdatesFinalStatus'"
+  }
+  $checkUpdatesOwnerEnabled = $false
+  for ($index = 0; $index -lt 100 -and -not $checkUpdatesOwnerEnabled; $index++) {
+    $checkUpdatesOwnerEnabled = [GraphCodeUiaGateState]::WindowIsEnabled($shellWindow)
+    if (-not $checkUpdatesOwnerEnabled) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $checkUpdatesOwnerEnabled `
+    "Check for Updates left the shell owner WS_DISABLED after its result was handled $(Get-FocusDiagnostics $shellWindow)"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 20)) `
     "sidebar parity fixture reset was rejected"
