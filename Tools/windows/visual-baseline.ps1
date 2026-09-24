@@ -285,5 +285,18 @@ foreach ($snapshot in @($manifest.terminalSnapshots)) {
     "terminal snapshot contains an environment-specific path: $($snapshot.id)"
 }
 
+# --- currentThemeContract: static, zero-tolerance source-drift check ---------
+#
+# Re-derives color tokens straight from the current-worktree Theme.swift/
+# DesignTokens.zig on disk (not a historical git blob) and asserts an exact
+# match against manifest.currentThemeContract, distinct from and additive to
+# the frozen historical tokenContracts/baseCommit checked above. See
+# Test-CurrentThemeContract.ps1 for the actual comparator; it is dot-sourced
+# here (rather than duplicated) so this run and VisualBaseline.Tests.ps1's
+# fixture-based tests exercise the identical production code.
+$themeSwiftPath = Join-Path $repoRoot "graphcode\Sources\Features\App\Theme.swift"
+. (Join-Path $PSScriptRoot "Test-CurrentThemeContract.ps1") `
+  -ManifestPath $manifestPath -ThemeSwiftPath $themeSwiftPath -DesignTokensPath $designTokensPath
+
 Write-Output "Visual baseline: PASS"
 exit 0

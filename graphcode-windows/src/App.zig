@@ -86,6 +86,33 @@ fn wheelRegion(x: i32, y: i32, bounds: InputBounds, controls: WorkspaceControls.
     return .none;
 }
 
+/// Whether a WM_GESTURE point should be treated as landing on the graph
+/// canvas. The `wheelRegion` rectangle test alone only says a point falls
+/// over the canvas-*shaped* area of the window; it says nothing about
+/// whether the surface actually showing there right now renders the graph
+/// canvas at all -- the terminal workspace surface reuses the exact same
+/// window chrome/rectangle. Both conditions are required: a graph-capable
+/// surface (anything except the terminal workspace) AND the mapped point
+/// actually falling inside the canvas rectangle.
+fn gestureInCanvas(surface: GraphCanvas.Surface, mapped: ?c.POINT, bounds: InputBounds, controls: WorkspaceControls.State) bool {
+    if (surface == .workspace) return false;
+    const point = mapped orelse return false;
+    return wheelRegion(point.x, point.y, bounds, controls) == .canvas;
+}
+
+/// Formats the gesture-registration failure diagnostic. Pulled out as a pure
+/// function (rather than inlined at the one `std.log`/`setStatus` call site)
+/// so the exact production message text is directly unit-testable without
+/// needing to run `App.run()`'s full startup sequence or capture `std.log`
+/// output.
+fn formatGestureRegistrationFailure(buf: []u8, last_error: c.DWORD) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "Touch pinch-zoom unavailable (gesture config error {d})",
+        .{last_error},
+    ) catch "Touch pinch-zoom unavailable";
+}
+
 fn isResolvedLoopState(state: []const u8) bool {
     return std.mem.eql(u8, state, "succeeded") or
         std.mem.eql(u8, state, "failed") or
@@ -413,6 +440,27 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
+        if (!self.window.gesture_config_registered) {
+            // Non-fatal: the canvas simply falls back to wheel-only zoom (no
+            // pinch input) rather than the app failing to start. The
+            // transient status/announcement line below is best-effort --
+            // several later calls in this same startup sequence (daemon
+            // status, accessibility attach, product-settings/canvas-layout/
+            // sidebar-store load failures) call setStatus themselves and can
+            // overwrite this message before the window is ever shown. Two
+            // things make this observable regardless: `std.log.warn` below
+            // writes the same message (with the captured Win32 error code)
+            // to stderr, so support/CI logs retain it even if the on-screen
+            // status line gets clobbered; and `window.gesture_config_registered`
+            // / `window.gesture_config_last_error` are the durable, never-
+            // overwritten record of the outcome for any caller (tests,
+            // future diagnostics UI, support tooling) that reads the window
+            // directly instead of the transient status text.
+            var buf: [96]u8 = undefined;
+            const message = formatGestureRegistrationFailure(&buf, self.window.gesture_config_last_error);
+            std.log.warn("{s}", .{message});
+            self.setStatus(message);
+        }
         // Seed the real startup DPI now that a window handle exists, rather than
         // waiting on the first WM_DPICHANGED. Without this a per-monitor-aware
         // process that launches directly on a scaled (>100%) monitor would still
@@ -834,6 +882,23 @@ pub const App = struct {
         if (self.model.recent_projects.items.len != 0) return self.model.recent_projects.items[0].path;
         if (self.worktree_inspection) |inspection| return inspection.project_path;
         return null;
+    }
+
+    /// A stable identity for "what an in-progress pinch gesture is currently
+    /// applied to", used to detect a same-region destination change (surface
+    /// switch, or project switch while the surface stays graph-capable) that
+    /// the OS never brackets with GID_END. Deliberately hashes the surface
+    /// tag and `currentProject()`'s path *content* (matching the existing
+    /// `GraphCanvas.nodeKey` Wyhash-of-content precedent) rather than storing
+    /// the path slice itself, since `currentProject()` returns data borrowed
+    /// from model storage that can be freed or reallocated out from under a
+    /// held pointer while a multi-message gesture is still in flight.
+    fn pinchGestureContext(self: *const App) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        const surface_tag = @intFromEnum(self.surface);
+        hasher.update(std.mem.asBytes(&surface_tag));
+        if (self.currentProject()) |path| hasher.update(path);
+        return hasher.final();
     }
 
     fn selectProject(self: *App, path: []const u8) bool {
@@ -6091,6 +6156,95 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_GESTURE => {
+            // GESTUREINFO.ptsLocation is always screen-relative (per the
+            // documented WM_GESTURE contract), so it must go through the
+            // same ScreenToClient + region classification WM_MOUSEWHEEL uses
+            // above before it can be compared against canvas bounds.
+            const gesture_handle = Win32.messagePointer(c.HGESTUREINFO, lparam);
+            var info: c.GESTUREINFO = std.mem.zeroes(c.GESTUREINFO);
+            info.cbSize = @sizeOf(c.GESTUREINFO);
+            if (c.GetGestureInfo(gesture_handle, &info) == 0) {
+                // Could not even read the gesture; nothing to handle, and
+                // per the handle-ownership contract an unhandled message
+                // must be forwarded (not closed) so DefWindowProc still sees
+                // it for any legacy fallback behavior.
+                app.canvas.endPinchZoom();
+                return false;
+            }
+            var gesture_client: c.RECT = undefined;
+            if (c.GetClientRect(hwnd, &gesture_client) == 0) {
+                // A failed GetClientRect leaves `gesture_client` undefined;
+                // treating that as "in canvas" would classify against
+                // garbage bounds. Reset any in-progress gesture and forward
+                // unhandled -- this window cannot safely act on the message
+                // without a valid client rect.
+                app.canvas.endPinchZoom();
+                return false;
+            }
+            const screen_point = c.POINT{ .x = info.ptsLocation.x, .y = info.ptsLocation.y };
+            const mapped = CanvasInput.screenToClient(hwnd, screen_point);
+            const gesture_routing = inputBounds(gesture_client.right, gesture_client.bottom, app.workspace_controls);
+            const in_canvas = gestureInCanvas(app.surface, mapped, gesture_routing, app.workspace_controls);
+            const distance: u32 = @truncate(info.ullArguments);
+            const pinch_context = app.pinchGestureContext();
+            switch (CanvasInput.classifyGesture(info.dwID, info.dwFlags, in_canvas)) {
+                // GID_BEGIN/GID_END (the generic gesture-sequence brackets) and
+                // any zoom message located outside the canvas: this window
+                // does not handle it, so per the documented handle-ownership
+                // contract it must be forwarded to DefWindowProc rather than
+                // closed here -- ownership of the handle transfers with the
+                // message. Returning false relies on MainWindow.windowProc's
+                // existing single DefWindowProcW forward; this case must
+                // never call DefWindowProcW itself, or the handle would be
+                // forwarded twice.
+                .forward_unhandled, .forward_out_of_region => {
+                    app.canvas.endPinchZoom();
+                    return false;
+                },
+                .begin_zoom => {
+                    app.canvas.beginPinchZoom(distance, pinch_context);
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+                .continue_zoom => {
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, pinch_context);
+                    // Release the owned handle before syncAccessibility()/
+                    // InvalidateRect, which can pump messages -- this
+                    // window's WM_GESTURE handling should never still be
+                    // holding a handle open while other message handling
+                    // runs.
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
+                },
+                .end_zoom => {
+                    if (mapped) |point| app.canvas.continuePinchZoom(point.x, point.y, distance, pinch_context);
+                    app.canvas.endPinchZoom();
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                    result.* = 0;
+                    return true;
+                },
+                .begin_and_end_zoom => {
+                    // A gesture short enough to arrive as a single message
+                    // still begins a fresh baseline (recording this begin's
+                    // context) and then immediately ends it, exactly as a
+                    // real begin-then-end sequence would -- never treated as
+                    // a continuation, which could otherwise apply whatever
+                    // baseline a previous, unrelated gesture left behind.
+                    app.canvas.beginPinchZoom(distance, pinch_context);
+                    app.canvas.endPinchZoom();
+                    _ = c.CloseGestureInfoHandle(gesture_handle);
+                    result.* = 0;
+                    return true;
+                },
+            }
+        },
         c.WM_SETFOCUS => {
             if (app.workspace) |workspace| {
                 if (app.surface == .workspace or app.workspace_controls.panel_visible) {
@@ -6111,6 +6265,14 @@ fn onWindowMessage(
             // restoration race and keep stealing focus away from the rest of the app's chrome.
             const activated = (wparam & 0xffff) != c.WA_INACTIVE;
             result.* = c.DefWindowProcW(hwnd, message, wparam, lparam);
+            if (!activated) {
+                // Deactivation (e.g. Alt+Tab away, or another window taking
+                // focus) can happen mid-pinch without ever delivering a
+                // GID_END for it; clear the baseline so a later reactivation
+                // cannot resume a stale gesture with a now-meaningless base
+                // distance.
+                app.canvas.endPinchZoom();
+            }
             if (activated) {
                 if (app.workspace) |workspace| {
                     if (app.surface == .workspace or app.workspace_controls.panel_visible) {
@@ -6212,6 +6374,93 @@ test "input routing bounds follow hidden workspace panel and rail" {
     try std.testing.expect(hidden.canvas.bottom > shown.canvas.bottom);
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(20, 300, hidden, hidden_controls));
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
+}
+
+test "gesture routing requires a graph-capable surface, not only the canvas rectangle" {
+    // This is the exact helper the real WM_GESTURE handler calls -- proving
+    // routing here is proving the production path, not a parallel reimplementation.
+    const hidden_controls = WorkspaceControls.State{
+        .rail_visible = false,
+        .panel_visible = false,
+        .activity_enabled = false,
+    };
+    const bounds = inputBounds(1200, 900, hidden_controls);
+    const point_over_canvas_rect = c.POINT{ .x = 600, .y = 500 };
+
+    // The terminal workspace surface reuses the exact same window chrome and
+    // canvas-shaped rectangle, but does not render the graph canvas at all --
+    // a pinch landing there must never be treated as a canvas gesture, even
+    // though the rectangle test alone would say "canvas".
+    try std.testing.expect(!gestureInCanvas(.workspace, point_over_canvas_rect, bounds, hidden_controls));
+
+    // Every graph-capable surface (project/overview/quick_chats) is routed
+    // when the point is genuinely over the canvas rectangle.
+    try std.testing.expect(gestureInCanvas(.project, point_over_canvas_rect, bounds, hidden_controls));
+    try std.testing.expect(gestureInCanvas(.overview, point_over_canvas_rect, bounds, hidden_controls));
+    try std.testing.expect(gestureInCanvas(.quick_chats, point_over_canvas_rect, bounds, hidden_controls));
+
+    // A graph-capable surface with a point outside the canvas rectangle (or
+    // an unmapped/failed ScreenToClient) is still not routed to the canvas.
+    try std.testing.expect(!gestureInCanvas(.project, null, bounds, hidden_controls));
+    try std.testing.expect(!gestureInCanvas(.project, c.POINT{ .x = -50, .y = -50 }, bounds, hidden_controls));
+
+    // A destination switch mid-gesture (surface flips from a graph surface to
+    // the terminal workspace at the exact same screen point) flips routing
+    // from in-canvas to not-in-canvas -- this is what lets the real handler's
+    // forward_out_of_region branch reset any in-progress pinch instead of
+    // continuing to scale a canvas that is no longer on screen.
+    try std.testing.expect(gestureInCanvas(.overview, point_over_canvas_rect, bounds, hidden_controls));
+    try std.testing.expect(!gestureInCanvas(.workspace, point_over_canvas_rect, bounds, hidden_controls));
+}
+
+test "pinchGestureContext changes identity across project switches on the same surface" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
+    );
+
+    _ = app.model.selectProject("A");
+    app.surface = .overview;
+    const context_project_a = app.pinchGestureContext();
+
+    _ = app.model.selectProject("B");
+    const context_project_b = app.pinchGestureContext();
+
+    // Same graph-capable surface, different project: this identity is what
+    // WM_GESTURE's routing uses to detect a same-region destination change
+    // during an in-progress pinch. A gesture begun on project A must not be
+    // able to keep scaling project B's canvas after a mid-gesture project
+    // switch, so the two identities must differ.
+    try std.testing.expect(context_project_a != context_project_b);
+
+    // A surface switch away from the graph canvas (still on project B) is
+    // also a distinct identity, covering the terminal-workspace case.
+    app.surface = .workspace;
+    const context_workspace = app.pinchGestureContext();
+    try std.testing.expect(context_workspace != context_project_b);
+
+    // Recomputing with no state change at all is stable (same inputs, same
+    // hash), since App.zig recomputes this fresh on every WM_GESTURE message
+    // rather than caching it.
+    app.surface = .overview;
+    try std.testing.expectEqual(context_project_b, app.pinchGestureContext());
 }
 
 test "jump matching ranks exact results across projects" {
@@ -6347,6 +6596,61 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     // Checking a row in the dialog makes it selected even with no sidebar path.
     _ = app.worktree_dialog.?.toggle(0);
     try std.testing.expect(app.worktreeRowSelected());
+}
+
+test "gesture registration outcome survives later startup setStatus calls" {
+    // App.run() calls setStatus() repeatedly during synchronous startup
+    // (tray, daemon status, accessibility attach, product-settings/canvas-
+    // layout/sidebar-store load failures) immediately after the gesture-
+    // registration diagnostic. Any of those can legitimately clobber the
+    // transient status line before the window is ever shown; what must NOT
+    // be lost is the durable record on `window` itself.
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    defer if (app.status_override.len != 0) allocator.free(app.status_override);
+
+    app.window.gesture_config_registered = false;
+    app.window.gesture_config_last_error = 1223;
+
+    var buf: [96]u8 = undefined;
+    app.setStatus(formatGestureRegistrationFailure(&buf, app.window.gesture_config_last_error));
+    // Simulate the later startup calls that are known to overwrite status.
+    app.setStatus("Connecting to daemon...");
+    app.setStatus("Accessibility provider unavailable");
+    app.setStatus("Product settings failed to load");
+
+    // The transient line is allowed to have been overwritten...
+    try std.testing.expect(!std.mem.eql(u8, app.status(), "Touch pinch-zoom unavailable (gesture config error 1223)"));
+    // ...but the durable record must be completely unaffected.
+    try std.testing.expect(!app.window.gesture_config_registered);
+    try std.testing.expectEqual(@as(c.DWORD, 1223), app.window.gesture_config_last_error);
+}
+
+test "gesture registration failure formats the exact production diagnostic text" {
+    // This is the same formatter run() actually calls for both the
+    // std.log.warn line and the transient setStatus() line, so this proves
+    // the real observable failure output, not a hand-duplicated string.
+    var buf: [96]u8 = undefined;
+    const message = formatGestureRegistrationFailure(&buf, 1223);
+    try std.testing.expectEqualStrings("Touch pinch-zoom unavailable (gesture config error 1223)", message);
+
+    // A buffer too small to hold the formatted error code falls back to the
+    // fixed, always-fitting message rather than silently truncating or
+    // erroring.
+    var tiny_buf: [4]u8 = undefined;
+    const fallback = formatGestureRegistrationFailure(&tiny_buf, 1223);
+    try std.testing.expectEqualStrings("Touch pinch-zoom unavailable", fallback);
 }
 
 test "header UIA identities hash to distinct payloads" {

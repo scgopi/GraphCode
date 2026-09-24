@@ -102,6 +102,34 @@ pub fn commandFromId(id: usize) ?Command {
     return std.meta.intToEnum(Command, @as(u16, @intCast(id))) catch null;
 }
 
+pub const GestureConfigResult = struct {
+    ok: bool,
+    /// `GetLastError()` captured immediately after the `SetGestureConfig`
+    /// call, before any other Win32 call can overwrite it. Only meaningful
+    /// when `ok` is false.
+    last_error: c.DWORD,
+};
+
+/// Registers this window's opt-in to native pinch-zoom (`GID_ZOOM`)
+/// gestures only. Every other WM_GESTURE class is left at its existing
+/// default (neither explicitly enabled nor blocked here) -- App.zig's
+/// `WM_GESTURE` handler already forwards any non-`GID_ZOOM` message
+/// unhandled via `CanvasInput.classifyGesture`, so there is no unimplemented
+/// gesture class this app could silently start reacting to; configuring an
+/// explicit block for gestures this app has no opinion on would only widen
+/// the surface unnecessarily. `SetGestureConfig` documents that a single
+/// call cannot mix a `dwID = 0` "all gestures" entry with specific-`dwID`
+/// entries, so this uses one specific-`dwID` entry rather than `dwID = 0`.
+pub fn registerCanvasGestureConfig(hwnd: c.HWND) GestureConfigResult {
+    var configs = [_]c.GESTURECONFIG{
+        .{ .dwID = c.GID_ZOOM, .dwWant = c.GC_ZOOM, .dwBlock = 0 },
+    };
+    if (c.SetGestureConfig(hwnd, 0, configs.len, &configs, @sizeOf(c.GESTURECONFIG)) != 0) {
+        return .{ .ok = true, .last_error = 0 };
+    }
+    return .{ .ok = false, .last_error = c.GetLastError() };
+}
+
 pub const Window = struct {
     hwnd: c.HWND = null,
     instance: c.HINSTANCE = null,
@@ -109,6 +137,12 @@ pub const Window = struct {
     callback: ?MessageCallback = null,
     accelerators: c.HACCEL = null,
     class_name: [*:0]const u16 = class_name.ptr,
+    /// Result of the one-time `SetGestureConfig` registration performed in
+    /// `create`. Kept on the struct (rather than discarded) so a failure can
+    /// be surfaced through the existing `setStatus` diagnostic path instead
+    /// of failing silently.
+    gesture_config_registered: bool = false,
+    gesture_config_last_error: c.DWORD = 0,
 
     pub fn create(
         self: *Window,
@@ -139,6 +173,9 @@ pub const Window = struct {
             self.instance,
             @ptrCast(self),
         ) orelse return error.WindowCreationFailed;
+        const gesture_result = registerCanvasGestureConfig(self.hwnd);
+        self.gesture_config_registered = gesture_result.ok;
+        self.gesture_config_last_error = gesture_result.last_error;
         try installMenu(self.hwnd);
         self.accelerators = createAccelerators();
         _ = c.ShowWindow(self.hwnd, c.SW_SHOW);
@@ -536,6 +573,69 @@ test "setUpdateCheckEnabled toggles only the Check for Updates command's real me
     // command's enable state must be untouched by either call above.
     const worktrees_state = c.GetMenuState(menu, @intFromEnum(Command.worktrees), c.MF_BYCOMMAND);
     try std.testing.expect((worktrees_state & c.MF_GRAYED) == 0);
+}
+
+// Real (not faked) `SetGestureConfig` registration test. Positive control
+// proves the exact array this code builds is accepted by the real Win32 API
+// against a genuine, never-shown HWND (reusing the same non-activating test
+// harness as `setUpdateCheckEnabled` above); negative control (a deliberately
+// wrong `cbSize`) proves the failure branch actually fires and captures a
+// nonzero `GetLastError()`, rather than the success path being trivially
+// true regardless of what's passed.
+test "registerCanvasGestureConfig succeeds with the real gesture array and captures errors on failure" {
+    const test_class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeMainWindowGestureTestClass");
+    var wc = std.mem.zeroes(c.WNDCLASSEXW);
+    wc.cbSize = @sizeOf(c.WNDCLASSEXW);
+    wc.lpfnWndProc = testWindowProc;
+    wc.hInstance = c.GetModuleHandleW(null);
+    wc.lpszClassName = test_class_name;
+    _ = c.RegisterClassExW(&wc);
+
+    const hwnd = c.CreateWindowExW(
+        0,
+        test_class_name,
+        std.unicode.utf8ToUtf16LeStringLiteral("GraphCode MainWindow gesture test"),
+        c.WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        wc.hInstance,
+        null,
+    ) orelse return error.SkipZigTest;
+    defer _ = c.DestroyWindow(hwnd);
+
+    const success = registerCanvasGestureConfig(hwnd);
+    try std.testing.expect(success.ok);
+    try std.testing.expectEqual(@as(c.DWORD, 0), success.last_error);
+
+    // Negative control: call the real API directly with a corrupted cbSize
+    // (rather than mocking anything) to prove SetGestureConfig genuinely
+    // rejects a malformed array and that GetLastError reports a real,
+    // nonzero code afterward.
+    var bad_config = [_]c.GESTURECONFIG{
+        .{ .dwID = c.GID_ZOOM, .dwWant = c.GC_ZOOM, .dwBlock = 0 },
+    };
+    const failed = c.SetGestureConfig(hwnd, 0, bad_config.len, &bad_config, 0);
+    try std.testing.expectEqual(@as(c.BOOL, 0), failed);
+    try std.testing.expect(c.GetLastError() != 0);
+}
+
+// The negative control above bypasses `registerCanvasGestureConfig` entirely
+// (it calls the raw Win32 API with a malformed argument), so it only proves
+// the OS API itself can fail -- it says nothing about whether this codebase's
+// own helper actually surfaces that failure correctly. A `registerCanvasGestureConfig`
+// that ignored `SetGestureConfig`'s return value and always reported success
+// would still pass the test above. This exercises the production helper's
+// own call with a genuinely invalid (never-created) HWND, so only a helper
+// that truly captures and returns the real failure/GetLastError can pass it.
+test "registerCanvasGestureConfig itself reports failure for a genuinely invalid HWND" {
+    const bogus_hwnd = Win32.opaquePointerFromInt(c.HWND, 0xdeadbeef);
+    const result = registerCanvasGestureConfig(bogus_hwnd);
+    try std.testing.expect(!result.ok);
+    try std.testing.expect(result.last_error != 0);
 }
 
 test "recent folder commands use a dedicated command range" {
