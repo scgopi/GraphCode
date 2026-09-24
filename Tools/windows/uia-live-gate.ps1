@@ -797,6 +797,15 @@ function Ensure-ShellForeground(
 # silently-passing check. That is exactly the transient class the original comment
 # described. Unlike the ENA case, this can't make an assertion vacuous: it always
 # throws (never returns a masking @()) unless it genuinely recovers within budget.
+function Test-RetryableUiaError([System.Management.Automation.ErrorRecord] $errorRecord) {
+  $exception = $errorRecord.Exception
+  $inner = $exception.InnerException
+  return ($exception -is [System.Runtime.InteropServices.COMException]) -or
+         ($inner -is [System.Runtime.InteropServices.COMException]) -or
+         ($exception -is [System.Windows.Automation.ElementNotAvailableException]) -or
+         ($inner -is [System.Windows.Automation.ElementNotAvailableException])
+}
+
 function Get-DirectChildren(
   [System.Windows.Automation.AutomationElement] $element,
   [System.Windows.Automation.TreeWalker] $walker
@@ -841,10 +850,7 @@ function Get-DirectChildren(
       # exception types get a bounded, wall-clock-limited chance to resolve
       # before that unconditional throw.
       $inner = $_.Exception.InnerException
-      $isRetryable = ($_.Exception -is [System.Runtime.InteropServices.COMException]) -or
-                     ($inner -is [System.Runtime.InteropServices.COMException]) -or
-                     ($_.Exception -is [System.Windows.Automation.ElementNotAvailableException]) -or
-                     ($inner -is [System.Windows.Automation.ElementNotAvailableException])
+      $isRetryable = Test-RetryableUiaError $_
       $hresult = if ($inner) { $inner.HResult } else { $_.Exception.HResult }
       $innerType = if ($inner) { $inner.GetType().FullName } else { "" }
       $attempt++
@@ -981,16 +987,21 @@ function Wait-ForGraphChildren(
   [int] $delayMs = 100
 ) {
   $observed = @()
+  $children = @()
   $liveGraph = $null
   for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
     $liveGraph = Find-FragmentById $root "graph" $walker
     if ($null -ne $liveGraph) {
-      $observed = @(Get-DirectChildren $liveGraph $walker | Where-Object $filter)
+      $children = @(Get-DirectChildren $liveGraph $walker)
+      $observed = @($children | Where-Object $filter)
       if (& $until $observed) { break }
+    } else {
+      $children = @()
+      $observed = @()
     }
     Start-Sleep -Milliseconds $delayMs
   }
-  return [pscustomobject]@{ Graph = $liveGraph; Items = $observed }
+  return [pscustomobject]@{ Graph = $liveGraph; Items = $observed; Children = $children }
 }
 
 # A modal teardown (e.g. dismissing the update-offer dialog via SendCommand)
@@ -1055,6 +1066,7 @@ function Wait-ForRootReconnect(
           break
         }
       } catch {
+        if (-not (Test-RetryableUiaError $_)) { throw }
         $lastException = $_
         Write-Host "UIA_ROOT_RECONNECT_RETRY attempt=$attempt type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
       }
@@ -2292,6 +2304,7 @@ try {
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
     "loop invocation did not transition to the selected workspace loop"
   $workspaceToolbar = $null
+  $workspaceLoopBar = $null
   $workspaceShowGraph = $null
   $workspaceTabs = @()
   $workspaceControls = @()
@@ -2313,6 +2326,10 @@ try {
     $workspaceChildren = @(Get-DirectChildren $liveGraph $rawWalker)
     $workspaceToolbar = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
+    }) | Select-Object -First 1
+    $workspaceLoopBar = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-loop-bar-' -and
+      $_.Current.Name -eq "Selected loop workspace"
     }) | Select-Object -First 1
     $workspaceShowGraph = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
@@ -2336,7 +2353,8 @@ try {
     $workspaceUsage = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-detail-usage-' -and $_.Current.Name -match 'tokens$'
     }) | Select-Object -First 1
-    if (($null -ne $workspaceToolbar) -and ($null -ne $workspaceShowGraph) -and
+    if (($null -ne $workspaceToolbar) -and ($null -ne $workspaceLoopBar) -and
+        ($null -ne $workspaceShowGraph) -and
         ($workspaceTabs.Count -ge 1) -and ($workspaceControls.Count -eq 3) -and
         ($null -ne $workspacePanelToggle) -and ($null -ne $workspaceSparkline) -and
         ($null -ne $workspaceStart) -and ($null -ne $workspaceUsage)) {
@@ -2346,6 +2364,8 @@ try {
   }
   Require ($null -ne $workspaceToolbar) `
     "workspace chrome omitted the toolbar identity child"
+  Require ($null -ne $workspaceLoopBar) `
+    "workspace chrome omitted the selected-loop identity child"
   Require ($null -ne $workspaceShowGraph) `
     "workspace chrome omitted the Show in Graph child"
   Require ($workspaceControls.Count -eq 3) `
@@ -2356,6 +2376,12 @@ try {
   Require ($null -ne $workspaceSparkline) "workspace right panel omitted metric sparkline child"
   Require ($null -ne $workspaceStart) "workspace right panel omitted start-time child"
   Require ($null -ne $workspaceUsage) "workspace right panel omitted token-usage child"
+  $expectedShowGraphCardId = $workspaceCards[0].Current.AutomationId
+  $expectedShowGraphLoopRowId = $activeLoopRow.Current.AutomationId
+  $expectedWorkspaceToolbarId = $workspaceToolbar.Current.AutomationId
+  $expectedWorkspaceLoopBarId = $workspaceLoopBar.Current.AutomationId
+  $expectedWorkspaceShowGraphId = $workspaceShowGraph.Current.AutomationId
+
   # The four detail children can be present in the UIA tree before the loop panel has
   # laid them out, so existence (which the mount loop above waits for) does not imply
   # non-empty bounds. They are also served by a custom fragment provider that destroys
@@ -2480,6 +2506,111 @@ try {
   Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
            ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
     "switching back from the mounted background tab changed terminal tab identity"
+
+  # Resolve the current workspace generation after the tab round trip, then invoke
+  # Show in Graph once. Poll only for the positive destination precondition: the
+  # exact selected card must exist. Workspace-chrome absence is asserted separately
+  # from the same successful generation, so an unavailable tree cannot pass as empty.
+  $showGraphActionProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -in @($expectedWorkspaceLoopBarId, $expectedWorkspaceShowGraphId) } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedWorkspaceLoopBarId }).Count -eq 1) -and
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedWorkspaceShowGraphId }).Count -eq 1) }
+  $graph = $showGraphActionProbe.Graph
+  $workspaceShowGraph = @($showGraphActionProbe.Items | Where-Object {
+    $_.Current.AutomationId -eq $expectedWorkspaceShowGraphId -and
+    $_.Current.Name -eq "Show in Graph"
+  })
+  Require ($workspaceShowGraph.Count -eq 1) `
+    "workspace round trip did not retain the exact Show in Graph action identity"
+  $workspaceShowGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+
+  $root = Wait-ForRootReconnect $process @($rawWalker)
+  $showGraphProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -eq $expectedShowGraphCardId } `
+    { param($items) $items.Count -eq 1 } `
+    -maxAttempts 100
+  $graph = $showGraphProbe.Graph
+  Require ($null -ne $graph) "Show in Graph did not expose the project graph"
+  $showGraphChildren = @($showGraphProbe.Children)
+  $showGraphCards = @($showGraphChildren | Where-Object {
+    $_.Current.AutomationId -eq $expectedShowGraphCardId -and
+    $_.Current.Name -eq "UIA loop A"
+  })
+  Require ($showGraphCards.Count -eq 1) `
+    "Show in Graph did not expose exactly one card with the selected loop's stable identity"
+  $remainingWorkspaceChrome = @($showGraphChildren | Where-Object {
+    $_.Current.AutomationId -match '^workspace-(toolbar|show-graph|loop-bar|tab|new-tab|split-right|split-down)-'
+  })
+  Require ($remainingWorkspaceChrome.Count -eq 0) `
+    "Show in Graph retained workspace chrome: $(@($remainingWorkspaceChrome | ForEach-Object { $_.Current.AutomationId }) -join '|')"
+  Require ($showGraphCards[0].GetCurrentPattern(
+      [System.Windows.Automation.SelectionItemPattern]::Pattern
+    ).Current.IsSelected) `
+    "Show in Graph did not retain selection of the exact UIA loop A card"
+  $process.Refresh()
+  Require (-not $process.HasExited) "Show in Graph terminated the shell"
+
+  # Cards are intentionally non-invokable. Return through the supported sidebar
+  # row, asserting its exact stable identity before invoking it, then require the
+  # reopened workspace to expose the same project and selected-loop identities.
+  $showGraphSidebar = Find-FragmentById $root "loops" $rawWalker
+  Require ($null -ne $showGraphSidebar) "Show in Graph result omitted the sidebar loop list"
+  $showGraphLoopRows = @(Get-DirectChildren $showGraphSidebar $rawWalker | Where-Object {
+    $_.Current.AutomationId -eq $expectedShowGraphLoopRowId -and
+    $_.Current.Name -eq "UIA loop A"
+  })
+  Require ($showGraphLoopRows.Count -eq 1) `
+    "Show in Graph result omitted the selected loop's exact sidebar identity"
+  $showGraphLoopRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+
+  $root = Wait-ForRootReconnect $process @($rawWalker)
+  $roundTripProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -in @(
+        $expectedShowGraphCardId,
+        $expectedWorkspaceToolbarId,
+        $expectedWorkspaceLoopBarId,
+        $expectedWorkspaceShowGraphId
+      ) } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedShowGraphCardId }).Count -eq 1) -and
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedWorkspaceToolbarId }).Count -eq 1) -and
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedWorkspaceLoopBarId }).Count -eq 1) -and
+      (@($items | Where-Object { $_.Current.AutomationId -eq $expectedWorkspaceShowGraphId }).Count -eq 1) }
+  $graph = $roundTripProbe.Graph
+  $roundTripSelectedCard = @($roundTripProbe.Items | Where-Object {
+    $_.Current.AutomationId -eq $expectedShowGraphCardId -and $_.Current.Name -eq "UIA loop A"
+  })
+  $roundTripToolbar = @($roundTripProbe.Items | Where-Object {
+    $_.Current.AutomationId -eq $expectedWorkspaceToolbarId -and $_.Current.Name -eq "UIA project"
+  })
+  $roundTripLoopBar = @($roundTripProbe.Items | Where-Object {
+    $_.Current.AutomationId -eq $expectedWorkspaceLoopBarId -and
+    $_.Current.Name -eq "Selected loop workspace"
+  })
+  $roundTripShowGraph = @($roundTripProbe.Items | Where-Object {
+    $_.Current.AutomationId -eq $expectedWorkspaceShowGraphId -and
+    $_.Current.Name -eq "Show in Graph"
+  })
+  Require (($roundTripSelectedCard.Count -eq 1) -and
+           $roundTripSelectedCard[0].GetCurrentPattern(
+             [System.Windows.Automation.SelectionItemPattern]::Pattern
+           ).Current.IsSelected -and
+           ($roundTripToolbar.Count -eq 1) -and
+           ($roundTripLoopBar.Count -eq 1) -and
+           ($roundTripShowGraph.Count -eq 1)) `
+    "Show in Graph sidebar return did not reopen the same project and selected-loop workspace"
+
+  # Rebind all provider references used below from the returned generation.
+  $projects = Find-FragmentById $root "projects" $rawWalker
+  $loops = Find-FragmentById $root "loops" $rawWalker
+  $overviewDestination = Find-FragmentById $root "overview-destination" $rawWalker
+  Require (($null -ne $projects) -and ($null -ne $loops) -and
+           ($null -ne $overviewDestination)) `
+    "Show in Graph round trip did not restore downstream navigation providers"
+  $surfaceActionPatterns["overview-destination"] = $overviewDestination.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  )
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 150
   Require ([GraphCodeUiaGateState]::PostTaggedExitCollision($process.MainWindowHandle)) `
