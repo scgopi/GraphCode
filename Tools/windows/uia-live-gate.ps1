@@ -398,6 +398,11 @@ public static class GraphCodeUiaGateState {
     if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
     return rect.Bottom - rect.Top;
   }
+  public static int ClientWidth(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
+    return rect.Right - rect.Left;
+  }
   [StructLayout(LayoutKind.Sequential)]
   private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")]
@@ -1805,25 +1810,43 @@ try {
   # CI runners can host the shell on a virtual desktop narrower than a local session's
   # (some have no interactive Explorer desktop at all -- see the physical-tray skip
   # earlier in this run), so SW_MAXIMIZE would only ever grow the window to fit
-  # whatever small work area that desktop reports. Force an explicit window rect
-  # instead: SetWindowPos does not clamp to monitor bounds, so this is deterministic
-  # regardless of the runner's actual screen size. $graph is re-resolved on each
-  # poll (matching every other acquisition in this file) rather than trusting a
+  # whatever small work area that desktop reports. SetWindowPos does not clamp to
+  # monitor bounds, but a cross-process resize request can still land smaller than
+  # requested when the caller and the target window disagree on DPI awareness (the
+  # PowerShell host here is not per-monitor-DPI-aware, so Windows can rescale the
+  # coordinates it hands to a per-monitor-aware target). Rather than assume a fixed
+  # requested size reliably produces a given client size, measure the real achieved
+  # client width via GetClientRect after each attempt and grow the request until it
+  # does, instead of guessing the runner's DPI scale factor. $graph is re-resolved on
+  # each poll (matching every other acquisition in this file) rather than trusting a
   # BoundingRectangle read against a handle captured before the resize, since a
   # UIA element's cached geometry is not guaranteed to reflect a resize that the
   # app's message loop has not yet processed.
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
-  [GraphCodeUiaGateState]::ResizeWindow($shellWindow, 0, 0, 1400, 900) | Out-Null
-  $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
-  for ($attempt = 0; $attempt -lt 30; $attempt++) {
-    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
-    $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
+  $requestedWidth = 1400
+  $requestedHeight = 900
+  $observedGraphWidth = 0
+  $observedClientWidth = 0
+  for ($growAttempt = 0; $growAttempt -lt 6; $growAttempt++) {
+    [GraphCodeUiaGateState]::ResizeWindow($shellWindow, 0, 0, $requestedWidth, $requestedHeight) | Out-Null
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+      $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+      $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
+      $observedClientWidth = [GraphCodeUiaGateState]::ClientWidth($shellWindow)
+      if ($observedGraphWidth -gt 808) { break }
+      Start-Sleep -Milliseconds 100
+    }
     if ($observedGraphWidth -gt 808) { break }
-    Start-Sleep -Milliseconds 100
+    # Grow proportionally to how far short the achieved client width fell, rather
+    # than a blind multiplier, so this converges quickly regardless of the actual
+    # scale factor at play.
+    $shortfallRatio = if ($observedClientWidth -gt 0) { [double]$requestedWidth / [double]$observedClientWidth } else { 2.0 }
+    $requestedWidth = [Math]::Min(6000, [int]([double]$requestedWidth * $shortfallRatio * 1.3))
+    $requestedHeight = [Math]::Min(3200, [int]([double]$requestedHeight * 1.2))
   }
   Require ($observedGraphWidth -gt 808) `
-    "shell window too narrow to use the wide-window overview lane geometry formula, even after forcing a 1400x900 window rect (observed graph width=$observedGraphWidth)"
+    "shell window too narrow to use the wide-window overview lane geometry formula, even after growing the requested window rect to ${requestedWidth}x${requestedHeight} (observed graph width=$observedGraphWidth, observed client width=$observedClientWidth)"
   $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
   $laneOpenScreenX = [int]$graph.Current.BoundingRectangle.Right - 128
   $laneOpenScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
