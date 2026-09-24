@@ -798,19 +798,38 @@ function Get-DirectChildren(
       # "retried=False", which looks exactly like "never matched the typed catch" -
       # the wrong diagnosis for what was actually a policy regression. Check both
       # the exception itself and its InnerException.
+      #
+      # Also retry a genuine ElementNotAvailableException (HRESULT 0x80040201),
+      # confirmed via 473b64b's own CI run: "windows-spikes" logged
+      # "UIA_GETCHILDREN_RETRY ... hresult=0x80040201 retried=False" under heavy
+      # concurrent load (multiple pwsh/conhost sessions live at once per the
+      # PRODUCT_RESOURCE_METRICS_JSON snapshots in that run), then threw
+      # uncaught. Verified locally by constructing the real exception from
+      # UIAutomationTypes.dll: HResult 0x80040201 matches exactly, and it derives
+      # from SystemException directly, not COMException - so neither the old
+      # typed catch nor the fixed COMException check could ever have retried it.
+      # This is NOT the be1497d swallow reinstated: that bug returned @() after
+      # exhausting its budget, making every "-eq 0"/"-not" assertion built on a
+      # dead parent pass vacuously. This still always throws on exhaustion or on
+      # any other exception type - it only widens which transient, recoverable
+      # exception types get a bounded, wall-clock-limited chance to resolve
+      # before that unconditional throw.
       $inner = $_.Exception.InnerException
-      $isComException = ($_.Exception -is [System.Runtime.InteropServices.COMException]) -or
-                         ($inner -is [System.Runtime.InteropServices.COMException])
+      $isRetryable = ($_.Exception -is [System.Runtime.InteropServices.COMException]) -or
+                     ($inner -is [System.Runtime.InteropServices.COMException]) -or
+                     ($_.Exception -is [System.Windows.Automation.ElementNotAvailableException]) -or
+                     ($inner -is [System.Windows.Automation.ElementNotAvailableException])
       $hresult = if ($inner) { $inner.HResult } else { $_.Exception.HResult }
+      $innerType = if ($inner) { $inner.GetType().FullName } else { "" }
       $attempt++
       $elapsedMs = [int](5000 - ($deadline - (Get-Date)).TotalMilliseconds)
-      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) hresult=0x$($hresult.ToString('X8')) retried=$isComException message=$($_.Exception.Message)"
+      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) innerType=$innerType hresult=0x$($hresult.ToString('X8')) retried=$isRetryable message=$($_.Exception.Message)"
       # Budget is wall-clock, not attempt count: this call runs inside every tree
       # walk across ~35 call sites, and a fixed attempt count multiplied across
       # that many sites is exactly the arithmetic that produced the 60-minute CI
       # hang earlier on this branch (be1497d). A duration cap keeps the worst-case
       # cost per call bounded regardless of how many sites hit it.
-      if ((-not $isComException) -or ((Get-Date) -ge $deadline)) { throw }
+      if ((-not $isRetryable) -or ((Get-Date) -ge $deadline)) { throw }
       Start-Sleep -Milliseconds 150
     }
   }
