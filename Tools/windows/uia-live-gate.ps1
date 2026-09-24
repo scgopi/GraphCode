@@ -341,6 +341,32 @@ public static class GraphCodeUiaGateState {
       return true;
     }, IntPtr.Zero);
   }
+  // Diagnostic only (Tools/windows/uia-live-gate.ps1's Get-DirectChildren
+  // exhaustion path): enumerates every top-level window currently owned by
+  // processId with its class, visibility, and title, so a failure that
+  // reports MainWindowHandle == 0 can be told apart as window-destroyed
+  // (empty result), window-hidden (a result exists but is not visible), or
+  // handle-churn (a visible, healthy-looking window exists under a handle
+  // Process.MainWindowHandle no longer reports). Does not filter or assert
+  // anything - it is read verbatim into a log line.
+  public static string[] DescribeTopLevelWindows(uint processId) {
+    var results = new System.Collections.ArrayList();
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner != processId) return true;
+      var classText = new StringBuilder(256);
+      GetClassName(window, classText, classText.Capacity);
+      int titleLength = GetWindowTextLength(window);
+      var titleText = new StringBuilder(titleLength + 1);
+      GetWindowText(window, titleText, titleText.Capacity);
+      bool visible = IsWindowVisible(window);
+      results.Add(window.ToInt64() + ":" + classText.ToString() + ":" +
+        (visible ? "visible" : "hidden") + ":" + titleText.ToString());
+      return true;
+    }, IntPtr.Zero);
+    return (string[])results.ToArray(typeof(string));
+  }
   public static bool PostMouseClick(IntPtr window) {
     return PostMessage(window, 0x0201, UIntPtr.Zero, IntPtr.Zero);
   }
@@ -823,20 +849,60 @@ function Get-DirectChildren(
       $innerType = if ($inner) { $inner.GetType().FullName } else { "" }
       $attempt++
       $elapsedMs = [int](5000 - ($deadline - (Get-Date)).TotalMilliseconds)
-      # Includes $process.MainWindowHandle (script-scope, set once the shell
-      # launches - already read this way by Wait-ForPopupMenu et al.) as the
-      # counterpart to Wait-ForRootReconnect's UIA_ROOT_RECONNECT_OK handle
-      # log: if a failure here is ever paired with a preceding reconnect and
-      # the handles differ, that proves the element died in the window
-      # between the check and this use, rather than requiring a fresh
-      # diagnostic round-trip to find out.
-      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) innerType=$innerType hresult=0x$($hresult.ToString('X8')) retried=$isRetryable handle=$($process.MainWindowHandle) message=$($_.Exception.Message)"
+      # Includes a freshly-refreshed $process.MainWindowHandle (script-scope,
+      # already read this way by Wait-ForPopupMenu et al.) as the counterpart
+      # to Wait-ForRootReconnect's UIA_ROOT_RECONNECT_OK handle log, to check
+      # whether the window in play differs between a preceding reconnect and
+      # this failing read. This file has 18 separate $process.Refresh() call
+      # sites, so without an explicit Refresh() immediately before this read,
+      # the value returned here depends on whichever unrelated site last
+      # refreshed it rather than on the state at this call - Refresh() here
+      # makes the read deterministic.
+      #
+      # NOTE: this file runs two separate shell processes at different
+      # points ($process for the main gate, $settingsProcess for the
+      # Product Settings fixture near the end). Get-DirectChildren picks up
+      # $process by dynamic scope regardless of which window's tree is
+      # actually being walked, so a handle logged while walking the
+      # settings window's tree is $process's handle, not $settingsProcess's
+      # - it does not identify the window in play in that phase.
+      if ($process) { $process.Refresh() }
+      $handleText = if ($process) { $process.MainWindowHandle } else { "" }
+      # Call-site marker: identifies which of this function's ~35 call
+      # sites is failing without instrumenting each one individually. CI has
+      # shown failures with several seconds of silence beforehand (no "==>"
+      # step marker in between), so without this a failure elapsedMs/attempt
+      # count alone cannot be mapped back to a specific gate step.
+      $callSite = (Get-PSCallStack | Select-Object -Skip 1 -First 4 |
+        ForEach-Object { "$($_.FunctionName):$($_.ScriptLineNumber)" }) -join "<-"
+      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) innerType=$innerType hresult=0x$($hresult.ToString('X8')) retried=$isRetryable handle=$handleText site=$callSite message=$($_.Exception.Message)"
       # Budget is wall-clock, not attempt count: this call runs inside every tree
       # walk across ~35 call sites, and a fixed attempt count multiplied across
       # that many sites is exactly the arithmetic that produced the 60-minute CI
       # hang earlier on this branch (be1497d). A duration cap keeps the worst-case
       # cost per call bounded regardless of how many sites hit it.
-      if ((-not $isRetryable) -or ((Get-Date) -ge $deadline)) { throw }
+      if ((-not $isRetryable) -or ((Get-Date) -ge $deadline)) {
+        # Diagnostic only, on the way to an unconditional rethrow: distinguish
+        # crashed (HasExited true) from window-destroyed (process alive, zero
+        # top-level windows) from window-hidden (a window exists but is not
+        # visible) from handle-churn (a visible window exists under a handle
+        # MainWindowHandle no longer reports) - four different bugs that are
+        # otherwise indistinguishable from this exception alone. Best-effort:
+        # swallow any failure describing process state so the real exception
+        # is still the one that propagates.
+        try {
+          if ($process) {
+            $process.Refresh()
+            $exitDetail = if ($process.HasExited) { "true exitCode=$($process.ExitCode)" } else { "false" }
+            $windows = [GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id)
+            $windowsText = if ($windows.Count -gt 0) { $windows -join ";" } else { "(none)" }
+            Write-Host "UIA_GETCHILDREN_EXHAUSTED hasExited=$exitDetail topLevelWindows=$windowsText"
+          }
+        } catch {
+          Write-Host "UIA_GETCHILDREN_EXHAUSTED process state unavailable: $($_.Exception.Message)"
+        }
+        throw
+      }
       Start-Sleep -Milliseconds 150
     }
   }
