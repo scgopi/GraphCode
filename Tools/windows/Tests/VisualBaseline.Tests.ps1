@@ -119,6 +119,9 @@ function Get-Sha256HexOfLfNormalizedText([string] $Text) {
 }
 $goodHash = Get-Sha256HexOfLfNormalizedText $goodThemeSwift
 
+$fixture = $null
+try {
+
 # Baseline fixture with the real hash: must pass outright.
 $fixture = New-ThemeContractFixture -ThemeSwiftText $goodThemeSwift -DesignTokensText $goodDesignTokens `
   -ManifestObject (New-GoodManifestObject $goodHash)
@@ -241,7 +244,83 @@ Test-ThemeSwiftMutation $themeSwiftWithUnrelatedEdit `
   "no longer matches the approved blob hash" `
   "unrelated edit caught by blob hash"
 
-Remove-Item -LiteralPath $fixture.Dir -Recurse -Force
+# 12) windowsToken is mandatory: blank/missing must fail outright, not silently
+#     skip the Windows/macOS cross-check.
+$manifestWithBlankWindowsToken = New-GoodManifestObject $goodHash
+$manifestWithBlankWindowsToken.currentThemeContract.tokens[0].windowsToken = ""
+Test-ManifestMutation $manifestWithBlankWindowsToken `
+  "is missing its required windowsToken mapping" `
+  "windowsToken blank"
+
+$manifestWithRemovedWindowsToken = New-GoodManifestObject $goodHash
+$manifestWithRemovedWindowsToken.currentThemeContract.tokens[0].Remove("windowsToken")
+Test-ManifestMutation $manifestWithRemovedWindowsToken `
+  "is missing its required windowsToken mapping" `
+  "windowsToken field removed"
+
+# 13) windowsToken present but mapped to the wrong constant name must also fail
+#     outright, not silently cross-check against an unrelated constant.
+$manifestWithWrongWindowsTokenMap = New-GoodManifestObject $goodHash
+$manifestWithWrongWindowsTokenMap.currentThemeContract.tokens[0].windowsToken = "canvas_grid_line"
+Test-ManifestMutation $manifestWithWrongWindowsTokenMap `
+  "has windowsToken 'canvas_grid_line' but the required mapping is" `
+  "windowsToken wrong mapping"
+
+# 14) schemaVersion must be exactly 1.
+$manifestWithWrongSchemaVersion = New-GoodManifestObject $goodHash
+$manifestWithWrongSchemaVersion.currentThemeContract.schemaVersion = 2
+Test-ManifestMutation $manifestWithWrongSchemaVersion `
+  "schemaVersion must be 1" `
+  "wrong schemaVersion"
+
+# 15) A fractional recorded RGB channel must be rejected before any [int]
+#     coercion would silently round it.
+$manifestWithFractionalChannel = New-GoodManifestObject $goodHash
+$manifestWithFractionalChannel.currentThemeContract.tokens[0].rgb = @(10, 12, 11.5)
+Test-ManifestMutation $manifestWithFractionalChannel `
+  "has a fractional (non-integral) RGB channel value" `
+  "fractional RGB channel"
+
+# 16) A null recorded RGB channel must be rejected before any [int] coercion
+#     would silently convert it to 0.
+$manifestWithNullChannel = New-GoodManifestObject $goodHash
+$manifestWithNullChannel.currentThemeContract.tokens[0].rgb = @(10, 12, $null)
+Test-ManifestMutation $manifestWithNullChannel `
+  "has a null RGB channel value" `
+  "null RGB channel"
+
+# 17) A declaration commented out via a Swift block comment ("/* ... */",
+#     possibly spanning multiple lines) must be treated as absent, same as a
+#     line-commented one -- not matched as if it were active.
+$themeSwiftWithBlockCommentedToken = @"
+enum Theme {
+  /* static let canvasTone =
+       Color(red: 0.040, green: 0.048, blue: 0.044) */
+  static let canvasGridLine = Color(red: 0.082, green: 0.094, blue: 0.086)
+}
+"@
+Test-ThemeSwiftMutation $themeSwiftWithBlockCommentedToken `
+  "no longer defines an active Color(red:green:blue:) literal for token: canvasTone" `
+  "block-commented-out declaration ignored"
+
+# 18) An unterminated block comment is unsupported syntax for this minimal
+#     grammar; it must fail explicitly rather than silently misparse the rest
+#     of the file as active or as commented out.
+$themeSwiftWithUnterminatedBlockComment = @"
+enum Theme {
+  /* static let canvasTone = Color(red: 0.040, green: 0.048, blue: 0.044)
+  static let canvasGridLine = Color(red: 0.082, green: 0.094, blue: 0.086)
+}
+"@
+Test-ThemeSwiftMutation $themeSwiftWithUnterminatedBlockComment `
+  "unterminated or unsupported block-comment delimiter" `
+  "unterminated block comment rejected"
+
+} finally {
+  if ($fixture) {
+    Remove-Item -LiteralPath $fixture.Dir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 
 Write-Host "VisualBaseline.Tests.ps1: PASS"
 exit 0

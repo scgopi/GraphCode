@@ -18,6 +18,14 @@ $ErrorActionPreference = "Stop"
 # enforced below so an empty or partial token list cannot pass vacuously.
 $script:RequiredThemeContractTokenNames = @("Theme.canvasTone", "Theme.canvasGridLine")
 
+# Each required token must map to exactly this Windows constant name; the
+# cross-check below is mandatory, not opt-in via a field that could be left
+# blank or removed to silently disable it.
+$script:RequiredWindowsTokenByThemeToken = @{
+  "Theme.canvasTone"     = "canvas_tone"
+  "Theme.canvasGridLine" = "canvas_grid_line"
+}
+
 function ConvertTo-Rgb8Channel([double] $Channel) {
   # Round-half-up: floor(x*255 + 0.5), clamped to [0,255].
   $clamped = [Math]::Max(0.0, [Math]::Min(1.0, $Channel))
@@ -33,8 +41,23 @@ function Remove-LineComments([string] $Text, [string] $CommentToken) {
   }) -join "`n")
 }
 
+function Remove-SwiftComments([string] $Text) {
+  # Strips "// ..." per line first, then "/* ... */" blocks (which may span
+  # multiple lines) so a declaration commented out either way is treated as
+  # absent, never matched as active. This is a minimal, explicit grammar, not
+  # a general Swift parser: if a "/*" or "*/" marker survives both passes
+  # (e.g. an unterminated block comment), fail explicitly rather than risk
+  # silently validating or silently ignoring a declaration.
+  $lineStripped = Remove-LineComments $Text "//"
+  $blockStripped = [regex]::Replace($lineStripped, "(?s)/\*.*?\*/", "")
+  if ($blockStripped -match "/\*" -or $blockStripped -match "\*/") {
+    throw "Theme.swift contains an unterminated or unsupported block-comment delimiter ('/*' or '*/') that this checker's minimal comment grammar cannot safely parse"
+  }
+  return $blockStripped
+}
+
 function Get-ThemeSwiftTokenRgb([string] $ThemeText, [string] $TokenName) {
-  $active = Remove-LineComments $ThemeText "//"
+  $active = Remove-SwiftComments $ThemeText
   $pattern = "static let $([regex]::Escape($TokenName))\s*=\s*Color\(red:\s*([0-9.]+),\s*green:\s*([0-9.]+),\s*blue:\s*([0-9.]+)\)([^\n]*)"
   $found = [regex]::Matches($active, $pattern)
   if ($found.Count -eq 0) {
@@ -71,6 +94,22 @@ function Get-DesignTokenColorref([string] $DesignTokensText, [string] $TokenName
   return [Convert]::ToInt32($found[0].Groups[1].Value, 16)
 }
 
+function ConvertTo-IntegralRgbChannel([object] $Value, [string] $TokenName, [int] $ChannelIndex) {
+  # Reject before any [int] coercion would silently round a fraction or parse
+  # a string: a recorded channel must already be a whole number.
+  if ($null -eq $Value) {
+    throw "currentThemeContract token $TokenName has a null RGB channel value at index $ChannelIndex"
+  }
+  if ($Value -is [string] -or $Value -is [bool]) {
+    throw "currentThemeContract token $TokenName has a non-numeric RGB channel value at index $ChannelIndex`: '$Value'"
+  }
+  $asDouble = [double] $Value
+  if ($asDouble -ne [Math]::Truncate($asDouble)) {
+    throw "currentThemeContract token $TokenName has a fractional (non-integral) RGB channel value at index $ChannelIndex`: $Value"
+  }
+  return [int] $asDouble
+}
+
 function ConvertFrom-Colorref([int] $Colorref) {
   # Win32 COLORREF packs 0x00BBGGRR, the reverse of what a hex literal like this
   # superficially resembles.
@@ -105,6 +144,9 @@ function Test-CurrentThemeContract {
 
   $contract = $Manifest.currentThemeContract
   if ($null -eq $contract) { throw "currentThemeContract section is missing from the manifest" }
+  if ($contract.schemaVersion -ne 1) {
+    throw "currentThemeContract.schemaVersion must be 1, got $($contract.schemaVersion)"
+  }
   if ($contract.supersedes -ne "tokenContracts") {
     throw "currentThemeContract must declare it supersedes tokenContracts, not replace it"
   }
@@ -128,9 +170,13 @@ function Test-CurrentThemeContract {
   }
 
   foreach ($token in $tokens) {
-    $recordedRgb = @($token.rgb | ForEach-Object { [int] $_ })
-    if ($recordedRgb.Count -ne 3) {
-      throw "currentThemeContract token $($token.name) must record exactly 3 RGB channel values, got $($recordedRgb.Count)"
+    $rawRgb = @($token.rgb)
+    if ($rawRgb.Count -ne 3) {
+      throw "currentThemeContract token $($token.name) must record exactly 3 RGB channel values, got $($rawRgb.Count)"
+    }
+    $recordedRgb = @()
+    for ($i = 0; $i -lt $rawRgb.Count; $i++) {
+      $recordedRgb += (ConvertTo-IntegralRgbChannel $rawRgb[$i] $token.name $i)
     }
     foreach ($channel in $recordedRgb) {
       if ($channel -lt 0 -or $channel -gt 255) {
@@ -154,17 +200,27 @@ function Test-CurrentThemeContract {
         "currentThemeContract's rgb/hex/swiftLiteral/themeSwiftBlobSha256; otherwise this is a real regression.")
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string] $token.windowsToken)) {
-      # Genuine cross-source check: an actual Windows constant, independently
-      # decoded, compared against the Swift-derived expectation above -- not a
-      # manifest constant compared against another manifest constant.
-      $designColorref = Get-DesignTokenColorref $DesignTokensText ([string] $token.windowsToken)
-      $decoded = ConvertFrom-Colorref $designColorref
-      if (($decoded -join ",") -ne ($recordedRgb -join ",")) {
-        throw ("DesignTokens.zig ($DesignTokensPathForDiagnostics) $($token.windowsToken) decodes to RGB(" +
-          "$($decoded -join ',')) but Theme.swift ($ThemeSwiftPathForDiagnostics) $shortName derives RGB(" +
-          "$($recordedRgb -join ',')) -- the Windows and macOS sources have drifted apart.")
-      }
+    # Mandatory: every required token must map to its exact required Windows
+    # constant name. A blank/missing/wrong-mapped windowsToken field fails
+    # outright rather than silently skipping the cross-source check.
+    $expectedWindowsToken = $script:RequiredWindowsTokenByThemeToken[$token.name]
+    $actualWindowsToken = [string] $token.windowsToken
+    if ([string]::IsNullOrWhiteSpace($actualWindowsToken)) {
+      throw "currentThemeContract token $($token.name) is missing its required windowsToken mapping (expected '$expectedWindowsToken')"
+    }
+    if ($actualWindowsToken -ne $expectedWindowsToken) {
+      throw "currentThemeContract token $($token.name) has windowsToken '$actualWindowsToken' but the required mapping is '$expectedWindowsToken'"
+    }
+
+    # Genuine cross-source check: an actual Windows constant, independently
+    # decoded, compared against the Swift-derived expectation above -- not a
+    # manifest constant compared against another manifest constant.
+    $designColorref = Get-DesignTokenColorref $DesignTokensText $actualWindowsToken
+    $decoded = ConvertFrom-Colorref $designColorref
+    if (($decoded -join ",") -ne ($recordedRgb -join ",")) {
+      throw ("DesignTokens.zig ($DesignTokensPathForDiagnostics) $actualWindowsToken decodes to RGB(" +
+        "$($decoded -join ',')) but Theme.swift ($ThemeSwiftPathForDiagnostics) $shortName derives RGB(" +
+        "$($recordedRgb -join ',')) -- the Windows and macOS sources have drifted apart.")
     }
   }
 
