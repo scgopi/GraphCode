@@ -756,6 +756,39 @@ function Find-FragmentById(
   return $null
 }
 
+# Reads children of the live "graph" fragment, re-resolving the parent on every attempt
+# and polling until $until is satisfied by the filtered set.
+#
+# Both halves matter. The fragment provider recreates the graph and its children when the
+# canvas re-lays out, so a parent captured before an Invoke can be dead by the time it is
+# read - and Get-DirectChildren on a dead parent returns nothing for as long as it is
+# asked, which no fixed sleep can outlast. Reading once after Start-Sleep also samples a
+# single arbitrary moment, so a slow runner fails while a fast one passes.
+#
+# This waits on the caller's precondition only. It never waits on the assertion itself:
+# on timeout it returns whatever it last observed so the caller's Require reports the real
+# state with its original message.
+function Wait-ForGraphChildren(
+  [System.Windows.Automation.AutomationElement] $root,
+  [System.Windows.Automation.TreeWalker] $walker,
+  [scriptblock] $filter,
+  [scriptblock] $until,
+  [int] $maxAttempts = 60,
+  [int] $delayMs = 100
+) {
+  $observed = @()
+  $liveGraph = $null
+  for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+    $liveGraph = Find-FragmentById $root "graph" $walker
+    if ($null -ne $liveGraph) {
+      $observed = @(Get-DirectChildren $liveGraph $walker | Where-Object $filter)
+      if (& $until $observed) { break }
+    }
+    Start-Sleep -Milliseconds $delayMs
+  }
+  return [pscustomobject]@{ Graph = $liveGraph; Items = $observed }
+}
+
 function Assert-FragmentLinks(
   [System.Windows.Automation.AutomationElement] $parent,
   [System.Windows.Automation.TreeWalker] $walker,
@@ -1430,8 +1463,13 @@ try {
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
   $projectCards[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $compositeChildren = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  $compositeProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.Name -match '^UIA nested ' }).Count -eq 2) -and
+      (@($items | Where-Object { $_.Current.Name -eq "Back to UIA project" }).Count -eq 1) }
+  $graph = $compositeProbe.Graph
+  $compositeChildren = @($compositeProbe.Items)
   $nestedCards = @($compositeChildren | Where-Object { $_.Current.Name -match '^UIA nested ' })
   Require (($nestedCards.Count -eq 2) -and
            ((@($nestedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA nested A|UIA nested B")) `
@@ -1442,10 +1480,11 @@ try {
   Require (($compositeBack[0].Current.BoundingRectangle.Width -gt 0) -and
            ($compositeBack[0].Current.BoundingRectangle.Height -gt 0)) "Composite Back breadcrumb has empty bounds"
   $compositeBack[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $restoredProjectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
-    })
+  $restoredProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $restoredProbe.Graph
+  $restoredProjectCards = @($restoredProbe.Items)
   Require (($restoredProjectCards.Count -eq 2) -and
            ((@($restoredProjectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
     "Composite Back did not restore the parent project canvas"
@@ -1459,17 +1498,19 @@ try {
       [System.Windows.Automation.InvokePattern]::Pattern)
   }
   $surfaceActionPatterns["overview-destination"].Invoke()
-  Start-Sleep -Milliseconds 150
-  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
-  })
+  $overviewProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $overviewProbe.Graph
+  $overviewCards = @($overviewProbe.Items)
   Require (($overviewCards.Count -eq 2) -and
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
   $surfaceActionPatterns["quick-chats-destination"].Invoke()
-  Start-Sleep -Milliseconds 150
-  $quickChatCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA chat '
-  })
+  $quickChatProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA chat ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $quickChatProbe.Graph
+  $quickChatCards = @($quickChatProbe.Items)
   Require (($quickChatCards.Count -eq 2) -and
            ((@($quickChatCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA chat A|UIA chat B")) "Quick Chats did not expose synchronized cards: $(@($quickChatCards | ForEach-Object { $_.Current.Name }) -join '|')"
   $surfaceActionPatterns["canvas-primary-action"].Invoke()
@@ -1691,57 +1732,60 @@ try {
   # observed taking longer than 150ms on a loaded CI runner. The assertion below is
   # unchanged -- this waits for exactly the control it already requires, and still fails
   # if that control never appears.
-  $workspacePanelToggle = $null
-  for ($attempt = 0; $attempt -lt 30; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
-    $workspacePanelToggle = @($workspaceChildren | Where-Object {
-      $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Expand loop panel"
-    }) | Select-Object -First 1
-    if ($null -ne $workspacePanelToggle) { break }
-  }
+  $panelProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Expand loop panel" } `
+    { param($items) $items.Count -ge 1 } 30
+  $graph = $panelProbe.Graph
+  $workspacePanelToggle = @($panelProbe.Items) | Select-Object -First 1
   Require ($null -ne $workspacePanelToggle) "workspace right panel did not expose expand control after collapse"
   $workspacePanelToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   # Same treatment for the expand repaint: wait for New Tab, which the assertion at the end
-  # of this block requires, instead of assuming a fixed 150ms is enough.
-  $newTab = $null
-  for ($attempt = 0; $attempt -lt 30; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
-    $newTab = @($workspaceChildren | Where-Object {
-      $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
-    }) | Select-Object -First 1
-    if ($null -ne $newTab) { break }
-  }
-  $workspaceTabs = @($workspaceChildren | Where-Object {
+  # of this block requires, instead of assuming a fixed 150ms is enough. Also wait for the
+  # first tab, whose id is captured below as the identity baseline: reading it from a tab
+  # list that has not remounted yet yields $null, which would later be compared against
+  # another $null and pass vacuously.
+  $newTabProbe = Wait-ForGraphChildren $root $rawWalker `
+    { ($_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab") -or
+      ($_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$') } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-new-tab-' }).Count -ge 1) -and
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-tab-' }).Count -ge 1) } 30
+  $graph = $newTabProbe.Graph
+  $newTab = @($newTabProbe.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
+  }) | Select-Object -First 1
+  $workspaceTabs = @($newTabProbe.Items | Where-Object {
     $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
   })
+  Require ($workspaceTabs.Count -ge 1) "workspace omitted its initial terminal tab before the mounted-tab preservation check"
   $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
   Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
   $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  for ($attempt = 0; $attempt -lt 60; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
-    $workspaceTabs = @($workspaceChildren | Where-Object {
-      $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
-    })
-    if ($workspaceTabs.Count -ge 2) { break }
-  }
+  $mountedProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { param($items) $items.Count -ge 2 }
+  $graph = $mountedProbe.Graph
+  $workspaceTabs = @($mountedProbe.Items)
   Require ($workspaceTabs.Count -ge 2) "New Tab did not expose a mounted background tab"
   $newWorkspaceTabId = $workspaceTabs[1].Current.AutomationId
   $workspaceTabs[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $workspaceTabs = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
-  })
+  # Wait for both tabs to be present again after the switch remounts them, then assert
+  # identity. The wait covers only the precondition (two tabs exist); it deliberately
+  # does not wait on the ids matching, so a genuine identity change still fails here.
+  $switchProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { param($items) $items.Count -ge 2 }
+  $graph = $switchProbe.Graph
+  $workspaceTabs = @($switchProbe.Items)
   Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
            ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
     "switching to the mounted background tab changed terminal tab identity"
   $workspaceTabs[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $workspaceTabs = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
-  })
+  $switchBackProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$' } `
+    { param($items) $items.Count -ge 2 }
+  $graph = $switchBackProbe.Graph
+  $workspaceTabs = @($switchBackProbe.Items)
   Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
            ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
     "switching back from the mounted background tab changed terminal tab identity"
@@ -2952,16 +2996,19 @@ try {
   $activityNavigationRow = @($filteredActivityRows | Where-Object { $_.Current.Name -eq 'Activity C' }) | Select-Object -First 1
   Require ($null -ne $activityNavigationRow) "activity strip omitted the Activity C card after filtering"
   $activityNavigationRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 250
-  $workspaceLoopBar = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^workspace-loop-bar-'
-  }) | Select-Object -First 1
+  $loopBarProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-loop-bar-' } `
+    { param($items) $items.Count -ge 1 }
+  $graph = $loopBarProbe.Graph
+  $workspaceLoopBar = @($loopBarProbe.Items) | Select-Object -First 1
   Require ($null -ne $workspaceLoopBar) "activity navigation did not open a workspace"
-  $selectedWorkspaceCard = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^canvas-card-' -and
+  $selectedProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and
       $_.Current.Name -eq 'Activity C' -and
-      $_.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected
-  }) | Select-Object -First 1
+      $_.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected } `
+    { param($items) $items.Count -ge 1 }
+  $graph = $selectedProbe.Graph
+  $selectedWorkspaceCard = @($selectedProbe.Items) | Select-Object -First 1
   Require ($null -ne $selectedWorkspaceCard) "activity navigation did not select the targeted loop"
   if ($SidebarParityOnly) { return }
 
