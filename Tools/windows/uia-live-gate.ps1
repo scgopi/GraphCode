@@ -1996,7 +1996,15 @@ try {
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
-  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  # The default 20-attempt/3s retry budget (Find-FragmentByIdWithRetry's default
+  # maxAttempts) was observed exhausted on a loaded CI runner right here: this is
+  # the same dynamic project/loop invocation event that #440 found needed a much
+  # longer settle window (10s -> 20s) for the workspace chrome children that mount
+  # a moment later on this same "graph" fragment. Re-fetching "graph" itself is the
+  # very first thing that has to succeed in that sequence, so it needs at least as
+  # much headroom; 80 attempts (12s) leaves it comfortably ahead of the 20s
+  # downstream budget while still failing loudly if the fragment never reappears.
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker -maxAttempts 80
   Require ($null -ne $graph) "missing graph fragment after dynamic project/loop invocation"
   $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
