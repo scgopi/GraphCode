@@ -333,9 +333,17 @@ public static class GraphCodeUiaGateState {
   public static void HideWindow(IntPtr window) {
     if (window != IntPtr.Zero) ShowWindow(window, 0);
   }
-  public static bool MaximizeWindow(IntPtr window) {
+  [DllImport("user32.dll")]
+  private static extern bool SetWindowPos(
+    IntPtr window, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+  public static bool ResizeWindow(IntPtr window, int x, int y, int width, int height) {
     if (window == IntPtr.Zero) return false;
-    return ShowWindow(window, 3);
+    // Un-maximize/un-minimize first so SetWindowPos's explicit size is not
+    // overridden by whatever restore geometry Windows would otherwise apply.
+    ShowWindow(window, 9);
+    const uint SWP_NOZORDER = 0x0004;
+    const uint SWP_NOACTIVATE = 0x0010;
+    return SetWindowPos(window, IntPtr.Zero, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
   }
   public static void HideProcessWindows(uint processId) {
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
@@ -1794,18 +1802,28 @@ try {
   # proven by the card's BoundingRectangle.Top moving away from the lane-grid
   # position ($laneGridCardTop, captured immediately before the click) to the
   # free-form project-canvas layout.
-  # CI runners can launch the shell at a narrower default window size than a local
-  # desktop session (smaller virtual display, different DPI). Maximize before trusting
-  # the wide-window geometry formula rather than assuming any particular starting size.
+  # CI runners can host the shell on a virtual desktop narrower than a local session's
+  # (some have no interactive Explorer desktop at all -- see the physical-tray skip
+  # earlier in this run), so SW_MAXIMIZE would only ever grow the window to fit
+  # whatever small work area that desktop reports. Force an explicit window rect
+  # instead: SetWindowPos does not clamp to monitor bounds, so this is deterministic
+  # regardless of the runner's actual screen size. $graph is re-resolved on each
+  # poll (matching every other acquisition in this file) rather than trusting a
+  # BoundingRectangle read against a handle captured before the resize, since a
+  # UIA element's cached geometry is not guaranteed to reflect a resize that the
+  # app's message loop has not yet processed.
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
-  [GraphCodeUiaGateState]::MaximizeWindow($shellWindow) | Out-Null
+  [GraphCodeUiaGateState]::ResizeWindow($shellWindow, 0, 0, 1400, 900) | Out-Null
+  $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
   for ($attempt = 0; $attempt -lt 30; $attempt++) {
-    if ([int]$graph.Current.BoundingRectangle.Width -gt 808) { break }
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
+    if ($observedGraphWidth -gt 808) { break }
     Start-Sleep -Milliseconds 100
   }
-  Require ([int]$graph.Current.BoundingRectangle.Width -gt 808) `
-    "shell window too narrow to use the wide-window overview lane geometry formula, even after maximizing"
+  Require ($observedGraphWidth -gt 808) `
+    "shell window too narrow to use the wide-window overview lane geometry formula, even after forcing a 1400x900 window rect (observed graph width=$observedGraphWidth)"
   $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
   $laneOpenScreenX = [int]$graph.Current.BoundingRectangle.Right - 128
   $laneOpenScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
