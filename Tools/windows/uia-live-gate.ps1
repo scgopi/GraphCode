@@ -333,6 +333,10 @@ public static class GraphCodeUiaGateState {
   public static void HideWindow(IntPtr window) {
     if (window != IntPtr.Zero) ShowWindow(window, 0);
   }
+  public static bool MaximizeWindow(IntPtr window) {
+    if (window == IntPtr.Zero) return false;
+    return ShowWindow(window, 3);
+  }
   public static void HideProcessWindows(uint processId) {
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
       uint owner;
@@ -1790,11 +1794,19 @@ try {
   # proven by the card's BoundingRectangle.Top moving away from the lane-grid
   # position ($laneGridCardTop, captured immediately before the click) to the
   # free-form project-canvas layout.
-  Require ([int]$graph.Current.BoundingRectangle.Width -gt 808) `
-    "shell window too narrow to use the wide-window overview lane geometry formula"
-  $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
+  # CI runners can launch the shell at a narrower default window size than a local
+  # desktop session (smaller virtual display, different DPI). Maximize before trusting
+  # the wide-window geometry formula rather than assuming any particular starting size.
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
+  [GraphCodeUiaGateState]::MaximizeWindow($shellWindow) | Out-Null
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if ([int]$graph.Current.BoundingRectangle.Width -gt 808) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Require ([int]$graph.Current.BoundingRectangle.Width -gt 808) `
+    "shell window too narrow to use the wide-window overview lane geometry formula, even after maximizing"
+  $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
   $laneOpenScreenX = [int]$graph.Current.BoundingRectangle.Right - 128
   $laneOpenScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
   $laneOpenClientX = 0
