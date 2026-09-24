@@ -458,6 +458,18 @@ Invoke-Native "Windows update feed executable tests" {
     & $zig test src\WindowsUpdates.zig -target x86_64-windows-msvc -lc -lwinhttp "-I$include"
   } finally { Pop-Location }
 }
+Invoke-Native "Windows update install executable tests" {
+  $winghosttyRoot = $env:GRAPHCODE_WINGHOSTTY_ROOT
+  if (-not $winghosttyRoot) {
+    $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsUpdateInstall.zig -target x86_64-windows-msvc -lc -lwinhttp "-I$include"
+  } finally { Pop-Location }
+}
 Invoke-Native "Frame buffer executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\FrameBuffer.zig } finally { Pop-Location }
@@ -650,6 +662,18 @@ Invoke-Native "Update offer dialog executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Update install dialog executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\UpdateInstallDialog.zig -target x86_64-windows-msvc -lc -lwinhttp -luser32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Native dialog field contract executable tests" {

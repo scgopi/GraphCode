@@ -7,6 +7,7 @@ const AppFont = @import("AppFont.zig");
 pub const Action = enum {
     later,
     release_notes,
+    install,
     install_unavailable,
 };
 
@@ -14,6 +15,7 @@ const State = struct {
     allocator: std.mem.Allocator,
     version: []const u8,
     reason: []const u8,
+    installable: bool,
     action: Action = .later,
     closed: bool = false,
 };
@@ -37,17 +39,25 @@ const button_row_y: i32 = 190;
 /// The dialog's button row. `windowProc` creates exactly these controls and
 /// routes WM_COMMAND through `actionForCommand`, so these specs are the
 /// presented behaviour rather than a parallel description of it.
-pub const buttons = [_]ButtonSpec{
-    .{ .label = "Install", .id = install_id, .x = 18, .width = 140, .enabled = false, .action = .install_unavailable },
-    .{ .label = "Release Notes", .id = release_notes_id, .x = 160, .width = 140, .enabled = true, .action = .release_notes },
-    .{ .label = "Later", .id = later_id, .x = 470, .width = 110, .enabled = true, .action = .later },
-};
+///
+/// `installable` reflects whether `WindowsUpdates.CheckResult.asset_url` was
+/// resolved for this release: the last recorded release-asset check found
+/// only macOS DMGs published, so a real release can genuinely lack a Windows
+/// asset. Install stays honestly disabled in that case rather than promising
+/// a download that will 404.
+pub fn buttonsFor(installable: bool) [3]ButtonSpec {
+    return .{
+        .{ .label = "Install", .id = install_id, .x = 18, .width = 140, .enabled = installable, .action = if (installable) .install else .install_unavailable },
+        .{ .label = "Release Notes", .id = release_notes_id, .x = 160, .width = 140, .enabled = true, .action = .release_notes },
+        .{ .label = "Later", .id = later_id, .x = 470, .width = 110, .enabled = true, .action = .later },
+    };
+}
 
 /// Action taken when the dialog is dismissed without pressing a button.
 pub const dismiss_action: Action = .later;
 
-pub fn actionForCommand(command: u16) ?Action {
-    for (buttons) |spec| {
+pub fn actionForCommand(installable: bool, command: u16) ?Action {
+    for (buttonsFor(installable)) |spec| {
         if (spec.id == command) return spec.action;
     }
     return null;
@@ -61,9 +71,10 @@ pub fn show(
     allocator: std.mem.Allocator,
     version: []const u8,
     reason: []const u8,
+    installable: bool,
 ) !Action {
     registerClass() catch return error.DialogClassRegistrationFailed;
-    var state = State{ .allocator = allocator, .version = version, .reason = reason };
+    var state = State{ .allocator = allocator, .version = version, .reason = reason, .installable = installable };
     active_state = state;
     active_state.closed = false;
     active = true;
@@ -128,12 +139,12 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             createStatic(hwnd, active_state.allocator, version_text, 18, 46, 560, 24);
             createStatic(hwnd, active_state.allocator, "Release Notes opens the verified GraphCode release page.", 18, 76, 560, 24);
             createStatic(hwnd, active_state.allocator, active_state.reason, 18, 106, 560, 44);
-            for (buttons) |spec| createButton(hwnd, spec);
+            for (buttonsFor(active_state.installable)) |spec| createButton(hwnd, spec);
             return 0;
         },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
-            if (actionForCommand(command)) |action| {
+            if (actionForCommand(active_state.installable, command)) |action| {
                 active_state.action = action;
                 requestClose(hwnd);
                 return 0;
@@ -219,44 +230,61 @@ fn wideZ(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
     return result;
 }
 
-test "update offer keeps install unavailable while preserving explicit actions" {
-    // The Install button must be presented but not actionable: an in-app
-    // installer does not exist yet, and offering an enabled control would
-    // promise behaviour the app cannot deliver.
-    const install = buttons[0];
+test "update offer disables install when no Windows asset was resolved" {
+    // The last recorded release-asset check found only macOS DMGs published,
+    // so a real release can genuinely lack a Windows asset. Install must stay
+    // honestly disabled in that case rather than promising a doomed download.
+    const install = buttonsFor(false)[0];
     try std.testing.expectEqualStrings("Install", install.label);
     try std.testing.expect(!install.enabled);
     try std.testing.expectEqual(Action.install_unavailable, install.action);
 
-    // The two actions the app can honour stay enabled.
-    for (buttons[1..]) |spec| {
+    // The two actions the app can always honour stay enabled regardless.
+    for (buttonsFor(false)[1..]) |spec| {
         try std.testing.expect(spec.enabled);
         try std.testing.expect(spec.action != .install_unavailable);
     }
 
-    // Exactly one disabled button, so a future edit cannot quietly disable
-    // Release Notes or Later and still satisfy the assertions above.
     var enabled_count: usize = 0;
-    for (buttons) |spec| {
+    for (buttonsFor(false)) |spec| {
         if (spec.enabled) enabled_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 2), enabled_count);
 }
 
-test "update offer routes every button command to its declared action" {
-    for (buttons) |spec| {
-        try std.testing.expectEqual(spec.action, actionForCommand(spec.id).?);
+test "update offer enables install once a Windows asset was resolved" {
+    const install = buttonsFor(true)[0];
+    try std.testing.expectEqualStrings("Install", install.label);
+    try std.testing.expect(install.enabled);
+    try std.testing.expectEqual(Action.install, install.action);
+
+    // All three buttons are enabled once install is genuinely possible.
+    var enabled_count: usize = 0;
+    for (buttonsFor(true)) |spec| {
+        if (spec.enabled) enabled_count += 1;
     }
-    // Unrecognised commands must not resolve to an action; windowProc relies on
-    // null to fall through to DefWindowProcW.
-    try std.testing.expectEqual(@as(?Action, null), actionForCommand(0));
-    try std.testing.expectEqual(@as(?Action, null), actionForCommand(install_id + 100));
+    try std.testing.expectEqual(@as(usize, 3), enabled_count);
+}
+
+test "update offer routes every button command to its declared action" {
+    inline for (.{ true, false }) |installable| {
+        for (buttonsFor(installable)) |spec| {
+            try std.testing.expectEqual(spec.action, actionForCommand(installable, spec.id).?);
+        }
+        // Unrecognised commands must not resolve to an action; windowProc
+        // relies on null to fall through to DefWindowProcW.
+        try std.testing.expectEqual(@as(?Action, null), actionForCommand(installable, 0));
+        try std.testing.expectEqual(@as(?Action, null), actionForCommand(installable, install_id + 100));
+    }
 }
 
 test "update offer button command ids are distinct" {
-    for (buttons, 0..) |spec, i| {
-        for (buttons[i + 1 ..]) |other| {
-            try std.testing.expect(spec.id != other.id);
+    inline for (.{ true, false }) |installable| {
+        const specs = buttonsFor(installable);
+        for (specs, 0..) |spec, i| {
+            for (specs[i + 1 ..]) |other| {
+                try std.testing.expect(spec.id != other.id);
+            }
         }
     }
 }
@@ -264,3 +292,4 @@ test "update offer button command ids are distinct" {
 test "dismissing the update offer defers rather than implying an install" {
     try std.testing.expectEqual(Action.later, dismiss_action);
 }
+

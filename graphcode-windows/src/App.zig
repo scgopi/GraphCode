@@ -31,6 +31,8 @@ const Onboarding = @import("WindowsOnboarding.zig");
 const WindowsUpdates = @import("WindowsUpdates.zig");
 const UpdateOfferDialog = @import("UpdateOfferDialog.zig");
 const UpdateOfferPresentation = @import("UpdateOfferPresentation.zig");
+const UpdateInstallDialog = @import("UpdateInstallDialog.zig");
+const WindowsUpdateInstall = @import("WindowsUpdateInstall.zig");
 const WorktreeDialog = @import("WorktreeDialog.zig");
 const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
@@ -285,6 +287,9 @@ pub const App = struct {
     update_user_initiated: bool = false,
     update_version: []u8 = &.{},
     update_release_url: []u8 = &.{},
+    update_asset_url: []u8 = &.{},
+    update_asset_sha256: []u8 = &.{},
+    update_asset_checksum_url: []u8 = &.{},
     smoke_restart_index: ?usize = null,
     smoke_restart_session: []const u8 = &.{},
 
@@ -390,6 +395,9 @@ pub const App = struct {
         if (self.update_thread) |thread| thread.join();
         if (self.update_version.len != 0) self.allocator.free(self.update_version);
         if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
+        if (self.update_asset_url.len != 0) self.allocator.free(self.update_asset_url);
+        if (self.update_asset_sha256.len != 0) self.allocator.free(self.update_asset_sha256);
+        if (self.update_asset_checksum_url.len != 0) self.allocator.free(self.update_asset_checksum_url);
         self.allocator.destroy(self);
     }
 
@@ -1627,10 +1635,19 @@ pub const App = struct {
             self.update_state = .{ .channel = result.channel, .state = result.state };
             if (self.update_version.len != 0) self.allocator.free(self.update_version);
             if (self.update_release_url.len != 0) self.allocator.free(self.update_release_url);
+            if (self.update_asset_url.len != 0) self.allocator.free(self.update_asset_url);
+            if (self.update_asset_sha256.len != 0) self.allocator.free(self.update_asset_sha256);
+            if (self.update_asset_checksum_url.len != 0) self.allocator.free(self.update_asset_checksum_url);
             self.update_version = result.version orelse &.{};
             self.update_release_url = result.release_url orelse &.{};
+            self.update_asset_url = result.asset_url orelse &.{};
+            self.update_asset_sha256 = result.asset_sha256 orelse &.{};
+            self.update_asset_checksum_url = result.asset_checksum_url orelse &.{};
             result.version = null;
             result.release_url = null;
+            result.asset_url = null;
+            result.asset_sha256 = null;
+            result.asset_checksum_url = null;
         }
         self.update_done = true;
         self.update_lock.unlock();
@@ -1688,18 +1705,25 @@ pub const App = struct {
             self.setStatus("Update release URL is not a trusted GraphCode release page");
             return;
         };
+        const installable = self.update_asset_url.len != 0;
+        const reason = if (installable)
+            "Install downloads the Windows package, verifies it, and installs it in place."
+        else
+            "No Windows build is attached to this release yet. Download the Windows ZIP from the release page once one is published.";
         const action = UpdateOfferDialog.show(
             self.window.hwnd,
             self.allocator,
             version,
-            "In-app Windows installation is not implemented yet. Download the Windows ZIP from the release page.",
+            reason,
+            installable,
         ) catch {
             self.setStatus("Unable to prepare the update offer");
             return;
         };
         switch (action) {
             .later => self.setStatus("Update offer deferred"),
-            .install_unavailable => self.setStatus("In-app installation is not implemented; download the Windows ZIP"),
+            .install_unavailable => self.setStatus("No Windows build is published for this release yet"),
+            .install => self.runInstall(),
             .release_notes => {
                 const url_wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, url) catch {
                     self.setStatus("Unable to encode the release URL");
@@ -1717,6 +1741,56 @@ pub const App = struct {
                 self.setStatus(if (@intFromPtr(result) <= 32) "Unable to open the release page" else "Opened the GraphCode release page");
             },
         }
+    }
+
+    fn runInstall(self: *App) void {
+        const sha256: ?[]const u8 = if (self.update_asset_sha256.len != 0) self.update_asset_sha256 else null;
+        const checksum_url: ?[]const u8 = if (self.update_asset_checksum_url.len != 0) self.update_asset_checksum_url else null;
+        const outcome = UpdateInstallDialog.run(
+            self.window.hwnd,
+            self.allocator,
+            self.update_asset_url,
+            sha256,
+            checksum_url,
+        ) catch {
+            self.setStatus("Unable to start the update install");
+            return;
+        };
+        switch (outcome) {
+            .relaunch => |choice| switch (choice) {
+                .relaunch_now => self.relaunchAfterUpdate(),
+                .later => self.setStatus("Update installed. Relaunch GraphCode to use it."),
+            },
+            .cancelled => self.setStatus("Update install cancelled"),
+            .failed => |message| {
+                self.setStatus(message);
+                self.allocator.free(message);
+            },
+        }
+    }
+
+    /// Spawns a fresh instance of the (now-upgraded, atomically swapped-in)
+    /// executable at the same path, then tears this process down. zmx-backed
+    /// terminal sessions are held by the background daemon, not this GUI
+    /// process, so they are unaffected by this relaunch.
+    fn relaunchAfterUpdate(self: *App) void {
+        var executable: [32768]u16 = undefined;
+        const length = c.GetModuleFileNameW(null, &executable, executable.len);
+        if (length == 0 or length >= executable.len) {
+            self.setStatus("GraphCode executable path could not be resolved; relaunch it manually");
+            return;
+        }
+        executable[length] = 0;
+        var startup: c.STARTUPINFOW = std.mem.zeroes(c.STARTUPINFOW);
+        startup.cb = @sizeOf(c.STARTUPINFOW);
+        var process: c.PROCESS_INFORMATION = undefined;
+        if (c.CreateProcessW(executable[0..length :0].ptr, null, null, null, 0, 0, null, null, &startup, &process) == 0) {
+            self.setStatus("The update installed, but GraphCode could not relaunch itself automatically");
+            return;
+        }
+        _ = c.CloseHandle(process.hThread);
+        _ = c.CloseHandle(process.hProcess);
+        _ = c.DestroyWindow(self.window.hwnd);
     }
 
     fn showCurrentUpdateOffer(self: *App) void {

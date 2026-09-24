@@ -5,6 +5,13 @@ pub const Channel = enum { stable, beta };
 pub const State = enum { disabled, available, up_to_date, failed };
 pub const releases_page_url = "https://github.com/scgopi/GraphCode/releases";
 
+/// The exact, versionless asset name `Tools/windows/release.ps1` publishes.
+/// Matching on this name (rather than a per-version filename) is what lets a
+/// release be found even though nothing else about the asset shape changes
+/// between versions.
+pub const windows_asset_name = "graphcode-windows-x86_64.zip";
+const windows_checksum_suffix = ".sha256";
+
 pub fn releasePageUrl(value: []const u8) ![]const u8 {
     if (value.len == 0) return releases_page_url;
     for (value) |byte| if (byte <= 0x20 or byte == 0x7f) return error.InvalidReleaseUrl;
@@ -31,11 +38,24 @@ pub const CheckResult = struct {
     version: ?[]u8 = null,
     release_url: ?[]u8 = null,
     message: ?[]u8 = null,
+    /// The direct download URL for `windows_asset_name` on the offered
+    /// release. Only populated when `state == .available`.
+    asset_url: ?[]u8 = null,
+    /// Lowercase hex SHA-256 of the asset, read straight from GitHub's own
+    /// `digest` field on the asset. Populated only when GitHub reported one;
+    /// callers must fall back to `asset_checksum_url` otherwise.
+    asset_sha256: ?[]u8 = null,
+    /// Download URL for the `<asset>.sha256` sidecar `release.ps1` publishes,
+    /// used only when the release asset itself carries no `digest`.
+    asset_checksum_url: ?[]u8 = null,
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
         if (self.version) |value| allocator.free(value);
         if (self.release_url) |value| allocator.free(value);
         if (self.message) |value| allocator.free(value);
+        if (self.asset_url) |value| allocator.free(value);
+        if (self.asset_sha256) |value| allocator.free(value);
+        if (self.asset_checksum_url) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -178,16 +198,73 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
         }
     }
     if (greatest) |selected| {
-        var result = CheckResult{
-            .channel = channel,
-            .state = if (selected.version.compare(installed) == .greater) .available else .up_to_date,
-            .version = try allocator.dupe(u8, selected.release.tag_name),
-        };
+        const state: State = if (selected.version.compare(installed) == .greater) .available else .up_to_date;
+        var result = CheckResult{ .channel = channel, .state = state, .version = try allocator.dupe(u8, selected.release.tag_name) };
         errdefer result.deinit(allocator);
         if (selected.release.html_url) |url| result.release_url = try allocator.dupe(u8, try releasePageUrl(url));
+        if (state == .available) {
+            // `asset_url` staying null here (release has no matching Windows
+            // asset — e.g. the 2026-09-17 macOS-only publish) is itself a
+            // meaningful, honest result: callers must present that as "no
+            // Windows build attached to this release" rather than assuming
+            // an asset exists and letting a download 404.
+            if (try findWindowsAsset(allocator, selected.release.assets)) |found| {
+                result.asset_url = found.url;
+                result.asset_sha256 = found.sha256;
+                result.asset_checksum_url = found.checksum_url;
+            }
+        }
         return result;
     }
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
+}
+
+const FoundAsset = struct {
+    url: []u8,
+    sha256: ?[]u8,
+    checksum_url: ?[]u8,
+};
+
+/// Finds the Windows release asset among a release's reported assets. GitHub
+/// reports a `sha256:<hex>` `digest` on most assets; when it is absent (older
+/// uploads predate the field) this falls back to recording the `.sha256`
+/// sidecar's own download URL so a caller can fetch and parse it instead.
+fn findWindowsAsset(allocator: std.mem.Allocator, assets: []const Asset) !?FoundAsset {
+    var url: ?[]const u8 = null;
+    var digest: ?[]const u8 = null;
+    var checksum_url: ?[]const u8 = null;
+    for (assets) |asset| {
+        if (std.mem.eql(u8, asset.name, windows_asset_name)) {
+            url = asset.browser_download_url;
+            digest = asset.digest;
+        } else if (std.mem.eql(u8, asset.name, windows_asset_name ++ windows_checksum_suffix)) {
+            checksum_url = asset.browser_download_url;
+        }
+    }
+    const found_url = url orelse return null;
+    var result = FoundAsset{ .url = try allocator.dupe(u8, found_url), .sha256 = null, .checksum_url = null };
+    errdefer allocator.free(result.url);
+    if (digest) |value| {
+        const prefix = "sha256:";
+        if (std.mem.startsWith(u8, value, prefix)) {
+            const hex = value[prefix.len..];
+            if (hex.len == 64 and isHex(hex)) {
+                result.sha256 = try allocator.dupe(u8, hex);
+                return result;
+            }
+        }
+    }
+    if (checksum_url) |value| {
+        result.checksum_url = allocator.dupe(u8, value) catch |err| {
+            return err;
+        };
+    }
+    return result;
+}
+
+fn isHex(value: []const u8) bool {
+    for (value) |byte| if (!std.ascii.isHex(byte)) return false;
+    return true;
 }
 
 const SemVer = struct {
@@ -291,6 +368,13 @@ const Release = struct {
     html_url: ?[]const u8 = null,
     prerelease: bool = false,
     draft: bool = false,
+    assets: []const Asset = &.{},
+};
+
+const Asset = struct {
+    name: []const u8,
+    browser_download_url: ?[]const u8 = null,
+    digest: ?[]const u8 = null,
 };
 
 test "default update feed uses the GraphCode release repository" {
@@ -469,6 +553,116 @@ test "variable length GraphCode version tuples normalize trailing zeroes" {
     var equal = try parseFeed(std.testing.allocator, releases, .stable, "0.1.26.1");
     defer equal.deinit(std.testing.allocator);
     try std.testing.expectEqual(State.up_to_date, equal.state);
+}
+
+test "an available release records its Windows asset URL and GitHub-reported digest" {
+    const releases =
+        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-macos-arm64.dmg","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-macos-arm64.dmg"},
+        \\  {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqualStrings(
+        "https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip",
+        result.asset_url.?,
+    );
+    try std.testing.expectEqualStrings(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        result.asset_sha256.?,
+    );
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_checksum_url);
+}
+
+test "a missing digest falls back to the published sha256 sidecar's own URL" {
+    const releases =
+        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip"},
+        \\  {"name":"graphcode-windows-x86_64.zip.sha256","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip.sha256"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expect(result.asset_url != null);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_sha256);
+    try std.testing.expectEqualStrings(
+        "https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip.sha256",
+        result.asset_checksum_url.?,
+    );
+}
+
+test "an available release with no Windows asset reports no asset rather than a guessed URL" {
+    // This is the honest, real state the 2026-09-17 asset check actually found:
+    // a release whose only published binaries are macOS DMGs. Present it as
+    // 'no asset' plainly rather than assuming a Windows asset exists.
+    const releases =
+        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-macos-arm64.dmg","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-macos-arm64.dmg"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_url);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_sha256);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_checksum_url);
+}
+
+test "a release with no assets array at all still resolves without an asset" {
+    var result = try parseFeed(std.testing.allocator, "[{\"tag_name\":\"v2.0.0\"}]", .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_url);
+}
+
+test "an up-to-date release never looks at assets" {
+    // Confirms the asset lookup is gated on `state == .available`: an
+    // already-installed version must never carry an asset_url even if the
+    // release JSON has one, since there is nothing to offer installing.
+    const releases =
+        \\[{"tag_name":"v1.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://example.invalid/graphcode-windows-x86_64.zip","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "v1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_url);
+}
+
+test "a malformed digest is ignored in favor of the checksum sidecar fallback" {
+    const releases =
+        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip","digest":"sha256:not-hex"},
+        \\  {"name":"graphcode-windows-x86_64.zip.sha256","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip.sha256"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(?[]u8, null), result.asset_sha256);
+    try std.testing.expectEqualStrings(
+        "https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip.sha256",
+        result.asset_checksum_url.?,
+    );
+}
+
+test "asset resolution allocation failures propagate without leaking the found asset" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const releases =
+                \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+                \\  {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip","digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+                \\]}]
+            ;
+            var result = try parseFeed(allocator, releases, .stable, "1.0.0");
+            defer result.deinit(allocator);
+            try std.testing.expect(result.asset_url != null);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "update feed errors are explicit" {
