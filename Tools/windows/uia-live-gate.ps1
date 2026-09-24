@@ -1568,12 +1568,17 @@ try {
   $workspaceStart = $null
   $workspaceUsage = $null
   # The workspace chrome mounts its toolbar, tab, split-control and detail children
-  # asynchronously after the loop invocation above. A loaded CI runner has been observed
-  # exhausting a 10s budget here and failing on the toolbar identity child while every
-  # other assertion in this block was satisfiable moments later, so this waits 20s.
-  # The break condition below is unchanged: all eight children must still appear.
+  # asynchronously after the loop invocation above. The invocation also remounts the
+  # graph fragment itself, so the parent captured before it can be dead by the time
+  # this loop runs - and Get-DirectChildren on a dead parent yields nothing forever,
+  # which no amount of waiting recovers from. Re-resolve the parent as well as the
+  # children on every attempt so this observes the live tree rather than a stale
+  # generation of it. The break condition is unchanged: all eight children must appear.
   for ($attempt = 0; $attempt -lt 200; $attempt++) {
-    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+    $liveGraph = Find-FragmentById $root "graph" $rawWalker
+    if ($null -eq $liveGraph) { Start-Sleep -Milliseconds 100; continue }
+    $graph = $liveGraph
+    $workspaceChildren = @(Get-DirectChildren $liveGraph $rawWalker)
     $workspaceToolbar = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
     }) | Select-Object -First 1
@@ -1638,7 +1643,16 @@ try {
   $resolvedDetails = $null
   $detailFailure = "workspace right panel never resolved its detail children"
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
-    $liveChildren = @(Get-DirectChildren $graph $rawWalker)
+    # Re-resolve the parent too: the fragment provider can remount the graph itself,
+    # and a dead parent yields no children no matter how long this waits.
+    $liveGraph = Find-FragmentById $root "graph" $rawWalker
+    if ($null -eq $liveGraph) {
+      $detailFailure = "workspace right panel lost its graph parent while waiting for layout"
+      Start-Sleep -Milliseconds 100
+      continue
+    }
+    $graph = $liveGraph
+    $liveChildren = @(Get-DirectChildren $liveGraph $rawWalker)
     $candidates = @()
     $pendingLabel = $null
     foreach ($spec in $detailSpecs) {
