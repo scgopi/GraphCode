@@ -22,6 +22,57 @@
     "graphcode/Sources/Features/App/ProjectHeader.swift",
     "investigation/ui-parity-matrix.md"
   ],
+  "currentThemeContract": {
+    "_comment": "Additive, separately-versioned section. Distinct from tokenContracts/baseCommit above, which is an immutable historical pin at CONTRACT_BASE ece55b6 and must never be edited to 'fix' drift. This section instead tracks today's graphcode/Sources/Features/App/Theme.swift and is intentionally re-derived and re-asserted every run (see visual-baseline.ps1's currentThemeContract checks), not frozen to a specific commit's git object -- so it works in a shallow checkout with no dependency on historical commit objects being fetchable.",
+    "schemaVersion": 1,
+    "supersedes": "tokenContracts",
+    "comparedAgainstBaseCommit": "ece55b6",
+    "roundingRule": "round-half-up per channel: floor(channel * 255 + 0.5), clamped to [0, 255]",
+    "recordedAtCommit": "a65bd3e31fac8e5f224e478fbce0b29db5fd2032",
+    "tokens": [
+      {
+        "name": "Theme.canvasTone",
+        "path": "graphcode/Sources/Features/App/Theme.swift",
+        "sourceLine": 54,
+        "swiftLiteral": "Color(red: 0.040, green: 0.048, blue: 0.044)",
+        "rgb": [10, 12, 11],
+        "hex": "#0A0C0B",
+        "opaque": true,
+        "note": "canvasBackground aliases this directly (opaque) as of recordedAtCommit. At the historical baseCommit ece55b6, canvasBackground was instead canvasTone.opacity(0.62) and canvasTone itself was Color(white: 0.095) (#181818) -- both era's values are real and intentionally different; see tokenContracts above for the historical one."
+      },
+      {
+        "name": "Theme.canvasGridLine",
+        "path": "graphcode/Sources/Features/App/Theme.swift",
+        "sourceLine": 62,
+        "swiftLiteral": "Color(red: 0.082, green: 0.094, blue: 0.086)",
+        "rgb": [21, 24, 22],
+        "hex": "#151816",
+        "opaque": true,
+        "note": "One step off canvasBackground/canvasTone, also opaque at recordedAtCommit. Windows renders this as a plain (non-anti-aliased) 1px GDI line, so any live pixel sample should hit either the flat line color or the flat background color exactly, not a blended edge."
+      }
+    ],
+    "crossChecks": [
+      {
+        "description": "graphcode-windows/src/DesignTokens.zig's canvas_grid_line is a raw Win32 COLORREF (byte order 0x00BBGGRR, not 0x00RRGGBB). BGR-decoding it agrees with the independently-traced Theme.swift value above. This is a consistency signal only: the expected value for any comparison must always come from the Theme.swift derivation above, never from reading this constant back.",
+        "windowsColorref": "0x00161815",
+        "decodedRgb": [21, 24, 22]
+      }
+    ],
+    "liveToleranceRegions": [
+      {
+        "id": "canvas-interior-fill",
+        "token": "Theme.canvasTone",
+        "tolerancePerChannel": 1,
+        "justification": "A flat, fully-opaque GDI SolidBrush fill sampled at 100% DPI away from any edge, grid line, card, or text has no anti-aliasing or ClearType involvement (ClearType only affects glyph pixels, and PNG capture via CopyFromScreen is lossless). The only realistic source of a 1-unit discrepancy is OS-level color management (ICC profile / gamma) rounding, not 'capture noise'. This tolerance intentionally accepts any color within 1/channel of the expected value, including plausible-but-wrong nearby colors -- that is a disclosed limitation of live pixel sampling, not a claim of exact verification (exact verification is the separate, zero-tolerance static source-drift check)."
+      },
+      {
+        "id": "canvas-grid-line",
+        "token": "Theme.canvasGridLine",
+        "tolerancePerChannel": 1,
+        "justification": "Same reasoning as canvas-interior-fill: this grid line is deliberately plain (non-anti-aliased) GDI, so a correctly-targeted line pixel should be bit-exact modulo the same OS color-management rounding."
+      }
+    ]
+  },
   "tokenContracts": [
     { "name": "Theme.windowTone", "value": "#1E1E1E" },
     { "name": "Theme.windowBackground", "value": "opacity(0.55)" },
