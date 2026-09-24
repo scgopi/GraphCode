@@ -1057,6 +1057,27 @@ try {
   $rawWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   $controlWalker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
   $shellWindow = $process.MainWindowHandle
+
+  # The freshly-launched shell's UI Automation provider can still be settling
+  # immediately after graphcode-root first responds to WM_GETOBJECT: a tree walk in
+  # this window can throw a COMException ("Catastrophic failure"/"Unrecognized
+  # error", both observed on CI) even though Get-DirectChildren's own bounded
+  # per-call retry (4 attempts, ~600ms) is exhausted before the provider settles.
+  # Rather than growing that per-call budget - which is paid on every one of the
+  # ~35 Find-FragmentById call sites for the rest of the run - absorb the one-time
+  # startup race here, once, with a longer budget before any real assertion begins.
+  $providerSettled = $false
+  for ($settleAttempt = 0; $settleAttempt -lt 30; $settleAttempt++) {
+    try {
+      $null = @($rawWalker.GetFirstChild($root))
+      $providerSettled = $true
+      break
+    } catch [System.Runtime.InteropServices.COMException] {
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  Require $providerSettled "shell UI Automation provider did not settle after graphcode-root appeared"
+
   $desktop = [System.Windows.Automation.AutomationElement]::RootElement
   $updateDialog = $desktop.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
