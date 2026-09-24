@@ -1806,12 +1806,12 @@ test "surface identity cannot leak a session across project paths" {
 
 test "replacement preserves both surface cell buffers for donor reuse" {
     var surfaces = [_]Surface{.{}} ** max_surfaces;
-    surfaces[0].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
-    surfaces[1].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
     defer for (&surfaces) |*surface| {
         if (surface.session_name.len != 0) std.testing.allocator.free(surface.session_name);
         if (surface.cells.len != 0) std.testing.allocator.free(surface.cells);
     };
+    surfaces[0].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    surfaces[1].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
 
     const target_cells = surfaces[0].cells.ptr;
     const replacement_cells = surfaces[1].cells.ptr;
