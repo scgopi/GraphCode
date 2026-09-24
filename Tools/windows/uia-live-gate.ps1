@@ -752,28 +752,45 @@ function Ensure-ShellForeground(
   return $acquired
 }
 
-# Reverted the ElementNotAvailableException/COMException retry-and-swallow wrapping
-# this function previously had: catching ElementNotAvailableException and returning
-# @() after a few attempts makes every downstream "-eq 0" / "-not" assertion built on
-# this (e.g. Assert-FragmentLinks's unexpected-children check) vacuously pass when the
-# parent is transiently or permanently unavailable, instead of surfacing the real
-# failure. There was no RED/GREEN evidence backing that retry, and it also explains
-# the failure point moving across otherwise byte-identical CI runs: which assertion an
-# absorbed ENA surfaces at depends on where in the tree walk it happened to land.
-# Throw immediately so a dead parent fails loudly at the real call site; callers that
-# genuinely need to tolerate a remounting parent (e.g. Wait-ForGraphChildren) already
-# re-resolve the parent each attempt around this call instead of masking it here.
+# Dropped the ElementNotAvailableException retry-and-swallow this function previously
+# had: catching it and returning @() after a few attempts makes every downstream
+# "-eq 0" / "-not" assertion built on this (e.g. Assert-FragmentLinks's
+# unexpected-children check) vacuously pass when the parent is transiently or
+# permanently unavailable, instead of surfacing the real failure. There was no
+# RED/GREEN evidence backing that retry, and it also explains three different failure
+# points observed across otherwise byte-identical CI runs of this branch: which
+# assertion an absorbed ENA surfaces at depends on where in the tree walk it happened
+# to land. A dead parent now throws immediately; callers that genuinely need to
+# tolerate a remounting parent (e.g. Wait-ForGraphChildren) already re-resolve the
+# parent each attempt around this call instead of masking it here.
+#
+# The COMException retry is kept, narrowly: with the ENA swallow removed, CI
+# reproduced a real "Catastrophic failure (0x8000FFFF (E_UNEXPECTED))" from
+# GetFirstChild seconds after the freshly-launched shell's UI Automation provider
+# registered, before any assertion ran - i.e. a raw framework call failing, not a
+# silently-passing check. That is exactly the transient class the original comment
+# described. Unlike the ENA case, this can't make an assertion vacuous: it always
+# throws (never returns a masking @()) unless it genuinely recovers within budget.
 function Get-DirectChildren(
   [System.Windows.Automation.AutomationElement] $element,
   [System.Windows.Automation.TreeWalker] $walker
 ) {
-  $children = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
-  $child = $walker.GetFirstChild($element)
-  while ($null -ne $child) {
-    $children.Add($child)
-    $child = $walker.GetNextSibling($child)
+  $attempt = 0
+  while ($true) {
+    try {
+      $children = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
+      $child = $walker.GetFirstChild($element)
+      while ($null -ne $child) {
+        $children.Add($child)
+        $child = $walker.GetNextSibling($child)
+      }
+      return @($children.ToArray())
+    } catch [System.Runtime.InteropServices.COMException] {
+      $attempt++
+      if ($attempt -ge 4) { throw }
+      Start-Sleep -Milliseconds 150
+    }
   }
-  return @($children.ToArray())
 }
 
 function Assert-Ids([string[]] $actual, [string[]] $expected, [string] $label) {
