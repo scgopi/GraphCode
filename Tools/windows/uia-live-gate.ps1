@@ -333,18 +333,6 @@ public static class GraphCodeUiaGateState {
   public static void HideWindow(IntPtr window) {
     if (window != IntPtr.Zero) ShowWindow(window, 0);
   }
-  [DllImport("user32.dll")]
-  private static extern bool SetWindowPos(
-    IntPtr window, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
-  public static bool ResizeWindow(IntPtr window, int x, int y, int width, int height) {
-    if (window == IntPtr.Zero) return false;
-    // Un-maximize/un-minimize first so SetWindowPos's explicit size is not
-    // overridden by whatever restore geometry Windows would otherwise apply.
-    ShowWindow(window, 9);
-    const uint SWP_NOZORDER = 0x0004;
-    const uint SWP_NOACTIVATE = 0x0010;
-    return SetWindowPos(window, IntPtr.Zero, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-  }
   public static void HideProcessWindows(uint processId) {
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
       uint owner;
@@ -397,11 +385,6 @@ public static class GraphCodeUiaGateState {
     RECT rect;
     if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
     return rect.Bottom - rect.Top;
-  }
-  public static int ClientWidth(IntPtr window) {
-    RECT rect;
-    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
-    return rect.Right - rect.Left;
   }
   [StructLayout(LayoutKind.Sequential)]
   private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
@@ -1797,58 +1780,51 @@ try {
 
   # Folder lanes/bands: the lane's Open and Worktrees actions have no dedicated UIA
   # elements (GraphCanvas.overviewLaneActionAt is a pure hit test painted by GDI), so
-  # this derives their real screen position from the synchronized card geometry
-  # (GraphCanvas.overviewCardBounds places row 0 at lane.top + 46, and with the lane
-  # width clamped to bounds.right - bounds.left - 48 for windows wider than 808px,
-  # lane.right = graph.Right - 24, matching overviewLaneActionAt's Open/Worktrees
-  # button rects) and posts real WM_LBUTTONDOWN/UP client-coordinate clicks at those
-  # points, exercising the exact App.zig click routing a physical mouse would drive.
-  # A genuine surface transition (not merely re-invoking the same overview paint) is
-  # proven by the card's BoundingRectangle.Top moving away from the lane-grid
-  # position ($laneGridCardTop, captured immediately before the click) to the
-  # free-form project-canvas layout.
-  # CI runners can host the shell on a virtual desktop narrower than a local session's
-  # (some have no interactive Explorer desktop at all -- see the physical-tray skip
-  # earlier in this run), so SW_MAXIMIZE would only ever grow the window to fit
-  # whatever small work area that desktop reports. SetWindowPos does not clamp to
-  # monitor bounds, but a cross-process resize request can still land smaller than
-  # requested when the caller and the target window disagree on DPI awareness (the
-  # PowerShell host here is not per-monitor-DPI-aware, so Windows can rescale the
-  # coordinates it hands to a per-monitor-aware target). Rather than assume a fixed
-  # requested size reliably produces a given client size, measure the real achieved
-  # client width via GetClientRect after each attempt and grow the request until it
-  # does, instead of guessing the runner's DPI scale factor. $graph is re-resolved on
-  # each poll (matching every other acquisition in this file) rather than trusting a
-  # BoundingRectangle read against a handle captured before the resize, since a
-  # UIA element's cached geometry is not guaranteed to reflect a resize that the
-  # app's message loop has not yet processed.
+  # this derives their real screen position from GraphCanvas.overviewLaneBounds'
+  # actual formula (lane.left = graph.Left + 24, lane width = max(760,
+  # graph.Width - 48)) and posts real WM_LBUTTONDOWN/UP client-coordinate clicks at
+  # those points, exercising the exact App.zig click routing a physical mouse would
+  # drive. A genuine surface transition (not merely re-invoking the same overview
+  # paint) is proven by the card's BoundingRectangle.Top moving away from the
+  # lane-grid position ($laneGridCardTop, captured immediately before the click) to
+  # the free-form project-canvas layout.
+  #
+  # An earlier version of this block instead tried to force the shell window wide
+  # enough that graph.Width - 48 would exceed the 760 floor, first via SW_MAXIMIZE,
+  # then via a growing SetWindowPos request -- but on a CI runner with a small
+  # virtual desktop, requesting an ever-larger window rect does not produce an
+  # ever-larger client rect: repeated attempts up to a 6000x2687 request all landed
+  # at the same ~1028px client width (confirmed by GetClientRect in that run),
+  # because the OS-level max-track-size clamp is bound to the monitor's real work
+  # area, not to whatever this script asks for. That made a "-gt 808" width
+  # precondition unsatisfiable on that runner no matter how the resize was framed,
+  # and chasing it further would have been fighting a fixed environment constraint
+  # instead of fixing the test. The lane-width formula's floor case is exactly as
+  # real a code path as its non-floor case, so this now computes lane.right
+  # correctly for whichever branch the shell's actual (possibly narrow) canvas
+  # falls into, using the graph element's own live BoundingRectangle -- valid at
+  # any window size and requiring no resize at all. actual-size is invoked first so
+  # CanvasState.zoom/pan_x/pan_y (state that participates in the same
+  # transformedRect() call the lane, card, and button rects all go through) are
+  # reset to the identity transform (1, 0, 0) that the arithmetic below assumes;
+  # without that, a zoom/pan left over from an earlier gate step could shift every
+  # screen coordinate computed here.
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
-  $requestedWidth = 1400
-  $requestedHeight = 900
-  $observedGraphWidth = 0
-  $observedClientWidth = 0
-  for ($growAttempt = 0; $growAttempt -lt 6; $growAttempt++) {
-    [GraphCodeUiaGateState]::ResizeWindow($shellWindow, 0, 0, $requestedWidth, $requestedHeight) | Out-Null
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-      $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
-      $observedGraphWidth = [int]$graph.Current.BoundingRectangle.Width
-      $observedClientWidth = [GraphCodeUiaGateState]::ClientWidth($shellWindow)
-      if ($observedGraphWidth -gt 808) { break }
-      Start-Sleep -Milliseconds 100
-    }
-    if ($observedGraphWidth -gt 808) { break }
-    # Grow proportionally to how far short the achieved client width fell, rather
-    # than a blind multiplier, so this converges quickly regardless of the actual
-    # scale factor at play.
-    $shortfallRatio = if ($observedClientWidth -gt 0) { [double]$requestedWidth / [double]$observedClientWidth } else { 2.0 }
-    $requestedWidth = [Math]::Min(6000, [int]([double]$requestedWidth * $shortfallRatio * 1.3))
-    $requestedHeight = [Math]::Min(3200, [int]([double]$requestedHeight * 1.2))
-  }
-  Require ($observedGraphWidth -gt 808) `
-    "shell window too narrow to use the wide-window overview lane geometry formula, even after growing the requested window rect to ${requestedWidth}x${requestedHeight} (observed graph width=$observedGraphWidth, observed client width=$observedClientWidth)"
+  $surfaceActionPatterns["actual-size"].Invoke()
+  Start-Sleep -Milliseconds 150
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  $overviewCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+  })
+  Require (($overviewCards.Count -eq 2) -and
+           ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
+    "Overview did not expose synchronized cards after resetting zoom/pan to actual size"
+  $graphBounds = $graph.Current.BoundingRectangle
+  $laneWidth = [Math]::Max(760, [int]$graphBounds.Width - 48)
+  $laneRight = [int]$graphBounds.Left + 24 + $laneWidth
   $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
-  $laneOpenScreenX = [int]$graph.Current.BoundingRectangle.Right - 128
+  $laneOpenScreenX = $laneRight - 104
   $laneOpenScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
   $laneOpenClientX = 0
   $laneOpenClientY = 0
