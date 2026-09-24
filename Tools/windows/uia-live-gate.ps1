@@ -907,15 +907,26 @@ function Wait-ForGraphChildren(
 # graphcode-root the same way it was first acquired can.
 #
 # Re-resolve $root via FromHandle on the shell's main window handle (checking
-# AutomationId, exactly like the initial acquisition loop), then prove a raw
-# tree walk of it succeeds before returning it as live. Waits on that
-# precondition only - it does not touch any caller assertion. On exhaustion,
-# Require fails with HasExited and the last exception observed, so a genuine
-# product crash (the shell actually died) is distinguishable from a gate-side
-# reconnection failure.
+# AutomationId, exactly like the initial acquisition loop), then prove a tree
+# walk of it succeeds *in every view the caller is about to use* before
+# returning it as live. A first version of this helper verified only with the
+# raw-view walker and still failed immediately downstream: CI showed the
+# raw-view walk succeeding (reconnect returned without throwing) followed by
+# the very next statement's control-view walk failing with
+# ElementNotAvailableException for the entire 5s budget, never recovering.
+# RawView and ControlView are separate client-side views of the same element
+# and can settle at different times after a remount, so proving one is alive
+# does not prove the other is. This site immediately exercises both views
+# (status lookup via ControlView, root-children assertions via both), so both
+# must be proven walkable before the element is trusted.
+#
+# Waits on that precondition only - it does not touch any caller assertion.
+# On exhaustion, Require fails with HasExited and the last exception observed,
+# so a genuine product crash (the shell actually died) is distinguishable
+# from a gate-side reconnection failure.
 function Wait-ForRootReconnect(
   [System.Diagnostics.Process] $process,
-  [System.Windows.Automation.TreeWalker] $walker,
+  [System.Windows.Automation.TreeWalker[]] $walkers,
   [int] $maxAttempts = 40,
   [int] $delayMs = 250
 ) {
@@ -928,12 +939,13 @@ function Wait-ForRootReconnect(
       try {
         $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
         if ($candidate.Current.AutomationId -eq "graphcode-root") {
-          $null = @($walker.GetFirstChild($candidate))
+          foreach ($walker in $walkers) { $null = @($walker.GetFirstChild($candidate)) }
           $reconnected = $candidate
           break
         }
       } catch {
         $lastException = $_
+        Write-Host "UIA_ROOT_RECONNECT_RETRY attempt=$attempt type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
       }
     }
     Start-Sleep -Milliseconds $delayMs
@@ -1231,8 +1243,10 @@ try {
   # bounded COM/ENA retry cannot revive (see Wait-ForRootReconnect). Other
   # modal teardowns later in this file (SendCommand 9703 again ~line 1265,
   # and ~line 3124) have the identical latent exposure but are out of scope
-  # for this fix - noted here rather than swept up in one change.
-  $root = Wait-ForRootReconnect $process $rawWalker
+  # for this fix - noted here rather than swept up in one change. Verify with
+  # both walkers this site is about to use (status lookup below is
+  # ControlView; the root-children assertions further down use both views).
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
   $status = Find-FragmentById $root "status" $controlWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
