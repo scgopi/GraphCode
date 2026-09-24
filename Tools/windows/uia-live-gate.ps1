@@ -776,6 +776,7 @@ function Get-DirectChildren(
   [System.Windows.Automation.TreeWalker] $walker
 ) {
   $attempt = 0
+  $deadline = (Get-Date).AddMilliseconds(5000)
   while ($true) {
     try {
       $children = New-Object System.Collections.Generic.List[System.Windows.Automation.AutomationElement]
@@ -786,21 +787,30 @@ function Get-DirectChildren(
       }
       return @($children.ToArray())
     } catch {
-      # Diagnostic-only: log every exception this hits, regardless of type, before
-      # deciding whether to retry. A prior CI run threw here with an uncaught,
-      # unlogged exception ("Unrecognized error.", ~17s into the gate, well after
-      # the one-time provider-settle wait already succeeded on its first attempt) -
-      # without this, it is impossible to tell whether it was a genuine
-      # COMException that exhausted the 4-attempt/450ms retry budget, or a
-      # differently-typed exception that never matched the typed catch this
-      # replaced and so was never retried at all. The retry POLICY is unchanged:
-      # only COMException is retried, capped at 4 attempts, everything else (and
-      # an exhausted COMException) still throws immediately.
-      $hresult = if ($_.Exception.InnerException) { $_.Exception.InnerException.HResult } else { $_.Exception.HResult }
-      $isComException = $_.Exception -is [System.Runtime.InteropServices.COMException]
+      # A direct .NET method call (e.g. $walker.GetFirstChild(...)) that throws is
+      # unwrapped by a *typed* catch clause, but a *bare* catch instead receives it
+      # wrapped in System.Management.Automation.MethodInvocationException, with the
+      # real exception (e.g. COMException) in .InnerException. An earlier version
+      # of this instrumentation checked "$_.Exception -is [COMException]" directly,
+      # which is always False for a bare catch on a COM failure - verified locally
+      # against a compiled method that throws a genuine COMException. That silently
+      # disabled the retry (threw on attempt 1 every time) while still logging
+      # "retried=False", which looks exactly like "never matched the typed catch" -
+      # the wrong diagnosis for what was actually a policy regression. Check both
+      # the exception itself and its InnerException.
+      $inner = $_.Exception.InnerException
+      $isComException = ($_.Exception -is [System.Runtime.InteropServices.COMException]) -or
+                         ($inner -is [System.Runtime.InteropServices.COMException])
+      $hresult = if ($inner) { $inner.HResult } else { $_.Exception.HResult }
       $attempt++
-      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt type=$($_.Exception.GetType().FullName) hresult=0x$($hresult.ToString('X8')) retried=$isComException message=$($_.Exception.Message)"
-      if ((-not $isComException) -or ($attempt -ge 4)) { throw }
+      $elapsedMs = [int](5000 - ($deadline - (Get-Date)).TotalMilliseconds)
+      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) hresult=0x$($hresult.ToString('X8')) retried=$isComException message=$($_.Exception.Message)"
+      # Budget is wall-clock, not attempt count: this call runs inside every tree
+      # walk across ~35 call sites, and a fixed attempt count multiplied across
+      # that many sites is exactly the arithmetic that produced the 60-minute CI
+      # hang earlier on this branch (be1497d). A duration cap keeps the worst-case
+      # cost per call bounded regardless of how many sites hit it.
+      if ((-not $isComException) -or ((Get-Date) -ge $deadline)) { throw }
       Start-Sleep -Milliseconds 150
     }
   }
