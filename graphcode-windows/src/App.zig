@@ -9,6 +9,7 @@ const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
 const TemplateLibrary = @import("TemplateLibrary.zig");
+const Diagnostics = @import("Diagnostics.zig");
 const JumpPalette = @import("JumpPalette.zig");
 const NativeDialogs = @import("WindowsNativeDialogs.zig");
 const Sidebar = @import("Sidebar.zig");
@@ -18,6 +19,7 @@ const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const Tokens = @import("DesignTokens.zig");
 const Dpi = @import("Dpi.zig");
+const AppFont = @import("AppFont.zig");
 const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const TrayModule = @import("Tray.zig");
@@ -70,6 +72,22 @@ fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControl
         .workspace_top = client_bottom - (if (controls.panel_visible) Tokens.workspace_height else 0),
         .canvas = GraphCanvas.renderBounds(client_right, client_bottom, controls),
     };
+}
+
+fn logicalClientRect(hwnd: c.HWND, dpi: u32) c.RECT {
+    var client: c.RECT = undefined;
+    if (c.GetClientRect(hwnd, &client) == 0) return std.mem.zeroes(c.RECT);
+    client.right = Dpi.unscale(client.right, dpi);
+    client.bottom = Dpi.unscale(client.bottom, dpi);
+    return client;
+}
+
+fn logicalCoordinate(value: i32, dpi: u32) i32 {
+    return Dpi.unscale(value, dpi);
+}
+
+fn physicalCoordinate(value: i32, dpi: u32) i32 {
+    return Dpi.scale(value, dpi);
 }
 
 fn wheelRegion(x: i32, y: i32, bounds: InputBounds, controls: WorkspaceControls.State) WheelRegion {
@@ -429,6 +447,7 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
+        Diagnostics.record(self.allocator, "startup", "GraphCode Windows shell starting");
         const com_result = c.CoInitializeEx(null, c.COINIT_APARTMENTTHREADED);
         if (com_result < 0) return error.ComInitializationFailed;
         defer c.CoUninitialize();
@@ -522,7 +541,7 @@ pub const App = struct {
         }
         self.createEmptyStateControls();
         self.refreshWorkspaceList();
-        self.updateNativeChrome();
+        self.updateNativeChrome(.state_change);
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
             self.installUiaFixture(true);
@@ -980,8 +999,6 @@ pub const App = struct {
     }
 
     fn sidebarRootDropIndex(self: *App, project_path: []const u8, y: i32) ?usize {
-        var client: c.RECT = undefined;
-        if (c.GetClientRect(self.window.hwnd, &client) == 0) return null;
         var rows = Sidebar.appendRows(
             self.allocator,
             &self.model,
@@ -1246,6 +1263,7 @@ pub const App = struct {
             "graphcode://global"
         else
             return;
+        Diagnostics.record(self.allocator, "action", "create-node");
         const path = self.allocator.dupe(u8, current_path) catch return;
         defer self.allocator.free(path);
         const settings = self.product_settings orelse return;
@@ -1273,8 +1291,23 @@ pub const App = struct {
             return;
         };
         defer self.allocator.free(choices);
-        var templates = TemplateLibrary.load(self.allocator, path) catch {
+        var templates = TemplateLibrary.load(self.allocator, path) catch |err| {
+            const detail = std.fmt.allocPrint(
+                self.allocator,
+                "template-load path={s} error={s}",
+                .{ path, @errorName(err) },
+            ) catch null;
+            if (detail) |message| {
+                Diagnostics.record(self.allocator, "error", message);
+                self.allocator.free(message);
+            }
             self.setStatus("Unable to load saved templates");
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |form_err| {
+                self.setStatus(nodeFormErrorStatus(form_err));
+                return;
+            } orelse return;
+            defer draft.deinit(self.allocator);
+            self.client.sendCreateNodeDraft(path, draft);
             return;
         };
         defer templates.deinit();
@@ -1638,7 +1671,7 @@ pub const App = struct {
     pub fn checkForUpdates(self: *App) void {
         self.setStatus("Checking for updates...");
         self.requestUpdateCheck(true);
-        self.updateNativeChrome();
+        self.updateNativeChrome(.state_change);
     }
 
     fn requestUpdateCheck(self: *App, user_initiated: bool) void {
@@ -3538,8 +3571,7 @@ pub const App = struct {
     }
 
     fn ensureWorktreeVisible(self: *App, index: usize) void {
-        var client: c.RECT = undefined;
-        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
         const loop_count = if (self.model.graph) |graph| graph.nodes.items.len else 0;
         const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
         const bottom = top + 34;
@@ -3551,8 +3583,8 @@ pub const App = struct {
     }
 
     fn clampSidebarScroll(self: *App) void {
-        var client: c.RECT = undefined;
-        if (c.GetClientRect(self.window.hwnd, &client) == 0) {
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        if (client.right == 0 or client.bottom == 0) {
             self.sidebar_scroll = 0;
             return;
         }
@@ -3676,8 +3708,7 @@ pub const App = struct {
                 self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
             },
             .zoom_out, .zoom_in => {
-                var client: c.RECT = undefined;
-                if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+                const client = logicalClientRect(self.window.hwnd, self.dpi);
                 const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
                 self.canvas.zoomBy(
                     @divTrunc(bounds.left + bounds.right, 2),
@@ -3691,8 +3722,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .fit_canvas => {
-                var client: c.RECT = undefined;
-                if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+                const client = logicalClientRect(self.window.hwnd, self.dpi);
                 const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
                 const content = GraphCanvas.contentSize(&self.model, self.surface);
                 self.canvas.fit(
@@ -3765,11 +3795,11 @@ pub const App = struct {
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
         if (self.workspace) |workspace| {
             const full_workspace = self.surface == .workspace;
-            const activity_height = if (self.workspace_controls.activity_enabled) Tokens.activity_strip_height else 0;
+            const activity_height = if (self.workspace_controls.activity_enabled) physicalCoordinate(Tokens.activity_strip_height, self.dpi) else 0;
             const panel_height = if (full_workspace)
-                @max(0, client.bottom - Tokens.header_height - Tokens.loop_bar_height - activity_height)
+                @max(0, client.bottom - physicalCoordinate(Tokens.header_height + Tokens.loop_bar_height, self.dpi) - activity_height)
             else if (self.workspace_controls.panel_visible)
-                Tokens.workspace_height
+                physicalCoordinate(Tokens.workspace_height, self.dpi)
             else
                 0;
             // When the workspace has no visible presence at all (neither the full surface nor the
@@ -3785,10 +3815,10 @@ pub const App = struct {
                 return;
             }
             workspace.resize(
-                if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                if (full_workspace) Tokens.header_height + Tokens.loop_bar_height else @max(0, client.bottom - panel_height),
-                @max(0, client.right - (if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0) -
-                    (if (full_workspace and self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0)),
+                if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else 0,
+                if (full_workspace) physicalCoordinate(Tokens.header_height + Tokens.loop_bar_height, self.dpi) else @max(0, client.bottom - panel_height),
+                @max(0, client.right - (if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else 0) -
+                    (if (full_workspace and self.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, self.dpi) else 0)),
                 panel_height,
             );
         }
@@ -3819,8 +3849,8 @@ pub const App = struct {
     }
 
     fn layoutEmptyStateControls(self: *App) void {
-        var client: c.RECT = undefined;
-        if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        if (client.right == 0 or client.bottom == 0) return;
         const graph = self.model.graph;
         const is_quick_chats = self.surface == .quick_chats;
         const is_overview = self.surface == .overview;
@@ -3844,7 +3874,15 @@ pub const App = struct {
                 self.empty_open_folder_button,
                 if (is_empty and !is_quick_chats and (is_overview or graph == null or is_global)) c.SW_SHOW else c.SW_HIDE,
             );
-            _ = c.SetWindowPos(self.empty_open_folder_button, null, x, y, 220, 32, c.SWP_NOZORDER | c.SWP_NOACTIVATE);
+            _ = c.SetWindowPos(
+                self.empty_open_folder_button,
+                null,
+                physicalCoordinate(x, self.dpi),
+                physicalCoordinate(y, self.dpi),
+                physicalCoordinate(220, self.dpi),
+                physicalCoordinate(32, self.dpi),
+                c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+            );
         }
         if (self.empty_global_overview_button != null) {
             setButtonText(self.empty_global_overview_button, if (is_quick_chats) "New Chat" else "New Loop");
@@ -3862,10 +3900,10 @@ pub const App = struct {
             _ = c.SetWindowPos(
                 self.empty_global_overview_button,
                 null,
-                primary_x,
-                primary_y,
-                if (is_empty) 220 else 120,
-                32,
+                physicalCoordinate(primary_x, self.dpi),
+                physicalCoordinate(primary_y, self.dpi),
+                physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
+                physicalCoordinate(32, self.dpi),
                 c.SWP_NOZORDER | c.SWP_NOACTIVATE,
             );
         }
@@ -3877,7 +3915,7 @@ pub const App = struct {
         const wide = std.heap.c_allocator.allocSentinel(u16, raw.len, 0) catch return null;
         defer std.heap.c_allocator.free(wide);
         @memcpy(wide[0..raw.len], raw);
-        return c.CreateWindowExW(
+        const button = c.CreateWindowExW(
             0,
             std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
             wide.ptr,
@@ -3891,6 +3929,8 @@ pub const App = struct {
             c.GetModuleHandleW(null),
             null,
         );
+        AppFont.apply(button, AppFont.control_size, false);
+        return button;
     }
 
     fn setButtonText(button: c.HWND, text: []const u8) void {
@@ -3907,7 +3947,7 @@ pub const App = struct {
         return @ptrFromInt(value);
     }
 
-    fn updateNativeChrome(self: *App) void {
+    fn updateNativeChrome(self: *App, refresh: MainWindow.MenuRefresh) void {
         self.update_lock.lock();
         const update_checking = self.update_thread != null and !self.update_done;
         self.update_lock.unlock();
@@ -3948,11 +3988,12 @@ pub const App = struct {
             .update_checking = update_checking,
             .recent_folders = recent_menu,
             .workspaces = workspace_items,
-        });
+        }, refresh);
         self.layoutEmptyStateControls();
     }
 
     fn setStatus(self: *App, value: []const u8) void {
+        Diagnostics.record(self.allocator, "status", value);
         const copy = self.allocator.dupe(u8, value) catch return;
         self.replaceStatus(copy);
         if (self.accessibility) |*provider| {
@@ -3993,8 +4034,7 @@ pub const App = struct {
             for (owned_identities.items) |value| self.allocator.free(value);
             owned_identities.deinit();
         }
-        var client: c.RECT = undefined;
-        _ = c.GetClientRect(self.window.hwnd, &client);
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
         const canvas_bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
         const canvas_rect = c.RECT{
             .left = canvas_bounds.left,
@@ -4378,6 +4418,12 @@ pub const App = struct {
                     .bottom = row_top + 28,
                 }) catch return;
             }
+        }
+        for (elements.items) |*element| {
+            element.left = physicalCoordinate(element.left, self.dpi);
+            element.top = physicalCoordinate(element.top, self.dpi);
+            element.right = physicalCoordinate(element.right, self.dpi);
+            element.bottom = physicalCoordinate(element.bottom, self.dpi);
         }
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy);
@@ -5039,7 +5085,7 @@ fn onWindowMessage(
             }
         },
         c.WM_INITMENUPOPUP => {
-            app.updateNativeChrome();
+            app.updateNativeChrome(.popup_open);
             result.* = 0;
             return true;
         },
@@ -5106,8 +5152,7 @@ fn onWindowMessage(
                     if (app.surface == .quick_chats) app.handleAction(.quick_chat) else app.handleAction(.create_node);
                 },
                 Accessibility.uia_zoom_out_command => {
-                    var client: c.RECT = undefined;
-                    _ = c.GetClientRect(hwnd, &client);
+                    const client = logicalClientRect(hwnd, app.dpi);
                     const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
                     app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 0.9);
                     app.syncAccessibility();
@@ -5119,16 +5164,14 @@ fn onWindowMessage(
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
                 Accessibility.uia_zoom_in_command => {
-                    var client: c.RECT = undefined;
-                    _ = c.GetClientRect(hwnd, &client);
+                    const client = logicalClientRect(hwnd, app.dpi);
                     const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
                     app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 1.1);
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
                 Accessibility.uia_fit_command => {
-                    var client: c.RECT = undefined;
-                    _ = c.GetClientRect(hwnd, &client);
+                    const client = logicalClientRect(hwnd, app.dpi);
                     const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
                     const content = GraphCanvas.contentSize(&app.model, app.surface);
                     app.canvas.fit(
@@ -5217,13 +5260,46 @@ fn onWindowMessage(
                     .workspace_previous => app.cycleWorkspace(-1),
                 }
             }
-            app.updateNativeChrome();
+            app.updateNativeChrome(.state_change);
             result.* = 0;
+            return true;
+        },
+        c.WM_ERASEBKGND => {
+            // WM_PAINT presents a complete off-screen frame, so erasing first would
+            // expose the background between GDI operations and cause visible flicker.
+            result.* = 1;
             return true;
         },
         c.WM_PAINT => {
             var paint: c.PAINTSTRUCT = undefined;
-            const hdc = c.BeginPaint(hwnd, &paint);
+            const target_hdc = c.BeginPaint(hwnd, &paint);
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            var buffer_dc: c.HDC = null;
+            var buffer_bitmap: c.HBITMAP = null;
+            var previous_bitmap: c.HGDIOBJ = null;
+            var hdc = target_hdc;
+            if (client.right > client.left and client.bottom > client.top) {
+                buffer_dc = c.CreateCompatibleDC(target_hdc);
+                if (buffer_dc != null) {
+                    buffer_bitmap = c.CreateCompatibleBitmap(
+                        target_hdc,
+                        client.right - client.left,
+                        client.bottom - client.top,
+                    );
+                    if (buffer_bitmap != null) {
+                        previous_bitmap = c.SelectObject(buffer_dc, buffer_bitmap);
+                        hdc = buffer_dc;
+                    }
+                }
+            }
+            const logical_right = Dpi.unscale(client.right, app.dpi);
+            const logical_bottom = Dpi.unscale(client.bottom, app.dpi);
+            if (logical_right > 0 and logical_bottom > 0) {
+                _ = c.SetMapMode(hdc, c.MM_ANISOTROPIC);
+                _ = c.SetWindowExtEx(hdc, logical_right, logical_bottom, null);
+                _ = c.SetViewportExtEx(hdc, client.right, client.bottom, null);
+            }
             const inspection = if (app.worktree_inspection) |*value| blk: {
                 const policy = WorktreeStatus.loadPolicy(app.allocator, value.project_path);
                 const summary = WorktreeStatus.summarize(value.entries.items);
@@ -5236,12 +5312,12 @@ fn onWindowMessage(
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hwnd, hdc, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
+            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
                     if (workspaceGraph(&app.model)) |graph| {
-                        const workspace_right = clientRight(hwnd) - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
+                        const workspace_right = logical_right - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         TerminalWorkspace.Workspace.paintWorkspaceToolbar(
                             hdc,
                             app.allocator,
@@ -5270,10 +5346,15 @@ fn onWindowMessage(
                                 isResolvedLoopState(node.state),
                             );
                         }
-                        if (!app.workspace_controls.panel_visible) GraphCanvas.paintLoopDetailExpandControl(hdc, app.allocator, clientRight(hwnd));
+                        if (!app.workspace_controls.panel_visible) GraphCanvas.paintLoopDetailExpandControl(hdc, app.allocator, logical_right);
                     }
                 }
-                if (app.workspace) |workspace| workspace.paintChrome(hdc);
+                if (app.workspace) |workspace| {
+                    const saved_mapping = c.SaveDC(hdc);
+                    _ = c.SetMapMode(hdc, c.MM_TEXT);
+                    workspace.paintChrome(hdc);
+                    _ = c.RestoreDC(hdc, saved_mapping);
+                }
                 if (app.surface == .workspace and app.workspace_controls.panel_visible) {
                     if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
@@ -5282,12 +5363,32 @@ fn onWindowMessage(
                             app.allocator,
                             graph,
                             index,
-                            clientRight(hwnd),
-                            clientBottom(hwnd),
+                            logical_right,
+                            logical_bottom,
                         );
                     }
                 }
             }
+            _ = c.SetMapMode(hdc, c.MM_TEXT);
+            if (hdc != target_hdc) {
+                const dirty = paint.rcPaint;
+                _ = c.BitBlt(
+                    target_hdc,
+                    dirty.left,
+                    dirty.top,
+                    dirty.right - dirty.left,
+                    dirty.bottom - dirty.top,
+                    hdc,
+                    dirty.left,
+                    dirty.top,
+                    c.SRCCOPY,
+                );
+            }
+            if (previous_bitmap != null and buffer_dc != null) {
+                _ = c.SelectObject(buffer_dc, previous_bitmap);
+            }
+            if (buffer_bitmap != null) _ = c.DeleteObject(buffer_bitmap);
+            if (buffer_dc != null) _ = c.DeleteDC(buffer_dc);
             _ = c.EndPaint(hwnd, &paint);
             result.* = 0;
             return true;
@@ -5377,7 +5478,6 @@ fn onWindowMessage(
                     app.restore_requested = true;
                     app.client.sendRestoreOpenProjects();
                 }
-                app.updateNativeChrome();
             }
             const updated_connection_state = app.client.connectionState();
             if (updated_connection_state != app.last_connection_state) {
@@ -5490,7 +5590,7 @@ fn onWindowMessage(
             const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
             const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
-            app.updateNativeChrome();
+            app.updateNativeChrome(.state_change);
             result.* = 0;
             return true;
         },
@@ -5505,15 +5605,16 @@ fn onWindowMessage(
             return true;
         },
         c.WM_LBUTTONDOWN => {
-            const x = mouseX(lparam);
-            const y = mouseY(lparam);
+            const physical_x = mouseX(lparam);
+            const physical_y = mouseY(lparam);
+            const x = logicalCoordinate(physical_x, app.dpi);
+            const y = logicalCoordinate(physical_y, app.dpi);
             if (envFlag("GRAPHCODE_UIA_GATE") and x == 0 and y == 0) {
                 _ = app.toggleWorktreeRow(0);
                 result.* = 0;
                 return true;
             }
-            var client: c.RECT = undefined;
-            _ = c.GetClientRect(hwnd, &client);
+            const client = logicalClientRect(hwnd, app.dpi);
             if (GraphCanvas.headerActionAt(
                 x,
                 y,
@@ -5592,7 +5693,7 @@ fn onWindowMessage(
                     }
                 }
                 if (app.workspace) |workspace| {
-                    if (workspace.chromeActionAt(x, y)) |action| {
+                    if (workspace.chromeActionAt(physical_x, physical_y)) |action| {
                         app.handleAction(switch (action) {
                             .new_tab => .new_tab,
                             .split_right => .split_horizontal,
@@ -5602,7 +5703,7 @@ fn onWindowMessage(
                         result.* = 0;
                         return true;
                     }
-                    if (workspace.tabActionAt(x, y)) |tab_action| {
+                    if (workspace.tabActionAt(physical_x, physical_y)) |tab_action| {
                         switch (tab_action.action) {
                             .select => workspace.selectTab(tab_action.index) catch {},
                             .close => workspace.closeTab(tab_action.index) catch {},
@@ -5927,9 +6028,12 @@ fn onWindowMessage(
             return true;
         },
         c.WM_RBUTTONUP => {
-            const point = CanvasInput.decodeMouseMessage(lparam);
-            var client: c.RECT = undefined;
-            _ = c.GetClientRect(hwnd, &client);
+            const physical_point = CanvasInput.decodeMouseMessage(lparam);
+            const point = c.POINT{
+                .x = logicalCoordinate(physical_point.x, app.dpi),
+                .y = logicalCoordinate(physical_point.y, app.dpi),
+            };
+            const client = logicalClientRect(hwnd, app.dpi);
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
             if (app.workspace_controls.rail_visible and point.x < routing.rail_left) {
                 const inspection = if (app.worktree_inspection) |*value| value else null;
@@ -5950,7 +6054,7 @@ fn onWindowMessage(
                         else => {},
                     }
                     if (project_path) |path| {
-                        var screen = c.POINT{ .x = point.x, .y = point.y };
+                        var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                         _ = c.ClientToScreen(hwnd, &screen);
                         GraphContextMenu.show(
                             hwnd,
@@ -5963,7 +6067,7 @@ fn onWindowMessage(
                     } else switch (row.kind) {
                         .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                             if (row.index < graph.nodes.items.len) {
-                                var screen = c.POINT{ .x = point.x, .y = point.y };
+                                var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                                 _ = c.ClientToScreen(hwnd, &screen);
                                 GraphContextMenu.show(
                                     hwnd,
@@ -5982,7 +6086,7 @@ fn onWindowMessage(
                             }
                         },
                         .quick_chat => if (row.index < app.model.quick_chats.items.len) {
-                            var screen = c.POINT{ .x = point.x, .y = point.y };
+                            var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                             _ = c.ClientToScreen(hwnd, &screen);
                             GraphContextMenu.show(
                                 hwnd,
@@ -5994,7 +6098,7 @@ fn onWindowMessage(
                             );
                         },
                         .quick_chat_overview => {
-                            var screen = c.POINT{ .x = point.x, .y = point.y };
+                            var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                             _ = c.ClientToScreen(hwnd, &screen);
                             GraphContextMenu.show(hwnd, .quick_chats, screen.x, screen.y, app, &onContextAction);
                         },
@@ -6008,7 +6112,7 @@ fn onWindowMessage(
                 const bounds = c.RECT{ .left = routing.canvas.left, .top = routing.canvas.top, .right = routing.canvas.right, .bottom = routing.canvas.bottom };
                 if (app.surface == .quick_chats) {
                     if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, point.x, point.y, &app.canvas, bounds)) |index| {
-                        var screen = c.POINT{ .x = point.x, .y = point.y };
+                        var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                         _ = c.ClientToScreen(hwnd, &screen);
                         app.showQuickChatContextMenu(index, screen.x, screen.y);
                     }
@@ -6030,7 +6134,7 @@ fn onWindowMessage(
                         target_index = index;
                     }
                 }
-                var screen = c.POINT{ .x = point.x, .y = point.y };
+                var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                 _ = c.ClientToScreen(hwnd, &screen);
                 switch (target) {
                     .background => GraphContextMenu.show(hwnd, .background, screen.x, screen.y, app, &onContextAction),
@@ -6056,7 +6160,11 @@ fn onWindowMessage(
                 return true;
             }
             if (app.canvas.edge_dragging) {
-                const point = CanvasInput.decodeMouseMessage(lparam);
+                const physical_point = CanvasInput.decodeMouseMessage(lparam);
+                const point = c.POINT{
+                    .x = logicalCoordinate(physical_point.x, app.dpi),
+                    .y = logicalCoordinate(physical_point.y, app.dpi),
+                };
                 const source_id = app.copyEdgeDragSourceForDrop() orelse {
                     app.cancelCanvasInteraction();
                     result.* = 0;
@@ -6065,7 +6173,8 @@ fn onWindowMessage(
                 defer app.allocator.free(source_id);
                 _ = c.ReleaseCapture();
                 if (app.model.graph) |graph| {
-                    const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = clientRight(hwnd), .bottom = clientBottom(hwnd) - Tokens.workspace_height };
+                    const client = logicalClientRect(hwnd, app.dpi);
+                    const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = client.bottom - Tokens.workspace_height };
                     if (GraphModel.findNodeIndexByID(graph.nodes.items, source_id)) |source| {
                         if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
                             if (target != source) app.createEdgeBetweenIDs(source_id, graph.nodes.items[target].id);
@@ -6089,34 +6198,33 @@ fn onWindowMessage(
             return true;
         },
         c.WM_MOUSEMOVE => {
-            const hover_y = mouseY(lparam);
-            const hover_x = mouseX(lparam);
+            const hover_y = logicalCoordinate(mouseY(lparam), app.dpi);
+            const hover_x = logicalCoordinate(mouseX(lparam), app.dpi);
             app.updateSidebarRootDrag(hover_y);
-            const next_hover = if (mouseX(lparam) >= 0 and mouseX(lparam) < Tokens.sidebar_width) hover_y else -1;
+            const next_hover = if (hover_x >= 0 and hover_x < Tokens.sidebar_width) hover_y else -1;
             if (next_hover != app.sidebar_hover_y) {
                 app.sidebar_hover_y = next_hover;
                 _ = c.InvalidateRect(hwnd, null, 0);
             }
             if (app.canvas.node_dragging) {
-                app.canvas.updateNodeDrag(mouseX(lparam), mouseY(lparam));
+                app.canvas.updateNodeDrag(hover_x, hover_y);
                 app.syncAccessibility();
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             } else if (app.canvas.edge_dragging) {
-                app.canvas.updateEdgeDrag(mouseX(lparam), mouseY(lparam));
+                app.canvas.updateEdgeDrag(hover_x, hover_y);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             } else if (app.canvas.dragging) {
-                app.canvas.updatePan(mouseX(lparam), mouseY(lparam));
+                app.canvas.updatePan(hover_x, hover_y);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             }
             if (app.model.graph) |graph| {
-                var client: c.RECT = undefined;
-                _ = c.GetClientRect(hwnd, &client);
+                const client = logicalClientRect(hwnd, app.dpi);
                 const canvas_render_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
                 const canvas_bounds = c.RECT{
                     .left = canvas_render_bounds.left,
@@ -6138,11 +6246,10 @@ fn onWindowMessage(
                 result.* = 0;
                 return true;
             };
-            const x = mapped.x;
-            const y = mapped.y;
+            const x = logicalCoordinate(mapped.x, app.dpi);
+            const y = logicalCoordinate(mapped.y, app.dpi);
             const delta = wheel.delta;
-            var client: c.RECT = undefined;
-            _ = c.GetClientRect(hwnd, &client);
+            const client = logicalClientRect(hwnd, app.dpi);
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
             switch (wheelRegion(x, y, routing, app.workspace_controls)) {
                 .sidebar => {
@@ -6461,6 +6568,13 @@ test "pinchGestureContext changes identity across project switches on the same s
     // rather than caching it.
     app.surface = .overview;
     try std.testing.expectEqual(context_project_b, app.pinchGestureContext());
+}
+
+test "main shell coordinates round trip across common Windows DPI steps" {
+    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+        try std.testing.expectEqual(@as(i32, 220), logicalCoordinate(physicalCoordinate(220, dpi), dpi));
+        try std.testing.expectEqual(@as(i32, 34), logicalCoordinate(physicalCoordinate(34, dpi), dpi));
+    }
 }
 
 test "jump matching ranks exact results across projects" {
@@ -6785,16 +6899,17 @@ fn smokeContractPassed(self: *const App) bool {
     };
     var client: c.RECT = undefined;
     if (c.GetClientRect(self.window.hwnd, &client) == 0) return false;
-    const layout_width = @max(0, client.right - Tokens.sidebar_width);
-    const layout_height = Tokens.workspace_height;
+    const sidebar_width = physicalCoordinate(Tokens.sidebar_width, self.dpi);
+    const layout_width = @max(0, client.right - sidebar_width);
+    const layout_height = physicalCoordinate(Tokens.workspace_height, self.dpi);
     const workspace_ready = if (scripted_actions)
         workspace.tabCount() > 0
     else
         workspace.hasSurface(0) and workspace.hasSurface(1) and
             workspace.hasAttach(0) and workspace.hasAttach(1);
     const layout_ok = workspace.layoutMatches(
-        Tokens.sidebar_width,
-        @max(0, client.bottom - Tokens.workspace_height),
+        sidebar_width,
+        @max(0, client.bottom - layout_height),
         layout_width,
         layout_height,
     );

@@ -406,8 +406,9 @@ pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceCo
 }
 
 pub fn paint(
-    hwnd: c.HWND,
     hdc: c.HDC,
+    client_right: i32,
+    client_bottom: i32,
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
@@ -425,8 +426,7 @@ pub fn paint(
     controls: WorkspaceControls.State,
     surface: Surface,
 ) void {
-    var client: c.RECT = undefined;
-    _ = c.GetClientRect(hwnd, &client);
+    const client = c.RECT{ .left = 0, .top = 0, .right = client_right, .bottom = client_bottom };
     fill(hdc, client, Tokens.canvas_tone);
     const visible_inspection = if (inspection) |value|
         if (model.graph) |graph|
