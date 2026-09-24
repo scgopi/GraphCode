@@ -895,6 +895,56 @@ function Wait-ForGraphChildren(
   return [pscustomobject]@{ Graph = $liveGraph; Items = $observed }
 }
 
+# A modal teardown (e.g. dismissing the update-offer dialog via SendCommand)
+# rebuilds the shell's fragment tree, and a $root captured before that teardown
+# can become a permanently dead reference - not a transient blip that
+# Get-DirectChildren's bounded COM/ENA retry can recover from. CI evidence for
+# this: a walk that failed mid-enumeration with "Catastrophic failure
+# (E_UNEXPECTED)" on GetNextSibling, then failed every subsequent attempt with
+# ElementNotAvailableException on GetFirstChild for the rest of a 5-second
+# retry budget - a corpse observed at two stages, not a glitch that recovers.
+# Retrying the same stale reference can never revive it; only re-acquiring
+# graphcode-root the same way it was first acquired can.
+#
+# Re-resolve $root via FromHandle on the shell's main window handle (checking
+# AutomationId, exactly like the initial acquisition loop), then prove a raw
+# tree walk of it succeeds before returning it as live. Waits on that
+# precondition only - it does not touch any caller assertion. On exhaustion,
+# Require fails with HasExited and the last exception observed, so a genuine
+# product crash (the shell actually died) is distinguishable from a gate-side
+# reconnection failure.
+function Wait-ForRootReconnect(
+  [System.Diagnostics.Process] $process,
+  [System.Windows.Automation.TreeWalker] $walker,
+  [int] $maxAttempts = 40,
+  [int] $delayMs = 250
+) {
+  $reconnected = $null
+  $lastException = $null
+  for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+    $process.Refresh()
+    if ($process.HasExited) { throw "shell exited with code $($process.ExitCode) while reconnecting graphcode-root" }
+    if ($process.MainWindowHandle -ne 0) {
+      try {
+        $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+        if ($candidate.Current.AutomationId -eq "graphcode-root") {
+          $null = @($walker.GetFirstChild($candidate))
+          $reconnected = $candidate
+          break
+        }
+      } catch {
+        $lastException = $_
+      }
+    }
+    Start-Sleep -Milliseconds $delayMs
+  }
+  $failureDetail = if ($null -ne $lastException) {
+    " (last: $($lastException.Exception.GetType().FullName): $($lastException.Exception.Message))"
+  } else { "" }
+  Require ($null -ne $reconnected) "graphcode-root did not become reachable after modal teardown$failureDetail"
+  return $reconnected
+}
+
 # A surface transition (navigating destinations, opening/closing a native
 # HWND-hosted inspection view) can leave the accessibility tree in a brief,
 # genuinely-transient state where a fragment that is about to exist (or that
@@ -1176,7 +1226,13 @@ try {
     "update offer did not expose Release Notes and Later actions"
   Require ([GraphCodeUiaGateState]::SendCommand([IntPtr]$updateDialog.Current.NativeWindowHandle, 9703)) `
     "update offer Later action could not be invoked"
-  Start-Sleep -Milliseconds 150
+  # Dismissing the modal rebuilds the shell's fragment tree; $root captured
+  # before this point can be a stale reference that Get-DirectChildren's
+  # bounded COM/ENA retry cannot revive (see Wait-ForRootReconnect). Other
+  # modal teardowns later in this file (SendCommand 9703 again ~line 1265,
+  # and ~line 3124) have the identical latent exposure but are out of scope
+  # for this fix - noted here rather than swept up in one change.
+  $root = Wait-ForRootReconnect $process $rawWalker
   $status = Find-FragmentById $root "status" $controlWalker
   $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView root")
   $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView root")
