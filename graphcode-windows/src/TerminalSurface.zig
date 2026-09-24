@@ -160,6 +160,21 @@ pub fn surfaceIdentityMatches(surface: *const Surface, project_path: []const u8,
         std.mem.eql(u8, surface.session_name, session);
 }
 
+fn moveReplacementSurface(
+    surfaces: *[max_surfaces]Surface,
+    target_index: usize,
+    replacement_index: usize,
+) void {
+    std.debug.assert(target_index < surfaces.len);
+    std.debug.assert(replacement_index < surfaces.len);
+    std.debug.assert(target_index != replacement_index);
+    std.debug.assert(surfaces[target_index].surface == null);
+    std.debug.assert(surfaces[target_index].attach == null);
+    std.debug.assert(surfaces[replacement_index].surface != null or
+        surfaces[replacement_index].attach != null);
+    std.mem.swap(Surface, &surfaces[target_index], &surfaces[replacement_index]);
+}
+
 pub const Workspace = struct {
     parent: c.HWND,
     host: ?*c.winghostty_host = null,
@@ -401,8 +416,7 @@ pub const Workspace = struct {
                 return err;
             };
             self.destroySurface(index);
-            self.surfaces[index] = self.surfaces[replacement_index];
-            self.surfaces[replacement_index] = .{};
+            moveReplacementSurface(&self.surfaces, index, replacement_index);
             self.syncTopology();
             self.clearRecreateSession(index);
             return;
@@ -1788,6 +1802,51 @@ test "surface identity cannot leak a session across project paths" {
     };
     try std.testing.expect(surfaceIdentityMatches(&first, "C:\\work\\first", "node-1"));
     try std.testing.expect(!surfaceIdentityMatches(&second, "C:\\work\\first", "node-1"));
+}
+
+test "replacement preserves both surface cell buffers for donor reuse" {
+    var surfaces = [_]Surface{.{}} ** max_surfaces;
+    surfaces[0].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    surfaces[1].cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    defer for (&surfaces) |*surface| {
+        if (surface.session_name.len != 0) std.testing.allocator.free(surface.session_name);
+        if (surface.cells.len != 0) std.testing.allocator.free(surface.cells);
+    };
+
+    const target_cells = surfaces[0].cells.ptr;
+    const replacement_cells = surfaces[1].cells.ptr;
+    const live_surface: *c.winghostty_surface = @ptrFromInt(1);
+    surfaces[1].surface = live_surface;
+    surfaces[1].session_name = try std.testing.allocator.dupe(u8, "replacement");
+
+    moveReplacementSurface(&surfaces, 0, 1);
+
+    try std.testing.expectEqual(live_surface, surfaces[0].surface.?);
+    try std.testing.expectEqualStrings("replacement", surfaces[0].session_name);
+    try std.testing.expectEqual(cell_count, surfaces[0].cells.len);
+    try std.testing.expectEqual(replacement_cells, surfaces[0].cells.ptr);
+    try std.testing.expectEqual(cell_count, surfaces[1].cells.len);
+    try std.testing.expectEqual(target_cells, surfaces[1].cells.ptr);
+    try std.testing.expect(surfaces[0].cells.ptr != surfaces[1].cells.ptr);
+
+    feedCells(&surfaces[1], "A");
+    try std.testing.expectEqual(@as(u32, 'A'), surfaces[1].cells[0].codepoint);
+
+    surfaces[0].surface = null;
+    std.testing.allocator.free(surfaces[0].session_name);
+    surfaces[0].session_name = &.{};
+    const second_surface: *c.winghostty_surface = @ptrFromInt(2);
+    surfaces[1].surface = second_surface;
+    surfaces[1].session_name = try std.testing.allocator.dupe(u8, "second replacement");
+
+    moveReplacementSurface(&surfaces, 0, 1);
+
+    try std.testing.expectEqual(second_surface, surfaces[0].surface.?);
+    try std.testing.expectEqualStrings("second replacement", surfaces[0].session_name);
+    try std.testing.expectEqual(target_cells, surfaces[0].cells.ptr);
+    try std.testing.expectEqual(replacement_cells, surfaces[1].cells.ptr);
+    feedCells(&surfaces[1], "B");
+    try std.testing.expectEqual(@as(u32, 'B'), surfaces[1].cells[0].codepoint);
 }
 
 fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
