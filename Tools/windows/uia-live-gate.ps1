@@ -1621,17 +1621,52 @@ try {
   Require ($null -ne $workspaceUsage) "workspace right panel omitted token-usage child"
   # The four detail children can be present in the UIA tree before the loop panel has
   # laid them out, so existence (which the mount loop above waits for) does not imply
-  # non-empty bounds. Wait for the layout to settle on exactly the condition asserted
-  # below rather than reading BoundingRectangle the instant the children appear.
-  $workspaceDetailChildren = @($workspacePanelToggle, $workspaceSparkline, $workspaceStart, $workspaceUsage)
+  # non-empty bounds. They are also served by a custom fragment provider that destroys
+  # and recreates these children when the panel re-lays out, which invalidates any
+  # AutomationElement reference captured beforehand. A dead fragment reference reports
+  # an empty AutomationId and an empty BoundingRectangle indefinitely instead of
+  # throwing, so polling cached references can never recover from a remount - it just
+  # burns the budget and then fails with a blank id. Re-resolve the children from the
+  # live tree on every attempt and require a single observed generation of the tree to
+  # satisfy existence and layout together.
+  $detailSpecs = @(
+    @{ Label = "collapse control"; Id = '^workspace-toggle-panel-'; Name = '^Collapse loop panel$' },
+    @{ Label = "metric sparkline child"; Id = '^workspace-detail-sparkline-'; Name = '^Metric sparkline$' },
+    @{ Label = "start-time child"; Id = '^workspace-detail-start-'; Name = '^Start time$' },
+    @{ Label = "token-usage child"; Id = '^workspace-detail-usage-'; Name = 'tokens$' }
+  )
+  $resolvedDetails = $null
+  $detailFailure = "workspace right panel never resolved its detail children"
   for ($attempt = 0; $attempt -lt 100; $attempt++) {
-    $unlaidOut = @($workspaceDetailChildren | Where-Object {
-      ($_.Current.BoundingRectangle.Width -le 0) -or ($_.Current.BoundingRectangle.Height -le 0)
-    })
-    if ($unlaidOut.Count -eq 0) { break }
+    $liveChildren = @(Get-DirectChildren $graph $rawWalker)
+    $candidates = @()
+    $pendingLabel = $null
+    foreach ($spec in $detailSpecs) {
+      $match = @($liveChildren | Where-Object {
+        ($_.Current.AutomationId -match $spec.Id) -and ($_.Current.Name -match $spec.Name)
+      }) | Select-Object -First 1
+      if ($null -eq $match) {
+        $pendingLabel = "workspace right panel omitted $($spec.Label) while waiting for layout"
+        break
+      }
+      $rect = $match.Current.BoundingRectangle
+      if (($rect.Width -le 0) -or ($rect.Height -le 0)) {
+        $pendingLabel = "workspace right panel $($spec.Label) has empty bounds"
+        break
+      }
+      $candidates += $match
+    }
+    if ($null -eq $pendingLabel) { $resolvedDetails = $candidates; break }
+    $detailFailure = $pendingLabel
     Start-Sleep -Milliseconds 100
   }
-  foreach ($detailChild in $workspaceDetailChildren) {
+  Require ($null -ne $resolvedDetails) $detailFailure
+  # Rebind to the live references so the Invoke below cannot run against a stale fragment.
+  $workspacePanelToggle = $resolvedDetails[0]
+  $workspaceSparkline = $resolvedDetails[1]
+  $workspaceStart = $resolvedDetails[2]
+  $workspaceUsage = $resolvedDetails[3]
+  foreach ($detailChild in $resolvedDetails) {
     Require (($detailChild.Current.BoundingRectangle.Width -gt 0) -and
              ($detailChild.Current.BoundingRectangle.Height -gt 0)) `
       "workspace right panel child $($detailChild.Current.AutomationId) has empty bounds"
