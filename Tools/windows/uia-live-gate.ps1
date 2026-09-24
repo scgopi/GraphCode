@@ -2032,19 +2032,25 @@ try {
   Start-Sleep -Milliseconds 250
   $process.Refresh()
   Require (-not $process.HasExited) "dynamic project or loop invocation terminated the shell"
-  # The default 20-attempt/3s retry budget (Find-FragmentByIdWithRetry's default
-  # maxAttempts) was observed exhausted on a loaded CI runner right here: this is
-  # the same dynamic project/loop invocation event that #440 found needed a much
-  # longer settle window (10s -> 20s) for the workspace chrome children that mount
-  # a moment later on this same "graph" fragment. Re-fetching "graph" itself is the
-  # very first thing that has to succeed in that sequence, so it needs at least as
-  # much headroom; 80 attempts (12s) leaves it comfortably ahead of the 20s
-  # downstream budget while still failing loudly if the fragment never reappears.
-  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker -maxAttempts 80
+  # This dynamic project/loop invocation was observed on a loaded CI runner both
+  # exhausting Find-FragmentByIdWithRetry's default 20-attempt/3s budget re-fetching
+  # "graph" itself, and - separately - remounting graph's "canvas-card-" children a
+  # moment after graph reappears (the same remount race Wait-ForGraphChildren exists
+  # for elsewhere in this file; #440 needed 10s->20s for the analogous workspace
+  # chrome children on this same fragment). A single-shot Get-DirectChildren read
+  # right after resolving graph could observe an empty or partial set from either
+  # race. Wait-ForGraphChildren re-resolves graph itself on every attempt, so one
+  # call covers both: it waits on the presence precondition only (both cards
+  # exist), never on the full assertion. -maxAttempts 150 (~15s) preserves the
+  # extra headroom the graph-refetch race needed, now covering the children-mount
+  # race too. The full identity/ordering/selection assertion below is unchanged.
+  $workspaceProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 } `
+    -maxAttempts 150
+  $graph = $workspaceProbe.Graph
   Require ($null -ne $graph) "missing graph fragment after dynamic project/loop invocation"
-  $workspaceCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
-  })
+  $workspaceCards = @($workspaceProbe.Items)
   Require (($workspaceCards.Count -eq 2) -and
            ((@($workspaceCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            $workspaceCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected) `
