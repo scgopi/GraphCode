@@ -1567,7 +1567,12 @@ try {
   $workspaceSparkline = $null
   $workspaceStart = $null
   $workspaceUsage = $null
-  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+  # The workspace chrome mounts its toolbar, tab, split-control and detail children
+  # asynchronously after the loop invocation above. A loaded CI runner has been observed
+  # exhausting a 10s budget here and failing on the toolbar identity child while every
+  # other assertion in this block was satisfiable moments later, so this waits 20s.
+  # The break condition below is unchanged: all eight children must still appear.
+  for ($attempt = 0; $attempt -lt 200; $attempt++) {
     $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
     $workspaceToolbar = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-toolbar-' -and $_.Current.Name -eq "UIA project"
@@ -1620,22 +1625,37 @@ try {
       "workspace right panel child $($detailChild.Current.AutomationId) has empty bounds"
   }
   $workspacePanelToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
-  $workspacePanelToggle = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Expand loop panel"
-  }) | Select-Object -First 1
+  # Poll for the collapsed-state control rather than sleeping a fixed interval and reading
+  # once: the repaint that swaps "Collapse loop panel" for "Expand loop panel" has been
+  # observed taking longer than 150ms on a loaded CI runner. The assertion below is
+  # unchanged -- this waits for exactly the control it already requires, and still fails
+  # if that control never appears.
+  $workspacePanelToggle = $null
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    Start-Sleep -Milliseconds 100
+    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+    $workspacePanelToggle = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-toggle-panel-' -and $_.Current.Name -eq "Expand loop panel"
+    }) | Select-Object -First 1
+    if ($null -ne $workspacePanelToggle) { break }
+  }
   Require ($null -ne $workspacePanelToggle) "workspace right panel did not expose expand control after collapse"
   $workspacePanelToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  Start-Sleep -Milliseconds 150
-  $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+  # Same treatment for the expand repaint: wait for New Tab, which the assertion at the end
+  # of this block requires, instead of assuming a fixed 150ms is enough.
+  $newTab = $null
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    Start-Sleep -Milliseconds 100
+    $workspaceChildren = @(Get-DirectChildren $graph $rawWalker)
+    $newTab = @($workspaceChildren | Where-Object {
+      $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
+    }) | Select-Object -First 1
+    if ($null -ne $newTab) { break }
+  }
   $workspaceTabs = @($workspaceChildren | Where-Object {
     $_.Current.AutomationId -match '^workspace-tab-' -and $_.Current.Name -match 'tab$'
   })
   $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
-  $newTab = @($workspaceChildren | Where-Object {
-    $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
-  }) | Select-Object -First 1
   Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
   $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   for ($attempt = 0; $attempt -lt 60; $attempt++) {
