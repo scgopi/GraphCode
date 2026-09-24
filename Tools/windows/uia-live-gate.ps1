@@ -1619,7 +1619,19 @@ try {
   Require ($null -ne $workspaceSparkline) "workspace right panel omitted metric sparkline child"
   Require ($null -ne $workspaceStart) "workspace right panel omitted start-time child"
   Require ($null -ne $workspaceUsage) "workspace right panel omitted token-usage child"
-  foreach ($detailChild in @($workspacePanelToggle, $workspaceSparkline, $workspaceStart, $workspaceUsage)) {
+  # The four detail children can be present in the UIA tree before the loop panel has
+  # laid them out, so existence (which the mount loop above waits for) does not imply
+  # non-empty bounds. Wait for the layout to settle on exactly the condition asserted
+  # below rather than reading BoundingRectangle the instant the children appear.
+  $workspaceDetailChildren = @($workspacePanelToggle, $workspaceSparkline, $workspaceStart, $workspaceUsage)
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    $unlaidOut = @($workspaceDetailChildren | Where-Object {
+      ($_.Current.BoundingRectangle.Width -le 0) -or ($_.Current.BoundingRectangle.Height -le 0)
+    })
+    if ($unlaidOut.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 100
+  }
+  foreach ($detailChild in $workspaceDetailChildren) {
     Require (($detailChild.Current.BoundingRectangle.Width -gt 0) -and
              ($detailChild.Current.BoundingRectangle.Height -gt 0)) `
       "workspace right panel child $($detailChild.Current.AutomationId) has empty bounds"
