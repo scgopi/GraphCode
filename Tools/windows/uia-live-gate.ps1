@@ -823,7 +823,14 @@ function Get-DirectChildren(
       $innerType = if ($inner) { $inner.GetType().FullName } else { "" }
       $attempt++
       $elapsedMs = [int](5000 - ($deadline - (Get-Date)).TotalMilliseconds)
-      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) innerType=$innerType hresult=0x$($hresult.ToString('X8')) retried=$isRetryable message=$($_.Exception.Message)"
+      # Includes $process.MainWindowHandle (script-scope, set once the shell
+      # launches - already read this way by Wait-ForPopupMenu et al.) as the
+      # counterpart to Wait-ForRootReconnect's UIA_ROOT_RECONNECT_OK handle
+      # log: if a failure here is ever paired with a preceding reconnect and
+      # the handles differ, that proves the element died in the window
+      # between the check and this use, rather than requiring a fresh
+      # diagnostic round-trip to find out.
+      Write-Host "UIA_GETCHILDREN_RETRY attempt=$attempt elapsedMs=$elapsedMs type=$($_.Exception.GetType().FullName) innerType=$innerType hresult=0x$($hresult.ToString('X8')) retried=$isRetryable handle=$($process.MainWindowHandle) message=$($_.Exception.Message)"
       # Budget is wall-clock, not attempt count: this call runs inside every tree
       # walk across ~35 call sites, and a fixed attempt count multiplied across
       # that many sites is exactly the arithmetic that produced the 60-minute CI
@@ -909,21 +916,33 @@ function Wait-ForGraphChildren(
 # Re-resolve $root via FromHandle on the shell's main window handle (checking
 # AutomationId, exactly like the initial acquisition loop), then prove a tree
 # walk of it succeeds *in every view the caller is about to use* before
-# returning it as live. A first version of this helper verified only with the
-# raw-view walker and still failed immediately downstream: CI showed the
-# raw-view walk succeeding (reconnect returned without throwing) followed by
-# the very next statement's control-view walk failing with
-# ElementNotAvailableException for the entire 5s budget, never recovering.
-# RawView and ControlView are separate client-side views of the same element
-# and can settle at different times after a remount, so proving one is alive
-# does not prove the other is. This site immediately exercises both views
-# (status lookup via ControlView, root-children assertions via both), so both
-# must be proven walkable before the element is trusted.
+# returning it as live.
+#
+# What was observed, not why (mechanism is not established): a first version
+# of this helper verified only with the raw-view walker. On one CI run, that
+# walk succeeded (reconnect returned without throwing) and the very next
+# statement's control-view walk then failed with ElementNotAvailableException
+# for the entire 5s budget, never recovering. On a later CI run, after adding
+# a control-view check here too, reconnect again returned success with zero
+# retries logged (both views walked cleanly on the first attempt) - and the
+# very next Get-DirectChildren call still failed immediately (5ms later) and
+# stayed dead for the full budget. That second result does not fit "the two
+# views settle at different times": both were proven walkable moments before
+# the failure. It is equally consistent with the element dying in the
+# window between this check and its use, i.e. the teardown had not actually
+# finished when the check passed. Do not treat either explanation as
+# confirmed; the fix below (require every view the caller is about to use to
+# be walkable) is defensible under both, so it stays regardless of which one
+# is eventually shown to be correct.
 #
 # Waits on that precondition only - it does not touch any caller assertion.
 # On exhaustion, Require fails with HasExited and the last exception observed,
 # so a genuine product crash (the shell actually died) is distinguishable
-# from a gate-side reconnection failure.
+# from a gate-side reconnection failure. Logs the reconnected window handle
+# on success as cheap insurance: if a later failure at this site is ever
+# paired with a handle-logging point downstream, a differing handle would
+# prove the time-of-check/time-of-use explanation outright rather than
+# requiring another diagnostic round-trip.
 function Wait-ForRootReconnect(
   [System.Diagnostics.Process] $process,
   [System.Windows.Automation.TreeWalker[]] $walkers,
@@ -941,6 +960,7 @@ function Wait-ForRootReconnect(
         if ($candidate.Current.AutomationId -eq "graphcode-root") {
           foreach ($walker in $walkers) { $null = @($walker.GetFirstChild($candidate)) }
           $reconnected = $candidate
+          Write-Host "UIA_ROOT_RECONNECT_OK attempt=$attempt handle=$($process.MainWindowHandle)"
           break
         }
       } catch {
