@@ -66,6 +66,23 @@ const InputBounds = struct {
 
 const WheelRegion = enum { sidebar, canvas, none };
 
+const AccessibilityBounds = union(enum) {
+    logical: c.RECT,
+    physical: c.RECT,
+
+    fn physicalRect(self: AccessibilityBounds, dpi: u32) c.RECT {
+        return switch (self) {
+            .logical => |bounds| .{
+                .left = physicalCoordinate(bounds.left, dpi),
+                .top = physicalCoordinate(bounds.top, dpi),
+                .right = physicalCoordinate(bounds.right, dpi),
+                .bottom = physicalCoordinate(bounds.bottom, dpi),
+            },
+            .physical => |bounds| bounds,
+        };
+    }
+};
+
 fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) InputBounds {
     return .{
         .rail_left = if (controls.rail_visible) Tokens.sidebar_width else 0,
@@ -88,6 +105,19 @@ fn logicalCoordinate(value: i32, dpi: u32) i32 {
 
 fn physicalCoordinate(value: i32, dpi: u32) i32 {
     return Dpi.scale(value, dpi);
+}
+
+fn gestureGeometry(point: ?c.POINT, client: c.RECT, dpi: u32, controls: WorkspaceControls.State) struct {
+    point: ?c.POINT,
+    bounds: InputBounds,
+} {
+    return .{
+        .point = if (point) |value| .{
+            .x = logicalCoordinate(value.x, dpi),
+            .y = logicalCoordinate(value.y, dpi),
+        } else null,
+        .bounds = inputBounds(logicalCoordinate(client.right, dpi), logicalCoordinate(client.bottom, dpi), controls),
+    };
 }
 
 fn wheelRegion(x: i32, y: i32, bounds: InputBounds, controls: WorkspaceControls.State) WheelRegion {
@@ -4027,6 +4057,10 @@ pub const App = struct {
 
     fn syncAccessibility(self: *App) void {
         const provider = if (self.accessibility) |*value| value else return;
+        self.syncAccessibilityTo(provider, logicalClientRect(self.window.hwnd, self.dpi));
+    }
+
+    fn syncAccessibilityTo(self: *App, provider: anytype, client: c.RECT) void {
         var elements = std.array_list.Managed(Accessibility.DynamicElement).init(self.allocator);
         defer elements.deinit();
         var owned_identities = std.array_list.Managed([]u8).init(self.allocator);
@@ -4034,7 +4068,6 @@ pub const App = struct {
             for (owned_identities.items) |value| self.allocator.free(value);
             owned_identities.deinit();
         }
-        const client = logicalClientRect(self.window.hwnd, self.dpi);
         const canvas_bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
         const canvas_rect = c.RECT{
             .left = canvas_bounds.left,
@@ -4042,7 +4075,7 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
-        provider.syncCanvasBounds(canvas_rect);
+        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
         var sidebar_rows = Sidebar.appendRows(
             self.allocator,
             &self.model,
@@ -4064,12 +4097,12 @@ pub const App = struct {
         // exhaustively-asserted child set with chrome that isn't part of the
         // canvas.
         if (self.model.attentionCount() != 0) {
-            self.appendAccessibilityElement(&elements, &owned_identities, "header-attention", "needs-you", "Review what needs you", 1, GraphCanvas.headerAttentionRect(), false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "header-attention", "needs-you", "Review what needs you", 1, .{ .logical = GraphCanvas.headerAttentionRect() }, false, true) catch return;
         }
         if (self.worktree_inspection != null) {
-            self.appendAccessibilityElement(&elements, &owned_identities, "header-worktree", "worktrees", "Reclaimable worktrees", 1, GraphCanvas.headerWorktreeRect(), false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "header-worktree", "worktrees", "Reclaimable worktrees", 1, .{ .logical = GraphCanvas.headerWorktreeRect() }, false, true) catch return;
         }
-        self.appendAccessibilityElement(&elements, &owned_identities, "header-jump", "jump", "Jump to Loop", 1, GraphCanvas.headerJumpRect(client.right), false, true) catch return;
+        self.appendAccessibilityElement(&elements, &owned_identities, "header-jump", "jump", "Jump to Loop", 1, .{ .logical = GraphCanvas.headerJumpRect(client.right) }, false, true) catch return;
         if (self.model.currentGraph() != null) {
             self.appendAccessibilityElement(
                 &elements,
@@ -4078,7 +4111,7 @@ pub const App = struct {
                 "control",
                 if (self.surface == .workspace) "Hide loop panel" else "Loop panel",
                 1,
-                GraphCanvas.headerPanelRect(client.right),
+                .{ .logical = GraphCanvas.headerPanelRect(client.right) },
                 false,
                 true,
             ) catch return;
@@ -4087,16 +4120,16 @@ pub const App = struct {
         for (sidebar_rows.items) |row| {
             const bounds = c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 };
             switch (row.kind) {
-                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", "Local Projects", 1, bounds, false, false) catch return,
-                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", "Remote Repositories", 1, bounds, false, false) catch return,
+                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", "Local Projects", 1, .{ .logical = bounds }, false, false) catch return,
+                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", "Remote Repositories", 1, .{ .logical = bounds }, false, false) catch return,
                 .project => {
                     const project = self.model.recent_projects.items[row.index];
-                    self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, bounds, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, .{ .logical = bounds }, false, false) catch return;
                 },
                 .open_project => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, bounds, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, .{ .logical = bounds }, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
                     const new_bounds = c.RECT{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 };
-                    self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, new_bounds, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (row.has_children) {
                         const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
                         self.appendAccessibilityElement(
@@ -4106,7 +4139,7 @@ pub const App = struct {
                             path,
                             if (self.sidebar_state.isProjectCollapsed(path)) "Expand project" else "Collapse project",
                             1,
-                            disclosure_bounds,
+                            .{ .logical = disclosure_bounds },
                             false,
                             false,
                         ) catch return;
@@ -4117,7 +4150,7 @@ pub const App = struct {
                         const node = graph.nodes.items[row.index];
                         const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ path, node.id }) catch return;
                         defer self.allocator.free(key);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, bounds, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
                         if (row.has_children) {
                             const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
                             self.appendAccessibilityElement(
@@ -4127,7 +4160,7 @@ pub const App = struct {
                                 key,
                                 if (self.sidebar_state.isNodeExpanded(node.id)) "Collapse loop children" else "Expand loop children",
                                 2,
-                                disclosure_bounds,
+                                .{ .logical = disclosure_bounds },
                                 false,
                                 false,
                             ) catch return;
@@ -4137,13 +4170,13 @@ pub const App = struct {
                 .worktree => if (self.worktree_dialog) |dialog| {
                     if (row.index < dialog.rows.items.len) {
                         const worktree = dialog.rows.items[row.index];
-                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, worktree.entry.path, 3, bounds, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, worktree.entry.path, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch return;
                     }
                 },
                 .quick_chat_overview => {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, bounds, self.surface == .quick_chats, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
                     const new_bounds = c.RECT{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 };
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, new_bounds, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (self.model.quick_chats.items.len != 0) {
                         const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
                         self.appendAccessibilityElement(
@@ -4153,7 +4186,7 @@ pub const App = struct {
                             "quick-chats",
                             if (self.sidebar_state.chats_collapsed) "Expand Quick Chats" else "Collapse Quick Chats",
                             1,
-                            disclosure_bounds,
+                            .{ .logical = disclosure_bounds },
                             false,
                             false,
                         ) catch return;
@@ -4161,7 +4194,7 @@ pub const App = struct {
                 },
                 .quick_chat => if (row.index < self.model.quick_chats.items.len) {
                     const chat = self.model.quick_chats.items[row.index];
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, bounds, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, .{ .logical = bounds }, false, false) catch return;
                 },
                 else => {},
             }
@@ -4174,12 +4207,12 @@ pub const App = struct {
                     self.allocator.free(identity);
                     return;
                 };
-                const workspace_bounds = c.RECT{
+                const workspace_bounds = (AccessibilityBounds{ .logical = .{
                     .left = canvas_rect.left,
                     .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
                     .right = canvas_rect.right,
                     .bottom = client.bottom,
-                };
+                } }).physicalRect(self.dpi);
                 elements.append(.{
                     .identity = identity,
                     .name = "Quick Chat terminal workspace",
@@ -4196,7 +4229,7 @@ pub const App = struct {
         };
         if (self.model.attention_entries.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
-            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .logical = .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 } }, false, true) catch return;
             for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
                 const row_offset = @as(i32, @intCast(index)) * 34;
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
@@ -4206,7 +4239,7 @@ pub const App = struct {
                     self.allocator.free(name);
                     return;
                 };
-                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .logical = .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset } }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
                 self.appendAccessibilityElement(
                     &elements,
                     &owned_identities,
@@ -4214,7 +4247,7 @@ pub const App = struct {
                     identity,
                     "Stop loop",
                     1,
-                    Sidebar.needsYouStopBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, index),
+                    .{ .logical = Sidebar.needsYouStopBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, index) },
                     false,
                     true,
                 ) catch return;
@@ -4224,7 +4257,7 @@ pub const App = struct {
             const section = Sidebar.sidebarSectionBottom(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state);
             const attention_rows = @min(self.model.attentionCount(), 4);
             const activity_top = section + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .logical = .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 } }, false, true) catch return;
             self.appendAccessibilityElement(
                 &elements,
                 &owned_identities,
@@ -4232,7 +4265,7 @@ pub const App = struct {
                 "attention",
                 if (self.sidebar_state.activity_attention_only) "Show all activity" else "Show attention-only activity",
                 1,
-                Sidebar.activityFilterBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll),
+                .{ .logical = Sidebar.activityFilterBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll) },
                 false,
                 true,
             ) catch return;
@@ -4249,15 +4282,16 @@ pub const App = struct {
                     identity,
                     event.title,
                     1,
-                    Sidebar.activityCardBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, visible_index),
+                    .{ .logical = Sidebar.activityCardBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, visible_index) },
                     false,
                     true,
                 ) catch return;
             }
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .left), false, true) catch return;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .right), false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .logical = Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .left) }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .logical = Sidebar.activityControlBounds(&self.model, if (self.worktree_inspection) |*value| value else null, &self.sidebar_state, self.sidebar_scroll, .right) }, false, true) catch return;
         }
         if (self.ingress_error.len != 0) {
+            const bounds = (AccessibilityBounds{ .logical = Sidebar.errorFooterRect(client.bottom) }).physicalRect(self.dpi);
             elements.append(.{
                 .identity = "sidebar-error-footer:ingress",
                 .name = self.ingress_error,
@@ -4265,10 +4299,10 @@ pub const App = struct {
                 .selected = false,
                 .eligible = false,
                 .invokable = false,
-                .left = Sidebar.errorFooterRect(client.bottom).left,
-                .top = Sidebar.errorFooterRect(client.bottom).top,
-                .right = Sidebar.errorFooterRect(client.bottom).right,
-                .bottom = Sidebar.errorFooterRect(client.bottom).bottom,
+                .left = bounds.left,
+                .top = bounds.top,
+                .right = bounds.right,
+                .bottom = bounds.bottom,
             }) catch return;
         }
         switch (self.surface) {
@@ -4286,7 +4320,7 @@ pub const App = struct {
                         parent_id,
                         back_name,
                         4,
-                        GraphCanvas.compositeBreadcrumbBounds(canvas_rect),
+                        .{ .logical = GraphCanvas.compositeBreadcrumbBounds(canvas_rect) },
                         false,
                         false,
                     ) catch return;
@@ -4295,14 +4329,14 @@ pub const App = struct {
                     const bounds = GraphCanvas.nodeBounds(index, &self.canvas);
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
-                    self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, bounds, self.model.selected_index == index, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, .{ .logical = bounds }, self.model.selected_index == index, false) catch return;
                     if (GraphCanvas.hitTestAttentionAction(graph.nodes.items, graph.edges.items, bounds.right - 20, bounds.bottom - 12, &self.canvas) != null) {
-                        self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, GraphCanvas.attentionActionBounds(bounds, &self.canvas), false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, .{ .logical = GraphCanvas.attentionActionBounds(bounds, &self.canvas) }, false, false) catch return;
                     }
                     if (GraphCanvas.hasReclaimOffer(node, if (self.worktree_inspection) |*value| value else null, self.kept_worktree_paths.items)) {
                         const offer = GraphCanvas.reclaimOfferBounds(bounds);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, offer.reclaim, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "keep", key, "Keep", 4, offer.keep, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, .{ .logical = offer.reclaim }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "keep", key, "Keep", 4, .{ .logical = offer.keep }, false, false) catch return;
                     }
                 }
                 if (self.surface == .workspace) {
@@ -4310,23 +4344,23 @@ pub const App = struct {
                         const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
                         const workspace_right = client.right - (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const selected_index = self.model.selectedIndex() orelse 0;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, graph.project.name, 4, .{ .left = workspace_left, .top = 0, .right = workspace_right, .bottom = Tokens.header_height }, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height }, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, graph.project.name, 4, .{ .logical = .{ .left = workspace_left, .top = 0, .right = workspace_right, .bottom = Tokens.header_height } }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height } }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 } }, false, false) catch return;
                         if (selected_index < graph.nodes.items.len and !isResolvedLoopState(graph.nodes.items[selected_index].state)) {
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .left = workspace_right - 196, .top = Tokens.header_height + 10, .right = workspace_right - 112, .bottom = Tokens.header_height + 36 }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = .{ .left = workspace_right - 196, .top = Tokens.header_height + 10, .right = workspace_right - 112, .bottom = Tokens.header_height + 36 } }, false, false) catch return;
                         }
                         const panel_toggle = if (self.workspace_controls.panel_visible)
                             GraphCanvas.loopDetailCollapseBounds(client.right)
                         else
                             GraphCanvas.loopDetailExpandBounds(client.right);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, panel_toggle, false, true) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
                         if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
                             const detail_left = client.right - Tokens.loop_detail_width;
                             const selected_node = graph.nodes.items[selected_index];
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 } }, false, false) catch return;
                             if (selected_node.created_at != null) {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 } }, false, false) catch return;
                             }
                             if (selected_node.token_usage) |tokens| {
                                 const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
@@ -4334,24 +4368,22 @@ pub const App = struct {
                                     self.allocator.free(usage_name);
                                     return;
                                 };
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 } }, false, false) catch return;
                             }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
                             const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
                             defer self.allocator.free(tab_key);
-                            const tab_left = workspace.layout_origin_x + @as(i32, @intCast(tab_index)) * 120;
-                            const tab_bounds = c.RECT{ .left = tab_left, .top = workspace.layout_origin_y + 4, .right = tab_left + 112, .bottom = workspace.layout_origin_y + Tokens.tab_bar_height - 4 };
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, if (tab.panes.items.len > 1) "Split tab" else if (tab_index == 0) "Agent tab" else "Shell tab", 4, tab_bounds, tab_index == workspace.layout.selected_tab, true) catch return;
+                            const tab_bounds = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, tab_index);
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, if (tab.panes.items.len > 1) "Split tab" else if (tab_index == 0) "Agent tab" else "Shell tab", 4, .{ .physical = tab_bounds }, tab_index == workspace.layout.selected_tab, true) catch return;
                             const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
                             defer self.allocator.free(close_key);
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom }, false, workspace.canCloseTab()) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom } }, false, workspace.canCloseTab()) catch return;
                         }
-                        const controls_left = @max(workspace.layout_origin_x, workspace.layout_origin_x + workspace.layout_width - 220);
                         for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
-                            const control_left = controls_left + @as(i32, @intCast(control_index)) * 72;
+                            const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
                             const kind = if (control_index == 0) "workspace-new-tab" else if (control_index == 1) "workspace-split-right" else "workspace-split-down";
-                            self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .left = control_left, .top = workspace.layout_origin_y + 3, .right = control_left + 68, .bottom = workspace.layout_origin_y + Tokens.tab_bar_height - 3 }, false, true) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .physical = control_bounds }, false, true) catch return;
                         }
                     }
                 }
@@ -4361,11 +4393,11 @@ pub const App = struct {
                     const bounds = GraphCanvas.overviewCardBounds(&self.model, graph_index, node_index, canvas_rect, &self.canvas);
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
-                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-card", key, node.title, 4, bounds, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-card", key, node.title, 4, .{ .logical = bounds }, false, false) catch return;
                 }
             },
             .quick_chats => for (self.model.quick_chats.items, 0..) |chat, index| {
-                self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas), false, false) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, .{ .logical = GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas) }, false, false) catch return;
             },
         }
         const canvas_alert = if (self.ingress_error.len != 0)
@@ -4383,7 +4415,7 @@ pub const App = struct {
                 self.allocator.free(identity);
                 return;
             };
-            const bounds = GraphCanvas.inlineAlertBounds(canvas_rect);
+            const bounds = (AccessibilityBounds{ .logical = GraphCanvas.inlineAlertBounds(canvas_rect) }).physicalRect(self.dpi);
             elements.append(.{
                 .identity = identity,
                 .name = canvas_alert,
@@ -4405,6 +4437,7 @@ pub const App = struct {
                     return;
                 };
                 const row_top: i32 = 34 + @as(i32, @intCast(index * 30));
+                const bounds = (AccessibilityBounds{ .logical = .{ .left = 250, .top = row_top, .right = 500, .bottom = row_top + 28 } }).physicalRect(self.dpi);
                 elements.append(.{
                     .identity = identity,
                     .name = workspace.name,
@@ -4412,18 +4445,12 @@ pub const App = struct {
                     .selected = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
                     .eligible = true,
                     .invokable = true,
-                    .left = 250,
-                    .top = row_top,
-                    .right = 500,
-                    .bottom = row_top + 28,
+                    .left = bounds.left,
+                    .top = bounds.top,
+                    .right = bounds.right,
+                    .bottom = bounds.bottom,
                 }) catch return;
             }
-        }
-        for (elements.items) |*element| {
-            element.left = physicalCoordinate(element.left, self.dpi);
-            element.top = physicalCoordinate(element.top, self.dpi);
-            element.right = physicalCoordinate(element.right, self.dpi);
-            element.bottom = physicalCoordinate(element.bottom, self.dpi);
         }
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy);
@@ -4437,10 +4464,11 @@ pub const App = struct {
         key: []const u8,
         name: []const u8,
         parent: c_int,
-        bounds: c.RECT,
+        coordinates: AccessibilityBounds,
         selected: bool,
         eligible: bool,
     ) !void {
+        const bounds = coordinates.physicalRect(self.dpi);
         const identity = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ kind, key });
         errdefer self.allocator.free(identity);
         try owned_identities.append(identity);
@@ -6290,9 +6318,9 @@ fn onWindowMessage(
                 return false;
             }
             const screen_point = c.POINT{ .x = info.ptsLocation.x, .y = info.ptsLocation.y };
-            const mapped = CanvasInput.screenToClient(hwnd, screen_point);
-            const gesture_routing = inputBounds(gesture_client.right, gesture_client.bottom, app.workspace_controls);
-            const in_canvas = gestureInCanvas(app.surface, mapped, gesture_routing, app.workspace_controls);
+            const geometry = gestureGeometry(CanvasInput.screenToClient(hwnd, screen_point), gesture_client, app.dpi, app.workspace_controls);
+            const mapped = geometry.point;
+            const in_canvas = gestureInCanvas(app.surface, mapped, geometry.bounds, app.workspace_controls);
             const distance: u32 = @truncate(info.ullArguments);
             const pinch_context = app.pinchGestureContext();
             switch (CanvasInput.classifyGesture(info.dwID, info.dwFlags, in_canvas)) {
@@ -6574,6 +6602,215 @@ test "main shell coordinates round trip across common Windows DPI steps" {
     for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
         try std.testing.expectEqual(@as(i32, 220), logicalCoordinate(physicalCoordinate(220, dpi), dpi));
         try std.testing.expectEqual(@as(i32, 34), logicalCoordinate(physicalCoordinate(34, dpi), dpi));
+    }
+}
+
+const DpiExpectedElement = struct {
+    identity: []const u8,
+    bounds: [3][4]i32,
+};
+
+const DpiAccessibilitySink = struct {
+    expected: []const DpiExpectedElement,
+    dpi_index: usize,
+    canvas: ?c.RECT = null,
+    checked: bool = false,
+    failure: ?anyerror = null,
+
+    fn syncCanvasBounds(self: *@This(), bounds: c.RECT) void {
+        self.canvas = bounds;
+    }
+
+    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+        self.checked = true;
+        self.checkElements(elements) catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn checkElements(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+        for (self.expected) |expected| {
+            var found = false;
+            for (elements) |element| {
+                if (!std.mem.eql(u8, expected.identity, element.identity)) continue;
+                found = true;
+                const actual = [4]i32{ element.left, element.top, element.right, element.bottom };
+                std.testing.expectEqualDeep(expected.bounds[self.dpi_index], actual) catch |err| {
+                    std.debug.print("UIA bounds mismatch: {s}, DPI index {d}\n", .{ expected.identity, self.dpi_index });
+                    return err;
+                };
+            }
+            if (!found) std.debug.print("Missing UIA element: {s}\n", .{expected.identity});
+            try std.testing.expect(found);
+        }
+    }
+};
+
+fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement) !void {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{
+            .allocator = allocator,
+            .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2),
+        },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        .surface = surface,
+        .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    app.ingress_error = try allocator.dupe(u8, "Fixture alert");
+    defer allocator.free(app.ingress_error);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running","createdAt":1,"inputTokens":100,"presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+    );
+    try app.model.recent_projects.append(.{ .path = try allocator.dupe(u8, "C"), .name = try allocator.dupe(u8, "Recent") });
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat"),
+        .title = try allocator.dupe(u8, "Chat"),
+        .backend = try allocator.dupe(u8, "claudeCode"),
+    });
+    app.selected_quick_chat = 0;
+    app.worktree_inspection = .{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "A"),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    var workspaces = [_]WorkspaceLifecycle.Workspace{
+        .{ .name = "Fixture", .path = "B", .is_default = false },
+    };
+    app.workspace_list = .{ .items = &workspaces };
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, "A"),
+        .layout_path = &.{},
+        .project_key = &.{},
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("agent", true);
+    try workspace.layout.addTab("shell", false);
+    app.workspace = &workspace;
+    const physical_layouts = [_][3]i32{ .{ 220, 80, 708 }, .{ 330, 120, 1062 }, .{ 440, 160, 1416 } };
+    for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
+        app.dpi = dpi;
+        workspace.layout_origin_x = physical_layouts[index][0];
+        workspace.layout_origin_y = physical_layouts[index][1];
+        workspace.layout_width = physical_layouts[index][2];
+        var sink: DpiAccessibilitySink = .{ .expected = expected, .dpi_index = index };
+        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        try std.testing.expect(sink.checked);
+        if (sink.failure) |err| return err;
+        if (canvas) |bounds| {
+            const actual = sink.canvas orelse return error.MissingCanvasBounds;
+            try std.testing.expectEqualDeep(bounds[index], [4]i32{ actual.left, actual.top, actual.right, actual.bottom });
+        }
+    }
+}
+
+test "DPI UIA fixed graph uses physical client bounds" {
+    try expectDpiAccessibility(.project, .{ .{ 220, 34, 1200, 650 }, .{ 330, 51, 1800, 975 }, .{ 440, 68, 2400, 1300 } }, &.{});
+}
+
+test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
+    const common = [_]DpiExpectedElement{
+        .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 220, 5, 330, 29 }, .{ 330, 8, 495, 44 }, .{ 440, 10, 660, 58 } } },
+        .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 338, 5, 458, 29 }, .{ 507, 8, 687, 44 }, .{ 676, 10, 916, 58 } } },
+        .{ .identity = "header-jump:jump", .bounds = .{ .{ 640, 5, 800, 29 }, .{ 960, 8, 1200, 44 }, .{ 1280, 10, 1600, 58 } } },
+        .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 810, 5, 920, 29 }, .{ 1215, 8, 1380, 44 }, .{ 1620, 10, 1840, 58 } } },
+        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 109, 232, 135 }, .{ 18, 164, 348, 203 }, .{ 24, 218, 464, 270 } } },
+        .{ .identity = "sidebar-error-footer:ingress", .bounds = .{ .{ 8, 816, 212, 858 }, .{ 12, 1224, 318, 1287 }, .{ 16, 1632, 424, 1716 } } },
+        .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
+    };
+    for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
+        try expectDpiAccessibility(surface, null, &common);
+    }
+    try expectDpiAccessibility(.project, null, &.{
+        .{ .identity = "project-card:A:loop", .bounds = .{ .{ 252, 84, 502, 190 }, .{ 378, 126, 753, 285 }, .{ 504, 168, 1004, 380 } } },
+        .{ .identity = "canvas-alert:ingress", .bounds = .{ .{ 244, 556, 1176, 612 }, .{ 366, 834, 1764, 918 }, .{ 488, 1112, 2352, 1224 } } },
+    });
+    try expectDpiAccessibility(.overview, null, &.{
+        .{ .identity = "overview-card:A:loop", .bounds = .{ .{ 262, 118, 482, 204 }, .{ 393, 177, 723, 306 }, .{ 524, 236, 964, 408 } } },
+    });
+    try expectDpiAccessibility(.quick_chats, null, &.{
+        .{ .identity = "quick-chat-card:chat", .bounds = .{ .{ 262, 88, 482, 152 }, .{ 393, 132, 723, 228 }, .{ 524, 176, 964, 304 } } },
+    });
+    try expectDpiAccessibility(.workspace, null, &.{
+        .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 220, 0, 928, 34 }, .{ 330, 0, 1392, 51 }, .{ 440, 0, 1856, 68 } } },
+        .{ .identity = "workspace-loop-bar:loop", .bounds = .{ .{ 220, 34, 928, 80 }, .{ 330, 51, 1392, 120 }, .{ 440, 68, 1856, 160 } } },
+        .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } } },
+        .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } } },
+        .{ .identity = "workspace-toggle-panel:control", .bounds = .{ .{ 1100, 46, 1182, 68 }, .{ 1650, 69, 1773, 102 }, .{ 2200, 92, 2364, 136 } } },
+        .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 946, 798, 1182, 830 }, .{ 1419, 1197, 1773, 1245 }, .{ 1892, 1596, 2364, 1660 } } },
+        .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 946, 836, 1182, 856 }, .{ 1419, 1254, 1773, 1284 }, .{ 1892, 1672, 2364, 1712 } } },
+        .{ .identity = "workspace-detail-usage:loop", .bounds = .{ .{ 946, 856, 1182, 876 }, .{ 1419, 1284, 1773, 1314 }, .{ 1892, 1712, 2364, 1752 } } },
+        .{ .identity = "quick-chat-workspace:chat", .bounds = .{ .{ 220, 650, 1200, 900 }, .{ 330, 975, 1800, 1350 }, .{ 440, 1300, 2400, 1800 } } },
+    });
+}
+
+test "DPI UIA terminal tab close and controls retain physical geometry" {
+    try expectDpiAccessibility(.workspace, null, &.{
+        .{ .identity = "workspace-tab:1", .bounds = .{ .{ 340, 84, 452, 106 }, .{ 450, 124, 562, 146 }, .{ 560, 164, 672, 186 } } },
+        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 428, 84, 452, 106 }, .{ 538, 124, 562, 146 }, .{ 648, 164, 672, 186 } } },
+        .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
+        .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
+        .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
+    });
+}
+
+test "DPI gesture mapper classifies scaled sidebar and graph boundaries" {
+    const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
+    const cases = [_]struct { dpi: u32, width: i32, height: i32, sidebar_x: i32, canvas_x: i32, top: i32, bottom: i32, y: i32 }{
+        .{ .dpi = 96, .width = 1200, .height = 900, .sidebar_x = 200, .canvas_x = 600, .top = 34, .bottom = 650, .y = 300 },
+        .{ .dpi = 144, .width = 1800, .height = 1350, .sidebar_x = 300, .canvas_x = 900, .top = 51, .bottom = 975, .y = 450 },
+        .{ .dpi = 192, .width = 2400, .height = 1800, .sidebar_x = 400, .canvas_x = 1200, .top = 68, .bottom = 1300, .y = 600 },
+    };
+    for (cases) |case| {
+        const client = c.RECT{ .left = 0, .top = 0, .right = case.width, .bottom = case.height };
+        for ([_]struct { point: c.POINT, region: WheelRegion }{
+            .{ .point = .{ .x = case.sidebar_x, .y = case.y }, .region = .sidebar },
+            .{ .point = .{ .x = case.canvas_x, .y = case.y }, .region = .canvas },
+            .{ .point = .{ .x = case.canvas_x, .y = case.top }, .region = .canvas },
+            .{ .point = .{ .x = case.canvas_x, .y = case.top - 2 }, .region = .none },
+            .{ .point = .{ .x = case.width, .y = case.y }, .region = .none },
+            .{ .point = .{ .x = case.canvas_x, .y = case.bottom }, .region = .none },
+        }) |sample| {
+            const mapped = gestureGeometry(sample.point, client, case.dpi, controls);
+            try std.testing.expectEqual(sample.region, wheelRegion(mapped.point.?.x, mapped.point.?.y, mapped.bounds, controls));
+            try std.testing.expectEqual(sample.region == .canvas, gestureInCanvas(.project, mapped.point, mapped.bounds, controls));
+            try std.testing.expect(!gestureInCanvas(.workspace, mapped.point, mapped.bounds, controls));
+        }
+        const failed = gestureGeometry(null, client, case.dpi, controls);
+        try std.testing.expect(!gestureInCanvas(.project, failed.point, failed.bounds, controls));
+    }
+}
+
+test "DPI gesture mapper preserves the logical world anchor through pinch updates" {
+    for ([_]struct { dpi: u32, point: c.POINT, width: i32, height: i32 }{
+        .{ .dpi = 96, .point = .{ .x = 600, .y = 300 }, .width = 1200, .height = 900 },
+        .{ .dpi = 144, .point = .{ .x = 900, .y = 450 }, .width = 1800, .height = 1350 },
+        .{ .dpi = 192, .point = .{ .x = 1200, .y = 600 }, .width = 2400, .height = 1800 },
+    }) |case| {
+        const mapped = gestureGeometry(case.point, .{ .left = 0, .top = 0, .right = case.width, .bottom = case.height }, case.dpi, .{});
+        var state = GraphCanvas.CanvasState{ .zoom = 1.2, .pan_x = 24, .pan_y = -36 };
+        state.beginPinchZoom(100, 7);
+        for ([_]u32{ 125, 125, 10000, 50 }) |distance| {
+            state.continuePinchZoom(mapped.point.?.x, mapped.point.?.y, distance, 7);
+            try std.testing.expectApproxEqAbs(@as(f32, 480), (600 - state.pan_x) / state.zoom, 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 280), (300 - state.pan_y) / state.zoom, 0.001);
+        }
     }
 }
 
