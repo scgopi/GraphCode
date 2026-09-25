@@ -552,7 +552,17 @@ fn createAccelerators() c.HACCEL {
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 0xBC, .cmd = @intFromEnum(Command.settings) },
     };
-    return c.CreateAcceleratorTableW(&entries, entries.len);
+    const accelerators = c.CreateAcceleratorTableW(&entries, entries.len);
+    if (accelerators == null) {
+        const last_error = c.GetLastError();
+        std.log.err("CreateAcceleratorTableW failed: error={d}, count={d}, ACCEL size={d}, alignment={d}", .{
+            last_error, entries.len, @sizeOf(c.ACCEL), @alignOf(c.ACCEL),
+        });
+        for (entries, 0..) |entry, index| {
+            std.log.err("ACCEL[{d}]: fVirt=0x{x}, key=0x{x}, cmd={d}", .{ index, entry.fVirt, entry.key, entry.cmd });
+        }
+    }
+    return accelerators;
 }
 
 test "native menu exposes the parity command groups" {
