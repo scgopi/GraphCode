@@ -96,6 +96,17 @@ cwd, layout, named-pipe and zmx namespaces. It deliberately refuses a sibling
 replace the synthetic graph. Disconnected UI is part of the recorded state,
 not full production-data parity.
 
+The zmx root alone uses a fresh short `TEMP\gcv-<12 hex>` directory. The pinned
+provider's ordinary `SetFileSecurityW` lease path must remain below 260 UTF-16
+units; its nonce-qualified owner pipe must remain below 256. The preflight
+records the exact endpoint/lease/pipe lengths and fails on collisions or
+excess length, without a global-root fallback or ACL workaround. Logs are
+copied into the run artifacts during cleanup; the exact short root is also
+recorded for preservation and later targeted removal. A zmx attach/conhost
+process alone is not readiness: the driver waits for the exact endpoint, then
+requires pinned `zmx info` to report the expected session/cwd, at least one
+attached client, and a live backend PID already proven to be a run descendant.
+
 After building with the pinned tools/providers, use a **new** output directory:
 
 ```powershell
@@ -115,6 +126,15 @@ geometry guards. Failure to acquire foreground is a capture-infrastructure
 failure, not a product-rendering regression. There is no global Alt injection or
 desktop-capture fallback. The outer process bounds even a stuck UIA call;
 cleanup uses recorded PID plus process creation time, never process-name kills.
+
+If the current foreground HWND belongs to the exact identity-proven owned zmx
+attach process, the harness may hide **only that HWND once** to expose workspace
+chrome. Its PID, executable, creation time, ancestry and visibility intervention
+are recorded; visibility is restored without activation if the original HWND
+still exists, and only run-owned processes are cleaned up. This is assisted
+capture, not proof that normal user focus behavior is correct. No arbitrary
+provider-window enumeration, global Alt injection or foreign-window hiding is
+used.
 
 To execute the same source/provider/binary preflight without launching the app,
 pass `-PreflightOnly` and a fresh output directory; no foreground lease is

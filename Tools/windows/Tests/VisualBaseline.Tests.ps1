@@ -370,6 +370,9 @@ try {
     capturedAt = '2026-01-15T15:00:00Z'; os = 'synthetic comparator input, not runtime'
     dpi = 96; executable = @{ sha256 = ('3' * 64); artifact = 'graphcode-windows\zig-out\bin\graphcode-windows.exe' }
     sources = $sourceRecords; process = @{ pid = 123; createdAt = '2026-01-15T14:59:00Z' }
+    backend = @{ session = 'v3-deadbeef11111111-1111-4111-8111-111111111111'; clients = 1
+      backendPid = 125; createdAt = '2026-01-15T14:59:01Z'; cwd = 'C:\fixture' }
+    zmxPathLengths = @{ endpoint = 214; lease = 220; ownerPipe = 165 }; visibilityInterventions = @()
     providers = @{
       zmx = @{ sha256 = ('4' * 64); pin = '029e11d2b19162fb3bdf90c8270237d303b8bfb4'
         artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
@@ -409,7 +412,8 @@ try {
     $captureAst = [Management.Automation.Language.Parser]::ParseFile(
       (Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'), [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-    foreach ($name in @('Get-CaptureUtcTicks','Test-CaptureProcessIdentity','Stop-CaptureProcesses','Get-ClientRelativeBounds')) {
+    foreach ($name in @('Get-CaptureUtcTicks','Test-CaptureProcessIdentity','Stop-CaptureProcesses',
+        'Get-ClientRelativeBounds','Get-ZmxCapturePaths','Get-OwnedZmxWindowRecord','ConvertFrom-CaptureZmxInfo')) {
       $definition = $captureAst.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -421,6 +425,27 @@ try {
     if (($relative -join ',') -ne '49.5,30.25,250,106') {
       throw "Actual capture bounds helper returned incorrect shape/coordinates: $($relative -join ',')"
     }
+    $fixtureSession = '11111111-1111-4111-8111-111111111111'
+    $pathProbe = Get-ZmxCapturePaths 'C:\x' 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession
+    $maxRoot = 'C:\x' + ('x' * (259 - $pathProbe.leaseLength))
+    $boundary = Get-ZmxCapturePaths $maxRoot 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession
+    if ($boundary.leaseLength -ne 259) { throw 'Pinned zmx length boundary fixture is incorrect' }
+    $rejected = $false
+    try { $null = Get-ZmxCapturePaths ($maxRoot + 'x') 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession }
+    catch { $rejected = $_.Exception.Message -like '*Pinned zmx path limit*' }
+    if (-not $rejected) { throw 'Capture accepted a 260-character lease path' }
+    $infoText = "v3-deadbeef$fixtureSession`tclients=1`tpid=123`tcmd=`tcwd=C:\fixture`n"
+    $parsedInfo = ConvertFrom-CaptureZmxInfo $infoText "v3-deadbeef$fixtureSession" 'C:\fixture'
+    if ($parsedInfo.backendPid -ne 123 -or $parsedInfo.clients -ne 1) { throw 'Pinned zmx info parser lost backend/client identity' }
+    $pendingInfo = ConvertFrom-CaptureZmxInfo ($infoText.Replace('clients=1','clients=0')) "v3-deadbeef$fixtureSession" 'C:\fixture'
+    if ($pendingInfo.clients -ne 0) { throw 'No-client zmx readiness was silently promoted' }
+    foreach ($badInfo in @($infoText.Replace('deadbeef','cafebabe'), $infoText.Replace('pid=123','pid=0'),
+        $infoText.Replace('C:\fixture','C:\foreign'))) {
+      $rejected = $false
+      try { $null = ConvertFrom-CaptureZmxInfo $badInfo "v3-deadbeef$fixtureSession" 'C:\fixture' }
+      catch { $rejected = $_.Exception.Message -like '*exact attached fixture session/backend/cwd*' }
+      if (-not $rejected) { throw 'Capture accepted mismatched backend/session/cwd info' }
+    }
     $start = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
     foreach ($arg in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')) {
@@ -428,11 +453,21 @@ try {
     }
     $sleeper = [Diagnostics.Process]::Start($start)
     try {
-      $record = @{ pid = $sleeper.Id; executable = $sleeper.Path
+      $record = @{ pid = $sleeper.Id; executable = $sleeper.Path; commandLine = "$($sleeper.Path) attach fixture"
         createdAt = $sleeper.StartTime.ToUniversalTime().ToString('o') }
       if (-not (Test-CaptureProcessIdentity $sleeper $record)) { throw 'String process timestamp identity failed' }
       $parsedRecord = $record | ConvertTo-Json | ConvertFrom-Json
       if (-not (Test-CaptureProcessIdentity $sleeper $parsedRecord)) { throw 'JSON process timestamp identity failed' }
+      $registry = [Collections.Generic.Dictionary[int,object]]::new()
+      $registry[$sleeper.Id] = $record
+      if ($null -eq (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Exact owned attach identity was not recognized' }
+      if ($null -ne (Get-OwnedZmxWindowRecord 1 $registry $sleeper.Path) -or
+          $null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry 'C:\foreign.exe')) {
+        throw 'Visibility policy accepted unrecorded or foreign executable identity'
+      }
+      $record.commandLine = "$($sleeper.Path) --daemon fixture"
+      if ($null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Visibility policy accepted a non-attach process' }
+      $record.commandLine = "$($sleeper.Path) attach fixture"
       foreach ($invalidTime in @('not-a-time', '2026-01-15T14:59:00',
           [DateTime]::SpecifyKind($sleeper.StartTime, [DateTimeKind]::Unspecified))) {
         $rejected = $false
@@ -441,6 +476,7 @@ try {
       }
       $record.createdAt = $sleeper.StartTime.ToUniversalTime().AddTicks(1).ToString('o')
       if (Test-CaptureProcessIdentity $sleeper $record) { throw 'Process identity lost subsecond timestamp precision' }
+      if ($null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Visibility policy accepted reused PID identity' }
       $record.createdAt = $sleeper.StartTime.ToUniversalTime().AddSeconds(-1).ToString('o')
       $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'processes.json')
       Stop-CaptureProcesses
@@ -523,7 +559,12 @@ try {
     @{ diagnostic = 'zmx provider provenance is missing'; edit = { param($m) $m.providers.Remove('zmx') } },
     @{ diagnostic = 'zmx provider hash is missing'; edit = { param($m) $m.providers.zmx.Remove('sha256') } },
     @{ diagnostic = 'winghostty provider must be a SHA-256'; edit = { param($m) $m.providers.winghostty.sha256 = 'invalid' } },
-    @{ diagnostic = 'zmx provider pin mismatch'; edit = { param($m) $m.providers.zmx.pin = ('0' * 40) } }
+    @{ diagnostic = 'zmx provider pin mismatch'; edit = { param($m) $m.providers.zmx.pin = ('0' * 40) } },
+    @{ diagnostic = 'workspace backend provenance is missing'; edit = { param($m) $m.Remove('backend') } },
+    @{ diagnostic = 'attached backend client count must be an integer'; edit = { param($m) $m.backend.clients = 0 } },
+    @{ diagnostic = 'workspace backend session/cwd identity mismatch'; edit = { param($m) $m.backend.session = 'foreign' } },
+    @{ diagnostic = 'zmx lease path length must be an integer'; edit = { param($m) $m.zmxPathLengths.lease = 260 } },
+    @{ diagnostic = 'window intervention provenance is missing'; edit = { param($m) $m.Remove('visibilityInterventions') } }
   )) {
     $mutated = $goodRendered | ConvertFrom-Json -AsHashtable
     & $case.edit $mutated

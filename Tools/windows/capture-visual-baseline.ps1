@@ -45,8 +45,52 @@ function Get-CaptureUtcTicks($Value) {
 
 function Test-CaptureProcessIdentity($Process, $Record) {
   return $null -ne $Process -and
+    $Process.Id -eq $Record.pid -and
     $Process.StartTime.ToUniversalTime().Ticks -eq (Get-CaptureUtcTicks $Record.createdAt) -and
     $Process.Path -eq $Record.executable
+}
+
+function Get-ZmxCapturePaths([string] $Root, [string] $Prefix, [string] $Sid, [string] $Session) {
+  if (-not [IO.Path]::IsPathFullyQualified($Root) -or $Prefix -notmatch '^v3-[0-9a-f]{8}$' -or
+      $Sid -notmatch '^S-[0-9-]+$' -or $Session -notmatch '^[0-9a-f-]{36}$') {
+    throw 'Invalid isolated zmx namespace identity'
+  }
+  $fullSession = $Prefix + $Session
+  $encoded = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes($fullSession)).ToLowerInvariant()
+  $endpoint = Join-Path $Root "ipc\$Sid\$encoded.endpoint"
+  $lease = "$endpoint.lease"
+  $rootHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [Text.Encoding]::UTF8.GetBytes($Root))).ToLowerInvariant().Substring(0,16)
+  $pipe = "\\.\pipe\zmx-$Sid-r$rootHash\$fullSession"
+  # Pinned runtime_windows.zig uses SetFileSecurityW on ordinary paths and a
+  # 256 UTF-16-unit pipe bound, including the server's 32-hex nonce suffix.
+  if ($lease.Length -ge 260 -or $pipe.Length + 33 -ge 256) {
+    throw "Pinned zmx path limit: endpoint=$($endpoint.Length), lease=$($lease.Length), ownerPipe=$($pipe.Length + 33)"
+  }
+  return [ordered]@{
+    root = $Root; prefix = $Prefix; session = $fullSession
+    endpoint = $endpoint; lease = $lease; pipe = $pipe
+    endpointLength = $endpoint.Length; leaseLength = $lease.Length; ownerPipeLength = $pipe.Length + 33
+  }
+}
+
+function Get-OwnedZmxWindowRecord([int] $WindowProcessId, $Registry, [string] $ZmxPath) {
+  if (-not $Registry.ContainsKey($WindowProcessId)) { return $null }
+  $record = $Registry[$WindowProcessId]
+  if ($record.executable -ne $ZmxPath -or $record.commandLine -notmatch '\sattach\s') { return $null }
+  $current = Get-Process -Id $WindowProcessId -ErrorAction SilentlyContinue
+  if (-not (Test-CaptureProcessIdentity $current $record)) { return $null }
+  return $record
+}
+
+function ConvertFrom-CaptureZmxInfo([string] $Text, [string] $Session, [string] $Cwd) {
+  $pattern = '^' + [regex]::Escape($Session) + '\tclients=(\d+)\tpid=(\d+)\tcmd=([^\t\r\n]*)\tcwd=([^\r\n]*)\r?\n?$'
+  $match = [regex]::Match($Text, $pattern)
+  if (-not $match.Success -or [int]$match.Groups[2].Value -le 0 -or $match.Groups[4].Value -ine $Cwd) {
+    throw 'Pinned zmx info did not prove the exact attached fixture session/backend/cwd'
+  }
+  return @{ session = $Session; clients = [int]$match.Groups[1].Value
+    backendPid = [int]$match.Groups[2].Value; command = $match.Groups[3].Value; cwd = $Cwd }
 }
 
 function Stop-CaptureProcesses {
@@ -137,6 +181,14 @@ public static class VisualWindow {
     if (!SystemParametersInfo(action, 0, out value, 0)) throw new Win32Exception();
     return value;
   }
+  public static uint Owner(IntPtr window) {
+    uint pid; GetWindowThreadProcessId(window, out pid); return pid;
+  }
+  public static void SetOwnedVisibility(IntPtr window, uint pid, bool visible) {
+    if (Owner(window) != pid) throw new InvalidOperationException("Window owner changed before visibility intervention");
+    ShowWindow(window, visible ? 8 : 0); // SW_SHOWNA restores visibility without activation.
+    if (IsWindowVisible(window) != visible) throw new InvalidOperationException("Owned window visibility intervention failed");
+  }
   public static bool Activate(IntPtr window) {
     if (GetForegroundWindow() == window) {
       ActivationDiagnostics = "already foreground";
@@ -217,6 +269,11 @@ $owned = [Collections.Generic.Dictionary[int,object]]::new()
 $actions = [Collections.Generic.List[object]]::new()
 $app = $null
 $images = [Collections.Generic.List[object]]::new()
+$hiddenWindows = [Collections.Generic.List[object]]::new()
+$zmxPaths = $null
+$zmxRootCreated = $false
+$infoQueryCount = 0
+$evidence = $null
 
 function Record-OwnedProcesses {
   $all = @(Get-CimInstance Win32_Process)
@@ -311,6 +368,73 @@ function Get-CaptureBuildSnapshot {
   }
 }
 
+function Hide-OwnedZmxForeground {
+  $foreground = [VisualWindow]::GetForegroundWindow()
+  $record = Get-OwnedZmxWindowRecord ([int][VisualWindow]::Owner($foreground)) $owned $Zmx
+  if ($null -eq $record) { return }
+  $entry = [ordered]@{ hwnd = $foreground.ToInt64(); pid = $record.pid; createdAt = $record.createdAt
+    executable = $record.executable; previouslyVisible = [VisualWindow]::IsWindowVisible($foreground)
+    restoration = 'pending'; reason = 'harness-assisted workspace visibility, not normal-user focus proof' }
+  if (-not $entry.previouslyVisible) { throw 'Owned foreground zmx HWND was unexpectedly invisible' }
+  $hiddenWindows.Add($entry)
+  $hiddenWindows | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'visibility-interventions.json')
+  [VisualWindow]::SetOwnedVisibility($foreground, $record.pid, $false)
+}
+
+function Restore-OwnedZmxWindows {
+  foreach ($entry in $hiddenWindows) {
+    $current = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
+    $window = [IntPtr]$entry.hwnd
+    if ((Test-CaptureProcessIdentity $current $entry) -and [VisualWindow]::Owner($window) -eq $entry.pid) {
+      [VisualWindow]::SetOwnedVisibility($window, $entry.pid, $entry.previouslyVisible)
+      $entry.restoration = 'same owned HWND visibility restored without activation'
+    } else {
+      $entry.restoration = 'original HWND/process no longer exists; no replacement touched'
+    }
+  }
+  if ($hiddenWindows.Count) {
+    $hiddenWindows | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'visibility-interventions.json')
+  }
+}
+
+function Read-OwnedZmxInfo {
+  $script:infoQueryCount++
+  $start = [Diagnostics.ProcessStartInfo]::new($Zmx)
+  $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+  $start.WorkingDirectory = $env:GRAPHCODE_GATE_CWD
+  $start.ArgumentList.Add('info')
+  $start.ArgumentList.Add('11111111-1111-4111-8111-111111111111')
+  $query = [Diagnostics.Process]::Start($start)
+  $record = @{ pid = $query.Id; parentPid = $PID; createdAt = $query.StartTime.ToUniversalTime().ToString('o')
+    executable = $Zmx; commandLine = "$Zmx info 11111111-1111-4111-8111-111111111111" }
+  $owned[$query.Id] = $record
+  try {
+    $stdout = $query.StandardOutput.ReadToEndAsync()
+    $stderr = $query.StandardError.ReadToEndAsync()
+    Record-OwnedProcesses
+    $remaining = [Math]::Min(5000, [Math]::Max(1, ($TimeoutSeconds - $clock.Elapsed.TotalSeconds - 1) * 1000))
+    if (-not $query.WaitForExit([int]$remaining)) { throw 'Pinned zmx info exceeded its bounded deadline' }
+    $stdout.Result | Set-Content -LiteralPath (Join-Path $OutputDirectory "zmx-info-$infoQueryCount.txt")
+    $stderr.Result | Set-Content -LiteralPath (Join-Path $OutputDirectory "zmx-info-$infoQueryCount-stderr.txt")
+    if ($query.ExitCode -ne 0) { throw "Pinned zmx info failed: $($stderr.Result)" }
+    $info = ConvertFrom-CaptureZmxInfo $stdout.Result $zmxPaths.session $env:GRAPHCODE_GATE_CWD
+    Record-OwnedProcesses
+    if (-not $owned.ContainsKey($info.backendPid) -or
+        -not (Test-CaptureProcessIdentity (Get-Process -Id $info.backendPid -ErrorAction SilentlyContinue) $owned[$info.backendPid])) {
+      throw 'Pinned zmx info backend PID is not a live identity-proven run descendant'
+    }
+    $info.createdAt = $owned[$info.backendPid].createdAt
+    return $info
+  } finally {
+    if (-not $query.HasExited -and (Test-CaptureProcessIdentity $query $record)) {
+      Stop-Process -Id $query.Id -Force
+      if (-not $query.WaitForExit(5000)) { throw 'Owned zmx info query did not exit' }
+    }
+    $query.Dispose()
+  }
+}
+
 function Save-AppClient([IntPtr] $Window, [string] $Id, [string] $State) {
   if (-not [VisualWindow]::Activate($Window)) {
     $foreground = [VisualWindow]::GetForegroundWindow()
@@ -355,23 +479,33 @@ function Save-AppClient([IntPtr] $Window, [string] $Id, [string] $State) {
 try {
   $buildSnapshot = Get-CaptureBuildSnapshot
   $buildSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'build-snapshot.json')
+  @{ sourceRoot = $repoRoot; zmxRoot = (Join-Path $repoRoot '.graphcode-tools\providers\zmx')
+    winghosttyRoot = (Join-Path $repoRoot '.graphcode-tools\providers\winghostty') } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'capture-origin.json')
+  $runId = [guid]::NewGuid().ToString('N')
+  $zmxPaths = Get-ZmxCapturePaths (Join-Path ([IO.Path]::GetTempPath()) "gcv-$($runId.Substring(0,12))") `
+    "v3-$($runId.Substring(0,8))" ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+    '11111111-1111-4111-8111-111111111111'
+  if (Test-Path -LiteralPath $zmxPaths.root) { throw 'Fresh short zmx root already exists; no fallback permitted' }
+  $zmxPaths | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'zmx-paths.json')
   if ($PreflightOnly) {
     Write-Output 'Capture preflight: PASS (sources, scripts, pinned providers and binary hashes; no app launch)'
     return
   }
   # The worker's environment cannot escape to the invoking shell or other runs.
   Get-ChildItem Env:GRAPHCODE_*,Env:ZMX_* | Remove-Item
-  $runId = [guid]::NewGuid().ToString('N')
-  foreach ($dir in @('support','localappdata','cwd','zmx')) {
+  foreach ($dir in @('support','localappdata','cwd')) {
     $null = New-Item -ItemType Directory -Path (Join-Path $OutputDirectory $dir)
   }
+  $null = New-Item -ItemType Directory -Path $zmxPaths.root
+  $zmxRootCreated = $true
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-visual-$runId"
   $env:GRAPHCODE_SUPPORT_DIR = Join-Path $OutputDirectory 'support'
   $env:LOCALAPPDATA = Join-Path $OutputDirectory 'localappdata'
   $env:GRAPHCODE_GATE_CWD = Join-Path $OutputDirectory 'cwd'
   $env:GRAPHCODE_ZMX = $Zmx
-  $env:ZMX_DIR = Join-Path $OutputDirectory 'zmx'
-  $env:ZMX_SESSION_PREFIX = "v3-$($runId.Substring(0,8))"
+  $env:ZMX_DIR = $zmxPaths.root
+  $env:ZMX_SESSION_PREFIX = $zmxPaths.prefix
   $env:GRAPHCODE_WORKSPACE_LAYOUT = Join-Path $OutputDirectory 'workspace.json'
   $env:GRAPHCODE_WORKSPACE_PROJECT = 'graphcode-visual-fixture'
   $env:GRAPHCODE_UIA_FIXTURE_ROWS = 'C:\fixture-safe|safe,C:\fixture-unsafe|unsafe'
@@ -416,6 +550,15 @@ try {
   Record-OwnedProcesses
   $attachments = @($owned.Values | Where-Object { $_.executable -eq $Zmx -and $_.commandLine -match '\battach\b' })
   if ($attachments.Count -eq 0) { throw "Workspace lacks a proven-owned real zmx attach process" }
+  $null = Wait-Visual { Test-Path -LiteralPath $zmxPaths.endpoint -PathType Leaf } 'pinned zmx session endpoint publication'
+  $backend = Wait-Visual {
+    $info = Read-OwnedZmxInfo
+    if ($info.clients -ge 1) { return $info }
+    Write-Host 'ZMX_READINESS: exact session/backend responds; waiting for attach client'
+    return $null
+  } 'pinned zmx attached-client readiness'
+  $backend | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'workspace-backend.json')
+  Hide-OwnedZmxForeground
   Save-AppClient $window 'workspace' 'fixture-loop-attached'
   if (@($owned.Values | Where-Object { [IO.Path]::GetFileName($_.executable) -eq 'graphcoded.exe' }).Count -gt 0) {
     throw "Unexpected daemon child in disconnected fixture capture"
@@ -431,6 +574,8 @@ try {
     dirtyFiles = @(git -C $repoRoot status --porcelain); sources = @($buildSnapshot.sources)
     executable = $buildSnapshot.executable; providers = $buildSnapshot.providers
     process = @{ pid = $app.Id; createdAt = $owned[$app.Id].createdAt }
+    backend = $backend; visibilityInterventions = @($hiddenWindows)
+    zmxPathLengths = @{ endpoint = $zmxPaths.endpointLength; lease = $zmxPaths.leaseLength; ownerPipe = $zmxPaths.ownerPipeLength }
     attachments = @($attachments | ForEach-Object { @{ pid = $_.pid; createdAt = $_.createdAt; parentPid = $_.parentPid } })
     foregroundLease = $ForegroundLease; dpi = $images[0].dpi
     fontSmoothing = @{ enabled = [VisualWindow]::FontSetting(0x004A); type = [VisualWindow]::FontSetting(0x200A) }
@@ -445,6 +590,20 @@ try {
   if (-not $app.WaitForExit(5000)) { throw "App did not exit normally after capture" }
   Write-Host 'Windows capture complete; review regions before running Test-RenderedVisualBaseline.ps1.'
 } finally {
-  try { if ($app) { Record-OwnedProcesses } }
-  finally { Stop-CaptureProcesses }
+  try {
+    Restore-OwnedZmxWindows
+    if ($app) { Record-OwnedProcesses }
+  } finally {
+    Stop-CaptureProcesses
+    if ($zmxRootCreated) {
+      $logs = Join-Path $zmxPaths.root 'logs'
+      if (Test-Path -LiteralPath $logs) {
+        Copy-Item -LiteralPath $logs -Destination (Join-Path $OutputDirectory 'zmx-logs') -Recurse
+      }
+    }
+    if ($evidence) {
+      $evidence.visibilityInterventions = @($hiddenWindows)
+      $evidence | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'evidence.json')
+    }
+  }
 }

@@ -124,6 +124,17 @@ foreach ($name in @('zmx','winghostty')) {
 }
 Require-Rendered ($evidence.executable.artifact -ceq 'graphcode-windows\zig-out\bin\graphcode-windows.exe') `
   "shell executable artifact identity mismatch"
+Require-Rendered ($null -ne $evidence.PSObject.Properties['backend']) "workspace backend provenance is missing"
+Require-Integer $evidence.backend.clients 1 ([int]::MaxValue) "attached backend client count"
+Require-ProcessRecord ([pscustomobject]@{ pid = $evidence.backend.backendPid; createdAt = $evidence.backend.createdAt }) "workspace backend"
+Require-Rendered ($evidence.backend.session -cmatch '^v3-[0-9a-f]{8}11111111-1111-4111-8111-111111111111$' -and
+  [IO.Path]::IsPathFullyQualified($evidence.backend.cwd)) "workspace backend session/cwd identity mismatch"
+Require-Rendered ($null -ne $evidence.PSObject.Properties['zmxPathLengths']) "zmx path-length preflight is missing"
+Require-Integer $evidence.zmxPathLengths.endpoint 1 253 "zmx endpoint path length"
+Require-Integer $evidence.zmxPathLengths.lease 1 259 "zmx lease path length"
+Require-Integer $evidence.zmxPathLengths.ownerPipe 1 255 "zmx owner pipe length"
+Require-Rendered ($evidence.zmxPathLengths.lease -eq $evidence.zmxPathLengths.endpoint + 6) "zmx lease/endpoint lengths disagree"
+Require-Rendered ($null -ne $evidence.PSObject.Properties['visibilityInterventions']) "window intervention provenance is missing"
 
 $sourceNames = @($evidence.sources | ForEach-Object { $_.path })
 Require-Rendered (@($sourceNames | Sort-Object -Unique).Count -eq $requiredSources.Count -and
@@ -253,6 +264,7 @@ $report = [ordered]@{
   result = "opaque-pixel-contracts-pass"
   matchedCurrentMacOS = "blocked: no compatible current capture"
   visualParity = "Partial"
+  normalUserFocus = "Not validated; capture may temporarily hide an identity-proven owned attach window."
   measurements = @($measurements)
 }
 if ($ReportPath) { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath -Encoding utf8 }
