@@ -8,6 +8,13 @@ pub const NodeTarget = struct {
     can_arm: bool = false,
     unwired: bool = false,
     follows_template: bool = false,
+    resolved: bool = false,
+};
+
+pub const BackgroundTarget = struct {
+    project_path: []const u8,
+    local_filesystem: bool,
+    can_create_edge: bool,
 };
 
 pub const EdgeTarget = struct {
@@ -25,7 +32,7 @@ pub const ProjectTarget = struct {
 };
 
 pub const Target = union(enum) {
-    background,
+    background: BackgroundTarget,
     quick_chats,
     project: ProjectTarget,
     node: NodeTarget,
@@ -143,10 +150,33 @@ pub fn show(
     context: ?*anyopaque,
     callback: Callback,
 ) void {
-    const menu = c.CreatePopupMenu() orelse return;
+    const menu = buildMenu(target) orelse return;
     defer _ = c.DestroyMenu(menu);
+    const command = c.TrackPopupMenu(
+        menu,
+        c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON,
+        x,
+        y,
+        0,
+        parent,
+        null,
+    );
+    const action = actionForCommand(command);
+    if (action != .none) callback(context, action, target);
+}
+
+fn buildMenu(target: Target) c.HMENU {
+    const menu = c.CreatePopupMenu() orelse return null;
     switch (target) {
-        .background => append(menu, ids.create_edge, "Create Edge"),
+        .background => |background| {
+            if (!std.mem.eql(u8, background.project_path, "graphcode://global")) {
+                appendEnabled(menu, ids.inspect_project_worktrees, "Worktrees...", background.local_filesystem);
+                appendEnabled(menu, ids.project_settings, "Project Settings...", background.local_filesystem);
+                appendEnabled(menu, ids.reveal_project, "Show in Explorer", background.local_filesystem);
+                separator(menu);
+            }
+            appendEnabled(menu, ids.create_edge, "Create Edge", background.can_create_edge);
+        },
         .quick_chats => append(menu, ids.new_quick_chat, "New Chat"),
         .project => |project| {
             append(menu, ids.open_project, "Open Project");
@@ -185,7 +215,7 @@ pub fn show(
             append(menu, ids.save_node_template, "Save as Template...");
             if (node.follows_template) append(menu, ids.detach_template, "Detach from Template");
             append(menu, ids.rename_node, "Rename...\tF2");
-            append(menu, ids.stop_node, "Stop\tCtrl+S");
+            if (!node.resolved) append(menu, ids.stop_node, "Stop\tCtrl+S");
             append(menu, ids.delete_node, "Delete Loop...\tDelete");
         },
         .edge => {
@@ -198,17 +228,7 @@ pub fn show(
             append(menu, ids.delete_quick_chat, "Delete Chat...\tCtrl+Shift+Delete");
         },
     }
-    const command = c.TrackPopupMenu(
-        menu,
-        c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON,
-        x,
-        y,
-        0,
-        parent,
-        null,
-    );
-    const action = actionForCommand(command);
-    if (action != .none) callback(context, action, target);
+    return menu;
 }
 
 pub fn confirm(parent: c.HWND, title: []const u8, message: []const u8) bool {
@@ -285,7 +305,90 @@ fn toWide(text: []const u8) ?[]u16 {
 
 const std = @import("std");
 
+test "background menu exposes supported folder actions and gates edge creation" {
+    const menu = buildMenu(.{ .background = .{
+        .project_path = "C:\\fixture",
+        .local_filesystem = true,
+        .can_create_edge = false,
+    } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(menu);
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.inspect_project_worktrees, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.project_settings, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.reveal_project, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_GRAYED), c.GetMenuState(menu, ids.create_edge, c.MF_BYCOMMAND));
+}
+
+test "resolved node menu hides Stop but retains rename and edit details" {
+    const menu = buildMenu(.{ .node = .{
+        .project_path = "C:\\fixture",
+        .id = "node-a",
+        .resolved = true,
+    } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(menu);
+    try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.stop_node, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.rename_node, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, ids.edit_node, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.message_node, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.memo_node, c.MF_BYCOMMAND));
+}
+
+test "background menu disables unavailable folder actions and omits them for global scope" {
+    const remote = buildMenu(.{ .background = .{
+        .project_path = "ssh://builder/fixture",
+        .local_filesystem = false,
+        .can_create_edge = true,
+    } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(remote);
+    for ([_]c.UINT{ ids.inspect_project_worktrees, ids.project_settings, ids.reveal_project }) |id|
+        try std.testing.expectEqual(@as(c.UINT, c.MF_GRAYED), c.GetMenuState(remote, id, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(remote, ids.create_edge, c.MF_BYCOMMAND));
+
+    const global = buildMenu(.{ .background = .{
+        .project_path = "graphcode://global",
+        .local_filesystem = false,
+        .can_create_edge = false,
+    } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(global);
+    try std.testing.expectEqual(@as(c_int, 1), c.GetMenuItemCount(global));
+    try std.testing.expectEqual(@as(c.UINT, ids.create_edge), c.GetMenuItemID(global, 0));
+}
+
+test "native node menu variants expose only eligible actions" {
+    for ([_]bool{ false, true }) |can_arm| {
+        const menu = buildMenu(.{ .node = .{
+            .project_path = "C:\\fixture",
+            .id = "node-b",
+            .composite = true,
+            .can_arm = can_arm,
+            .follows_template = true,
+        } }) orelse return error.MenuCreationFailed;
+        defer _ = c.DestroyMenu(menu);
+        try std.testing.expectEqual(@as(c.UINT, if (can_arm) c.MF_ENABLED else c.MF_GRAYED), c.GetMenuState(menu, ids.arm_composite, c.MF_BYCOMMAND));
+        for ([_]c.UINT{ ids.open_composite, ids.pilot_composite, ids.stop_node, ids.detach_template }) |id|
+            try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(menu, id, c.MF_BYCOMMAND));
+        try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(menu, ids.wire_node, c.MF_BYCOMMAND));
+    }
+    const unwired = buildMenu(.{ .node = .{
+        .project_path = "C:\\fixture",
+        .id = "node-c",
+        .unwired = true,
+    } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(unwired);
+    for ([_]c.UINT{ ids.wire_node, ids.mark_entry, ids.stop_node }) |id|
+        try std.testing.expectEqual(@as(c.UINT, c.MF_ENABLED), c.GetMenuState(unwired, id, c.MF_BYCOMMAND));
+    try std.testing.expectEqual(std.math.maxInt(c.UINT), c.GetMenuState(unwired, ids.arm_composite, c.MF_BYCOMMAND));
+}
+
+test "edge menu preserves edit and delete command ordering" {
+    const menu = buildMenu(.{ .edge = .{ .project_path = "C:\\fixture", .id = "edge-a" } }) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(menu);
+    try std.testing.expectEqual(@as(c_int, 2), c.GetMenuItemCount(menu));
+    try std.testing.expectEqual(@as(c.UINT, ids.edit_edge), c.GetMenuItemID(menu, 0));
+    try std.testing.expectEqual(@as(c.UINT, ids.delete_edge), c.GetMenuItemID(menu, 1));
+}
+
 test "context actions remain stable when graph IDs are reordered" {
+    try std.testing.expectEqual(Action.edit_node, actionForCommand(ids.edit_node));
     try std.testing.expectEqual(Action.rename_node, actionForCommand(ids.rename_node));
     try std.testing.expectEqual(Action.delete_edge, actionForCommand(ids.delete_edge));
     try std.testing.expectEqual(Action.none, actionForCommand(0));
