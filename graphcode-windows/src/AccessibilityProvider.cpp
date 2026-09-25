@@ -19,6 +19,22 @@ constexpr WPARAM kSelectionCommandTag = 0xc000000000000000ULL;
 constexpr WPARAM kDynamicInvokeTag = 0x8000000000000000ULL;
 constexpr WPARAM kSelectionOperationMask = 0x3000000000000000ULL;
 constexpr int kSelectionOperationShift = 60;
+constexpr UINT kHeaderFocusMessage = WM_APP + 46;
+
+static bool isHeader(const std::string &identity) {
+  return identity == "header-attention:needs-you" ||
+      identity == "header-worktree:worktrees" ||
+      identity == "header-jump:jump" ||
+      identity == "header-toggle-panel:control";
+}
+
+static bool hasHeaderNativeFocus(HWND hwnd) {
+  GUITHREADINFO info{};
+  info.cbSize = sizeof(info);
+  return GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, nullptr), &info) &&
+      info.hwndFocus == hwnd && GetForegroundWindow() == hwnd &&
+      IsWindowEnabled(hwnd);
+}
 
 enum SelectionOperation { kSelect = 0, kAdd = 1, kRemove = 2 };
 
@@ -108,7 +124,7 @@ class Node final : public IRawElementProviderSimple,
     else if (iid == __uuidof(ISelectionProvider) &&
              ((id_ >= 1 && id_ <= 4) || id_ == 21))
       *out = static_cast<ISelectionProvider *>(this);
-    else if (iid == __uuidof(ISelectionItemProvider) && isAvailableRow())
+    else if (iid == __uuidof(ISelectionItemProvider) && supportsSelectionItem())
       *out = static_cast<ISelectionItemProvider *>(this);
     else if (iid == __uuidof(IToggleProvider) && (id_ == 12 || id_ == 13))
       *out = static_cast<IToggleProvider *>(this);
@@ -142,7 +158,7 @@ class Node final : public IRawElementProviderSimple,
     else if (id == UIA_SelectionPatternId &&
              ((id_ >= 1 && id_ <= 4) || id_ == 21))
       *value = static_cast<ISelectionProvider *>(this);
-    else if (id == UIA_SelectionItemPatternId && isAvailableRow())
+    else if (id == UIA_SelectionItemPatternId && supportsSelectionItem())
       *value = static_cast<ISelectionItemProvider *>(this);
     else if (id == UIA_TogglePatternId && (id_ == 12 || id_ == 13))
       *value = static_cast<IToggleProvider *>(this);
@@ -177,16 +193,21 @@ class Node final : public IRawElementProviderSimple,
         if (isRowKey(id_)) {
           const Row &row = state_->rows.at(id_);
           const bool sidebar_error_footer =
-              row.identity.rfind("sidebar-error-footer:", 0) == 0;
+              row.identity.rfind("sidebar-error-footer:", 0) == 0 ||
+              row.identity.rfind("workspace-toolbar:", 0) == 0;
           bool_value = sidebar_error_footer
               ? (property != UIA_IsKeyboardFocusablePropertyId)
               : true;
+          if (property == UIA_IsEnabledPropertyId && isHeader(row.identity))
+            bool_value = IsWindowEnabled(state_->hwnd) != FALSE;
         } else {
           bool_value = true;
         }
         kind = kBool;
       } else if (property == UIA_HasKeyboardFocusPropertyId) {
         bool_value = state_->focused == id_;
+        if (isRowKey(id_) && isHeader(state_->rows.at(id_).identity))
+          bool_value = bool_value && hasHeaderNativeFocus(state_->hwnd);
         kind = kBool;
       } else if (property == UIA_LiveSettingPropertyId && id_ == 6) {
         integer_value = 1;
@@ -345,12 +366,27 @@ class Node final : public IRawElementProviderSimple,
   HRESULT STDMETHODCALLTYPE SetFocus() override {
     bool changed = false;
     HWND hwnd = nullptr;
+    bool header = false;
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
-      changed = state_->focused != id_;
-      state_->focused = id_;
+      header = isRowKey(id_) && isHeader(state_->rows.at(id_).identity);
+      if (!header) {
+        changed = state_->focused != id_;
+        state_->focused = id_;
+      }
       hwnd = state_->hwnd;
+    }
+    if (header) {
+      DWORD_PTR result = 0;
+      SetLastError(ERROR_SUCCESS);
+      if (!SendMessageTimeoutW(hwnd, kHeaderFocusMessage,
+              static_cast<WPARAM>(id_) & kRowPayloadMask, 0,
+              SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result)) {
+        const DWORD error = GetLastError();
+        return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_TIMEOUT : error);
+      }
+      return result ? S_OK : UIA_E_INVALIDOPERATION;
     }
     if (hwnd) {
       const DWORD current_thread = GetCurrentThreadId();
@@ -499,6 +535,37 @@ class Node final : public IRawElementProviderSimple,
     if (id_ == 12) *value = state_->allow_reclaim ? ToggleState_On : ToggleState_Off;
     else if (id_ == 13) *value = state_->confirm_each_reclaim ? ToggleState_On : ToggleState_Off;
     else return UIA_E_INVALIDOPERATION;
+    return S_OK;
+  }
+
+  HRESULT setHeaderFocus(const char *identity) {
+    Node *focused = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!state_->active) return UIA_E_ELEMENTNOTAVAILABLE;
+      int64_t next = 0;
+      if (identity) {
+        for (const auto &item : state_->rows) {
+          if (isHeader(item.second.identity) && item.second.identity == identity) {
+            next = item.first;
+            break;
+          }
+        }
+        if (!next) return UIA_E_ELEMENTNOTAVAILABLE;
+      } else {
+        const auto previous = state_->rows.find(state_->focused);
+        if (previous == state_->rows.end() || !isHeader(previous->second.identity))
+          return S_OK;
+      }
+      if (state_->focused == next) return S_OK;
+      state_->focused = next;
+      focused = retainElementLocked(next);
+    }
+    if (focused) {
+      UiaRaiseAutomationEvent(static_cast<IRawElementProviderSimple *>(focused),
+          UIA_AutomationFocusChangedEventId);
+      focused->Release();
+    }
     return S_OK;
   }
 
@@ -702,6 +769,12 @@ class Node final : public IRawElementProviderSimple,
     std::lock_guard<std::mutex> lock(state_->mutex);
     return isAvailableLocked() && isRowKey(id_);
   }
+  bool supportsSelectionItem() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked() || !isRowKey(id_)) return false;
+    const Row &row = state_->rows.at(id_);
+    return !isHeader(row.identity) && row.identity.rfind("workspace-toolbar:", 0) != 0;
+  }
   int64_t rowKeyForIdentityLocked(
       const std::string &identity,
       const std::unordered_map<int64_t, Row> &pending) const {
@@ -899,6 +972,8 @@ class Node final : public IRawElementProviderSimple,
     if (id_ >= 1 && id_ <= 3) return UIA_ListControlTypeId;
     if (isRowKey(id_)) {
       const Row &row = state_->rows.at(id_);
+      if (isHeader(row.identity)) return UIA_ButtonControlTypeId;
+      if (row.identity.rfind("workspace-toolbar:", 0) == 0) return UIA_TextControlTypeId;
       if (row.identity.rfind("sidebar-error-footer:", 0) == 0) {
         return UIA_TextControlTypeId;
       }
@@ -931,6 +1006,9 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      const auto row = state_->rows.find(state_->focused);
+      if (row != state_->rows.end() && isHeader(row->second.identity) &&
+          !hasHeaderNativeFocus(state_->hwnd)) return S_OK;
       focused = retainElementLocked(state_->focused);
     }
     if (focused) *value = static_cast<IRawElementProviderFragment *>(focused);
@@ -982,6 +1060,7 @@ class Node final : public IRawElementProviderSimple,
       if (!isAvailableLocked() || !isRowKey(id_))
         return UIA_E_ELEMENTNOTAVAILABLE;
       const auto selected = state_->rows.find(id_);
+      if (isHeader(selected->second.identity)) return UIA_E_INVALIDOPERATION;
       if (selected->second.parent != 3) {
         if (operation == kRemove || !selected->second.invokable)
           return UIA_E_INVALIDOPERATION;
@@ -1040,6 +1119,11 @@ extern "C" void gc_uia_release(IRawElementProviderSimple *provider) {
     static_cast<Node *>(provider)->shutdown();
     provider->Release();
   }
+}
+
+extern "C" HRESULT gc_uia_set_header_focus(IRawElementProviderSimple *provider,
+                                            const char *identity) {
+  return provider ? static_cast<Node *>(provider)->setHeaderFocus(identity) : E_POINTER;
 }
 
 extern "C" LRESULT gc_uia_get_object(HWND hwnd, WPARAM wparam, LPARAM lparam,
