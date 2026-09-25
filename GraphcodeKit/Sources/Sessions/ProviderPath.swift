@@ -59,17 +59,17 @@ public enum ProviderPath {
       if found { await FoundCache.shared.record(executable) }
       return found
     #else
-    guard
-      let shell = invocation.first,
-      let session = try? PTYProcessSession(
-        executable: shell, arguments: Array(invocation.dropFirst()))
-    else { return nil }
-    guard let found = await withDeadline(deadline, { await session.waitUntilFinished() }) else {
-      session.terminate()
-      return nil
-    }
-    if found { await FoundCache.shared.record(executable) }
-    return found
+      guard
+        let shell = invocation.first,
+        let session = try? PTYProcessSession(
+          executable: shell, arguments: Array(invocation.dropFirst()))
+      else { return nil }
+      guard let found = await withDeadline(deadline, { await session.waitUntilFinished() }) else {
+        session.terminate()
+        return nil
+      }
+      if found { await FoundCache.shared.record(executable) }
+      return found
     #endif
   }
 

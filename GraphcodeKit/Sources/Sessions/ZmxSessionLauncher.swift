@@ -2580,12 +2580,12 @@ public enum ZmxSessionLauncher {
         ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
       let executable = "/bin/sh"
       let arguments = ["-c", script]
-    guard
-      let session = try? PTYProcessSession(
-        executable: executable, arguments: arguments,
-        workingDirectory: workingDirectory)
-    else { return }
-    _ = await session.waitUntilFinished()
+      guard
+        let session = try? PTYProcessSession(
+          executable: executable, arguments: arguments,
+          workingDirectory: workingDirectory)
+      else { return }
+      _ = await session.waitUntilFinished()
     #endif
   }
 
