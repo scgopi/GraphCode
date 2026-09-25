@@ -107,7 +107,7 @@ struct GraphcodeCommands: Commands {
 
       Button("Send Message to All Loops…") { store.send(.sessionRestart(.broadcastTapped)) }
         .keyboardShortcut("m", modifiers: [.command, .shift])
-        .disabled(!store.projects.contains { $0.graph.liveLoopCount > 0 })
+        .disabled(!store.projects.contains { $0.graph.broadcastLoopCount > 0 })
     }
 
     CommandMenu("Terminal") {

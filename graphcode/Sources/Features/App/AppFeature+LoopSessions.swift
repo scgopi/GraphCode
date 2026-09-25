@@ -157,7 +157,7 @@ extension AppFeature {
           .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return .none }
         state.sessionRestart.broadcastDraft = nil
-        let paths = state.projects.filter { $0.graph.liveLoopCount > 0 }.map(\.id)
+        let paths = state.projects.filter { $0.graph.broadcastLoopCount > 0 }.map(\.id)
         return .run { _ in
           for path in paths {
             try? await orchestratorClient.send(
@@ -245,5 +245,5 @@ extension AppFeature {
 }
 
 extension LoopGraph {
-  var liveLoopCount: Int { broadcastTargets.count }
+  var broadcastLoopCount: Int { broadcastTargets.count }
 }

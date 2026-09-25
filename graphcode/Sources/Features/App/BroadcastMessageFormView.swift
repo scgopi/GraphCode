@@ -2,7 +2,7 @@ import ComposableArchitecture
 import GraphcodeKit
 import SwiftUI
 
-/// Send Message to All Loops… — one message typed into every live loop's session, in
+/// Send Message to All Loops… — one message for every loop's session, in
 /// every open project, the way `graphcode node send` types into one. A sheet rather than
 /// an alert with a field for the reason every text entry here is one: it has to take the
 /// keyboard over a terminal that holds first responder.
@@ -48,19 +48,20 @@ struct BroadcastMessageFormView: View {
       set: { store.send(.sessionRestart(.broadcastDraftChanged($0))) })
   }
 
-  private var liveLoops: Int {
-    store.projects.reduce(0) { $0 + $1.graph.liveLoopCount }
+  private var loopCount: Int {
+    store.projects.reduce(0) { $0 + $1.graph.broadcastLoopCount }
   }
 
   private var canSend: Bool {
-    liveLoops > 0
+    loopCount > 0
       && !(store.sessionRestart.broadcastDraft ?? "")
         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   private var summary: String {
-    let loops = liveLoops == 1 ? "1 live loop" : "\(liveLoops) live loops"
-    return "Typed into the sessions of \(loops) across your open projects, as if sent with "
-      + "graphcode node send. Loops that aren't running right now don't get it. ⌘↩ sends."
+    let loops = loopCount == 1 ? "1 loop" : "\(loopCount) loops"
+    return "Sent to all \(loops) across your open projects, as if with graphcode node send: "
+      + "typed into each session that can take it, and saved to the others' memory for "
+      + "their next wake. ⌘↩ sends."
   }
 }
