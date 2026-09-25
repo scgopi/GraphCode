@@ -12,10 +12,20 @@ public enum ProviderPath {
   /// from `~/.zshrc`. `whence -p` rather than `command -v`: the launch `exec`s the agent,
   /// which only a file on PATH satisfies, so an alias of the same name must not count.
   public static func probeInvocation(for executable: String) -> [String] {
-    [
-      "/bin/zsh", "-i", "-l", "-c",
-      "whence -p -- \(RemoteProjectLocation.shellQuoted(executable)) >/dev/null 2>&1",
-    ]
+    #if os(Windows)
+      let systemRoot = ProcessInfo.processInfo.environment["SystemRoot"] ?? "C:\\Windows"
+      return [
+        URL(fileURLWithPath: systemRoot)
+          .appendingPathComponent("System32")
+          .appendingPathComponent("where.exe").path,
+        executable,
+      ]
+    #else
+      return [
+        "/bin/zsh", "-i", "-l", "-c",
+        "whence -p -- \(RemoteProjectLocation.shellQuoted(executable)) >/dev/null 2>&1",
+      ]
+    #endif
   }
 
   /// `nil` when the shell did not answer in time: a slow `~/.zshrc` says nothing about
@@ -25,6 +35,30 @@ public enum ProviderPath {
   {
     if await FoundCache.shared.isFresh(executable) { return true }
     let invocation = probeInvocation(for: executable)
+    #if os(Windows)
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: invocation[0])
+      process.arguments = Array(invocation.dropFirst())
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      do {
+        try process.run()
+      } catch {
+        return nil
+      }
+      let found = await withDeadline(deadline) {
+        await Task.detached {
+          process.waitUntilExit()
+          return process.terminationStatus == 0
+        }.value
+      }
+      guard let found else {
+        if process.isRunning { process.terminate() }
+        return nil
+      }
+      if found { await FoundCache.shared.record(executable) }
+      return found
+    #else
     guard
       let shell = invocation.first,
       let session = try? PTYProcessSession(
@@ -36,6 +70,7 @@ public enum ProviderPath {
     }
     if found { await FoundCache.shared.record(executable) }
     return found
+    #endif
   }
 
   /// The failure launching `node` would hit, or `nil`. Always `nil` for a remote project:

@@ -3139,7 +3139,7 @@ public actor GraphStore {
       // the cycle may begin.
       if edge.fireCount > 0 {
         if let until = edge.cycleGuard?.effectiveUntil, let onEvaluatePredicate {
-          let workingDirectory = graph.nodes[id: edge.from]?.worktreeBinding?.worktreePath
+          let workingDirectory = graph.nodes[id: edge.from].flatMap(predicateWorkingDirectory)
           let satisfied = await onEvaluatePredicate(
             ShellPredicate(command: until, workingDirectory: workingDirectory))
           // The condition holds, so the loop is done — stop without another pass.
@@ -3175,7 +3175,7 @@ public actor GraphStore {
       let command = goal.effectiveMetricCommand, let onCaptureScript
     else { return }
     let output = await onCaptureScript(
-      ShellPredicate(command: command, workingDirectory: node.worktreeBinding?.worktreePath))
+      ShellPredicate(command: command, workingDirectory: predicateWorkingDirectory(for: node)))
     guard let output, let value = MetricTrend.value(fromScriptOutput: output) else {
       recordMemory(nodeID, "metric: not measured (command failed or printed no number)")
       return
@@ -3249,7 +3249,7 @@ public actor GraphStore {
     case .script(let command):
       guard let onCaptureScript else { return nil }
       return await onCaptureScript(
-        ShellPredicate(command: command, workingDirectory: source.worktreeBinding?.worktreePath))
+        ShellPredicate(command: command, workingDirectory: predicateWorkingDirectory(for: source)))
     }
   }
 
@@ -3949,7 +3949,7 @@ public actor GraphStore {
       return
     }
     let shellPredicate = ShellPredicate(
-      command: predicate, workingDirectory: node.worktreeBinding?.worktreePath)
+      command: predicate, workingDirectory: predicateWorkingDirectory(for: node))
 
     var fingerprint: String?
     if goal.skipsUnchangedWorkspace, !forcePredicate, let onCaptureScript {
@@ -3983,6 +3983,7 @@ public actor GraphStore {
         goalCache.setReawakened(fingerprint, for: nodeID)
         goalCache.clearFeedback(for: nodeID)
       }
+
     }
 
     let outcome: PredicateOutcome
@@ -4006,6 +4007,14 @@ public actor GraphStore {
     }
     if let fingerprint { goalCache.setFingerprint(fingerprint, for: nodeID) }
     await relayPredicateFailure(to: current, predicate: predicate, outcome: outcome)
+  }
+
+  /// Imported loops deliberately drop machine-specific worktree bindings. Local
+  /// predicates still belong to the graph's project, not the daemon's launch folder.
+  private func predicateWorkingDirectory(for node: LoopNode) -> String? {
+    if let worktreePath = node.worktreeBinding?.worktreePath { return worktreePath }
+    guard RemoteProjectLocation.parse(projectPath: graph.project.path) == nil else { return nil }
+    return graph.project.path
   }
 
   /// A verdict counts only for the goal it was recorded against. One dated before the goal

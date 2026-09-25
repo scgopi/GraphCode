@@ -371,8 +371,26 @@ public enum ZmxSessionLauncher {
 
   static func loginShellInvocation(
     of command: String, arguments: [String], environment: [String: String] = [:],
-    scriptSuffix: String = ""
+    scriptSuffix: String = "", usesWindowsShell: Bool = false
   ) -> [String] {
+    #if os(Windows)
+      if usesWindowsShell {
+        let environmentPrefix = environment.keys.sorted().flatMap { key in
+          let value = environment[key] ?? ""
+          let inheritedPrefix = "${\(key):+$\(key),}"
+          let windowsValue: String
+          if value.hasPrefix(inheritedPrefix) {
+            let suffix = String(value.dropFirst(inheritedPrefix.count))
+            windowsValue =
+              ProcessInfo.processInfo.environment[key].map { "\($0),\(suffix)" } ?? suffix
+          } else {
+            windowsValue = value
+          }
+          return ["set", "\(key)=\(windowsValue)", "&&"]
+        }
+        return environmentPrefix + [command] + arguments
+      }
+    #endif
     // `env K=V …` rather than exporting: it scopes the variables to this one process, and
     // keeps the script a single `exec` so the shell doesn't linger as a parent. Values are
     // double-quoted because a project path can contain spaces; the whole script is one
@@ -1293,7 +1311,7 @@ public enum ZmxSessionLauncher {
         environment: Self.environment(
           forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
           remoteHooksPath: remoteEnvironmentPath),
-        scriptSuffix: remoteHooksSuffix)
+        scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
     // discards everything past `MAX_CANON` (1024 bytes on macOS). Overrunning it does not
@@ -1324,7 +1342,7 @@ public enum ZmxSessionLauncher {
             environment: Self.environment(
               forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
               remoteHooksPath: remoteEnvironmentPath),
-            scriptSuffix: remoteHooksSuffix)
+            scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
       }
       let unbriefedCommand = shed(prompt: promptWithMemory, briefingPath: nil, extraPath: nil)
 
@@ -1462,7 +1480,7 @@ public enum ZmxSessionLauncher {
             forBackend: node.backend, projectPath: projectPath, isRemote: remote != nil,
             settings: settings),
           hooksFile: hooksFile, remoteHooksPath: remoteEnvironmentPath),
-        scriptSuffix: remoteHooksSuffix)
+        scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
   }
 
   /// Stands in for a remote session ID that this machine cannot know: the ID was written
@@ -2532,13 +2550,23 @@ public enum ZmxSessionLauncher {
   ) async {
     let run = quotedCommand([zmxPath] + runArguments)
     #if os(Windows)
-      // `logFragment` is POSIX shell — `mkdir -p`, `wc`, `printf`, `$HOME` — so it cannot
-      // ride inside a `cmd.exe` script. Windows ensures therefore run unlogged rather
-      // than with a fragment quoted into something that would not execute; the Swift-side
-      // `DialLog.record` is the path to route this through when it is wired up.
-      let script = "\(checkCommand) >NUL 2>&1 || \(run)"
-      let executable = "cmd.exe"
-      let arguments = ["/d", "/s", "/c", script]
+      // Windows zmx receives argv directly. POSIX shell quoting turns paths and prompts
+      // into literal single-quoted text under cmd.exe, so launch the provider without a
+      // shell. zmx rejects a duplicate session atomically, preserving the check-or-create
+      // race guarantee without translating the POSIX readiness probe.
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: zmxPath)
+      process.arguments = runArguments
+      if let workingDirectory {
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
+      }
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
+      do {
+        try process.run()
+        await Task.detached { process.waitUntilExit() }.value
+      } catch {}
+      return
     #else
       // The stamp rides in the run branch, after the launch it describes and only if
       // that launch was made. Repair precedes relaunch so an alive unlabelled session
@@ -2552,13 +2580,13 @@ public enum ZmxSessionLauncher {
         ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
       let executable = "/bin/sh"
       let arguments = ["-c", script]
-    #endif
     guard
       let session = try? PTYProcessSession(
         executable: executable, arguments: arguments,
         workingDirectory: workingDirectory)
     else { return }
     _ = await session.waitUntilFinished()
+    #endif
   }
 
 }
