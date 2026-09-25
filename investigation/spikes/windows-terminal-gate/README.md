@@ -11,17 +11,31 @@ session/ConPTY lifetime.
 `provider-pins.json` records the accepted provider commits:
 
 - Winghostty `f5abc059e4ca58b376eb209313aca7784659c679`
-- zmx `029e11d2b19162fb3bdf90c8270237d303b8bfb4`
+- zmx `11e20c738b4ebd88031c7a01f1a9d938ee123234`
 
 Both commits are published on dedicated branches in the public `coneilen`
 provider repositories. The bootstrap creates detached, exact-revision
 checkouts without copying provider source into GraphCode.
 
-The annotated `graphcode-windows-baseline-2026-09-17` tag preserves each exact
-pin. The provider forks protect these tags against updates/deletion and the
-dedicated branches against deletion/history rewrites; see
+The annotated `graphcode-windows-baseline-2026-09-17` tags preserve the original
+baseline sources, including zmx `029e11d2b19162fb3bdf90c8270237d303b8bfb4`,
+not the current zmx pin. The provider forks protect these tags against
+updates/deletion and the dedicated branches against deletion/history rewrites; see
 `Tools\windows\PACKAGING.md` for the recorded ruleset IDs and retention limits.
 These are source-retention tags, not signed Windows releases.
+
+The current zmx pin is the merged startup fix from
+[coneilen/zmx#2](https://github.com/coneilen/zmx/pull/2). A closed readiness probe
+can produce native `NO_DATA`/`BrokenPipe`; the ConPTY accept loop now tolerates
+recognized peer disconnects. Transport rearm retains the pipe instance on
+disconnect and creates its replacement before closing it on timeout/cancellation.
+This does not add client retries or weaken ACLs. Long configured-root
+`SetFileSecurityW` path failures and concurrent POSIX TaskComplete-before-Ack
+ordering remain outside this fix.
+
+`graphcode-windows\fixtures\zmx-quick-chat-provider.json` is historical
+quick-chat provenance at the old provider SHA and recorded source/executable
+paths. It is not an active pin assertion or evidence of a build at the new SHA.
 
 `graphcode-windows\provider-pins.json` is authoritative. The terminal gate's
 contract compares its schema and all provider fields against this copy, and

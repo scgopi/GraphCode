@@ -57,6 +57,16 @@ try {
     param($product, $gate)
     $product.schemaVersion = 2
   } "provider pin schemas differ"
+  foreach ($rejectedSha in @(
+      "029e11d2b19162fb3bdf90c8270237d303b8bfb4",
+      "56caff0df61b122c89633e6ad39b8f2c1aafba11"
+    )) {
+    Test-Pins "matching unaccepted zmx SHA $rejectedSha" {
+      param($product, $gate)
+      $product.zmx.sha = $rejectedSha
+      $gate.zmx.sha = $rejectedSha
+    } "zmx SHA is not exact"
+  }
   Test-Pins "matching sources" { param($product, $gate) } ""
   Test-Pins "order and explanatory metadata" {
     param($product, $gate)
