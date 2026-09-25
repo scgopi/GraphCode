@@ -5,6 +5,8 @@ const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
+const Dpi = @import("Dpi.zig");
+const AppFont = @import("AppFont.zig");
 const ModalTeardown = @import("ModalTeardown.zig");
 
 extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, max_files: c.DWORD) callconv(.c) c_int;
@@ -15,6 +17,7 @@ const DialogState = struct {
     parent: c.HWND,
     result: bool = false,
     closed: bool = false,
+    dpi: u32 = Dpi.base_dpi,
     scroll_offset: i32 = 0,
     checks: [3]c.HWND = .{ null, null, null },
     labels: [256]c.HWND = .{null} ** 256,
@@ -88,6 +91,33 @@ const ok_id = 1;
 const cancel_id = 2;
 const reveal_id = 3;
 const templates_id = 4;
+
+const form_width: i32 = 760;
+const form_max_height: i32 = 760;
+const form_min_height: i32 = 420;
+const form_margin: i32 = 24;
+const form_fields_top: i32 = 76;
+const form_footer_height: i32 = 64;
+const form_label_height: i32 = 22;
+const form_input_height: i32 = 32;
+const form_help_height: i32 = 20;
+const form_row_height: i32 = 84;
+const tile_row_height: i32 = 204;
+const attachment_section_height: i32 = 176;
+
+fn scaled(state: *const DialogState, value: i32) i32 {
+    return Dpi.scale(value, state.dpi);
+}
+
+fn formContentWidth(hwnd: c.HWND, state: *const DialogState) i32 {
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    return @max(scaled(state, 240), client.right - scaled(state, form_margin * 2));
+}
+
+fn formViewportHeight(hwnd: c.HWND, state: *const DialogState) i32 {
+    return @max(scaled(state, 120), clientHeight(hwnd) - scaled(state, form_footer_height));
+}
 
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
@@ -486,6 +516,13 @@ pub fn update(
         freeValues(state);
         allocator.destroy(state);
     }
+    try initializeNodeUpdate(state, initial);
+    if (!(try show(state, "Update node", &.{}))) return null;
+    return try buildNodeUpdate(state, initial);
+}
+
+fn initializeNodeUpdate(state: *DialogState, initial: Forms.NodeUpdate) !void {
+    const allocator = state.allocator;
     state.values[0] = try dupOptional(allocator, initial.goal_summary);
     state.values[1] = try dupOptional(allocator, initial.goal_predicate);
     state.values[2] = try dupFloat(allocator, initial.poll_interval_seconds);
@@ -496,20 +533,24 @@ pub fn update(
     state.values[7] = try dupOptional(allocator, initial.check_description);
     state.values[8] = try dupOptional(allocator, initial.model_tier);
     for (0..9) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
-    if (!(try show(state, "Update node", &.{}))) return null;
+}
+
+fn buildNodeUpdate(state: *const DialogState, initial: Forms.NodeUpdate) !?Forms.NodeUpdate {
+    if (!state.result) return null;
+    const allocator = state.allocator;
     const poll_interval = try changedFloat(state.values[2], initial.poll_interval_seconds, false);
     const stall_after = try changedFloat(state.values[3], initial.stall_after_seconds, true);
     var result = Forms.NodeUpdate{};
     errdefer result.deinit(allocator);
-    result.goal_summary = try changedOptional(allocator, state.values[0], initial.goal_summary, false);
-    result.goal_predicate = try changedOptional(allocator, state.values[1], initial.goal_predicate, true);
+    result.goal_summary = try changedOptional(allocator, state.values[0], state.initial_values[0], false);
+    result.goal_predicate = try changedOptional(allocator, state.values[1], state.initial_values[1], true);
     result.poll_interval_seconds = poll_interval;
     result.stall_after_seconds = stall_after;
-    result.metric_command = try changedOptional(allocator, state.values[4], initial.metric_command, true);
-    result.metric_direction = try changedOptional(allocator, state.values[5], initial.metric_direction, false);
-    result.trigger_prompt = try changedOptional(allocator, state.values[6], initial.trigger_prompt, true);
-    result.check_description = try changedOptional(allocator, state.values[7], initial.check_description, true);
-    result.model_tier = try changedOptional(allocator, state.values[8], initial.model_tier, false);
+    result.metric_command = try changedOptional(allocator, state.values[4], state.initial_values[4], true);
+    result.metric_direction = try changedOptional(allocator, state.values[5], state.initial_values[5], false);
+    result.trigger_prompt = try changedOptional(allocator, state.values[6], state.initial_values[6], true);
+    result.check_description = try changedOptional(allocator, state.values[7], state.initial_values[7], true);
+    result.model_tier = try changedOptional(allocator, state.values[8], state.initial_values[8], false);
     Forms.validateNodeUpdate(result) catch return error.InvalidNodeUpdate;
     return result;
 }
@@ -708,8 +749,13 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     active_state_storage = state.*;
     active_state_storage.closed = false;
     active_state_storage.result = false;
+    active_state_storage.dpi = Dpi.normalize(Win32.dpiForWindow(state.parent));
     const screen_height = c.GetSystemMetrics(c.SM_CYSCREEN);
-    const dialog_height: i32 = if (state.kind == .worktree_policy) 430 else @max(320, @min(700, screen_height - 96));
+    const desired_height = if (state.kind == .worktree_policy) 520 else form_max_height;
+    const dialog_height = @max(
+        Dpi.scale(form_min_height, active_state_storage.dpi),
+        @min(Dpi.scale(desired_height, active_state_storage.dpi), screen_height - Dpi.scale(64, active_state_storage.dpi)),
+    );
     const hwnd = c.CreateWindowExW(
         c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
         class_name.ptr,
@@ -717,7 +763,7 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
         c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
         c.CW_USEDEFAULT,
         c.CW_USEDEFAULT,
-        580,
+        Dpi.scale(form_width, active_state_storage.dpi),
         dialog_height,
         state.parent,
         null,
@@ -861,58 +907,41 @@ fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT
     }
     if (pen != null) _ = c.DeleteObject(pen);
     if (brush != null) _ = c.DeleteObject(brush);
-    const chip = c.RECT{ .left = bounds.left + 12, .top = bounds.top + 10, .right = bounds.left + 20, .bottom = bounds.top + 18 };
+    const chip = c.RECT{
+        .left = bounds.left + scaled(state, 14),
+        .top = bounds.top + scaled(state, 15),
+        .right = bounds.left + scaled(state, 23),
+        .bottom = bounds.top + scaled(state, 24),
+    };
     const chip_brush = c.CreateSolidBrush(choice.accent);
     if (chip_brush != null) {
         _ = c.FillRect(draw_item.hDC, &chip, chip_brush);
         _ = c.DeleteObject(chip_brush);
     }
-    formDrawText(draw_item.hDC, choice.label, .{ .left = bounds.left + 28, .top = bounds.top + 6, .right = bounds.right - 8, .bottom = bounds.top + 24 }, 12, Tokens.dialog_title_text, true);
-    formDrawText(draw_item.hDC, choice.description, .{ .left = bounds.left + 12, .top = bounds.top + 28, .right = bounds.right - 8, .bottom = bounds.bottom - 6 }, 10, Tokens.dialog_muted_text, false);
+    formDrawText(draw_item.hDC, choice.label, .{
+        .left = bounds.left + scaled(state, 32),
+        .top = bounds.top + scaled(state, 9),
+        .right = bounds.right - scaled(state, 12),
+        .bottom = bounds.top + scaled(state, 32),
+    }, 14, Tokens.dialog_title_text, true);
+    formDrawText(draw_item.hDC, choice.description, .{
+        .left = bounds.left + scaled(state, 14),
+        .top = bounds.top + scaled(state, 38),
+        .right = bounds.right - scaled(state, 12),
+        .bottom = bounds.bottom - scaled(state, 9),
+    }, 12, Tokens.dialog_muted_text, false);
     if ((draw_item.itemState & c.ODS_FOCUS) != 0) _ = c.DrawFocusRect(draw_item.hDC, &bounds);
-}
-
-// Teaching-tile title/description fonts are painted repeatedly (every
-// WM_DRAWITEM redraw of every tile), so they are created lazily once per
-// process and reused rather than created/destroyed on every paint. This
-// keeps tile-heavy dialogs (e.g. Node creation) as cheap to open and redraw
-// as the plain-control forms they replaced.
-var tile_bold_font: c.HFONT = null;
-var tile_regular_font: c.HFONT = null;
-
-fn cachedTileFont(size: i32, bold: bool) c.HFONT {
-    const slot = if (bold) &tile_bold_font else &tile_regular_font;
-    if (slot.* == null) {
-        slot.* = c.CreateFontW(
-            -size,
-            0,
-            0,
-            0,
-            if (bold) c.FW_SEMIBOLD else c.FW_NORMAL,
-            0,
-            0,
-            0,
-            c.DEFAULT_CHARSET,
-            c.OUT_DEFAULT_PRECIS,
-            c.CLIP_DEFAULT_PRECIS,
-            c.CLEARTYPE_QUALITY,
-            c.DEFAULT_PITCH | c.FF_DONTCARE,
-            std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
-        );
-    }
-    return slot.*;
 }
 
 fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
-    const font = cachedTileFont(size, bold);
-    const old_font = if (font != null) c.SelectObject(hdc, font) else null;
+    const old_font = AppFont.selectForDpi(hdc, size, bold);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = bounds_value;
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_WORDBREAK | c.DT_END_ELLIPSIS);
-    if (font != null) _ = c.SelectObject(hdc, old_font);
+    _ = c.SelectObject(hdc, old_font);
 }
 
 fn configureFields(state: *DialogState) void {
@@ -1099,11 +1128,12 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
-            createButton(safe_hwnd, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 478, client.bottom - 38);
+            createButton(safe_hwnd, value, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 0, 0);
             if (value.kind == .node and value.templates_available)
-                createButton(safe_hwnd, "Templates", templates_id, 300, client.bottom - 38);
-            if (value.kind == .worktree_sweep) createButton(safe_hwnd, "Show in Explorer", reveal_id, 300, client.bottom - 38);
-            createButton(safe_hwnd, "Cancel", cancel_id, 393, client.bottom - 38);
+                createButton(safe_hwnd, value, "Templates", templates_id, 0, 0);
+            if (value.kind == .worktree_sweep) createButton(safe_hwnd, value, "Show in Explorer", reveal_id, 0, 0);
+            createButton(safe_hwnd, value, "Cancel", cancel_id, 0, 0);
+            layoutFooter(safe_hwnd, value);
             return 0;
         },
         c.WM_ERASEBKGND => {
@@ -1125,13 +1155,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             return 0;
         },
         c.WM_SIZE => {
-            var client: c.RECT = undefined;
-            _ = c.GetClientRect(safe_hwnd, &client);
-            _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(ok_id)), 478, client.bottom - 38, 70, 26, 1);
-            _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(cancel_id)), 393, client.bottom - 38, 70, 26, 1);
-            if (value.kind == .node and value.templates_available)
-                _ = c.MoveWindow(c.GetDlgItem(safe_hwnd, @intCast(templates_id)), 300, client.bottom - 38, 82, 26, 1);
-            if (value.validation != null) _ = c.MoveWindow(value.validation, 18, client.bottom - 42, 360, 34, 1);
+            layoutFooter(safe_hwnd, value);
             if (value.kind != .worktree_policy) layoutForm(safe_hwnd, value);
             updateScrollBar(safe_hwnd, value);
             return 0;
@@ -1148,10 +1172,10 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 return 0;
             }
             const delta: i32 = switch (command) {
-                c.SB_LINEUP => -48,
-                c.SB_LINEDOWN => 48,
-                c.SB_PAGEUP => -@as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
-                c.SB_PAGEDOWN => @as(i32, @intCast(@max(48, clientHeight(safe_hwnd) - 60))),
+                c.SB_LINEUP => -scaled(value, 48),
+                c.SB_LINEDOWN => scaled(value, 48),
+                c.SB_PAGEUP => -@as(i32, @intCast(@max(scaled(value, 48), formViewportHeight(safe_hwnd, value) - scaled(value, 12)))),
+                c.SB_PAGEDOWN => @as(i32, @intCast(@max(scaled(value, 48), formViewportHeight(safe_hwnd, value) - scaled(value, 12)))),
                 c.SB_TOP => -100000,
                 c.SB_BOTTOM => 100000,
                 else => 0,
@@ -1161,7 +1185,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         },
         c.WM_MOUSEWHEEL => {
             const wheel_delta: i16 = @bitCast(@as(u16, @truncate(wparam >> 16)));
-            scrollFields(safe_hwnd, value, if (wheel_delta > 0) -48 else 48);
+            scrollFields(safe_hwnd, value, if (wheel_delta > 0) -scaled(value, 48) else scaled(value, 48));
             return 0;
         },
         c.WM_COMMAND => {
@@ -1269,7 +1293,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
 fn createStatic(hwnd: c.HWND, state: *DialogState, text: []const u8, x: i32, y: i32, width: i32, height: i32, output: *c.HWND) void {
     const wide = utf8ToWideZ(state.allocator, text) catch return;
     defer state.allocator.free(wide);
-    output.* = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, x, y, width, height, hwnd, null, c.GetModuleHandleW(null), null);
+    output.* = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, scaled(state, x), scaled(state, y), scaled(state, width), scaled(state, height), hwnd, null, c.GetModuleHandleW(null), null);
+    AppFont.apply(output.*, AppFont.control_size, false);
 }
 
 fn isEndpointCombo(state: *const DialogState, index: usize) bool {
@@ -1321,8 +1346,8 @@ fn endpointIndex(endpoints: []const EdgeEndpoint, value: []const u8) usize {
     return 0;
 }
 
-fn inputControlHeight(kind: InputKind) i32 {
-    return if (kind == .combo) 180 else 24;
+fn inputControlHeight(state: *const DialogState, kind: InputKind) i32 {
+    return scaled(state, if (kind == .combo) 220 else form_input_height);
 }
 
 // Attachments: unlike every other node field, this one is a variable-length list the
@@ -1332,7 +1357,6 @@ fn inputControlHeight(kind: InputKind) i32 {
 // fixed-index field system `createField`/`InputKind` drive everything else through.
 // This keeps every existing field index (and the worktree/subgraph/createdBy
 // pass-through slots at 14-19) completely untouched.
-const attachment_section_height: i32 = 132;
 const attachment_listbox_id = 6;
 
 fn attachmentsVisible(state: *const DialogState) bool {
@@ -1359,17 +1383,18 @@ fn createAttachmentsSection(hwnd: c.HWND, state: *DialogState) void {
         @as(c.DWORD, @intCast(c.WS_CHILD)) | @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
             @as(c.DWORD, @intCast(c.WS_TABSTOP)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)) |
             @as(c.DWORD, @intCast(c.LBS_NOTIFY)),
-        18,
+        scaled(state, 18),
         0,
-        392,
-        84,
+        scaled(state, 392),
+        scaled(state, 84),
         hwnd,
         childId(attachment_listbox_id),
         c.GetModuleHandleW(null),
         null,
     );
-    state.attachment_attach_button = createButtonLabelled(hwnd, "Attach…", attachment_attach_id, 422, 0, 126, 26);
-    state.attachment_remove_button = createButtonLabelled(hwnd, "Remove", attachment_remove_id, 422, 30, 126, 26);
+    AppFont.apply(state.attachment_listbox, AppFont.control_size, false);
+    state.attachment_attach_button = createButtonLabelled(hwnd, state, "Attach…", attachment_attach_id, 422, 0, 126, 32);
+    state.attachment_remove_button = createButtonLabelled(hwnd, state, "Remove", attachment_remove_id, 422, 38, 126, 32);
     createStatic(
         hwnd,
         state,
@@ -1382,36 +1407,43 @@ fn createAttachmentsSection(hwnd: c.HWND, state: *DialogState) void {
     );
 }
 
-fn createButtonLabelled(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, width: i32, height: i32) c.HWND {
+fn createButtonLabelled(hwnd: c.HWND, state: *const DialogState, text: []const u8, id: usize, x: i32, y: i32, width: i32, height: i32) c.HWND {
     const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return null;
     defer std.heap.c_allocator.free(wide);
-    return c.CreateWindowExW(
+    const button = c.CreateWindowExW(
         0,
         std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
         wide.ptr,
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP,
-        x,
-        y,
-        width,
-        height,
+        scaled(state, x),
+        scaled(state, y),
+        scaled(state, width),
+        scaled(state, height),
         hwnd,
         childId(id),
         c.GetModuleHandleW(null),
         null,
     );
+    AppFont.apply(button, AppFont.control_size, false);
+    return button;
 }
 
-fn layoutAttachmentsSection(state: *DialogState, top: i32) void {
+fn layoutAttachmentsSection(hwnd: c.HWND, state: *DialogState, top: i32) void {
     const shown = attachmentsVisible(state);
     const command = if (shown) c.SW_SHOW else c.SW_HIDE;
     for ([_]c.HWND{ state.attachment_label, state.attachment_listbox, state.attachment_attach_button, state.attachment_remove_button, state.attachment_help }) |control|
         _ = c.ShowWindow(control, command);
     if (!shown) return;
-    _ = c.MoveWindow(state.attachment_label, 18, top, 530, 18, 1);
-    _ = c.MoveWindow(state.attachment_listbox, 18, top + 18, 392, 84, 1);
-    _ = c.MoveWindow(state.attachment_attach_button, 422, top + 18, 126, 26, 1);
-    _ = c.MoveWindow(state.attachment_remove_button, 422, top + 48, 126, 26, 1);
-    _ = c.MoveWindow(state.attachment_help, 18, top + 106, 530, 18, 1);
+    const margin = scaled(state, form_margin);
+    const width = formContentWidth(hwnd, state);
+    const button_width = scaled(state, 132);
+    const gap = scaled(state, 12);
+    const list_width = width - button_width - gap;
+    _ = c.MoveWindow(state.attachment_label, margin, top, width, scaled(state, form_label_height), 1);
+    _ = c.MoveWindow(state.attachment_listbox, margin, top + scaled(state, 26), list_width, scaled(state, 106), 1);
+    _ = c.MoveWindow(state.attachment_attach_button, margin + list_width + gap, top + scaled(state, 26), button_width, scaled(state, 32), 1);
+    _ = c.MoveWindow(state.attachment_remove_button, margin + list_width + gap, top + scaled(state, 66), button_width, scaled(state, 32), 1);
+    _ = c.MoveWindow(state.attachment_help, margin, top + scaled(state, 140), width, scaled(state, form_help_height), 1);
 }
 
 fn refreshAttachmentListbox(state: *DialogState) void {
@@ -1586,15 +1618,16 @@ fn createTileButtons(hwnd: c.HWND, state: *DialogState, index: usize) c.HWND {
             std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
             wide.ptr,
             c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | @as(c.DWORD, @intCast(c.BS_OWNERDRAW)),
-            18,
+            scaled(state, 18),
             0,
-            250,
-            52,
+            scaled(state, 250),
+            scaled(state, 76),
             hwnd,
             childId(tile_base_id + i),
             c.GetModuleHandleW(null),
             null,
         );
+        AppFont.apply(button, AppFont.control_size, false);
         state.tile_buttons[i] = button;
         if (first == null) first = button;
     }
@@ -1622,10 +1655,10 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX").ptr,
             null,
             style | @as(c.DWORD, @intCast(if (state.kind == .template_picker) c.CBS_DROPDOWN else c.CBS_DROPDOWNLIST)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)),
-            18,
+            scaled(state, 18),
             0,
-            530,
-            180,
+            scaled(state, 530),
+            scaled(state, 180),
             hwnd,
             childId(9100 + index),
             c.GetModuleHandleW(null),
@@ -1639,10 +1672,10 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
                 std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
                 wide.ptr,
                 style | @as(c.DWORD, @intCast(c.BS_AUTOCHECKBOX)),
-                18,
+                scaled(state, 18),
                 0,
-                530,
-                24,
+                scaled(state, 530),
+                scaled(state, form_input_height),
                 hwnd,
                 childId(9100 + index),
                 c.GetModuleHandleW(null),
@@ -1654,10 +1687,10 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
             null,
             style | @as(c.DWORD, @intCast(c.ES_AUTOHSCROLL)) | (if (state.input_kinds[index] == .readonly) @as(c.DWORD, @intCast(c.ES_READONLY)) else 0),
-            18,
+            scaled(state, 18),
             0,
-            530,
-            24,
+            scaled(state, 530),
+            scaled(state, form_input_height),
             hwnd,
             childId(9100 + index),
             c.GetModuleHandleW(null),
@@ -1665,6 +1698,8 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
         ),
     } orelse return;
     state.edits[index] = input;
+    AppFont.apply(input, AppFont.control_size, false);
+    AppFont.apply(state.labels[index], AppFont.control_size, true);
     switch (state.input_kinds[index]) {
         .tiles => {},
         .combo => {
@@ -1708,6 +1743,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
         },
     }
     createStatic(hwnd, state, fieldHelp(state.kind, index), 18, 0, 530, 18, &state.helps[index]);
+    AppFont.apply(state.helps[index], 12, false);
 }
 
 fn setStaticText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
@@ -1718,7 +1754,7 @@ fn setStaticText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
 }
 
 fn rowHeight(state: *const DialogState, index: usize) i32 {
-    return if (state.input_kinds[index] == .tiles) tile_row_height else 64;
+    return scaled(state, if (state.input_kinds[index] == .tiles) tile_row_height else form_row_height);
 }
 
 fn showsRecap(kind: Kind) bool {
@@ -1750,7 +1786,7 @@ fn refreshRecap(state: *DialogState) void {
 }
 
 fn fieldTop(state: *const DialogState, target: usize) ?i32 {
-    var y: i32 = 54;
+    var y = scaled(state, form_fields_top);
     for (0..state.field_count) |index| {
         if (!state.visible[index]) continue;
         if (index == target) return y;
@@ -1760,7 +1796,10 @@ fn fieldTop(state: *const DialogState, target: usize) ?i32 {
 }
 
 fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
-    var y: i32 = 54;
+    var y = scaled(state, form_fields_top);
+    const margin = scaled(state, form_margin);
+    const width = formContentWidth(hwnd, state);
+    _ = c.MoveWindow(state.intro, margin, scaled(state, 16) - state.scroll_offset, width, scaled(state, 48), 1);
     for (0..state.field_count) |index| {
         const shown = state.visible[index];
         const command = if (shown) c.SW_SHOW else c.SW_HIDE;
@@ -1773,34 +1812,33 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         _ = c.ShowWindow(state.helps[index], if (state.input_kinds[index] == .tiles) c.SW_HIDE else command);
         if (!shown) continue;
         const top = y - state.scroll_offset;
-        _ = c.MoveWindow(state.labels[index], 18, top, 530, 18, 1);
+        _ = c.MoveWindow(state.labels[index], margin, top, width, scaled(state, form_label_height), 1);
         if (state.input_kinds[index] == .tiles) {
-            layoutTiles(state, index, 18, top + 20, 530);
+            layoutTiles(state, index, margin, top + scaled(state, 28), width);
         } else {
-            _ = c.MoveWindow(state.edits[index], 18, top + 18, 530, inputControlHeight(state.input_kinds[index]), 1);
-            _ = c.MoveWindow(state.helps[index], 18, top + 43, 530, 18, 1);
+            _ = c.MoveWindow(state.edits[index], margin, top + scaled(state, 26), width, inputControlHeight(state, state.input_kinds[index]), 1);
+            _ = c.MoveWindow(state.helps[index], margin, top + scaled(state, 62), width, scaled(state, form_help_height), 1);
         }
         y += rowHeight(state, index);
     }
     if (state.kind == .node) {
-        layoutAttachmentsSection(state, y - state.scroll_offset);
-        if (attachmentsVisible(state)) y += attachment_section_height;
+        layoutAttachmentsSection(hwnd, state, y - state.scroll_offset);
+        if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
     }
     if (showsRecap(state.kind)) {
         _ = c.ShowWindow(state.recap, c.SW_SHOW);
-        _ = c.MoveWindow(state.recap, 18, y - state.scroll_offset, 530, 34, 1);
+        _ = c.MoveWindow(state.recap, margin, y - state.scroll_offset, width, scaled(state, 40), 1);
     }
     updateScrollBar(hwnd, state);
 }
 
 const tile_columns = 2;
-const tile_row_height = 150;
 
 fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
     _ = index;
-    const gap: i32 = 8;
+    const gap = scaled(state, 12);
     const tile_width = @divTrunc(width - gap * (tile_columns - 1), tile_columns);
-    const tile_height: i32 = 58;
+    const tile_height = scaled(state, 76);
     for (0..state.tile_count) |i| {
         const col: i32 = @intCast(i % tile_columns);
         const tile_row: i32 = @intCast(i / tile_columns);
@@ -1811,13 +1849,13 @@ fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32) vo
 }
 
 fn contentHeight(state: *const DialogState) i32 {
-    var y: i32 = 54;
+    var y = scaled(state, form_fields_top);
     for (0..state.field_count) |index| {
         if (state.visible[index]) y += rowHeight(state, index);
     }
-    if (state.kind == .node and attachmentsVisible(state)) y += attachment_section_height;
-    if (showsRecap(state.kind)) y += 34;
-    return y + 12;
+    if (state.kind == .node and attachmentsVisible(state)) y += scaled(state, attachment_section_height);
+    if (showsRecap(state.kind)) y += scaled(state, 40);
+    return y + scaled(state, 16);
 }
 
 fn clientHeight(hwnd: c.HWND) i32 {
@@ -1827,16 +1865,16 @@ fn clientHeight(hwnd: c.HWND) i32 {
 }
 
 fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
-    const viewport = clientHeight(hwnd);
+    const viewport = formViewportHeight(hwnd, state);
     const content = contentHeight(state);
     const next = boundedScrollOffset(content, viewport, state.scroll_offset, requested);
     setScrollOffsetValue(hwnd, state, next);
 }
 
 fn setScrollOffset(hwnd: c.HWND, state: *DialogState, requested: i32) void {
-    const viewport = clientHeight(hwnd);
+    const viewport = formViewportHeight(hwnd, state);
     const content = contentHeight(state);
-    const next = std.math.clamp(requested, 0, @max(0, content - @max(120, viewport - 48)));
+    const next = std.math.clamp(requested, 0, @max(0, content - viewport));
     setScrollOffsetValue(hwnd, state, next);
 }
 
@@ -1849,9 +1887,9 @@ fn setScrollOffsetValue(hwnd: c.HWND, state: *DialogState, next: i32) void {
 }
 
 fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
-    const viewport = clientHeight(hwnd);
+    const viewport = formViewportHeight(hwnd, state);
     const content = contentHeight(state);
-    const page: u32 = @intCast(@max(1, viewport - 48));
+    const page: u32 = @intCast(@max(1, viewport));
     const max_offset = @max(0, content - @as(i32, @intCast(page)));
     state.scroll_offset = std.math.clamp(state.scroll_offset, 0, max_offset);
     var info: c.SCROLLINFO = std.mem.zeroes(c.SCROLLINFO);
@@ -1866,10 +1904,10 @@ fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
 
 fn ensureControlVisible(hwnd: c.HWND, state: *DialogState, index: usize) void {
     const top = fieldTop(state, index) orelse return;
-    const viewport = clientHeight(hwnd);
+    const viewport = formViewportHeight(hwnd, state);
     const bottom = top + rowHeight(state, index) - 3;
     const visible_top = state.scroll_offset;
-    const visible_bottom = state.scroll_offset + @max(1, viewport - 48);
+    const visible_bottom = state.scroll_offset + @max(1, viewport);
     if (top < visible_top) {
         scrollFields(hwnd, state, top - visible_top);
     } else if (bottom > visible_bottom) {
@@ -1878,11 +1916,11 @@ fn ensureControlVisible(hwnd: c.HWND, state: *DialogState, index: usize) void {
 }
 
 fn boundedScrollOffset(content: i32, viewport: i32, current: i32, requested: i32) i32 {
-    const max_offset = @max(0, content - @max(120, viewport - 48));
+    const max_offset = @max(0, content - @max(120, viewport));
     return std.math.clamp(current + requested, 0, max_offset);
 }
 
-fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void {
+fn createButton(hwnd: c.HWND, state: *const DialogState, text: []const u8, id: usize, x: i32, y: i32) void {
     const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
     const button_style: c.DWORD = @intCast(if (id == ok_id) c.BS_DEFPUSHBUTTON else c.BS_PUSHBUTTON);
@@ -1890,14 +1928,36 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32) void 
         @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
         @as(c.DWORD, @intCast(c.WS_TABSTOP)) |
         button_style;
-    _ = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, style, x, y, 70, 26, hwnd, childId(id), c.GetModuleHandleW(null), null);
+    const button = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, style, scaled(state, x), scaled(state, y), scaled(state, 88), scaled(state, 34), hwnd, childId(id), c.GetModuleHandleW(null), null);
+    AppFont.apply(button, AppFont.control_size, false);
+}
+
+fn layoutFooter(hwnd: c.HWND, state: *DialogState) void {
+    var client: c.RECT = undefined;
+    _ = c.GetClientRect(hwnd, &client);
+    const margin = scaled(state, form_margin);
+    const button_width = scaled(state, 96);
+    const button_height = scaled(state, 36);
+    const gap = scaled(state, 12);
+    const y = client.bottom - scaled(state, 50);
+    const ok_x = client.right - margin - button_width;
+    const cancel_x = ok_x - gap - button_width;
+    _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(ok_id)), ok_x, y, button_width, button_height, 1);
+    _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(cancel_id)), cancel_x, y, button_width, button_height, 1);
+    if ((state.kind == .node and state.templates_available) or state.kind == .worktree_sweep) {
+        const auxiliary_id: usize = if (state.kind == .worktree_sweep) reveal_id else templates_id;
+        _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(auxiliary_id)), cancel_x - gap - scaled(state, 132), y, scaled(state, 132), button_height, 1);
+    }
+    if (state.validation != null)
+        _ = c.MoveWindow(state.validation, margin, client.bottom - scaled(state, 54), @max(scaled(state, 180), cancel_x - margin - gap), scaled(state, 42), 1);
 }
 
 fn createCheckBox(hwnd: c.HWND, state: *DialogState, text: []const u8, index: usize, y: i32) void {
     const wide = utf8ToWideZ(state.allocator, text) catch return;
     defer state.allocator.free(wide);
-    const check = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 18, y, 380, 24, hwnd, childId(9200 + index), c.GetModuleHandleW(null), null) orelse return;
+    const check = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, scaled(state, 18), scaled(state, y), scaled(state, 380), scaled(state, form_input_height), hwnd, childId(9200 + index), c.GetModuleHandleW(null), null) orelse return;
     state.checks[index] = check;
+    AppFont.apply(check, AppFont.control_size, false);
     const selected = if (index == 0) state.policy.allow_reclaim else state.policy.confirm_each_reclaim;
     _ = c.SendMessageW(check, c.BM_SETCHECK, if (selected) c.BST_CHECKED else c.BST_UNCHECKED, 0);
 }
@@ -1915,16 +1975,17 @@ fn createPolicyRadio(hwnd: c.HWND, state: *DialogState, text: []const u8, index:
         std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
         wide.ptr,
         style,
-        18,
-        y,
-        530,
-        24,
+        scaled(state, 18),
+        scaled(state, y),
+        scaled(state, 530),
+        scaled(state, form_input_height),
         hwnd,
         childId(9200 + index),
         c.GetModuleHandleW(null),
         null,
     ) orelse return;
     state.checks[index] = radio;
+    AppFont.apply(radio, AppFont.control_size, false);
     const selected_index: usize = switch (state.policy.effectiveResolveAction()) {
         .remove => 0,
         .ask => 1,
@@ -1939,16 +2000,17 @@ fn createPolicyEdit(hwnd: c.HWND, state: *DialogState, index: usize, x: i32, y: 
         std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
         null,
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL | c.ES_NUMBER,
-        x,
-        y,
-        width,
-        24,
+        scaled(state, x),
+        scaled(state, y),
+        scaled(state, width),
+        scaled(state, form_input_height),
         hwnd,
         childId(9100 + index),
         c.GetModuleHandleW(null),
         null,
     ) orelse return;
     state.edits[index] = edit;
+    AppFont.apply(edit, AppFont.control_size, false);
     const wide = utf8ToWideZ(state.allocator, state.values[index]) catch return;
     defer state.allocator.free(wide);
     _ = c.SetWindowTextW(edit, wide.ptr);
@@ -2259,8 +2321,9 @@ test "guided choices map human labels to stable wire values" {
         .{ .id = "node-b", .title = "Beta" },
     };
     try std.testing.expectEqual(@as(usize, 1), endpointIndex(&endpoints, "node-b"));
-    try std.testing.expectEqual(@as(i32, 180), inputControlHeight(.combo));
-    try std.testing.expectEqual(@as(i32, 24), inputControlHeight(.checkbox));
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    try std.testing.expectEqual(@as(i32, 220), inputControlHeight(&state, .combo));
+    try std.testing.expectEqual(@as(i32, form_input_height), inputControlHeight(&state, .checkbox));
     try std.testing.expect(attachment_attach_id != templates_id);
     try std.testing.expect(attachment_remove_id != templates_id);
     try std.testing.expect(attachment_attach_id != attachment_remove_id);
@@ -2477,20 +2540,136 @@ test "graph form cancellation leaves draft values untouched" {
     try std.testing.expectEqualStrings("handoff", state.values[2]);
 }
 
+test "node update uses its owned baseline after the source graph changes" {
+    var summary = "Original goal".*;
+    const initial = Forms.NodeUpdate{ .goal_summary = &summary, .poll_interval_seconds = 30 };
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    @memset(&summary, 'x');
+    state.allocator.free(state.values[2]);
+    state.values[2] = try state.allocator.dupe(u8, "45");
+    applyModalCommand(&state, .submit);
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expect(result.goal_summary == null);
+    try std.testing.expectEqual(@as(?f64, 45), result.poll_interval_seconds);
+}
+
+test "node update preserves unchanged values and clear semantics" {
+    const initial = Forms.NodeUpdate{
+        .goal_summary = "Goal",
+        .goal_predicate = "test",
+        .poll_interval_seconds = 30,
+        .stall_after_seconds = 120,
+        .metric_command = "coverage",
+        .metric_direction = "maximize",
+        .trigger_prompt = "Trigger",
+        .check_description = "Check",
+        .model_tier = "capable",
+    };
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    applyModalCommand(&state, .submit);
+    try std.testing.expectError(error.InvalidNodeUpdate, buildNodeUpdate(&state, initial));
+    for (0..9) |index| {
+        state.allocator.free(state.values[index]);
+        state.values[index] = &.{};
+    }
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expect(result.goal_summary == null);
+    try std.testing.expectEqualStrings("", result.goal_predicate.?);
+    try std.testing.expect(result.poll_interval_seconds == null);
+    try std.testing.expectEqual(@as(?f64, 0), result.stall_after_seconds);
+    try std.testing.expectEqualStrings("", result.metric_command.?);
+    try std.testing.expect(result.metric_direction == null);
+    try std.testing.expectEqualStrings("", result.trigger_prompt.?);
+    try std.testing.expectEqualStrings("", result.check_description.?);
+    try std.testing.expect(result.model_tier == null);
+}
+
+test "node update binds every changed field to the typed result" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    const initial = Forms.NodeUpdate{};
+    try initializeNodeUpdate(&state, initial);
+    const values = [_][]const u8{
+        "New goal", "new-test", "45.5", "90.25", "new-metric", "minimize", "New trigger", "New check", "standard",
+    };
+    for (values, 0..) |value, index| {
+        const owned = try state.allocator.dupe(u8, value);
+        state.allocator.free(state.values[index]);
+        state.values[index] = owned;
+    }
+    applyModalCommand(&state, .submit);
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expectEqualStrings(values[0], result.goal_summary.?);
+    try std.testing.expectEqualStrings(values[1], result.goal_predicate.?);
+    try std.testing.expectEqual(@as(?f64, 45.5), result.poll_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, 90.25), result.stall_after_seconds);
+    try std.testing.expectEqualStrings(values[4], result.metric_command.?);
+    try std.testing.expectEqualStrings(values[5], result.metric_direction.?);
+    try std.testing.expectEqualStrings(values[6], result.trigger_prompt.?);
+    try std.testing.expectEqualStrings(values[7], result.check_description.?);
+    try std.testing.expectEqualStrings(values[8], result.model_tier.?);
+}
+
+test "node update cancellation and close return no result" {
+    for ([_]ModalCommand{ .cancel, .close }) |command| {
+        var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+        defer freeValues(&state);
+        const initial = Forms.NodeUpdate{ .goal_summary = "Goal", .poll_interval_seconds = 30 };
+        try initializeNodeUpdate(&state, initial);
+        const invalid = try state.allocator.dupe(u8, "not a number");
+        state.allocator.free(state.values[2]);
+        state.values[2] = invalid;
+        applyModalCommand(&state, command);
+        try std.testing.expect((try buildNodeUpdate(&state, initial)) == null);
+        try std.testing.expect(state.closed);
+        try std.testing.expectEqualStrings("Goal", state.initial_values[0]);
+    }
+}
+
+test "node update initialization and result release every partial allocation" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+            defer freeValues(&state);
+            const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .poll_interval_seconds = 30 };
+            try initializeNodeUpdate(&state, initial);
+            const values = [_][]const u8{
+                "New goal", "test", "45", "90", "metric", "maximize", "trigger", "check", "fast",
+            };
+            for (values, 0..) |value, index| {
+                const owned = try allocator.dupe(u8, value);
+                allocator.free(state.values[index]);
+                state.values[index] = owned;
+            }
+            applyModalCommand(&state, .submit);
+            var result = (try buildNodeUpdate(&state, initial)).?;
+            defer result.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 test "keyboard-sized guided form keeps every field reachable through bounded scrolling" {
-    const content: i32 = 54 + 10 * 64 + 12;
-    const viewport: i32 = 768 - 96;
+    const content: i32 = form_fields_top + 10 * form_row_height + 16;
+    const viewport: i32 = 768 - form_footer_height;
     const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
     try std.testing.expectEqual(max_offset, boundedScrollOffset(content, viewport, max_offset, 48));
     try std.testing.expectEqual(@as(i32, 0), boundedScrollOffset(content, viewport, 0, -48));
-    const last_top: i32 = 54 + 9 * 64;
-    try std.testing.expect(last_top + 61 <= max_offset + viewport - 48);
+    const last_top: i32 = form_fields_top + 9 * form_row_height;
+    try std.testing.expect(last_top + form_row_height <= max_offset + viewport);
 }
 
 test "scrollbar thumb positions seek and clamp the dialog content" {
-    const content: i32 = 54 + 10 * 64 + 12;
-    const viewport: i32 = 768 - 96;
-    try std.testing.expectEqual(@as(i32, 0), std.math.clamp(@as(i32, 0), 0, content - (viewport - 48)));
+    const content: i32 = form_fields_top + 10 * form_row_height + 16;
+    const viewport: i32 = 768 - form_footer_height;
+    try std.testing.expectEqual(@as(i32, 0), std.math.clamp(@as(i32, 0), 0, content - viewport));
     const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
     try std.testing.expectEqual(@min(@as(i32, 200), max_offset), std.math.clamp(@as(i32, 200), 0, max_offset));
     try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
@@ -2519,13 +2698,26 @@ test "tile rows reserve full teaching-tile height while other rows stay compact"
     state.visible[0] = true;
     state.visible[1] = true;
     state.visible[2] = true;
-    try std.testing.expectEqual(@as(i32, 64), rowHeight(&state, 0));
+    try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 0));
     try std.testing.expectEqual(@as(i32, tile_row_height), rowHeight(&state, 1));
-    try std.testing.expectEqual(@as(i32, 64), rowHeight(&state, 2));
-    try std.testing.expectEqual(@as(i32, 54), fieldTop(&state, 0).?);
-    try std.testing.expectEqual(@as(i32, 118), fieldTop(&state, 1).?);
-    try std.testing.expectEqual(@as(i32, 118 + tile_row_height), fieldTop(&state, 2).?);
-    try std.testing.expectEqual(@as(i32, 118 + tile_row_height + 64 + attachment_section_height + 34 + 12), contentHeight(&state));
+    try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 2));
+    try std.testing.expectEqual(@as(i32, form_fields_top), fieldTop(&state, 0).?);
+    try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height), fieldTop(&state, 1).?);
+    try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height + tile_row_height), fieldTop(&state, 2).?);
+    try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height + tile_row_height + form_row_height + attachment_section_height + 40 + 16), contentHeight(&state));
+}
+
+test "native form layout scales design units at common Windows DPI steps" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null, .dpi = 144 };
+    state.field_count = 1;
+    state.visible[0] = true;
+    try std.testing.expectEqual(@as(i32, 126), rowHeight(&state, 0));
+    try std.testing.expectEqual(@as(i32, 114), fieldTop(&state, 0).?);
+    try std.testing.expectEqual(@as(i32, 48), inputControlHeight(&state, .edit));
+    state.dpi = 192;
+    try std.testing.expectEqual(@as(i32, 168), rowHeight(&state, 0));
+    try std.testing.expectEqual(@as(i32, 152), fieldTop(&state, 0).?);
+    try std.testing.expectEqual(@as(i32, 64), inputControlHeight(&state, .edit));
 }
 
 test "blendColor tints toward the overlay color proportionally to strength" {

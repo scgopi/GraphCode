@@ -3139,7 +3139,7 @@ public actor GraphStore {
       // the cycle may begin.
       if edge.fireCount > 0 {
         if let until = edge.cycleGuard?.effectiveUntil, let onEvaluatePredicate {
-          let workingDirectory = graph.nodes[id: edge.from]?.worktreeBinding?.worktreePath
+          let workingDirectory = graph.nodes[id: edge.from].flatMap(predicateWorkingDirectory)
           let satisfied = await onEvaluatePredicate(
             ShellPredicate(command: until, workingDirectory: workingDirectory))
           // The condition holds, so the loop is done — stop without another pass.
@@ -3175,7 +3175,7 @@ public actor GraphStore {
       let command = goal.effectiveMetricCommand, let onCaptureScript
     else { return }
     let output = await onCaptureScript(
-      ShellPredicate(command: command, workingDirectory: node.worktreeBinding?.worktreePath))
+      ShellPredicate(command: command, workingDirectory: predicateWorkingDirectory(for: node)))
     guard let output, let value = MetricTrend.value(fromScriptOutput: output) else {
       recordMemory(nodeID, "metric: not measured (command failed or printed no number)")
       return
@@ -3249,7 +3249,7 @@ public actor GraphStore {
     case .script(let command):
       guard let onCaptureScript else { return nil }
       return await onCaptureScript(
-        ShellPredicate(command: command, workingDirectory: source.worktreeBinding?.worktreePath))
+        ShellPredicate(command: command, workingDirectory: predicateWorkingDirectory(for: source)))
     }
   }
 
@@ -3373,8 +3373,17 @@ public actor GraphStore {
   /// level. Workers are sent to with this graph's path, the one piloting launched their
   /// sessions with. The sends run concurrently for the reason `restart`'s kills do: each
   /// one is paced in chunks, and a dozen in sequence would hold this actor for as long as
-  /// they add up to. A send that fails is staged to that loop's memory, as
-  /// `deliverAdHocMessage` does.
+  /// they add up to.
+  ///
+  /// Every loop is addressed, not only the ones the graph last read as live: a finished
+  /// loop whose session is still up was left out without a word while `node send` reached
+  /// it. Each target is treated as `deliverAdHocMessage` treats one — a live loop or a
+  /// finished one with a session is typed into, a live unattended loop's dead session is
+  /// relaunched and retried once, and the rest are staged to memory. Stopped, stalled and
+  /// blocked loops are staged rather than typed into: a message in a paused session can
+  /// restart the work, and relaunching a blocked one would run it before its upstream.
+  /// Finished loops are counted in the summary rather than named, or every broadcast's
+  /// banner would list the graph's whole history.
   private func broadcastMessage(_ text: String, from senderID: UUID?) async {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -3382,12 +3391,44 @@ public actor GraphStore {
       return
     }
     let targets = graph.broadcastTargets.filter { $0.id != senderID }
-    guard !targets.isEmpty, let onDeliverMessage else { return }
+    guard !targets.isEmpty else { return }
     recordMailroomCommunication(from: senderID, to: "all", text: trimmed, topic: "direct")
     let sender = senderID.flatMap { id in graph.nodesAtAnyDepth.first { $0.id == id }?.title }
     let message = "[graphcode] \(sender.map { "\($0): " } ?? "")\(trimmed)"
+    let typeable = targets.filter { target in
+      MessageBus.deliverability(to: target) == nil
+        || ((target.state == .succeeded || target.state == .failed)
+          && target.backend.capabilities.supportsMidSessionInput)
+    }
+    var delivered = await typeConcurrently(message, into: typeable)
+    let revivable = typeable.filter {
+      delivered[$0.id] != true && $0.runsUnattended && MessageBus.deliverability(to: $0) == nil
+    }
+    if !revivable.isEmpty {
+      revivable.forEach(ensureSession)
+      try? await Task.sleep(for: Self.respawnedSessionSettle)
+      delivered.merge(await typeConcurrently(message, into: revivable)) { $0 || $1 }
+    }
+    let missed = targets.filter { delivered[$0.id] != true }
+    guard !missed.isEmpty else { return }
+    for target in missed { recordMemory(target.id, "while you were away: \(message)") }
+    let finished = missed.filter(\.isResolved).count
+    var staged = missed.filter { !$0.isResolved }.map(\.title)
+    if finished > 0 {
+      staged.append(finished == 1 ? "1 finished loop" : "\(finished) finished loops")
+    }
+    announceError(
+      "broadcast reached \(targets.count - missed.count) of \(targets.count) loops — staged to "
+        + "the memory of \(staged.joined(separator: ", ")); they will read it when they next "
+        + "wake")
+  }
+
+  private func typeConcurrently(_ message: String, into targets: [LoopNode]) async
+    -> [UUID: Bool]
+  {
+    guard let onDeliverMessage, !targets.isEmpty else { return [:] }
     let path = graph.project.path
-    let delivered = await withTaskGroup(of: (UUID, Bool).self) { group in
+    return await withTaskGroup(of: (UUID, Bool).self) { group in
       for target in targets {
         group.addTask { (target.id, await onDeliverMessage(target, message, path)) }
       }
@@ -3395,13 +3436,6 @@ public actor GraphStore {
       for await (id, landed) in group { results[id] = landed }
       return results
     }
-    let missed = targets.filter { delivered[$0.id] != true }
-    guard !missed.isEmpty else { return }
-    for target in missed { recordMemory(target.id, "while you were away: \(message)") }
-    announceError(
-      "broadcast reached \(targets.count - missed.count) of \(targets.count) loops — staged to "
-        + "the memory of \(missed.map(\.title).joined(separator: ", ")); they will read it "
-        + "when they next wake")
   }
 
   /// Long enough for a relaunched session to exist and start its agent's boot, short
@@ -3915,7 +3949,7 @@ public actor GraphStore {
       return
     }
     let shellPredicate = ShellPredicate(
-      command: predicate, workingDirectory: node.worktreeBinding?.worktreePath)
+      command: predicate, workingDirectory: predicateWorkingDirectory(for: node))
 
     var fingerprint: String?
     if goal.skipsUnchangedWorkspace, !forcePredicate, let onCaptureScript {
@@ -3949,6 +3983,7 @@ public actor GraphStore {
         goalCache.setReawakened(fingerprint, for: nodeID)
         goalCache.clearFeedback(for: nodeID)
       }
+
     }
 
     let outcome: PredicateOutcome
@@ -3972,6 +4007,14 @@ public actor GraphStore {
     }
     if let fingerprint { goalCache.setFingerprint(fingerprint, for: nodeID) }
     await relayPredicateFailure(to: current, predicate: predicate, outcome: outcome)
+  }
+
+  /// Imported loops deliberately drop machine-specific worktree bindings. Local
+  /// predicates still belong to the graph's project, not the daemon's launch folder.
+  private func predicateWorkingDirectory(for node: LoopNode) -> String? {
+    if let worktreePath = node.worktreeBinding?.worktreePath { return worktreePath }
+    guard RemoteProjectLocation.parse(projectPath: graph.project.path) == nil else { return nil }
+    return graph.project.path
   }
 
   /// A verdict counts only for the goal it was recorded against. One dated before the goal

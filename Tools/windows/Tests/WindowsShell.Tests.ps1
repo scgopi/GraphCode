@@ -39,6 +39,10 @@ $traySource = Get-Content (Join-Path $shellRoot "src\Tray.zig") -Raw
 $win32Source = Get-Content (Join-Path $shellRoot "src\Win32.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+$menuTimerBlock = [regex]::Match(
+  $appSource,
+  '(?s)else if \(wparam == MainWindow\.timer_id\) \{.*?const updated_connection_state'
+).Value
 Assert-Contract ($win32Source -match
   '(?s)pub fn opaquePointerFromInt.*?@setRuntimeSafety\(false\);.*?@ptrFromInt\(value\)' -and
   $win32Source -match 'pub fn messagePointer' -and
@@ -66,6 +70,16 @@ Assert-Contract ($nativeFormsSource -match 'if \(active_state\) return error\.Fo
   $nativeFormsSource -match 'pub fn isModalActive\(\) bool' -and
   $appSource -match 'UpdateOfferPresentation\.decide\(completed_offer, self\.update_offer_pending, NativeForms\.isModalActive\(\)\)') `
   "native forms must reject reentrancy and completed update offers must wait for the active modal"
+Assert-Contract ($mainWindowSource -match 'pub const MenuRefresh = enum' -and
+  $mainWindowSource -match 'if \(redrawsMenuBar\(refresh\)\) _ = c\.DrawMenuBar\(hwnd\);' -and
+  $appSource -match '(?s)c\.WM_INITMENUPOPUP.*?updateNativeChrome\(\.popup_open\)' -and
+  $menuTimerBlock -notmatch 'app\.updateNativeChrome') `
+  "timer polling must not rebuild open popup menus or continuously redraw the menu bar"
+Assert-Contract ($appSource -match 'SetMapMode\(hdc, c\.MM_ANISOTROPIC\)' -and
+  $appSource -match 'SetWindowExtEx\(hdc, logical_right, logical_bottom' -and
+  $appSource -match 'logicalCoordinate\(mouseX\(lparam\), app\.dpi\)' -and
+  $appSource -match 'physicalCoordinate\(Tokens\.sidebar_width, self\.dpi\)') `
+  "custom main-window painting, input, and child layout must share one DPI-scaled coordinate system"
 Assert-Contract ($appSource -match
   'const uia_gate_hook = envFlag\("GRAPHCODE_UIA_GATE"\);' -and
   $appSource -match 'if \(!daemon_supervisor_test_hook and !uia_gate_hook\) GdiplusAA\.init\(\);') `
@@ -182,6 +196,7 @@ foreach ($path in @(
     "src\main.zig",
     "src\Win32.zig",
     "src\App.zig",
+    "src\Diagnostics.zig",
     "src\MainWindow.zig",
     "src\DaemonClient.zig",
     "src\GraphModel.zig",
@@ -231,7 +246,7 @@ Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
   "f5abc059e4ca58b376eb209313aca7784659c679") "Winghostty pin changed"
 Assert-Contract ($pins.zmx.sha -eq
-  "029e11d2b19162fb3bdf90c8270237d303b8bfb4") "zmx pin changed"
+  "11e20c738b4ebd88031c7a01f1a9d938ee123234") "zmx pin changed"
 Assert-Contract ($pins.winghostty.remoteUrl -eq
   "https://github.com/coneilen/winghostty.git") "Winghostty remote URL changed"
 Assert-Contract ($pins.zmx.remoteUrl -eq
@@ -297,6 +312,14 @@ Assert-Contract ($callbackIndex -ge 0 -and $defaultIndex -gt $callbackIndex) `
 $appSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\App.zig") -Raw
 Assert-Contract ($appSource -match "GraphCanvas\.paint[\s\S]+workspace\.paintChrome\(hdc\)") `
   "WM_PAINT must render both the GraphCode canvas and terminal workspace chrome"
+Assert-Contract ($appSource -match
+  '(?s)c\.WM_ERASEBKGND\s*=>.*?result\.\*\s*=\s*1;.*?c\.WM_PAINT\s*=>.*?CreateCompatibleDC.*?CreateCompatibleBitmap.*?BitBlt') `
+  "top-level painting must suppress background erase and present one buffered frame"
+Assert-Contract ($appSource -match
+  'TemplateLibrary\.load\(self\.allocator, path\) catch \|err\|' -and
+  $appSource -match 'Diagnostics\.record\(self\.allocator, "error", message\)' -and
+  $appSource -match '(?s)"Unable to load saved templates".*?NativeForms\.node') `
+  "template failures must be logged and fall back to the plain New Loop form"
 
 $codespaceDialogSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\WindowsCodespaceDialog.zig") -Raw
 $codespaceClientSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\Codespaces.zig") -Raw
@@ -579,6 +602,10 @@ Invoke-Native "DPI scaling executable tests" {
 Invoke-Native "Template library executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\TemplateLibrary.zig } finally { Pop-Location }
+}
+Invoke-Native "Windows shell diagnostics executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\Diagnostics.zig } finally { Pop-Location }
 }
 Invoke-Native "Workspace lifecycle executable tests" {
   Push-Location $shellRoot

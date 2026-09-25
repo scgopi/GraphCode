@@ -76,6 +76,13 @@ let project = Project(
                 "CFBundleName": .string(appDisplayName),
                 "CFBundleDisplayName": .string(appDisplayName),
                 "CFBundleIconName": "AppIcon",
+                // Local Network privacy charges a pane's `ssh`, `git` or agent traffic
+                // to a LAN host against this app, the responsible process. Without a
+                // purpose string macOS has nothing to show and the connection can fail
+                // with EHOSTUNREACH instead of prompting.
+                "NSLocalNetworkUsageDescription": .string(
+                    "\(appDisplayName) runs terminals and coding agents that connect to machines on your local network, such as SSH hosts and remote projects."
+                ),
                 // The app reported Tuist's default 1.0 while every release was tagged
                 // v0.0.x, so About said one thing and the download page another. Keep
                 // this in step with the git tag when cutting a release — suffix and
@@ -84,8 +91,8 @@ let project = Project(
                 // (#33). Before that the suffix lived on the tag only, so betas 48/49
                 // of the 0.1.15 line read "0.1.15" and are told by the build number
                 // apart.
-                "CFBundleShortVersionString": "0.1.74",
-                "CFBundleVersion": "293",
+                "CFBundleShortVersionString": "0.1.75-beta1",
+                "CFBundleVersion": "294",
             ]),
             resources: [
                 "graphcode/Resources/**"

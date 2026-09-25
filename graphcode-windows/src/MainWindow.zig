@@ -81,6 +81,15 @@ pub const WorkspaceItem = struct {
     is_current: bool,
 };
 
+pub const MenuRefresh = enum {
+    state_change,
+    popup_open,
+};
+
+fn redrawsMenuBar(refresh: MenuRefresh) bool {
+    return refresh == .state_change;
+}
+
 pub const MenuState = struct {
     has_project: bool,
     can_worktrees: bool,
@@ -376,7 +385,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     _ = c.DrawMenuBar(hwnd);
 }
 
-pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
+pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     updateRecentFolderMenu(hwnd, state.recent_folders);
     updateWorkspaceMenu(hwnd, state.workspaces);
     setEnabled(hwnd, .open_global_overview, true);
@@ -415,7 +424,7 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     setChecked(hwnd, .toggle_sidebar, state.sidebar_visible);
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
-    _ = c.DrawMenuBar(hwnd);
+    if (redrawsMenuBar(refresh)) _ = c.DrawMenuBar(hwnd);
 }
 
 fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
@@ -837,6 +846,11 @@ test "recent folder commands use a dedicated command range" {
 test "workspace commands use a dedicated command range" {
     try std.testing.expect(workspace_command_base < workspace_command_limit);
     try std.testing.expectEqual(Command.workspace_new, commandFromId(4800).?);
+}
+
+test "popup initialization updates menu state without redrawing the active menu bar" {
+    try std.testing.expect(redrawsMenuBar(.state_change));
+    try std.testing.expect(!redrawsMenuBar(.popup_open));
 }
 
 test "gate fixture messages and timers never collide with shell traffic" {

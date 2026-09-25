@@ -13,7 +13,9 @@
 // the exact same ClearType Segoe UI font instead of duplicating the
 // creation call or falling back to a stock font.
 const std = @import("std");
-const c = @import("Win32.zig").c;
+const Win32 = @import("Win32.zig");
+const c = Win32.c;
+const Dpi = @import("Dpi.zig");
 
 const CacheEntry = struct { size: i32, bold: bool, font: c.HFONT };
 
@@ -22,18 +24,15 @@ const CacheEntry = struct { size: i32, bold: bool, font: c.HFONT };
 // array is simpler and cheaper than a hash map, and every font lives for
 // the process lifetime exactly like the other cached GDI fonts/brushes
 // already in this codebase (e.g. NativeForms.zig's `cachedTileFont`).
-var cache: [16]CacheEntry = undefined;
+var cache: [32]CacheEntry = undefined;
 var cache_len: usize = 0;
 
-/// Returns the app's standard ClearType-quality Segoe UI font at `size`
-/// (pixel height; internally negated per the CreateFontW convention),
-/// creating and caching it on first use per (size, bold) pair.
-pub fn get(size: i32, bold: bool) c.HFONT {
+fn getScaled(scaled_size: i32, bold: bool) c.HFONT {
     for (cache[0..cache_len]) |entry| {
-        if (entry.size == size and entry.bold == bold) return entry.font;
+        if (entry.size == scaled_size and entry.bold == bold) return entry.font;
     }
     const font = c.CreateFontW(
-        -size,
+        -scaled_size,
         0,
         0,
         0,
@@ -49,10 +48,21 @@ pub fn get(size: i32, bold: bool) c.HFONT {
         std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
     );
     if (font != null and cache_len < cache.len) {
-        cache[cache_len] = .{ .size = size, .bold = bold, .font = font };
+        cache[cache_len] = .{ .size = scaled_size, .bold = bold, .font = font };
         cache_len += 1;
     }
     return font;
+}
+
+/// Returns the app's standard ClearType-quality Segoe UI font at a logical
+/// 96-DPI size. Use `apply` or `select` for live controls and paint DCs so the
+/// logical size is scaled to the monitor automatically.
+pub fn get(size: i32, bold: bool) c.HFONT {
+    return getForDpi(size, bold, Dpi.base_dpi);
+}
+
+pub fn getForDpi(size: i32, bold: bool, dpi: u32) c.HFONT {
+    return getScaled(Dpi.scale(size, dpi), bold);
 }
 
 /// The standard body-text size used for plain dialog controls (EDIT,
@@ -66,7 +76,7 @@ pub const control_size: i32 = 14;
 /// -hinted `DEFAULT_GUI_FONT`).
 pub fn apply(control: c.HWND, size: i32, bold: bool) void {
     if (control == null) return;
-    _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(get(size, bold)), 1);
+    _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(getForDpi(size, bold, Win32.dpiForWindow(control))), 1);
 }
 
 /// Selects the standard ClearType font into `hdc` for direct GDI text
@@ -75,6 +85,19 @@ pub fn apply(control: c.HWND, size: i32, bold: bool) void {
 pub fn select(hdc: c.HDC, size: i32, bold: bool) c.HGDIOBJ {
     const font = get(size, bold);
     return c.SelectObject(hdc, font);
+}
+
+/// Selects a logical-size font scaled for the target DC. Use this only when
+/// the caller also scales its text rectangles and surrounding geometry.
+pub fn selectForDpi(hdc: c.HDC, size: i32, bold: bool) c.HGDIOBJ {
+    const dpi: u32 = @intCast(c.GetDeviceCaps(hdc, c.LOGPIXELSY));
+    return c.SelectObject(hdc, getForDpi(size, bold, dpi));
+}
+
+test "logical font sizes scale with monitor DPI" {
+    try std.testing.expectEqual(@as(i32, 14), Dpi.scale(14, 96));
+    try std.testing.expectEqual(@as(i32, 21), Dpi.scale(14, 144));
+    try std.testing.expectEqual(@as(i32, 28), Dpi.scale(14, 192));
 }
 
 test "get caches distinct fonts per (size, bold) and reuses the same handle" {

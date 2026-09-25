@@ -146,15 +146,14 @@ public enum MessageBus {
 }
 
 extension LoopGraph {
-  /// The loops a broadcast (`GraphCommand.broadcastMessage`) types into: every session
-  /// that can take input now, at any depth. A composite has no session of its own, and
-  /// one never piloted has none among its workers either — they are templates. Kept out of
-  /// `Domain/` because the portable domain package builds that folder without `Sessions/`.
+  /// The loops a broadcast (`GraphCommand.broadcastMessage`) is for: every loop in the
+  /// graph, at any depth, whatever its state — a finished loop whose session is still up
+  /// takes input like any other (#346), and one that cannot is staged instead. A composite
+  /// has no session of its own, and one never piloted has no loops among its workers
+  /// either — they are templates, instantiated under fresh ids.
   public var broadcastTargets: [LoopNode] {
     nodes.flatMap { node -> [LoopNode] in
-      guard node.loopType == .composite else {
-        return MessageBus.deliverability(to: node) == nil ? [node] : []
-      }
+      guard node.loopType == .composite else { return [node] }
       guard node.pilotState != .notPiloted else { return [] }
       return node.subGraph?.broadcastTargets ?? []
     }

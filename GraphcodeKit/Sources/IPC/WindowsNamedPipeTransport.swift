@@ -1034,11 +1034,8 @@ import Foundation
       _ timeout: TimeInterval = 5
     ) async throws -> Data {
       try await withTaskCancellationHandler {
-        while try !stream.hasAvailableBytes() {
-          try await Task.sleep(for: .milliseconds(10))
-        }
         return try await withCheckedThrowingContinuation { continuation in
-          DispatchQueue.global(qos: .utility).async {
+          Thread.detachNewThread {
             do {
               continuation.resume(
                 returning: try self.receiveFrameWithPostHandshakeDeadlineSynchronously(timeout))
