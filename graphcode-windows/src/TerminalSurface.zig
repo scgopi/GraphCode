@@ -43,12 +43,12 @@ fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i3
     return null;
 }
 
-fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, index: usize) c.RECT {
+pub fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, index: usize) c.RECT {
     const left = @max(origin_x, origin_x + width - 220) + @as(i32, @intCast(index)) * 72;
     return .{ .left = left, .top = origin_y + 3, .right = left + 68, .bottom = origin_y + Tokens.tab_bar_height - 3 };
 }
 
-fn tabBounds(origin_x: i32, origin_y: i32, index: usize) c.RECT {
+pub fn tabBounds(origin_x: i32, origin_y: i32, index: usize) c.RECT {
     const left = origin_x + @as(i32, @intCast(index)) * 120;
     return .{ .left = left, .top = origin_y + 4, .right = left + 112, .bottom = origin_y + Tokens.tab_bar_height - 4 };
 }

@@ -76,8 +76,26 @@ public enum ShellPredicateEvaluator {
     guard !trimmed.isEmpty else { return nil }
 
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    process.arguments = ["-l", "-c", "eval \"$GRAPHCODE_PREDICATE\""]
+    #if os(Windows)
+      process.executableURL = WindowsShellStrategy().powerShell
+      process.arguments = [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        """
+        $global:LASTEXITCODE = 0
+        try {
+          Invoke-Expression $env:GRAPHCODE_PREDICATE
+          if (-not $?) { exit 1 }
+          exit $global:LASTEXITCODE
+        } catch {
+          [Console]::Error.WriteLine($_)
+          exit 1
+        }
+        """,
+      ]
+    #else
+      process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+      process.arguments = ["-l", "-c", "eval \"$GRAPHCODE_PREDICATE\""]
+    #endif
     if let workingDirectory = predicate.workingDirectory {
       process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
     }

@@ -33,9 +33,11 @@ pub const Library = struct {
 pub fn load(allocator: std.mem.Allocator, project_path: []const u8) !Library {
     var library = Library.init(allocator);
     errdefer library.deinit();
-    const project = try projectDirectory(allocator, project_path);
-    defer allocator.free(project);
-    try loadDirectory(&library, project);
+    if (isFilesystemProject(project_path)) {
+        const project = try projectDirectory(allocator, project_path);
+        defer allocator.free(project);
+        try loadDirectory(&library, project);
+    }
     const home = try homeDirectory(allocator);
     defer allocator.free(home);
     try loadDirectory(&library, home);
@@ -164,6 +166,10 @@ fn projectDirectory(allocator: std.mem.Allocator, project_path: []const u8) ![]u
     return std.fs.path.join(allocator, &.{ project_path, ".graphcode", "templates" });
 }
 
+fn isFilesystemProject(project_path: []const u8) bool {
+    return std.mem.indexOf(u8, project_path, "://") == null;
+}
+
 fn containsID(templates: []const Template, id: []const u8) bool {
     for (templates) |template| if (std.mem.eql(u8, template.id, id)) return true;
     return false;
@@ -284,4 +290,12 @@ test "timed templates populate the scheduled prompt" {
     try std.testing.expectEqualStrings("timeBased", draft.loop_type);
     try std.testing.expectEqualStrings("Check the queue.", draft.trigger_prompt);
     try std.testing.expectEqualStrings("old", draft.first_instruction);
+}
+
+test "virtual projects do not produce filesystem template paths" {
+    try std.testing.expect(!isFilesystemProject("graphcode://global"));
+    try std.testing.expect(!isFilesystemProject("ssh://host/repository"));
+    try std.testing.expect(!isFilesystemProject("codespace://workspace/repository"));
+    try std.testing.expect(isFilesystemProject("C:\\src\\GraphCode"));
+    try std.testing.expect(isFilesystemProject("\\\\server\\share\\GraphCode"));
 }

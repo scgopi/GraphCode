@@ -6,7 +6,11 @@ import Foundation
 /// app's (often minimal, launchd-provided) `PATH`.
 public enum ZmxLocator {
   public static var binaryURL: URL {
-    SupportDirectory.binDirectory.appendingPathComponent("zmx")
+    #if os(Windows)
+      SupportDirectory.binDirectory.appendingPathComponent("zmx.exe")
+    #else
+      SupportDirectory.binDirectory.appendingPathComponent("zmx")
+    #endif
   }
 
   public static var isInstalled: Bool {

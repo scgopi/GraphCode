@@ -45,6 +45,15 @@ project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
 activity settings. `Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q`
 renames the selected chat and `Ctrl+Shift+X` deletes it.
 
+Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
+UI Automation receives physical client pixels: logical bounds, including the
+fixed graph group, are scaled once at the reporting boundary. Terminal tab and
+control bounds already use physical pixels shared with MM_TEXT painting and
+hit-testing, so they must not be scaled again. Touch pinch locations and client
+bounds are converted to logical units before graph routing and anchored zoom.
+App regression tests exercise these production boundaries at 96, 144, and 192
+DPI; they do not substitute for live touch or multi-monitor validation.
+
 ## Workspace lifecycle
 
 The Workspace menu lists `Default` and `.graphcode-*` directories under

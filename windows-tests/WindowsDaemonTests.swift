@@ -8,6 +8,14 @@ import XCTest
 #endif
 
 final class WindowsDaemonTests: XCTestCase {
+  private actor PredicateCapture {
+    private(set) var workingDirectory: String?
+
+    func record(_ value: String?) {
+      workingDirectory = value
+    }
+  }
+
   func testGraphcodeSettingsPersistAllProductChoices() throws {
     let url = FileManager.default.temporaryDirectory
       .appendingPathComponent("graphcode-settings-\(UUID().uuidString)", isDirectory: true)
@@ -29,6 +37,131 @@ final class WindowsDaemonTests: XCTestCase {
   }
 
   #if os(Windows)
+    func testZmxLocatorUsesWindowsExecutableName() {
+      XCTAssertEqual(ZmxLocator.binaryURL.lastPathComponent, "zmx.exe")
+    }
+
+    func testWindowsProviderProbeUsesWhere() {
+      let invocation = ProviderPath.probeInvocation(for: "copilot")
+      XCTAssertEqual(URL(fileURLWithPath: invocation[0]).lastPathComponent, "where.exe")
+      XCTAssertEqual(invocation[1], "copilot")
+    }
+
+    func testWindowsProviderProbeCompletesWithoutAPTY() async {
+      let present = await ProviderPath.isOnPath("where.exe")
+      let missing = await ProviderPath.isOnPath("graphcode-provider-that-does-not-exist.exe")
+      XCTAssertEqual(present, true)
+      XCTAssertEqual(missing, false)
+    }
+
+    func testWindowsZmxLaunchUsesCmdTokensInsteadOfZsh() {
+      XCTAssertEqual(
+        ZmxSessionLauncher.loginShellInvocation(
+          of: "copilot",
+          arguments: ["--interactive", "inspect the project"],
+          environment: ["COPILOT_CUSTOM_INSTRUCTIONS_DIRS": "C:\\GraphCode Briefing"],
+          usesWindowsShell: true),
+        [
+          "set", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS=C:\\GraphCode Briefing", "&&",
+          "copilot", "--interactive", "inspect the project",
+        ])
+    }
+
+    func testWindowsZmxLaunchResolvesInheritedEnvironmentExpansion() {
+      XCTAssertEqual(
+        ZmxSessionLauncher.loginShellInvocation(
+          of: "copilot",
+          arguments: [],
+          environment: [
+            "GRAPHCODE_TEST_PATH":
+              "${GRAPHCODE_TEST_PATH:+$GRAPHCODE_TEST_PATH,}C:\\GraphCode Briefing"
+          ],
+          usesWindowsShell: true),
+        [
+          "set", "GRAPHCODE_TEST_PATH=C:\\GraphCode Briefing", "&&", "copilot",
+        ])
+    }
+
+    func testPresencePollingBacksOffWhenNoLoopsAreRunning() {
+      XCTAssertEqual(ProjectRegistry.presencePollDelay(runningLoops: 1), .seconds(15))
+      XCTAssertEqual(ProjectRegistry.presencePollDelay(runningLoops: 0), .seconds(60))
+    }
+
+    func testShellPredicateUsesPowerShellAndProjectWorkingDirectory() async throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-predicate-\(UUID().uuidString)", isDirectory: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      try Data("ready".utf8).write(to: root.appendingPathComponent("marker.txt"))
+
+      let passed = await ShellPredicateEvaluator.evaluate(
+        ShellPredicate(
+          command: "if ((Get-Content marker.txt -Raw) -eq 'ready') { exit 0 } else { exit 1 }",
+          workingDirectory: root.path))
+      let failed = await ShellPredicateEvaluator.evaluate(
+        ShellPredicate(command: "exit 7", workingDirectory: root.path))
+      let captured = await ShellPredicateEvaluator.capture(
+        ShellPredicate(command: "Write-Output 0.875", workingDirectory: root.path))
+
+      XCTAssertTrue(passed)
+      XCTAssertFalse(failed)
+      XCTAssertEqual(captured, "0.875")
+    }
+
+    func testImportedGoalPredicateDefaultsToTargetProjectDirectory() async throws {
+      let project = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-project-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: project) }
+      let capture = PredicateCapture()
+      let store = GraphStore(
+        graph: LoopGraph(project: ProjectRef(path: project.path, name: "target")),
+        onEvaluatePredicate: { predicate in
+          await capture.record(predicate.workingDirectory)
+          return true
+        })
+      let exported = LoopNode(
+        title: "Imported goal", loopType: .goalBased,
+        goal: GoalSpec(
+          summary: "marker exists", predicate: "exit 0", pollIntervalSeconds: 1),
+        state: .idle)
+      let snapshot = LoopGraph(
+        project: ProjectRef(path: "C:\\source", name: "source"),
+        nodes: [exported])
+
+      _ = await store.handle(.importNodes(GraphImportRequest(snapshot: snapshot)))
+      try await Task.sleep(for: .seconds(2))
+
+      let workingDirectory = await capture.workingDirectory
+      XCTAssertEqual(workingDirectory, project.path)
+    }
+
+    func testGraphExportBundleRoundTripsThroughWindowsZipTools() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("graphcode-export-\(UUID().uuidString)", isDirectory: true)
+      try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let node = LoopNode(title: "Portable loop", loopType: .goalBased)
+      let graph = LoopGraph(
+        project: ProjectRef(path: root.path, name: "portable"),
+        nodes: [node])
+      let bundle = GraphExportBundle(
+        manifest: ExportManifest(
+          createdBy: "test",
+          contents: ExportContents(
+            nodeIDs: [node.id.uuidString], isFullGraph: true,
+            sourceProject: root.path)),
+        graphSnapshot: graph,
+        memoryByNodeID: [node.id.uuidString: ["portable memory"]])
+      let archive = root.appendingPathComponent("bundle.zip")
+
+      XCTAssertEqual(bundle.writeToZip(at: archive.path), archive.path)
+      let decoded = GraphExportBundle.readFromZip(at: archive.path)
+
+      XCTAssertEqual(decoded?.graphSnapshot.nodes.map(\.title), ["Portable loop"])
+      XCTAssertEqual(decoded?.memoryByNodeID[node.id.uuidString], ["portable memory"])
+    }
+
     func testEndpointIsPerUserAndSupportDirectory() throws {
       let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("graphcode-identity-\(UUID().uuidString)", isDirectory: true)
