@@ -3553,11 +3553,13 @@ try {
   $plainLoopLabels = @($plainLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
     "Open Terminal`tEnter", "Edit Details...`tCtrl+E", "Save as Template...",
-    "Rename...`tF2", "Stop`tCtrl+S", "Delete Loop...`tDelete"
+    "Rename...`tF2", "Delete Loop...`tDelete"
   )) {
     Require ($plainLoopLabels -contains $expectedLabel) `
       "plain loop context menu omitted '$expectedLabel': $plainLoopDescription"
   }
+  Require (@($plainLoopItems | Where-Object { $_.Id -eq 5102 }).Count -eq 0) `
+    "succeeded loop context menu unexpectedly offered Stop: $plainLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108, 5109, 5112, 5115)) {
     Require (@($plainLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
       "plain loop context menu unexpectedly offered command $absentId (composite/unwired/template-only): $plainLoopDescription"

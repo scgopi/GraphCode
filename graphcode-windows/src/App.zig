@@ -1405,6 +1405,16 @@ pub const App = struct {
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
         const node = graph.nodes.items[index];
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch {
+            self.setStatus("Unable to remember the project while editing details");
+            return;
+        };
+        defer self.allocator.free(project_path);
+        const node_id = self.allocator.dupe(u8, node.id) catch {
+            self.setStatus("Unable to remember the loop while editing details");
+            return;
+        };
+        defer self.allocator.free(node_id);
         var update = NativeForms.update(self.window.hwnd, self.allocator, .{
             .goal_summary = if (node.goal_summary.len == 0) null else node.goal_summary,
             .goal_predicate = if (node.goal_predicate.len == 0) null else node.goal_predicate,
@@ -1420,9 +1430,15 @@ pub const App = struct {
             return;
         } orelse return;
         defer update.deinit(self.allocator);
-        const current_graph = self.model.graph orelse return;
-        if (!std.mem.eql(u8, current_graph.project.path, graph.project.path)) return;
-        const current_index = GraphModel.findNodeIndexByID(current_graph.nodes.items, node.id) orelse {
+        const current_graph = self.model.graph orelse {
+            self.setStatus("Project closed while editing details");
+            return;
+        };
+        if (!std.mem.eql(u8, current_graph.project.path, project_path)) {
+            self.setStatus("Project changed while editing details");
+            return;
+        }
+        const current_index = GraphModel.findNodeIndexByID(current_graph.nodes.items, node_id) orelse {
             self.setStatus("Loop changed while editing details");
             return;
         };
@@ -2214,6 +2230,28 @@ pub const App = struct {
                 .can_arm = std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted"),
                 .unwired = unwired,
                 .follows_template = graph.nodes.items[index].follows_template,
+                .resolved = isResolvedLoopState(graph.nodes.items[index].state),
+            } },
+            x,
+            y,
+            self,
+            &onContextAction,
+        );
+    }
+
+    fn showBackgroundContextMenu(self: *App, x: i32, y: i32) void {
+        const graph = self.model.graph orelse return;
+        const project_path = self.allocator.dupe(u8, graph.project.path) catch {
+            self.setStatus("Unable to open the project canvas menu");
+            return;
+        };
+        defer self.allocator.free(project_path);
+        GraphContextMenu.show(
+            self.window.hwnd,
+            .{ .background = .{
+                .project_path = project_path,
+                .local_filesystem = graph.project.isLocalFilesystem(),
+                .can_create_edge = graph.nodes.items.len >= 2,
             } },
             x,
             y,
@@ -2262,6 +2300,13 @@ pub const App = struct {
     fn showUiaContextMenu(self: *App, target_kind: c.WPARAM) void {
         if (!envFlag("GRAPHCODE_UIA_GATE")) return;
         const hwnd = self.window.hwnd;
+        _ = c.SetTimer(
+            hwnd,
+            MainWindow.menu_watchdog_timer_id,
+            MainWindow.menu_watchdog_interval_ms,
+            null,
+        );
+        defer _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
         const target: GraphContextMenu.Target = switch (target_kind) {
             1 => .{ .project = .{ .path = uia_context_menu_project_path, .remote = false } },
             2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true } },
@@ -2276,9 +2321,10 @@ pub const App = struct {
                     .can_arm = std.mem.eql(u8, graph.nodes.items[0].pilot_state, "piloted"),
                     .unwired = self.nodeIsUnwired(graph.nodes.items[0].id),
                     .follows_template = graph.nodes.items[0].follows_template,
+                    .resolved = isResolvedLoopState(graph.nodes.items[0].state),
                 } };
             },
-            4 => .background,
+            4 => return self.showBackgroundContextMenu(uia_context_menu_x, uia_context_menu_y),
             5 => .quick_chats,
             // Sidebar-parity-only targets: expose the composite and unwired
             // loop-menu variants that target 3 (the plain wired first node)
@@ -2296,6 +2342,7 @@ pub const App = struct {
                     .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
                     .unwired = self.nodeIsUnwired(node.id),
                     .follows_template = node.follows_template,
+                    .resolved = isResolvedLoopState(node.state),
                 } };
             },
             7 => blk: {
@@ -2313,16 +2360,11 @@ pub const App = struct {
                     .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
                     .unwired = self.nodeIsUnwired(node.id),
                     .follows_template = node.follows_template,
+                    .resolved = isResolvedLoopState(node.state),
                 } };
             },
             else => return,
         };
-        _ = c.SetTimer(
-            hwnd,
-            MainWindow.menu_watchdog_timer_id,
-            MainWindow.menu_watchdog_interval_ms,
-            null,
-        );
         GraphContextMenu.show(
             hwnd,
             target,
@@ -2331,7 +2373,6 @@ pub const App = struct {
             self,
             &onContextAction,
         );
-        _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
     }
 
     /// Gate-only hook that presents a real native modal form with deterministic
@@ -2579,7 +2620,24 @@ pub const App = struct {
                     else => {},
                 }
             },
-            .background => if (action == .create_edge) self.createEdge(),
+            .background => |stable| {
+                const already_active = if (self.model.graph) |active|
+                    std.mem.eql(u8, active.project.path, stable.project_path)
+                else
+                    false;
+                if (!already_active and !self.selectProject(stable.project_path)) {
+                    self.setStatus("Project changed while the canvas menu was open");
+                    return;
+                }
+                const graph = self.model.graph orelse return;
+                switch (action) {
+                    .create_edge => if (graph.nodes.items.len >= 2) self.createEdge() else self.setStatus("Create Edge requires two loops"),
+                    .inspect_project_worktrees => if (graph.project.isLocalFilesystem()) self.inspectWorktrees() else self.setStatus("Worktrees require a local filesystem project"),
+                    .project_settings => if (graph.project.isLocalFilesystem()) self.editWorktreePolicy() else self.setStatus("Project settings require a local filesystem project"),
+                    .reveal_project => if (graph.project.isLocalFilesystem()) self.revealProjectPath(stable.project_path) else self.setStatus("Explorer requires a local filesystem project"),
+                    else => {},
+                }
+            },
             .quick_chats => if (action == .new_quick_chat) self.createQuickChat(),
         }
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -5973,6 +6031,7 @@ fn onWindowMessage(
                                         .composite = std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "composite") or
                                             std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "proactive"),
                                         .can_arm = std.mem.eql(u8, graph.nodes.items[row.index].pilot_state, "piloted"),
+                                        .resolved = isResolvedLoopState(graph.nodes.items[row.index].state),
                                     } },
                                     screen.x,
                                     screen.y,
@@ -6033,7 +6092,7 @@ fn onWindowMessage(
                 var screen = c.POINT{ .x = point.x, .y = point.y };
                 _ = c.ClientToScreen(hwnd, &screen);
                 switch (target) {
-                    .background => GraphContextMenu.show(hwnd, .background, screen.x, screen.y, app, &onContextAction),
+                    .background => app.showBackgroundContextMenu(screen.x, screen.y),
                     .node => app.showNodeContextMenu(target_index, screen.x, screen.y),
                     .edge => app.showEdgeContextMenu(target_index, screen.x, screen.y),
                 }

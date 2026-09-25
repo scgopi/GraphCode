@@ -486,6 +486,13 @@ pub fn update(
         freeValues(state);
         allocator.destroy(state);
     }
+    try initializeNodeUpdate(state, initial);
+    if (!(try show(state, "Update node", &.{}))) return null;
+    return try buildNodeUpdate(state, initial);
+}
+
+fn initializeNodeUpdate(state: *DialogState, initial: Forms.NodeUpdate) !void {
+    const allocator = state.allocator;
     state.values[0] = try dupOptional(allocator, initial.goal_summary);
     state.values[1] = try dupOptional(allocator, initial.goal_predicate);
     state.values[2] = try dupFloat(allocator, initial.poll_interval_seconds);
@@ -496,20 +503,24 @@ pub fn update(
     state.values[7] = try dupOptional(allocator, initial.check_description);
     state.values[8] = try dupOptional(allocator, initial.model_tier);
     for (0..9) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
-    if (!(try show(state, "Update node", &.{}))) return null;
+}
+
+fn buildNodeUpdate(state: *const DialogState, initial: Forms.NodeUpdate) !?Forms.NodeUpdate {
+    if (!state.result) return null;
+    const allocator = state.allocator;
     const poll_interval = try changedFloat(state.values[2], initial.poll_interval_seconds, false);
     const stall_after = try changedFloat(state.values[3], initial.stall_after_seconds, true);
     var result = Forms.NodeUpdate{};
     errdefer result.deinit(allocator);
-    result.goal_summary = try changedOptional(allocator, state.values[0], initial.goal_summary, false);
-    result.goal_predicate = try changedOptional(allocator, state.values[1], initial.goal_predicate, true);
+    result.goal_summary = try changedOptional(allocator, state.values[0], state.initial_values[0], false);
+    result.goal_predicate = try changedOptional(allocator, state.values[1], state.initial_values[1], true);
     result.poll_interval_seconds = poll_interval;
     result.stall_after_seconds = stall_after;
-    result.metric_command = try changedOptional(allocator, state.values[4], initial.metric_command, true);
-    result.metric_direction = try changedOptional(allocator, state.values[5], initial.metric_direction, false);
-    result.trigger_prompt = try changedOptional(allocator, state.values[6], initial.trigger_prompt, true);
-    result.check_description = try changedOptional(allocator, state.values[7], initial.check_description, true);
-    result.model_tier = try changedOptional(allocator, state.values[8], initial.model_tier, false);
+    result.metric_command = try changedOptional(allocator, state.values[4], state.initial_values[4], true);
+    result.metric_direction = try changedOptional(allocator, state.values[5], state.initial_values[5], false);
+    result.trigger_prompt = try changedOptional(allocator, state.values[6], state.initial_values[6], true);
+    result.check_description = try changedOptional(allocator, state.values[7], state.initial_values[7], true);
+    result.model_tier = try changedOptional(allocator, state.values[8], state.initial_values[8], false);
     Forms.validateNodeUpdate(result) catch return error.InvalidNodeUpdate;
     return result;
 }
@@ -2475,6 +2486,122 @@ test "graph form cancellation leaves draft values untouched" {
     try std.testing.expect(state.closed);
     try std.testing.expectEqualStrings("source-id", state.values[0]);
     try std.testing.expectEqualStrings("handoff", state.values[2]);
+}
+
+test "node update uses its owned baseline after the source graph changes" {
+    var summary = "Original goal".*;
+    const initial = Forms.NodeUpdate{ .goal_summary = &summary, .poll_interval_seconds = 30 };
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    @memset(&summary, 'x');
+    state.allocator.free(state.values[2]);
+    state.values[2] = try state.allocator.dupe(u8, "45");
+    applyModalCommand(&state, .submit);
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expect(result.goal_summary == null);
+    try std.testing.expectEqual(@as(?f64, 45), result.poll_interval_seconds);
+}
+
+test "node update preserves unchanged values and clear semantics" {
+    const initial = Forms.NodeUpdate{
+        .goal_summary = "Goal",
+        .goal_predicate = "test",
+        .poll_interval_seconds = 30,
+        .stall_after_seconds = 120,
+        .metric_command = "coverage",
+        .metric_direction = "maximize",
+        .trigger_prompt = "Trigger",
+        .check_description = "Check",
+        .model_tier = "capable",
+    };
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeUpdate(&state, initial);
+    applyModalCommand(&state, .submit);
+    try std.testing.expectError(error.InvalidNodeUpdate, buildNodeUpdate(&state, initial));
+    for (0..9) |index| {
+        state.allocator.free(state.values[index]);
+        state.values[index] = &.{};
+    }
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expect(result.goal_summary == null);
+    try std.testing.expectEqualStrings("", result.goal_predicate.?);
+    try std.testing.expect(result.poll_interval_seconds == null);
+    try std.testing.expectEqual(@as(?f64, 0), result.stall_after_seconds);
+    try std.testing.expectEqualStrings("", result.metric_command.?);
+    try std.testing.expect(result.metric_direction == null);
+    try std.testing.expectEqualStrings("", result.trigger_prompt.?);
+    try std.testing.expectEqualStrings("", result.check_description.?);
+    try std.testing.expect(result.model_tier == null);
+}
+
+test "node update binds every changed field to the typed result" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+    defer freeValues(&state);
+    const initial = Forms.NodeUpdate{};
+    try initializeNodeUpdate(&state, initial);
+    const values = [_][]const u8{
+        "New goal", "new-test", "45.5", "90.25", "new-metric", "minimize", "New trigger", "New check", "standard",
+    };
+    for (values, 0..) |value, index| {
+        const owned = try state.allocator.dupe(u8, value);
+        state.allocator.free(state.values[index]);
+        state.values[index] = owned;
+    }
+    applyModalCommand(&state, .submit);
+    var result = (try buildNodeUpdate(&state, initial)).?;
+    defer result.deinit(state.allocator);
+    try std.testing.expectEqualStrings(values[0], result.goal_summary.?);
+    try std.testing.expectEqualStrings(values[1], result.goal_predicate.?);
+    try std.testing.expectEqual(@as(?f64, 45.5), result.poll_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, 90.25), result.stall_after_seconds);
+    try std.testing.expectEqualStrings(values[4], result.metric_command.?);
+    try std.testing.expectEqualStrings(values[5], result.metric_direction.?);
+    try std.testing.expectEqualStrings(values[6], result.trigger_prompt.?);
+    try std.testing.expectEqualStrings(values[7], result.check_description.?);
+    try std.testing.expectEqualStrings(values[8], result.model_tier.?);
+}
+
+test "node update cancellation and close return no result" {
+    for ([_]ModalCommand{ .cancel, .close }) |command| {
+        var state = DialogState{ .allocator = std.testing.allocator, .kind = .update, .parent = null };
+        defer freeValues(&state);
+        const initial = Forms.NodeUpdate{ .goal_summary = "Goal", .poll_interval_seconds = 30 };
+        try initializeNodeUpdate(&state, initial);
+        const invalid = try state.allocator.dupe(u8, "not a number");
+        state.allocator.free(state.values[2]);
+        state.values[2] = invalid;
+        applyModalCommand(&state, command);
+        try std.testing.expect((try buildNodeUpdate(&state, initial)) == null);
+        try std.testing.expect(state.closed);
+        try std.testing.expectEqualStrings("Goal", state.initial_values[0]);
+    }
+}
+
+test "node update initialization and result release every partial allocation" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var state = DialogState{ .allocator = allocator, .kind = .update, .parent = null };
+            defer freeValues(&state);
+            const initial = Forms.NodeUpdate{ .goal_summary = "Old goal", .poll_interval_seconds = 30 };
+            try initializeNodeUpdate(&state, initial);
+            const values = [_][]const u8{
+                "New goal", "test", "45", "90", "metric", "maximize", "trigger", "check", "fast",
+            };
+            for (values, 0..) |value, index| {
+                const owned = try allocator.dupe(u8, value);
+                allocator.free(state.values[index]);
+                state.values[index] = owned;
+            }
+            applyModalCommand(&state, .submit);
+            var result = (try buildNodeUpdate(&state, initial)).?;
+            defer result.deinit(allocator);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "keyboard-sized guided form keeps every field reachable through bounded scrolling" {
