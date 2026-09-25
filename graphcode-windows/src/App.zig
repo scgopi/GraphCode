@@ -42,12 +42,217 @@ const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
-const instance_prefix = "Local\\graphcode-windows-";
+const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
 const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
 const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
+
+fn workspaceUser(allocator: std.mem.Allocator) ![]u8 {
+    return std.process.getEnvVarOwned(allocator, "USERNAME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "USER"),
+        else => err,
+    };
+}
+
+fn workspaceInstanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16 {
+    const user = try workspaceUser(allocator);
+    defer allocator.free(user);
+    const name = try WorkspaceLifecycle.instanceName(allocator, user, path);
+    defer allocator.free(name);
+    return std.unicode.utf8ToUtf16LeAllocZ(allocator, name);
+}
+
+pub fn restoreCurrentWorkspace(allocator: std.mem.Allocator) !void {
+    const path = try WorkspaceLifecycle.currentPath(allocator);
+    defer allocator.free(path);
+    const key = try workspaceInstanceKey(allocator, path);
+    defer allocator.free(key);
+    try MainWindow.restoreExistingInstance(key);
+}
+
+const WorkspaceReservation = struct {
+    handles: [2]c.HANDLE = .{ null, null },
+
+    fn acquire(allocator: std.mem.Allocator, path: []const u8) !WorkspaceReservation {
+        const user = try workspaceUser(allocator);
+        defer allocator.free(user);
+        return acquireForUser(allocator, user, path);
+    }
+
+    fn acquireForUser(allocator: std.mem.Allocator, user: []const u8, path: []const u8) !WorkspaceReservation {
+        const canonical = try WorkspaceLifecycle.instanceName(allocator, user, path);
+        defer allocator.free(canonical);
+        const legacy = try WorkspaceLifecycle.legacyInstanceName(allocator, user, path);
+        defer allocator.free(legacy);
+        var result = WorkspaceReservation{};
+        errdefer result.deinit();
+        const names = [_][]const u8{ canonical, legacy };
+        for (names, 0..) |name, index| {
+            if (index == 1 and std.mem.eql(u8, canonical, legacy)) break;
+            const wide = try std.unicode.utf8ToUtf16LeAllocZ(allocator, name);
+            defer allocator.free(wide);
+            const handle = c.CreateMutexW(null, 1, wide.ptr) orelse return error.WorkspaceReservationFailed;
+            const last_error = c.GetLastError();
+            if (last_error == c.ERROR_ALREADY_EXISTS) {
+                _ = c.CloseHandle(handle);
+                return error.WorkspaceInUse;
+            }
+            result.handles[index] = handle;
+        }
+        return result;
+    }
+
+    fn deinit(self: *WorkspaceReservation) void {
+        for (&self.handles) |*handle| {
+            if (handle.* != null) {
+                _ = c.ReleaseMutex(handle.*);
+                _ = c.CloseHandle(handle.*);
+                handle.* = null;
+            }
+        }
+    }
+};
+
+const WorkspaceProcess = struct {
+    fn windows(key: [:0]const u16) !MainWindow.WorkspaceWindows {
+        return MainWindow.workspaceWindows(key);
+    }
+
+    fn restore(key: [:0]const u16) !void {
+        try MainWindow.restoreExistingInstance(key);
+    }
+
+    fn launch(allocator: std.mem.Allocator, path: []const u8) !void {
+        const block = try workspaceEnvironment(allocator, path);
+        defer allocator.free(block);
+        var executable: [32768]u16 = undefined;
+        const length = c.GetModuleFileNameW(null, &executable, executable.len);
+        if (length == 0 or length >= executable.len) return error.WorkspaceExecutablePathFailed;
+        executable[length] = 0;
+        var startup: c.STARTUPINFOW = std.mem.zeroes(c.STARTUPINFOW);
+        startup.cb = @sizeOf(c.STARTUPINFOW);
+        var process: c.PROCESS_INFORMATION = undefined;
+        if (c.CreateProcessW(executable[0..length :0].ptr, null, null, null, 0, c.CREATE_UNICODE_ENVIRONMENT, block.ptr, null, &startup, &process) == 0)
+            return error.WorkspaceLaunchFailed;
+        _ = c.CloseHandle(process.hThread);
+        _ = c.CloseHandle(process.hProcess);
+    }
+};
+
+fn workspaceEnvironment(allocator: std.mem.Allocator, path: []const u8) ![]u16 {
+    var environment = try std.process.getEnvMap(allocator);
+    defer environment.deinit();
+    try environment.put("GRAPHCODE_SUPPORT_DIR", path);
+    environment.remove("GRAPHCODE_DAEMON_PIPE");
+    return std.process.createWindowsEnvBlock(allocator, &environment);
+}
+
+const WorkspaceOpenResult = enum { current, restored, launched };
+
+fn openWorkspaceWith(comptime Api: type, allocator: std.mem.Allocator, current_identity: []const u8, path: []const u8) !WorkspaceOpenResult {
+    const identity = try WorkspaceLifecycle.pathIdentity(allocator, path);
+    defer allocator.free(identity);
+    if (std.mem.eql(u8, current_identity, identity)) return .current;
+    const key = try workspaceInstanceKey(allocator, path);
+    defer allocator.free(key);
+    const windows = try Api.windows(key);
+    if (windows.target != null) {
+        try Api.restore(key);
+        return .restored;
+    }
+    if (windows.unidentified) return error.UnidentifiedWorkspaceWindow;
+    try Api.launch(allocator, path);
+    return .launched;
+}
+
+const WorkspaceMutation = union(enum) { rename: []const u8, delete };
+const WorkspaceMutationResult = enum { renamed, deleted, cancelled };
+const workspace_delete_confirmation_flags = c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2;
+
+const WorkspaceMutationApi = struct {
+    const reserve = WorkspaceReservation.acquire;
+    const windows = WorkspaceProcess.windows;
+
+    fn confirm(owner: c.HWND) c.INT {
+        return c.MessageBoxW(
+            owner,
+            std.unicode.utf8ToUtf16LeStringLiteral("This permanently deletes the workspace folder and all of its projects and loops. Continue?").ptr,
+            std.unicode.utf8ToUtf16LeStringLiteral("Delete Workspace").ptr,
+            workspace_delete_confirmation_flags,
+        );
+    }
+
+    fn rename(allocator: std.mem.Allocator, source: []const u8, destination: []const u8) !void {
+        const from = try std.unicode.utf8ToUtf16LeAllocZ(allocator, source);
+        defer allocator.free(from);
+        const to = try std.unicode.utf8ToUtf16LeAllocZ(allocator, destination);
+        defer allocator.free(to);
+        if (c.MoveFileW(from.ptr, to.ptr) == 0) return error.WorkspaceRenameFailed;
+    }
+
+    fn delete(path: []const u8) !void {
+        try std.fs.deleteTreeAbsolute(path);
+    }
+};
+
+fn requireIdentifiedClosedWorkspace(comptime Api: type, key: [:0]const u16) !void {
+    const windows = try Api.windows(key);
+    if (windows.unidentified) return error.UnidentifiedWorkspaceWindow;
+    if (windows.target != null) return error.WorkspaceInUse;
+}
+
+fn mutateWorkspaceWith(
+    comptime Api: type,
+    allocator: std.mem.Allocator,
+    owner: c.HWND,
+    current_identity: []const u8,
+    workspace: WorkspaceLifecycle.Workspace,
+    mutation: WorkspaceMutation,
+) !WorkspaceMutationResult {
+    if (workspace.is_default) return error.DefaultWorkspace;
+    // The confirmation pumps messages that can refresh and free workspace_list.
+    const source = try allocator.dupe(u8, workspace.path);
+    defer allocator.free(source);
+    const identity = try WorkspaceLifecycle.pathIdentity(allocator, source);
+    defer allocator.free(identity);
+    if (std.mem.eql(u8, identity, current_identity)) return error.CurrentWorkspace;
+    var reservation = try Api.reserve(allocator, source);
+    defer reservation.deinit();
+    const key = try workspaceInstanceKey(allocator, source);
+    defer allocator.free(key);
+    try requireIdentifiedClosedWorkspace(Api, key);
+    switch (mutation) {
+        .rename => |destination| {
+            var destination_reservation = try Api.reserve(allocator, destination);
+            defer destination_reservation.deinit();
+            const destination_key = try workspaceInstanceKey(allocator, destination);
+            defer allocator.free(destination_key);
+            try requireIdentifiedClosedWorkspace(Api, destination_key);
+            try Api.rename(allocator, source, destination);
+            return .renamed;
+        },
+        .delete => {
+            if (Api.confirm(owner) != c.IDYES) return .cancelled;
+            try requireIdentifiedClosedWorkspace(Api, key);
+            var directory = try std.fs.openDirAbsolute(source, .{});
+            directory.close();
+            try Api.delete(source);
+            return .deleted;
+        },
+    }
+}
+
+fn workspaceMutationFailure(err: anyerror) []const u8 {
+    return switch (err) {
+        error.DefaultWorkspace => "The default workspace cannot be renamed or deleted",
+        error.CurrentWorkspace => "The current workspace cannot be renamed or deleted",
+        error.WorkspaceInUse => "That workspace is open in another window; quit it first",
+        error.UnidentifiedWorkspaceWindow => "Close older GraphCode windows before changing a workspace",
+        else => "Workspace could not be changed safely",
+    };
+}
 
 /// Deterministic targets and screen position used only by the live UIA gate's
 /// context-menu hook (`MainWindow.wm_uia_context_menu`).
@@ -255,9 +460,12 @@ pub const App = struct {
     canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
     selected_quick_chat: ?usize = null,
-    instance_mutex: c.HANDLE = null,
+    workspace_reservation: WorkspaceReservation = .{},
     workspace_list: ?WorkspaceLifecycle.List = null,
     workspace_path: []u8 = &.{},
+    workspace_identity: []u8 = &.{},
+    workspace_identity_valid: bool = false,
+    workspace_identity_blocked: bool = false,
     sync_requested: bool = false,
     restore_requested: bool = false,
     open_project_pending: bool = false,
@@ -392,9 +600,10 @@ pub const App = struct {
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
-        if (self.instance_mutex != null) _ = c.CloseHandle(self.instance_mutex);
+        self.workspace_reservation.deinit();
         if (self.workspace_list) |*list| list.deinit(self.allocator);
         if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
+        if (self.workspace_identity.len != 0) self.allocator.free(self.workspace_identity);
         if (self.last_project_opened.len != 0) self.allocator.free(self.last_project_opened);
         if (self.accepted_subscription.len != 0) self.allocator.free(self.accepted_subscription);
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
@@ -440,6 +649,7 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
+        try self.revalidateWorkspaceIdentity();
         if (!self.window.gesture_config_registered) {
             // Non-fatal: the canvas simply falls back to wheel-only zoom (no
             // pinch input) rather than the app failing to start. The
@@ -521,7 +731,7 @@ pub const App = struct {
             }
         }
         self.createEmptyStateControls();
-        self.refreshWorkspaceList();
+        _ = self.refreshWorkspaceList();
         self.updateNativeChrome();
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
@@ -1529,10 +1739,24 @@ pub const App = struct {
         } orelse return;
         defer self.allocator.free(draft.daemon_pipe);
         defer self.allocator.free(draft.support_directory);
-        self.client.applySettings(draft.daemon_pipe, draft.support_directory) catch {
+        self.applyWorkspaceConnectionSettings(draft.daemon_pipe, draft.support_directory) catch {
             self.setStatus("Invalid daemon settings");
+            self.updateNativeChrome();
             return;
         };
+        self.syncAccessibility();
+        self.updateNativeChrome();
+    }
+
+    fn applyWorkspaceConnectionSettings(self: *App, pipe: []const u8, support: []const u8) !void {
+        self.workspace_identity_valid = false;
+        self.workspace_identity_blocked = true;
+        try MainWindow.invalidateWorkspaceIdentity(self.window.hwnd);
+        self.client.applySettings(pipe, support) catch |err| {
+            try self.revalidateWorkspaceIdentity();
+            return err;
+        };
+        try self.revalidateWorkspaceIdentity();
     }
 
     fn openProductSettings(self: *App) void {
@@ -3853,6 +4077,7 @@ pub const App = struct {
     }
 
     fn status(self: *const App) []const u8 {
+        if (self.workspace_identity_blocked) return workspace_restart_message;
         if (self.status_override.len != 0) return self.status_override;
         return self.client.statusText();
     }
@@ -3986,7 +4211,7 @@ pub const App = struct {
                 for (list.items, 0..) |workspace, index| {
                     workspace_items[index] = .{
                         .name = workspace.name,
-                        .is_current = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
+                        .is_current = self.workspace_identity_valid and std.mem.eql(u8, workspace.identity, self.workspace_identity),
                     };
                 }
             }
@@ -4427,9 +4652,9 @@ pub const App = struct {
                     .identity = identity,
                     .name = workspace.name,
                     .parent = 21,
-                    .selected = WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path),
-                    .eligible = true,
-                    .invokable = true,
+                    .selected = self.workspace_identity_valid and std.mem.eql(u8, workspace.identity, self.workspace_identity),
+                    .eligible = self.workspace_identity_valid,
+                    .invokable = self.workspace_identity_valid,
                     .left = 250,
                     .top = row_top,
                     .right = 500,
@@ -4794,46 +5019,58 @@ pub const App = struct {
     }
 
     fn acquireSingleInstance(self: *App) !void {
-        const user = std.process.getEnvVarOwned(self.allocator, "USERNAME") catch
-            try std.process.getEnvVarOwned(self.allocator, "USER");
-        defer self.allocator.free(user);
         const path = try WorkspaceLifecycle.currentPath(self.allocator);
-        defer self.allocator.free(path);
-        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(path, &digest, .{});
-        const digest_text = std.fmt.bytesToHex(digest, .lower);
-        const name = try std.fmt.allocPrint(self.allocator, "{s}{s}-{s}", .{ instance_prefix, user, digest_text[0..20] });
-        defer self.allocator.free(name);
-        const raw_wide = try std.unicode.utf8ToUtf16LeAlloc(self.allocator, name);
-        defer self.allocator.free(raw_wide);
-        const wide = try self.allocator.alloc(u16, raw_wide.len + 1);
-        defer self.allocator.free(wide);
-        @memcpy(wide[0..raw_wide.len], raw_wide);
-        wide[raw_wide.len] = 0;
-        self.instance_mutex = c.CreateMutexW(null, 1, wide.ptr);
-        if (self.instance_mutex == null) return error.SingleInstanceMutexFailed;
-        if (c.GetLastError() == c.ERROR_ALREADY_EXISTS) {
-            _ = c.CloseHandle(self.instance_mutex);
-            self.instance_mutex = null;
-            return error.InstanceAlreadyRunning;
-        }
+        errdefer self.allocator.free(path);
+        const identity = try WorkspaceLifecycle.pathIdentity(self.allocator, path);
+        errdefer self.allocator.free(identity);
+        const reservation = WorkspaceReservation.acquire(self.allocator, path) catch |err| switch (err) {
+            error.WorkspaceInUse => return error.InstanceAlreadyRunning,
+            else => return err,
+        };
+        self.workspace_reservation = reservation;
+        self.workspace_path = path;
+        self.workspace_identity = identity;
     }
 
-    fn refreshWorkspaceList(self: *App) void {
-        const current = WorkspaceLifecycle.currentPath(self.allocator) catch {
-            self.setStatus("Workspace location could not be resolved");
-            return;
+    fn revalidateWorkspaceIdentity(self: *App) !void {
+        self.workspace_identity_valid = false;
+        self.workspace_identity_blocked = true;
+        try MainWindow.invalidateWorkspaceIdentity(self.window.hwnd);
+        if (self.workspace_reservation.handles[0] == null) return error.WorkspaceReservationMissing;
+        const current = try WorkspaceLifecycle.currentPath(self.allocator);
+        defer self.allocator.free(current);
+        const identity = try WorkspaceLifecycle.pathIdentity(self.allocator, current);
+        defer self.allocator.free(identity);
+        if (!std.mem.eql(u8, self.workspace_identity, identity)) return error.WorkspaceRestartRequired;
+        const key = try workspaceInstanceKey(self.allocator, self.workspace_path);
+        defer self.allocator.free(key);
+        try MainWindow.publishWorkspaceIdentity(self.window.hwnd, key);
+        self.workspace_identity_valid = true;
+        self.workspace_identity_blocked = false;
+    }
+
+    fn ensureWorkspaceIdentity(self: *App) bool {
+        self.revalidateWorkspaceIdentity() catch {
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return false;
         };
-        if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
-        self.workspace_path = current;
-        if (self.workspace_list) |*list| list.deinit(self.allocator);
-        self.workspace_list = WorkspaceLifecycle.list(self.allocator) catch blk: {
+        return true;
+    }
+
+    fn refreshWorkspaceList(self: *App) bool {
+        if (!self.ensureWorkspaceIdentity()) return false;
+        const refreshed = WorkspaceLifecycle.list(self.allocator) catch {
             self.setStatus("Workspace list could not be loaded");
-            break :blk null;
+            return false;
         };
+        if (self.workspace_list) |*list| list.deinit(self.allocator);
+        self.workspace_list = refreshed;
+        return true;
     }
 
     fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeDialogs.Result {
+        if (!self.ensureWorkspaceIdentity()) return null;
         return NativeDialogs.textWithDescription(
             self.window.hwnd,
             self.allocator,
@@ -4842,7 +5079,7 @@ pub const App = struct {
             labels,
             initial,
         ) catch {
-            self.setStatus("Workspace dialog could not be opened");
+            self.setStatus("Workspace dialog could not be completed");
             return null;
         };
     }
@@ -4853,84 +5090,52 @@ pub const App = struct {
             var owned = result;
             owned.deinit(self.allocator);
         }
+        if (!self.ensureWorkspaceIdentity()) return;
         const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
             self.setStatus("User profile could not be resolved");
             return;
         };
         defer self.allocator.free(home);
-        const name = WorkspaceLifecycle.validateName(self.allocator, result.values[0], home) catch |err| {
+        var workspace = WorkspaceLifecycle.create(self.allocator, result.values[0], home) catch |err| {
             self.setStatus(switch (err) {
                 error.EmptyName => "Workspace name is required",
                 error.NameTooLong => "Workspace name is too long",
-                error.NameTaken => "That workspace already exists",
-                else => "Workspace name is invalid",
+                error.NameTaken, error.PathAlreadyExists => "That workspace already exists",
+                else => "Workspace could not be created",
             });
             return;
         };
-        defer self.allocator.free(name);
-        const path = WorkspaceLifecycle.workspacePath(self.allocator, name, home) catch {
-            self.setStatus("Workspace path could not be prepared");
-            return;
-        };
-        defer self.allocator.free(path);
-        std.fs.makeDirAbsolute(path) catch |err| {
-            self.setStatus(if (err == error.PathAlreadyExists) "That workspace already exists" else "Workspace could not be created");
-            return;
-        };
-        self.refreshWorkspaceList();
-        self.launchWorkspace(path);
+        defer workspace.deinit(self.allocator);
+        if (!self.refreshWorkspaceList()) return;
+        self.launchWorkspace(workspace.path);
     }
 
     fn launchWorkspace(self: *App, path: []const u8) void {
-        const old = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
-        defer if (old) |value| self.allocator.free(value);
-        const key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
-        const value = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, path) catch {
-            self.setStatus("Workspace path could not be encoded");
+        if (!self.ensureWorkspaceIdentity()) return;
+        const opened = openWorkspaceWith(WorkspaceProcess, self.allocator, self.workspace_identity, path) catch |err| {
+            self.setStatus(if (err == error.UnidentifiedWorkspaceWindow)
+                "Close older GraphCode windows before opening another workspace"
+            else
+                "Workspace could not be opened or activated");
             return;
         };
-        defer self.allocator.free(value);
-        if (c.SetEnvironmentVariableW(key.ptr, value.ptr) == 0) {
-            self.setStatus("Workspace launch environment could not be set");
-            return;
-        }
-        defer {
-            if (old) |previous| {
-                if (std.unicode.utf8ToUtf16LeAllocZ(self.allocator, previous)) |previous_wide| {
-                    defer self.allocator.free(previous_wide);
-                    _ = c.SetEnvironmentVariableW(key.ptr, previous_wide.ptr);
-                } else |_| {
-                    _ = c.SetEnvironmentVariableW(key.ptr, null);
-                }
-            } else {
-                _ = c.SetEnvironmentVariableW(key.ptr, null);
-            }
-        }
-        var executable: [32768]u16 = undefined;
-        const length = c.GetModuleFileNameW(null, &executable, executable.len);
-        if (length == 0 or length >= executable.len) {
-            self.setStatus("GraphCode executable path could not be resolved");
-            return;
-        }
-        executable[length] = 0;
-        var startup: c.STARTUPINFOW = std.mem.zeroes(c.STARTUPINFOW);
-        startup.cb = @sizeOf(c.STARTUPINFOW);
-        var process: c.PROCESS_INFORMATION = undefined;
-        if (c.CreateProcessW(executable[0..length :0].ptr, null, null, null, 0, 0, null, null, &startup, &process) == 0) {
-            self.setStatus("Workspace could not be opened");
-            return;
-        }
-        _ = c.CloseHandle(process.hThread);
-        _ = c.CloseHandle(process.hProcess);
-        self.setStatus("Workspace opened");
+        self.setStatus(switch (opened) {
+            .current => "This workspace is already open",
+            .restored => "Workspace activated",
+            .launched => "Workspace launch requested",
+        });
     }
 
     fn workspaceByName(self: *App, name: []const u8) ?WorkspaceLifecycle.Workspace {
         const list = self.workspace_list orelse return null;
+        var found: ?WorkspaceLifecycle.Workspace = null;
         for (list.items) |workspace| {
-            if (std.ascii.eqlIgnoreCase(workspace.name, name)) return workspace;
+            if (std.ascii.eqlIgnoreCase(workspace.name, name)) {
+                if (found != null) return null;
+                found = workspace;
+            }
         }
-        return null;
+        return found;
     }
 
     fn renameWorkspace(self: *App) void {
@@ -4943,28 +5148,31 @@ pub const App = struct {
             var owned = result;
             owned.deinit(self.allocator);
         }
+        if (!self.refreshWorkspaceList()) return;
         const workspace = self.workspaceByName(result.values[0]) orelse {
             self.setStatus("Workspace was not found");
             return;
         };
-        if (workspace.is_default or WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
-            self.setStatus("Switch to another workspace before renaming this one");
+        const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
+            self.setStatus("User profile could not be resolved");
             return;
-        }
-        const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch return;
+        };
         defer self.allocator.free(home);
         const name = WorkspaceLifecycle.validateName(self.allocator, result.values[1], home) catch {
             self.setStatus("Workspace name is invalid or already exists");
             return;
         };
         defer self.allocator.free(name);
-        const destination = WorkspaceLifecycle.workspacePath(self.allocator, name, home) catch return;
-        defer self.allocator.free(destination);
-        std.fs.renameAbsolute(workspace.path, destination) catch {
-            self.setStatus("Workspace could not be renamed");
+        const destination = WorkspaceLifecycle.workspacePath(self.allocator, name, home) catch {
+            self.setStatus("Workspace path could not be prepared");
             return;
         };
-        self.refreshWorkspaceList();
+        defer self.allocator.free(destination);
+        _ = mutateWorkspaceWith(WorkspaceMutationApi, self.allocator, self.window.hwnd, self.workspace_identity, workspace, .{ .rename = destination }) catch |err| {
+            self.setStatus(workspaceMutationFailure(err));
+            return;
+        };
+        if (!self.refreshWorkspaceList()) return;
         self.setStatus("Workspace renamed");
     }
 
@@ -4974,45 +5182,41 @@ pub const App = struct {
             var owned = result;
             owned.deinit(self.allocator);
         }
+        if (!self.refreshWorkspaceList()) return;
         const workspace = self.workspaceByName(result.values[0]) orelse {
             self.setStatus("Workspace was not found");
             return;
         };
-        if (workspace.is_default or WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
-            self.setStatus("The default or current workspace cannot be deleted");
-            return;
-        }
-        const dialog_title = std.unicode.utf8ToUtf16LeStringLiteral("Delete Workspace");
-        const message = std.unicode.utf8ToUtf16LeStringLiteral(
-            "This permanently deletes the workspace folder and all of its projects and loops. Continue?",
-        );
-        if (c.MessageBoxW(self.window.hwnd, message.ptr, dialog_title.ptr, c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2) != c.IDYES) {
-            self.setStatus("Workspace deletion cancelled");
-            return;
-        }
-        std.fs.deleteTreeAbsolute(workspace.path) catch {
-            self.setStatus("Workspace could not be deleted");
+        const outcome = mutateWorkspaceWith(WorkspaceMutationApi, self.allocator, self.window.hwnd, self.workspace_identity, workspace, .delete) catch |err| {
+            self.setStatus(workspaceMutationFailure(err));
             return;
         };
-        self.refreshWorkspaceList();
-        self.setStatus("Workspace deleted");
+        if (!self.refreshWorkspaceList()) return;
+        self.setStatus(if (outcome == .deleted) "Workspace deleted" else "Workspace deletion cancelled");
     }
 
     fn cycleWorkspace(self: *App, direction: isize) void {
+        if (!self.refreshWorkspaceList()) return;
         const list = self.workspace_list orelse return;
         if (list.items.len < 2) return;
-        var index: usize = 0;
-        for (list.items, 0..) |workspace, i| {
-            if (WorkspaceLifecycle.isSamePath(workspace.path, self.workspace_path)) {
-                index = i;
-                break;
-            }
-        }
-        const count = @as(isize, @intCast(list.items.len));
-        const next = @mod(@as(isize, @intCast(index)) + direction + count, count);
-        self.launchWorkspace(list.items[@intCast(next)].path);
+        const next = workspaceCycleTarget(list.items, self.workspace_identity, direction) orelse {
+            self.setStatus("The current workspace is not in the workspace list");
+            return;
+        };
+        self.launchWorkspace(list.items[next].path);
     }
 };
+
+fn workspaceCycleTarget(items: []const WorkspaceLifecycle.Workspace, current_identity: []const u8, direction: isize) ?usize {
+    if (items.len < 2) return null;
+    for (items, 0..) |workspace, index| {
+        if (std.mem.eql(u8, workspace.identity, current_identity)) {
+            const count: isize = @intCast(items.len);
+            return @intCast(@mod(@as(isize, @intCast(index)) + @mod(direction, count), count));
+        }
+    }
+    return null;
+}
 
 fn onDaemonFrame(
     context: ?*anyopaque,
@@ -5045,7 +5249,7 @@ fn onWindowMessage(
         return true;
     }
     if (MainWindow.restore_message != 0 and message == MainWindow.restore_message) {
-        restoreShellWindow(hwnd);
+        if (app.ensureWorkspaceIdentity()) restoreShellWindow(hwnd);
         result.* = 0;
         return true;
     }
@@ -5097,6 +5301,9 @@ fn onWindowMessage(
             }
         },
         c.WM_INITMENUPOPUP => {
+            if (@intFromPtr(c.GetSubMenu(c.GetMenu(hwnd), 3)) == wparam) {
+                if (app.refreshWorkspaceList()) app.syncAccessibility();
+            }
             app.updateNativeChrome();
             result.* = 0;
             return true;
@@ -5558,7 +5765,11 @@ fn onWindowMessage(
             return true;
         },
         c.WM_ACTIVATEAPP => {
-            if (wparam == 0) app.cancelCanvasInteraction();
+            if (wparam == 0) {
+                app.cancelCanvasInteraction();
+            } else {
+                if (app.refreshWorkspaceList()) app.syncAccessibility();
+            }
             result.* = 0;
             return true;
         },
@@ -6411,6 +6622,519 @@ fn restoreShellWindow(hwnd: c.HWND) void {
         }
     }
     _ = c.SetFocus(hwnd);
+}
+
+fn setWorkspaceTestEnvironment(name: [*:0]const u16, value: ?[]const u8) !void {
+    const wide = if (value) |text| try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, text) else null;
+    defer if (wide) |text| std.testing.allocator.free(text);
+    if (c.SetEnvironmentVariableW(name, if (wide) |text| text.ptr else null) == 0)
+        return error.TestEnvironmentUpdateFailed;
+}
+
+test "connection settings invalidate lifecycle attribution until the reserved support is revalidated" {
+    const allocator = std.testing.allocator;
+    const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+    const pipe_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_DAEMON_PIPE");
+    var original_environment = try std.process.getEnvMap(allocator);
+    defer original_environment.deinit();
+    defer setWorkspaceTestEnvironment(support_key, original_environment.get("GRAPHCODE_SUPPORT_DIR")) catch @panic("support environment restore failed");
+    defer setWorkspaceTestEnvironment(pipe_key, original_environment.get("GRAPHCODE_DAEMON_PIPE")) catch @panic("pipe environment restore failed");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    for ([_][]const u8{ ".graphcode-alpha", ".graphcode-beta" }) |name| {
+        var directory = try temporary.dir.makeOpenPath(name, .{});
+        defer directory.close();
+        try directory.writeFile(.{ .sub_path = ".graphcode-rendezvous.secret", .data = "workspace-fixture-not-a-secret!!" });
+        try directory.writeFile(.{ .sub_path = "saved-state", .data = name });
+    }
+    const alpha = try temporary.dir.realpathAlloc(allocator, ".graphcode-alpha");
+    defer allocator.free(alpha);
+    const beta = try temporary.dir.realpathAlloc(allocator, ".graphcode-beta");
+    defer allocator.free(beta);
+    const pipe = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\graphcode-lifecycle-{x:0>32}", .{std.crypto.random.int(u128)});
+    defer allocator.free(pipe);
+    const second_pipe = try std.fmt.allocPrint(allocator, "{s}-changed", .{pipe});
+    defer allocator.free(second_pipe);
+    try setWorkspaceTestEnvironment(support_key, alpha);
+    try setWorkspaceTestEnvironment(pipe_key, pipe);
+    const hwnd = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("Hidden workspace identity fixture").ptr,
+        0,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    var app: App = .{
+        .allocator = allocator,
+        .window = .{ .hwnd = hwnd },
+        .client = try DaemonClient.init(allocator),
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    defer if (app.status_override.len != 0) allocator.free(app.status_override);
+    try app.acquireSingleInstance();
+    defer app.workspace_reservation.deinit();
+    defer allocator.free(app.workspace_path);
+    defer allocator.free(app.workspace_identity);
+    const published_key = try workspaceInstanceKey(allocator, alpha);
+    defer allocator.free(published_key);
+    try app.revalidateWorkspaceIdentity();
+    try std.testing.expect(MainWindow.workspaceIdentityMatches(hwnd, published_key));
+    try app.applyWorkspaceConnectionSettings(second_pipe, alpha);
+    try std.testing.expect(app.workspace_identity_valid);
+    const alias = try std.fmt.allocPrint(allocator, "{s}\\ignored\\..\\", .{alpha});
+    defer allocator.free(alias);
+    try app.applyWorkspaceConnectionSettings(pipe, alias);
+    try std.testing.expect(app.workspace_identity_valid);
+    try std.testing.expectError(error.InvalidDaemonPipe, app.applyWorkspaceConnectionSettings("invalid-pipe", alpha));
+    try std.testing.expect(app.workspace_identity_valid);
+    try std.testing.expect(MainWindow.workspaceIdentityMatches(hwnd, published_key));
+
+    try std.testing.expectError(error.WorkspaceRestartRequired, app.applyWorkspaceConnectionSettings(pipe, beta));
+    try std.testing.expect(!app.workspace_identity_valid);
+    try std.testing.expect(!MainWindow.workspaceIdentityMatches(hwnd, published_key));
+    try std.testing.expectEqualStrings(workspace_restart_message, app.status());
+    try std.testing.expectError(error.WorkspaceInUse, WorkspaceReservation.acquire(allocator, alpha));
+    try std.testing.expectError(error.WorkspaceRestartRequired, app.applyWorkspaceConnectionSettings("invalid-pipe", alpha));
+    app.createWorkspace();
+    app.renameWorkspace();
+    app.deleteWorkspace();
+    app.launchWorkspace(beta);
+    app.cycleWorkspace(1);
+    try std.testing.expect(!app.workspace_identity_valid);
+    try std.testing.expect(app.workspace_list == null);
+    try std.testing.expectEqualStrings(alpha, app.workspace_path);
+    for ([_][]const u8{ ".graphcode-alpha", ".graphcode-beta" }) |name| {
+        var directory = try temporary.dir.openDir(name, .{});
+        defer directory.close();
+        const saved = try directory.readFileAlloc(allocator, "saved-state", 100);
+        defer allocator.free(saved);
+        try std.testing.expectEqualStrings(name, saved);
+    }
+
+    try app.applyWorkspaceConnectionSettings(pipe, alpha);
+    try std.testing.expect(app.workspace_identity_valid);
+    try std.testing.expect(!app.workspace_identity_blocked);
+    try std.testing.expect(MainWindow.workspaceIdentityMatches(hwnd, published_key));
+    try setWorkspaceTestEnvironment(support_key, "C:relative");
+    try std.testing.expectError(error.InvalidWorkspacePath, app.revalidateWorkspaceIdentity());
+    try std.testing.expect(!MainWindow.workspaceIdentityMatches(hwnd, published_key));
+    try std.testing.expectEqualStrings(workspace_restart_message, app.status());
+    try setWorkspaceTestEnvironment(support_key, alpha);
+
+    const Probe = struct {
+        fn run(failing: std.mem.Allocator, target: *App, key: [:0]const u16) !void {
+            const previous = target.allocator;
+            target.allocator = failing;
+            defer target.allocator = previous;
+            target.revalidateWorkspaceIdentity() catch |err| {
+                try std.testing.expect(!target.workspace_identity_valid);
+                try std.testing.expect(target.workspace_identity_blocked);
+                try std.testing.expect(!MainWindow.workspaceIdentityMatches(target.window.hwnd, key));
+                try std.testing.expectEqualStrings(workspace_restart_message, target.status());
+                return err;
+            };
+            try std.testing.expect(target.workspace_identity_valid);
+            try std.testing.expect(MainWindow.workspaceIdentityMatches(target.window.hwnd, key));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, published_key });
+    try app.revalidateWorkspaceIdentity();
+    try std.testing.expectError(error.WorkspaceInUse, WorkspaceReservation.acquire(allocator, alpha));
+}
+
+test "workspace open routes current restore and cold launch exactly once" {
+    const Probe = struct {
+        var lookup: MainWindow.WorkspaceWindows = .{};
+        var lookups: usize = 0;
+        var restores: usize = 0;
+        var launches: usize = 0;
+        var fail_lookup = false;
+        var fail_launch = false;
+        var expected_key: [:0]const u16 = undefined;
+
+        fn windows(key: [:0]const u16) !MainWindow.WorkspaceWindows {
+            lookups += 1;
+            try std.testing.expectEqualSlices(u16, expected_key, key);
+            if (fail_lookup) return error.WorkspaceWindowLookupFailed;
+            return lookup;
+        }
+        fn restore(key: [:0]const u16) !void {
+            restores += 1;
+            try std.testing.expectEqualSlices(u16, expected_key, key);
+        }
+        fn launch(_: std.mem.Allocator, path: []const u8) !void {
+            launches += 1;
+            try std.testing.expectEqualStrings("C:\\fixture\\.graphcode-beta", path);
+            if (fail_launch) return error.WorkspaceLaunchFailed;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const path = "C:\\fixture\\.graphcode-beta";
+    const identity = try WorkspaceLifecycle.pathIdentity(allocator, path);
+    defer allocator.free(identity);
+    const key = try workspaceInstanceKey(allocator, path);
+    defer allocator.free(key);
+    Probe.expected_key = key;
+    Probe.lookup = .{};
+    Probe.lookups = 0;
+    Probe.restores = 0;
+    Probe.launches = 0;
+    Probe.fail_lookup = false;
+    Probe.fail_launch = false;
+    try std.testing.expectEqual(WorkspaceOpenResult.current, try openWorkspaceWith(Probe, allocator, identity, "c:/FIXTURE/./.graphcode-beta/"));
+    try std.testing.expectEqual(@as(usize, 0), Probe.lookups + Probe.restores + Probe.launches);
+    try std.testing.expectEqual(WorkspaceOpenResult.launched, try openWorkspaceWith(Probe, allocator, "c:/fixture/.graphcode-alpha", path));
+    try std.testing.expectEqual(@as(usize, 1), Probe.launches);
+    Probe.lookup.target = Win32.opaquePointerFromInt(c.HWND, 1);
+    try std.testing.expectEqual(WorkspaceOpenResult.restored, try openWorkspaceWith(Probe, allocator, "c:/fixture/.graphcode-alpha", path));
+    try std.testing.expectEqual(@as(usize, 1), Probe.restores);
+    try std.testing.expectEqual(@as(usize, 1), Probe.launches);
+    Probe.lookup = .{ .unidentified = true };
+    try std.testing.expectError(error.UnidentifiedWorkspaceWindow, openWorkspaceWith(Probe, allocator, "c:/fixture/.graphcode-alpha", path));
+    Probe.fail_lookup = true;
+    try std.testing.expectError(error.WorkspaceWindowLookupFailed, openWorkspaceWith(Probe, allocator, "c:/fixture/.graphcode-alpha", path));
+    try std.testing.expectEqual(@as(usize, 1), Probe.launches);
+    Probe.fail_lookup = false;
+    Probe.lookup = .{};
+    Probe.fail_launch = true;
+    try std.testing.expectError(error.WorkspaceLaunchFailed, openWorkspaceWith(Probe, allocator, "c:/fixture/.graphcode-alpha", path));
+    try std.testing.expectEqual(@as(usize, 2), Probe.launches);
+}
+
+test "workspace child environment isolates its endpoint and leaves parent and restore environments unchanged" {
+    const allocator = std.testing.allocator;
+    const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+    const pipe_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_DAEMON_PIPE");
+    var original = try std.process.getEnvMap(allocator);
+    defer original.deinit();
+    defer setWorkspaceTestEnvironment(support_key, original.get("GRAPHCODE_SUPPORT_DIR")) catch @panic("support environment restore failed");
+    defer setWorkspaceTestEnvironment(pipe_key, original.get("GRAPHCODE_DAEMON_PIPE")) catch @panic("pipe environment restore failed");
+    const parent_support = "C:\\fixture\\.graphcode-parent";
+    const child_support = "C:\\fixture\\.graphcode-child";
+    const parent_pipe = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\graphcode-lifecycle-{x:0>32}", .{std.crypto.random.int(u128)});
+    defer allocator.free(parent_pipe);
+    try setWorkspaceTestEnvironment(support_key, parent_support);
+    try setWorkspaceTestEnvironment(pipe_key, parent_pipe);
+    var before = try std.process.getEnvMap(allocator);
+    defer before.deinit();
+    const block = try workspaceEnvironment(allocator, child_support);
+    defer allocator.free(block);
+    try std.testing.expect(block.len >= 2 and block[block.len - 1] == 0 and block[block.len - 2] == 0);
+    var decoded = std.process.EnvMap.init(allocator);
+    defer decoded.deinit();
+    var entries = std.mem.splitScalar(u16, block, 0);
+    while (entries.next()) |entry| {
+        if (entry.len == 0) continue;
+        const text = try std.unicode.utf16LeToUtf8Alloc(allocator, entry);
+        defer allocator.free(text);
+        const separator = std.mem.indexOfScalarPos(u8, text, 1, '=') orelse return error.InvalidEnvironmentEntry;
+        try decoded.put(text[0..separator], text[separator + 1 ..]);
+    }
+    try std.testing.expectEqualStrings(child_support, decoded.get("GRAPHCODE_SUPPORT_DIR") orelse return error.MissingChildSupport);
+    try std.testing.expect(decoded.get("GRAPHCODE_DAEMON_PIPE") == null);
+    var inherited = before.iterator();
+    while (inherited.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "GRAPHCODE_SUPPORT_DIR") or
+            std.ascii.eqlIgnoreCase(entry.key_ptr.*, "GRAPHCODE_DAEMON_PIPE")) continue;
+        try std.testing.expectEqualStrings(entry.value_ptr.*, decoded.get(entry.key_ptr.*) orelse return error.MissingInheritedVariable);
+    }
+
+    const RestoreOnly = struct {
+        var lookups: usize = 0;
+        var restores: usize = 0;
+
+        fn windows(_: [:0]const u16) !MainWindow.WorkspaceWindows {
+            lookups += 1;
+            return .{ .target = Win32.opaquePointerFromInt(c.HWND, 1) };
+        }
+        fn restore(_: [:0]const u16) !void {
+            restores += 1;
+        }
+        fn launch(_: std.mem.Allocator, _: []const u8) !void {
+            return error.UnexpectedWorkspaceLaunch;
+        }
+    };
+    RestoreOnly.lookups = 0;
+    RestoreOnly.restores = 0;
+    const parent_identity = try WorkspaceLifecycle.pathIdentity(allocator, parent_support);
+    defer allocator.free(parent_identity);
+    try std.testing.expectEqual(WorkspaceOpenResult.current, try openWorkspaceWith(RestoreOnly, allocator, parent_identity, parent_support));
+    try std.testing.expectEqual(@as(usize, 0), RestoreOnly.lookups + RestoreOnly.restores);
+    try std.testing.expectEqual(WorkspaceOpenResult.restored, try openWorkspaceWith(RestoreOnly, allocator, parent_identity, child_support));
+    try std.testing.expectEqual(@as(usize, 1), RestoreOnly.lookups);
+    try std.testing.expectEqual(@as(usize, 1), RestoreOnly.restores);
+    var after = try std.process.getEnvMap(allocator);
+    defer after.deinit();
+    try std.testing.expectEqualStrings(parent_support, after.get("GRAPHCODE_SUPPORT_DIR").?);
+    try std.testing.expectEqualStrings(parent_pipe, after.get("GRAPHCODE_DAEMON_PIPE").?);
+    var original_entries = before.iterator();
+    while (original_entries.next()) |entry| {
+        try std.testing.expectEqualStrings(entry.value_ptr.*, after.get(entry.key_ptr.*) orelse return error.ParentEnvironmentChanged);
+    }
+    var final_entries = after.iterator();
+    while (final_entries.next()) |entry| {
+        try std.testing.expect(before.get(entry.key_ptr.*) != null);
+    }
+}
+
+test "workspace reservations exclude lexical aliases and old raw path mutexes" {
+    const allocator = std.testing.allocator;
+    const user = try std.fmt.allocPrint(allocator, "workspace-test-{d}-{d}", .{ c.GetCurrentProcessId(), std.crypto.random.int(u64) });
+    defer allocator.free(user);
+    const path = "C:\\fixture\\.graphcode-alpha";
+    {
+        var held = try WorkspaceReservation.acquireForUser(allocator, user, path);
+        defer held.deinit();
+        try std.testing.expectError(error.WorkspaceInUse, WorkspaceReservation.acquireForUser(allocator, user, "c:/FIXTURE/./.graphcode-alpha/"));
+        var distinct = try WorkspaceReservation.acquireForUser(allocator, user, "C:\\fixture\\.graphcode-beta");
+        defer distinct.deinit();
+    }
+    const legacy_name = try WorkspaceLifecycle.legacyInstanceName(allocator, user, path);
+    defer allocator.free(legacy_name);
+    const wide = try std.unicode.utf8ToUtf16LeAllocZ(allocator, legacy_name);
+    defer allocator.free(wide);
+    {
+        const legacy = c.CreateMutexW(null, 1, wide.ptr) orelse return error.TestMutexCreationFailed;
+        defer {
+            _ = c.ReleaseMutex(legacy);
+            _ = c.CloseHandle(legacy);
+        }
+        try std.testing.expect(c.GetLastError() != c.ERROR_ALREADY_EXISTS);
+        try std.testing.expectError(error.WorkspaceInUse, WorkspaceReservation.acquireForUser(allocator, user, path));
+    }
+    var reacquired = try WorkspaceReservation.acquireForUser(allocator, user, path);
+    defer reacquired.deinit();
+}
+
+const WorkspaceMutationFixture = struct {
+    const reserve = WorkspaceReservation.acquire;
+    const rename = WorkspaceMutationApi.rename;
+    var response: c.INT = c.IDNO;
+    var confirmations: usize = 0;
+    var deletions: usize = 0;
+    var lookups: usize = 0;
+    var unidentified = false;
+    var unidentified_after_confirmation = false;
+    var fail_lookup = false;
+    var held_during_confirmation = false;
+    var expected_path: []const u8 = "";
+    var skip_delete = false;
+    var list_to_release: ?*WorkspaceLifecycle.List = null;
+    var list_released = false;
+
+    fn reset(path: []const u8) void {
+        response = c.IDNO;
+        confirmations = 0;
+        deletions = 0;
+        lookups = 0;
+        unidentified = false;
+        unidentified_after_confirmation = false;
+        fail_lookup = false;
+        held_during_confirmation = false;
+        expected_path = path;
+        skip_delete = false;
+        list_to_release = null;
+        list_released = false;
+    }
+    fn windows(_: [:0]const u16) !MainWindow.WorkspaceWindows {
+        lookups += 1;
+        if (fail_lookup) return error.WorkspaceWindowLookupFailed;
+        return .{ .unidentified = unidentified or (unidentified_after_confirmation and confirmations != 0) };
+    }
+    fn confirm(_: c.HWND) c.INT {
+        confirmations += 1;
+        if (WorkspaceReservation.acquire(std.testing.allocator, expected_path)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+        } else |err| {
+            held_during_confirmation = err == error.WorkspaceInUse;
+        }
+        if (list_to_release) |list| {
+            list.deinit(std.testing.allocator);
+            list_to_release = null;
+            list_released = true;
+        }
+        return response;
+    }
+    fn delete(path: []const u8) !void {
+        deletions += 1;
+        try std.testing.expectEqualStrings(expected_path, path);
+        if (!skip_delete) try WorkspaceMutationApi.delete(path);
+    }
+};
+
+fn namedWorkspaceFixture(list: WorkspaceLifecycle.List, name: []const u8) !WorkspaceLifecycle.Workspace {
+    for (list.items) |workspace| {
+        if (std.mem.eql(u8, name, workspace.name)) return workspace;
+    }
+    return error.MissingFixtureWorkspace;
+}
+
+test "workspace deletion guards default current open legacy and every non Yes response" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-alpha");
+    try temporary.dir.makeDir(".graphcode-beta");
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-alpha\\saved-state", .data = "alpha-state" });
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-beta\\saved-state", .data = "beta-state" });
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var list = try WorkspaceLifecycle.listFromHome(allocator, home);
+    defer if (!WorkspaceMutationFixture.list_released) list.deinit(allocator);
+    const alpha = try namedWorkspaceFixture(list, "alpha");
+    const default = try namedWorkspaceFixture(list, "Default");
+    const saved_alpha_path = try allocator.dupe(u8, alpha.path);
+    defer allocator.free(saved_alpha_path);
+    WorkspaceMutationFixture.reset(alpha.path);
+    try std.testing.expectError(error.DefaultWorkspace, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, alpha.identity, default, .delete));
+    try std.testing.expectError(error.CurrentWorkspace, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, alpha.identity, alpha, .delete));
+    {
+        var open = try WorkspaceReservation.acquire(allocator, alpha.path);
+        defer open.deinit();
+        try std.testing.expectError(error.WorkspaceInUse, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    }
+    WorkspaceMutationFixture.unidentified = true;
+    try std.testing.expectError(error.UnidentifiedWorkspaceWindow, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    WorkspaceMutationFixture.unidentified = false;
+    WorkspaceMutationFixture.fail_lookup = true;
+    try std.testing.expectError(error.WorkspaceWindowLookupFailed, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.confirmations);
+    try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.deletions);
+    for ([_]c.INT{ c.IDNO, c.IDCANCEL, c.IDCLOSE, c.IDOK, 0, -1 }) |response| {
+        WorkspaceMutationFixture.reset(alpha.path);
+        WorkspaceMutationFixture.response = response;
+        try std.testing.expectEqual(WorkspaceMutationResult.cancelled, try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+        try std.testing.expect(WorkspaceMutationFixture.held_during_confirmation);
+        try std.testing.expectEqual(@as(usize, 1), WorkspaceMutationFixture.confirmations);
+        try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.deletions);
+        const saved = try temporary.dir.readFileAlloc(allocator, ".graphcode-alpha\\saved-state", 100);
+        defer allocator.free(saved);
+        try std.testing.expectEqualStrings("alpha-state", saved);
+    }
+    WorkspaceMutationFixture.reset(alpha.path);
+    WorkspaceMutationFixture.response = c.IDYES;
+    WorkspaceMutationFixture.unidentified_after_confirmation = true;
+    try std.testing.expectError(error.UnidentifiedWorkspaceWindow, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.deletions);
+    WorkspaceMutationFixture.reset(alpha.path);
+    WorkspaceMutationFixture.response = c.IDYES;
+    WorkspaceMutationFixture.skip_delete = true;
+    _ = try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete);
+    try std.testing.expectError(error.WorkspaceStillExists, requireDeletedWorkspace(alpha.path));
+    WorkspaceMutationFixture.reset(saved_alpha_path);
+    WorkspaceMutationFixture.response = c.IDYES;
+    WorkspaceMutationFixture.list_to_release = &list;
+    try std.testing.expectEqual(WorkspaceMutationResult.deleted, try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .delete));
+    try std.testing.expect(WorkspaceMutationFixture.held_during_confirmation);
+    try std.testing.expectEqual(@as(usize, 1), WorkspaceMutationFixture.deletions);
+    try requireDeletedWorkspace(saved_alpha_path);
+    const untouched = try temporary.dir.readFileAlloc(allocator, ".graphcode-beta\\saved-state", 100);
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings("beta-state", untouched);
+}
+
+test "workspace delete confirmation makes No the default and uses a warning" {
+    try std.testing.expectEqual(c.MB_YESNO, workspace_delete_confirmation_flags & c.MB_TYPEMASK);
+    try std.testing.expectEqual(c.MB_DEFBUTTON2, workspace_delete_confirmation_flags & c.MB_DEFMASK);
+    try std.testing.expectEqual(c.MB_ICONWARNING, workspace_delete_confirmation_flags & c.MB_ICONMASK);
+}
+
+test "workspace cancelled mutation releases every partial allocation and reservation" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-alpha");
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var list = try WorkspaceLifecycle.listFromHome(allocator, home);
+    defer list.deinit(allocator);
+    const alpha = try namedWorkspaceFixture(list, "alpha");
+    const default = try namedWorkspaceFixture(list, "Default");
+    const Probe = struct {
+        fn run(failing: std.mem.Allocator, current_identity: []const u8, workspace: WorkspaceLifecycle.Workspace) !void {
+            WorkspaceMutationFixture.reset(workspace.path);
+            try std.testing.expectEqual(WorkspaceMutationResult.cancelled, try mutateWorkspaceWith(
+                WorkspaceMutationFixture,
+                failing,
+                null,
+                current_identity,
+                workspace,
+                .delete,
+            ));
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ default.identity, alpha });
+    var reacquired = try WorkspaceReservation.acquire(allocator, alpha.path);
+    defer reacquired.deinit();
+}
+
+fn requireDeletedWorkspace(path: []const u8) !void {
+    var directory = std.fs.openDirAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    directory.close();
+    return error.WorkspaceStillExists;
+}
+
+test "workspace rename preserves saved bytes and never replaces a colliding workspace" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-alpha");
+    try temporary.dir.makeDir(".graphcode-beta");
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-alpha\\saved-state", .data = "alpha-state" });
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-beta\\saved-state", .data = "beta-state" });
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    var list = try WorkspaceLifecycle.listFromHome(allocator, home);
+    defer list.deinit(allocator);
+    const alpha = try namedWorkspaceFixture(list, "alpha");
+    const beta = try namedWorkspaceFixture(list, "beta");
+    const default = try namedWorkspaceFixture(list, "Default");
+    WorkspaceMutationFixture.reset(alpha.path);
+    try std.testing.expectError(error.WorkspaceRenameFailed, mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .{ .rename = beta.path }));
+    const destination = try WorkspaceLifecycle.workspacePath(allocator, "renamed", home);
+    defer allocator.free(destination);
+    try std.testing.expectEqual(WorkspaceMutationResult.renamed, try mutateWorkspaceWith(WorkspaceMutationFixture, allocator, null, default.identity, alpha, .{ .rename = destination }));
+    try requireDeletedWorkspace(alpha.path);
+    const saved = try temporary.dir.readFileAlloc(allocator, ".graphcode-renamed\\saved-state", 100);
+    defer allocator.free(saved);
+    const untouched = try temporary.dir.readFileAlloc(allocator, ".graphcode-beta\\saved-state", 100);
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings("alpha-state", saved);
+    try std.testing.expectEqualStrings("beta-state", untouched);
+    try std.testing.expectEqual(@as(usize, 0), WorkspaceMutationFixture.confirmations + WorkspaceMutationFixture.deletions);
+}
+
+test "workspace cycling wraps from the current identity and never invents a current target" {
+    const items = [_]WorkspaceLifecycle.Workspace{
+        .{ .name = "alpha", .path = "C:\\fixture\\.graphcode-alpha", .identity = "c:/fixture/.graphcode-alpha", .is_default = false },
+        .{ .name = "beta", .path = "C:\\fixture\\.graphcode-beta", .identity = "c:/fixture/.graphcode-beta", .is_default = false },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), workspaceCycleTarget(&items, items[0].identity, 1));
+    try std.testing.expectEqual(@as(?usize, 1), workspaceCycleTarget(&items, items[0].identity, -1));
+    try std.testing.expectEqual(@as(?usize, 0), workspaceCycleTarget(&items, items[1].identity, 1));
+    try std.testing.expect(workspaceCycleTarget(&items, "c:/missing", 1) == null);
+    try std.testing.expect(workspaceCycleTarget(items[0..1], items[0].identity, 1) == null);
 }
 
 test "input routing bounds follow hidden workspace panel and rail" {

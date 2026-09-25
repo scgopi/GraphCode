@@ -228,19 +228,119 @@ pub const menu_watchdog_interval_ms: c.UINT = 10000;
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsShell");
 
-pub fn restoreExistingInstance() void {
-    const hwnd = c.FindWindowW(class_name.ptr, null);
+const workspace_identity_property = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.WorkspaceIdentityV1");
+
+pub const WorkspaceWindows = struct {
+    target: c.HWND = null,
+    unidentified: bool = false,
+};
+
+pub fn publishWorkspaceIdentity(hwnd: c.HWND, key: [:0]const u16) !void {
+    if (key.len == 0) return error.InvalidWorkspaceIdentity;
+    const marker = Win32.opaquePointerFromInt(c.HANDLE, 1);
+    if (c.SetPropW(hwnd, key.ptr, marker) == 0) return error.WorkspaceIdentityPublishFailed;
+    errdefer _ = c.RemovePropW(hwnd, key.ptr);
+    if (c.SetPropW(hwnd, workspace_identity_property.ptr, marker) == 0)
+        return error.WorkspaceIdentityPublishFailed;
+}
+
+pub fn invalidateWorkspaceIdentity(hwnd: c.HWND) !void {
+    if (c.IsWindow(hwnd) == 0) return error.WorkspaceIdentityWindowMissing;
+    _ = c.RemovePropW(hwnd, workspace_identity_property.ptr);
+    if (c.GetPropW(hwnd, workspace_identity_property.ptr) != null)
+        return error.WorkspaceIdentityInvalidationFailed;
+}
+
+pub fn workspaceIdentityMatches(hwnd: c.HWND, key: [:0]const u16) bool {
+    return c.GetPropW(hwnd, workspace_identity_property.ptr) != null and c.GetPropW(hwnd, key.ptr) != null;
+}
+
+pub fn workspaceWindows(key: [:0]const u16) !WorkspaceWindows {
+    return workspaceWindowsForClass(key, class_name);
+}
+
+fn workspaceWindowsForClass(key: [:0]const u16, window_class: []const u16) !WorkspaceWindows {
+    if (key.len == 0) return error.InvalidWorkspaceIdentity;
+    const Lookup = struct {
+        key: [:0]const u16,
+        window_class: []const u16,
+        found: WorkspaceWindows = .{},
+        failure: ?anyerror = null,
+
+        fn visit(hwnd: c.HWND, parameter: c.LPARAM) callconv(.winapi) c.BOOL {
+            const self = Win32.messagePointer(*@This(), parameter);
+            var buffer: [256]u16 = undefined;
+            const length = c.GetClassNameW(hwnd, &buffer, buffer.len);
+            if (length <= 0 or !std.mem.eql(u16, self.window_class, buffer[0..@intCast(length)])) return 1;
+            const same_user = sameWindowUser(hwnd) catch |err| {
+                self.failure = err;
+                return 0;
+            };
+            if (!same_user) return 1;
+            if (c.GetPropW(hwnd, workspace_identity_property.ptr) == null) {
+                self.found.unidentified = true;
+            } else if (workspaceIdentityMatches(hwnd, self.key)) {
+                if (self.found.target != null) {
+                    self.failure = error.AmbiguousWorkspaceWindow;
+                    return 0;
+                }
+                self.found.target = hwnd;
+            }
+            return 1;
+        }
+    };
+    var lookup = Lookup{ .key = key, .window_class = window_class };
+    const enumerated = c.EnumWindows(Lookup.visit, @bitCast(@intFromPtr(&lookup)));
+    if (lookup.failure) |err| return err;
+    if (enumerated == 0) return error.WorkspaceWindowLookupFailed;
+    return lookup.found;
+}
+
+fn sameWindowUser(hwnd: c.HWND) !bool {
+    var pid: c.DWORD = 0;
+    if (c.GetWindowThreadProcessId(hwnd, &pid) == 0) return error.WorkspaceWindowOwnerUnknown;
+    if (pid == c.GetCurrentProcessId()) return true;
+    var own_session: c.DWORD = 0;
+    var target_session: c.DWORD = 0;
+    if (c.ProcessIdToSessionId(c.GetCurrentProcessId(), &own_session) == 0 or
+        c.ProcessIdToSessionId(pid, &target_session) == 0) return error.WorkspaceWindowOwnerUnknown;
+    if (own_session != target_session) return false;
+    const process = c.OpenProcess(c.PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) orelse
+        return error.WorkspaceWindowOwnerUnknown;
+    defer _ = c.CloseHandle(process);
+    var own_token: c.HANDLE = null;
+    if (c.OpenProcessToken(c.GetCurrentProcess(), c.TOKEN_QUERY, &own_token) == 0)
+        return error.WorkspaceWindowOwnerUnknown;
+    defer _ = c.CloseHandle(own_token);
+    var target_token: c.HANDLE = null;
+    if (c.OpenProcessToken(process, c.TOKEN_QUERY, &target_token) == 0)
+        return error.WorkspaceWindowOwnerUnknown;
+    defer _ = c.CloseHandle(target_token);
+    var own_info: [512]u8 align(@alignOf(c.TOKEN_USER)) = undefined;
+    var target_info: [512]u8 align(@alignOf(c.TOKEN_USER)) = undefined;
+    var required: c.DWORD = 0;
+    if (c.GetTokenInformation(own_token, c.TokenUser, &own_info, own_info.len, &required) == 0 or
+        c.GetTokenInformation(target_token, c.TokenUser, &target_info, target_info.len, &required) == 0)
+        return error.WorkspaceWindowOwnerUnknown;
+    const own_user: *const c.TOKEN_USER = @ptrCast(&own_info);
+    const target_user: *const c.TOKEN_USER = @ptrCast(&target_info);
+    return c.EqualSid(own_user.User.Sid, target_user.User.Sid) != 0;
+}
+
+pub fn restoreExistingInstance(key: [:0]const u16) !void {
+    const hwnd = (try workspaceWindows(key)).target orelse return error.WorkspaceWindowNotFound;
     const message = c.RegisterWindowMessageW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.Restore").ptr);
-    if (hwnd != null and message != 0) {
-        var process_id: c.DWORD = 0;
-        _ = c.GetWindowThreadProcessId(hwnd, &process_id);
-        if (process_id != 0) _ = c.AllowSetForegroundWindow(process_id);
-        _ = c.ShowWindow(hwnd, c.SW_RESTORE);
-        _ = c.ShowWindow(hwnd, c.SW_SHOW);
-        _ = c.BringWindowToTop(hwnd);
-        _ = c.SetForegroundWindow(hwnd);
-        _ = c.PostMessageW(hwnd, message, 0, 0);
-    }
+    if (message == 0) return error.WorkspaceRestoreFailed;
+    var process_id: c.DWORD = 0;
+    if (c.GetWindowThreadProcessId(hwnd, &process_id) == 0) return error.WorkspaceWindowOwnerUnknown;
+    if (!workspaceIdentityMatches(hwnd, key)) return error.WorkspaceWindowNotFound;
+    _ = c.AllowSetForegroundWindow(process_id);
+    _ = c.ShowWindow(hwnd, c.SW_RESTORE);
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.BringWindowToTop(hwnd);
+    if (c.PostMessageW(hwnd, message, 0, 0) == 0) return error.WorkspaceRestoreFailed;
+    if (c.SetForegroundWindow(hwnd) == 0 and c.GetForegroundWindow() != hwnd)
+        return error.WorkspaceActivationFailed;
 }
 
 pub fn installMenu(hwnd: c.HWND) !void {
@@ -390,12 +490,10 @@ fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
     appendEnabled(menu, "Previous Workspace\tCtrl+Alt+PageUp", @intFromEnum(Command.workspace_previous), workspaces.len > 1);
     separator(menu);
     for (workspaces[0..@min(workspaces.len, workspace_command_limit - workspace_command_base + 1)], 0..) |item, index| {
-        const label = if (item.is_current)
-            std.fmt.allocPrint(std.heap.c_allocator, "✓ {s}", .{item.name}) catch continue
-        else
-            std.heap.c_allocator.dupe(u8, item.name) catch continue;
-        defer std.heap.c_allocator.free(label);
-        append(menu, label, workspace_command_base + index);
+        const command: c.UINT = @intCast(workspace_command_base + index);
+        append(menu, item.name, command);
+        const flags: c.UINT = if (item.is_current) c.MF_BYCOMMAND | c.MF_CHECKED else c.MF_BYCOMMAND | c.MF_UNCHECKED;
+        _ = c.CheckMenuItem(menu, command, flags);
     }
 }
 
@@ -519,6 +617,103 @@ test "native menu exposes the parity command groups" {
 
 fn testWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
     return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+const workspace_test_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWorkspaceIdentityTest");
+
+fn hiddenWorkspaceTestWindow() !c.HWND {
+    var wc = std.mem.zeroes(c.WNDCLASSW);
+    wc.lpfnWndProc = testWindowProc;
+    wc.hInstance = c.GetModuleHandleW(null);
+    wc.lpszClassName = workspace_test_class.ptr;
+    if (c.RegisterClassW(&wc) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
+        return error.TestWindowClassFailed;
+    return c.CreateWindowExW(
+        0,
+        workspace_test_class.ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("Hidden workspace fixture").ptr,
+        c.WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        0,
+        0,
+        null,
+        null,
+        wc.hInstance,
+        null,
+    ) orelse error.TestWindowCreationFailed;
+}
+
+test "workspace lookup selects only the exact identified window and flags legacy ambiguity" {
+    const alpha = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(alpha);
+    const beta = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(beta);
+    const key_alpha = std.unicode.utf8ToUtf16LeStringLiteral("workspace-fixture-alpha");
+    const key_beta = std.unicode.utf8ToUtf16LeStringLiteral("workspace-fixture-beta");
+    const missing = std.unicode.utf8ToUtf16LeStringLiteral("workspace-fixture-missing");
+    try publishWorkspaceIdentity(alpha, key_alpha);
+    try publishWorkspaceIdentity(beta, key_beta);
+    const found = try workspaceWindowsForClass(key_beta, workspace_test_class);
+    try std.testing.expectEqual(beta, found.target);
+    try std.testing.expect(!found.unidentified);
+    try invalidateWorkspaceIdentity(beta);
+    const invalidated = try workspaceWindowsForClass(key_beta, workspace_test_class);
+    try std.testing.expect(invalidated.unidentified);
+    try std.testing.expect(invalidated.target == null);
+    try std.testing.expect(!workspaceIdentityMatches(beta, key_beta));
+    try publishWorkspaceIdentity(beta, key_beta);
+    try std.testing.expectEqual(beta, (try workspaceWindowsForClass(key_beta, workspace_test_class)).target);
+    try std.testing.expect((try workspaceWindowsForClass(missing, workspace_test_class)).target == null);
+    const legacy = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(legacy);
+    const uncertain = try workspaceWindowsForClass(missing, workspace_test_class);
+    try std.testing.expect(uncertain.unidentified);
+    try std.testing.expect(uncertain.target == null);
+    try publishWorkspaceIdentity(alpha, key_beta);
+    try std.testing.expectError(error.AmbiguousWorkspaceWindow, workspaceWindowsForClass(key_beta, workspace_test_class));
+}
+
+fn expectDisabledWorkspaceCommand(menu: c.HMENU, command: Command) !void {
+    const state = c.GetMenuState(menu, @intFromEnum(command), c.MF_BYCOMMAND);
+    try std.testing.expect(state != std.math.maxInt(c.UINT));
+    try std.testing.expect(state & c.MF_GRAYED != 0);
+}
+
+test "workspace menu checks the exact command and retains target labels and enablement" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const menu = c.GetSubMenu(c.GetMenu(hwnd), 3);
+    var items = [_]WorkspaceItem{
+        .{ .name = "Default", .is_current = false },
+        .{ .name = "alpha", .is_current = true },
+        .{ .name = "beta", .is_current = false },
+    };
+    for ([_]usize{ 1, 2 }) |selected| {
+        for (&items, 0..) |*item, index| item.is_current = index == selected;
+        updateWorkspaceMenu(hwnd, &items);
+        for (items, 0..) |item, index| {
+            const command: c.UINT = @intCast(workspace_command_base + index);
+            const state = c.GetMenuState(menu, command, c.MF_BYCOMMAND);
+            try std.testing.expect(state != std.math.maxInt(c.UINT));
+            try std.testing.expectEqual(index == selected, state & c.MF_CHECKED != 0);
+            var label: [128]u16 = undefined;
+            const length = c.GetMenuStringW(menu, command, &label, label.len, c.MF_BYCOMMAND);
+            const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+            defer std.testing.allocator.free(actual);
+            try std.testing.expectEqualStrings(item.name, actual);
+        }
+        try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.workspace_next), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    }
+    updateWorkspaceMenu(hwnd, items[0..1]);
+    try expectDisabledWorkspaceCommand(menu, .workspace_next);
+    try std.testing.expect(c.DeleteMenu(menu, @intFromEnum(Command.workspace_next), c.MF_BYCOMMAND) != 0);
+    try std.testing.expectError(error.TestUnexpectedResult, expectDisabledWorkspaceCommand(menu, .workspace_next));
+    updateWorkspaceMenu(hwnd, &.{});
+    try expectDisabledWorkspaceCommand(menu, .workspace_rename);
+    try std.testing.expect(c.DeleteMenu(menu, @intFromEnum(Command.workspace_rename), c.MF_BYCOMMAND) != 0);
+    try std.testing.expectError(error.TestUnexpectedResult, expectDisabledWorkspaceCommand(menu, .workspace_rename));
 }
 
 // Regression test for the Update-command re-enable bug: a real background

@@ -18,7 +18,10 @@ pub fn main() !void {
     }
     var app = App.init(allocator) catch |err| {
         if (err == error.InstanceAlreadyRunning) {
-            @import("MainWindow.zig").restoreExistingInstance();
+            @import("App.zig").restoreCurrentWorkspace(allocator) catch |restore_error| {
+                std.log.err("Workspace activation failed: {s}", .{@errorName(restore_error)});
+                return restore_error;
+            };
             return;
         }
         return err;

@@ -27,6 +27,7 @@ const State = struct {
     scroll_offset: i32 = 0,
     accepted: bool = false,
     closed: bool = false,
+    failure: ?anyerror = null,
     button_y: i32 = 565,
 };
 
@@ -54,6 +55,7 @@ pub fn textWithDescription(
     labels: []const []const u8,
     initial: []const []const u8,
 ) !?Result {
+    if (active) return error.DialogAlreadyOpen;
     if (labels.len == 0 or labels.len > 16 or labels.len != initial.len) return error.InvalidDialogFields;
     var state = State{
         .allocator = allocator,
@@ -121,21 +123,39 @@ pub fn textWithDescription(
     }
     ModalTeardown.dismiss(hwnd, parent);
     active = false;
-    if (!active_state.accepted) {
-        freeStateValues(&active_state);
+    return finishText(&active_state);
+}
+
+fn finishText(state: *State) !?Result {
+    if (state.failure) |err| {
+        freeStateValues(state);
+        return err;
+    }
+    if (!state.accepted) {
+        freeStateValues(state);
         return null;
     }
-    var result = Result{ .values = [_][]u8{&.{}} ** 16, .count = state.count };
-    readValues(&active_state);
-    for (active_state.values[0..state.count], 0..) |value, index| {
-        result.values[index] = allocator.dupe(u8, value) catch |err| {
-            result.deinit(allocator);
-            freeStateValues(&active_state);
-            return err;
-        };
-    }
-    freeStateValues(&active_state);
+    const result = Result{ .values = state.values, .count = state.count };
+    state.values = [_][]u8{&.{}} ** 16;
+    state.count = 0;
     return result;
+}
+
+const TextCommand = enum { submit, cancel, close };
+
+fn applyTextCommand(state: *State, command: TextCommand) void {
+    if (command == .submit) {
+        readValues(state) catch |err| {
+            state.failure = err;
+            state.accepted = false;
+            state.closed = true;
+            return;
+        };
+        state.accepted = true;
+    } else {
+        state.accepted = false;
+    }
+    state.closed = true;
 }
 
 fn freeStateValues(state: *State) void {
@@ -182,33 +202,26 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
             if (command == ok_id) {
-                readValues(&active_state);
-                active_state.accepted = true;
-                active_state.closed = true;
+                applyTextCommand(&active_state, .submit);
                 return 0;
             }
             if (command == cancel_id) {
-                active_state.accepted = false;
-                active_state.closed = true;
+                applyTextCommand(&active_state, .cancel);
                 return 0;
             }
         },
         c.WM_KEYDOWN => {
             if (wparam == c.VK_RETURN) {
-                readValues(&active_state);
-                active_state.accepted = true;
-                active_state.closed = true;
+                applyTextCommand(&active_state, .submit);
                 return 0;
             }
             if (wparam == c.VK_ESCAPE) {
-                active_state.accepted = false;
-                active_state.closed = true;
+                applyTextCommand(&active_state, .cancel);
                 return 0;
             }
         },
         c.WM_CLOSE => {
-            active_state.accepted = false;
-            active_state.closed = true;
+            applyTextCommand(&active_state, .close);
             return 0;
         },
         else => {},
@@ -276,11 +289,15 @@ fn createButton(hwnd: c.HWND, label: []const u8, id: usize, x: i32, y: i32) void
     AppFont.apply(button, AppFont.control_size, false);
 }
 
-fn readValues(state: *State) void {
+fn readValues(state: *State) !void {
     var buffer: [4096]u16 = undefined;
     for (0..state.count) |index| {
+        if (c.IsWindow(state.edits[index]) == 0) return error.DialogReadFailed;
+        if (c.GetWindowTextLengthW(state.edits[index]) >= buffer.len) return error.DialogTextTooLong;
+        c.SetLastError(0);
         const length = c.GetWindowTextW(state.edits[index], &buffer, @intCast(buffer.len));
-        const value = std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(length)]) catch continue;
+        if (length == 0 and c.GetLastError() != 0) return error.DialogReadFailed;
+        const value = try std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(length)]);
         state.allocator.free(state.values[index]);
         state.values[index] = value;
     }
@@ -299,4 +316,136 @@ test "native dialog field contract preserves Unicode and field count" {
     const labels = [_][]const u8{ "URL", "Destination" };
     try std.testing.expectEqual(labels.len, 2);
     try std.testing.expect(std.unicode.utf8ValidateSlice("Проекты\\über"));
+}
+
+test "accepted workspace text survives native edit teardown" {
+    const allocator = std.testing.allocator;
+    var state = State{ .allocator = allocator, .parent = null, .count = 2 };
+    defer freeStateValues(&state);
+    state.values[0] = try allocator.dupe(u8, "old workspace");
+    state.values[1] = try allocator.dupe(u8, "old name");
+    const first = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("alpha").ptr,
+        0,
+        0,
+        0,
+        100,
+        20,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    defer if (c.IsWindow(first) != 0) {
+        _ = c.DestroyWindow(first);
+    };
+    const second = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("Проекты über").ptr,
+        0,
+        0,
+        0,
+        100,
+        20,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    defer if (c.IsWindow(second) != 0) {
+        _ = c.DestroyWindow(second);
+    };
+    state.edits[0] = first;
+    state.edits[1] = second;
+    applyTextCommand(&state, .submit);
+    try std.testing.expect(c.DestroyWindow(first) != 0);
+    try std.testing.expect(c.DestroyWindow(second) != 0);
+    var result = (try finishText(&state)) orelse return error.ExpectedAcceptedText;
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.count);
+    try std.testing.expectEqualStrings("alpha", result.values[0]);
+    try std.testing.expectEqualStrings("Проекты über", result.values[1]);
+    try std.testing.expectEqual(@as(usize, 0), state.count);
+}
+
+test "cancelled or closed workspace text has no accepted result" {
+    for ([_]TextCommand{ .cancel, .close }) |command| {
+        var state = State{
+            .allocator = std.testing.allocator,
+            .parent = null,
+            .count = 1,
+        };
+        defer freeStateValues(&state);
+        state.values[0] = try state.allocator.dupe(u8, "do-not-delete");
+        applyTextCommand(&state, command);
+        try std.testing.expect((try finishText(&state)) == null);
+        try std.testing.expect(state.closed);
+        try std.testing.expectEqual(@as(usize, 0), state.count);
+    }
+}
+
+test "workspace text read failure never accepts stale values" {
+    var state = State{
+        .allocator = std.testing.allocator,
+        .parent = null,
+        .count = 1,
+    };
+    defer freeStateValues(&state);
+    state.values[0] = try state.allocator.dupe(u8, "stale-name");
+    applyTextCommand(&state, .submit);
+    try std.testing.expect(!state.accepted);
+    try std.testing.expect(state.closed);
+    try std.testing.expectError(error.DialogReadFailed, finishText(&state));
+    try std.testing.expectEqual(@as(usize, 0), state.count);
+}
+
+test "workspace text rejects reentrant presentation before creating any window" {
+    const previous = active;
+    active = true;
+    defer active = previous;
+    try std.testing.expectError(error.DialogAlreadyOpen, textWithDescription(
+        null,
+        std.testing.allocator,
+        "New Workspace",
+        "",
+        &.{"Name"},
+        &.{""},
+    ));
+}
+
+test "workspace text capture and transfer release every partial allocation" {
+    const edit = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("new workspace").ptr,
+        0,
+        0,
+        0,
+        100,
+        20,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    defer _ = c.DestroyWindow(edit);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, window: c.HWND) !void {
+            var state = State{ .allocator = allocator, .parent = null, .count = 2 };
+            defer freeStateValues(&state);
+            state.values[0] = try allocator.dupe(u8, "old first");
+            state.values[1] = try allocator.dupe(u8, "old second");
+            state.edits[0] = window;
+            state.edits[1] = window;
+            applyTextCommand(&state, .submit);
+            var result = (try finishText(&state)) orelse return error.ExpectedAcceptedText;
+            defer result.deinit(allocator);
+            try std.testing.expectEqualStrings("new workspace", result.values[0]);
+            try std.testing.expectEqualStrings("new workspace", result.values[1]);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{edit});
 }

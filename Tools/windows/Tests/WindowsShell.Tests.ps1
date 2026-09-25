@@ -392,7 +392,7 @@ Invoke-Native "Context menu and gate fixture message executable tests" {
   try {
     & $zig test src\GraphContextMenu.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
     if ($LASTEXITCODE -ne 0) { return }
-    & $zig test src\MainWindow.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+    & $zig test src\MainWindow.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Jump palette executable tests" {
@@ -685,7 +685,7 @@ Invoke-Native "Native dialog field contract executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\WindowsNativeDialogs.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    & $zig test src\WindowsNativeDialogs.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "App shell executable tests" {
@@ -698,7 +698,7 @@ Invoke-Native "App shell executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\App.zig src\AccessibilityProvider.cpp `
-      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
   } finally { Pop-Location }
 }
 
