@@ -20,9 +20,10 @@ geometry from the real source-of-truth constants (`Dpi.zig`, `DesignTokens.zig`)
 checks the manifest's declared values against that math. This still catches real drift
 (a stale manifest value or a changed constant that nobody updated the manifest for),
 which is why it is stronger than the prior version's simple presence checks, but it is
-not a substitute for a rendered screenshot diff. This repository/CI has no
-deterministic way to rasterize a live Win32 window, so no such rendered comparison
-exists for GraphCode-owned regions today.
+not a substitute for a rendered screenshot diff. The separate rendered capture
+and replay commands below do not turn these historical layout variants into
+runtime screenshots. Live capture requires an exclusively reserved interactive
+Windows desktop; the static command does not.
 
 The GraphCode-owned regions are safe for screenshot comparison. Terminal rendering,
 input, IME, clipboard, resize, and accessibility remain live Winghostty functional
@@ -77,3 +78,108 @@ re-declared copy. For each of the two tracked tokens it enforces:
 
 This is a source-contract check only. It does not capture or compare live
 screenshot pixels; no live/launch mode exists in this script.
+
+## Rendered Windows capture and replay
+
+`Tools\windows\capture-visual-baseline.ps1` captures actual application client
+pixels, not a reimplementation of the renderer. Its data is the existing
+`App.installUiaFixture` synthetic graph; **the production rendering path remains
+enabled**. In particular, `GRAPHCODE_UIA_GATE` and the daemon-supervisor test hook
+must be unset: both disable GDI+ startup, so ordinary UIA-gate screenshots cannot
+prove production shape anti-aliasing.
+
+The bounded driver captures graph/sidebar, Product Settings (without saving),
+and an attached workspace. It requires own-worktree shell/provider binaries and
+an explicit foreground reservation. It creates isolated support, LOCALAPPDATA,
+cwd, layout, named-pipe and zmx namespaces. It deliberately refuses a sibling
+`graphcoded.exe` and connects to no daemon server, so a real daemon cannot
+replace the synthetic graph. Disconnected UI is part of the recorded state,
+not full production-data parity.
+
+After building with the pinned tools/providers, use a **new** output directory:
+
+```powershell
+pwsh -NoProfile -File .\Tools\windows\capture-visual-baseline.ps1 `
+  -Shell .\graphcode-windows\zig-out\bin\graphcode-windows.exe `
+  -Zmx .\.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe `
+  -OutputDirectory <absolute-new-run-directory> `
+  -ForegroundLease <explicit-reservation-reference> `
+  -TimeoutSeconds 120
+```
+
+The lease parameter records authorization; it does not acquire a reservation.
+Do not run this concurrently with another desktop test. No display/font/input
+settings are changed. Capture uses `CopyFromScreen` only inside the owned,
+foreground, unobstructed client rectangle, with before/after ownership and
+geometry guards. Failure to acquire foreground is a capture-infrastructure
+failure, not a product-rendering regression. There is no global Alt injection or
+desktop-capture fallback. The outer process bounds even a stuck UIA call;
+cleanup uses recorded PID plus process creation time, never process-name kills.
+
+To execute the same source/provider/binary preflight without launching the app,
+pass `-PreflightOnly` and a fresh output directory; no foreground lease is
+required for that mode. It writes `build-snapshot.json` and compiles the actual
+capture interop. It does not establish that foreground acquisition or capture
+will succeed.
+
+The output includes lossless PNGs, UIA bounds/state, actions, DPI, font-smoothing
+settings, shell/zmx/Winghostty-library hashes and pinned provider commits, raw
+and LF-normalized source/script hashes, and private process/environment records.
+Provider pins/cleanliness are checked before launch and binary hashes again
+after capture. Keep private paths/logs out of published
+artifacts. Captures are native-size at the observed DPI; they do not establish
+multi-DPI or hardware-input coverage.
+
+`evidence.json` intentionally starts with **empty regions**. Review the actual
+images and map sample rectangles to renderer/UIA geometry before replay; a
+successful capture alone is not a comparator PASS. A region records `id`,
+`kind`, `rect` (client-relative x/y/width/height), and its `source` call site.
+`flat` regions name the `windowsToken`; `coverage` observations name
+`backgroundRgb` and `foregroundRgb`; `gradient` observations report row means.
+Exclude glyphs, shadows, grid intersections and borders from opaque-interior
+assertions. Required flat regions are `canvas-tone`, `canvas-grid`,
+`dialog-panel`, `selected-tab`, and `pane-focus`.
+
+```powershell
+pwsh -NoProfile -File .\Tools\windows\Test-RenderedVisualBaseline.ps1 `
+  -EvidencePath <run-directory>\evidence.json `
+  -ReportPath <run-directory>\measurements.json
+```
+
+The comparator first runs the existing currentThemeContract validator, then
+checks source provenance and the actual PNGs. Text source comparisons use the
+existing LF-normalized SHA-256 helper so CRLF checkouts do not create false
+drift; raw capture-time hashes are retained separately. PNGs and binaries are
+never newline-normalized. `-SourceRoot` selects the source checkout being
+verified; it defaults to this repository, not a historical reference.
+Window PID/creation-time/HWND, surface state, client dimensions and provider
+pin/hash identities are required metadata. Consistent metadata is not origin
+authentication: the actual capture guards and preserved run process records
+must independently establish that these were the owned app's pixels.
+
+Opaque flat samples require **zero** channel difference. A one-channel delta of
+1, neutral `#0C0C0C` instead of canvas `#0A0C0B`, and a red/blue swap are rejected.
+This is Windows-renderer/source consistency, not matched macOS screenshot
+parity. The separate currentThemeContract independently cross-checks the
+canvas/grid source values against current Theme.swift.
+
+Coverage counts and gradient row samples are observations, not quality-score
+thresholds. Colors other than the selected endpoints may include subpixel
+fringes, decorations or grid pixels, not just shape anti-aliasing. Font flags
+and system ClearType configuration are not rendered glyph proof. Preserve and
+inspect native-size glyph/curve crops, and record the limits of each region.
+Windows two-stop gradients and opaque surfaces also differ from macOS material
+compositing; do not silently equate those outputs.
+
+`VisualBaseline.Tests.ps1` invokes this exact production comparator against
+explicitly labeled tiny synthetic test PNGs. It covers the exact RGB boundary,
+neutral gray and channel-swap negatives, coverage counts, invalid/missing
+regions, hashes, dimensions, state/DPI, physical LF/CRLF source copies, and
+actual source-content drift. Synthetic inputs require `-AllowTestFixture` and
+are never runtime screenshots.
+
+The historical hero image remains authentic **historical** evidence only.
+A compatible current macOS capture with matching source, state, geometry/DPI
+and compositing context is still required for matched-current comparison.
+Source agreement, a Windows capture, or a comparator PASS alone does not
+promote any of the four visual parity rows to Validated.
