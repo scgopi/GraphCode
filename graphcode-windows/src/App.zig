@@ -1504,14 +1504,100 @@ pub const App = struct {
         return choices;
     }
 
-    fn createNode(self: *App) void {
+    const NodeCreationContext = struct {
+        project_path: []u8,
+        composite_id: ?[]u8,
+        origin: enum { loaded, recent, inspection, overview_global },
+
+        fn deinit(self: *NodeCreationContext, allocator: std.mem.Allocator) void {
+            allocator.free(self.project_path);
+            if (self.composite_id) |id| allocator.free(id);
+        }
+    };
+
+    fn captureNodeCreationContext(self: *const App) !?NodeCreationContext {
         const current_path = self.currentProject() orelse if (self.surface == .overview)
             "graphcode://global"
         else
+            return null;
+        const path = try self.allocator.dupe(u8, current_path);
+        errdefer self.allocator.free(path);
+        return .{
+            .project_path = path,
+            .composite_id = if (self.model.open_composite_id) |id| try self.allocator.dupe(u8, id) else null,
+            .origin = if (self.model.currentGraph() != null)
+                .loaded
+            else if (self.model.recent_projects.items.len != 0)
+                .recent
+            else if (self.worktree_inspection != null)
+                .inspection
+            else
+                .overview_global,
+        };
+    }
+
+    fn validateNodeCreationContext(self: *const App, context: *const NodeCreationContext) !void {
+        if (context.origin == .loaded and self.model.graphFor(context.project_path) == null)
+            return error.NodeCreationProjectClosed;
+        const path = self.currentProject() orelse if (self.surface == .overview)
+            "graphcode://global"
+        else
+            return error.NodeCreationProjectChanged;
+        if (!std.mem.eql(u8, path, context.project_path)) return error.NodeCreationProjectChanged;
+        if (context.composite_id) |id| {
+            const current_id = self.model.open_composite_id orelse return error.NodeCreationCompositeChanged;
+            if (id.len == 0 or !std.mem.eql(u8, current_id, id) or !std.mem.eql(u8, self.client.subgraph_node_id, id))
+                return error.NodeCreationCompositeChanged;
+            const graph = self.model.graphFor(context.project_path) orelse return error.NodeCreationCompositeChanged;
+            const index = GraphModel.findNodeIndexByID(graph.nodes.items, id) orelse return error.NodeCreationCompositeChanged;
+            const node = graph.nodes.items[index];
+            if ((!std.mem.eql(u8, node.loop_type, "composite") and !std.mem.eql(u8, node.loop_type, "proactive")) or
+                node.subgraph_json.len == 0)
+                return error.NodeCreationCompositeChanged;
+        } else if (self.model.open_composite_id != null or self.client.subgraph_node_id.len != 0) {
+            return error.NodeCreationCompositeChanged;
+        }
+    }
+
+    const NodeCreationValidation = struct {
+        app: *const App,
+        context: *const NodeCreationContext,
+
+        fn check(raw: *const anyopaque) !void {
+            const self: *const NodeCreationValidation = @ptrCast(@alignCast(raw));
+            try self.app.validateNodeCreationContext(self.context);
+        }
+    };
+
+    fn nodeCreationCleanupStatus(buffer: *[512]u8, primary_status: ?[]const u8, primary: ?anyerror, cleanup: anyerror) []const u8 {
+        return std.fmt.bufPrint(buffer, "{s} ({s}); attachment cleanup failed ({s}). Staged files retained.", .{
+            primary_status orelse if (primary) |err| nodeFormErrorStatus(err) else "Node creation cancelled",
+            if (primary) |err| @errorName(err) else "cancelled",
+            @errorName(cleanup),
+        }) catch "Node creation did not complete; attachment cleanup also failed. Staged files retained.";
+    }
+
+    fn createNode(self: *App) void {
+        var context = (self.captureNodeCreationContext() catch {
+            self.setStatus("Unable to remember node creation context");
             return;
+        }) orelse return;
+        defer context.deinit(self.allocator);
+        const path = context.project_path;
         Diagnostics.record(self.allocator, "action", "create-node");
-        const path = self.allocator.dupe(u8, current_path) catch return;
-        defer self.allocator.free(path);
+        var continuation = NativeForms.NodeContinuation{};
+        var primary_error: ?anyerror = null;
+        var primary_status: ?[]const u8 = null;
+        defer {
+            if (continuation.abandon(self.allocator)) |cleanup_error| {
+                var buffer: [512]u8 = undefined;
+                self.setStatus(nodeCreationCleanupStatus(&buffer, primary_status, primary_error, cleanup_error));
+                Diagnostics.record(self.allocator, "node-staging-retained", continuation.directory);
+            }
+            continuation.deinit(self.allocator);
+        }
+        const guard_context = NodeCreationValidation{ .app = self, .context = &context };
+        const validation = NativeForms.NodeValidation{ .context = &guard_context, .check = NodeCreationValidation.check };
         const settings = self.product_settings orelse return;
         // Generated before the dialog opens (rather than at send time, as every other
         // draft field is) so a file picked mid-dialog can be copied straight into the
@@ -1548,7 +1634,8 @@ pub const App = struct {
                 self.allocator.free(message);
             }
             self.setStatus("Unable to load saved templates");
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |form_err| {
+            var draft = NativeForms.nodeGuarded(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial, validation, &continuation) catch |form_err| {
+                primary_error = form_err;
                 self.setStatus(nodeFormErrorStatus(form_err));
                 return;
             } orelse return;
@@ -1558,7 +1645,8 @@ pub const App = struct {
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |err| {
+            var draft = NativeForms.nodeGuarded(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial, validation, &continuation) catch |err| {
+                primary_error = err;
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
@@ -1588,7 +1676,8 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, current, true) catch |err| {
+            const result = NativeForms.nodeWithTemplatesGuarded(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, current, true, validation, &continuation) catch |err| {
+                primary_error = err;
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
@@ -1604,11 +1693,20 @@ pub const App = struct {
                     if (owns_current) current.deinit(self.allocator);
                     current = draft;
                     owns_current = true;
-                    const selected = NativeForms.templatePicker(self.window.hwnd, self.allocator, labels.items) catch {
+                    const selected = NativeForms.templatePicker(self.window.hwnd, self.allocator, labels.items) catch |err| {
+                        primary_error = err;
+                        primary_status = "Unable to open saved template picker";
                         self.setStatus("Unable to open saved template picker");
                         return;
                     };
-                    if (selected) |index| TemplateLibrary.applyOwned(&current, templates.templates.items[index], self.allocator) catch {
+                    self.validateNodeCreationContext(&context) catch |err| {
+                        primary_error = err;
+                        self.setStatus(nodeFormErrorStatus(err));
+                        return;
+                    };
+                    if (selected) |index| TemplateLibrary.applyOwned(&current, templates.templates.items[index], self.allocator) catch |err| {
+                        primary_error = err;
+                        primary_status = "Unable to apply selected template";
                         self.setStatus("Unable to apply selected template");
                         return;
                     };
@@ -1619,6 +1717,11 @@ pub const App = struct {
 
     fn nodeFormErrorStatus(err: anyerror) []const u8 {
         return switch (err) {
+            error.NodeCreationProjectClosed => "Project closed while creating node",
+            error.NodeCreationProjectChanged => "Project changed while creating node",
+            error.NodeCreationCompositeChanged => "Composite context changed while creating node",
+            error.MissingNodeAttachmentOwnership => "Unable to restore node attachment ownership",
+            error.NodeAttachmentCleanupFailed => "Unable to discard unused node attachments",
             error.EmptyTitle,
             error.MissingSource,
             error.MissingTarget,
@@ -7871,6 +7974,241 @@ test "node form validation errors keep the validation status" {
         "Unable to open node form",
         App.nodeFormErrorStatus(error.FormCreationFailed),
     );
+}
+
+fn nodeSubmissionTestApp(allocator: std.mem.Allocator) !App {
+    return .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+}
+
+fn deinitNodeSubmissionTestApp(app: *App) void {
+    app.client.deinit();
+    app.model.deinit();
+    app.sidebar_state.deinit();
+    app.declared_entry_ids.deinit();
+    app.kept_worktree_paths.deinit();
+    if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
+}
+
+const node_submission_graph =
+    \\{"version":2,"kind":"event","event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"parent","title":"Empty group","loopType":"proactive","subGraph":{"nodes":[],"edges":[]}}],"edges":[]}}}
+;
+const node_submission_refresh =
+    \\{"version":2,"kind":"event","event":{"graphChanged":{"project":{"path":"A","name":"Refreshed"},"nodes":[{"id":"other","title":"Other"},{"id":"parent","title":"Still empty","loopType":"composite","subGraph":{}}],"edges":[]}}}
+;
+const node_submission_foreign =
+    \\{"version":2,"kind":"event","event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"parent","title":"Foreign","loopType":"proactive","subGraph":{}}],"edges":[]}}}
+;
+
+test "node submission owns identity and accepts refreshed empty composites" {
+    const allocator = std.testing.allocator;
+    var app = try nodeSubmissionTestApp(allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(node_submission_graph);
+    try std.testing.expect(app.model.openComposite("parent"));
+    try std.testing.expectEqual(@as(usize, 0), app.model.graph.?.nodes.items.len);
+    app.client.setSubgraphAddress("parent");
+    var context = (try app.captureNodeCreationContext()).?;
+    defer context.deinit(allocator);
+    try std.testing.expect(context.origin == .loaded);
+    try std.testing.expect(context.project_path.ptr != app.model.currentGraph().?.project.path.ptr);
+    try std.testing.expect(context.composite_id.?.ptr != app.model.open_composite_id.?.ptr);
+    const guard = App.NodeCreationValidation{ .app = &app, .context = &context };
+    try App.NodeCreationValidation.check(&guard);
+    _ = try app.model.updateFromFrame(node_submission_refresh);
+    try App.NodeCreationValidation.check(&guard);
+    try std.testing.expectEqualStrings("A", context.project_path);
+    try std.testing.expectEqualStrings("parent", context.composite_id.?);
+    try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings("parent", app.model.open_composite_id.?);
+    try std.testing.expectEqualStrings("parent", app.client.subgraph_node_id);
+}
+
+test "node submission refuses project closure and independent composite scope drift" {
+    const allocator = std.testing.allocator;
+    const Change = enum { project, closed, client, composite, missing, wrong_type, missing_payload };
+    for (std.enums.values(Change)) |change| {
+        var app = try nodeSubmissionTestApp(allocator);
+        defer deinitNodeSubmissionTestApp(&app);
+        _ = try app.model.updateFromFrame(node_submission_graph);
+        try std.testing.expect(app.model.openComposite("parent"));
+        app.client.setSubgraphAddress("parent");
+        var context = (try app.captureNodeCreationContext()).?;
+        defer context.deinit(allocator);
+        switch (change) {
+            .project => {
+                _ = try app.model.updateFromFrame(node_submission_foreign);
+                try std.testing.expect(app.model.selectProject("B"));
+            },
+            .closed => {
+                _ = try app.model.updateFromFrame(
+                    \\{"kind":"event","event":{"recentProjectsListed":[{"path":"A","name":"Alpha"}]}}
+                );
+                try std.testing.expect(app.model.applyLifecycle(.close, "A"));
+                try std.testing.expectEqualStrings("A", app.currentProject().?);
+            },
+            .client => app.client.setSubgraphAddress("different-parent"),
+            .composite => app.model.closeComposite(),
+            .missing => {
+                _ = try app.model.updateFromFrame(
+                    \\{"kind":"event","event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[],"edges":[]}}}
+                );
+            },
+            .wrong_type => {
+                _ = try app.model.updateFromFrame(
+                    \\{"kind":"event","event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"parent","title":"Not a group","loopType":"turnBased","subGraph":{}}],"edges":[]}}}
+                );
+            },
+            .missing_payload => {
+                _ = try app.model.updateFromFrame(
+                    \\{"kind":"event","event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"parent","title":"Missing graph","loopType":"proactive"}],"edges":[]}}}
+                );
+            },
+        }
+        const expected: anyerror = switch (change) {
+            .project => error.NodeCreationProjectChanged,
+            .closed => error.NodeCreationProjectClosed,
+            else => error.NodeCreationCompositeChanged,
+        };
+        try std.testing.expectError(expected, app.validateNodeCreationContext(&context));
+        try std.testing.expectEqualStrings("A", context.project_path);
+        try std.testing.expectEqualStrings("parent", context.composite_id.?);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
+}
+
+test "node submission top level requires both current scopes to remain empty" {
+    const allocator = std.testing.allocator;
+    var app = try nodeSubmissionTestApp(allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(node_submission_graph);
+    var context = (try app.captureNodeCreationContext()).?;
+    defer context.deinit(allocator);
+    try app.validateNodeCreationContext(&context);
+    _ = try app.model.updateFromFrame(node_submission_refresh);
+    try app.validateNodeCreationContext(&context);
+    app.client.setSubgraphAddress("parent");
+    try std.testing.expectError(error.NodeCreationCompositeChanged, app.validateNodeCreationContext(&context));
+    app.client.setSubgraphAddress(null);
+    try std.testing.expect(app.model.openComposite("parent"));
+    try std.testing.expectError(error.NodeCreationCompositeChanged, app.validateNodeCreationContext(&context));
+    app.model.closeComposite();
+    app.model.open_composite_id = try allocator.dupe(u8, "");
+    try std.testing.expectError(error.NodeCreationCompositeChanged, app.validateNodeCreationContext(&context));
+}
+
+test "node submission preserves recent and inspection path-only starts and promotion" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |recent| {
+        var app = try nodeSubmissionTestApp(allocator);
+        defer deinitNodeSubmissionTestApp(&app);
+        app.worktree_inspection = .{
+            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+            .default_branch = try allocator.dupe(u8, ""),
+            .project_path = try allocator.dupe(u8, "A"),
+        };
+        if (recent) {
+            _ = try app.model.updateFromFrame(
+                \\{"kind":"event","event":{"recentProjectsListed":[{"path":"A","name":"Alpha"}]}}
+            );
+        }
+        var context = (try app.captureNodeCreationContext()).?;
+        defer context.deinit(allocator);
+        try std.testing.expect(if (recent) context.origin == .recent else context.origin == .inspection);
+        try std.testing.expect(app.model.graph == null);
+        try app.validateNodeCreationContext(&context);
+        _ = try app.model.updateFromFrame(
+            \\{"kind":"event","event":{"recentProjectsListed":[]}}
+        );
+        try app.validateNodeCreationContext(&context);
+        _ = try app.model.updateFromFrame(node_submission_graph);
+        try app.validateNodeCreationContext(&context);
+        _ = try app.model.updateFromFrame(node_submission_foreign);
+        try std.testing.expect(app.model.selectProject("B"));
+        try std.testing.expectError(error.NodeCreationProjectChanged, app.validateNodeCreationContext(&context));
+    }
+}
+
+test "node submission preserves overview global fallback without inventing availability" {
+    const allocator = std.testing.allocator;
+    var app = try nodeSubmissionTestApp(allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    try std.testing.expect((try app.captureNodeCreationContext()) == null);
+    app.surface = .overview;
+    var context = (try app.captureNodeCreationContext()).?;
+    defer context.deinit(allocator);
+    try std.testing.expect(context.origin == .overview_global);
+    try std.testing.expectEqualStrings("graphcode://global", context.project_path);
+    try app.validateNodeCreationContext(&context);
+    app.surface = .project;
+    try std.testing.expectError(error.NodeCreationProjectChanged, app.validateNodeCreationContext(&context));
+    _ = try app.model.updateFromFrame(
+        \\{"kind":"event","event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Global"},"nodes":[],"edges":[]}}}
+    );
+    try app.validateNodeCreationContext(&context);
+}
+
+test "node submission path identity is exact and a recent-only target can disappear" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "C:\\Project", "ssh://host/project" }) |path| {
+        var app = try nodeSubmissionTestApp(allocator);
+        defer deinitNodeSubmissionTestApp(&app);
+        try app.model.recent_projects.append(.{
+            .path = try allocator.dupe(u8, path),
+            .name = try allocator.dupe(u8, "Recent"),
+        });
+        var context = (try app.captureNodeCreationContext()).?;
+        defer context.deinit(allocator);
+        try app.validateNodeCreationContext(&context);
+        app.model.recent_projects.items[0].path[0] = std.ascii.toLower(path[0]);
+        if (path[0] == 'C')
+            try std.testing.expectError(error.NodeCreationProjectChanged, app.validateNodeCreationContext(&context));
+        _ = try app.model.updateFromFrame(
+            \\{"kind":"event","event":{"recentProjectsListed":[]}}
+        );
+        try std.testing.expectError(error.NodeCreationProjectChanged, app.validateNodeCreationContext(&context));
+        try std.testing.expectEqualStrings(path, context.project_path);
+    }
+}
+
+fn nodeSubmissionCaptureAllocationCase(allocator: std.mem.Allocator) !void {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(node_submission_graph);
+    try std.testing.expect(app.model.openComposite("parent"));
+    app.client.setSubgraphAddress("parent");
+    app.allocator = allocator;
+    var context = (try app.captureNodeCreationContext()).?;
+    defer context.deinit(allocator);
+    try app.validateNodeCreationContext(&context);
+}
+
+test "node submission capture allocation failure preserves original model identity" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, nodeSubmissionCaptureAllocationCase, .{});
+}
+
+test "node submission cleanup reporting retains the primary and cleanup failures" {
+    var buffer: [512]u8 = undefined;
+    const message = App.nodeCreationCleanupStatus(&buffer, null, error.NodeCreationProjectClosed, error.AccessDenied);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Project closed while creating node") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "NodeCreationProjectClosed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "AccessDenied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "Staged files retained") != null);
+    const cancelled = App.nodeCreationCleanupStatus(&buffer, null, null, error.AccessDenied);
+    try std.testing.expect(std.mem.indexOf(u8, cancelled, "Node creation cancelled") != null);
+    const apply_failed = App.nodeCreationCleanupStatus(&buffer, "Unable to apply selected template", error.OutOfMemory, error.AccessDenied);
+    try std.testing.expect(std.mem.indexOf(u8, apply_failed, "Unable to apply selected template (OutOfMemory)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, apply_failed, "AccessDenied") != null);
+    const unused = App.nodeCreationCleanupStatus(&buffer, null, error.NodeAttachmentCleanupFailed, error.AccessDenied);
+    try std.testing.expect(std.mem.indexOf(u8, unused, "Unable to discard unused node attachments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unused, "context changed") == null);
 }
 
 test "worktree choices for node form degrade honestly when there is no inspection" {

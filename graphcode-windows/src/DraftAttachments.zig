@@ -156,7 +156,12 @@ pub fn ingest(
 /// swallowed for the same reason macOS's `try?` is — there is no node left to report the
 /// failure against.
 pub fn discardAll(dest_dir: []const u8) void {
-    std.fs.cwd().deleteTree(dest_dir) catch {};
+    discardAllChecked(dest_dir) catch {};
+}
+
+pub fn discardAllChecked(dest_dir: []const u8) !void {
+    // deleteTree explicitly accepts a missing path; every reported error survives.
+    try std.fs.cwd().deleteTree(dest_dir);
 }
 
 /// The placeholder for the `number`-th attachment, 1-based — byte-identical to macOS

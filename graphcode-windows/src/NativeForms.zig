@@ -55,6 +55,7 @@ const DialogState = struct {
     attachment_draft_id: []const u8 = "",
     node_worktree_choices: []const WorktreeChoice = &.{},
     attachment_dir: []u8 = &.{},
+    guarded_attachments: bool = false,
     attachment_names: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
     attachment_paths: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
     attachment_ids: [DraftAttachments.max_attachments][]u8 = .{&.{}} ** DraftAttachments.max_attachments,
@@ -261,6 +262,89 @@ pub const NodeResult = union(enum) {
     templates: Forms.NodeDraft,
 };
 
+/// Runs after modal teardown. Success must reach the caller's send without message pumping.
+pub const NodeValidation = struct {
+    context: *const anyopaque,
+    check: *const fn (*const anyopaque) anyerror!void,
+};
+
+pub const NodeContinuation = struct {
+    // Populated only by the guarded form's reserved leaf, never by draft attachment paths.
+    directory: []u8 = &.{},
+    cleanup_error: ?anyerror = null,
+
+    fn takeDirectory(self: *NodeContinuation) []u8 {
+        std.debug.assert(self.cleanup_error == null);
+        const directory = self.directory;
+        self.directory = &.{};
+        return directory;
+    }
+
+    fn retainDirectory(self: *NodeContinuation, state: *DialogState) void {
+        std.debug.assert(self.directory.len == 0 and self.cleanup_error == null);
+        self.directory = state.attachment_dir;
+        state.attachment_dir = &.{};
+    }
+
+    pub fn abandon(self: *NodeContinuation, allocator: std.mem.Allocator) ?anyerror {
+        return self.abandonWith(allocator, DraftAttachments.discardAllChecked);
+    }
+
+    fn abandonWith(
+        self: *NodeContinuation,
+        allocator: std.mem.Allocator,
+        discard: *const fn ([]const u8) anyerror!void,
+    ) ?anyerror {
+        if (self.cleanup_error) |err| return err;
+        if (self.directory.len == 0) return null;
+        discard(self.directory) catch |err| {
+            self.cleanup_error = err;
+            return err;
+        };
+        allocator.free(self.directory);
+        self.directory = &.{};
+        return null;
+    }
+
+    /// Call after abandon and after reporting any retained cleanup error/path.
+    pub fn deinit(self: *NodeContinuation, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.directory.len == 0 or self.cleanup_error != null);
+        if (self.directory.len != 0) allocator.free(self.directory);
+        self.* = .{};
+    }
+};
+
+pub fn nodeGuarded(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    draft_id: []const u8,
+    worktree_choices: []const WorktreeChoice,
+    initial: Forms.NodeDraft,
+    validation: NodeValidation,
+    continuation: *NodeContinuation,
+) !?Forms.NodeDraft {
+    return switch (try nodeWithTemplatesGuarded(parent, allocator, project_path, draft_id, worktree_choices, initial, false, validation, continuation)) {
+        .draft => |draft| draft,
+        .cancelled => null,
+        .templates => unreachable,
+    };
+}
+
+pub fn nodeWithTemplatesGuarded(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    draft_id: []const u8,
+    worktree_choices: []const WorktreeChoice,
+    initial: Forms.NodeDraft,
+    templates_available: bool,
+    validation: NodeValidation,
+    continuation: *NodeContinuation,
+) !NodeResult {
+    return nodeWithTemplatesImpl(parent, allocator, project_path, draft_id, worktree_choices, initial, templates_available, validation, continuation);
+}
+
 /// Opens the normal node form. Saved templates are an explicit secondary action,
 /// mirroring macOS's Templates control rather than intercepting New Loop.
 pub fn nodeWithTemplates(
@@ -272,14 +356,27 @@ pub fn nodeWithTemplates(
     initial: Forms.NodeDraft,
     templates_available: bool,
 ) !NodeResult {
-    const state = try allocator.create(DialogState);
-    state.* = .{
+    return nodeWithTemplatesImpl(parent, allocator, project_path, draft_id, worktree_choices, initial, templates_available, null, null);
+}
+
+fn nodeWithTemplatesImpl(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    draft_id: []const u8,
+    worktree_choices: []const WorktreeChoice,
+    initial: Forms.NodeDraft,
+    templates_available: bool,
+    validation: ?NodeValidation,
+    continuation: ?*NodeContinuation,
+) !NodeResult {
+    const state = try allocateNodeDialog(.{
         .allocator = allocator,
         .kind = .node,
         .parent = parent,
         .templates_available = templates_available,
         .node_worktree_choices = worktree_choices,
-    };
+    }, continuation);
     state.attachment_project_path = project_path;
     state.attachment_draft_id = draft_id;
     var attachments_transferred = false;
@@ -287,8 +384,7 @@ pub fn nodeWithTemplates(
         // A cancelled dialog leaves nothing behind for the daemon to clean up — the
         // draft id it was staged under is never going to become a real node — so the
         // client has to take the same responsibility macOS's `cancelNodeForm` does.
-        if (!state.result and !attachments_transferred and state.attachment_dir.len != 0)
-            DraftAttachments.discardAll(state.attachment_dir);
+        abandonNodeState(state, attachments_transferred, continuation, DraftAttachments.discardAllChecked);
         freeAttachmentState(state);
         freeValues(state);
         allocator.destroy(state);
@@ -317,18 +413,74 @@ pub fn nodeWithTemplates(
     state.values[20] = try allocator.dupe(u8, initial.created_by);
     for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
     try restoreStagedAttachments(state, initial);
-    if (!(try show(state, "Create or edit node", &.{}))) {
-        if (!state.template_requested) return .cancelled;
-        const draft = try buildNodeDraftUnchecked(allocator, state, initial);
-        attachments_transferred = true;
+    const accepted = try show(state, "Create or edit node", &.{});
+    return finishNodeDialog(allocator, state, initial, accepted, &attachments_transferred, validation, continuation, DraftAttachments.discardAllChecked);
+}
+
+fn allocateNodeDialog(initial: DialogState, continuation: ?*NodeContinuation) !*DialogState {
+    const state = try initial.allocator.create(DialogState);
+    state.* = initial;
+    state.guarded_attachments = continuation != null;
+    if (continuation) |owner| state.attachment_dir = owner.takeDirectory();
+    return state;
+}
+
+fn abandonNodeState(
+    state: *DialogState,
+    transferred: bool,
+    continuation: ?*NodeContinuation,
+    discard: *const fn ([]const u8) anyerror!void,
+) void {
+    if (continuation) |owner| {
+        if (owner.cleanup_error != null) {
+            std.debug.assert(state.attachment_dir.len == 0);
+            return;
+        }
+        if (!transferred) {
+            owner.retainDirectory(state);
+            _ = owner.abandonWith(state.allocator, discard);
+        }
+    } else if (!state.result and !transferred and state.attachment_dir.len != 0) {
+        DraftAttachments.discardAll(state.attachment_dir);
+    }
+}
+
+fn finishNodeDialog(
+    allocator: std.mem.Allocator,
+    state: *DialogState,
+    initial: Forms.NodeDraft,
+    accepted: bool,
+    attachments_transferred: *bool,
+    validation: ?NodeValidation,
+    continuation: ?*NodeContinuation,
+    discard: *const fn ([]const u8) anyerror!void,
+) !NodeResult {
+    if (!accepted and !state.template_requested) return .cancelled;
+    var draft = if (accepted)
+        buildNodeDraft(allocator, state, initial) catch |err| {
+            if (continuation == null and state.attachment_dir.len != 0)
+                DraftAttachments.discardAll(state.attachment_dir);
+            return err;
+        }
+    else
+        try buildNodeDraftUnchecked(allocator, state, initial);
+    errdefer draft.deinit(allocator);
+    if (accepted and draft.attachment_count == 0) {
+        // An unattached draft keeps the legacy generated-at-send ID, so this leaf has no owner.
+        if (continuation) |owner| {
+            owner.retainDirectory(state);
+            if (owner.abandonWith(allocator, discard) != null)
+                return error.NodeAttachmentCleanupFailed;
+        }
+    }
+    if (validation) |guard| try guard.check(guard.context);
+    if (!accepted) {
+        if (continuation) |owner| owner.retainDirectory(state);
+        attachments_transferred.* = true;
         return .{ .templates = draft };
     }
-    return .{ .draft = buildNodeDraft(allocator, state, initial) catch |err| {
-        // The user pressed Create, but validation rejected the draft, so no node will
-        // claim this staged directory.
-        if (state.attachment_dir.len != 0) DraftAttachments.discardAll(state.attachment_dir);
-        return err;
-    } };
+    attachments_transferred.* = true;
+    return .{ .draft = draft };
 }
 
 /// A native, keyboard-searchable list of saved templates. The editable combo
@@ -355,23 +507,23 @@ pub fn templatePicker(
 
 fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void {
     if (initial.attachment_count == 0) return;
-    const support = try DraftAttachments.supportDirectory(state.allocator);
-    defer state.allocator.free(support);
-    state.attachment_dir = try DraftAttachments.attachmentsDirectory(
-        state.allocator,
-        support,
-        state.attachment_project_path,
-        state.attachment_draft_id,
-    );
+    if (state.guarded_attachments and state.attachment_dir.len == 0)
+        return error.MissingNodeAttachmentOwnership;
+    _ = try ensureAttachmentsDirectory(state);
     for (0..initial.attachment_count) |index| {
-        state.attachment_paths[index] = try state.allocator.dupe(u8, initial.attachment_paths[index]);
-        state.attachment_ids[index] = try state.allocator.dupe(u8, initial.attachment_ids[index]);
-        state.attachment_names[index] = try state.allocator.dupe(
+        const path = try state.allocator.dupe(u8, initial.attachment_paths[index]);
+        errdefer state.allocator.free(path);
+        const id = try state.allocator.dupe(u8, initial.attachment_ids[index]);
+        errdefer state.allocator.free(id);
+        const name = try state.allocator.dupe(
             u8,
             std.fs.path.basename(initial.attachment_paths[index]),
         );
+        state.attachment_paths[index] = path;
+        state.attachment_ids[index] = id;
+        state.attachment_names[index] = name;
+        state.attachment_count += 1;
     }
-    state.attachment_count = initial.attachment_count;
 }
 
 fn buildNodeDraft(
@@ -436,10 +588,13 @@ fn buildNodeDraftUnchecked(
     if (state.attachment_count != 0) {
         result.node_id = try allocator.dupe(u8, state.attachment_draft_id);
         for (0..state.attachment_count) |index| {
-            result.attachment_paths[index] = try allocator.dupe(u8, state.attachment_paths[index]);
-            result.attachment_ids[index] = try allocator.dupe(u8, state.attachment_ids[index]);
+            const path = try allocator.dupe(u8, state.attachment_paths[index]);
+            errdefer allocator.free(path);
+            const id = try allocator.dupe(u8, state.attachment_ids[index]);
+            result.attachment_paths[index] = path;
+            result.attachment_ids[index] = id;
+            result.attachment_count += 1;
         }
-        result.attachment_count = state.attachment_count;
     }
     return result;
 }
@@ -1472,14 +1627,31 @@ fn ensureAttachmentsDirectory(state: *DialogState) ![]const u8 {
     if (state.attachment_dir.len == 0) {
         const support = try DraftAttachments.supportDirectory(state.allocator);
         defer state.allocator.free(support);
-        state.attachment_dir = try DraftAttachments.attachmentsDirectory(
+        state.attachment_dir = try nodeAttachmentsDirectory(
             state.allocator,
             support,
             state.attachment_project_path,
             state.attachment_draft_id,
+            state.guarded_attachments,
         );
     }
     return state.attachment_dir;
+}
+
+fn nodeAttachmentsDirectory(
+    allocator: std.mem.Allocator,
+    support: []const u8,
+    project_path: []const u8,
+    draft_id: []const u8,
+    reserve: bool,
+) ![]u8 {
+    const directory = try DraftAttachments.attachmentsDirectory(allocator, support, project_path, draft_id);
+    errdefer allocator.free(directory);
+    if (reserve) {
+        try std.fs.cwd().makePath(std.fs.path.dirname(directory).?);
+        try std.fs.cwd().makeDir(directory);
+    }
+    return directory;
 }
 
 fn attachmentErrorReason(err: DraftAttachments.IngestError) []const u8 {
@@ -2436,6 +2608,424 @@ test "node draft builder carries staged attachments and the draft id onto the wi
     try std.testing.expectEqual(@as(usize, 1), draft.attachment_count);
     try std.testing.expectEqualStrings(state.attachment_paths[0], draft.attachment_paths[0]);
     try std.testing.expectEqualStrings(state.attachment_ids[0], draft.attachment_ids[0]);
+}
+
+test "node submission rejects stale scope at the production transfer boundary" {
+    const allocator = std.testing.allocator;
+    const Client = @import("DaemonClient.zig").DaemonClient;
+    const FrameBuffer = @import("FrameBuffer.zig").FrameBuffer;
+    var client = Client{ .allocator = allocator, .frame_buffer = try FrameBuffer.init(allocator, .v2) };
+    defer client.deinit();
+    const Guard = struct {
+        client: *const Client,
+        original_scope: []const u8,
+
+        fn check(raw: *const anyopaque) !void {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            if (!std.mem.eql(u8, self.original_scope, self.client.subgraph_node_id))
+                return error.NodeCreationContextChanged;
+        }
+    };
+    client.setSubgraphAddress("original-composite");
+    const guard = Guard{ .client = &client, .original_scope = "original-composite" };
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null, .result = true };
+    state.values[1] = @constCast("turnBased");
+    state.values[4] = @constCast("Preserve original scope");
+    client.setSubgraphAddress("foreign-composite");
+    var transferred = false;
+    var refused = false;
+    const result = finishNodeDialog(allocator, &state, .{ .title = "" }, true, &transferred, .{
+        .context = &guard,
+        .check = Guard.check,
+    }, null, DraftAttachments.discardAllChecked) catch |err| blk: {
+        try std.testing.expectEqual(error.NodeCreationContextChanged, err);
+        refused = true;
+        break :blk NodeResult.cancelled;
+    };
+    switch (result) {
+        .draft => |value| {
+            var draft = value;
+            defer draft.deinit(allocator);
+            client.sendCreateNodeDraft("original-project", draft);
+        },
+        .templates => |value| {
+            var draft = value;
+            draft.deinit(allocator);
+            return error.UnexpectedTemplateTransfer;
+        },
+        .cancelled => {},
+    }
+    if (client.outbound_count != 0)
+        std.debug.print("baseline queued stale command: {s}\n", .{client.outbound[client.outbound_head]});
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expect(refused);
+    try std.testing.expect(!transferred);
+}
+
+test "node submission transfer outcomes preserve or abandon only the owned leaf" {
+    const allocator = std.testing.allocator;
+    const Outcome = enum { cancel, invalid, reject, reject_templates, accept, templates, templates_accept, zero_attachments, templates_empty, already_gone };
+    const Guard = struct {
+        reject: bool,
+
+        fn check(raw: *const anyopaque) !void {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            if (self.reject) return error.NodeCreationProjectClosed;
+        }
+    };
+    for (std.enums.values(Outcome)) |outcome| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.realpathAlloc(allocator, ".");
+        defer allocator.free(root);
+        try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "original source" });
+        try tmp.dir.writeFile(.{ .sub_path = "preexisting.txt", .data = "unrelated sentinel" });
+        const source = try tmp.dir.realpathAlloc(allocator, "source.txt");
+        defer allocator.free(source);
+        var owner = NodeContinuation{};
+        defer {
+            _ = owner.abandon(allocator);
+            owner.deinit(allocator);
+        }
+        var state = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .guarded_attachments = true,
+            .result = outcome != .cancel and outcome != .templates and outcome != .templates_accept and outcome != .templates_empty and outcome != .reject_templates,
+            .template_requested = outcome == .templates or outcome == .templates_accept or outcome == .templates_empty or outcome == .reject_templates,
+            .attachment_draft_id = "11111111-1111-4111-8111-111111111111",
+        };
+        state.attachment_dir = try nodeAttachmentsDirectory(allocator, root, "project", state.attachment_draft_id, true);
+        defer freeAttachmentState(&state);
+        state.values[1] = @constCast("turnBased");
+        state.values[4] = @constCast(if (outcome == .invalid) "" else "review [image #1]");
+        state.attachment_paths[0] = try DraftAttachments.ingest(allocator, source, state.attachment_dir, 1);
+        state.attachment_ids[0] = try allocator.dupe(u8, "attachment-id");
+        state.attachment_names[0] = try allocator.dupe(u8, "source.txt");
+        state.attachment_count = 1;
+        const staged = try allocator.dupe(u8, state.attachment_paths[0]);
+        defer allocator.free(staged);
+        const directory = try allocator.dupe(u8, state.attachment_dir);
+        defer allocator.free(directory);
+        if (outcome == .zero_attachments or outcome == .already_gone) {
+            allocator.free(state.attachment_paths[0]);
+            allocator.free(state.attachment_ids[0]);
+            allocator.free(state.attachment_names[0]);
+            state.attachment_count = 0;
+            if (outcome == .already_gone) try DraftAttachments.discardAllChecked(directory);
+        }
+        const guard = Guard{ .reject = outcome == .reject or outcome == .reject_templates };
+        var transferred = false;
+        var rejected = false;
+        const result = finishNodeDialog(allocator, &state, .{ .title = "" }, state.result, &transferred, .{
+            .context = &guard,
+            .check = Guard.check,
+        }, &owner, DraftAttachments.discardAllChecked) catch |err| blk: {
+            try std.testing.expectEqual(if (outcome == .invalid) error.MissingFirstInstruction else error.NodeCreationProjectClosed, err);
+            rejected = true;
+            break :blk NodeResult.cancelled;
+        };
+        abandonNodeState(&state, transferred, &owner, DraftAttachments.discardAllChecked);
+        switch (result) {
+            .cancelled => {
+                try std.testing.expectEqual(guard.reject or outcome == .invalid, rejected);
+                try std.testing.expect(!transferred);
+                try std.testing.expect(owner.cleanup_error == null);
+                try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
+                try DraftAttachments.discardAllChecked(directory);
+            },
+            .draft => |value| {
+                var draft = value;
+                defer draft.deinit(allocator);
+                try std.testing.expect(outcome == .accept or outcome == .zero_attachments or outcome == .already_gone);
+                try std.testing.expect(transferred);
+                try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+                try std.testing.expect(owner.abandon(allocator) == null);
+                if (outcome == .zero_attachments or outcome == .already_gone) {
+                    try std.testing.expectEqual(@as(usize, 0), draft.attachment_count);
+                    try std.testing.expectEqual(@as(usize, 0), draft.node_id.len);
+                    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
+                } else {
+                    const bytes = try std.fs.cwd().readFileAlloc(allocator, draft.attachment_paths[0], 128);
+                    defer allocator.free(bytes);
+                    try std.testing.expectEqualStrings("original source", bytes);
+                }
+            },
+            .templates => |value| {
+                var draft = value;
+                defer draft.deinit(allocator);
+                try std.testing.expect(outcome == .templates or outcome == .templates_accept or outcome == .templates_empty);
+                try std.testing.expect(transferred);
+                try std.testing.expectEqual(@as(usize, 0), state.attachment_dir.len);
+                try std.testing.expectEqualStrings(directory, owner.directory);
+                if (outcome == .templates_accept or outcome == .templates_empty) {
+                    try @import("TemplateLibrary.zig").applyOwned(&draft, .{
+                        .id = @constCast("template"),
+                        .name = @constCast("Applied template"),
+                        .body = @constCast("template [image #1]"),
+                        .shape = @constCast("turnBased"),
+                    }, allocator);
+                }
+                const reopened = try allocateNodeDialog(.{
+                    .allocator = allocator,
+                    .kind = .node,
+                    .parent = null,
+                    .attachment_project_path = "must-not-recompute-from-this-project",
+                    .attachment_draft_id = state.attachment_draft_id,
+                }, &owner);
+                defer allocator.destroy(reopened);
+                defer freeAttachmentState(reopened);
+                defer freeValues(reopened);
+                try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+                try restoreStagedAttachments(reopened, draft);
+                try std.testing.expectEqualStrings(directory, reopened.attachment_dir);
+                const bytes = try std.fs.cwd().readFileAlloc(allocator, reopened.attachment_paths[0], 128);
+                defer allocator.free(bytes);
+                try std.testing.expectEqualStrings("original source", bytes);
+                if (outcome == .templates_accept or outcome == .templates_empty) {
+                    if (outcome == .templates_empty) {
+                        allocator.free(reopened.attachment_paths[0]);
+                        allocator.free(reopened.attachment_ids[0]);
+                        allocator.free(reopened.attachment_names[0]);
+                        reopened.attachment_count = 0;
+                    }
+                    reopened.values[0] = try allocator.dupe(u8, draft.title);
+                    reopened.values[1] = try allocator.dupe(u8, draft.loop_type);
+                    reopened.values[4] = try allocator.dupe(u8, draft.first_instruction);
+                    var final_transfer = false;
+                    const final = try finishNodeDialog(allocator, reopened, draft, true, &final_transfer, .{
+                        .context = &guard,
+                        .check = Guard.check,
+                    }, &owner, DraftAttachments.discardAllChecked);
+                    var submitted = final.draft;
+                    defer submitted.deinit(allocator);
+                    try std.testing.expectEqualStrings("Applied template", submitted.title);
+                    try std.testing.expectEqualStrings("template [image #1]", submitted.first_instruction);
+                    abandonNodeState(reopened, final_transfer, &owner, DraftAttachments.discardAllChecked);
+                    try std.testing.expect(owner.abandon(allocator) == null);
+                    if (outcome == .templates_empty) {
+                        try std.testing.expectEqual(@as(usize, 0), submitted.attachment_count);
+                        try std.testing.expectEqual(@as(usize, 0), submitted.node_id.len);
+                        try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
+                    } else {
+                        try std.testing.expectEqualStrings(staged, submitted.attachment_paths[0]);
+                        try std.fs.cwd().access(staged, .{});
+                    }
+                } else {
+                    abandonNodeState(reopened, false, &owner, DraftAttachments.discardAllChecked);
+                    try std.testing.expect(owner.cleanup_error == null);
+                    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
+                }
+            },
+        }
+        for ([_][]const u8{ "source.txt", "preexisting.txt" }, [_][]const u8{ "original source", "unrelated sentinel" }) |name, expected| {
+            const bytes = try tmp.dir.readFileAlloc(allocator, name, 128);
+            defer allocator.free(bytes);
+            try std.testing.expectEqualStrings(expected, bytes);
+        }
+        const parent = std.fs.path.dirname(directory).?;
+        try std.fs.cwd().access(parent, .{});
+    }
+}
+
+test "node submission exclusive reservation refuses a preexisting leaf without granting ownership" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const existing = try nodeAttachmentsDirectory(allocator, root, "project", "draft", false);
+    defer allocator.free(existing);
+    try std.fs.cwd().makePath(existing);
+    const sentinel = try std.fs.path.join(allocator, &.{ existing, "preexisting.txt" });
+    defer allocator.free(sentinel);
+    try std.fs.cwd().writeFile(.{ .sub_path = sentinel, .data = "never owned by this form" });
+    try std.testing.expectError(error.PathAlreadyExists, nodeAttachmentsDirectory(allocator, root, "project", "draft", true));
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, sentinel, 128);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("never owned by this form", bytes);
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null, .guarded_attachments = true };
+    var arbitrary = Forms.NodeDraft{ .title = "", .attachment_count = 1 };
+    arbitrary.attachment_paths[0] = sentinel;
+    try std.testing.expectError(error.MissingNodeAttachmentOwnership, restoreStagedAttachments(&state, arbitrary));
+    try std.testing.expectEqual(@as(usize, 0), state.attachment_dir.len);
+    try std.fs.cwd().access(sentinel, .{});
+}
+
+test "node submission cleanup failure retains its capability and is never silently retried" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    var owner = NodeContinuation{
+        .directory = try nodeAttachmentsDirectory(allocator, root, "project", "draft", true),
+    };
+    defer owner.deinit(allocator);
+    const Failure = struct {
+        fn discard(_: []const u8) !void {
+            return error.AccessDenied;
+        }
+    };
+    try std.testing.expectEqual(error.AccessDenied, owner.abandonWith(allocator, Failure.discard).?);
+    try std.testing.expectEqual(error.AccessDenied, owner.cleanup_error.?);
+    try std.testing.expectEqual(error.AccessDenied, owner.abandon(allocator).?);
+    try std.fs.cwd().access(owner.directory, .{});
+}
+
+test "node submission failed cleanup preserves the observed cause and blocks zero-reference transfer" {
+    const allocator = std.testing.allocator;
+    const Scenario = enum { empty_direct, empty_template, context_rejection };
+    const Failure = struct {
+        var calls: usize = 0;
+
+        fn discard(_: []const u8) !void {
+            calls += 1;
+            return error.AccessDenied;
+        }
+    };
+    const Guard = struct {
+        reject: bool,
+        calls: *usize,
+
+        fn check(raw: *const anyopaque) !void {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            self.calls.* += 1;
+            if (self.reject) return error.NodeCreationProjectClosed;
+        }
+    };
+    for (std.enums.values(Scenario)) |scenario| {
+        Failure.calls = 0;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.realpathAlloc(allocator, ".");
+        defer allocator.free(root);
+        try tmp.dir.writeFile(.{ .sub_path = "outside.txt", .data = "outside bytes" });
+        var owner = NodeContinuation{};
+        defer owner.deinit(allocator);
+        var state = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .guarded_attachments = true,
+            .attachment_draft_id = "11111111-1111-4111-8111-111111111111",
+        };
+        state.attachment_dir = try nodeAttachmentsDirectory(allocator, root, "project", "failure-draft", true);
+        defer freeAttachmentState(&state);
+        const directory = try allocator.dupe(u8, state.attachment_dir);
+        defer allocator.free(directory);
+        const staged = try std.fs.path.join(allocator, &.{ directory, "staged.txt" });
+        defer allocator.free(staged);
+        try std.fs.cwd().writeFile(.{ .sub_path = staged, .data = "staged bytes" });
+        state.values[1] = @constCast("turnBased");
+        state.values[4] = @constCast("original instruction");
+        var initial = Forms.NodeDraft{ .title = "" };
+        var owns_initial = false;
+        defer if (owns_initial) initial.deinit(allocator);
+        if (scenario == .empty_template) {
+            state.template_requested = true;
+            var template_transfer = false;
+            const result = try finishNodeDialog(allocator, &state, initial, false, &template_transfer, null, &owner, DraftAttachments.discardAllChecked);
+            initial = result.templates;
+            owns_initial = true;
+            try std.testing.expect(template_transfer);
+            try std.testing.expectEqualStrings(directory, owner.directory);
+            state.attachment_dir = owner.takeDirectory();
+            state.template_requested = false;
+        } else if (scenario == .context_rejection) {
+            state.attachment_paths[0] = try allocator.dupe(u8, staged);
+            state.attachment_ids[0] = try allocator.dupe(u8, "attachment-id");
+            state.attachment_names[0] = try allocator.dupe(u8, "staged.txt");
+            state.attachment_count = 1;
+        }
+        var validation_calls: usize = 0;
+        const guard = Guard{ .reject = scenario == .context_rejection, .calls = &validation_calls };
+        var transferred = false;
+        const primary: anyerror = if (scenario == .context_rejection) error.NodeCreationProjectClosed else error.NodeAttachmentCleanupFailed;
+        try std.testing.expectError(primary, finishNodeDialog(allocator, &state, initial, true, &transferred, .{
+            .context = &guard,
+            .check = Guard.check,
+        }, &owner, Failure.discard));
+        try std.testing.expect(!transferred);
+        try std.testing.expectEqual(@as(usize, if (scenario == .context_rejection) 1 else 0), validation_calls);
+        abandonNodeState(&state, transferred, &owner, Failure.discard);
+        try std.testing.expectEqual(error.AccessDenied, owner.cleanup_error.?);
+        try std.testing.expectEqualStrings(directory, owner.directory);
+        try std.testing.expectEqual(@as(usize, 0), state.attachment_dir.len);
+        try std.testing.expectEqual(error.AccessDenied, owner.abandonWith(allocator, Failure.discard).?);
+        try std.testing.expectEqual(@as(usize, 1), Failure.calls);
+        const bytes = try std.fs.cwd().readFileAlloc(allocator, staged, 128);
+        defer allocator.free(bytes);
+        try std.testing.expectEqualStrings("staged bytes", bytes);
+        const outside = try tmp.dir.readFileAlloc(allocator, "outside.txt", 128);
+        defer allocator.free(outside);
+        try std.testing.expectEqualStrings("outside bytes", outside);
+    }
+}
+
+fn nodeSubmissionAllocationCase(allocator: std.mem.Allocator, root: []const u8) !void {
+    var owner = NodeContinuation{
+        .directory = try nodeAttachmentsDirectory(allocator, root, "project", "oom-draft", true),
+    };
+    defer {
+        std.testing.expect(owner.abandon(allocator) == null) catch @panic("owned fixture cleanup failed");
+        owner.deinit(allocator);
+    }
+    const first_path = try std.fs.path.join(std.testing.allocator, &.{ owner.directory, "first.txt" });
+    defer std.testing.allocator.free(first_path);
+    const second_path = try std.fs.path.join(std.testing.allocator, &.{ owner.directory, "second.txt" });
+    defer std.testing.allocator.free(second_path);
+    try std.fs.cwd().writeFile(.{ .sub_path = first_path, .data = "first staged bytes" });
+    try std.fs.cwd().writeFile(.{ .sub_path = second_path, .data = "second staged bytes" });
+    const state = try allocateNodeDialog(.{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_draft_id = "11111111-1111-4111-8111-111111111111",
+    }, &owner);
+    defer {
+        abandonNodeState(state, false, &owner, DraftAttachments.discardAllChecked);
+        freeAttachmentState(state);
+        freeValues(state);
+        allocator.destroy(state);
+    }
+    var initial = Forms.NodeDraft{ .title = "original title", .first_instruction = "original instruction", .attachment_count = 2 };
+    initial.attachment_paths[0] = first_path;
+    initial.attachment_paths[1] = second_path;
+    initial.attachment_ids[0] = "first-id";
+    initial.attachment_ids[1] = "second-id";
+    defer {
+        std.testing.expectEqualStrings("original title", initial.title) catch unreachable;
+        std.testing.expectEqualStrings("original instruction", initial.first_instruction) catch unreachable;
+        std.testing.expectEqualStrings(first_path, initial.attachment_paths[0]) catch unreachable;
+        std.testing.expectEqualStrings("second-id", initial.attachment_ids[1]) catch unreachable;
+    }
+    state.values[0] = try allocator.dupe(u8, initial.title);
+    state.values[1] = try allocator.dupe(u8, initial.loop_type);
+    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
+    try restoreStagedAttachments(state, initial);
+    var draft = try buildNodeDraft(allocator, state, initial);
+    defer draft.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), draft.attachment_count);
+    try std.testing.expectEqualStrings(initial.attachment_paths[0], draft.attachment_paths[0]);
+    try std.testing.expectEqualStrings(initial.attachment_ids[1], draft.attachment_ids[1]);
+}
+
+test "node submission allocation failure unwinds before and after the capability move" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    try tmp.dir.writeFile(.{ .sub_path = "outside.txt", .data = "outside survives" });
+    try std.testing.checkAllAllocationFailures(allocator, nodeSubmissionAllocationCase, .{root});
+    const directory = try DraftAttachments.attachmentsDirectory(allocator, root, "project", "oom-draft");
+    defer allocator.free(directory);
+    try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(directory, .{}));
+    const bytes = try tmp.dir.readFileAlloc(allocator, "outside.txt", 128);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("outside survives", bytes);
 }
 
 test "template handoff retains staged attachments in the unchecked draft" {
