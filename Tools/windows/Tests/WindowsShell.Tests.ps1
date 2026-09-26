@@ -738,10 +738,11 @@ Invoke-Native "App shell executable tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
   Push-Location $shellRoot
   try {
     & $zig test src\App.zig src\AccessibilityProvider.cpp `
-      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
 
