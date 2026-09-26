@@ -47,6 +47,12 @@ pub const QuickChat = struct {
     activity_sequence: u64 = 0,
 };
 
+pub const CycleGuard = struct {
+    max_iterations: ?i64 = null,
+    until: ?[]u8 = null,
+    stop_after_passes_without_improvement: ?i64 = null,
+};
+
 pub const Edge = struct {
     id: []u8 = &.{},
     from: []u8,
@@ -55,7 +61,8 @@ pub const Edge = struct {
     condition: []u8 = @constCast("always"),
     blocks_target: bool = true,
     fired: bool = false,
-    fire_count: u32 = 0,
+    fire_count: i64 = 0,
+    cycle_guard: ?CycleGuard = null,
 };
 
 pub const Project = struct {
@@ -701,7 +708,7 @@ pub const Model = struct {
         if (std.mem.indexOf(u8, graph_json, "\"edges\"")) |edges_key| {
             if (indexOfByte(graph_json, edges_key, '[')) |edges_open| {
                 if (findClosing(graph_json, edges_open, '[', ']')) |edges_close| {
-                    try decodeEdges(self.allocator, graph_json[edges_open + 1 .. edges_close], &graph.edges);
+                    graph.edges = try decodeEdges(self.allocator, graph_json[edges_open .. edges_close + 1]);
                 }
             }
         }
@@ -774,17 +781,10 @@ pub const Model = struct {
                 return;
             };
         }
-        for (summary.edges.items) |edge| {
-            const copy = cloneEdge(self.allocator, edge) catch {
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-            graph.edges.append(copy) catch {
-                freeEdge(self.allocator, copy);
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-        }
+        graph.edges = cloneEdges(self.allocator, summary.edges.items) catch {
+            freeGraph(self.allocator, &graph);
+            return;
+        };
         self.graph = graph;
         self.applyOpenComposite();
     }
@@ -833,12 +833,13 @@ pub const Model = struct {
     fn upsertSummary(self: *Model, graph: *const Graph) !void {
         for (self.graphs.items) |*summary| {
             if (!std.mem.eql(u8, summary.project.path, graph.project.path)) continue;
+            var edges = try cloneEdges(self.allocator, graph.edges.items);
+            errdefer freeEdges(self.allocator, &edges);
             for (summary.nodes.items) |node| freeNode(self.allocator, node);
-            for (summary.edges.items) |edge| freeEdge(self.allocator, edge);
             summary.nodes.clearRetainingCapacity();
-            summary.edges.clearRetainingCapacity();
             for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
-            for (graph.edges.items) |edge| try summary.edges.append(try cloneEdge(self.allocator, edge));
+            freeEdges(self.allocator, &summary.edges);
+            summary.edges = edges;
             return;
         }
         var summary = GraphSummary{
@@ -851,7 +852,7 @@ pub const Model = struct {
         };
         errdefer summary.deinit(self.allocator);
         for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
-        for (graph.edges.items) |edge| try summary.edges.append(try cloneEdge(self.allocator, edge));
+        summary.edges = try cloneEdges(self.allocator, graph.edges.items);
         try self.graphs.append(summary);
     }
 
@@ -1049,16 +1050,44 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
 }
 
 fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
-    return .{
-        .id = try allocator.dupe(u8, edge.id),
-        .from = try allocator.dupe(u8, edge.from),
-        .to = try allocator.dupe(u8, edge.to),
-        .kind = try allocator.dupe(u8, edge.kind),
-        .condition = try allocator.dupe(u8, edge.condition),
+    var copy = Edge{
+        .from = &.{},
+        .to = &.{},
+        .condition = &.{},
         .blocks_target = edge.blocks_target,
         .fired = edge.fired,
         .fire_count = edge.fire_count,
     };
+    errdefer freeEdge(allocator, copy);
+    copy.id = try allocator.dupe(u8, edge.id);
+    copy.from = try allocator.dupe(u8, edge.from);
+    copy.to = try allocator.dupe(u8, edge.to);
+    copy.kind = try allocator.dupe(u8, edge.kind);
+    copy.condition = try allocator.dupe(u8, edge.condition);
+    if (edge.cycle_guard) |guard| {
+        copy.cycle_guard = .{
+            .max_iterations = guard.max_iterations,
+            .stop_after_passes_without_improvement = guard.stop_after_passes_without_improvement,
+            .until = if (guard.until) |until| try allocator.dupe(u8, until) else null,
+        };
+    }
+    return copy;
+}
+
+fn cloneEdges(allocator: std.mem.Allocator, edges: []const Edge) !std.array_list.Managed(Edge) {
+    var copies = std.array_list.Managed(Edge).init(allocator);
+    errdefer freeEdges(allocator, &copies);
+    for (edges) |edge| {
+        const copy = try cloneEdge(allocator, edge);
+        errdefer freeEdge(allocator, copy);
+        try copies.append(copy);
+    }
+    return copies;
+}
+
+fn freeEdges(allocator: std.mem.Allocator, edges: *std.array_list.Managed(Edge)) void {
+    for (edges.items) |edge| freeEdge(allocator, edge);
+    edges.deinit();
 }
 
 fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
@@ -1067,6 +1096,9 @@ fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
     allocator.free(edge.to);
     allocator.free(edge.kind);
     allocator.free(edge.condition);
+    if (edge.cycle_guard) |guard| {
+        if (guard.until) |until| allocator.free(until);
+    }
 }
 
 fn freeAttentionEntry(allocator: std.mem.Allocator, entry: AttentionEntry) void {
@@ -1131,35 +1163,79 @@ fn hasNonNullJsonField(object: []const u8, key: []const u8) bool {
 fn decodeEdges(
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    edges: *std.array_list.Managed(Edge),
-) !void {
-    var cursor: usize = 0;
-    while (cursor < bytes.len) {
-        const start = indexOfByte(bytes, cursor, '{') orelse break;
-        const end = findClosing(bytes, start, '{', '}') orelse break;
-        const object = bytes[start .. end + 1];
-        try edges.append(.{
-            .id = try duplicateJsonStringOr(allocator, object, "id", ""),
-            .from = try duplicateJsonString(allocator, object, "from"),
-            .to = try duplicateJsonString(allocator, object, "to"),
-            .kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff"),
-            .condition = try duplicateJsonStringOr(allocator, object, "condition", "always"),
-            .blocks_target = !std.mem.eql(u8, Wire.jsonString(object, "kind") orelse "", "message"),
-            .fired = jsonBool(object, "fired") orelse false,
-            .fire_count = jsonNumber(object, "fireCount") orelse 0,
-        });
-        cursor = end + 1;
+) !std.array_list.Managed(Edge) {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.MalformedEdge;
+    var edges = std.array_list.Managed(Edge).init(allocator);
+    errdefer freeEdges(allocator, &edges);
+    for (parsed.value.array.items) |value| {
+        const edge = try decodeEdge(allocator, value);
+        errdefer freeEdge(allocator, edge);
+        try edges.append(edge);
     }
+    return edges;
 }
 
-fn jsonBool(object: []const u8, key: []const u8) ?bool {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return null;
-    const value = object[start + needle.len ..];
-    if (std.mem.startsWith(u8, value, "true")) return true;
-    if (std.mem.startsWith(u8, value, "false")) return false;
-    return null;
+fn decodeEdge(allocator: std.mem.Allocator, value: std.json.Value) !Edge {
+    if (value != .object) return error.MalformedEdge;
+    const object = value.object;
+    const count = try edgeOptionalInteger(object.get("fireCount")) orelse blk: {
+        const legacy = object.get("fired") orelse break :blk 0;
+        break :blk switch (legacy) {
+            .null => 0,
+            .bool => |fired| @as(i64, if (fired) 1 else 0),
+            else => return error.MalformedEdge,
+        };
+    };
+    var edge = Edge{
+        .from = &.{},
+        .to = &.{},
+        .condition = &.{},
+        .fire_count = count,
+        .fired = count > 0,
+    };
+    errdefer freeEdge(allocator, edge);
+    edge.id = try allocator.dupe(u8, edgeString(object, "id", ""));
+    edge.from = try allocator.dupe(u8, edgeString(object, "from", ""));
+    edge.to = try allocator.dupe(u8, edgeString(object, "to", ""));
+    edge.kind = try allocator.dupe(u8, edgeString(object, "kind", "handoff"));
+    edge.condition = try allocator.dupe(u8, edgeString(object, "condition", "always"));
+    edge.blocks_target = !std.mem.eql(u8, edge.kind, "message");
+    edge.cycle_guard = try decodeCycleGuard(allocator, object.get("cycleGuard"));
+    return edge;
+}
+
+fn edgeString(object: std.json.ObjectMap, key: []const u8, fallback: []const u8) []const u8 {
+    const value = object.get(key) orelse return fallback;
+    return if (value == .string) value.string else fallback;
+}
+
+fn edgeOptionalInteger(value: ?std.json.Value) !?i64 {
+    const field = value orelse return null;
+    return switch (field) {
+        .null => null,
+        .integer => |number| number,
+        else => error.MalformedEdge,
+    };
+}
+
+fn decodeCycleGuard(allocator: std.mem.Allocator, value: ?std.json.Value) !?CycleGuard {
+    const field = value orelse return null;
+    if (field == .null) return null;
+    if (field != .object) return error.MalformedEdge;
+    const maximum = try edgeOptionalInteger(field.object.get("maxIterations"));
+    const plateau = try edgeOptionalInteger(field.object.get("stopAfterPassesWithoutImprovement"));
+    const until: ?[]const u8 = if (field.object.get("until")) |text| switch (text) {
+        .null => null,
+        .string => |string| string,
+        else => return error.MalformedEdge,
+    } else null;
+    return .{
+        .max_iterations = maximum,
+        .stop_after_passes_without_improvement = plateau,
+        .until = if (until) |text| try allocator.dupe(u8, text) else null,
+    };
 }
 
 fn jsonNumber(object: []const u8, key: []const u8) ?u32 {
@@ -1337,10 +1413,9 @@ pub fn decodeSubgraph(
         if (indexOfByte(subgraph_json, edges_key, '[')) |edges_open| {
             const edges_close = findClosing(subgraph_json, edges_open, '[', ']') orelse
                 return error.MalformedSubgraph;
-            try decodeEdges(
+            graph.edges = try decodeEdges(
                 allocator,
-                subgraph_json[edges_open + 1 .. edges_close],
-                &graph.edges,
+                subgraph_json[edges_open .. edges_close + 1],
             );
         }
     }
@@ -1450,13 +1525,7 @@ fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {
 fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     freeProject(allocator, graph.project);
     for (graph.nodes.items) |node| freeNode(allocator, node);
-    for (graph.edges.items) |edge| {
-        if (edge.id.len != 0) allocator.free(edge.id);
-        allocator.free(edge.from);
-        allocator.free(edge.to);
-        allocator.free(edge.kind);
-        allocator.free(edge.condition);
-    }
+    for (graph.edges.items) |edge| freeEdge(allocator, edge);
     graph.nodes.deinit();
     graph.edges.deinit();
 }
@@ -1900,9 +1969,181 @@ test "fireCount parses complete positive numeric tokens" {
         \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"a","title":"A","state":"running"},{"id":"b","title":"B","state":"blocked"}],"edges":[{"from":"a","to":"b","kind":"handoff","fireCount":1},{"from":"a","to":"b","kind":"handoff","fireCount":123}]}}}
     ;
     _ = try model.updateFromFrame(frame);
-    try std.testing.expectEqual(@as(u32, 1), model.graph.?.edges.items[0].fire_count);
-    try std.testing.expectEqual(@as(u32, 123), model.graph.?.edges.items[1].fire_count);
+    try std.testing.expectEqual(@as(i64, 1), model.graph.?.edges.items[0].fire_count);
+    try std.testing.expectEqual(@as(i64, 123), model.graph.?.edges.items[1].fire_count);
     try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
+}
+
+test "edge guard decoding preserves optional signed data and authoritative counts" {
+    const Case = struct { json: []const u8, count: i64, guarded: bool = false };
+    const cases = [_]Case{
+        .{ .json = "[{}]", .count = 0 },
+        .{ .json = "[{\"cycleGuard\":null,\"fired\":null}]", .count = 0 },
+        .{ .json = "[{\"fired\":true}]", .count = 1 },
+        .{ .json = "[{\"fired\":false}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":null,\"fired\":true}]", .count = 1 },
+        .{ .json = "[{\"fireCount\":null,\"fired\":false}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":null}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":0,\"fired\":true}]", .count = 0 },
+        .{ .json = "[{\"fireCount\":2,\"fired\":false}]", .count = 2 },
+        .{ .json = "[{\"fireCount\":2,\"fired\":\"unused\"}]", .count = 2 },
+        .{ .json = "[{\"fireCount\":-1,\"fired\":true}]", .count = -1 },
+        .{ .json = "[{\"fireCount\":9223372036854775807}]", .count = std.math.maxInt(i64) },
+        .{ .json = "[{\"fireCount\":-9223372036854775808}]", .count = std.math.minInt(i64) },
+        .{ .json = "[{\"cycleGuard\":{}}]", .count = 0, .guarded = true },
+        .{ .json = "[{\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null}}]", .count = 0, .guarded = true },
+        .{ .json = "[{\"future\":{\"fireCount\":99,\"kind\":\"message\",\"until\":\"wrong\"},\"cycleGuard\":{\"budget\":5}}]", .count = 0, .guarded = true },
+    };
+    for (cases) |case| {
+        var edges = try decodeEdges(std.testing.allocator, case.json);
+        defer freeEdges(std.testing.allocator, &edges);
+        try std.testing.expectEqual(@as(usize, 1), edges.items.len);
+        const edge = edges.items[0];
+        try std.testing.expectEqual(case.count, edge.fire_count);
+        try std.testing.expectEqual(case.count > 0, edge.fired);
+        try std.testing.expectEqual(case.guarded, edge.cycle_guard != null);
+        try std.testing.expectEqualStrings("handoff", edge.kind);
+        try std.testing.expectEqualStrings("always", edge.condition);
+    }
+    var edges = try decodeEdges(std.testing.allocator,
+        \\[{"kind":"futureKind","condition":"futureCondition","cycleGuard":{"maxIterations":-9223372036854775808,"until":" \tquote \"x\" \\ \u2603  ","stopAfterPassesWithoutImprovement":9223372036854775807}},{"cycleGuard":{"maxIterations":0,"until":"","stopAfterPassesWithoutImprovement":-2}}]
+    );
+    defer freeEdges(std.testing.allocator, &edges);
+    const guard = edges.items[0].cycle_guard.?;
+    try std.testing.expectEqualStrings("futureKind", edges.items[0].kind);
+    try std.testing.expectEqualStrings("futureCondition", edges.items[0].condition);
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), guard.max_iterations);
+    try std.testing.expectEqual(@as(?i64, std.math.maxInt(i64)), guard.stop_after_passes_without_improvement);
+    try std.testing.expectEqualStrings(" \tquote \"x\" \\ ☃  ", guard.until.?);
+    try std.testing.expectEqual(@as(?i64, 0), edges.items[1].cycle_guard.?.max_iterations);
+    try std.testing.expectEqual(@as(?i64, -2), edges.items[1].cycle_guard.?.stop_after_passes_without_improvement);
+    try std.testing.expectEqualStrings("", edges.items[1].cycle_guard.?.until.?);
+}
+
+fn edgeGuardTestFrame(allocator: std.mem.Allocator, edges: []const u8) ![]u8 {
+    return std.mem.concat(allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"edge-fixture\",\"name\":\"Edge fixture\"},\"nodes\":[],\"edges\":",
+        edges,
+        "}}}",
+    });
+}
+
+test "edge guard malformed replacements preserve the last valid graph" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    const valid = try edgeGuardTestFrame(allocator,
+        \\[{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"keep me"},"fireCount":2}]
+    );
+    defer allocator.free(valid);
+    _ = try model.updateFromFrame(valid);
+    for ([_][]const u8{
+        "[false]",
+        "[{\"cycleGuard\":\"none\"}]",
+        "[{\"cycleGuard\":[]}]",
+        "[{\"cycleGuard\":{\"until\":true}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":\"3\"}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":2.5}}]",
+        "[{\"cycleGuard\":{\"maxIterations\":9223372036854775808}}]",
+        "[{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":false}}]",
+        "[{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":-9223372036854775809}}]",
+        "[{\"fireCount\":\"2\",\"fired\":true}]",
+        "[{\"fireCount\":2.5,\"fired\":true}]",
+        "[{\"fireCount\":2.0}]",
+        "[{\"fireCount\":2e0}]",
+        "[{\"fireCount\":9223372036854775808}]",
+        "[{\"fireCount\":-9223372036854775809}]",
+        "[{\"fired\":\"true\"}]",
+        "[{\"fireCount\":null,\"fired\":1}]",
+        "[{\"cycleGuard\":{\"until\":\"allocated first\"}},{\"cycleGuard\":false}]",
+    }) |invalid| {
+        const frame = try edgeGuardTestFrame(allocator, invalid);
+        defer allocator.free(frame);
+        try std.testing.expectError(error.MalformedEdge, model.updateFromFrame(frame));
+        for ([_]Edge{ model.graph.?.edges.items[0], model.currentGraph().?.edges.items[0] }) |edge| {
+            try std.testing.expectEqualStrings("kept", edge.id);
+            try std.testing.expectEqualStrings("keep me", edge.cycle_guard.?.until.?);
+            try std.testing.expectEqual(@as(i64, 2), edge.fire_count);
+            try std.testing.expect(edge.fired);
+        }
+    }
+    try std.testing.expectError(error.SyntaxError, decodeEdges(allocator, "[{]"));
+}
+
+test "edge guard ownership survives input release project selection and same ID refresh" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    {
+        const frame = try edgeGuardTestFrame(allocator,
+            \\[{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"  keep me  ","maxIterations":3},"fireCount":2},{"id":"other","from":"b","to":"a"}]
+        );
+        defer allocator.free(frame);
+        _ = try model.updateFromFrame(frame);
+        @memset(frame, '?');
+    }
+    const retained = model.currentGraph().?.edges.items[0];
+    const selected = model.graph.?.edges.items[0];
+    try std.testing.expect(retained.cycle_guard.?.until.?.ptr != selected.cycle_guard.?.until.?.ptr);
+    try std.testing.expect(retained.id.ptr != selected.id.ptr);
+    try std.testing.expectEqualStrings("  keep me  ", selected.cycle_guard.?.until.?);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"other-project","name":"Other"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(model.selectProject("other-project"));
+    try std.testing.expect(model.selectProject("edge-fixture"));
+    try std.testing.expectEqualStrings("  keep me  ", model.graph.?.edges.items[0].cycle_guard.?.until.?);
+    const refresh = try edgeGuardTestFrame(allocator,
+        \\[{"id":"other","from":"b","to":"a"},{"id":"kept","from":"a","to":"b","cycleGuard":{"until":"replacement","stopAfterPassesWithoutImprovement":2},"fireCount":3}]
+    );
+    defer allocator.free(refresh);
+    _ = try model.updateFromFrame(refresh);
+    const index = findEdgeIndexByID(model.graph.?.edges.items, "kept").?;
+    try std.testing.expectEqual(@as(usize, 1), index);
+    const updated = model.graph.?.edges.items[index];
+    try std.testing.expectEqualStrings("a", updated.from);
+    try std.testing.expectEqualStrings("b", updated.to);
+    try std.testing.expectEqualStrings("replacement", updated.cycle_guard.?.until.?);
+    try std.testing.expectEqual(@as(?i64, null), updated.cycle_guard.?.max_iterations);
+    const removed = try edgeGuardTestFrame(allocator,
+        \\[{"id":"kept","from":"a","to":"b","cycleGuard":null,"fireCount":0,"fired":true}]
+    );
+    defer allocator.free(removed);
+    _ = try model.updateFromFrame(removed);
+    try std.testing.expect(model.graph.?.edges.items[0].cycle_guard == null);
+    try std.testing.expect(model.currentGraph().?.edges.items[0].cycle_guard == null);
+    try std.testing.expect(!model.graph.?.edges.items[0].fired);
+}
+
+test "edge guard decoder and clone append allocations unwind" {
+    const Exercise = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var edges = try decodeEdges(allocator,
+                \\[{"id":"one","from":"a","to":"b","kind":"message","condition":"onSuccess","cycleGuard":{"maxIterations":3,"until":"  test \"done\"  ","stopAfterPassesWithoutImprovement":2},"fireCount":2},{"id":"two","from":"b","to":"a","cycleGuard":{"until":"another"}}]
+            );
+            defer freeEdges(allocator, &edges);
+            var copies = try cloneEdges(allocator, edges.items);
+            defer freeEdges(allocator, &copies);
+            try std.testing.expectEqualStrings("  test \"done\"  ", copies.items[0].cycle_guard.?.until.?);
+            try std.testing.expect(edges.items[0].cycle_guard.?.until.?.ptr != copies.items[0].cycle_guard.?.until.?.ptr);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Exercise.run, .{});
+}
+
+test "edge guard composite decoder retains bounds and rejects malformed guard" {
+    const allocator = std.testing.allocator;
+    var graph = try decodeSubgraph(allocator, .{ .path = @constCast("edge-fixture"), .name = @constCast("Edge fixture") },
+        \\{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"maxIterations":4,"until":"nested command"},"fireCount":3}]}
+    );
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqualStrings("nested", graph.edges.items[0].id);
+    try std.testing.expectEqualStrings("nested command", graph.edges.items[0].cycle_guard.?.until.?);
+    try std.testing.expectEqual(@as(?i64, 4), graph.edges.items[0].cycle_guard.?.max_iterations);
+    try std.testing.expect(graph.edges.items[0].fired);
+    try std.testing.expectError(error.MalformedEdge, decodeSubgraph(allocator, graph.project,
+        \\{"nodes":[],"edges":[{"cycleGuard":false}]}
+    ));
 }
 
 test "metric history samples retain recent values for sparklines" {

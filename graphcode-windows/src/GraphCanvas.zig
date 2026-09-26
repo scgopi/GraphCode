@@ -1143,7 +1143,7 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
             state.selected_edge == index;
         const color = if (selected)
             Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count != 0)
+        else if (edge.fired or edge.fire_count > 0)
             0x006BD58D
         else
             edgeKindColor(edge.kind);
@@ -1170,12 +1170,16 @@ fn drawEdgeLabels(hdc: c.HDC, allocator: std.mem.Allocator, graph: GraphModel.Gr
             state.selected_edge == index;
         const color = if (selected)
             Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count != 0)
+        else if (edge.fired or edge.fire_count > 0)
             0x006BD58D
         else
             edgeKindColor(edge.kind);
-        var label_buffer: [128]u8 = undefined;
-        const label = edgeLabel(&label_buffer, edge);
+        const label_result = edgeLabel(allocator, edge);
+        defer if (label_result) |owned| allocator.free(owned) else |_| {};
+        const label = if (label_result) |text| text else |err| switch (err) {
+            error.OutOfMemory => "Edge label unavailable (out of memory)",
+            error.InvalidUtf8 => "Edge label unavailable (invalid text)",
+        };
         const center_x = @divTrunc(from.x + to.x, 2);
         var label_y = if (@abs(to.y - from.y) < 40)
             @min(from.y, to.y) - 76
@@ -1217,13 +1221,67 @@ fn edgeKindColor(kind: []const u8) u32 {
     return Tokens.rgb(Tokens.canvas_edge);
 }
 
-fn edgeLabel(buffer: []u8, edge: GraphModel.Edge) []const u8 {
+fn edgeLabel(allocator: std.mem.Allocator, edge: GraphModel.Edge) ![]u8 {
+    var output = std.array_list.Managed(u8).init(allocator);
+    errdefer output.deinit();
+    const writer = output.writer();
     const kind = if (edge.kind.len == 0) "handoff" else edge.kind;
-    if (edge.fire_count != 0)
-        return std.fmt.bufPrint(buffer, "{s} · {s} · fired {d}", .{ kind, edge.condition, edge.fire_count }) catch kind;
-    if (!std.mem.eql(u8, edge.condition, "always"))
-        return std.fmt.bufPrint(buffer, "{s} · {s}", .{ kind, edge.condition }) catch kind;
-    return kind;
+    try writer.writeAll(kind);
+    if (edge.fire_count > 0 or !std.mem.eql(u8, edge.condition, "always"))
+        try writer.print(" · {s}", .{edge.condition});
+    if (edge.cycle_guard) |guard| {
+        try writer.print(" · loop {d}/", .{edge.fire_count});
+        try writeCycleGuard(writer, guard);
+    } else if (edge.fire_count > 0) {
+        try writer.print(" · fired {d}", .{edge.fire_count});
+    }
+    return output.toOwnedSlice();
+}
+
+fn writeCycleGuard(writer: anytype, guard: GraphModel.CycleGuard) !void {
+    var has_part = false;
+    if (guard.max_iterations) |maximum| {
+        try writer.print("≤{d}×", .{maximum});
+        has_part = true;
+    }
+    if (guard.until) |raw| {
+        const until = try effectiveEdgeUntil(raw);
+        if (until.len != 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("until `{s}`", .{until});
+            has_part = true;
+        }
+    }
+    if (guard.stop_after_passes_without_improvement) |passes| {
+        if (passes > 0) {
+            if (has_part) try writer.writeAll(" or ");
+            try writer.print("{d} flat passes", .{passes});
+            has_part = true;
+        }
+    }
+    if (!has_part) try writer.writeAll("unbounded");
+}
+
+fn effectiveEdgeUntil(text: []const u8) error{InvalidUtf8}![]const u8 {
+    const view = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
+    var iterator = view.iterator();
+    var start = text.len;
+    var end: usize = 0;
+    var offset: usize = 0;
+    while (iterator.nextCodepointSlice()) |bytes| {
+        const codepoint = std.unicode.utf8Decode(bytes) catch return error.InvalidUtf8;
+        // Foundation .whitespaces: Unicode space separators plus horizontal tab, not newlines.
+        const whitespace = switch (codepoint) {
+            0x09, 0x20, 0xa0, 0x1680, 0x2000...0x200a, 0x202f, 0x205f, 0x3000 => true,
+            else => false,
+        };
+        if (!whitespace) {
+            start = @min(start, offset);
+            end = offset + bytes.len;
+        }
+        offset += bytes.len;
+    }
+    return text[@min(start, end)..end];
 }
 
 fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, style: c_int) void {
@@ -2480,7 +2538,6 @@ test "edge drag state cancels without leaving a selection" {
 }
 
 test "edge presentation distinguishes kind condition and fired state" {
-    var buffer: [128]u8 = undefined;
     const message = GraphModel.Edge{
         .id = @constCast("edge"),
         .from = @constCast("a"),
@@ -2490,8 +2547,148 @@ test "edge presentation distinguishes kind condition and fired state" {
         .fire_count = 2,
     };
     try std.testing.expectEqual(c.PS_DOT, edgeKindPenStyle(message.kind));
-    try std.testing.expectEqualStrings("message · onSuccess · fired 2", edgeLabel(&buffer, message));
+    const label = try edgeLabel(std.testing.allocator, message);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("message · onSuccess · fired 2", label);
     try std.testing.expect(edgeKindColor("message") != edgeKindColor("spawn"));
+}
+
+test "edge guard JSON reaches the production label" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"00000000-0000-4000-8000-000000000001","project":{"path":"edge-fixture","name":"Edge fixture"},"nodes":[],"edges":[{"id":"00000000-0000-4000-8000-000000000002","from":"00000000-0000-4000-8000-000000000003","to":"00000000-0000-4000-8000-000000000004","kind":"handoff","condition":"always","payloadTransform":{"none":{}},"cycleGuard":{"maxIterations":3,"until":"  test -f done  ","stopAfterPassesWithoutImprovement":2},"fireCount":2}]}}}
+    );
+    const label = try edgeLabel(std.testing.allocator, model.graph.?.edges.items[0]);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings(
+        "handoff · always · loop 2/≤3× or until `test -f done` or 2 flat passes",
+        label,
+    );
+}
+
+fn edgeGuardLabelTestModel(allocator: std.mem.Allocator, edge_json: []const u8) !GraphModel.Model {
+    const frame = try std.mem.concat(allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"edge-fixture\",\"name\":\"Edge fixture\"},\"nodes\":[],\"edges\":[",
+        edge_json,
+        "]}}}",
+    });
+    defer allocator.free(frame);
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(frame);
+    return model;
+}
+
+test "edge guard JSON labels match domain summary variants and legacy counts" {
+    const Case = struct { json: []const u8, label: []const u8 };
+    const cases = [_]Case{
+        .{ .json = "{}", .label = "handoff" },
+        .{ .json = "{\"cycleGuard\":null}", .label = "handoff" },
+        .{ .json = "{\"fired\":true}", .label = "handoff · always · fired 1" },
+        .{ .json = "{\"fireCount\":null,\"fired\":true}", .label = "handoff · always · fired 1" },
+        .{ .json = "{\"fireCount\":0,\"fired\":true}", .label = "handoff" },
+        .{ .json = "{\"fireCount\":-1,\"fired\":true}", .label = "handoff" },
+        .{ .json = "{\"kind\":\"message\",\"condition\":\"onSuccess\",\"fireCount\":2}", .label = "message · onSuccess · fired 2" },
+        .{ .json = "{\"cycleGuard\":{}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":null,\"until\":null,\"stopAfterPassesWithoutImprovement\":null}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3}}", .label = "handoff · loop 0/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":2}", .label = "handoff · always · loop 2/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":0,\"fired\":true}", .label = "handoff · loop 0/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3},\"fireCount\":null,\"fired\":true}", .label = "handoff · always · loop 1/≤3×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":0,\"stopAfterPassesWithoutImprovement\":-1}}", .label = "handoff · loop 0/≤0×" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":-3},\"fireCount\":-2}", .label = "handoff · loop -2/≤-3×" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"  test -f done  \"}}", .label = "handoff · loop 0/until `test -f done`" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"\"}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\" \\t\\u00a0\\u2003\\u3000 \"}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\"\\u00a0\\t echo \\\"yes\\\" \\\\ \\u2603\\u2003\"}}", .label = "handoff · loop 0/until `echo \"yes\" \\ ☃`" },
+        .{ .json = "{\"cycleGuard\":{\"until\":\" \\ncommand\\r\\n \"}}", .label = "handoff · loop 0/until `\ncommand\r\n`" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":1}}", .label = "handoff · loop 0/1 flat passes" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":0}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"stopAfterPassesWithoutImprovement\":-1}}", .label = "handoff · loop 0/unbounded" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3,\"stopAfterPassesWithoutImprovement\":2}}", .label = "handoff · loop 0/≤3× or 2 flat passes" },
+        .{ .json = "{\"cycleGuard\":{\"maxIterations\":3,\"until\":\"done\"}}", .label = "handoff · loop 0/≤3× or until `done`" },
+        .{ .json = "{\"condition\":\"onFailure\",\"cycleGuard\":{\"until\":\"done\",\"stopAfterPassesWithoutImprovement\":2}}", .label = "handoff · onFailure · loop 0/until `done` or 2 flat passes" },
+        .{ .json = "{\"kind\":\"futureKind\",\"condition\":\"futureCondition\",\"cycleGuard\":{\"budget\":3},\"future\":{\"maxIterations\":7}}", .label = "futureKind · futureCondition · loop 0/unbounded" },
+        .{ .json = "{\"fireCount\":9223372036854775807,\"cycleGuard\":{\"maxIterations\":-9223372036854775808,\"stopAfterPassesWithoutImprovement\":9223372036854775807}}", .label = "handoff · always · loop 9223372036854775807/≤-9223372036854775808× or 9223372036854775807 flat passes" },
+    };
+    for (cases) |case| {
+        var model = try edgeGuardLabelTestModel(std.testing.allocator, case.json);
+        defer model.deinit();
+        for ([_]GraphModel.Edge{ model.graph.?.edges.items[0], model.currentGraph().?.edges.items[0] }) |edge| {
+            const label = try edgeLabel(std.testing.allocator, edge);
+            defer std.testing.allocator.free(label);
+            try std.testing.expectEqualStrings(case.label, label);
+        }
+    }
+}
+
+test "edge guard long Unicode labels remain complete and allocation failures unwind" {
+    const allocator = std.testing.allocator;
+    const command = "☃" ** 100;
+    const json = try std.fmt.allocPrint(allocator, "{{\"cycleGuard\":{{\"until\":\"{s}\"}},\"fireCount\":2}}", .{command});
+    defer allocator.free(json);
+    var model = try edgeGuardLabelTestModel(allocator, json);
+    defer model.deinit();
+    const expected = "handoff · always · loop 2/until `" ++ command ++ "`";
+    const label = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(label);
+    try std.testing.expect(label.len > 128);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(label));
+    try std.testing.expectEqualStrings(expected, label);
+    const Exercise = struct {
+        fn run(test_allocator: std.mem.Allocator, edge: GraphModel.Edge) !void {
+            const text = try edgeLabel(test_allocator, edge);
+            defer test_allocator.free(text);
+            try std.testing.expectEqualStrings(expected, text);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Exercise.run, .{model.graph.?.edges.items[0]});
+    try std.testing.expectError(error.InvalidUtf8, edgeLabel(allocator, .{
+        .from = &.{},
+        .to = &.{},
+        .cycle_guard = .{ .until = @constCast("\xff") },
+    }));
+}
+
+test "edge guard malformed refresh keeps the previous production label" {
+    const allocator = std.testing.allocator;
+    var model = try edgeGuardLabelTestModel(allocator,
+        \\{"id":"kept","from":"a","to":"b","cycleGuard":{"maxIterations":3,"until":"done"},"fireCount":2}
+    );
+    defer model.deinit();
+    try std.testing.expectError(error.MalformedEdge, model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"nodes":[],"edges":[{"id":"kept","cycleGuard":{"maxIterations":"invalid"}}]}}}
+    ));
+    const label = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(label);
+    try std.testing.expectEqualStrings("handoff · always · loop 2/≤3× or until `done`", label);
+}
+
+test "edge guard production label follows composite refresh and guard removal" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"until":"first"},"fireCount":1}]}}]}}}
+    );
+    try std.testing.expect(model.openComposite("parent"));
+    const first = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("handoff · always · loop 1/until `first`", first);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":{"maxIterations":4},"fireCount":2}]}}]}}}
+    );
+    try std.testing.expectEqualStrings("nested", model.graph.?.edges.items[0].id);
+    const refreshed = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("handoff · always · loop 2/≤4×", refreshed);
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"edge-fixture","name":"Edge fixture"},"edges":[],"nodes":[{"id":"parent","title":"Group","loopType":"proactive","subGraph":{"nodes":[],"edges":[{"id":"nested","from":"a","to":"b","cycleGuard":null,"fireCount":0,"fired":true}]}}]}}}
+    );
+    const removed = try edgeLabel(allocator, model.graph.?.edges.items[0]);
+    defer allocator.free(removed);
+    try std.testing.expectEqualStrings("handoff", removed);
 }
 
 test "capture loss cancels both pan and edge drag state" {
