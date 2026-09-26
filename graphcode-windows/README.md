@@ -18,9 +18,14 @@ not a synthetic terminal proof.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
-`Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` opens the
-jump palette (also `Ctrl+P`), and `Ctrl+,` opens settings. Mutations are sent as correlated v2
-daemon requests; daemon refusals remain visible as explicit status errors.
+`Ctrl+N` creates a node, `Ctrl+J` opens the jump palette, and `Ctrl+,` opens
+advanced connection settings. With the graph canvas owning the keyboard,
+`F2` or `Ctrl+E` renames the selected loop; `Ctrl+E` edits the selected edge
+instead when an edge is selected. Full **Edit Details...** remains a node
+context-menu action, not the `Ctrl+E` action. **Open Terminal** is also in that
+menu; Enter is not a standalone shortcut for it. Mutations are sent as
+correlated v2 daemon requests; daemon refusals remain visible as explicit status
+errors.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
@@ -48,12 +53,22 @@ authenticated account, and the `codespace` token scope — without the scope,
 discovery reports the exact `gh auth refresh -h github.com -s codespace` command
 that grants it.
 
-Parity actions are reachable without App-specific view coupling: `Ctrl+P` opens
-the searchable jump/palette form, `Ctrl+Up`/`Ctrl+Down` navigate by stable
-project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
-`Ctrl+Shift+P`, and `Ctrl+Shift+A` toggle the workspace rail, panel, and
-activity settings. `Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q`
-renames the selected chat and `Ctrl+Shift+X` deletes it.
+When the app root owns the keyboard, `Ctrl+P` is another route to the same
+searchable jump palette as `Ctrl+J`, and `Ctrl+Up`/`Ctrl+Down` navigate by stable
+project/node identity. `Ctrl+Shift+L`, `Ctrl+Shift+B`, and `Ctrl+Shift+A` toggle
+the application sidebar, terminal workspace, and activity strip, respectively.
+`Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q` renames the selected
+chat and `Ctrl+Shift+Delete` requests its deletion with confirmation.
+`Ctrl+Shift+R` adds an SSH repository, `Ctrl+Shift+P` opens worktree policy,
+and `Ctrl+Shift+X` cancels a clone; they are not aliases for those toggles or
+chat deletion.
+
+These root-window bindings are not universal terminal or dialog shortcuts.
+`Ctrl+J` is forwarded from the terminal; `Ctrl+P` is not. In the jump palette,
+Up/Down moves through results and Enter accepts the selection, returning to
+the selected loop in the graph rather than opening its terminal. Native forms
+keep their own text editing, Tab navigation, and acceptance/cancellation;
+Enter in an already-open menu activates its highlighted item.
 
 Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
 UI Automation receives physical client pixels: logical bounds, including the
