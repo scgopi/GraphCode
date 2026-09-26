@@ -4,8 +4,10 @@ param(
   [Parameter(Mandatory)] [string] $Zmx,
   [Parameter(Mandatory)] [string] $OutputDirectory,
   [string] $ForegroundLease = "",
-  [ValidateRange(30, 300)] [int] $TimeoutSeconds = 120,
+  [ValidateRange(30, 120)] [int] $TimeoutSeconds = 120,
   [switch] $PreflightOnly,
+  [ValidateSet('none', 'stall', 'sampler-block', 'worker-failure')] [string] $SupervisorProbe = 'none',
+  [string] $WorkerToken,
   [switch] $Worker
 )
 
@@ -20,7 +22,7 @@ foreach ($path in @($Shell, $Zmx)) {
     throw "Capture requires own-worktree binaries: $path"
   }
 }
-if (-not $PreflightOnly -and [string]::IsNullOrWhiteSpace($ForegroundLease)) {
+if (-not $PreflightOnly -and $SupervisorProbe -eq 'none' -and [string]::IsNullOrWhiteSpace($ForegroundLease)) {
   throw "An explicit coordinator foreground lease is required"
 }
 if (Test-Path -LiteralPath (Join-Path (Split-Path $Shell) 'graphcoded.exe')) {
@@ -84,13 +86,13 @@ function Get-OwnedZmxWindowRecord([int] $WindowProcessId, $Registry, [string] $Z
 }
 
 function ConvertFrom-CaptureZmxInfo([string] $Text, [string] $Session, [string] $Cwd) {
-  $pattern = '^' + [regex]::Escape($Session) + '\tclients=(\d+)\tpid=(\d+)\tcmd=([^\t\r\n]*)\tcwd=([^\r\n]*)\r?\n?$'
+  $pattern = '\A' + [regex]::Escape($Session) + '\tclients=(0|[1-9][0-9]*)\tpid=([1-9][0-9]*)\tcmd=\tcwd=([^\t\r\n]+)\r?\n\z'
   $match = [regex]::Match($Text, $pattern)
-  if (-not $match.Success -or [int]$match.Groups[2].Value -le 0 -or $match.Groups[4].Value -ine $Cwd) {
+  if (-not $match.Success -or [int]$match.Groups[2].Value -le 0 -or $match.Groups[3].Value -ine $Cwd) {
     throw 'Pinned zmx info did not prove the exact attached fixture session/backend/cwd'
   }
-  return @{ session = $Session; clients = [int]$match.Groups[1].Value
-    backendPid = [int]$match.Groups[2].Value; command = $match.Groups[3].Value; cwd = $Cwd }
+  return @{ session = $Session; clients = [ulong]::Parse($match.Groups[1].Value)
+    backendPid = [int]::Parse($match.Groups[2].Value); command = ''; cwd = $Cwd }
 }
 
 function Stop-CaptureProcesses {
@@ -106,31 +108,213 @@ function Stop-CaptureProcesses {
   }
 }
 
-# An outer process deadline also bounds a stuck cross-process UIA call.
+function Import-CaptureJobSupport {
+  $providerRoot = Join-Path $repoRoot '.graphcode-tools\providers\zmx'
+  $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'graphcode-windows\provider-pins.json') -Raw | ConvertFrom-Json
+  $head = git -C $providerRoot rev-parse HEAD
+  if ($LASTEXITCODE -ne 0 -or $head -cne $pins.zmx.sha) { throw 'Job support provider pin mismatch' }
+  $status = @(git -C $providerRoot status --porcelain --untracked-files=all)
+  if ($LASTEXITCODE -ne 0 -or $status.Count) { throw 'Job support provider worktree is not clean' }
+  $providerScript = Join-Path $providerRoot 'test\windows-startup.ps1'
+  $tokens = $null; $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($providerScript, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw ($errors | Out-String) }
+  foreach ($name in @('Require', 'Complete-StartupRun')) {
+    $definitions = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true))
+    if ($definitions.Count -ne 1) { throw "Pinned provider helper is missing/ambiguous: $name" }
+    . ([scriptblock]::Create(($definitions[0].Extent.Text -replace
+      ("^function " + [regex]::Escape($name) + '\b'), "function script:$name")))
+  }
+  $types = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+      $node.Value.Contains('public static class ZmxStartupJob')
+  }, $true))
+  if ($types.Count -ne 1) { throw 'Pinned provider job type is missing/ambiguous' }
+  Add-Type -TypeDefinition $types[0].Value
+}
+
+if ($Worker) {
+  if ([string]::IsNullOrWhiteSpace($WorkerToken)) { throw 'Capture worker requires its job-assignment barrier' }
+  $barrier = [Threading.EventWaitHandle]::OpenExisting("Local\graphcode-visual-$WorkerToken")
+  try { if (-not $barrier.WaitOne(15000)) { throw 'Capture worker job ownership was not established' } }
+  finally { $barrier.Dispose() }
+  if ($SupervisorProbe -ne 'none') {
+    $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    foreach ($arg in @('-NoProfile','-NonInteractive','-Command','[Threading.Thread]::Sleep(60000)')) {
+      $start.ArgumentList.Add($arg)
+    }
+    $child = [Diagnostics.Process]::Start($start)
+    @{ pid = $child.Id; createdAt = $child.StartTime.ToUniversalTime().ToString('o'); executable = $child.Path } |
+      ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'probe-child.json')
+    [Console]::Out.WriteLine("CAPTURE_PROBE_STDOUT $SupervisorProbe"); [Console]::Out.Flush()
+    [Console]::Error.WriteLine("CAPTURE_PROBE_STDERR $SupervisorProbe"); [Console]::Error.Flush()
+    if ($SupervisorProbe -eq 'worker-failure') { throw 'CAPTURE_ORIGINAL_WORKER_FAILURE' }
+    [Threading.Thread]::Sleep(60000)
+    throw 'Capture watchdog did not terminate its stalled worker'
+  }
+}
+
 if (-not $Worker -and -not $PreflightOnly) {
   if (Test-Path -LiteralPath $OutputDirectory) { throw "Capture output directory must be fresh" }
   $null = New-Item -ItemType Directory -Path $OutputDirectory
-  $start = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
-  $start.UseShellExecute = $false
-  foreach ($arg in @('-NoProfile', '-File', $PSCommandPath, '-Shell', $Shell, '-Zmx', $Zmx,
-      '-OutputDirectory', $OutputDirectory, '-ForegroundLease', $ForegroundLease,
-      '-TimeoutSeconds', "$TimeoutSeconds", '-Worker')) { $start.ArgumentList.Add($arg) }
-  $workerProcess = [Diagnostics.Process]::Start($start)
-  try {
-    if (-not $workerProcess.WaitForExit($TimeoutSeconds * 1000)) {
-      Stop-Process -Id $workerProcess.Id -Force
-      throw "Visual capture exceeded its $TimeoutSeconds second wall-clock deadline; partial artifacts retained"
-    }
-    if ($workerProcess.ExitCode -ne 0) { throw "Visual capture worker failed with exit code $($workerProcess.ExitCode)" }
-  } finally {
-    Stop-CaptureProcesses
-    $workerProcess.Dispose()
+  Import-CaptureJobSupport
+  Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+public sealed class CaptureJobWatchdog {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+  readonly object gate = new object();
+  readonly Stopwatch clock = Stopwatch.StartNew();
+  IntPtr job;
+  Timer timer;
+  public bool Fired { get; private set; }
+  public bool Terminated { get; private set; }
+  public int NativeError { get; private set; }
+  public string CallbackError { get; private set; }
+  public long FiredElapsedMilliseconds { get; private set; }
+  public bool Joined { get; private set; }
+  public CaptureJobWatchdog(IntPtr handle, int milliseconds) {
+    if (handle == IntPtr.Zero || milliseconds <= 0) throw new ArgumentException("Invalid capture watchdog.");
+    job = handle;
+    timer = new Timer(_ => {
+      lock (gate) {
+        if (job == IntPtr.Zero) return;
+        Fired = true;
+        FiredElapsedMilliseconds = clock.ElapsedMilliseconds;
+        try {
+          Terminated = TerminateJobObject(job, 124);
+          if (!Terminated) NativeError = Marshal.GetLastWin32Error();
+        } catch (Exception error) { CallbackError = error.ToString(); }
+      }
+    }, null, milliseconds, Timeout.Infinite);
   }
+  public void DisarmAndJoin() {
+    Timer pending;
+    lock (gate) { job = IntPtr.Zero; pending = timer; timer = null; }
+    if (pending == null) return;
+    using (var drained = new ManualResetEvent(false)) {
+      if (!pending.Dispose(drained) || !drained.WaitOne(5000))
+        throw new TimeoutException("Capture watchdog did not drain; job must remain open.");
+    }
+    Joined = true;
+  }
+}
+'@
+  $limitMs = if ($SupervisorProbe -eq 'none') { $TimeoutSeconds * 1000 } else { 2000 }
+  $token = [guid]::NewGuid().ToString('N')
+  $job = $null; $gate = $null; $workerProcess = $null; $workerUtc = $null; $watchdog = $null
+  $assigned = $false; $output = $null; $stderr = $null; $failure = $null; $exitCode = $null
+  $samplerBlocked = $false
+  $identities = @{}
+  $totalClock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $gate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, "Local\graphcode-visual-$token")
+    $job = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([ZmxStartupJob]::Create(), $true)
+    $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    foreach ($arg in @('-NoProfile','-NonInteractive','-File',$PSCommandPath,'-Shell',$Shell,'-Zmx',$Zmx,
+        '-OutputDirectory',$OutputDirectory,'-ForegroundLease',$ForegroundLease,
+        '-TimeoutSeconds',"$TimeoutSeconds",'-WorkerToken',$token,'-SupervisorProbe',$SupervisorProbe,'-Worker')) {
+      $start.ArgumentList.Add($arg)
+    }
+    $workerProcess = [Diagnostics.Process]::Start($start)
+    $workerUtc = $workerProcess.StartTime.ToUniversalTime()
+    $output = $workerProcess.StandardOutput.ReadToEndAsync()
+    $stderr = $workerProcess.StandardError.ReadToEndAsync()
+    Require ([ZmxStartupJob]::AssignProcessToJobObject($job.DangerousGetHandle(), $workerProcess.SafeHandle.DangerousGetHandle())) `
+      'Capture worker job assignment failed'
+    $assigned = $true
+    $watchdog = [CaptureJobWatchdog]::new($job.DangerousGetHandle(), $limitMs)
+    $executionClock = [Diagnostics.Stopwatch]::StartNew()
+    $null = $gate.Set()
+    do {
+      $pids = [ZmxStartupJob]::Pids($job.DangerousGetHandle())
+      if ($SupervisorProbe -ne 'none') { Require (-not [ZmxStartupJob]::HasVisibleWindow($pids)) 'Hidden capture probe created a visible window' }
+      foreach ($childId in $pids) {
+        $record = Get-CimInstance Win32_Process -Filter "ProcessId=$childId"
+        if ($record) {
+          $utc = ([datetime]$record.CreationDate).ToUniversalTime()
+          $identities["${childId}:$($utc.Ticks)"] = @{ pid = $childId; parentPid = $record.ParentProcessId
+            createdAt = $utc.ToString('o'); createdUtcTicks = $utc.Ticks
+            executable = $record.ExecutablePath; commandLine = $record.CommandLine }
+        }
+      }
+      if ($SupervisorProbe -eq 'sampler-block' -and -not $samplerBlocked -and
+          (Test-Path -LiteralPath (Join-Path $OutputDirectory 'probe-child.json'))) {
+        $samplerBlocked = $true
+        [Threading.Thread]::Sleep($limitMs + 1000)
+      }
+      if ($workerProcess.WaitForExit(50)) { break }
+    } while ($executionClock.ElapsedMilliseconds -lt $limitMs)
+    Require ($workerProcess.HasExited) "Capture execution exceeded $limitMs ms"
+    $exitCode = $workerProcess.ExitCode
+    if ($exitCode -ne 0) { $failure = "Capture worker exited $exitCode; original error is retained in supervisor-stderr.log" }
+  } catch {
+    $failure = $_.ToString()
+  } finally {
+    $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+    if ($watchdog) {
+      try { $watchdog.DisarmAndJoin() }
+      catch {
+        @{ failure = $failure; watchdogJoinFailure = $_.ToString(); jobDisposed = $false; cleanupVerified = $false } |
+          ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'watchdog-join-failure.json')
+        throw
+      }
+      if ($watchdog.Fired) {
+        $detail = "Independent $limitMs ms watchdog fired at $($watchdog.FiredElapsedMilliseconds) ms; terminated=$($watchdog.Terminated); win32=$($watchdog.NativeError); callback=$($watchdog.CallbackError)"
+        $failure = if ($failure) { "$failure`n$detail" } else { $detail }
+      }
+    }
+    $cleanup = Complete-StartupRun $job $gate $workerProcess $workerUtc $assigned $output $stderr -Report {
+      param($result)
+      # Save each stream independently before reporting, even if another write fails.
+      $writeErrors = [Collections.Generic.List[string]]::new()
+      foreach ($stream in @(@('stdout', $output), @('stderr', $stderr))) {
+        if ($stream[1] -and $stream[1].IsCompletedSuccessfully) {
+          try { [IO.File]::WriteAllText((Join-Path $OutputDirectory "supervisor-$($stream[0]).log"), $stream[1].Result) }
+          catch { $writeErrors.Add($_.ToString()) }
+        }
+      }
+      @{ failure = $failure; workerExitCode = $exitCode; cleanupVerified = $result.Verified
+        originalWorkerError = $(if ($stderr -and $stderr.IsCompletedSuccessfully) { $stderr.Result } else { $null })
+        cleanupFailures = @($result.Failures); remainingOwnedPids = $result.Remaining
+        watchdogFired = ($null -ne $watchdog -and $watchdog.Fired)
+        watchdogTerminated = ($null -ne $watchdog -and $watchdog.Terminated)
+        watchdogJoined = ($null -ne $watchdog -and $watchdog.Joined)
+        watchdogNativeError = $(if ($watchdog) { $watchdog.NativeError } else { $null })
+        watchdogCallbackError = $(if ($watchdog) { $watchdog.CallbackError } else { $null })
+        watchdogFiredMilliseconds = $(if ($watchdog) { $watchdog.FiredElapsedMilliseconds } else { $null })
+        executionLimitMilliseconds = $limitMs; cleanupWaitBudgetMilliseconds = 20000
+        cleanupElapsedMilliseconds = $cleanupClock.ElapsedMilliseconds; totalElapsedMilliseconds = $totalClock.ElapsedMilliseconds
+        samplerBlockInjected = $samplerBlocked; probe = $SupervisorProbe
+        processes = @($identities.Values); streamWriteFailures = @($writeErrors)
+        providerJobSupport = @{ path = '.graphcode-tools\providers\zmx\test\windows-startup.ps1'
+          sha256 = (Get-FileHash -LiteralPath (Join-Path $repoRoot '.graphcode-tools\providers\zmx\test\windows-startup.ps1')).Hash.ToLowerInvariant() }
+      } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'supervisor.json')
+      if ($writeErrors.Count) { throw ($writeErrors -join "`n") }
+    }
+  }
+  Require ($cleanup.Verified -and $cleanup.Failures.Count -eq 0) "Capture cleanup failed; original=$failure; cleanup=$($cleanup.Failures -join '; ')"
+  Require (-not $failure) "Capture failed: $failure"
+  if ($exitCode -ne 0) {
+    if ($stderr -and $stderr.IsCompletedSuccessfully) { [Console]::Error.Write($stderr.Result) }
+    throw "Capture worker exited $exitCode; original stderr preserved in supervisor-stderr.log"
+  }
+  if ($output -and $output.IsCompletedSuccessfully) { Write-Output $output.Result }
   exit 0
 }
 if ($PreflightOnly) {
   if (Test-Path -LiteralPath $OutputDirectory) { throw 'Preflight output directory must be fresh' }
   $null = New-Item -ItemType Directory -Path $OutputDirectory
+  Import-CaptureJobSupport
 }
 
 Add-Type -AssemblyName UIAutomationClient
@@ -271,7 +455,7 @@ $app = $null
 $images = [Collections.Generic.List[object]]::new()
 $hiddenWindows = [Collections.Generic.List[object]]::new()
 $zmxPaths = $null
-$zmxRootCreated = $false
+$zmxRootReserved = $false
 $infoQueryCount = 0
 $evidence = $null
 
@@ -424,7 +608,20 @@ function Read-OwnedZmxInfo {
         -not (Test-CaptureProcessIdentity (Get-Process -Id $info.backendPid -ErrorAction SilentlyContinue) $owned[$info.backendPid])) {
       throw 'Pinned zmx info backend PID is not a live identity-proven run descendant'
     }
+    $backendRecord = $owned[$info.backendPid]
+    if ([IO.Path]::GetFileName($backendRecord.executable) -ine 'cmd.exe' -or
+        -not $owned.ContainsKey([int]$backendRecord.parentPid)) {
+      throw 'Pinned zmx backend is not the expected cmd process under an owned server'
+    }
+    $server = $owned[[int]$backendRecord.parentPid]
+    if ($server.executable -ine $Zmx -or
+        $server.commandLine -notmatch ('--daemon\s+"?' + [regex]::Escape($zmxPaths.session) + '"?(?:\s|$)') -or
+        -not (Test-CaptureProcessIdentity (Get-Process -Id $server.pid -ErrorAction SilentlyContinue) $server)) {
+      throw 'Pinned zmx server does not match the exact live owned fixture session'
+    }
     $info.createdAt = $owned[$info.backendPid].createdAt
+    $info.serverPid = $server.pid
+    $info.serverCreatedAt = $server.createdAt
     return $info
   } finally {
     if (-not $query.HasExited -and (Test-CaptureProcessIdentity $query $record)) {
@@ -487,6 +684,7 @@ try {
     "v3-$($runId.Substring(0,8))" ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
     '11111111-1111-4111-8111-111111111111'
   if (Test-Path -LiteralPath $zmxPaths.root) { throw 'Fresh short zmx root already exists; no fallback permitted' }
+  $zmxRootReserved = $true
   $zmxPaths | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'zmx-paths.json')
   if ($PreflightOnly) {
     Write-Output 'Capture preflight: PASS (sources, scripts, pinned providers and binary hashes; no app launch)'
@@ -497,8 +695,8 @@ try {
   foreach ($dir in @('support','localappdata','cwd')) {
     $null = New-Item -ItemType Directory -Path (Join-Path $OutputDirectory $dir)
   }
-  $null = New-Item -ItemType Directory -Path $zmxPaths.root
-  $zmxRootCreated = $true
+  # The provider creates this fresh root with the current token SID as owner.
+  # Generic directory creation can instead select Administrators when elevated.
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-visual-$runId"
   $env:GRAPHCODE_SUPPORT_DIR = Join-Path $OutputDirectory 'support'
   $env:LOCALAPPDATA = Join-Path $OutputDirectory 'localappdata'
@@ -595,7 +793,7 @@ try {
     if ($app) { Record-OwnedProcesses }
   } finally {
     Stop-CaptureProcesses
-    if ($zmxRootCreated) {
+    if ($zmxRootReserved -and (Test-Path -LiteralPath $zmxPaths.root)) {
       $logs = Join-Path $zmxPaths.root 'logs'
       if (Test-Path -LiteralPath $logs) {
         Copy-Item -LiteralPath $logs -Destination (Join-Path $OutputDirectory 'zmx-logs') -Recurse

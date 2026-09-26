@@ -1,3 +1,6 @@
+[CmdletBinding()]
+param([string] $SupervisorArtifactsDirectory = "")
+
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
@@ -374,7 +377,7 @@ try {
       backendPid = 125; createdAt = '2026-01-15T14:59:01Z'; cwd = 'C:\fixture' }
     zmxPathLengths = @{ endpoint = 214; lease = 220; ownerPipe = 165 }; visibilityInterventions = @()
     providers = @{
-      zmx = @{ sha256 = ('4' * 64); pin = '029e11d2b19162fb3bdf90c8270237d303b8bfb4'
+      zmx = @{ sha256 = ('4' * 64); pin = '11e20c738b4ebd88031c7a01f1a9d938ee123234'
         artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
       winghostty = @{ sha256 = ('5' * 64); pin = 'f5abc059e4ca58b376eb209313aca7784659c679'
         artifact = '.graphcode-tools\providers\winghostty\zig-out\lib\winghostty-win32-host.lib' }
@@ -440,7 +443,8 @@ try {
     $pendingInfo = ConvertFrom-CaptureZmxInfo ($infoText.Replace('clients=1','clients=0')) "v3-deadbeef$fixtureSession" 'C:\fixture'
     if ($pendingInfo.clients -ne 0) { throw 'No-client zmx readiness was silently promoted' }
     foreach ($badInfo in @($infoText.Replace('deadbeef','cafebabe'), $infoText.Replace('pid=123','pid=0'),
-        $infoText.Replace('C:\fixture','C:\foreign'))) {
+        $infoText.Replace('C:\fixture','C:\foreign'), $infoText.Replace("cmd=`t","cmd=cmd.exe`t"),
+        ($infoText + $infoText), $infoText.TrimEnd("`n"))) {
       $rejected = $false
       try { $null = ConvertFrom-CaptureZmxInfo $badInfo "v3-deadbeef$fixtureSession" 'C:\fixture' }
       catch { $rejected = $_.Exception.Message -like '*exact attached fixture session/backend/cwd*' }
@@ -573,6 +577,55 @@ try {
   }
 } finally {
   Remove-Item -LiteralPath $renderedDir -Recurse -Force
+}
+
+if ($SupervisorArtifactsDirectory) {
+  $capture = Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'
+  $captureShell = Join-Path $repoRoot 'graphcode-windows\zig-out\bin\graphcode-windows.exe'
+  $captureZmx = Join-Path $repoRoot '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe'
+  if (Test-Path -LiteralPath $SupervisorArtifactsDirectory) { throw 'Supervisor test artifacts must be a fresh directory' }
+  $null = New-Item -ItemType Directory -Path $SupervisorArtifactsDirectory
+  $probeResults = @()
+  foreach ($probe in @('worker-failure','stall','sampler-block')) {
+    $directory = Join-Path $SupervisorArtifactsDirectory $probe
+    $output = & pwsh -NoProfile -File $capture -Shell $captureShell -Zmx $captureZmx `
+      -OutputDirectory $directory -SupervisorProbe $probe 2>&1
+    $exitCode = $LASTEXITCODE
+    $output | Out-String | Set-Content -LiteralPath (Join-Path $directory 'caller.log')
+    if ($exitCode -eq 0) { throw "$probe should fail its hidden worker, not return capture success" }
+    $receipt = Get-Content -LiteralPath (Join-Path $directory 'supervisor.json') -Raw | ConvertFrom-Json
+    if (-not $receipt.cleanupVerified -or @($receipt.remainingOwnedPids).Count -or
+        @($receipt.cleanupFailures).Count -or -not $receipt.watchdogJoined) {
+      throw "$probe did not verify job cleanup and callback drain"
+    }
+    foreach ($stream in @('stdout','stderr')) {
+      $text = Get-Content -LiteralPath (Join-Path $directory "supervisor-$stream.log") -Raw
+      if ($text -notlike "*CAPTURE_PROBE_$($stream.ToUpperInvariant()) $probe*") {
+        throw "$probe lost the original $stream stream"
+      }
+    }
+    if ($probe -eq 'worker-failure') {
+      if ($receipt.watchdogFired -or $receipt.originalWorkerError -notlike '*CAPTURE_ORIGINAL_WORKER_FAILURE*') {
+        throw 'Capture worker failure was hidden or incorrectly attributed to the watchdog'
+      }
+    } elseif (-not $receipt.watchdogFired -or -not $receipt.watchdogTerminated -or
+        $receipt.watchdogNativeError -ne 0 -or $receipt.watchdogCallbackError) {
+      throw "$probe independent job timer did not terminate successfully"
+    }
+    if ($probe -eq 'sampler-block' -and -not $receipt.samplerBlockInjected) { throw 'Sampler block was not exercised' }
+    $child = Get-Content -LiteralPath (Join-Path $directory 'probe-child.json') -Raw | ConvertFrom-Json
+    foreach ($record in @($receipt.processes) + @($child)) {
+      $process = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+      if ($process -and $process.StartTime.ToUniversalTime().Ticks -eq ([datetimeoffset]$record.createdAt).UtcTicks) {
+        throw "$probe left its exact recorded process $($record.pid) alive"
+      }
+    }
+    $probeResults += @{ probe = $probe; passed = $true; workerExit = $receipt.workerExitCode
+      firedMilliseconds = $receipt.watchdogFiredMilliseconds; cleanupVerified = $receipt.cleanupVerified
+      samplerBlocked = $receipt.samplerBlockInjected; totalMilliseconds = $receipt.totalElapsedMilliseconds }
+  }
+  $probeResults | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $SupervisorArtifactsDirectory 'verification.json')
+  Write-Host 'Capture supervisor: PASS (hidden failure, worker stall, blocked parent sampler; zero survivors)'
 }
 
 Write-Host "VisualBaseline.Tests.ps1: PASS"

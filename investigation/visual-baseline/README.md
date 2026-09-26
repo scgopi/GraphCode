@@ -100,7 +100,9 @@ The zmx root alone uses a fresh short `TEMP\gcv-<12 hex>` directory. The pinned
 provider's ordinary `SetFileSecurityW` lease path must remain below 260 UTF-16
 units; its nonce-qualified owner pipe must remain below 256. The preflight
 records the exact endpoint/lease/pipe lengths and fails on collisions or
-excess length, without a global-root fallback or ACL workaround. Logs are
+excess length, without a global-root fallback or ACL workaround. Leave the
+fresh root absent: the provider creates it with the current token SID as owner,
+rather than generic elevated directory creation selecting Administrators. Logs are
 copied into the run artifacts during cleanup; the exact short root is also
 recorded for preservation and later targeted removal. A zmx attach/conhost
 process alone is not readiness: the driver waits for the exact endpoint, then
@@ -124,8 +126,21 @@ settings are changed. Capture uses `CopyFromScreen` only inside the owned,
 foreground, unobstructed client rectangle, with before/after ownership and
 geometry guards. Failure to acquire foreground is a capture-infrastructure
 failure, not a product-rendering regression. There is no global Alt injection or
-desktop-capture fallback. The outer process bounds even a stuck UIA call;
-cleanup uses recorded PID plus process creation time, never process-name kills.
+desktop-capture fallback. Before any app descendant can start, the worker waits
+on an event barrier until assigned to a kill-on-close job. An independent native
+timer terminates that job at the execution deadline even if UIA, CIM sampling or
+capture hangs. Timer callbacks are disarmed and joined before the typed job
+handle is disposed. The job and cleanup helpers are imported unchanged from the
+clean, pinned own-worktree provider's `test\windows-startup.ps1`.
+
+The default **120-second execution deadline** is separate from bounded cleanup:
+callback drain waits up to five seconds, and provider cleanup has up to twenty
+seconds of process/stream waits. These are not a 120-second total-return
+guarantee; synchronous reporting and delayed scheduling remain observable in
+`supervisor.json`. Both worker streams, the original error, native watchdog
+result/error, callback drain, job survivor query and elapsed times are retained.
+The job owns late descendants as well as sampled PIDs; cleanup never kills by
+process name.
 
 If the current foreground HWND belongs to the exact identity-proven owned zmx
 attach process, the harness may hide **only that HWND once** to expose workspace
@@ -197,6 +212,20 @@ neutral gray and channel-swap negatives, coverage counts, invalid/missing
 regions, hashes, dimensions, state/DPI, physical LF/CRLF source copies, and
 actual source-content drift. Synthetic inputs require `-AllowTestFixture` and
 are never runtime screenshots.
+
+After building the own-worktree shell and adopted providers, exercise the
+actual supervisor without a visible app:
+
+```powershell
+pwsh -NoProfile -File .\Tools\windows\Tests\VisualBaseline.Tests.ps1 `
+  -SupervisorArtifactsDirectory <absolute-new-probe-directory>
+```
+
+The three hidden probes inject a worker error, a worker stall, and a blocked
+parent sampler. Their two-second test timers must terminate the owned job,
+retain stdout/stderr and the original error, drain before disposal, and leave
+no exact recorded process alive. This does not exercise capture/rendering;
+production runs retain the separate 120-second execution limit.
 
 The historical hero image remains authentic **historical** evidence only.
 A compatible current macOS capture with matching source, state, geometry/DPI
