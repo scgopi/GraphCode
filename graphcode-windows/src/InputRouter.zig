@@ -1,5 +1,24 @@
 const std = @import("std");
 
+pub const HeaderKey = enum { none, enter, exit, next, previous, first, last, activate };
+
+pub fn headerKey(key: usize, ctrl: bool, shift: bool, alt: bool, focused: bool) HeaderKey {
+    if (ctrl or alt) return .none;
+    if (key == 0x75) return if (focused) .exit else .enter;
+    if (!focused) return .none;
+    if (key == 0x09) return if (shift) .previous else .next;
+    if (shift) return .none;
+    return switch (key) {
+        0x25 => .previous,
+        0x27 => .next,
+        0x24 => .first,
+        0x23 => .last,
+        0x0D, 0x20 => .activate,
+        0x1B => .exit,
+        else => .none,
+    };
+}
+
 pub const Action = enum {
     none,
     reconnect,
@@ -177,6 +196,27 @@ test "workspace shortcuts route to tabs splits and panes" {
     try std.testing.expectEqual(Action.focus_next_pane, keyAction(0xDD, true, false));
     try std.testing.expectEqual(Action.select_previous_tab, keyAction(0x21, true, false));
     try std.testing.expectEqual(Action.select_next_tab, keyAction(0x22, true, false));
+}
+
+test "header keys are scoped and preserve modified and global navigation" {
+    try std.testing.expectEqual(HeaderKey.enter, headerKey(0x75, false, false, false, false));
+    try std.testing.expectEqual(HeaderKey.enter, headerKey(0x75, false, true, false, false));
+    try std.testing.expectEqual(HeaderKey.exit, headerKey(0x75, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.next, headerKey(0x09, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.previous, headerKey(0x09, false, true, false, true));
+    try std.testing.expectEqual(HeaderKey.first, headerKey(0x24, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.last, headerKey(0x23, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.activate, headerKey(0x0D, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.activate, headerKey(0x20, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.exit, headerKey(0x1B, false, false, false, true));
+    try std.testing.expectEqual(HeaderKey.none, headerKey('P', false, false, false, true));
+    for ([_]usize{ 0x09, 0x25, 0x27, 0x24, 0x23, 0x0D, 0x20, 0x1B }) |key| {
+        try std.testing.expectEqual(HeaderKey.none, headerKey(key, false, false, false, false));
+    }
+    for ([_]usize{ 0x75, 0x09, 0x25, 0x27, 0x24, 0x23, 0x0D, 0x20, 0x1B }) |key| {
+        try std.testing.expectEqual(HeaderKey.none, headerKey(key, true, false, false, true));
+        try std.testing.expectEqual(HeaderKey.none, headerKey(key, false, false, true, true));
+    }
 }
 
 test "attention and worktree shortcuts are distinct from ordinary selection" {

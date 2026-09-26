@@ -1,5 +1,6 @@
 const std = @import("std");
 const App = @import("App.zig").App;
+const Diagnostics = @import("Diagnostics.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const build_options = @import("build_options");
@@ -34,6 +35,9 @@ pub export fn WinMain(
     _: [*:0]u16,
     _: c.INT,
 ) callconv(.winapi) c.INT {
-    main() catch return 1;
+    main() catch |err| {
+        Diagnostics.record(std.heap.c_allocator, "fatal", @errorName(err));
+        return 1;
+    };
     return 0;
 }

@@ -11,6 +11,8 @@ pub const MessageCallback = *const fn (
     result: *c.LRESULT,
 ) callconv(.c) bool;
 
+pub const KeyCallback = *const fn (context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool;
+
 pub const Command = enum(u16) {
     open_folder = 4101,
     open_global_overview = 4102,
@@ -47,6 +49,7 @@ pub const Command = enum(u16) {
     actual_size = 4408,
     zoom_in = 4409,
     fit_canvas = 4410,
+    focus_header = 4411,
     about = 4501,
     onboarding = 4502,
     check_updates = 4503,
@@ -77,6 +80,15 @@ pub const WorkspaceItem = struct {
     name: []const u8,
     is_current: bool,
 };
+
+pub const MenuRefresh = enum {
+    state_change,
+    popup_open,
+};
+
+fn redrawsMenuBar(refresh: MenuRefresh) bool {
+    return refresh == .state_change;
+}
 
 pub const MenuState = struct {
     has_project: bool,
@@ -135,6 +147,7 @@ pub const Window = struct {
     instance: c.HINSTANCE = null,
     context: ?*anyopaque = null,
     callback: ?MessageCallback = null,
+    key_callback: ?KeyCallback = null,
     accelerators: c.HACCEL = null,
     class_name: [*:0]const u16 = class_name.ptr,
     /// Result of the one-time `SetGestureConfig` registration performed in
@@ -200,13 +213,53 @@ pub const Window = struct {
             const result = c.GetMessageW(&message, null, 0, 0);
             if (result == 0) break;
             if (result == -1) return error.MessageLoopFailed;
+            if (self.pretranslateKey(&message, KeyContext.capture(self.hwnd, message.hwnd))) continue;
             if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, &message) != 0)
                 continue;
             _ = c.TranslateMessage(&message);
             _ = c.DispatchMessageW(&message);
         }
     }
+
+    pub fn pretranslateKey(self: *Window, message: *const c.MSG, keys: KeyContext) bool {
+        if (message.message != c.WM_KEYDOWN or !keys.eligible()) return false;
+        const callback = self.key_callback orelse return false;
+        return callback(self.context, message.wParam, keys.ctrl, keys.shift, keys.alt);
+    }
 };
+
+pub const KeyContext = struct {
+    active: bool = false,
+    owner_enabled: bool = false,
+    target_owned: bool = false,
+    target_visible: bool = false,
+    target_enabled: bool = false,
+    ctrl: bool = false,
+    shift: bool = false,
+    alt: bool = false,
+
+    pub fn capture(owner: c.HWND, target: c.HWND) KeyContext {
+        if (owner == null or target == null) return .{};
+        return .{
+            .active = c.GetActiveWindow() == owner and c.GetForegroundWindow() == owner,
+            .owner_enabled = c.IsWindowEnabled(owner) != 0,
+            .target_owned = target == owner or c.IsChild(owner, target) != 0,
+            .target_visible = c.IsWindowVisible(target) != 0,
+            .target_enabled = c.IsWindowEnabled(target) != 0,
+            .ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0,
+            .shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0,
+            .alt = (@as(i32, c.GetKeyState(c.VK_MENU)) & 0x8000) != 0,
+        };
+    }
+
+    pub fn eligible(self: KeyContext) bool {
+        return self.active and self.owner_enabled and self.target_owned and self.target_visible and self.target_enabled;
+    }
+};
+
+pub fn keyOwnerEligible(owner: c.HWND, target: c.HWND) bool {
+    return KeyContext.capture(owner, target).eligible();
+}
 
 pub const timer_id: usize = 41;
 pub const wm_app_tick: c.UINT = c.WM_APP + 41;
@@ -296,6 +349,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(terminal, "Focus Previous Pane\tCtrl+[", @intFromEnum(Command.focus_previous_pane));
 
     append(view, "Global Overview", @intFromEnum(Command.open_global_overview));
+    append(view, "Focus Window Toolbar\tF6", @intFromEnum(Command.focus_header));
     append(view, "Show Application Sidebar\tCtrl+Shift+L", @intFromEnum(Command.toggle_sidebar));
     append(view, "Show Terminal Workspace\tCtrl+Shift+B", @intFromEnum(Command.toggle_workspace));
     append(view, "Show Activity Strip\tCtrl+Shift+A", @intFromEnum(Command.toggle_activity));
@@ -331,7 +385,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     _ = c.DrawMenuBar(hwnd);
 }
 
-pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
+pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     updateRecentFolderMenu(hwnd, state.recent_folders);
     updateWorkspaceMenu(hwnd, state.workspaces);
     setEnabled(hwnd, .open_global_overview, true);
@@ -370,7 +424,7 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState) void {
     setChecked(hwnd, .toggle_sidebar, state.sidebar_visible);
     setChecked(hwnd, .toggle_workspace, state.workspace_visible);
     setChecked(hwnd, .toggle_activity, state.activity_visible);
-    _ = c.DrawMenuBar(hwnd);
+    if (redrawsMenuBar(refresh)) _ = c.DrawMenuBar(hwnd);
 }
 
 fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
@@ -507,7 +561,17 @@ fn createAccelerators() c.HACCEL {
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 0xBC, .cmd = @intFromEnum(Command.settings) },
     };
-    return c.CreateAcceleratorTableW(&entries, entries.len);
+    const accelerators = c.CreateAcceleratorTableW(&entries, entries.len);
+    if (accelerators == null) {
+        const last_error = c.GetLastError();
+        std.log.err("CreateAcceleratorTableW failed: error={d}, count={d}, ACCEL size={d}, alignment={d}", .{
+            last_error, entries.len, @sizeOf(c.ACCEL), @alignOf(c.ACCEL),
+        });
+        for (entries, 0..) |entry, index| {
+            std.log.err("ACCEL[{d}]: fVirt=0x{x}, key=0x{x}, cmd={d}", .{ index, entry.fVirt, entry.key, entry.cmd });
+        }
+    }
+    return accelerators;
 }
 
 test "native menu exposes the parity command groups" {
@@ -515,6 +579,141 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(Command.split_right, commandFromId(4303).?);
     try std.testing.expectEqual(Command.about, commandFromId(4501).?);
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
+}
+
+test "pretranslation invokes the real header key classifier only for eligible input" {
+    const Probe = struct {
+        focused: bool = false,
+        calls: usize = 0,
+        fn callback(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.calls += 1;
+            const action = @import("InputRouter.zig").headerKey(key, ctrl, shift, alt, self.focused);
+            if (action == .enter) self.focused = true;
+            if (action == .exit) self.focused = false;
+            return action != .none;
+        }
+    };
+    var probe = Probe{};
+    var window = Window{ .context = &probe, .key_callback = &Probe.callback };
+    const eligible = KeyContext{ .active = true, .owner_enabled = true, .target_owned = true, .target_visible = true, .target_enabled = true };
+    var message = std.mem.zeroes(c.MSG);
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_TAB;
+    try std.testing.expect(!window.pretranslateKey(&message, eligible));
+    message.wParam = c.VK_F6;
+    try std.testing.expect(window.pretranslateKey(&message, eligible));
+    try std.testing.expect(probe.focused);
+    message.wParam = c.VK_TAB;
+    try std.testing.expect(window.pretranslateKey(&message, eligible));
+    var modified = eligible;
+    modified.ctrl = true;
+    try std.testing.expect(!window.pretranslateKey(&message, modified));
+    modified = eligible;
+    modified.alt = true;
+    try std.testing.expect(!window.pretranslateKey(&message, modified));
+    message.wParam = c.VK_F6;
+    try std.testing.expect(!window.pretranslateKey(&message, modified));
+    for ([_][]const u8{ "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |field| {
+        var excluded = eligible;
+        inline for (.{ "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |name| {
+            if (std.mem.eql(u8, field, name)) @field(excluded, name) = false;
+        }
+        const calls = probe.calls;
+        try std.testing.expect(!window.pretranslateKey(&message, excluded));
+        try std.testing.expectEqual(calls, probe.calls);
+    }
+    for ([_]c.UINT{ c.WM_SYSKEYDOWN, c.WM_KEYUP, c.WM_COMMAND }) |message_type| {
+        message.message = message_type;
+        const calls = probe.calls;
+        try std.testing.expect(!window.pretranslateKey(&message, eligible));
+        try std.testing.expectEqual(calls, probe.calls);
+    }
+    message.message = c.WM_KEYDOWN;
+    try std.testing.expect(window.pretranslateKey(&message, eligible));
+    try std.testing.expect(!probe.focused);
+    message.wParam = c.VK_TAB;
+    try std.testing.expect(!window.pretranslateKey(&message, eligible));
+}
+
+test "toolbar routing rejects hidden windows without changing accelerator contracts" {
+    const DispatchProbe = struct {
+        var command: usize = 0;
+        fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+            if (message == c.WM_COMMAND) {
+                command = wparam & 0xffff;
+                return 0;
+            }
+            return c.DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+    };
+    const test_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeHiddenAcceleratorTest");
+    var window_class = std.mem.zeroes(c.WNDCLASSW);
+    window_class.hInstance = c.GetModuleHandleW(null);
+    window_class.lpszClassName = test_class;
+    window_class.lpfnWndProc = &DispatchProbe.windowProc;
+    if (c.RegisterClassW(&window_class) == 0) return error.WindowClassRegistrationFailed;
+    defer _ = c.UnregisterClassW(test_class, window_class.hInstance);
+    const hwnd = c.CreateWindowExW(
+        0,
+        test_class,
+        std.unicode.utf8ToUtf16LeStringLiteral("Hidden toolbar routing test"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    const child = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Child"),
+        c.WS_CHILD,
+        0,
+        0,
+        20,
+        20,
+        hwnd,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(child);
+    try std.testing.expect(!keyOwnerEligible(hwnd, hwnd));
+    try std.testing.expect(!keyOwnerEligible(hwnd, child));
+    try std.testing.expect(!keyOwnerEligible(hwnd, null));
+    const accelerators = createAccelerators() orelse return error.AcceleratorCreationFailed;
+    defer _ = c.DestroyAcceleratorTable(accelerators);
+    var entries: [32]c.ACCEL = undefined;
+    const count = c.CopyAcceleratorTableW(accelerators, &entries, entries.len);
+    try std.testing.expect(count > 0);
+    var tab_count: usize = 0;
+    for (entries[0..@intCast(count)]) |entry| {
+        if (entry.key != c.VK_TAB) continue;
+        tab_count += 1;
+        const expected: Command = if ((entry.fVirt & c.FCONTROL) != 0)
+            .review_attention
+        else if ((entry.fVirt & c.FSHIFT) != 0)
+            .previous_loop
+        else
+            .next_loop;
+        try std.testing.expectEqual(@intFromEnum(expected), entry.cmd);
+    }
+    try std.testing.expectEqual(@as(usize, 3), tab_count);
+    try installMenu(hwnd);
+    try std.testing.expect(c.GetMenuState(c.GetMenu(hwnd), @intFromEnum(Command.focus_header), c.MF_BYCOMMAND) != 0xffffffff);
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = hwnd;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_TAB;
+    DispatchProbe.command = 0;
+    try std.testing.expect(c.TranslateAcceleratorW(hwnd, accelerators, &message) != 0);
+    try std.testing.expectEqual(@as(usize, @intFromEnum(Command.next_loop)), DispatchProbe.command);
 }
 
 fn testWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
@@ -647,6 +846,11 @@ test "recent folder commands use a dedicated command range" {
 test "workspace commands use a dedicated command range" {
     try std.testing.expect(workspace_command_base < workspace_command_limit);
     try std.testing.expectEqual(Command.workspace_new, commandFromId(4800).?);
+}
+
+test "popup initialization updates menu state without redrawing the active menu bar" {
+    try std.testing.expect(redrawsMenuBar(.state_change));
+    try std.testing.expect(!redrawsMenuBar(.popup_open));
 }
 
 test "gate fixture messages and timers never collide with shell traffic" {

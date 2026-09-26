@@ -186,12 +186,17 @@ extension GraphExportBundle {
 
   private static func createZipArchive(at destination: URL, from source: URL) throws {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-    // `--norsrc`, not `--sequesterRsrc`: sequestering writes AppleDouble copies into a
-    // `__MACOSX/` shadow tree, which doubled the archive's file count with junk every
-    // other platform shows the user. Nothing in a bundle has resource forks worth
-    // keeping.
-    process.arguments = ["-c", "-k", "--norsrc", source.path, destination.path]
+    #if os(Windows)
+      process.executableURL = windowsTarURL()
+      process.arguments = ["-a", "-cf", destination.path, "-C", source.path, "."]
+    #else
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+      // `--norsrc`, not `--sequesterRsrc`: sequestering writes AppleDouble copies into a
+      // `__MACOSX/` shadow tree, which doubled the archive's file count with junk every
+      // other platform shows the user. Nothing in a bundle has resource forks worth
+      // keeping.
+      process.arguments = ["-c", "-k", "--norsrc", source.path, destination.path]
+    #endif
 
     try? FileManager.default.removeItem(at: destination)
     try process.run()
@@ -204,8 +209,13 @@ extension GraphExportBundle {
 
   private static func extractZipArchive(from source: URL, to destination: URL) throws {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-    process.arguments = ["-q", source.path, "-d", destination.path]
+    #if os(Windows)
+      process.executableURL = windowsTarURL()
+      process.arguments = ["-xf", source.path, "-C", destination.path]
+    #else
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+      process.arguments = ["-q", source.path, "-d", destination.path]
+    #endif
 
     try process.run()
     process.waitUntilExit()
@@ -214,6 +224,16 @@ extension GraphExportBundle {
       throw ExportError.zipExtractionFailed
     }
   }
+
+  #if os(Windows)
+    private static func windowsTarURL() -> URL {
+      let environment = ProcessInfo.processInfo.environment
+      let root = environment["SystemRoot"] ?? environment["WINDIR"] ?? "C:\\Windows"
+      return URL(fileURLWithPath: root)
+        .appendingPathComponent("System32", isDirectory: true)
+        .appendingPathComponent("tar.exe")
+    }
+  #endif
 
   private func readmeMarkdown(for manifest: ExportManifest) -> String {
     var lines: [String] = [

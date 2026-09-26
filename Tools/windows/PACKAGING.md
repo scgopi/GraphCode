@@ -253,13 +253,21 @@ no certificate, network access, or real build.
 
 ## Retained provider sources
 
-Both exact public provider pins have the annotated source-retention tag
-`graphcode-windows-baseline-2026-09-17`:
+The current accepted public provider commits are:
 
 | Provider | Pinned commit | Retained branch |
 |---|---|---|
-| [coneilen/winghostty](https://github.com/coneilen/winghostty/tree/graphcode-windows-baseline-2026-09-17) | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-host` |
-| [coneilen/zmx](https://github.com/coneilen/zmx/tree/graphcode-windows-baseline-2026-09-17) | `029e11d2b19162fb3bdf90c8270237d303b8bfb4` | `graphcode-quickchat-hang` |
+| [coneilen/winghostty](https://github.com/coneilen/winghostty/commit/f5abc059e4ca58b376eb209313aca7784659c679) | `f5abc059e4ca58b376eb209313aca7784659c679` | `graphcode-host` |
+| [coneilen/zmx](https://github.com/coneilen/zmx/commit/11e20c738b4ebd88031c7a01f1a9d938ee123234) | `11e20c738b4ebd88031c7a01f1a9d938ee123234` | `graphcode-quickchat-hang` |
+
+The annotated `graphcode-windows-baseline-2026-09-17` tags remain historical
+source-retention references:
+[Winghostty's baseline](https://github.com/coneilen/winghostty/tree/graphcode-windows-baseline-2026-09-17)
+preserves `f5abc059e4ca58b376eb209313aca7784659c679`, and
+[zmx's baseline](https://github.com/coneilen/zmx/tree/graphcode-windows-baseline-2026-09-17)
+preserves `029e11d2b19162fb3bdf90c8270237d303b8bfb4`, not the current zmx pin.
+The current zmx commit adopts the startup fix merged in
+[coneilen/zmx#2](https://github.com/coneilen/zmx/pull/2).
 
 As verified on 2026-09-17, each fork has an active ruleset forbidding updates or
 deletion of `refs/tags/graphcode-windows-*`, without bypass actors. Separate
@@ -277,6 +285,7 @@ credentials; collaborator permissions were not changed.
 packaging still use exact commit SHAs, not moving branch or tag resolution.
 The terminal gate checks every provider field against its investigation copy,
 including repository, remote URL, SHA, artifact path, and Zig version.
-`ProviderPins.Tests.ps1` proves drift in either file is rejected, while JSON
-property order and explanatory fallback wording are immaterial. Run it directly
-or through `validate.ps1 -Task terminal-gate`.
+`ProviderPins.Tests.ps1` proves drift in either file is rejected, as are matching
+copies of the old zmx pin or the reviewed feature head instead of the merged
+commit. JSON property order and explanatory fallback wording are immaterial.
+Run it directly or through `validate.ps1 -Task terminal-gate`.

@@ -406,11 +406,9 @@ struct AppFeature {
           return .send(.projects(.element(id: path, action: .daemonEvent(event))))
         case .nodesChanged(let path, let revision, let nodes):
           return foldDelta(state, path: path, revision: revision, nodes: nodes)
-          return foldDelta(state, path: path, revision: revision, nodes: nodes)
         // Only the Windows shell learns about quick chats from the daemon; this app owns
         // them locally through `quickChatStore`, so the broadcast is redundant here.
         case .quickChatsListed, .quickChatChanged, .quickChatDeleted, .quickChatActivity:
-          return .none
           return .none
         }
 

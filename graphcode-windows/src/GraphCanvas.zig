@@ -62,20 +62,6 @@ pub const CanvasState = struct {
         self.start_pan_y = self.pan_y;
     }
 
-    test "toolbar actions require visible contextual controls" {
-        const attention = headerAttentionRect();
-        try std.testing.expectEqual(
-            HeaderAction.review_attention,
-            headerActionAt(attention.left + 2, attention.top + 2, 1200, true, false, false).?,
-        );
-        try std.testing.expect(headerActionAt(attention.left + 2, attention.top + 2, 1200, false, false, false) == null);
-        const jump = headerJumpRect(1200);
-        try std.testing.expectEqual(HeaderAction.jump, headerActionAt(jump.left + 2, jump.top + 2, 1200, false, false, false).?);
-        const panel = headerPanelRect(1200);
-        try std.testing.expect(headerActionAt(panel.left + 2, panel.top + 2, 1200, false, false, false) == null);
-        try std.testing.expectEqual(HeaderAction.toggle_panel, headerActionAt(panel.left + 2, panel.top + 2, 1200, false, false, true).?);
-    }
-
     pub fn updatePan(self: *CanvasState, x: i32, y: i32) void {
         if (!self.dragging) return;
         self.pan_x = self.start_pan_x + @as(f32, @floatFromInt(x - self.drag_x));
@@ -361,6 +347,125 @@ pub const OverviewHit = struct { graph_index: usize, node_index: usize };
 pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
 pub const ZoomControl = enum { out, actual, in, fit };
 pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
+pub const header_actions = [_]HeaderAction{ .review_attention, .inspect_worktrees, .jump, .toggle_panel };
+
+pub fn headerIdentity(action: HeaderAction) []const u8 {
+    return switch (action) {
+        .review_attention => "header-attention:needs-you",
+        .inspect_worktrees => "header-worktree:worktrees",
+        .jump => "header-jump:jump",
+        .toggle_panel => "header-toggle-panel:control",
+    };
+}
+
+pub const Header = struct {
+    title: []const u8 = "GraphCode Windows",
+    context: []const u8 = "",
+    attention_count: usize = 0,
+    notice_name: []const u8 = "",
+    notice: ?WorktreeStatus.Summary = null,
+    panel_visible: ?bool = null,
+
+    pub fn contains(self: Header, action: HeaderAction) bool {
+        return switch (action) {
+            .review_attention => self.attention_count != 0,
+            .inspect_worktrees => self.notice != null,
+            .jump => true,
+            .toggle_panel => self.panel_visible != null,
+        };
+    }
+
+    pub fn label(self: Header, allocator: std.mem.Allocator, action: HeaderAction) ![]u8 {
+        return switch (action) {
+            .review_attention => std.fmt.allocPrint(allocator, "{d} need you", .{self.attention_count}),
+            .inspect_worktrees => if (self.notice.?.reclaimable != 0)
+                std.fmt.allocPrint(allocator, "{s}: {d} reclaimable", .{ self.notice_name, self.notice.?.reclaimable })
+            else
+                std.fmt.allocPrint(allocator, "{s}: {d} worktrees", .{ self.notice_name, self.notice.?.total }),
+            .jump => allocator.dupe(u8, "Jump to loop   Ctrl+P"),
+            .toggle_panel => allocator.dupe(u8, if (self.panel_visible.?) "Hide loop panel" else "Show loop panel"),
+        };
+    }
+
+    pub fn layout(self: Header, width: i32) HeaderLayout {
+        var result = HeaderLayout{};
+        const right = @max(0, width - 8);
+        const identity_right = @min(right, @max(0, @min(280, @divTrunc(width, 3))));
+        result.identity = rect(@min(8, identity_right), 1, identity_right, Tokens.header_height - 1);
+        const status_width: i32 = if (width >= 1100) 220 else 0;
+        result.status = rect(right - status_width, 5, right, Tokens.header_height - 5);
+        const controls_right = @max(identity_right, right - status_width - (if (status_width != 0) @as(i32, 8) else 0));
+        var total: i32 = 0;
+        var count: i32 = 0;
+        const preferred = [_]i32{ 112, 180, 164, 136 };
+        for (header_actions, preferred) |action, preferred_width| {
+            if (!self.contains(action)) continue;
+            total += preferred_width;
+            count += 1;
+        }
+        const gap = @min(@as(i32, 8), @divTrunc(controls_right - identity_right, count * 2));
+        const available = @max(0, controls_right - identity_right - gap * count);
+        var left = identity_right + gap;
+        for (header_actions, preferred, 0..) |action, preferred_width, index| {
+            if (!self.contains(action)) continue;
+            const control_width = @min(preferred_width, @divTrunc(available * preferred_width, total));
+            if (control_width > 0) result.controls[index] = rect(left, 5, left + control_width, Tokens.header_height - 5);
+            left += control_width + gap;
+        }
+        return result;
+    }
+};
+
+pub const HeaderLayout = struct {
+    identity: c.RECT = std.mem.zeroes(c.RECT),
+    status: c.RECT = std.mem.zeroes(c.RECT),
+    controls: [header_actions.len]?c.RECT = .{null} ** header_actions.len,
+
+    pub fn bounds(self: HeaderLayout, action: HeaderAction) ?c.RECT {
+        return self.controls[@intFromEnum(action)];
+    }
+
+    pub fn actionAt(self: HeaderLayout, x: i32, y: i32) ?HeaderAction {
+        for (header_actions, self.controls) |action, control| {
+            if (control) |bounds_value| if (insideGraph(x, y, bounds_value)) return action;
+        }
+        return null;
+    }
+
+    pub fn step(self: HeaderLayout, current: ?HeaderAction, backwards: bool) ?HeaderAction {
+        const start: usize = if (current) |action| @intFromEnum(action) else if (backwards) 0 else header_actions.len - 1;
+        for (1..header_actions.len + 1) |offset| {
+            const index = if (backwards)
+                (start + header_actions.len - offset) % header_actions.len
+            else
+                (start + offset) % header_actions.len;
+            if (self.controls[index] != null) return header_actions[index];
+        }
+        return null;
+    }
+};
+
+pub fn loopPanelHasContent(model: *const GraphModel.Model, surface: Surface, quick_chat: bool) bool {
+    if (surface != .workspace or quick_chat) return false;
+    const graph = model.currentGraph() orelse return false;
+    const index = model.selectedIndex() orelse return false;
+    if (index >= graph.nodes.items.len) return false;
+    const node = graph.nodes.items[index];
+    if (node.metric_sample_count >= 2) return true;
+    for (graph.edges.items) |edge| {
+        if (std.mem.eql(u8, edge.from, node.id) or std.mem.eql(u8, edge.to, node.id)) return true;
+    }
+    return false;
+}
+
+pub fn headerWorktreeNotice(model: *const GraphModel.Model, inspection: *const WorktreeStatus.Inspection, policy: WorktreeStatus.Policy) bool {
+    const graph = model.currentGraph() orelse return false;
+    if (!graph.project.isLocalFilesystem() or !std.mem.eql(u8, graph.project.path, inspection.project_path)) return false;
+    const summary = WorktreeStatus.summarize(inspection.entries.items);
+    var bytes: u64 = 0;
+    for (inspection.entries.items) |entry| bytes +|= entry.size_bytes;
+    return summary.total >= policy.notice_count or bytes >= @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024;
+}
 pub const AttentionAction = enum { reply, inspect };
 pub const ReclaimAction = enum { reclaim, keep };
 pub const ReclaimHit = struct { node_index: usize, action: ReclaimAction };
@@ -406,8 +511,9 @@ pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceCo
 }
 
 pub fn paint(
-    hwnd: c.HWND,
     hdc: c.HDC,
+    client_right: i32,
+    client_bottom: i32,
     model: *const GraphModel.Model,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
@@ -425,8 +531,7 @@ pub fn paint(
     controls: WorkspaceControls.State,
     surface: Surface,
 ) void {
-    var client: c.RECT = undefined;
-    _ = c.GetClientRect(hwnd, &client);
+    const client = c.RECT{ .left = 0, .top = 0, .right = client_right, .bottom = client_bottom };
     fill(hdc, client, Tokens.canvas_tone);
     const visible_inspection = if (inspection) |value|
         if (model.graph) |graph|
@@ -435,7 +540,6 @@ pub fn paint(
             null
     else
         null;
-    header(hdc, allocator, client.right, status, model, inspection, surface);
     if (controls.rail_visible) {
         const sidebar_bottom = if (controls.panel_visible and surface != .workspace)
             client.bottom - Tokens.workspace_height
@@ -833,84 +937,120 @@ test "inline canvas alerts remain inside the active detail surface" {
     try std.testing.expect(alert.bottom < bounds.bottom);
 }
 
-fn header(
+pub fn paintHeader(
     hdc: c.HDC,
     allocator: std.mem.Allocator,
     width: i32,
     status: []const u8,
-    model: *const GraphModel.Model,
-    inspection: ?*const WorktreeStatus.Inspection,
-    surface: Surface,
+    presentation: Header,
+    focused: ?HeaderAction,
 ) void {
     fill(hdc, rect(0, 0, width, Tokens.header_height), Tokens.window_tone);
-    if (surface == .workspace and model.currentGraph() != null) {
-        const project = model.currentGraph().?.project;
-        drawText(hdc, allocator, project.name, 16, 7, 15, 0x00FFFFFF);
-        drawText(hdc, allocator, if (project.isRemote()) "Remote" else "Local folder", 172, 10, 11, 0x008E8E93);
-    } else {
-        drawText(hdc, allocator, "GraphCode Windows", 16, 8, 15, 0x00FFFFFF);
+    const layout = presentation.layout(width);
+    const flags = c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
+    var title_bounds = layout.identity;
+    if (presentation.context.len != 0) {
+        var context_bounds = layout.identity;
+        context_bounds.top = 1;
+        context_bounds.bottom = 15;
+        title_bounds.top = 14;
+        title_bounds.bottom = Tokens.header_height - 1;
+        drawTextRect(hdc, allocator, presentation.context, context_bounds, 8, 0x00A8A8A8, flags);
     }
-    if (model.attentionCount() != 0) {
-        const bounds = headerAttentionRect();
-        fill(hdc, bounds, 0x00352B1C);
-        var buffer: [48]u8 = undefined;
-        const label = std.fmt.bufPrint(&buffer, "{d} need you", .{model.attentionCount()}) catch "Needs you";
-        drawTextRect(hdc, allocator, label, bounds, 10, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    drawTextRect(hdc, allocator, presentation.title, title_bounds, 11, 0x00FFFFFF, flags);
+    for (header_actions) |action| {
+        const bounds = layout.bounds(action) orelse continue;
+        const notice = action == .review_attention or action == .inspect_worktrees;
+        fill(hdc, bounds, if (notice) @as(c.COLORREF, 0x00352B1C) else 0x00282828);
+        const label = presentation.label(allocator, action) catch {
+            std.debug.print("Unable to allocate header control label\n", .{});
+            continue;
+        };
+        defer allocator.free(label);
+        var text_bounds = bounds;
+        text_bounds.left += 4;
+        text_bounds.right -= 4;
+        drawTextRect(hdc, allocator, label, text_bounds, 10, if (notice) @as(c.COLORREF, 0x00FFCD7A) else 0x00D8D8D8, flags | c.DT_CENTER);
+        if (focused == action) {
+            var ring = bounds;
+            _ = c.InflateRect(&ring, -1, -1);
+            _ = c.DrawFocusRect(hdc, &ring);
+        }
     }
-    if (inspection) |value| {
-        const summary = WorktreeStatus.summarize(value.entries.items);
-        const bounds = headerWorktreeRect();
-        fill(hdc, bounds, 0x002D2418);
-        var buffer: [64]u8 = undefined;
-        const label = if (summary.reclaimable != 0)
-            std.fmt.bufPrint(&buffer, "{d} reclaimable", .{summary.reclaimable}) catch "Worktrees"
-        else
-            std.fmt.bufPrint(&buffer, "{d} worktrees", .{summary.total}) catch "Worktrees";
-        drawTextRect(hdc, allocator, label, bounds, 10, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    if (layout.status.right > layout.status.left) drawTextRect(hdc, allocator, status, layout.status, 10, 0x00A8A8A8, flags);
+}
+
+test "header layout shares visibility hit testing and focus order at narrow widths" {
+    const header = Header{ .attention_count = 2, .notice = .{ .total = 8, .reclaimable = 3, .blocked = 5 }, .notice_name = "Project", .panel_visible = false };
+    for ([_]i32{ 480, 640, 900, 1280 }) |width| {
+        const layout = header.layout(width);
+        var previous_right = layout.identity.right;
+        var focused: ?HeaderAction = null;
+        for (header_actions) |action| {
+            const bounds = layout.bounds(action).?;
+            try std.testing.expect(bounds.left > previous_right);
+            try std.testing.expect(bounds.right > bounds.left);
+            try std.testing.expect(bounds.right <= width);
+            try std.testing.expectEqual(action, layout.actionAt(bounds.left + 1, bounds.top + 1).?);
+            focused = layout.step(focused, false);
+            try std.testing.expectEqual(action, focused.?);
+            previous_right = bounds.right;
+        }
+        try std.testing.expect(previous_right <= layout.status.left);
+        try std.testing.expectEqual(HeaderAction.review_attention, layout.step(focused, false).?);
+        try std.testing.expectEqual(HeaderAction.toggle_panel, layout.step(null, true).?);
     }
-    const jump = headerJumpRect(width);
-    fill(hdc, jump, 0x00282828);
-    drawTextRect(hdc, allocator, "Jump to loop   Ctrl+P", jump, 10, 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-    if (model.currentGraph() != null) {
-        const panel = headerPanelRect(width);
-        fill(hdc, panel, 0x00282828);
-        drawTextRect(hdc, allocator, if (surface == .workspace) "Hide loop panel" else "Loop panel", panel, 10, 0x00D8D8D8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    const empty = (Header{}).layout(640);
+    try std.testing.expectEqual(HeaderAction.jump, empty.step(.toggle_panel, false).?);
+    try std.testing.expect(empty.bounds(.toggle_panel) == null);
+    try std.testing.expect(empty.bounds(.inspect_worktrees) == null);
+    try std.testing.expect(empty.bounds(.review_attention) == null);
+    try std.testing.expect(empty.actionAt(0, Tokens.header_height) == null);
+}
+
+test "header panel belongs only to a selected workspace loop with supported content" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\test","name":"Test"},"nodes":[{"id":"a","title":"A","state":"idle"},{"id":"b","title":"B","state":"idle","metricHistory":[{"value":1},{"value":2}]},{"id":"c","title":"C","state":"idle"}],"edges":[{"from":"a","to":"b"}]}}}
+    );
+    try std.testing.expect(model.setSelectedIndex(0));
+    for ([_]Surface{ .project, .overview, .quick_chats }) |surface| {
+        try std.testing.expect(!loopPanelHasContent(&model, surface, false));
     }
-    drawText(hdc, allocator, status, width - 270, 9, 11, 0x00A8A8A8);
+    try std.testing.expect(loopPanelHasContent(&model, .workspace, false));
+    try std.testing.expect(!loopPanelHasContent(&model, .workspace, true));
+    try std.testing.expect(model.setSelectedIndex(1));
+    try std.testing.expect(loopPanelHasContent(&model, .workspace, false));
+    try std.testing.expect(model.setSelectedIndex(2));
+    try std.testing.expect(!loopPanelHasContent(&model, .workspace, false));
+    model.selected_index = null;
+    try std.testing.expect(!loopPanelHasContent(&model, .workspace, false));
 }
 
-pub fn headerAttentionRect() c.RECT {
-    return rect(220, 5, 330, Tokens.header_height - 5);
+test "header notice threshold and owner gating exclude invisible actions" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\test","name":"Test"},"nodes":[],"edges":[]}}}
+    );
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .project_path = @constCast("C:\\test"),
+        .default_branch = @constCast("main"),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{ .path = @constCast("C:\\tree"), .branch = @constCast("topic"), .size_bytes = 1024 * 1024 * 1024 - 1 });
+    const policy = WorktreeStatus.Policy{ .notice_count = 2, .notice_size_gb = 1 };
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes += 1;
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes = 0;
+    try inspection.entries.append(inspection.entries.items[0]);
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.project_path = @constCast("C:\\foreign");
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
 }
-
-pub fn headerWorktreeRect() c.RECT {
-    return rect(338, 5, 458, Tokens.header_height - 5);
-}
-
-pub fn headerJumpRect(width: i32) c.RECT {
-    return rect(width - 560, 5, width - 400, Tokens.header_height - 5);
-}
-
-pub fn headerPanelRect(width: i32) c.RECT {
-    return rect(width - 390, 5, width - 280, Tokens.header_height - 5);
-}
-
-pub fn headerActionAt(
-    x: i32,
-    y: i32,
-    width: i32,
-    has_attention: bool,
-    has_worktrees: bool,
-    has_graph: bool,
-) ?HeaderAction {
-    if (y < 0 or y >= Tokens.header_height) return null;
-    if (has_attention and insideGraph(x, y, headerAttentionRect())) return .review_attention;
-    if (has_worktrees and insideGraph(x, y, headerWorktreeRect())) return .inspect_worktrees;
-    if (insideGraph(x, y, headerJumpRect(width))) return .jump;
-    if (has_graph and insideGraph(x, y, headerPanelRect(width))) return .toggle_panel;
-    return null;
-}
-
 fn attentionRail(
     hdc: c.HDC,
     allocator: std.mem.Allocator,

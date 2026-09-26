@@ -457,10 +457,10 @@ import Foundation
     }
 
     public func close() async throws {
-      lock.lock()
-      let shouldClose = !isClosed
-      isClosed = true
-      lock.unlock()
+      let shouldClose = lock.withLock {
+        defer { isClosed = true }
+        return !isClosed
+      }
       if shouldClose {
         #if canImport(Darwin)
           Darwin.close(fileDescriptor)

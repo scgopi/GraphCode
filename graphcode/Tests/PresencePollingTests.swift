@@ -288,5 +288,7 @@ struct PresencePollingTests {
     // saying so. Worth pinning: dropping it to a second would multiply the subprocess
     // count by fifteen for a difference nobody could perceive on a canvas.
     #expect(ProjectRegistry.presencePollInterval == .seconds(15))
+    #expect(ProjectRegistry.presencePollDelay(runningLoops: 1) == .seconds(15))
+    #expect(ProjectRegistry.presencePollDelay(runningLoops: 0) == .seconds(60))
   }
 }

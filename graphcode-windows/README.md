@@ -18,8 +18,8 @@ not a synthetic terminal proof.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
-`Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` advances
-selection, and `Ctrl+,` opens settings. Mutations are sent as correlated v2
+`Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` opens the
+jump palette (also `Ctrl+P`), and `Ctrl+,` opens settings. Mutations are sent as correlated v2
 daemon requests; daemon refusals remain visible as explicit status errors.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
@@ -27,6 +27,16 @@ share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
+
+`F6` (or View > Focus Window Toolbar) enters the window toolbar; `Shift+F6`
+enters at its last visible control. Within the toolbar, `Tab`/`Shift+Tab` and
+Left/Right move between controls, Home/End select the first/last control, and
+Enter/Space activate it. `F6`, `Shift+F6`, or Escape leave the toolbar and restore
+the still-visible app-owned focus target. Outside the toolbar, Tab/Shift+Tab keep
+their loop-navigation behavior and Ctrl+Tab still advances attention selection.
+The header's loop-panel button is available only in a loop workspace with
+supported detail content (connections or metric history); it collapses/expands
+the detail rail without navigating away from the workspace.
 
 Repository ingress covers four sources: a local folder, an HTTPS clone, an SSH
 remote (`Ctrl+Shift+R`), and a GitHub Codespace (`Ctrl+Shift+K`). The codespace
@@ -44,6 +54,19 @@ project/node identity, `Ctrl+Tab` advances attention, and `Ctrl+Shift+R`,
 `Ctrl+Shift+P`, and `Ctrl+Shift+A` toggle the workspace rail, panel, and
 activity settings. `Ctrl+Q` creates a daemon-owned Quick Chat; `Ctrl+Shift+Q`
 renames the selected chat and `Ctrl+Shift+X` deletes it.
+
+Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
+UI Automation receives physical client pixels: logical bounds, including the
+fixed graph group, are scaled once at the reporting boundary. Terminal tab and
+control bounds already use physical pixels shared with MM_TEXT painting and
+hit-testing, so they must not be scaled again. Touch pinch locations and client
+bounds are converted to logical units before graph routing and anchored zoom.
+App regression tests exercise these production boundaries at 96, 144, and 192
+DPI; they do not substitute for live touch or multi-monitor validation.
+The destination toolbar and its focus ring render at the end of the buffered
+logical pass, before the physical frame is copied to the window. Header UIA
+controls use that same logical layout with one physical-boundary conversion;
+the workspace identity region remains separate from the terminal's physical tabs.
 
 ## Build
 

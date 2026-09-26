@@ -291,10 +291,21 @@ public actor ProjectRegistry {
   /// labels at once (`list --where k=v` is in its help but returns every session whatever
   /// you filter on, so it cannot be used to batch this).
   ///
-  /// Fifteen seconds puts a handful of millisecond-long socket round-trips a minute
-  /// against a canvas that tells the truth within a glance. It is the one number to turn
-  /// up if a graph ever grows to hundreds of loops.
+  /// Fifteen seconds keeps active work current. Once every loaded graph has no running
+  /// loops, the poll backs off to a minute: terminal input can still wake a parked session
+  /// without making a canvas full of stalled or completed loops expensive to leave open.
   static let presencePollInterval: Duration = .seconds(15)
+  static let idlePresencePollInterval: Duration = .seconds(60)
+
+  static func presencePollDelay(runningLoops: Int) -> Duration {
+    runningLoops > 0 ? presencePollInterval : idlePresencePollInterval
+  }
+
+  private func presencePollDelay() async -> Duration {
+    var running = 0
+    for store in stores.values { running += await store.runningLoopCount() }
+    return Self.presencePollDelay(runningLoops: running)
+  }
 
   /// Polling runs only while a client is attached — see `GraphStore.pollPresence` for why
   /// the same guard is repeated per store. Started by the first connection and cancelled
@@ -303,9 +314,10 @@ public actor ProjectRegistry {
     guard presencePoller == nil, readPresence != nil else { return }
     presencePoller = Task { [weak self] in
       while !Task.isCancelled {
-        try? await Task.sleep(for: Self.presencePollInterval)
+        guard let self else { return }
+        try? await Task.sleep(for: await self.presencePollDelay())
         guard !Task.isCancelled else { return }
-        await self?.pollPresence()
+        await self.pollPresence()
       }
     }
   }
