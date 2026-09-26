@@ -148,6 +148,32 @@ pub const GraphSummary = struct {
     }
 };
 
+const AttentionLists = struct {
+    nodes: std.array_list.Managed(Node),
+    entries: std.array_list.Managed(AttentionEntry),
+
+    fn deinit(self: *AttentionLists, allocator: std.mem.Allocator) void {
+        for (self.nodes.items) |node| freeNode(allocator, node);
+        for (self.entries.items) |entry| freeAttentionEntry(allocator, entry);
+        self.nodes.deinit();
+        self.entries.deinit();
+    }
+};
+
+const LegacySnapshot = struct {
+    graph: ?Graph = null,
+    selected_index: ?usize,
+    selected_node_id: ?[]u8 = null,
+    composite_title: ?[]u8 = null,
+    clear_composite: bool = false,
+
+    fn deinit(self: *LegacySnapshot, allocator: std.mem.Allocator) void {
+        if (self.graph) |*graph| freeGraph(allocator, graph);
+        if (self.selected_node_id) |id| allocator.free(id);
+        if (self.composite_title) |title| allocator.free(title);
+    }
+};
+
 pub const Model = struct {
     allocator: std.mem.Allocator,
     recent_projects: std.array_list.Managed(Project),
@@ -195,12 +221,7 @@ pub const Model = struct {
         self.attention.deinit();
         for (self.attention_entries.items) |entry| freeAttentionEntry(self.allocator, entry);
         self.attention_entries.deinit();
-        for (self.activity.items) |event| {
-            self.allocator.free(event.title);
-            self.allocator.free(event.state);
-            self.allocator.free(event.project_path);
-            self.allocator.free(event.node_id);
-        }
+        for (self.activity.items) |event| freeActivityEvent(self.allocator, event);
         self.activity.deinit();
         for (self.quick_chats.items) |chat| freeQuickChat(self.allocator, chat);
         self.quick_chats.deinit();
@@ -682,14 +703,13 @@ pub const Model = struct {
         const object_end = findClosing(frame, object_start, '{', '}') orelse return error.MalformedGraph;
         const graph_json = frame[object_start .. object_end + 1];
         var graph = Graph{
-            .project = .{
-                .path = try duplicateJsonString(self.allocator, graph_json, "path"),
-                .name = try duplicateJsonString(self.allocator, graph_json, "name"),
-            },
+            .project = .{ .path = &.{}, .name = &.{} },
             .nodes = std.array_list.Managed(Node).init(self.allocator),
             .edges = std.array_list.Managed(Edge).init(self.allocator),
         };
-        errdefer freeGraph(self.allocator, &graph);
+        defer freeGraph(self.allocator, &graph);
+        graph.project.path = try duplicateJsonString(self.allocator, graph_json, "path");
+        graph.project.name = try duplicateJsonString(self.allocator, graph_json, "name");
 
         if (std.mem.indexOf(u8, graph_json, "\"nodes\"")) |nodes_key| {
             if (indexOfByte(graph_json, nodes_key, '[')) |nodes_open| {
@@ -710,113 +730,141 @@ pub const Model = struct {
         else
             self.graph == null;
         const prior_node_id: ?[]const u8 = if (was_selected) self.selected_node_id else null;
-        self.recordActivity(graph);
-        try self.upsertSummary(&graph);
-        self.markGraphSeen(graph.project.path);
-        self.rebuildAttention();
-        try self.addOpenProject(.{
-            .path = try self.allocator.dupe(u8, graph.project.path),
-            .name = try self.allocator.dupe(u8, graph.project.name),
-        });
-        if (self.graph) |*old| freeGraph(self.allocator, old);
-        self.graph = graph;
-        if (self.selected_project_path == null) {
-            self.selected_project_path = try self.allocator.dupe(u8, graph.project.path);
+        const selected_path = if (self.selected_project_path == null)
+            try self.allocator.dupe(u8, graph.project.path)
+        else
+            null;
+        errdefer if (selected_path) |path| self.allocator.free(path);
+        const already_open = for (self.open_projects.items) |project| {
+            if (std.mem.eql(u8, project.path, graph.project.path)) break true;
+        } else false;
+        const open_project = if (!already_open) try cloneProject(self.allocator, graph.project) else null;
+        errdefer if (open_project) |project| freeProject(self.allocator, project);
+        if (open_project != null) try self.open_projects.ensureUnusedCapacity(1);
+        const seen = try self.prepareGraphSeen(graph.project.path);
+        errdefer if (seen) |entry| self.allocator.free(entry.project_path);
+        var activity = try self.prepareActivity(graph);
+        defer {
+            for (activity.items) |event| freeActivityEvent(self.allocator, event);
+            activity.deinit();
         }
+        try self.activity.ensureUnusedCapacity(activity.items.len);
+        var attention = try self.prepareAttention(&graph);
+        defer attention.deinit(self.allocator);
+        var selected_index = self.selected_index;
+        var selected_node_id: ?[]const u8 = self.selected_node_id;
         if (was_selected and graph.nodes.items.len == 0) {
-            self.selected_index = null;
-            self.freeSelectedNodeID();
+            selected_index = null;
+            selected_node_id = null;
         } else if (was_selected) {
-            self.selected_index = 0;
+            selected_index = 0;
             if (prior_node_id) |node_id| {
                 for (graph.nodes.items, 0..) |node, index| {
                     if (std.mem.eql(u8, node.id, node_id)) {
-                        self.selected_index = index;
-                        self.replaceSelectedNodeID(node.id);
+                        selected_index = index;
+                        selected_node_id = node.id;
                         break;
                     }
                 }
             } else if (graph.nodes.items.len != 0) {
-                self.replaceSelectedNodeID(graph.nodes.items[0].id);
+                selected_node_id = graph.nodes.items[0].id;
             }
         }
-        self.syncLegacyGraph();
+        const incoming_summary = GraphSummary{
+            .project = if (self.graphFor(graph.project.path)) |prior| prior.project else graph.project,
+            .nodes = graph.nodes,
+            .edges = graph.edges,
+        };
+        const effective_path = self.selected_project_path orelse selected_path.?;
+        const selected_summary = if (std.mem.eql(u8, effective_path, graph.project.path))
+            &incoming_summary
+        else
+            self.graphFor(effective_path);
+        var legacy = try self.prepareLegacySnapshot(selected_summary, selected_index, selected_node_id);
+        defer legacy.deinit(self.allocator);
+
+        // The summary replacement is the last fallible step; all other owned
+        // values and append capacity are ready before any model data is replaced.
+        try self.upsertSummary(&graph);
+        if (open_project) |project| self.open_projects.appendAssumeCapacity(project);
+        if (selected_path) |path| self.selected_project_path = path;
+        self.markGraphSeen(graph.project.path, seen);
+        self.installActivity(&activity);
+        self.installAttention(&attention);
+        self.installLegacySnapshot(&legacy);
     }
 
     fn syncLegacyGraph(self: *Model) void {
-        if (self.graph) |*old| {
-            freeGraph(self.allocator, old);
+        const summary = if (self.selected_project_path) |path| self.graphFor(path) else null;
+        var snapshot = self.prepareLegacySnapshot(summary, self.selected_index, self.selected_node_id) catch {
+            if (self.graph) |*old| freeGraph(self.allocator, old);
             self.graph = null;
-        }
-        const path = self.selected_project_path orelse return;
-        const summary = self.graphFor(path) orelse return;
-        const project_path = self.allocator.dupe(u8, summary.project.path) catch return;
-        const project_name = self.allocator.dupe(u8, summary.project.name) catch {
-            self.allocator.free(project_path);
             return;
         };
-        var graph = Graph{
-            .project = .{
-                .path = project_path,
-                .name = project_name,
-            },
-            .nodes = std.array_list.Managed(Node).init(self.allocator),
-            .edges = std.array_list.Managed(Edge).init(self.allocator),
-        };
-        for (summary.nodes.items) |node| {
-            const copy = cloneNode(self.allocator, node) catch {
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-            graph.nodes.append(copy) catch {
-                freeNode(self.allocator, copy);
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-        }
-        for (summary.edges.items) |edge| {
-            const copy = cloneEdge(self.allocator, edge) catch {
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-            graph.edges.append(copy) catch {
-                freeEdge(self.allocator, copy);
-                freeGraph(self.allocator, &graph);
-                return;
-            };
-        }
-        self.graph = graph;
-        self.applyOpenComposite();
+        defer snapshot.deinit(self.allocator);
+        self.installLegacySnapshot(&snapshot);
     }
 
-    fn applyOpenComposite(self: *Model) void {
-        const node_id = self.open_composite_id orelse return;
-        const top = self.graph orelse return;
+    fn prepareLegacySnapshot(
+        self: *Model,
+        summary: ?*const GraphSummary,
+        selected_index: ?usize,
+        selected_node_id: ?[]const u8,
+    ) !LegacySnapshot {
+        var snapshot = LegacySnapshot{ .selected_index = selected_index };
+        errdefer snapshot.deinit(self.allocator);
+        if (selected_node_id) |id| snapshot.selected_node_id = try self.allocator.dupe(u8, id);
+        const selected_summary = summary orelse return snapshot;
+        snapshot.graph = try cloneGraph(self.allocator, selected_summary.*);
+        const node_id = self.open_composite_id orelse return snapshot;
+        const top = snapshot.graph.?;
         const index = findNodeIndexByID(top.nodes.items, node_id) orelse {
-            self.clearOpenComposite();
-            return;
+            snapshot.clear_composite = true;
+            return snapshot;
         };
         const node = top.nodes.items[index];
-        if (self.allocator.dupe(u8, node.title)) |title| {
-            if (self.open_composite_title) |old| self.allocator.free(old);
-            self.open_composite_title = title;
-        } else |_| {}
-        const nested = decodeSubgraph(self.allocator, top.project, node.subgraph_json) catch {
-            self.clearOpenComposite();
-            return;
+        snapshot.composite_title = try self.allocator.dupe(u8, node.title);
+        const nested = decodeSubgraph(self.allocator, top.project, node.subgraph_json) catch |err| switch (err) {
+            error.MalformedSubgraph, error.MalformedJsonString => {
+                self.allocator.free(snapshot.composite_title.?);
+                snapshot.composite_title = null;
+                snapshot.clear_composite = true;
+                return snapshot;
+            },
+            else => return err,
         };
-        if (self.graph) |*old| freeGraph(self.allocator, old);
-        self.graph = nested;
+        freeGraph(self.allocator, &snapshot.graph.?);
+        snapshot.graph = nested;
         if (nested.nodes.items.len == 0) {
-            self.selected_index = null;
-            self.freeSelectedNodeID();
+            snapshot.selected_index = null;
+            if (snapshot.selected_node_id) |id| self.allocator.free(id);
+            snapshot.selected_node_id = null;
         } else {
-            const retained = if (self.selected_node_id) |id|
+            const retained = if (snapshot.selected_node_id) |id|
                 findNodeIndexByID(nested.nodes.items, id)
             else
                 null;
-            self.selected_index = retained orelse 0;
-            self.replaceSelectedNodeID(nested.nodes.items[self.selected_index.?].id);
+            snapshot.selected_index = retained orelse 0;
+            const id = try self.allocator.dupe(u8, nested.nodes.items[snapshot.selected_index.?].id);
+            if (snapshot.selected_node_id) |old| self.allocator.free(old);
+            snapshot.selected_node_id = id;
+        }
+        return snapshot;
+    }
+
+    fn installLegacySnapshot(self: *Model, snapshot: *LegacySnapshot) void {
+        if (self.graph) |*old| freeGraph(self.allocator, old);
+        self.graph = snapshot.graph;
+        snapshot.graph = null;
+        self.selected_index = snapshot.selected_index;
+        self.freeSelectedNodeID();
+        self.selected_node_id = snapshot.selected_node_id;
+        snapshot.selected_node_id = null;
+        if (snapshot.clear_composite) self.clearOpenComposite();
+        if (snapshot.composite_title) |title| {
+            if (self.open_composite_title) |old| self.allocator.free(old);
+            self.open_composite_title = title;
+            snapshot.composite_title = null;
         }
     }
 
@@ -831,41 +879,41 @@ pub const Model = struct {
     }
 
     fn upsertSummary(self: *Model, graph: *const Graph) !void {
+        var copy = try cloneGraph(self.allocator, .{ .project = graph.project, .nodes = graph.nodes, .edges = graph.edges });
+        defer freeGraph(self.allocator, &copy);
         for (self.graphs.items) |*summary| {
             if (!std.mem.eql(u8, summary.project.path, graph.project.path)) continue;
-            for (summary.nodes.items) |node| freeNode(self.allocator, node);
-            for (summary.edges.items) |edge| freeEdge(self.allocator, edge);
-            summary.nodes.clearRetainingCapacity();
-            summary.edges.clearRetainingCapacity();
-            for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
-            for (graph.edges.items) |edge| try summary.edges.append(try cloneEdge(self.allocator, edge));
+            std.mem.swap(std.array_list.Managed(Node), &summary.nodes, &copy.nodes);
+            std.mem.swap(std.array_list.Managed(Edge), &summary.edges, &copy.edges);
             return;
         }
-        var summary = GraphSummary{
-            .project = .{
-                .path = try self.allocator.dupe(u8, graph.project.path),
-                .name = try self.allocator.dupe(u8, graph.project.name),
-            },
-            .nodes = std.array_list.Managed(Node).init(self.allocator),
-            .edges = std.array_list.Managed(Edge).init(self.allocator),
-        };
-        errdefer summary.deinit(self.allocator);
-        for (graph.nodes.items) |node| try summary.nodes.append(try cloneNode(self.allocator, node));
-        for (graph.edges.items) |edge| try summary.edges.append(try cloneEdge(self.allocator, edge));
-        try self.graphs.append(summary);
+        try self.graphs.append(.{ .project = copy.project, .nodes = copy.nodes, .edges = copy.edges });
+        copy.project = .{ .path = &.{}, .name = &.{} };
+        copy.nodes = std.array_list.Managed(Node).init(self.allocator);
+        copy.edges = std.array_list.Managed(Edge).init(self.allocator);
     }
 
-    fn markGraphSeen(self: *Model, path: []const u8) void {
+    fn prepareGraphSeen(self: *Model, path: []const u8) !?GraphGeneration {
+        for (self.graph_generations.items) |entry| {
+            if (std.mem.eql(u8, entry.project_path, path)) return null;
+        }
+        const project_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(project_path);
+        try self.graph_generations.ensureUnusedCapacity(1);
+        return .{ .project_path = project_path, .generation = self.restore_generation };
+    }
+
+    fn markGraphSeen(self: *Model, path: []const u8, prepared: ?GraphGeneration) void {
+        if (prepared) |entry| {
+            self.graph_generations.appendAssumeCapacity(entry);
+            return;
+        }
         for (self.graph_generations.items) |*entry| {
             if (std.mem.eql(u8, entry.project_path, path)) {
                 entry.generation = self.restore_generation;
                 return;
             }
         }
-        self.graph_generations.append(.{
-            .project_path = self.allocator.dupe(u8, path) catch return,
-            .generation = self.restore_generation,
-        }) catch {};
     }
 
     fn wasGraphSeen(self: *const Model, path: []const u8) bool {
@@ -881,75 +929,130 @@ pub const Model = struct {
     }
 
     fn rebuildAttention(self: *Model) void {
-        for (self.attention.items) |node| freeNode(self.allocator, node);
-        self.attention.clearRetainingCapacity();
-        for (self.attention_entries.items) |entry| freeAttentionEntry(self.allocator, entry);
-        self.attention_entries.clearRetainingCapacity();
-        for (self.graphs.items) |summary| {
-            for (summary.nodes.items) |node| {
-                if (!needsAttention(node) and !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
-                const node_copy = cloneNode(self.allocator, node) catch continue;
-                const entry = AttentionEntry{ .project_path = self.allocator.dupe(u8, summary.project.path) catch {
-                    freeNode(self.allocator, node_copy);
-                    continue;
-                }, .node = node_copy };
-                self.attention_entries.append(entry) catch {
-                    freeAttentionEntry(self.allocator, entry);
-                    continue;
-                };
-                const compat = cloneNode(self.allocator, node) catch continue;
-                self.attention.append(compat) catch freeNode(self.allocator, compat);
-            }
-        }
-        std.sort.heap(AttentionEntry, self.attention_entries.items, {}, compareAttentionEntry);
-        std.sort.heap(Node, self.attention.items, {}, compareAttentionNode);
+        var attention = self.prepareAttention(null) catch {
+            for (self.attention.items) |node| freeNode(self.allocator, node);
+            self.attention.clearRetainingCapacity();
+            for (self.attention_entries.items) |entry| freeAttentionEntry(self.allocator, entry);
+            self.attention_entries.clearRetainingCapacity();
+            return;
+        };
+        defer attention.deinit(self.allocator);
+        self.installAttention(&attention);
     }
 
-    fn recordActivity(self: *Model, next: Graph) void {
-        const previous = self.graphFor(next.project.path) orelse return;
+    fn prepareAttention(self: *Model, replacement: ?*const Graph) !AttentionLists {
+        var attention = AttentionLists{
+            .nodes = std.array_list.Managed(Node).init(self.allocator),
+            .entries = std.array_list.Managed(AttentionEntry).init(self.allocator),
+        };
+        errdefer attention.deinit(self.allocator);
+        var replaced = false;
+        for (self.graphs.items) |summary| {
+            if (replacement) |graph| {
+                if (std.mem.eql(u8, summary.project.path, graph.project.path)) {
+                    try appendAttention(self.allocator, &attention, .{
+                        .project = summary.project,
+                        .nodes = graph.nodes,
+                        .edges = graph.edges,
+                    });
+                    replaced = true;
+                    continue;
+                }
+            }
+            try appendAttention(self.allocator, &attention, summary);
+        }
+        if (!replaced) {
+            if (replacement) |graph| try appendAttention(self.allocator, &attention, .{
+                .project = graph.project,
+                .nodes = graph.nodes,
+                .edges = graph.edges,
+            });
+        }
+        std.sort.heap(AttentionEntry, attention.entries.items, {}, compareAttentionEntry);
+        std.sort.heap(Node, attention.nodes.items, {}, compareAttentionNode);
+        return attention;
+    }
+
+    fn installAttention(self: *Model, attention: *AttentionLists) void {
+        std.mem.swap(std.array_list.Managed(Node), &self.attention, &attention.nodes);
+        std.mem.swap(std.array_list.Managed(AttentionEntry), &self.attention_entries, &attention.entries);
+    }
+
+    fn prepareActivity(self: *Model, next: Graph) !std.array_list.Managed(ActivityEvent) {
+        var activity = std.array_list.Managed(ActivityEvent).init(self.allocator);
+        errdefer {
+            for (activity.items) |event| freeActivityEvent(self.allocator, event);
+            activity.deinit();
+        }
+        const previous = self.graphFor(next.project.path) orelse return activity;
         for (next.nodes.items) |node| {
             const old = findNode(previous.nodes.items, node.id) orelse continue;
             if (std.mem.eql(u8, old.state, node.state)) continue;
-            const title = self.allocator.dupe(u8, node.title) catch continue;
-            const state = self.allocator.dupe(u8, node.state) catch {
-                self.allocator.free(title);
-                continue;
-            };
-            const project_path = self.allocator.dupe(u8, next.project.path) catch {
-                self.allocator.free(title);
-                self.allocator.free(state);
-                continue;
-            };
-            const node_id = self.allocator.dupe(u8, node.id) catch {
-                self.allocator.free(title);
-                self.allocator.free(state);
-                self.allocator.free(project_path);
-                continue;
-            };
-            const event = ActivityEvent{
-                .title = title,
-                .state = state,
-                .project_path = project_path,
-                .node_id = node_id,
-                .timestamp = std.time.timestamp(),
-            };
-            self.activity.insert(0, event) catch {
-                self.allocator.free(event.title);
-                self.allocator.free(event.state);
-                self.allocator.free(event.project_path);
-                self.allocator.free(event.node_id);
-                continue;
-            };
+            var event = ActivityEvent{ .title = &.{}, .state = &.{}, .timestamp = std.time.timestamp() };
+            errdefer freeActivityEvent(self.allocator, event);
+            event.title = try self.allocator.dupe(u8, node.title);
+            event.state = try self.allocator.dupe(u8, node.state);
+            event.project_path = try self.allocator.dupe(u8, next.project.path);
+            event.node_id = try self.allocator.dupe(u8, node.id);
+            try activity.append(event);
+        }
+        return activity;
+    }
+
+    fn installActivity(self: *Model, activity: *std.array_list.Managed(ActivityEvent)) void {
+        for (activity.items) |event| {
+            self.activity.insertAssumeCapacity(0, event);
             if (self.activity.items.len > 32) {
                 const removed = self.activity.pop() orelse continue;
-                self.allocator.free(removed.title);
-                self.allocator.free(removed.state);
-                self.allocator.free(removed.project_path);
-                self.allocator.free(removed.node_id);
+                freeActivityEvent(self.allocator, removed);
             }
         }
+        activity.clearRetainingCapacity();
     }
 };
+
+fn appendAttention(allocator: std.mem.Allocator, attention: *AttentionLists, summary: GraphSummary) !void {
+    for (summary.nodes.items) |node| {
+        if (!needsAttention(node) and !(std.mem.eql(u8, node.state, "blocked") and isStrandedSummary(&summary, node.id))) continue;
+        {
+            const node_copy = try cloneNode(allocator, node);
+            errdefer freeNode(allocator, node_copy);
+            const path = try allocator.dupe(u8, summary.project.path);
+            errdefer allocator.free(path);
+            try attention.entries.append(.{ .project_path = path, .node = node_copy });
+        }
+        const compat = try cloneNode(allocator, node);
+        errdefer freeNode(allocator, compat);
+        try attention.nodes.append(compat);
+    }
+}
+
+fn freeActivityEvent(allocator: std.mem.Allocator, event: ActivityEvent) void {
+    allocator.free(event.title);
+    allocator.free(event.state);
+    allocator.free(event.project_path);
+    allocator.free(event.node_id);
+}
+
+fn cloneGraph(allocator: std.mem.Allocator, source: GraphSummary) !Graph {
+    var graph = Graph{
+        .project = try cloneProject(allocator, source.project),
+        .nodes = std.array_list.Managed(Node).init(allocator),
+        .edges = std.array_list.Managed(Edge).init(allocator),
+    };
+    errdefer freeGraph(allocator, &graph);
+    for (source.nodes.items) |node| {
+        const copy = try cloneNode(allocator, node);
+        errdefer freeNode(allocator, copy);
+        try graph.nodes.append(copy);
+    }
+    for (source.edges.items) |edge| {
+        const copy = try cloneEdge(allocator, edge);
+        errdefer freeEdge(allocator, copy);
+        try graph.edges.append(copy);
+    }
+    return graph;
+}
 
 fn findNode(nodes: []const Node, id: []const u8) ?Node {
     for (nodes) |node| if (std.mem.eql(u8, node.id, id)) return node;
@@ -1018,22 +1121,13 @@ fn isResolved(state: []const u8) bool {
 }
 
 fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
-    return .{
-        .id = try allocator.dupe(u8, node.id),
-        .title = try allocator.dupe(u8, node.title),
-        .loop_type = try allocator.dupe(u8, node.loop_type),
-        .state = try allocator.dupe(u8, node.state),
-        .activity = try allocator.dupe(u8, node.activity),
-        .presence = try allocator.dupe(u8, node.presence),
-        .backend = try allocator.dupe(u8, node.backend),
-        .pilot_state = try allocator.dupe(u8, node.pilot_state),
-        .goal_summary = try allocator.dupe(u8, node.goal_summary),
-        .goal_predicate = try allocator.dupe(u8, node.goal_predicate),
-        .metric_command = try allocator.dupe(u8, node.metric_command),
-        .metric_direction = try allocator.dupe(u8, node.metric_direction),
-        .trigger_prompt = try allocator.dupe(u8, node.trigger_prompt),
-        .check_description = try allocator.dupe(u8, node.check_description),
-        .model_tier = try allocator.dupe(u8, node.model_tier),
+    var copy = Node{
+        .id = &.{},
+        .title = &.{},
+        .loop_type = &.{},
+        .state = &.{},
+        .activity = &.{},
+        .presence = &.{},
         .poll_interval_seconds = node.poll_interval_seconds,
         .stall_after_seconds = node.stall_after_seconds,
         .created_at = node.created_at,
@@ -1041,24 +1135,46 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .metric_samples = node.metric_samples,
         .metric_sample_count = node.metric_sample_count,
         .token_usage = node.token_usage,
-        .worktree_path = try allocator.dupe(u8, node.worktree_path),
-        .worktree_branch = try allocator.dupe(u8, node.worktree_branch),
-        .subgraph_json = try allocator.dupe(u8, node.subgraph_json),
         .follows_template = node.follows_template,
     };
+    errdefer freeNode(allocator, copy);
+    copy.id = try allocator.dupe(u8, node.id);
+    copy.title = try allocator.dupe(u8, node.title);
+    copy.loop_type = try allocator.dupe(u8, node.loop_type);
+    copy.state = try allocator.dupe(u8, node.state);
+    copy.activity = try allocator.dupe(u8, node.activity);
+    copy.presence = try allocator.dupe(u8, node.presence);
+    copy.backend = try allocator.dupe(u8, node.backend);
+    copy.pilot_state = try allocator.dupe(u8, node.pilot_state);
+    copy.goal_summary = try allocator.dupe(u8, node.goal_summary);
+    copy.goal_predicate = try allocator.dupe(u8, node.goal_predicate);
+    copy.metric_command = try allocator.dupe(u8, node.metric_command);
+    copy.metric_direction = try allocator.dupe(u8, node.metric_direction);
+    copy.trigger_prompt = try allocator.dupe(u8, node.trigger_prompt);
+    copy.check_description = try allocator.dupe(u8, node.check_description);
+    copy.model_tier = try allocator.dupe(u8, node.model_tier);
+    copy.worktree_path = try allocator.dupe(u8, node.worktree_path);
+    copy.worktree_branch = try allocator.dupe(u8, node.worktree_branch);
+    copy.subgraph_json = try allocator.dupe(u8, node.subgraph_json);
+    return copy;
 }
 
 fn cloneEdge(allocator: std.mem.Allocator, edge: Edge) !Edge {
-    return .{
-        .id = try allocator.dupe(u8, edge.id),
-        .from = try allocator.dupe(u8, edge.from),
-        .to = try allocator.dupe(u8, edge.to),
-        .kind = try allocator.dupe(u8, edge.kind),
-        .condition = try allocator.dupe(u8, edge.condition),
+    var copy = Edge{
+        .from = &.{},
+        .to = &.{},
+        .condition = &.{},
         .blocks_target = edge.blocks_target,
         .fired = edge.fired,
         .fire_count = edge.fire_count,
     };
+    errdefer freeEdge(allocator, copy);
+    copy.id = try allocator.dupe(u8, edge.id);
+    copy.from = try allocator.dupe(u8, edge.from);
+    copy.to = try allocator.dupe(u8, edge.to);
+    copy.kind = try allocator.dupe(u8, edge.kind);
+    copy.condition = try allocator.dupe(u8, edge.condition);
+    return copy;
 }
 
 fn freeEdge(allocator: std.mem.Allocator, edge: Edge) void {
@@ -1087,22 +1203,13 @@ fn decodeNodes(
         const scalar_object = try withoutJsonObjectField(allocator, object, "subGraph");
         defer allocator.free(scalar_object);
         const samples = jsonMetricSamples(scalar_object, "metricHistory");
-        try nodes.append(.{
-            .id = try duplicateJsonString(allocator, scalar_object, "id"),
-            .title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled"),
-            .loop_type = try duplicateJsonStringOr(allocator, scalar_object, "loopType", "turnBased"),
-            .state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle"),
-            .activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", ""),
-            .presence = try duplicatePresence(allocator, scalar_object),
-            .backend = try duplicateJsonStringOr(allocator, scalar_object, "backend", ""),
-            .pilot_state = try duplicateJsonStringOr(allocator, scalar_object, "pilotState", "notPiloted"),
-            .goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", ""),
-            .goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", ""),
-            .metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", ""),
-            .metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", ""),
-            .trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", ""),
-            .check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", ""),
-            .model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", ""),
+        var node = Node{
+            .id = &.{},
+            .title = &.{},
+            .loop_type = &.{},
+            .state = &.{},
+            .activity = &.{},
+            .presence = &.{},
             .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
             .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
             .created_at = jsonNumber64(scalar_object, "createdAt"),
@@ -1110,14 +1217,30 @@ fn decodeNodes(
             .metric_samples = samples.values,
             .metric_sample_count = samples.count,
             .token_usage = jsonUsageTotal(scalar_object),
-            .worktree_path = try duplicateWorktreePath(allocator, scalar_object),
-            .worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object),
-            .subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph"),
             .follows_template = hasNonNullJsonField(scalar_object, "templateFollow"),
-        });
+        };
+        errdefer freeNode(allocator, node);
+        node.id = try duplicateJsonString(allocator, scalar_object, "id");
+        node.title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled");
+        node.loop_type = try duplicateJsonStringOr(allocator, scalar_object, "loopType", "turnBased");
+        node.state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle");
+        node.activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", "");
+        node.presence = try duplicatePresence(allocator, scalar_object);
+        node.backend = try duplicateJsonStringOr(allocator, scalar_object, "backend", "");
+        node.pilot_state = try duplicateJsonStringOr(allocator, scalar_object, "pilotState", "notPiloted");
+        node.goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", "");
+        node.goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", "");
+        node.metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", "");
+        node.metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", "");
+        node.trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", "");
+        node.check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", "");
+        node.model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", "");
+        node.worktree_path = try duplicateWorktreePath(allocator, scalar_object);
+        node.worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object);
+        node.subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph");
+        try nodes.append(node);
         cursor = end + 1;
     }
-
 }
 
 fn hasNonNullJsonField(object: []const u8, key: []const u8) bool {
@@ -1138,16 +1261,21 @@ fn decodeEdges(
         const start = indexOfByte(bytes, cursor, '{') orelse break;
         const end = findClosing(bytes, start, '{', '}') orelse break;
         const object = bytes[start .. end + 1];
-        try edges.append(.{
-            .id = try duplicateJsonStringOr(allocator, object, "id", ""),
-            .from = try duplicateJsonString(allocator, object, "from"),
-            .to = try duplicateJsonString(allocator, object, "to"),
-            .kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff"),
-            .condition = try duplicateJsonStringOr(allocator, object, "condition", "always"),
+        var edge = Edge{
+            .from = &.{},
+            .to = &.{},
+            .condition = &.{},
             .blocks_target = !std.mem.eql(u8, Wire.jsonString(object, "kind") orelse "", "message"),
             .fired = jsonBool(object, "fired") orelse false,
             .fire_count = jsonNumber(object, "fireCount") orelse 0,
-        });
+        };
+        errdefer freeEdge(allocator, edge);
+        edge.id = try duplicateJsonStringOr(allocator, object, "id", "");
+        edge.from = try duplicateJsonString(allocator, object, "from");
+        edge.to = try duplicateJsonString(allocator, object, "to");
+        edge.kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff");
+        edge.condition = try duplicateJsonStringOr(allocator, object, "condition", "always");
+        try edges.append(edge);
         cursor = end + 1;
     }
 }
@@ -1314,10 +1442,7 @@ pub fn decodeSubgraph(
     subgraph_json: []const u8,
 ) !Graph {
     var graph = Graph{
-        .project = .{
-            .path = try allocator.dupe(u8, parent_project.path),
-            .name = try allocator.dupe(u8, parent_project.name),
-        },
+        .project = try cloneProject(allocator, parent_project),
         .nodes = std.array_list.Managed(Node).init(allocator),
         .edges = std.array_list.Managed(Edge).init(allocator),
     };
@@ -1414,6 +1539,12 @@ fn findClosing(bytes: []const u8, start: usize, open: u8, close: u8) ?usize {
     return null;
 }
 
+fn cloneProject(allocator: std.mem.Allocator, project: Project) !Project {
+    const path = try allocator.dupe(u8, project.path);
+    errdefer allocator.free(path);
+    return .{ .path = path, .name = try allocator.dupe(u8, project.name) };
+}
+
 fn freeProject(allocator: std.mem.Allocator, project: Project) void {
     allocator.free(project.path);
     allocator.free(project.name);
@@ -1450,13 +1581,7 @@ fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {
 fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     freeProject(allocator, graph.project);
     for (graph.nodes.items) |node| freeNode(allocator, node);
-    for (graph.edges.items) |edge| {
-        if (edge.id.len != 0) allocator.free(edge.id);
-        allocator.free(edge.from);
-        allocator.free(edge.to);
-        allocator.free(edge.kind);
-        allocator.free(edge.condition);
-    }
+    for (graph.edges.items) |edge| freeEdge(allocator, edge);
     graph.nodes.deinit();
     graph.edges.deinit();
 }
@@ -2030,4 +2155,502 @@ test "composite navigation swaps to nested graph and survives refresh" {
     try std.testing.expect(!model.isCompositeOpen());
     try std.testing.expectEqual(@as(usize, 1), model.graph.?.nodes.items.len);
     try std.testing.expectEqualStrings("parent", model.selected().?.id);
+}
+
+const ownershipGraphJson =
+    \\{"project":{"path":"C:\\owned\\graph","name":"Owned \"graph\""},
+    \\"edges":[{"id":"edge-first","from":"first","to":"second","kind":"handoff","condition":"onSuccess","fired":true,"fireCount":2},{"id":"edge-second","from":"second","to":"first","kind":"message"}],
+    \\"nodes":[{"id":"first","title":"First \"node\"","loopType":"proactive","state":"running","activity":"editing","presence":{"presence":"busy"},"backend":"copilot","pilotState":"piloted","goal":{"summary":"Ship it","predicate":"done"},"metricCommand":"measure","metricDirection":"decrease","triggerPrompt":"Continue","checkDescription":"Check","modelTier":"high","pollIntervalSeconds":12.5,"stallAfterSeconds":60,"createdAt":123,"metricHistory":[{"value":3},{"value":2}],"inputTokens":11,"outputTokens":7,"worktreeBinding":{"path":"C:\\owned\\branch","branch":"topic"},"subGraph":{"nodes":[{"id":"child","title":"Child","state":"idle"}],"edges":[]},"templateFollow":{"id":"template"}},{"id":"second","title":"Second","state":"idle"}]}
+;
+const ownershipGraphFrame = "{\"graphChanged\":" ++ ownershipGraphJson ++ "}";
+
+fn checkOwnershipAllocationFailures(comptime test_fn: anytype, extra_args: anytype) !void {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try @call(.auto, test_fn, .{counting.allocator()} ++ extra_args);
+    std.debug.print("allocation positions: {d}\n", .{counting.alloc_index});
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, test_fn, extra_args);
+}
+
+fn expectOwnershipGraph(graph: anytype) !void {
+    try std.testing.expectEqualStrings("C:\\owned\\graph", graph.project.path);
+    try std.testing.expectEqualStrings("Owned \"graph\"", graph.project.name);
+    try std.testing.expectEqual(@as(usize, 2), graph.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), graph.edges.items.len);
+    const node = graph.nodes.items[0];
+    try std.testing.expectEqualStrings("first", node.id);
+    try std.testing.expectEqualStrings("First \"node\"", node.title);
+    try std.testing.expectEqualStrings("proactive", node.loop_type);
+    try std.testing.expectEqualStrings("running", node.state);
+    try std.testing.expectEqualStrings("editing", node.activity);
+    try std.testing.expectEqualStrings("busy", node.presence);
+    try std.testing.expectEqualStrings("copilot", node.backend);
+    try std.testing.expectEqualStrings("piloted", node.pilot_state);
+    try std.testing.expectEqualStrings("Ship it", node.goal_summary);
+    try std.testing.expectEqualStrings("done", node.goal_predicate);
+    try std.testing.expectEqualStrings("measure", node.metric_command);
+    try std.testing.expectEqualStrings("decrease", node.metric_direction);
+    try std.testing.expectEqualStrings("Continue", node.trigger_prompt);
+    try std.testing.expectEqualStrings("Check", node.check_description);
+    try std.testing.expectEqualStrings("high", node.model_tier);
+    try std.testing.expectEqual(@as(?f64, 12.5), node.poll_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, 60), node.stall_after_seconds);
+    try std.testing.expectEqual(@as(?u64, 123), node.created_at);
+    try std.testing.expectEqual(@as(u32, 2), node.metric_passes);
+    try std.testing.expectEqual(@as(u8, 2), node.metric_sample_count);
+    try std.testing.expectEqual(@as(f64, 3), node.metric_samples[0]);
+    try std.testing.expectEqual(@as(f64, 2), node.metric_samples[1]);
+    try std.testing.expectEqual(@as(?u32, 18), node.token_usage);
+    try std.testing.expectEqualStrings("C:\\owned\\branch", node.worktree_path);
+    try std.testing.expectEqualStrings("topic", node.worktree_branch);
+    try std.testing.expectEqual(@as(usize, 1), subgraphNodeCount(node.subgraph_json));
+    try std.testing.expect(node.follows_template);
+    try std.testing.expectEqualStrings("second", graph.nodes.items[1].id);
+    try std.testing.expectEqualStrings("turnBased", graph.nodes.items[1].loop_type);
+    try std.testing.expectEqualStrings("notPiloted", graph.nodes.items[1].pilot_state);
+    const edge = graph.edges.items[0];
+    try std.testing.expectEqualStrings("edge-first", edge.id);
+    try std.testing.expectEqualStrings("first", edge.from);
+    try std.testing.expectEqualStrings("second", edge.to);
+    try std.testing.expectEqualStrings("handoff", edge.kind);
+    try std.testing.expectEqualStrings("onSuccess", edge.condition);
+    try std.testing.expect(edge.blocks_target and edge.fired);
+    try std.testing.expectEqual(@as(u32, 2), edge.fire_count);
+    try std.testing.expectEqualStrings("edge-second", graph.edges.items[1].id);
+    try std.testing.expectEqualStrings("always", graph.edges.items[1].condition);
+    try std.testing.expect(!graph.edges.items[1].blocks_target);
+}
+
+fn checkGraphDecoderOwnership(allocator: std.mem.Allocator) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    {
+        const frame = try allocator.dupe(u8, ownershipGraphFrame);
+        defer allocator.free(frame);
+        try model.decodeGraph(frame);
+    }
+    try expectOwnershipGraph(model.graph orelse return error.TestExpectedGraph);
+    try expectOwnershipGraph(model.graphs.items[0]);
+}
+
+test "decoder ownership actual graph allocation failures" {
+    try checkOwnershipAllocationFailures(checkGraphDecoderOwnership, .{});
+}
+
+fn checkSubgraphDecoderOwnership(allocator: std.mem.Allocator) !void {
+    var graph = graph: {
+        const json = try allocator.dupe(u8, ownershipGraphJson);
+        defer allocator.free(json);
+        break :graph try decodeSubgraph(allocator, .{
+            .path = @constCast("C:\\owned\\graph"),
+            .name = @constCast("Owned \"graph\""),
+        }, json);
+    };
+    defer freeGraph(allocator, &graph);
+    try expectOwnershipGraph(graph);
+}
+
+test "decoder ownership subgraph allocation failures" {
+    try checkOwnershipAllocationFailures(checkSubgraphDecoderOwnership, .{});
+}
+
+fn checkCloneOwnership(allocator: std.mem.Allocator, source: *const Graph) !void {
+    const project = try cloneProject(allocator, source.project);
+    defer freeProject(allocator, project);
+    try std.testing.expectEqualStrings(source.project.path, project.path);
+    try std.testing.expectEqualStrings(source.project.name, project.name);
+    for (source.nodes.items) |node| {
+        const copy = try cloneNode(allocator, node);
+        defer freeNode(allocator, copy);
+        inline for (@typeInfo(Node).@"struct".fields) |field| {
+            try std.testing.expectEqualDeep(@field(node, field.name), @field(copy, field.name));
+        }
+    }
+    for (source.edges.items) |edge| {
+        const copy = try cloneEdge(allocator, edge);
+        defer freeEdge(allocator, copy);
+        inline for (@typeInfo(Edge).@"struct".fields) |field| {
+            try std.testing.expectEqualDeep(@field(edge, field.name), @field(copy, field.name));
+        }
+    }
+}
+
+test "decoder ownership cloning preserves all fields at every allocation failure" {
+    var source = try decodeSubgraph(std.testing.allocator, .{
+        .path = @constCast("C:\\owned\\graph"),
+        .name = @constCast("Owned \"graph\""),
+    }, ownershipGraphJson);
+    defer freeGraph(std.testing.allocator, &source);
+    try checkOwnershipAllocationFailures(checkCloneOwnership, .{&source});
+}
+
+fn checkSummaryReplacementOwnership(allocator: std.mem.Allocator, source: *const Graph) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try model.upsertSummary(source);
+    const old_nodes = model.graphs.items[0].nodes.items.ptr;
+    const old_edges = model.graphs.items[0].edges.items.ptr;
+    model.upsertSummary(source) catch |err| {
+        try std.testing.expect(old_nodes == model.graphs.items[0].nodes.items.ptr);
+        try std.testing.expect(old_edges == model.graphs.items[0].edges.items.ptr);
+        try expectOwnershipGraph(model.graphs.items[0]);
+        return err;
+    };
+    try expectOwnershipGraph(model.graphs.items[0]);
+}
+
+test "decoder ownership summary replacement retains old arrays until copies are owned" {
+    var source = try decodeSubgraph(std.testing.allocator, .{
+        .path = @constCast("C:\\owned\\graph"),
+        .name = @constCast("Owned \"graph\""),
+    }, ownershipGraphJson);
+    defer freeGraph(std.testing.allocator, &source);
+    try checkOwnershipAllocationFailures(checkSummaryReplacementOwnership, .{&source});
+}
+
+fn checkDecoderListGrowth(allocator: std.mem.Allocator) !void {
+    var nodes = std.array_list.Managed(Node).init(allocator);
+    defer {
+        for (nodes.items) |node| freeNode(allocator, node);
+        nodes.deinit();
+    }
+    var edges = std.array_list.Managed(Edge).init(allocator);
+    defer {
+        for (edges.items) |edge| freeEdge(allocator, edge);
+        edges.deinit();
+    }
+    try decodeNodes(allocator, "[{\"id\":\"node\"}" ++ (",{\"id\":\"node\"}" ** 9) ++ "]", &nodes);
+    try decodeEdges(allocator, "[{\"from\":\"node\",\"to\":\"node\"}" ++ (",{\"from\":\"node\",\"to\":\"node\"}" ** 9) ++ "]", &edges);
+    try std.testing.expectEqual(@as(usize, 10), nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 10), edges.items.len);
+    for (nodes.items) |node| try std.testing.expectEqualStrings("Untitled", node.title);
+    for (edges.items) |edge| try std.testing.expectEqualStrings("always", edge.condition);
+}
+
+test "decoder ownership partial lists and growing appends release every allocation" {
+    try checkOwnershipAllocationFailures(checkDecoderListGrowth, .{});
+}
+
+fn checkMalformedSubgraphOwnership(allocator: std.mem.Allocator, json: []const u8, expected: anyerror) !void {
+    if (decodeSubgraph(allocator, .{ .path = @constCast("parent"), .name = @constCast("Parent") }, json)) |value| {
+        var graph = value;
+        defer freeGraph(allocator, &graph);
+        return error.TestExpectedError;
+    } else |err| {
+        if (err != expected) return err;
+    }
+}
+
+test "decoder ownership malformed subgraphs preserve primary errors under allocation failure" {
+    const malformed_strings = [_][]const u8{
+        \\{"nodes":[{"id":"valid"},{"id":"next","title":"bad\q"}]}
+        ,
+        \\{"nodes":[{"id":"valid"},{"id":"next","worktreeBinding":{"path":"owned","branch":"bad\q"}}]}
+        ,
+        \\{"nodes":[{"id":"valid"}],"edges":[{"id":"valid","from":"valid","to":"valid"},{"id":"next","from":"valid","to":"valid","condition":"bad\q"}]}
+        ,
+    };
+    for (malformed_strings) |json| {
+        try checkOwnershipAllocationFailures(checkMalformedSubgraphOwnership, .{ json, error.MalformedJsonString });
+    }
+    const malformed_arrays = [_][]const u8{
+        \\{"nodes":[
+        ,
+        \\{"nodes":[{"id":"valid"}],"edges":[
+        ,
+    };
+    for (malformed_arrays) |json| {
+        try checkOwnershipAllocationFailures(checkMalformedSubgraphOwnership, .{ json, error.MalformedSubgraph });
+    }
+}
+
+test "decoder ownership decoded data outlives temporary JSON storage" {
+    const allocator = std.testing.allocator;
+    var graph = graph: {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, ownershipGraphJson, .{ .allocate = .alloc_always });
+        defer parsed.deinit();
+        const project = parsed.value.object.get("project").?.object;
+        const json = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+        defer allocator.free(json);
+        break :graph try decodeSubgraph(allocator, .{
+            .path = @constCast(project.get("path").?.string),
+            .name = @constCast(project.get("name").?.string),
+        }, json);
+    };
+    defer freeGraph(allocator, &graph);
+    try expectOwnershipGraph(graph);
+}
+
+test "decoder ownership malformed strings preserve the previous graph" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    const invalid_frames = [_][]const u8{
+        \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"bad\q"},"nodes":[],"edges":[]}}
+        ,
+        \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Changed"},"nodes":[{"id":"valid"},{"id":"invalid","title":"bad\q"}],"edges":[]}}
+        ,
+        \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Changed"},"nodes":[{"id":"valid"}],"edges":[{"id":"valid","from":"valid","to":"valid"},{"id":"invalid","from":"valid","to":"valid","condition":"bad\q"}]}}
+        ,
+    };
+    for (invalid_frames) |frame| {
+        try std.testing.expectError(error.MalformedJsonString, model.decodeGraph(frame));
+        try expectOwnershipGraph(model.graph.?);
+        try expectOwnershipGraph(model.graphs.items[0]);
+        try checkOwnershipAllocationFailures(checkMalformedGraphDecoderOwnership, .{frame});
+    }
+
+    try std.testing.expectError(error.MalformedGraph, model.decodeGraph("{\"graphChanged\":{"));
+    try expectOwnershipGraph(model.graph.?);
+}
+
+fn checkMalformedGraphDecoderOwnership(allocator: std.mem.Allocator, frame: []const u8) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    model.decodeGraph(frame) catch |err| {
+        if (err != error.MalformedJsonString) return err;
+        try std.testing.expect(model.graph == null);
+        try std.testing.expectEqual(@as(usize, 0), model.graphs.items.len);
+        return;
+    };
+    return error.TestExpectedError;
+}
+
+const ownershipOtherFrame =
+    \\{"graphChanged":{"project":{"path":"other","name":"Other"},"nodes":[{"id":"other-node","title":"Other node","state":"failed"}],"edges":[]}}
+;
+const ownershipReplacementFrame =
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[{"id":"replacement-edge","from":"second","to":"first","kind":"message"}],"nodes":[{"id":"first","title":"Updated parent","loopType":"proactive","state":"succeeded","subGraph":{"nodes":[{"id":"child","title":"Updated child","state":"failed"}],"edges":[]}},{"id":"second","title":"Updated second","state":"failed"}]}}
+;
+const ownershipMalformedCompositeFrame =
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"edges":[],"nodes":[{"id":"first","title":"Updated","loopType":"proactive","subGraph":{"nodes":[{"id":"child","title":"bad\q"}],"edges":[]}}]}}
+;
+const ownershipOtherReplacementFrame =
+    \\{"graphChanged":{"project":{"path":"other","name":"Ignored rename"},"nodes":[{"id":"other-node","title":"Changed other","state":"succeeded"}],"edges":[]}}
+;
+const ownershipNewProjectFrame =
+    \\{"graphChanged":{"project":{"path":"new","name":"New"},"nodes":[{"id":"new-node","title":"New node","state":"failed"}],"edges":[]}}
+;
+const ownershipEmptyFrame =
+    \\{"graphChanged":{"project":{"path":"C:\\owned\\graph","name":"Ignored rename"},"nodes":[],"edges":[]}}
+;
+
+fn initOwnershipModel(allocator: std.mem.Allocator, failed_frame: []const u8, composite: bool) !Model {
+    var model = Model.init(allocator);
+    errdefer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    try model.decodeGraph(failed_frame);
+    try model.decodeGraph(ownershipOtherFrame);
+    if (composite) {
+        model.open_composite_id = try allocator.dupe(u8, "first");
+        model.open_composite_title = try allocator.dupe(u8, "First \"node\"");
+        try model.decodeGraph(failed_frame);
+    }
+    model.beginRestore();
+    return model;
+}
+
+fn expectGraphDataEqual(expected: anytype, actual: anytype) !void {
+    try std.testing.expectEqualDeep(expected.project, actual.project);
+    try std.testing.expectEqualDeep(expected.nodes.items, actual.nodes.items);
+    try std.testing.expectEqualDeep(expected.edges.items, actual.edges.items);
+}
+
+fn expectModelDataEqual(expected: *const Model, actual: *const Model) !void {
+    try std.testing.expectEqualDeep(expected.selected_project_path, actual.selected_project_path);
+    try std.testing.expectEqualDeep(expected.selected_node_id, actual.selected_node_id);
+    try std.testing.expectEqual(expected.selected_index, actual.selected_index);
+    try std.testing.expectEqualDeep(expected.open_composite_id, actual.open_composite_id);
+    try std.testing.expectEqualDeep(expected.open_composite_title, actual.open_composite_title);
+    try std.testing.expectEqual(expected.last_sequence, actual.last_sequence);
+    try std.testing.expectEqual(expected.restore_state, actual.restore_state);
+    try std.testing.expectEqual(expected.restore_generation, actual.restore_generation);
+    try std.testing.expectEqualDeep(expected.graph_generations.items, actual.graph_generations.items);
+    try std.testing.expectEqualDeep(expected.recent_projects.items, actual.recent_projects.items);
+    try std.testing.expectEqualDeep(expected.open_projects.items, actual.open_projects.items);
+    try std.testing.expectEqualDeep(expected.quick_chats.items, actual.quick_chats.items);
+    try std.testing.expectEqualDeep(expected.attention.items, actual.attention.items);
+    try std.testing.expectEqualDeep(expected.attention_entries.items, actual.attention_entries.items);
+    try std.testing.expectEqual(expected.graphs.items.len, actual.graphs.items.len);
+    for (expected.graphs.items, actual.graphs.items) |left, right| try expectGraphDataEqual(left, right);
+    try std.testing.expectEqual(expected.graph == null, actual.graph == null);
+    if (expected.graph) |graph| try expectGraphDataEqual(graph, actual.graph.?);
+    try std.testing.expectEqual(expected.activity.items.len, actual.activity.items.len);
+    for (expected.activity.items, actual.activity.items) |left, right| {
+        try std.testing.expectEqualStrings(left.title, right.title);
+        try std.testing.expectEqualStrings(left.state, right.state);
+        try std.testing.expectEqualStrings(left.project_path, right.project_path);
+        try std.testing.expectEqualStrings(left.node_id, right.node_id);
+    }
+    if (actual.graph) |graph| {
+        try std.testing.expectEqualStrings(actual.selected_project_path.?, graph.project.path);
+        try std.testing.expect(actual.currentGraph() != null);
+    }
+}
+
+fn checkModelReplacementOwnership(
+    allocator: std.mem.Allocator,
+    failed_frame: []const u8,
+    frame: []const u8,
+    composite: bool,
+    before: *const Model,
+    after: *const Model,
+) !void {
+    var model = try initOwnershipModel(allocator, failed_frame, composite);
+    defer model.deinit();
+    const old_nodes = model.graph.?.nodes.items.ptr;
+    const old_summary_nodes = model.graphs.items[0].nodes.items.ptr;
+    const old_selection = model.selected_node_id.?.ptr;
+    const old_timestamp = model.activity.items[0].timestamp;
+    model.decodeGraph(frame) catch |err| {
+        try expectModelDataEqual(before, &model);
+        try std.testing.expect(old_nodes == model.graph.?.nodes.items.ptr);
+        try std.testing.expect(old_summary_nodes == model.graphs.items[0].nodes.items.ptr);
+        try std.testing.expect(old_selection == model.selected_node_id.?.ptr);
+        try std.testing.expectEqual(old_timestamp, model.activity.items[0].timestamp);
+        return err;
+    };
+    try expectModelDataEqual(after, &model);
+}
+
+test "decoder ownership populated model replacements preserve coherent state at every allocation failure" {
+    const allocator = std.testing.allocator;
+    const failed_frame = try std.mem.replaceOwned(u8, allocator, ownershipGraphFrame, "\"state\":\"running\"", "\"state\":\"failed\"");
+    defer allocator.free(failed_frame);
+    const cases = [_]struct { frame: []const u8, composite: bool = false }{
+        .{ .frame = ownershipReplacementFrame },
+        .{ .frame = ownershipOtherReplacementFrame },
+        .{ .frame = ownershipNewProjectFrame },
+        .{ .frame = ownershipReplacementFrame, .composite = true },
+        .{ .frame = ownershipMalformedCompositeFrame, .composite = true },
+        .{ .frame = ownershipEmptyFrame },
+    };
+    for (cases) |case| {
+        var before = try initOwnershipModel(allocator, failed_frame, case.composite);
+        defer before.deinit();
+        var after = try initOwnershipModel(allocator, failed_frame, case.composite);
+        defer after.deinit();
+        try after.decodeGraph(case.frame);
+        try checkOwnershipAllocationFailures(checkModelReplacementOwnership, .{ failed_frame, case.frame, case.composite, &before, &after });
+    }
+}
+
+test "decoder ownership malformed open subgraph retains the existing top level fallback" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    try std.testing.expect(model.openComposite("first"));
+    try model.decodeGraph(ownershipMalformedCompositeFrame);
+    try std.testing.expect(!model.isCompositeOpen());
+    try std.testing.expectEqualStrings("first", model.graph.?.nodes.items[0].id);
+    try std.testing.expectEqualStrings("Owned \"graph\"", model.graph.?.project.name);
+}
+
+test "decoder ownership best effort synchronization never retains a different project on allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    try model.decodeGraph(ownershipOtherFrame);
+    const path = try allocator.dupe(u8, "other");
+    allocator.free(model.selected_project_path.?);
+    model.selected_project_path = path;
+    failing.fail_index = failing.alloc_index;
+    model.syncLegacyGraph();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(model.graph == null);
+    try std.testing.expectEqualStrings("other", model.currentGraph().?.project.path);
+}
+
+fn initAttentionEvictionModel(allocator: std.mem.Allocator, restore: bool) !Model {
+    const first =
+        \\{"graphChanged":{"project":{"path":"attention-a","name":"A"},"nodes":[{"id":"a-node","title":"A node","state":"failed"}],"edges":[]}}
+    ;
+    const second =
+        \\{"graphChanged":{"project":{"path":"attention-b","name":"B"},"nodes":[{"id":"b-first","title":"B first","state":"failed","activity":"waiting","presence":"awaitingInput"},{"id":"b-second","title":"B second","state":"failed"}],"edges":[]}}
+    ;
+    var model = Model.init(allocator);
+    errdefer model.deinit();
+    try model.decodeGraph(first);
+    try model.decodeGraph(second);
+    try std.testing.expect(model.selectProject("attention-b"));
+    if (restore) {
+        model.beginRestore();
+        try model.decodeGraph(second);
+    }
+    try std.testing.expectEqual(@as(usize, 3), model.attentionCount());
+    try std.testing.expectEqual(@as(usize, 3), model.attention_entries.items.len);
+    return model;
+}
+
+fn evictAttentionProject(model: *Model, restore: bool) !void {
+    if (restore) {
+        model.markRestored();
+        try std.testing.expectEqual(RestoreState.restored, model.restore_state);
+    } else {
+        try std.testing.expect(model.applyLifecycle(.close, "attention-a"));
+    }
+    try std.testing.expect(model.graphFor("attention-a") == null);
+    try std.testing.expect(model.graphFor("attention-b") != null);
+    try std.testing.expectEqualStrings("attention-b", model.graph.?.project.path);
+}
+
+fn expectRetainedProjectAttention(model: *const Model) !void {
+    try std.testing.expectEqual(@as(usize, 2), model.attentionCount());
+    try std.testing.expectEqual(@as(usize, 2), model.attention_entries.items.len);
+    for (model.attention_entries.items) |entry| {
+        try std.testing.expectEqualStrings("attention-b", entry.project_path);
+        try std.testing.expect(model.graphFor(entry.project_path) != null);
+    }
+}
+
+fn checkAttentionEvictionFailures(restore: bool) !void {
+    const budget = budget: {
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var model = try initAttentionEvictionModel(counting.allocator(), restore);
+        defer model.deinit();
+        const start = counting.alloc_index;
+        try evictAttentionProject(&model, restore);
+        const total = counting.alloc_index - start;
+        try expectRetainedProjectAttention(&model);
+        const attention_start = counting.alloc_index;
+        var attention = try model.prepareAttention(null);
+        defer attention.deinit(counting.allocator());
+        const attention_count = counting.alloc_index - attention_start;
+        try std.testing.expect(attention_count > 0 and total >= attention_count);
+        break :budget .{ .prefix = total - attention_count, .count = attention_count };
+    };
+    std.debug.print("attention preparation failure positions: {d}\n", .{budget.count});
+    for (0..budget.count) |index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        {
+            var model = try initAttentionEvictionModel(failing.allocator(), restore);
+            defer model.deinit();
+            // Removal and legacy synchronization succeed; fail each allocation
+            // in the subsequent attention rebuild, including partial lists.
+            failing.fail_index = failing.alloc_index + budget.prefix + index;
+            try evictAttentionProject(&model, restore);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
+            try std.testing.expectEqual(@as(usize, 0), model.attention_entries.items.len);
+            model.selectNextAttention();
+            try std.testing.expectEqualStrings("attention-b", model.selected_project_path.?);
+            try std.testing.expectEqualStrings("b-first", model.selected_node_id.?);
+
+            failing.fail_index = std.math.maxInt(usize);
+            model.rebuildAttention();
+            try expectRetainedProjectAttention(&model);
+            model.selectNextAttention();
+            try std.testing.expectEqualStrings("attention-b", model.selected_project_path.?);
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "decoder ownership attention eviction lifecycle removal discards obsolete lists on allocation failure" {
+    try checkAttentionEvictionFailures(false);
+}
+
+test "decoder ownership attention eviction restore reconciliation discards obsolete lists on allocation failure" {
+    try checkAttentionEvictionFailures(true);
 }

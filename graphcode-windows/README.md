@@ -114,6 +114,26 @@ real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
 provides a structured Manage view, content summaries, creation-order/running-only
 cycling, and recoverable deletion with daemon/session teardown.
 
+## Graph decoder ownership
+
+Graph snapshots own their project, node, edge, and optional string storage.
+`GraphModel.decodeGraph` propagates allocation failures, including failures while
+preparing attention, activity, restore-generation, selection, and legacy/nested
+snapshots. It prepares owned replacements before its final fallible summary
+update. On error, existing model data remains intact; list capacity may grow.
+This guarantee covers the decoder, not all model operations or the sequence
+bookkeeping performed by `updateFromFrame` before decoding. Nondecoder navigation
+and attention APIs retain their best-effort interface. If attention rebuilding
+fails after nondecoder project eviction, both owned attention lists are cleared
+so removed projects cannot remain visible. Wire defaults and the
+existing malformed-open-subgraph fallback to the top-level graph are unchanged.
+
+From `graphcode-windows`, run `zig test src\GraphModel.zig --test-filter "decoder ownership"`
+with Zig 0.15.2 for direct test-allocator, exhaustive allocation-fault, malformed
+input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
+for the existing semantic root as well. These are offline allocation simulations,
+not evidence of true OS memory exhaustion or live UI behavior.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and
