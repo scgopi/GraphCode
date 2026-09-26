@@ -1,3 +1,6 @@
+[CmdletBinding()]
+param([string] $SupervisorArtifactsDirectory = "")
+
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
@@ -320,6 +323,352 @@ Test-ThemeSwiftMutation $themeSwiftWithUnterminatedBlockComment `
   if ($fixture) {
     Remove-Item -LiteralPath $fixture.Dir -Recurse -Force -ErrorAction SilentlyContinue
   }
+}
+
+# Tiny generated images below test the production PNG comparator. They are not
+# app captures and require explicit comparator-test opt-in.
+Add-Type -AssemblyName System.Drawing
+$renderedValidator = Join-Path $repoRoot "Tools\windows\Test-RenderedVisualBaseline.ps1"
+$renderedDir = Join-Path ([IO.Path]::GetTempPath()) "graphcode-rendered-test-$([guid]::NewGuid().ToString('N'))"
+$null = New-Item -ItemType Directory -Path $renderedDir
+$renderedPath = Join-Path $renderedDir "evidence.json"
+$reportPath = Join-Path $renderedDir "report.json"
+try {
+  $sourceRecords = @(& $renderedValidator -SourceSnapshot)
+  $specs = @(
+    @{ id = 'canvas-sidebar'; tokens = @('canvas_tone','canvas_grid_line')
+      regionIds = @('canvas-tone','canvas-grid'); rgb = @(@(10,12,11),@(21,24,22)); state = 'fixture-project-disconnected' },
+    @{ id = 'dialog'; tokens = @('dialog_panel')
+      regionIds = @('dialog-panel'); rgb = ,@(35,35,38); state = 'product-settings-unmodified' },
+    @{ id = 'workspace'; tokens = @('tab_selected_background','pane_focus_tint')
+      regionIds = @('selected-tab','pane-focus'); rgb = @(@(60,62,68),@(10,132,255)); state = 'fixture-loop-attached' }
+  )
+  $testImages = @()
+  foreach ($spec in $specs) {
+    $bitmap = [Drawing.Bitmap]::new(4, 3)
+    try {
+      $graphics = [Drawing.Graphics]::FromImage($bitmap)
+      try { $graphics.Clear([Drawing.Color]::Black) } finally { $graphics.Dispose() }
+      $regions = @()
+      for ($i = 0; $i -lt $spec.tokens.Count; $i++) {
+        $rgb = $spec.rgb[$i]
+        $bitmap.SetPixel($i, 0, [Drawing.Color]::FromArgb($rgb[0], $rgb[1], $rgb[2]))
+        $regions += @{ id = $spec.regionIds[$i]; kind = 'flat'; rect = @($i,0,1,1)
+          windowsToken = $spec.tokens[$i]; source = 'explicit comparator test input' }
+      }
+      $bitmap.SetPixel(1, 1, [Drawing.Color]::White)
+      $bitmap.SetPixel(2, 1, [Drawing.Color]::FromArgb(128,128,128))
+      $regions += @{ id = 'coverage'; kind = 'coverage'; rect = @(0,1,4,1)
+        backgroundRgb = @(0,0,0); foregroundRgb = @(255,255,255); source = 'explicit comparator test input' }
+      $file = "$($spec.id).png"
+      $imagePath = Join-Path $renderedDir $file
+      $bitmap.Save($imagePath, [Drawing.Imaging.ImageFormat]::Png)
+      $testImages += @{ id = $spec.id; file = $file; sha256 = (Get-FileHash $imagePath).Hash.ToLowerInvariant()
+        width = 4; height = 3; dpi = 96; regions = $regions; state = $spec.state
+        window = @{ pid = 123; createdAt = '2026-01-15T14:59:00Z'; hwnd = 100; screenClient = @(0,0,4,3) } }
+    } finally { $bitmap.Dispose() }
+  }
+  $goodRendered = @{
+    schemaVersion = 1; kind = 'comparator-test'; sourceCommit = ('1' * 40); sourceTree = ('2' * 40)
+    capturedAt = '2026-01-15T15:00:00Z'; os = 'synthetic comparator input, not runtime'
+    dpi = 96; executable = @{ sha256 = ('3' * 64); artifact = 'graphcode-windows\zig-out\bin\graphcode-windows.exe' }
+    sources = $sourceRecords; process = @{ pid = 123; createdAt = '2026-01-15T14:59:00Z' }
+    backend = @{ session = 'v3-deadbeef11111111-1111-4111-8111-111111111111'; clients = 1
+      backendPid = 125; createdAt = '2026-01-15T14:59:01Z'; cwd = 'C:\fixture' }
+    zmxPathLengths = @{ endpoint = 214; lease = 220; ownerPipe = 165 }; visibilityInterventions = @()
+    providers = @{
+      zmx = @{ sha256 = ('4' * 64); pin = '11e20c738b4ebd88031c7a01f1a9d938ee123234'
+        artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
+      winghostty = @{ sha256 = ('5' * 64); pin = 'f5abc059e4ca58b376eb209313aca7784659c679'
+        artifact = '.graphcode-tools\providers\winghostty\zig-out\lib\winghostty-win32-host.lib' }
+    }
+    renderer = @{ uiaGate = $false; daemonSupervisorHook = $false }
+    fixture = @{ name = 'App.installUiaFixture'; daemonState = 'disconnected'; zoom = 1 }
+    images = $testImages
+  } | ConvertTo-Json -Depth 15
+
+  function Invoke-RenderedTest([string] $ExpectedFailure = '', [switch] $WithoutOptIn, [string] $SourceRoot = '', [string] $AnalysisPath = '') {
+    $arguments = @('-NoProfile','-File',$renderedValidator,'-EvidencePath',$renderedPath,'-ReportPath',$reportPath)
+    if (-not $WithoutOptIn) { $arguments += '-AllowTestFixture' }
+    if ($SourceRoot) { $arguments += @('-SourceRoot',$SourceRoot) }
+    if ($AnalysisPath) { $arguments += @('-AnalysisPath',$AnalysisPath) }
+    $text = (& pwsh @arguments 2>&1 | Out-String)
+    $result = [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = $text }
+    if ($ExpectedFailure) {
+      Assert-Fails $result $ExpectedFailure "rendered $ExpectedFailure"
+    } elseif ($result.ExitCode -ne 0 -or $text -notlike '*Rendered visual baseline: PASS*') {
+      throw "Rendered comparator did not pass: $text"
+    }
+  }
+  $goodRendered | Set-Content -LiteralPath $renderedPath
+  Invoke-RenderedTest
+  $measure = @((Get-Content $reportPath -Raw | ConvertFrom-Json).measurements | Where-Object region -eq 'coverage')[0]
+  if ($measure.backgroundPixels -ne 2 -or $measure.foregroundPixels -ne 1 -or
+      $measure.otherPixels -ne 1 -or $measure.distinctColors -ne 3) {
+    throw "Production comparator coverage counts are incorrect"
+  }
+  Invoke-RenderedTest 'test fixtures require explicit opt-in' -WithoutOptIn
+
+  & {
+    $OutputDirectory = Join-Path $renderedDir 'cleanup'
+    $null = New-Item -ItemType Directory -Path $OutputDirectory
+    $tokens = $null; $parseErrors = $null
+    $captureAst = [Management.Automation.Language.Parser]::ParseFile(
+      (Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'), [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+    foreach ($name in @('Get-CaptureUtcTicks','Test-CaptureProcessIdentity','Stop-CaptureProcesses',
+        'Get-ClientRelativeBounds','Get-ZmxCapturePaths','Get-OwnedZmxWindowRecord','ConvertFrom-CaptureZmxInfo')) {
+      $definition = $captureAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+      }, $true)
+      . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $bounds = [pscustomobject]@{ X = -1550.5; Y = 210.25; Width = 250.0; Height = 106.0 }
+    $relative = @(Get-ClientRelativeBounds $bounds ([Drawing.Rectangle]::new(-1600,180,1200,800)))
+    if (($relative -join ',') -ne '49.5,30.25,250,106') {
+      throw "Actual capture bounds helper returned incorrect shape/coordinates: $($relative -join ',')"
+    }
+    $fixtureSession = '11111111-1111-4111-8111-111111111111'
+    $pathProbe = Get-ZmxCapturePaths 'C:\x' 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession
+    $maxRoot = 'C:\x' + ('x' * (259 - $pathProbe.leaseLength))
+    $boundary = Get-ZmxCapturePaths $maxRoot 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession
+    if ($boundary.leaseLength -ne 259) { throw 'Pinned zmx length boundary fixture is incorrect' }
+    $rejected = $false
+    try { $null = Get-ZmxCapturePaths ($maxRoot + 'x') 'v3-deadbeef' 'S-1-5-21-123' $fixtureSession }
+    catch { $rejected = $_.Exception.Message -like '*Pinned zmx path limit*' }
+    if (-not $rejected) { throw 'Capture accepted a 260-character lease path' }
+    $infoText = "v3-deadbeef$fixtureSession`tclients=1`tpid=123`tcmd=`tcwd=C:\fixture`n"
+    $parsedInfo = ConvertFrom-CaptureZmxInfo $infoText "v3-deadbeef$fixtureSession" 'C:\fixture'
+    if ($parsedInfo.backendPid -ne 123 -or $parsedInfo.clients -ne 1) { throw 'Pinned zmx info parser lost backend/client identity' }
+    $pendingInfo = ConvertFrom-CaptureZmxInfo ($infoText.Replace('clients=1','clients=0')) "v3-deadbeef$fixtureSession" 'C:\fixture'
+    if ($pendingInfo.clients -ne 0) { throw 'No-client zmx readiness was silently promoted' }
+    foreach ($badInfo in @($infoText.Replace('deadbeef','cafebabe'), $infoText.Replace('pid=123','pid=0'),
+        $infoText.Replace('C:\fixture','C:\foreign'), $infoText.Replace("cmd=`t","cmd=cmd.exe`t"),
+        ($infoText + $infoText), $infoText.TrimEnd("`n"))) {
+      $rejected = $false
+      try { $null = ConvertFrom-CaptureZmxInfo $badInfo "v3-deadbeef$fixtureSession" 'C:\fixture' }
+      catch { $rejected = $_.Exception.Message -like '*exact attached fixture session/backend/cwd*' }
+      if (-not $rejected) { throw 'Capture accepted mismatched backend/session/cwd info' }
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh).Source)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    foreach ($arg in @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60')) {
+      $start.ArgumentList.Add($arg)
+    }
+    $sleeper = [Diagnostics.Process]::Start($start)
+    try {
+      $record = @{ pid = $sleeper.Id; executable = $sleeper.Path; commandLine = "$($sleeper.Path) attach fixture"
+        createdAt = $sleeper.StartTime.ToUniversalTime().ToString('o') }
+      if (-not (Test-CaptureProcessIdentity $sleeper $record)) { throw 'String process timestamp identity failed' }
+      $parsedRecord = $record | ConvertTo-Json | ConvertFrom-Json
+      if (-not (Test-CaptureProcessIdentity $sleeper $parsedRecord)) { throw 'JSON process timestamp identity failed' }
+      $registry = [Collections.Generic.Dictionary[int,object]]::new()
+      $registry[$sleeper.Id] = $record
+      if ($null -eq (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Exact owned attach identity was not recognized' }
+      if ($null -ne (Get-OwnedZmxWindowRecord 1 $registry $sleeper.Path) -or
+          $null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry 'C:\foreign.exe')) {
+        throw 'Visibility policy accepted unrecorded or foreign executable identity'
+      }
+      $record.commandLine = "$($sleeper.Path) --daemon fixture"
+      if ($null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Visibility policy accepted a non-attach process' }
+      $record.commandLine = "$($sleeper.Path) attach fixture"
+      foreach ($invalidTime in @('not-a-time', '2026-01-15T14:59:00',
+          [DateTime]::SpecifyKind($sleeper.StartTime, [DateTimeKind]::Unspecified))) {
+        $rejected = $false
+        try { $null = Get-CaptureUtcTicks $invalidTime } catch { $rejected = $true }
+        if (-not $rejected) { throw 'Cleanup accepted an invalid/ambiguous process timestamp' }
+      }
+      $record.createdAt = $sleeper.StartTime.ToUniversalTime().AddTicks(1).ToString('o')
+      if (Test-CaptureProcessIdentity $sleeper $record) { throw 'Process identity lost subsecond timestamp precision' }
+      if ($null -ne (Get-OwnedZmxWindowRecord $sleeper.Id $registry $sleeper.Path)) { throw 'Visibility policy accepted reused PID identity' }
+      $record.createdAt = $sleeper.StartTime.ToUniversalTime().AddSeconds(-1).ToString('o')
+      $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'processes.json')
+      Stop-CaptureProcesses
+      if ($sleeper.HasExited) { throw 'Cleanup killed a process with mismatched creation time' }
+      $parsedRecord | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'processes.json')
+      Stop-CaptureProcesses
+      if (-not $sleeper.HasExited) { throw 'Cleanup left its matching owned process alive' }
+    } finally {
+      if (-not $sleeper.HasExited) {
+        Stop-Process -Id $sleeper.Id -Force
+        $null = $sleeper.WaitForExit(5000)
+      }
+      $sleeper.Dispose()
+    }
+  }
+
+  $copiedSourceRoot = Join-Path $renderedDir 'source'
+  foreach ($relative in @($sourceRecords.path) + @('investigation\visual-baseline\manifest.json')) {
+    $destination = Join-Path $copiedSourceRoot $relative
+    $null = New-Item -ItemType Directory -Path (Split-Path $destination) -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot $relative) -Destination $destination
+  }
+  foreach ($newline in @("`n","`r`n")) {
+    foreach ($record in $sourceRecords) {
+      $path = Join-Path $copiedSourceRoot $record.path
+      $text = [IO.File]::ReadAllText($path).Replace("`r`n","`n").Replace("`n",$newline)
+      [IO.File]::WriteAllText($path,$text)
+    }
+    Invoke-RenderedTest -SourceRoot $copiedSourceRoot
+  }
+  $driftPath = Join-Path $copiedSourceRoot 'graphcode-windows\src\AppFont.zig'
+  [IO.File]::AppendAllText($driftPath,"`n// actual content drift in copied source fixture`n")
+  Invoke-RenderedTest 'source hash mismatch: graphcode-windows\src\AppFont.zig' -SourceRoot $copiedSourceRoot
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'graphcode-windows\src\AppFont.zig') -Destination $driftPath -Force
+  $copiedTokens = Join-Path $copiedSourceRoot 'graphcode-windows\src\DesignTokens.zig'
+  $tokenText = [IO.File]::ReadAllText($copiedTokens)
+  [IO.File]::WriteAllText($copiedTokens, $tokenText.Replace(
+    'pub const pane_focus_tint: Color = 0x00FF840A;', 'pub const pane_focus_tint: Color = 0x000A84FF;'))
+  Invoke-RenderedTest 'pane-focus source mismatch' -SourceRoot $copiedSourceRoot
+  [IO.File]::WriteAllText($copiedTokens, $tokenText)
+  Invoke-RenderedTest -SourceRoot $copiedSourceRoot
+
+  $analysisPath = Join-Path $renderedDir 'analysis.json'
+  $recorded = $goodRendered | ConvertFrom-Json -AsHashtable
+  $oldComparator = @($recorded.sources | Where-Object path -eq 'Tools\windows\Test-RenderedVisualBaseline.ps1')[0]
+  $oldComparator.sha256 = '6' * 64
+  $oldComparator.lfSha256 = '6' * 64
+  $recorded | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+  Invoke-RenderedTest 'source hash mismatch: Tools\windows\Test-RenderedVisualBaseline.ps1'
+  $analysis = @{ kind = 'controlled-pane-focus-reanalysis'; reason = 'synthetic provenance test, not runtime evidence'
+    evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant(); sources = $sourceRecords }
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest -AnalysisPath $analysisPath
+  $reanalysisReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+  if ($reanalysisReport.analysisProvenance.kind -cne 'controlled-pane-focus-reanalysis' -or
+      @($reanalysisReport.analysisProvenance.changedSources).Count -ne 1) {
+    throw 'Re-analysis lost its explicit provenance/changed-source record'
+  }
+  $analysis.evidenceSha256 = '0' * 64
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled re-analysis evidence hash mismatch' -AnalysisPath $analysisPath
+  $analysis.evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant()
+  $analysis.kind = 'runtime-capture'
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled re-analysis must identify its kind and reason' -AnalysisPath $analysisPath
+  $analysis.kind = 'controlled-pane-focus-reanalysis'
+  $unrelated = @($recorded.sources | Where-Object path -eq 'graphcode-windows\src\AppFont.zig')[0]
+  $unrelated.lfSha256 = '7' * 64
+  $recorded | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+  $analysis.evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant()
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled pane-focus re-analysis cannot replace unrelated capture sources' -AnalysisPath $analysisPath
+  $goodRendered | Set-Content -LiteralPath $renderedPath
+
+  foreach ($case in @(
+    @{ name = 'one-channel delta=1'; rgb = @(11,12,11); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'neutral gray'; rgb = @(12,12,12); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'BGR swap'; rgb = @(11,12,10); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'pane-focus old-orange channel swap'; rgb = @(255,132,10); image = 2; x = 1; diagnostic = 'workspace/pane-focus (1,0)' },
+    @{ name = 'pane-focus delta=1'; rgb = @(10,132,254); image = 2; x = 1; diagnostic = 'workspace/pane-focus (1,0)' }
+  )) {
+    $imagePath = Join-Path $renderedDir $testImages[$case.image].file
+    $original = [IO.File]::ReadAllBytes($imagePath)
+    $bitmap = [Drawing.Bitmap]::new($imagePath)
+    try {
+      $bitmap.SetPixel($case.x,0,[Drawing.Color]::FromArgb($case.rgb[0],$case.rgb[1],$case.rgb[2]))
+      $mutationPath = Join-Path $renderedDir 'mutation.png'
+      $bitmap.Save($mutationPath,[Drawing.Imaging.ImageFormat]::Png)
+    } finally { $bitmap.Dispose() }
+    Move-Item -LiteralPath $mutationPath -Destination $imagePath -Force
+    $mutated = $goodRendered | ConvertFrom-Json -AsHashtable
+    $mutated.images[$case.image].sha256 = (Get-FileHash $imagePath).Hash.ToLowerInvariant()
+    $mutated | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+    Invoke-RenderedTest "RGB mismatch $($case.diagnostic)"
+    [IO.File]::WriteAllBytes($imagePath,$original)
+    $goodRendered | Set-Content -LiteralPath $renderedPath
+    Invoke-RenderedTest
+    Write-Host "Rendered boundary: $($case.name) rejected; unchanged delta=0 accepted"
+  }
+
+  foreach ($case in @(
+    @{ diagnostic = 'regions must not be empty'; edit = { param($m) $m.images[0].regions = @() } },
+    @{ diagnostic = 'required flat region/mapping missing'; edit = { param($m) $m.images[0].regions[0].id = 'wrong' } },
+    @{ diagnostic = 'missing or duplicate region identity'; edit = { param($m) $m.images[0].regions += $m.images[0].regions[2] } },
+    @{ diagnostic = 'region is out of bounds'; edit = { param($m) $m.images[0].regions[0].rect = @(3,0,2,1) } },
+    @{ diagnostic = 'region width must be an integer'; edit = { param($m) $m.images[0].regions[0].rect[2] = 0 } },
+    @{ diagnostic = 'image dimensions mismatch'; edit = { param($m) $m.images[0].width = 5; $m.images[0].window.screenClient[2] = 5 } },
+    @{ diagnostic = 'image hash mismatch'; edit = { param($m) $m.images[0].sha256 = ('0' * 64) } },
+    @{ diagnostic = 'source provenance cardinality/identity'; edit = { param($m) $m.sources = @() } },
+    @{ diagnostic = 'source hash mismatch'; edit = { param($m) $m.sources[0].lfSha256 = ('0' * 64) } },
+    @{ diagnostic = 'incompatible image DPI'; edit = { param($m) $m.images[0].dpi = 120 } },
+    @{ diagnostic = 'incompatible fixture state'; edit = { param($m) $m.fixture.zoom = 2 } },
+    @{ diagnostic = 'production renderer requires both automation hooks disabled'; edit = { param($m) $m.renderer.uiaGate = $true } },
+    @{ diagnostic = 'image window provenance is missing'; edit = { param($m) $m.images[0].Remove('window') } },
+    @{ diagnostic = 'image surface state mismatch'; edit = { param($m) $m.images[0].Remove('state') } },
+    @{ diagnostic = 'image surface state mismatch'; edit = { param($m) $m.images[0].state = 'wrong-surface' } },
+    @{ diagnostic = 'image does not identify the recorded owned process'; edit = { param($m) $m.images[0].window.pid = 456 } },
+    @{ diagnostic = 'image HWND must be an integer'; edit = { param($m) $m.images[0].window.hwnd = 0 } },
+    @{ diagnostic = 'creation time is invalid'; edit = { param($m) $m.images[0].window.createdAt = 'invalid' } },
+    @{ diagnostic = 'creation time is invalid'; edit = { param($m) $m.images[0].window.createdAt = '2026-01-15T14:59:00' } },
+    @{ diagnostic = 'provider provenance is missing'; edit = { param($m) $m.Remove('providers') } },
+    @{ diagnostic = 'zmx provider provenance is missing'; edit = { param($m) $m.providers.Remove('zmx') } },
+    @{ diagnostic = 'zmx provider hash is missing'; edit = { param($m) $m.providers.zmx.Remove('sha256') } },
+    @{ diagnostic = 'winghostty provider must be a SHA-256'; edit = { param($m) $m.providers.winghostty.sha256 = 'invalid' } },
+    @{ diagnostic = 'zmx provider pin mismatch'; edit = { param($m) $m.providers.zmx.pin = ('0' * 40) } },
+    @{ diagnostic = 'workspace backend provenance is missing'; edit = { param($m) $m.Remove('backend') } },
+    @{ diagnostic = 'attached backend client count must be an integer'; edit = { param($m) $m.backend.clients = 0 } },
+    @{ diagnostic = 'workspace backend session/cwd identity mismatch'; edit = { param($m) $m.backend.session = 'foreign' } },
+    @{ diagnostic = 'zmx lease path length must be an integer'; edit = { param($m) $m.zmxPathLengths.lease = 260 } },
+    @{ diagnostic = 'window intervention provenance is missing'; edit = { param($m) $m.Remove('visibilityInterventions') } }
+  )) {
+    $mutated = $goodRendered | ConvertFrom-Json -AsHashtable
+    & $case.edit $mutated
+    $mutated | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+    Invoke-RenderedTest $case.diagnostic
+  }
+} finally {
+  Remove-Item -LiteralPath $renderedDir -Recurse -Force
+}
+
+if ($SupervisorArtifactsDirectory) {
+  $capture = Join-Path $repoRoot 'Tools\windows\capture-visual-baseline.ps1'
+  $captureShell = Join-Path $repoRoot 'graphcode-windows\zig-out\bin\graphcode-windows.exe'
+  $captureZmx = Join-Path $repoRoot '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe'
+  if (Test-Path -LiteralPath $SupervisorArtifactsDirectory) { throw 'Supervisor test artifacts must be a fresh directory' }
+  $null = New-Item -ItemType Directory -Path $SupervisorArtifactsDirectory
+  $probeResults = @()
+  foreach ($probe in @('worker-failure','stall','sampler-block')) {
+    $directory = Join-Path $SupervisorArtifactsDirectory $probe
+    $output = & pwsh -NoProfile -File $capture -Shell $captureShell -Zmx $captureZmx `
+      -OutputDirectory $directory -SupervisorProbe $probe 2>&1
+    $exitCode = $LASTEXITCODE
+    $output | Out-String | Set-Content -LiteralPath (Join-Path $directory 'caller.log')
+    if ($exitCode -eq 0) { throw "$probe should fail its hidden worker, not return capture success" }
+    $receipt = Get-Content -LiteralPath (Join-Path $directory 'supervisor.json') -Raw | ConvertFrom-Json
+    if (-not $receipt.cleanupVerified -or @($receipt.remainingOwnedPids).Count -or
+        @($receipt.cleanupFailures).Count -or -not $receipt.watchdogJoined) {
+      throw "$probe did not verify job cleanup and callback drain"
+    }
+    foreach ($stream in @('stdout','stderr')) {
+      $text = Get-Content -LiteralPath (Join-Path $directory "supervisor-$stream.log") -Raw
+      if ($text -notlike "*CAPTURE_PROBE_$($stream.ToUpperInvariant()) $probe*") {
+        throw "$probe lost the original $stream stream"
+      }
+    }
+    if ($probe -eq 'worker-failure') {
+      if ($receipt.watchdogFired -or $receipt.originalWorkerError -notlike '*CAPTURE_ORIGINAL_WORKER_FAILURE*') {
+        throw 'Capture worker failure was hidden or incorrectly attributed to the watchdog'
+      }
+    } elseif (-not $receipt.watchdogFired -or -not $receipt.watchdogTerminated -or
+        $receipt.watchdogNativeError -ne 0 -or $receipt.watchdogCallbackError) {
+      throw "$probe independent job timer did not terminate successfully"
+    }
+    if ($probe -eq 'sampler-block' -and -not $receipt.samplerBlockInjected) { throw 'Sampler block was not exercised' }
+    $child = Get-Content -LiteralPath (Join-Path $directory 'probe-child.json') -Raw | ConvertFrom-Json
+    foreach ($record in @($receipt.processes) + @($child)) {
+      $process = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+      if ($process -and $process.StartTime.ToUniversalTime().Ticks -eq ([datetimeoffset]$record.createdAt).UtcTicks) {
+        throw "$probe left its exact recorded process $($record.pid) alive"
+      }
+    }
+    $probeResults += @{ probe = $probe; passed = $true; workerExit = $receipt.workerExitCode
+      firedMilliseconds = $receipt.watchdogFiredMilliseconds; cleanupVerified = $receipt.cleanupVerified
+      samplerBlocked = $receipt.samplerBlockInjected; totalMilliseconds = $receipt.totalElapsedMilliseconds }
+  }
+  $probeResults | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $SupervisorArtifactsDirectory 'verification.json')
+  Write-Host 'Capture supervisor: PASS (hidden failure, worker stall, blocked parent sampler; zero survivors)'
 }
 
 Write-Host "VisualBaseline.Tests.ps1: PASS"

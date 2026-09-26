@@ -1,0 +1,807 @@
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)] [string] $Shell,
+  [Parameter(Mandatory)] [string] $Zmx,
+  [Parameter(Mandatory)] [string] $OutputDirectory,
+  [string] $ForegroundLease = "",
+  [ValidateRange(30, 120)] [int] $TimeoutSeconds = 120,
+  [switch] $PreflightOnly,
+  [ValidateSet('none', 'stall', 'sampler-block', 'worker-failure')] [string] $SupervisorProbe = 'none',
+  [string] $WorkerToken,
+  [switch] $Worker
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$Shell = (Resolve-Path -LiteralPath $Shell).Path
+$Zmx = (Resolve-Path -LiteralPath $Zmx).Path
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
+foreach ($path in @($Shell, $Zmx)) {
+  if (-not $path.StartsWith($repoRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Capture requires own-worktree binaries: $path"
+  }
+}
+if (-not $PreflightOnly -and $SupervisorProbe -eq 'none' -and [string]::IsNullOrWhiteSpace($ForegroundLease)) {
+  throw "An explicit coordinator foreground lease is required"
+}
+if (Test-Path -LiteralPath (Join-Path (Split-Path $Shell) 'graphcoded.exe')) {
+  throw "Fixture-only capture rejects a sibling graphcoded.exe; no real daemon may replace the fixture"
+}
+if ($Shell -ne (Join-Path $repoRoot 'graphcode-windows\zig-out\bin\graphcode-windows.exe') -or
+    $Zmx -ne (Join-Path $repoRoot '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe')) {
+  throw 'Capture requires the standard own-worktree pinned build artifacts'
+}
+
+function Get-CaptureUtcTicks($Value) {
+  if ($Value -is [DateTime]) {
+    if ($Value.Kind -eq [DateTimeKind]::Unspecified) { throw "Capture process creation time must include a timezone" }
+    return $Value.ToUniversalTime().Ticks
+  }
+  if ($Value -is [DateTimeOffset]) { return $Value.UtcTicks }
+  if ([string]$Value -notmatch '^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$') {
+    throw "Capture process creation time must include a timezone"
+  }
+  return [DateTimeOffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture).UtcTicks
+}
+
+function Test-CaptureProcessIdentity($Process, $Record) {
+  return $null -ne $Process -and
+    $Process.Id -eq $Record.pid -and
+    $Process.StartTime.ToUniversalTime().Ticks -eq (Get-CaptureUtcTicks $Record.createdAt) -and
+    $Process.Path -eq $Record.executable
+}
+
+function Get-ZmxCapturePaths([string] $Root, [string] $Prefix, [string] $Sid, [string] $Session) {
+  if (-not [IO.Path]::IsPathFullyQualified($Root) -or $Prefix -notmatch '^v3-[0-9a-f]{8}$' -or
+      $Sid -notmatch '^S-[0-9-]+$' -or $Session -notmatch '^[0-9a-f-]{36}$') {
+    throw 'Invalid isolated zmx namespace identity'
+  }
+  $fullSession = $Prefix + $Session
+  $encoded = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes($fullSession)).ToLowerInvariant()
+  $endpoint = Join-Path $Root "ipc\$Sid\$encoded.endpoint"
+  $lease = "$endpoint.lease"
+  $rootHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+    [Text.Encoding]::UTF8.GetBytes($Root))).ToLowerInvariant().Substring(0,16)
+  $pipe = "\\.\pipe\zmx-$Sid-r$rootHash\$fullSession"
+  # Pinned runtime_windows.zig uses SetFileSecurityW on ordinary paths and a
+  # 256 UTF-16-unit pipe bound, including the server's 32-hex nonce suffix.
+  if ($lease.Length -ge 260 -or $pipe.Length + 33 -ge 256) {
+    throw "Pinned zmx path limit: endpoint=$($endpoint.Length), lease=$($lease.Length), ownerPipe=$($pipe.Length + 33)"
+  }
+  return [ordered]@{
+    root = $Root; prefix = $Prefix; session = $fullSession
+    endpoint = $endpoint; lease = $lease; pipe = $pipe
+    endpointLength = $endpoint.Length; leaseLength = $lease.Length; ownerPipeLength = $pipe.Length + 33
+  }
+}
+
+function Get-OwnedZmxWindowRecord([int] $WindowProcessId, $Registry, [string] $ZmxPath) {
+  if (-not $Registry.ContainsKey($WindowProcessId)) { return $null }
+  $record = $Registry[$WindowProcessId]
+  if ($record.executable -ne $ZmxPath -or $record.commandLine -notmatch '\sattach\s') { return $null }
+  $current = Get-Process -Id $WindowProcessId -ErrorAction SilentlyContinue
+  if (-not (Test-CaptureProcessIdentity $current $record)) { return $null }
+  return $record
+}
+
+function ConvertFrom-CaptureZmxInfo([string] $Text, [string] $Session, [string] $Cwd) {
+  $pattern = '\A' + [regex]::Escape($Session) + '\tclients=(0|[1-9][0-9]*)\tpid=([1-9][0-9]*)\tcmd=\tcwd=([^\t\r\n]+)\r?\n\z'
+  $match = [regex]::Match($Text, $pattern)
+  if (-not $match.Success -or [int]$match.Groups[2].Value -le 0 -or $match.Groups[3].Value -ine $Cwd) {
+    throw 'Pinned zmx info did not prove the exact attached fixture session/backend/cwd'
+  }
+  return @{ session = $Session; clients = [ulong]::Parse($match.Groups[1].Value)
+    backendPid = [int]::Parse($match.Groups[2].Value); command = ''; cwd = $Cwd }
+}
+
+function Stop-CaptureProcesses {
+  $recordsPath = Join-Path $OutputDirectory 'processes.json'
+  if (-not (Test-Path -LiteralPath $recordsPath)) { return }
+  $records = @(Get-Content -LiteralPath $recordsPath -Raw | ConvertFrom-Json)
+  foreach ($record in ($records | Sort-Object createdAt -Descending)) {
+    $current = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    if (Test-CaptureProcessIdentity $current $record) {
+      Stop-Process -Id $record.pid -Force -ErrorAction Stop
+      if (-not $current.WaitForExit(5000)) { throw "Owned capture PID $($record.pid) did not exit" }
+    }
+  }
+}
+
+function Import-CaptureJobSupport {
+  $providerRoot = Join-Path $repoRoot '.graphcode-tools\providers\zmx'
+  $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'graphcode-windows\provider-pins.json') -Raw | ConvertFrom-Json
+  $head = git -C $providerRoot rev-parse HEAD
+  if ($LASTEXITCODE -ne 0 -or $head -cne $pins.zmx.sha) { throw 'Job support provider pin mismatch' }
+  $status = @(git -C $providerRoot status --porcelain --untracked-files=all)
+  if ($LASTEXITCODE -ne 0 -or $status.Count) { throw 'Job support provider worktree is not clean' }
+  $providerScript = Join-Path $providerRoot 'test\windows-startup.ps1'
+  $tokens = $null; $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($providerScript, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw ($errors | Out-String) }
+  foreach ($name in @('Require', 'Complete-StartupRun')) {
+    $definitions = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true))
+    if ($definitions.Count -ne 1) { throw "Pinned provider helper is missing/ambiguous: $name" }
+    . ([scriptblock]::Create(($definitions[0].Extent.Text -replace
+      ("^function " + [regex]::Escape($name) + '\b'), "function script:$name")))
+  }
+  $types = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+      $node.Value.Contains('public static class ZmxStartupJob')
+  }, $true))
+  if ($types.Count -ne 1) { throw 'Pinned provider job type is missing/ambiguous' }
+  Add-Type -TypeDefinition $types[0].Value
+}
+
+if ($Worker) {
+  if ([string]::IsNullOrWhiteSpace($WorkerToken)) { throw 'Capture worker requires its job-assignment barrier' }
+  $barrier = [Threading.EventWaitHandle]::OpenExisting("Local\graphcode-visual-$WorkerToken")
+  try { if (-not $barrier.WaitOne(15000)) { throw 'Capture worker job ownership was not established' } }
+  finally { $barrier.Dispose() }
+  if ($SupervisorProbe -ne 'none') {
+    $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    foreach ($arg in @('-NoProfile','-NonInteractive','-Command','[Threading.Thread]::Sleep(60000)')) {
+      $start.ArgumentList.Add($arg)
+    }
+    $child = [Diagnostics.Process]::Start($start)
+    @{ pid = $child.Id; createdAt = $child.StartTime.ToUniversalTime().ToString('o'); executable = $child.Path } |
+      ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'probe-child.json')
+    [Console]::Out.WriteLine("CAPTURE_PROBE_STDOUT $SupervisorProbe"); [Console]::Out.Flush()
+    [Console]::Error.WriteLine("CAPTURE_PROBE_STDERR $SupervisorProbe"); [Console]::Error.Flush()
+    if ($SupervisorProbe -eq 'worker-failure') { throw 'CAPTURE_ORIGINAL_WORKER_FAILURE' }
+    [Threading.Thread]::Sleep(60000)
+    throw 'Capture watchdog did not terminate its stalled worker'
+  }
+}
+
+if (-not $Worker -and -not $PreflightOnly) {
+  if (Test-Path -LiteralPath $OutputDirectory) { throw "Capture output directory must be fresh" }
+  $null = New-Item -ItemType Directory -Path $OutputDirectory
+  Import-CaptureJobSupport
+  Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+public sealed class CaptureJobWatchdog {
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
+  readonly object gate = new object();
+  readonly Stopwatch clock = Stopwatch.StartNew();
+  IntPtr job;
+  Timer timer;
+  public bool Fired { get; private set; }
+  public bool Terminated { get; private set; }
+  public int NativeError { get; private set; }
+  public string CallbackError { get; private set; }
+  public long FiredElapsedMilliseconds { get; private set; }
+  public bool Joined { get; private set; }
+  public CaptureJobWatchdog(IntPtr handle, int milliseconds) {
+    if (handle == IntPtr.Zero || milliseconds <= 0) throw new ArgumentException("Invalid capture watchdog.");
+    job = handle;
+    timer = new Timer(_ => {
+      lock (gate) {
+        if (job == IntPtr.Zero) return;
+        Fired = true;
+        FiredElapsedMilliseconds = clock.ElapsedMilliseconds;
+        try {
+          Terminated = TerminateJobObject(job, 124);
+          if (!Terminated) NativeError = Marshal.GetLastWin32Error();
+        } catch (Exception error) { CallbackError = error.ToString(); }
+      }
+    }, null, milliseconds, Timeout.Infinite);
+  }
+  public void DisarmAndJoin() {
+    Timer pending;
+    lock (gate) { job = IntPtr.Zero; pending = timer; timer = null; }
+    if (pending == null) return;
+    using (var drained = new ManualResetEvent(false)) {
+      if (!pending.Dispose(drained) || !drained.WaitOne(5000))
+        throw new TimeoutException("Capture watchdog did not drain; job must remain open.");
+    }
+    Joined = true;
+  }
+}
+'@
+  $limitMs = if ($SupervisorProbe -eq 'none') { $TimeoutSeconds * 1000 } else { 2000 }
+  $token = [guid]::NewGuid().ToString('N')
+  $job = $null; $gate = $null; $workerProcess = $null; $workerUtc = $null; $watchdog = $null
+  $assigned = $false; $output = $null; $stderr = $null; $failure = $null; $exitCode = $null
+  $samplerBlocked = $false
+  $identities = @{}
+  $totalClock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $gate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, "Local\graphcode-visual-$token")
+    $job = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([ZmxStartupJob]::Create(), $true)
+    $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    foreach ($arg in @('-NoProfile','-NonInteractive','-File',$PSCommandPath,'-Shell',$Shell,'-Zmx',$Zmx,
+        '-OutputDirectory',$OutputDirectory,'-ForegroundLease',$ForegroundLease,
+        '-TimeoutSeconds',"$TimeoutSeconds",'-WorkerToken',$token,'-SupervisorProbe',$SupervisorProbe,'-Worker')) {
+      $start.ArgumentList.Add($arg)
+    }
+    $workerProcess = [Diagnostics.Process]::Start($start)
+    $workerUtc = $workerProcess.StartTime.ToUniversalTime()
+    $output = $workerProcess.StandardOutput.ReadToEndAsync()
+    $stderr = $workerProcess.StandardError.ReadToEndAsync()
+    Require ([ZmxStartupJob]::AssignProcessToJobObject($job.DangerousGetHandle(), $workerProcess.SafeHandle.DangerousGetHandle())) `
+      'Capture worker job assignment failed'
+    $assigned = $true
+    $watchdog = [CaptureJobWatchdog]::new($job.DangerousGetHandle(), $limitMs)
+    $executionClock = [Diagnostics.Stopwatch]::StartNew()
+    $null = $gate.Set()
+    do {
+      $pids = [ZmxStartupJob]::Pids($job.DangerousGetHandle())
+      if ($SupervisorProbe -ne 'none') { Require (-not [ZmxStartupJob]::HasVisibleWindow($pids)) 'Hidden capture probe created a visible window' }
+      foreach ($childId in $pids) {
+        $record = Get-CimInstance Win32_Process -Filter "ProcessId=$childId"
+        if ($record) {
+          $utc = ([datetime]$record.CreationDate).ToUniversalTime()
+          $identities["${childId}:$($utc.Ticks)"] = @{ pid = $childId; parentPid = $record.ParentProcessId
+            createdAt = $utc.ToString('o'); createdUtcTicks = $utc.Ticks
+            executable = $record.ExecutablePath; commandLine = $record.CommandLine }
+        }
+      }
+      if ($SupervisorProbe -eq 'sampler-block' -and -not $samplerBlocked -and
+          (Test-Path -LiteralPath (Join-Path $OutputDirectory 'probe-child.json'))) {
+        $samplerBlocked = $true
+        [Threading.Thread]::Sleep($limitMs + 1000)
+      }
+      if ($workerProcess.WaitForExit(50)) { break }
+    } while ($executionClock.ElapsedMilliseconds -lt $limitMs)
+    Require ($workerProcess.HasExited) "Capture execution exceeded $limitMs ms"
+    $exitCode = $workerProcess.ExitCode
+    if ($exitCode -ne 0) { $failure = "Capture worker exited $exitCode; original error is retained in supervisor-stderr.log" }
+  } catch {
+    $failure = $_.ToString()
+  } finally {
+    $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+    if ($watchdog) {
+      try { $watchdog.DisarmAndJoin() }
+      catch {
+        @{ failure = $failure; watchdogJoinFailure = $_.ToString(); jobDisposed = $false; cleanupVerified = $false } |
+          ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'watchdog-join-failure.json')
+        throw
+      }
+      if ($watchdog.Fired) {
+        $detail = "Independent $limitMs ms watchdog fired at $($watchdog.FiredElapsedMilliseconds) ms; terminated=$($watchdog.Terminated); win32=$($watchdog.NativeError); callback=$($watchdog.CallbackError)"
+        $failure = if ($failure) { "$failure`n$detail" } else { $detail }
+      }
+    }
+    $cleanup = Complete-StartupRun $job $gate $workerProcess $workerUtc $assigned $output $stderr -Report {
+      param($result)
+      # Save each stream independently before reporting, even if another write fails.
+      $writeErrors = [Collections.Generic.List[string]]::new()
+      foreach ($stream in @(@('stdout', $output), @('stderr', $stderr))) {
+        if ($stream[1] -and $stream[1].IsCompletedSuccessfully) {
+          try { [IO.File]::WriteAllText((Join-Path $OutputDirectory "supervisor-$($stream[0]).log"), $stream[1].Result) }
+          catch { $writeErrors.Add($_.ToString()) }
+        }
+      }
+      @{ failure = $failure; workerExitCode = $exitCode; cleanupVerified = $result.Verified
+        originalWorkerError = $(if ($stderr -and $stderr.IsCompletedSuccessfully) { $stderr.Result } else { $null })
+        cleanupFailures = @($result.Failures); remainingOwnedPids = $result.Remaining
+        watchdogFired = ($null -ne $watchdog -and $watchdog.Fired)
+        watchdogTerminated = ($null -ne $watchdog -and $watchdog.Terminated)
+        watchdogJoined = ($null -ne $watchdog -and $watchdog.Joined)
+        watchdogNativeError = $(if ($watchdog) { $watchdog.NativeError } else { $null })
+        watchdogCallbackError = $(if ($watchdog) { $watchdog.CallbackError } else { $null })
+        watchdogFiredMilliseconds = $(if ($watchdog) { $watchdog.FiredElapsedMilliseconds } else { $null })
+        executionLimitMilliseconds = $limitMs; cleanupWaitBudgetMilliseconds = 20000
+        cleanupElapsedMilliseconds = $cleanupClock.ElapsedMilliseconds; totalElapsedMilliseconds = $totalClock.ElapsedMilliseconds
+        samplerBlockInjected = $samplerBlocked; probe = $SupervisorProbe
+        processes = @($identities.Values); streamWriteFailures = @($writeErrors)
+        providerJobSupport = @{ path = '.graphcode-tools\providers\zmx\test\windows-startup.ps1'
+          sha256 = (Get-FileHash -LiteralPath (Join-Path $repoRoot '.graphcode-tools\providers\zmx\test\windows-startup.ps1')).Hash.ToLowerInvariant() }
+      } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'supervisor.json')
+      if ($writeErrors.Count) { throw ($writeErrors -join "`n") }
+    }
+  }
+  Require ($cleanup.Verified -and $cleanup.Failures.Count -eq 0) "Capture cleanup failed; original=$failure; cleanup=$($cleanup.Failures -join '; ')"
+  Require (-not $failure) "Capture failed: $failure"
+  if ($exitCode -ne 0) {
+    if ($stderr -and $stderr.IsCompletedSuccessfully) { [Console]::Error.Write($stderr.Result) }
+    throw "Capture worker exited $exitCode; original stderr preserved in supervisor-stderr.log"
+  }
+  if ($output -and $output.IsCompletedSuccessfully) { Write-Output $output.Result }
+  exit 0
+}
+if ($PreflightOnly) {
+  if (Test-Path -LiteralPath $OutputDirectory) { throw 'Preflight output directory must be fresh' }
+  $null = New-Item -ItemType Directory -Path $OutputDirectory
+  Import-CaptureJobSupport
+}
+
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class VisualWindow {
+  public static string ActivationDiagnostics;
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] private struct MONITORINFO { public int Size; public RECT Monitor, Work; public uint Flags; }
+  private delegate bool EnumProc(IntPtr window, IntPtr value);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr value);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
+  [DllImport("user32.dll")] private static extern IntPtr SetActiveWindow(IntPtr window);
+  [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll", SetLastError=true)] private static extern bool ClientToScreen(IntPtr window, ref POINT point);
+  [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+  [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
+  [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int length);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
+  [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+  [DllImport("user32.dll")] private static extern bool SystemParametersInfo(uint action, uint param, out uint value, uint flags);
+  [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out uint value, int size);
+  public static void EnableDpi() {
+    if (SetThreadDpiAwarenessContext(new IntPtr(-4)) == IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot enable per-monitor capture coordinates");
+  }
+  public static uint FontSetting(uint action) {
+    uint value;
+    if (!SystemParametersInfo(action, 0, out value, 0)) throw new Win32Exception();
+    return value;
+  }
+  public static uint Owner(IntPtr window) {
+    uint pid; GetWindowThreadProcessId(window, out pid); return pid;
+  }
+  public static void SetOwnedVisibility(IntPtr window, uint pid, bool visible) {
+    if (Owner(window) != pid) throw new InvalidOperationException("Window owner changed before visibility intervention");
+    ShowWindow(window, visible ? 8 : 0); // SW_SHOWNA restores visibility without activation.
+    if (IsWindowVisible(window) != visible) throw new InvalidOperationException("Owned window visibility intervention failed");
+  }
+  public static bool Activate(IntPtr window) {
+    if (GetForegroundWindow() == window) {
+      ActivationDiagnostics = "already foreground";
+      return true;
+    }
+    uint ignored;
+    var foreground = GetForegroundWindow();
+    uint foregroundThread = foreground == IntPtr.Zero ? 0 : GetWindowThreadProcessId(foreground, out ignored);
+    uint targetThread = GetWindowThreadProcessId(window, out ignored);
+    uint currentThread = GetCurrentThreadId();
+    bool attachedForeground = foregroundThread != 0 && foregroundThread != currentThread &&
+      AttachThreadInput(currentThread, foregroundThread, true);
+    int foregroundError = attachedForeground ? 0 : Marshal.GetLastWin32Error();
+    bool attachedTarget = targetThread != currentThread && targetThread != foregroundThread &&
+      AttachThreadInput(currentThread, targetThread, true);
+    int targetError = attachedTarget ? 0 : Marshal.GetLastWin32Error();
+    try {
+      bool wasVisible = ShowWindow(window, 9);
+      bool raised = BringWindowToTop(window);
+      IntPtr previousActive = SetActiveWindow(window);
+      bool requested = SetForegroundWindow(window);
+      ActivationDiagnostics = $"attachForeground={attachedForeground} win32={foregroundError}; " +
+        $"attachTarget={attachedTarget} win32={targetError}; wasVisible={wasVisible}; " +
+        $"raised={raised}; previousActive={previousActive}; setForeground={requested}";
+      return GetForegroundWindow() == window;
+    } finally {
+      int detachError = 0;
+      if (attachedTarget && !AttachThreadInput(currentThread, targetThread, false))
+        detachError = Marshal.GetLastWin32Error();
+      if (attachedForeground && !AttachThreadInput(currentThread, foregroundThread, false))
+        detachError = Marshal.GetLastWin32Error();
+      if (detachError != 0) throw new Win32Exception(detachError, "Capture thread input detach failed");
+    }
+  }
+  public static IntPtr Find(uint pid, string className) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((window, value) => {
+      uint owner; GetWindowThreadProcessId(window, out owner);
+      if (owner != pid || !IsWindowVisible(window)) return true;
+      var text = new StringBuilder(256); GetClassName(window, text, text.Capacity);
+      if (text.ToString() == className) { found = window; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static Rectangle Client(IntPtr window) {
+    RECT rect; var point = new POINT();
+    if (!GetClientRect(window, out rect) || !ClientToScreen(window, ref point)) throw new Win32Exception();
+    return new Rectangle(point.X, point.Y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+  }
+  public static Rectangle Verify(IntPtr window, uint pid) {
+    uint owner; GetWindowThreadProcessId(window, out owner);
+    if (owner != pid || !IsWindowVisible(window) || IsIconic(window) || GetForegroundWindow() != window)
+      throw new InvalidOperationException("Capture ownership/visibility/foreground guard failed");
+    var rect = Client(window);
+    if (rect.Width <= 0 || rect.Height <= 0) throw new InvalidOperationException("Empty capture client");
+    var monitor = new MONITORINFO { Size = Marshal.SizeOf<MONITORINFO>() };
+    if (!GetMonitorInfo(MonitorFromWindow(window, 0), ref monitor) ||
+        !Rectangle.FromLTRB(monitor.Monitor.Left, monitor.Monitor.Top, monitor.Monitor.Right, monitor.Monitor.Bottom).Contains(rect))
+      throw new InvalidOperationException("Capture client is not fully visible on one monitor");
+    // GW_HWNDPREV walks only higher Z-order windows; do not read their content.
+    for (var above = GetWindow(window, 3); above != IntPtr.Zero; above = GetWindow(above, 3)) {
+      if (!IsWindowVisible(above) || IsIconic(above)) continue;
+      uint cloaked;
+      if (DwmGetWindowAttribute(above, 14, out cloaked, 4) == 0 && cloaked != 0) continue;
+      RECT other;
+      if (GetWindowRect(above, out other) &&
+          rect.IntersectsWith(Rectangle.FromLTRB(other.Left, other.Top, other.Right, other.Bottom)))
+        throw new InvalidOperationException("Capture client is overlapped; no desktop pixels saved");
+    }
+    return rect;
+  }
+}
+'@
+[VisualWindow]::EnableDpi()
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$owned = [Collections.Generic.Dictionary[int,object]]::new()
+$actions = [Collections.Generic.List[object]]::new()
+$app = $null
+$images = [Collections.Generic.List[object]]::new()
+$hiddenWindows = [Collections.Generic.List[object]]::new()
+$zmxPaths = $null
+$zmxRootReserved = $false
+$infoQueryCount = 0
+$evidence = $null
+
+function Record-OwnedProcesses {
+  $all = @(Get-CimInstance Win32_Process)
+  $changed = $true
+  while ($changed) {
+    $changed = $false
+    foreach ($candidate in $all) {
+      $parentId = [int]$candidate.ParentProcessId
+      if ($owned.ContainsKey([int]$candidate.ProcessId) -or -not $owned.ContainsKey($parentId)) { continue }
+      $parent = Get-Process -Id $parentId -ErrorAction SilentlyContinue
+      if (-not (Test-CaptureProcessIdentity $parent $owned[$parentId])) { continue }
+      $process = Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue
+      if (-not $process -or $process.StartTime -lt $parent.StartTime) { continue }
+      $owned[[int]$candidate.ProcessId] = [ordered]@{
+        pid = [int]$candidate.ProcessId; parentPid = $parentId
+        createdAt = $process.StartTime.ToUniversalTime().ToString('o')
+        executable = $candidate.ExecutablePath; commandLine = $candidate.CommandLine
+      }
+      $changed = $true
+    }
+  }
+  $temporary = Join-Path $OutputDirectory 'processes.tmp'
+  @($owned.Values) | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary
+  Move-Item -LiteralPath $temporary -Destination (Join-Path $OutputDirectory 'processes.json') -Force
+}
+
+function Wait-Visual([scriptblock] $Condition, [string] $Description) {
+  do {
+    if ($clock.Elapsed.TotalSeconds -gt $TimeoutSeconds - 5) { throw "Capture deadline: $Description" }
+    if ($app.HasExited) { throw "App exited before $Description; see stderr.log" }
+    Record-OwnedProcesses
+    $value = & $Condition
+    if ($value) { return $value }
+    Start-Sleep -Milliseconds 100
+  } while ($true)
+}
+
+function Read-Elements([IntPtr] $Window) {
+  $root = [Windows.Automation.AutomationElement]::FromHandle($Window)
+  $queue = [Collections.Generic.Queue[object]]::new()
+  $queue.Enqueue($root)
+  $result = [Collections.Generic.List[object]]::new()
+  $walker = [Windows.Automation.TreeWalker]::RawViewWalker
+  while ($queue.Count -gt 0) {
+    if ($result.Count -gt 512) { throw "Unexpectedly large app UIA tree" }
+    $element = $queue.Dequeue()
+    $result.Add($element)
+    $child = $walker.GetFirstChild($element)
+    while ($null -ne $child) { $queue.Enqueue($child); $child = $walker.GetNextSibling($child) }
+  }
+  return $result.ToArray()
+}
+
+function Invoke-VisualElement([IntPtr] $Window, [string] $IdPattern, [string] $Name) {
+  $matches = @(Read-Elements $Window | Where-Object {
+    $_.Current.AutomationId -match $IdPattern -and $_.Current.Name -eq $Name
+  })
+  if ($matches.Count -ne 1) { throw "Expected one UIA action $IdPattern / $Name; found $($matches.Count)" }
+  $matches[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $actions.Add([ordered]@{ kind = 'UIA InvokePattern'; id = $matches[0].Current.AutomationId; name = $Name })
+}
+
+function Post-Menu([IntPtr] $Window, [uint32] $Command) {
+  if (-not [VisualWindow]::PostMessage($Window, 0x0111, [UIntPtr]$Command, [IntPtr]::Zero)) {
+    throw "WM_COMMAND $Command failed"
+  }
+  $actions.Add([ordered]@{ kind = 'native WM_COMMAND'; command = $Command })
+}
+
+function Get-ClientRelativeBounds($Bounds, [Drawing.Rectangle] $Client) {
+  return @(($Bounds.X - $Client.X), ($Bounds.Y - $Client.Y), $Bounds.Width, $Bounds.Height)
+}
+
+function Get-CaptureBuildSnapshot {
+  $sources = @(& (Join-Path $PSScriptRoot 'Test-RenderedVisualBaseline.ps1') -SourceSnapshot)
+  $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'graphcode-windows\provider-pins.json') -Raw | ConvertFrom-Json
+  $providers = [ordered]@{}
+  foreach ($name in @('zmx','winghostty')) {
+    $providerRoot = Join-Path $repoRoot ".graphcode-tools\providers\$name"
+    $head = git -C $providerRoot rev-parse HEAD
+    if ($LASTEXITCODE -ne 0 -or $head -cne $pins.$name.sha) { throw "$name provider pin mismatch" }
+    $status = @(git -C $providerRoot status --porcelain --untracked-files=all)
+    if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw "$name provider worktree is not clean" }
+    $artifact = ".graphcode-tools\providers\$name\" + $pins.$name.artifact.Replace('/','\')
+    $providers[$name] = @{ pin = $head; artifact = $artifact
+      sha256 = (Get-FileHash -LiteralPath (Join-Path $repoRoot $artifact)).Hash.ToLowerInvariant() }
+  }
+  return [ordered]@{
+    sources = $sources; providers = $providers
+    executable = @{ artifact = 'graphcode-windows\zig-out\bin\graphcode-windows.exe'
+      sha256 = (Get-FileHash -LiteralPath $Shell).Hash.ToLowerInvariant() }
+  }
+}
+
+function Hide-OwnedZmxForeground {
+  $foreground = [VisualWindow]::GetForegroundWindow()
+  $record = Get-OwnedZmxWindowRecord ([int][VisualWindow]::Owner($foreground)) $owned $Zmx
+  if ($null -eq $record) { return }
+  $entry = [ordered]@{ hwnd = $foreground.ToInt64(); pid = $record.pid; createdAt = $record.createdAt
+    executable = $record.executable; previouslyVisible = [VisualWindow]::IsWindowVisible($foreground)
+    restoration = 'pending'; reason = 'harness-assisted workspace visibility, not normal-user focus proof' }
+  if (-not $entry.previouslyVisible) { throw 'Owned foreground zmx HWND was unexpectedly invisible' }
+  $hiddenWindows.Add($entry)
+  $hiddenWindows | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'visibility-interventions.json')
+  [VisualWindow]::SetOwnedVisibility($foreground, $record.pid, $false)
+}
+
+function Restore-OwnedZmxWindows {
+  foreach ($entry in $hiddenWindows) {
+    $current = Get-Process -Id $entry.pid -ErrorAction SilentlyContinue
+    $window = [IntPtr]$entry.hwnd
+    if ((Test-CaptureProcessIdentity $current $entry) -and [VisualWindow]::Owner($window) -eq $entry.pid) {
+      [VisualWindow]::SetOwnedVisibility($window, $entry.pid, $entry.previouslyVisible)
+      $entry.restoration = 'same owned HWND visibility restored without activation'
+    } else {
+      $entry.restoration = 'original HWND/process no longer exists; no replacement touched'
+    }
+  }
+  if ($hiddenWindows.Count) {
+    $hiddenWindows | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'visibility-interventions.json')
+  }
+}
+
+function Read-OwnedZmxInfo {
+  $script:infoQueryCount++
+  $start = [Diagnostics.ProcessStartInfo]::new($Zmx)
+  $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+  $start.WorkingDirectory = $env:GRAPHCODE_GATE_CWD
+  $start.ArgumentList.Add('info')
+  $start.ArgumentList.Add('11111111-1111-4111-8111-111111111111')
+  $query = [Diagnostics.Process]::Start($start)
+  $record = @{ pid = $query.Id; parentPid = $PID; createdAt = $query.StartTime.ToUniversalTime().ToString('o')
+    executable = $Zmx; commandLine = "$Zmx info 11111111-1111-4111-8111-111111111111" }
+  $owned[$query.Id] = $record
+  try {
+    $stdout = $query.StandardOutput.ReadToEndAsync()
+    $stderr = $query.StandardError.ReadToEndAsync()
+    Record-OwnedProcesses
+    $remaining = [Math]::Min(5000, [Math]::Max(1, ($TimeoutSeconds - $clock.Elapsed.TotalSeconds - 1) * 1000))
+    if (-not $query.WaitForExit([int]$remaining)) { throw 'Pinned zmx info exceeded its bounded deadline' }
+    $stdout.Result | Set-Content -LiteralPath (Join-Path $OutputDirectory "zmx-info-$infoQueryCount.txt")
+    $stderr.Result | Set-Content -LiteralPath (Join-Path $OutputDirectory "zmx-info-$infoQueryCount-stderr.txt")
+    if ($query.ExitCode -ne 0) { throw "Pinned zmx info failed: $($stderr.Result)" }
+    $info = ConvertFrom-CaptureZmxInfo $stdout.Result $zmxPaths.session $env:GRAPHCODE_GATE_CWD
+    Record-OwnedProcesses
+    if (-not $owned.ContainsKey($info.backendPid) -or
+        -not (Test-CaptureProcessIdentity (Get-Process -Id $info.backendPid -ErrorAction SilentlyContinue) $owned[$info.backendPid])) {
+      throw 'Pinned zmx info backend PID is not a live identity-proven run descendant'
+    }
+    $backendRecord = $owned[$info.backendPid]
+    if ([IO.Path]::GetFileName($backendRecord.executable) -ine 'cmd.exe' -or
+        -not $owned.ContainsKey([int]$backendRecord.parentPid)) {
+      throw 'Pinned zmx backend is not the expected cmd process under an owned server'
+    }
+    $server = $owned[[int]$backendRecord.parentPid]
+    if ($server.executable -ine $Zmx -or
+        $server.commandLine -notmatch ('--daemon\s+"?' + [regex]::Escape($zmxPaths.session) + '"?(?:\s|$)') -or
+        -not (Test-CaptureProcessIdentity (Get-Process -Id $server.pid -ErrorAction SilentlyContinue) $server)) {
+      throw 'Pinned zmx server does not match the exact live owned fixture session'
+    }
+    $info.createdAt = $owned[$info.backendPid].createdAt
+    $info.serverPid = $server.pid
+    $info.serverCreatedAt = $server.createdAt
+    return $info
+  } finally {
+    if (-not $query.HasExited -and (Test-CaptureProcessIdentity $query $record)) {
+      Stop-Process -Id $query.Id -Force
+      if (-not $query.WaitForExit(5000)) { throw 'Owned zmx info query did not exit' }
+    }
+    $query.Dispose()
+  }
+}
+
+function Save-AppClient([IntPtr] $Window, [string] $Id, [string] $State) {
+  if (-not [VisualWindow]::Activate($Window)) {
+    $foreground = [VisualWindow]::GetForegroundWindow()
+    [uint32]$foregroundPid = 0
+    $null = [VisualWindow]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    throw "Could not foreground owned $Id window: target=$Window pid=$($app.Id); foreground=$foreground pid=$foregroundPid; $([VisualWindow]::ActivationDiagnostics)"
+  }
+  $null = Wait-Visual { [VisualWindow]::GetForegroundWindow() -eq $Window } "$Id foreground"
+  $app.Refresh()
+  if (-not (Test-CaptureProcessIdentity $app $owned[$app.Id])) { throw "App process identity changed" }
+  $rect = [VisualWindow]::Verify($Window, $app.Id)
+  $dpi = [VisualWindow]::GetDpiForWindow($Window)
+  $elements = @(Read-Elements $Window | ForEach-Object {
+    $current = $_.Current
+    [ordered]@{ id = $current.AutomationId; name = $current.Name; type = $current.ControlType.ProgrammaticName
+      bounds = @(Get-ClientRelativeBounds $current.BoundingRectangle $rect) }
+  })
+  $bitmap = [Drawing.Bitmap]::new($rect.Width, $rect.Height)
+  try {
+    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+    try { $graphics.CopyFromScreen($rect.Location, [Drawing.Point]::Empty, $rect.Size) }
+    finally { $graphics.Dispose() }
+    $after = [VisualWindow]::Verify($Window, $app.Id)
+    if ($after -ne $rect -or [VisualWindow]::GetDpiForWindow($Window) -ne $dpi) {
+      throw "Window geometry/DPI changed during capture"
+    }
+    $file = "$Id.png"
+    $path = Join-Path $OutputDirectory $file
+    $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
+  } finally { $bitmap.Dispose() }
+  $images.Add([ordered]@{
+    id = $Id; file = $file; sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant()
+    width = $rect.Width; height = $rect.Height; dpi = $dpi; state = $State
+    window = @{ hwnd = $Window.ToInt64(); pid = $app.Id; createdAt = $owned[$app.Id].createdAt
+      screenClient = @($rect.X, $rect.Y, $rect.Width, $rect.Height) }
+    elements = $elements; regions = @()
+  })
+  $images | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'captured-images.json')
+  Write-Host "CAPTURED: $Id $($rect.Width)x$($rect.Height) dpi=$dpi"
+}
+
+try {
+  $buildSnapshot = Get-CaptureBuildSnapshot
+  $buildSnapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'build-snapshot.json')
+  @{ sourceRoot = $repoRoot; zmxRoot = (Join-Path $repoRoot '.graphcode-tools\providers\zmx')
+    winghosttyRoot = (Join-Path $repoRoot '.graphcode-tools\providers\winghostty') } |
+    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'capture-origin.json')
+  $runId = [guid]::NewGuid().ToString('N')
+  $zmxPaths = Get-ZmxCapturePaths (Join-Path ([IO.Path]::GetTempPath()) "gcv-$($runId.Substring(0,12))") `
+    "v3-$($runId.Substring(0,8))" ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) `
+    '11111111-1111-4111-8111-111111111111'
+  if (Test-Path -LiteralPath $zmxPaths.root) { throw 'Fresh short zmx root already exists; no fallback permitted' }
+  $zmxRootReserved = $true
+  $zmxPaths | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'zmx-paths.json')
+  if ($PreflightOnly) {
+    Write-Output 'Capture preflight: PASS (sources, scripts, pinned providers and binary hashes; no app launch)'
+    return
+  }
+  # The worker's environment cannot escape to the invoking shell or other runs.
+  Get-ChildItem Env:GRAPHCODE_*,Env:ZMX_* | Remove-Item
+  foreach ($dir in @('support','localappdata','cwd')) {
+    $null = New-Item -ItemType Directory -Path (Join-Path $OutputDirectory $dir)
+  }
+  # The provider creates this fresh root with the current token SID as owner.
+  # Generic directory creation can instead select Administrators when elevated.
+  $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-visual-$runId"
+  $env:GRAPHCODE_SUPPORT_DIR = Join-Path $OutputDirectory 'support'
+  $env:LOCALAPPDATA = Join-Path $OutputDirectory 'localappdata'
+  $env:GRAPHCODE_GATE_CWD = Join-Path $OutputDirectory 'cwd'
+  $env:GRAPHCODE_ZMX = $Zmx
+  $env:ZMX_DIR = $zmxPaths.root
+  $env:ZMX_SESSION_PREFIX = $zmxPaths.prefix
+  $env:GRAPHCODE_WORKSPACE_LAYOUT = Join-Path $OutputDirectory 'workspace.json'
+  $env:GRAPHCODE_WORKSPACE_PROJECT = 'graphcode-visual-fixture'
+  $env:GRAPHCODE_UIA_FIXTURE_ROWS = 'C:\fixture-safe|safe,C:\fixture-unsafe|unsafe'
+  $env:GRAPHCODE_UIA_RESET_SIDEBAR = '1'
+  $env:GRAPHCODE_UIA_UPDATE_AVAILABLE = '1'
+  $markerDir = Join-Path $env:LOCALAPPDATA 'GraphCode'
+  $null = New-Item -ItemType Directory -Path $markerDir
+  $null = New-Item -ItemType File -Path (Join-Path $markerDir 'onboarding-seen')
+  @(Get-ChildItem Env: | Where-Object Name -match '^(GRAPHCODE_|ZMX_|LOCALAPPDATA$)') |
+    Select-Object Name,Value | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'launch-environment.json')
+  $app = Start-Process -FilePath $Shell -WorkingDirectory $env:GRAPHCODE_GATE_CWD -PassThru `
+    -RedirectStandardError (Join-Path $OutputDirectory 'stderr.log') `
+    -RedirectStandardOutput (Join-Path $OutputDirectory 'stdout.log')
+  $owned[$app.Id] = [ordered]@{
+    pid = $app.Id; parentPid = $PID; executable = $Shell; commandLine = $Shell
+    createdAt = $app.StartTime.ToUniversalTime().ToString('o')
+  }
+  Record-OwnedProcesses
+  $window = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeWindowsShell') } 'main HWND'
+  $null = Wait-Visual {
+    @(Read-Elements $window | Where-Object { $_.Current.Name -eq 'UIA project' }).Count -gt 0
+  } 'fixture project'
+  Invoke-VisualElement $window '^open-project-' 'UIA project'
+  Post-Menu $window 4408
+  $null = Wait-Visual {
+    @(Read-Elements $window | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop [AB]'
+    }).Count -eq 2
+  } 'fixture canvas'
+  Save-AppClient $window 'canvas-sidebar' 'fixture-project-disconnected'
+  Post-Menu $window 4403
+  $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
+  Save-AppClient $dialog 'dialog' 'product-settings-unmodified'
+  if (-not [VisualWindow]::PostMessage($dialog, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
+    throw "Could not close Product Settings"
+  }
+  $null = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') -eq [IntPtr]::Zero } 'dialog close'
+  Invoke-VisualElement $window '^loop-row-' 'UIA loop A'
+  $null = Wait-Visual {
+    @(Read-Elements $window | Where-Object { $_.Current.Name -eq 'New Tab' }).Count -gt 0
+  } 'real workspace chrome'
+  Record-OwnedProcesses
+  $attachments = @($owned.Values | Where-Object { $_.executable -eq $Zmx -and $_.commandLine -match '\battach\b' })
+  if ($attachments.Count -eq 0) { throw "Workspace lacks a proven-owned real zmx attach process" }
+  $null = Wait-Visual { Test-Path -LiteralPath $zmxPaths.endpoint -PathType Leaf } 'pinned zmx session endpoint publication'
+  $backend = Wait-Visual {
+    $info = Read-OwnedZmxInfo
+    if ($info.clients -ge 1) { return $info }
+    Write-Host 'ZMX_READINESS: exact session/backend responds; waiting for attach client'
+    return $null
+  } 'pinned zmx attached-client readiness'
+  $backend | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'workspace-backend.json')
+  Hide-OwnedZmxForeground
+  Save-AppClient $window 'workspace' 'fixture-loop-attached'
+  if (@($owned.Values | Where-Object { [IO.Path]::GetFileName($_.executable) -eq 'graphcoded.exe' }).Count -gt 0) {
+    throw "Unexpected daemon child in disconnected fixture capture"
+  }
+  $afterSnapshot = Get-CaptureBuildSnapshot
+  if (($afterSnapshot | ConvertTo-Json -Depth 6 -Compress) -cne ($buildSnapshot | ConvertTo-Json -Depth 6 -Compress)) {
+    throw 'Source/script/provider/binary hashes changed during capture'
+  }
+  $evidence = [ordered]@{
+    schemaVersion = 1; kind = 'windows-production-renderer-fixture'
+    capturedAt = [DateTime]::UtcNow.ToString('o'); os = [Environment]::OSVersion.VersionString
+    sourceCommit = (git -C $repoRoot rev-parse HEAD); sourceTree = (git -C $repoRoot rev-parse 'HEAD^{tree}')
+    dirtyFiles = @(git -C $repoRoot status --porcelain); sources = @($buildSnapshot.sources)
+    executable = $buildSnapshot.executable; providers = $buildSnapshot.providers
+    process = @{ pid = $app.Id; createdAt = $owned[$app.Id].createdAt }
+    backend = $backend; visibilityInterventions = @($hiddenWindows)
+    zmxPathLengths = @{ endpoint = $zmxPaths.endpointLength; lease = $zmxPaths.leaseLength; ownerPipe = $zmxPaths.ownerPipeLength }
+    attachments = @($attachments | ForEach-Object { @{ pid = $_.pid; createdAt = $_.createdAt; parentPid = $_.parentPid } })
+    foregroundLease = $ForegroundLease; dpi = $images[0].dpi
+    fontSmoothing = @{ enabled = [VisualWindow]::FontSetting(0x004A); type = [VisualWindow]::FontSetting(0x200A) }
+    renderer = @{ uiaGate = $false; daemonSupervisorHook = $false }
+    fixture = @{ name = 'App.installUiaFixture'; daemonState = 'disconnected'; zoom = 1 }
+    captureMethod = 'CopyFromScreen; owned visible client only; before/after Z-order/identity/DPI guards'
+    actions = @($actions); images = @($images)
+    review = 'Regions deliberately empty until source-mapped review; capture alone is not PASS.'
+  }
+  $evidence | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'evidence.json')
+  Post-Menu $window 4104
+  if (-not $app.WaitForExit(5000)) { throw "App did not exit normally after capture" }
+  Write-Host 'Windows capture complete; review regions before running Test-RenderedVisualBaseline.ps1.'
+} finally {
+  try {
+    Restore-OwnedZmxWindows
+    if ($app) { Record-OwnedProcesses }
+  } finally {
+    Stop-CaptureProcesses
+    if ($zmxRootReserved -and (Test-Path -LiteralPath $zmxPaths.root)) {
+      $logs = Join-Path $zmxPaths.root 'logs'
+      if (Test-Path -LiteralPath $logs) {
+        Copy-Item -LiteralPath $logs -Destination (Join-Path $OutputDirectory 'zmx-logs') -Recurse
+      }
+    }
+    if ($evidence) {
+      $evidence.visibilityInterventions = @($hiddenWindows)
+      $evidence | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'evidence.json')
+    }
+  }
+}
