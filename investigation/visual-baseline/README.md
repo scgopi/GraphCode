@@ -198,6 +198,25 @@ This is Windows-renderer/source consistency, not matched macOS screenshot
 parity. The separate currentThemeContract independently cross-checks the
 canvas/grid source values against current Theme.swift.
 
+The rendered comparator also cross-checks `pane-focus` independently against
+current `Theme.paneFocusTint` and RGB `(10,132,255)`, using the existing production
+Swift/COLORREF parsers. The Windows `pane_focus_tint` constant must therefore be
+`0x00FF840A` (BGR), not the orange-producing `0x000A84FF`. Both the source check
+and actual focus-strip pixels must agree; matching the wrong Windows token is
+not a palette PASS. This does not modify the historical manifest or the
+existing two-token currentThemeContract.
+
+To re-analyze an immutable before-capture with the corrected comparator, keep
+its PNGs, `sources`, executable/script hashes and all other capture fields
+unchanged. Supply a separate `-AnalysisPath` JSON containing
+`kind: "controlled-pane-focus-reanalysis"`, a `reason`, the exact
+`evidenceSha256`, and current `sources` from `-SourceSnapshot`. The comparator
+validates that snapshot and rejects source differences beyond DesignTokens and
+the comparator itself. Reports explicitly identify re-analysis provenance;
+the new comparator is not represented as the capture-time script. The unchanged
+orange before-image must fail the corrected blue pixel expectation. This
+controlled re-analysis is not a new runtime capture or an after-fix proof.
+
 Coverage counts and gradient row samples are observations, not quality-score
 thresholds. Colors other than the selected endpoints may include subpixel
 fringes, decorations or grid pixels, not just shape anti-aliasing. Font flags

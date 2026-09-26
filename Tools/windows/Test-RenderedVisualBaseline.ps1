@@ -2,6 +2,7 @@
 param(
   [Parameter(Mandatory, ParameterSetName = 'Compare')] [string] $EvidencePath,
   [string] $ReportPath,
+  [Parameter(ParameterSetName = 'Compare')] [string] $AnalysisPath,
   [string] $SourceRoot = (Join-Path $PSScriptRoot "..\.."),
   [switch] $AllowTestFixture,
   [Parameter(Mandatory, ParameterSetName = 'Sources')] [switch] $SourceSnapshot
@@ -89,6 +90,13 @@ $snapshot = @(foreach ($path in $requiredSources) {
   }
 })
 if ($SourceSnapshot) { return $snapshot }
+$designText = Get-Content -LiteralPath $designPath -Raw
+$paneFocusRgb = (Get-ThemeSwiftTokenRgb `
+  (Get-Content -LiteralPath (Join-Path $repoRoot 'graphcode\Sources\Features\App\Theme.swift') -Raw) 'paneFocusTint') -join ','
+Require-Rendered ($paneFocusRgb -ceq '10,132,255') "Theme.paneFocusTint must derive independent expected RGB 10,132,255"
+$windowsPaneFocus = (ConvertFrom-Colorref (Get-DesignTokenColorref $designText 'pane_focus_tint')) -join ','
+Require-Rendered ($windowsPaneFocus -ceq $paneFocusRgb) `
+  "pane-focus source mismatch: Theme.paneFocusTint expects $paneFocusRgb, Windows pane_focus_tint derives $windowsPaneFocus"
 $evidenceRoot = Split-Path (Resolve-Path -LiteralPath $EvidencePath).Path
 $evidence = Get-Content -LiteralPath $EvidencePath -Raw | ConvertFrom-Json
 
@@ -136,19 +144,43 @@ Require-Integer $evidence.zmxPathLengths.ownerPipe 1 255 "zmx owner pipe length"
 Require-Rendered ($evidence.zmxPathLengths.lease -eq $evidence.zmxPathLengths.endpoint + 6) "zmx lease/endpoint lengths disagree"
 Require-Rendered ($null -ne $evidence.PSObject.Properties['visibilityInterventions']) "window intervention provenance is missing"
 
-$sourceNames = @($evidence.sources | ForEach-Object { $_.path })
-Require-Rendered (@($sourceNames | Sort-Object -Unique).Count -eq $requiredSources.Count -and
-  $sourceNames.Count -eq $requiredSources.Count) "source provenance cardinality/identity is incomplete"
-foreach ($path in $requiredSources) {
-  $source = @($evidence.sources | Where-Object path -eq $path)
-  Require-Rendered ($source.Count -eq 1) "source provenance is missing: $path"
-  Require-Hash $source[0].sha256 "source $path"
-  Require-Hash $source[0].lfSha256 "LF-normalized source $path"
-  $actual = @($snapshot | Where-Object path -eq $path)[0]
-  Require-Rendered ($actual.lfSha256 -ceq $source[0].lfSha256) "source hash mismatch: $path"
+function Assert-RenderedSources($Records, [bool] $CompareCurrent) {
+  $sourceNames = @($Records | ForEach-Object { $_.path })
+  Require-Rendered (@($sourceNames | Sort-Object -Unique).Count -eq $requiredSources.Count -and
+    $sourceNames.Count -eq $requiredSources.Count) "source provenance cardinality/identity is incomplete"
+  foreach ($path in $requiredSources) {
+    $source = @($Records | Where-Object path -eq $path)
+    Require-Rendered ($source.Count -eq 1) "source provenance is missing: $path"
+    Require-Hash $source[0].sha256 "source $path"
+    Require-Hash $source[0].lfSha256 "LF-normalized source $path"
+    if ($CompareCurrent) {
+      $actual = @($snapshot | Where-Object path -eq $path)[0]
+      Require-Rendered ($actual.lfSha256 -ceq $source[0].lfSha256) "source hash mismatch: $path"
+    }
+  }
 }
-
-$designText = Get-Content -LiteralPath $designPath -Raw
+Assert-RenderedSources $evidence.sources (-not $AnalysisPath)
+$analysisProvenance = $null
+if ($AnalysisPath) {
+  $analysis = Get-Content -LiteralPath $AnalysisPath -Raw | ConvertFrom-Json
+  Require-Rendered ($analysis.kind -ceq 'controlled-pane-focus-reanalysis' -and
+    -not [string]::IsNullOrWhiteSpace($analysis.reason)) "controlled re-analysis must identify its kind and reason"
+  Require-Hash $analysis.evidenceSha256 'controlled re-analysis evidence'
+  Require-Rendered ($analysis.evidenceSha256 -ceq
+    (Get-FileHash -LiteralPath $EvidencePath).Hash.ToLowerInvariant()) "controlled re-analysis evidence hash mismatch"
+  Assert-RenderedSources $analysis.sources $true
+  $changed = @(foreach ($source in $evidence.sources) {
+    $current = @($snapshot | Where-Object path -eq $source.path)[0]
+    if ($source.lfSha256 -cne $current.lfSha256) { $source.path }
+  })
+  Require-Rendered (@($changed | Where-Object { $_ -notin @(
+    'graphcode-windows\src\DesignTokens.zig', 'Tools\windows\Test-RenderedVisualBaseline.ps1'
+  ) }).Count -eq 0) "controlled pane-focus re-analysis cannot replace unrelated capture sources"
+  $analysisProvenance = @{ kind = $analysis.kind; reason = $analysis.reason
+    evidenceSha256 = $analysis.evidenceSha256; analysisSha256 = (Get-FileHash -LiteralPath $AnalysisPath).Hash.ToLowerInvariant()
+    changedSources = $changed; sources = $analysis.sources }
+  Write-Output 'Controlled pane-focus re-analysis: original capture metadata retained; current comparator/source expectations applied.'
+}
 
 $images = @($evidence.images)
 Require-Rendered ($images.Count -eq 3 -and
@@ -214,6 +246,7 @@ foreach ($image in $images) {
       $expected = $null
       if ($region.kind -eq 'flat') {
         $expected = (ConvertFrom-Colorref (Get-DesignTokenColorref $designText $region.windowsToken)) -join ','
+        if ($image.id -eq 'workspace' -and $region.id -eq 'pane-focus') { $expected = $paneFocusRgb }
       }
       if ($region.kind -eq 'coverage') {
         $background = Read-Rgb $region.backgroundRgb "background"
@@ -265,6 +298,7 @@ $report = [ordered]@{
   matchedCurrentMacOS = "blocked: no compatible current capture"
   visualParity = "Partial"
   normalUserFocus = "Not validated; capture may temporarily hide an identity-proven owned attach window."
+  analysisProvenance = $analysisProvenance
   measurements = @($measurements)
 }
 if ($ReportPath) { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ReportPath -Encoding utf8 }

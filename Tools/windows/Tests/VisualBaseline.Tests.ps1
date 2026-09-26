@@ -341,7 +341,7 @@ try {
     @{ id = 'dialog'; tokens = @('dialog_panel')
       regionIds = @('dialog-panel'); rgb = ,@(35,35,38); state = 'product-settings-unmodified' },
     @{ id = 'workspace'; tokens = @('tab_selected_background','pane_focus_tint')
-      regionIds = @('selected-tab','pane-focus'); rgb = @(@(60,62,68),@(255,132,10)); state = 'fixture-loop-attached' }
+      regionIds = @('selected-tab','pane-focus'); rgb = @(@(60,62,68),@(10,132,255)); state = 'fixture-loop-attached' }
   )
   $testImages = @()
   foreach ($spec in $specs) {
@@ -387,10 +387,11 @@ try {
     images = $testImages
   } | ConvertTo-Json -Depth 15
 
-  function Invoke-RenderedTest([string] $ExpectedFailure = '', [switch] $WithoutOptIn, [string] $SourceRoot = '') {
+  function Invoke-RenderedTest([string] $ExpectedFailure = '', [switch] $WithoutOptIn, [string] $SourceRoot = '', [string] $AnalysisPath = '') {
     $arguments = @('-NoProfile','-File',$renderedValidator,'-EvidencePath',$renderedPath,'-ReportPath',$reportPath)
     if (-not $WithoutOptIn) { $arguments += '-AllowTestFixture' }
     if ($SourceRoot) { $arguments += @('-SourceRoot',$SourceRoot) }
+    if ($AnalysisPath) { $arguments += @('-AnalysisPath',$AnalysisPath) }
     $text = (& pwsh @arguments 2>&1 | Out-String)
     $result = [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = $text }
     if ($ExpectedFailure) {
@@ -514,25 +515,67 @@ try {
   $driftPath = Join-Path $copiedSourceRoot 'graphcode-windows\src\AppFont.zig'
   [IO.File]::AppendAllText($driftPath,"`n// actual content drift in copied source fixture`n")
   Invoke-RenderedTest 'source hash mismatch: graphcode-windows\src\AppFont.zig' -SourceRoot $copiedSourceRoot
+  Copy-Item -LiteralPath (Join-Path $repoRoot 'graphcode-windows\src\AppFont.zig') -Destination $driftPath -Force
+  $copiedTokens = Join-Path $copiedSourceRoot 'graphcode-windows\src\DesignTokens.zig'
+  $tokenText = [IO.File]::ReadAllText($copiedTokens)
+  [IO.File]::WriteAllText($copiedTokens, $tokenText.Replace(
+    'pub const pane_focus_tint: Color = 0x00FF840A;', 'pub const pane_focus_tint: Color = 0x000A84FF;'))
+  Invoke-RenderedTest 'pane-focus source mismatch' -SourceRoot $copiedSourceRoot
+  [IO.File]::WriteAllText($copiedTokens, $tokenText)
+  Invoke-RenderedTest -SourceRoot $copiedSourceRoot
+
+  $analysisPath = Join-Path $renderedDir 'analysis.json'
+  $recorded = $goodRendered | ConvertFrom-Json -AsHashtable
+  $oldComparator = @($recorded.sources | Where-Object path -eq 'Tools\windows\Test-RenderedVisualBaseline.ps1')[0]
+  $oldComparator.sha256 = '6' * 64
+  $oldComparator.lfSha256 = '6' * 64
+  $recorded | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+  Invoke-RenderedTest 'source hash mismatch: Tools\windows\Test-RenderedVisualBaseline.ps1'
+  $analysis = @{ kind = 'controlled-pane-focus-reanalysis'; reason = 'synthetic provenance test, not runtime evidence'
+    evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant(); sources = $sourceRecords }
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest -AnalysisPath $analysisPath
+  $reanalysisReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+  if ($reanalysisReport.analysisProvenance.kind -cne 'controlled-pane-focus-reanalysis' -or
+      @($reanalysisReport.analysisProvenance.changedSources).Count -ne 1) {
+    throw 'Re-analysis lost its explicit provenance/changed-source record'
+  }
+  $analysis.evidenceSha256 = '0' * 64
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled re-analysis evidence hash mismatch' -AnalysisPath $analysisPath
+  $analysis.evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant()
+  $analysis.kind = 'runtime-capture'
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled re-analysis must identify its kind and reason' -AnalysisPath $analysisPath
+  $analysis.kind = 'controlled-pane-focus-reanalysis'
+  $unrelated = @($recorded.sources | Where-Object path -eq 'graphcode-windows\src\AppFont.zig')[0]
+  $unrelated.lfSha256 = '7' * 64
+  $recorded | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
+  $analysis.evidenceSha256 = (Get-FileHash -LiteralPath $renderedPath).Hash.ToLowerInvariant()
+  $analysis | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $analysisPath
+  Invoke-RenderedTest 'controlled pane-focus re-analysis cannot replace unrelated capture sources' -AnalysisPath $analysisPath
+  $goodRendered | Set-Content -LiteralPath $renderedPath
 
   foreach ($case in @(
-    @{ name = 'one-channel delta=1'; rgb = @(11,12,11) },
-    @{ name = 'neutral gray'; rgb = @(12,12,12) },
-    @{ name = 'BGR swap'; rgb = @(11,12,10) }
+    @{ name = 'one-channel delta=1'; rgb = @(11,12,11); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'neutral gray'; rgb = @(12,12,12); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'BGR swap'; rgb = @(11,12,10); image = 0; x = 0; diagnostic = 'canvas-sidebar/canvas-tone (0,0)' },
+    @{ name = 'pane-focus old-orange channel swap'; rgb = @(255,132,10); image = 2; x = 1; diagnostic = 'workspace/pane-focus (1,0)' },
+    @{ name = 'pane-focus delta=1'; rgb = @(10,132,254); image = 2; x = 1; diagnostic = 'workspace/pane-focus (1,0)' }
   )) {
-    $imagePath = Join-Path $renderedDir 'canvas-sidebar.png'
+    $imagePath = Join-Path $renderedDir $testImages[$case.image].file
     $original = [IO.File]::ReadAllBytes($imagePath)
     $bitmap = [Drawing.Bitmap]::new($imagePath)
     try {
-      $bitmap.SetPixel(0,0,[Drawing.Color]::FromArgb($case.rgb[0],$case.rgb[1],$case.rgb[2]))
+      $bitmap.SetPixel($case.x,0,[Drawing.Color]::FromArgb($case.rgb[0],$case.rgb[1],$case.rgb[2]))
       $mutationPath = Join-Path $renderedDir 'mutation.png'
       $bitmap.Save($mutationPath,[Drawing.Imaging.ImageFormat]::Png)
     } finally { $bitmap.Dispose() }
     Move-Item -LiteralPath $mutationPath -Destination $imagePath -Force
     $mutated = $goodRendered | ConvertFrom-Json -AsHashtable
-    $mutated.images[0].sha256 = (Get-FileHash $imagePath).Hash.ToLowerInvariant()
+    $mutated.images[$case.image].sha256 = (Get-FileHash $imagePath).Hash.ToLowerInvariant()
     $mutated | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $renderedPath
-    Invoke-RenderedTest 'RGB mismatch canvas-sidebar/canvas-tone (0,0)'
+    Invoke-RenderedTest "RGB mismatch $($case.diagnostic)"
     [IO.File]::WriteAllBytes($imagePath,$original)
     $goodRendered | Set-Content -LiteralPath $renderedPath
     Invoke-RenderedTest
