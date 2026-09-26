@@ -294,11 +294,17 @@ pub const Model = struct {
 
     pub fn selectProject(self: *Model, project_path: []const u8) bool {
         const summary = self.graphFor(project_path) orelse return false;
+        const replacement_path = self.allocator.dupe(u8, summary.project.path) catch return false;
+        const replacement_node: ?[]u8 = if (summary.nodes.items.len == 0) null else self.allocator.dupe(u8, summary.nodes.items[0].id) catch {
+            self.allocator.free(replacement_path);
+            return false;
+        };
         self.clearOpenComposite();
         if (self.selected_project_path) |path| self.allocator.free(path);
-        self.selected_project_path = self.allocator.dupe(u8, summary.project.path) catch return false;
+        self.selected_project_path = replacement_path;
         self.selected_index = if (summary.nodes.items.len == 0) null else 0;
-        if (summary.nodes.items.len == 0) self.freeSelectedNodeID() else self.replaceSelectedNodeID(summary.nodes.items[0].id);
+        self.freeSelectedNodeID();
+        self.selected_node_id = replacement_node;
         self.syncLegacyGraph();
         return true;
     }
@@ -1622,6 +1628,69 @@ test "selecting B resynchronizes the active snapshot and current graph" {
     try std.testing.expectEqualStrings("B", model.currentGraph().?.project.path);
     try std.testing.expectEqualStrings("B", model.graph.?.project.path);
     try std.testing.expectEqualStrings("B1", model.graph.?.nodes.items[0].title);
+}
+
+fn custodySelectionTestModel() !Model {
+    var model = Model.init(std.testing.allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"group","title":"Group","loopType":"composite","subGraph":{"nodes":[{"id":"inner","title":"Inner"}],"edges":[]}}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"B1"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"E","name":"Empty"},"nodes":[],"edges":[]}}}
+    );
+    if (!model.openComposite("group") or !model.setSelectedIndex(0)) return error.TestSetupFailed;
+    return model;
+}
+
+test "custody selection stages both identity allocations before any selection mutation" {
+    for (0..2) |fail_index| {
+        var model = try custodySelectionTestModel();
+        defer model.deinit();
+        const old_path = model.selected_project_path.?;
+        const old_composite = model.open_composite_id.?;
+        const old_composite_title = model.open_composite_title.?;
+        const old_node = model.selected_node_id.?;
+        const old_nodes = model.graph.?.nodes.items.ptr;
+        const old_index = model.selected_index;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        model.allocator = failing.allocator();
+        defer model.allocator = std.testing.allocator;
+        const selected = model.selectProject("B");
+        try std.testing.expect(!selected);
+        try std.testing.expect(model.open_composite_id != null);
+        try std.testing.expectEqual(old_composite.ptr, model.open_composite_id.?.ptr);
+        try std.testing.expectEqual(old_composite_title.ptr, model.open_composite_title.?.ptr);
+        try std.testing.expectEqual(old_path.ptr, model.selected_project_path.?.ptr);
+        try std.testing.expectEqual(old_node.ptr, model.selected_node_id.?.ptr);
+        try std.testing.expectEqual(old_nodes, model.graph.?.nodes.items.ptr);
+        try std.testing.expectEqual(old_index, model.selected_index);
+        try std.testing.expectEqualStrings("A", model.selected_project_path.?);
+        try std.testing.expectEqualStrings("group", model.open_composite_id.?);
+        try std.testing.expectEqualStrings("Group", model.open_composite_title.?);
+        try std.testing.expectEqualStrings("inner", model.selected_node_id.?);
+    }
+}
+
+test "custody selection preserves normal same different and empty project behavior" {
+    for ([_][]const u8{ "A", "B", "E" }) |target| {
+        var model = try custodySelectionTestModel();
+        defer model.deinit();
+        try std.testing.expect(model.selectProject(target));
+        try std.testing.expectEqualStrings(target, model.selected_project_path.?);
+        try std.testing.expectEqualStrings(target, model.graph.?.project.path);
+        try std.testing.expect(model.open_composite_id == null);
+        if (std.mem.eql(u8, target, "E")) {
+            try std.testing.expect(model.selected_node_id == null);
+            try std.testing.expect(model.selected_index == null);
+        } else {
+            try std.testing.expectEqualStrings(if (std.mem.eql(u8, target, "A")) "group" else "b1", model.selected_node_id.?);
+            try std.testing.expectEqual(@as(?usize, 0), model.selected_index);
+        }
+    }
 }
 
 test "restore generation removes unreplayed graphs and preserves valid selection" {

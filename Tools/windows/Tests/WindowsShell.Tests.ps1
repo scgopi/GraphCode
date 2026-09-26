@@ -603,6 +603,10 @@ Invoke-Native "Template library executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\TemplateLibrary.zig } finally { Pop-Location }
 }
+Invoke-Native "Custody child data-only executable tests" {
+  & (Join-Path $PSScriptRoot "CustodyChild.Tests.ps1") -ZigExecutable $zig
+  if ($LASTEXITCODE -ne 0) { throw "Custody child tests failed with exit code $LASTEXITCODE" }
+}
 Invoke-Native "Windows shell diagnostics executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Diagnostics.zig } finally { Pop-Location }

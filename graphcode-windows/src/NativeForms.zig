@@ -390,6 +390,13 @@ fn nodeWithTemplatesImpl(
         allocator.destroy(state);
     }
 
+    try initializeNodeDialog(state, initial);
+    const accepted = try show(state, "Create or edit node", &.{});
+    return finishNodeDialog(allocator, state, initial, accepted, &attachments_transferred, validation, continuation, DraftAttachments.discardAllChecked);
+}
+
+fn initializeNodeDialog(state: *DialogState, initial: Forms.NodeDraft) !void {
+    const allocator = state.allocator;
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, initial.loop_type);
     state.values[2] = try allocator.dupe(u8, initial.check_description);
@@ -404,7 +411,7 @@ fn nodeWithTemplatesImpl(
     state.values[11] = try allocator.dupe(u8, initial.metric_direction);
     state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
     state.values[13] = try allocator.dupe(u8, initial.model_tier);
-    state.values[14] = try worktreeSelectionText(allocator, worktree_choices, initial.worktree_path);
+    state.values[14] = try worktreeSelectionText(allocator, state.node_worktree_choices, initial.worktree_path);
     state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
     state.values[16] = try allocator.dupe(u8, initial.worktree_id);
     state.values[17] = try allocator.dupe(u8, initial.worktree_path);
@@ -413,8 +420,6 @@ fn nodeWithTemplatesImpl(
     state.values[20] = try allocator.dupe(u8, initial.created_by);
     for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
     try restoreStagedAttachments(state, initial);
-    const accepted = try show(state, "Create or edit node", &.{});
-    return finishNodeDialog(allocator, state, initial, accepted, &attachments_transferred, validation, continuation, DraftAttachments.discardAllChecked);
 }
 
 fn allocateNodeDialog(initial: DialogState, continuation: ?*NodeContinuation) !*DialogState {
@@ -482,6 +487,34 @@ fn finishNodeDialog(
     attachments_transferred.* = true;
     return .{ .draft = draft };
 }
+
+pub const NodeFormTest = if (@import("builtin").is_test) struct {
+    pub const Outcome = enum { accept, cancel, templates };
+
+    /// Data-only bridge: the test supplies a synthetic leaf and a non-filesystem discard.
+    pub fn finish(
+        allocator: std.mem.Allocator,
+        initial: Forms.NodeDraft,
+        outcome: Outcome,
+        validation: NodeValidation,
+        continuation: *NodeContinuation,
+        transferred: *bool,
+        discard: *const fn ([]const u8) anyerror!void,
+    ) !NodeResult {
+        const state = try allocateNodeDialog(.{ .allocator = allocator, .kind = .node, .parent = null }, continuation);
+        defer {
+            abandonNodeState(state, transferred.*, continuation, discard);
+            freeAttachmentState(state);
+            freeValues(state);
+            allocator.destroy(state);
+        }
+        state.attachment_draft_id = initial.node_id;
+        try initializeNodeDialog(state, initial);
+        state.template_requested = outcome == .templates;
+        state.result = outcome == .accept;
+        return finishNodeDialog(allocator, state, initial, state.result, transferred, validation, continuation, discard);
+    }
+} else void;
 
 /// A native, keyboard-searchable list of saved templates. The editable combo
 /// provides standard type-ahead search, Up/Down selection, Enter acceptance,
@@ -1184,7 +1217,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
         "What should it do each time?",              "First instruction",                  "Pause only before writing files",
         "What does done look like?",                 "Done check command (optional)",      "Check every (seconds)",
         "Declare stalled after (seconds, optional)", "Progress metric command (optional)", "When is the metric better?",
-        "Agent",                                     "Model",                                     "Branch",
+        "Agent",                                     "Model",                              "Branch",
     };
     const edge_labels = [_][]const u8{
         "Source loop identity",                          "Target loop identity", "What should this connection do?", "When does it fire?",
@@ -1882,8 +1915,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
                     _ = c.SendMessageW(input, c.CB_ADDSTRING, 0, @intCast(@intFromPtr(wide.ptr)));
                 }
                 _ = c.SendMessageW(input, c.CB_SETCURSEL, 0, 0);
-            } else
-            if (isEndpointCombo(state, index)) {
+            } else if (isEndpointCombo(state, index)) {
                 for (state.edge_endpoints) |endpoint| {
                     const label = std.fmt.allocPrint(state.allocator, "{s} — {s}", .{ endpoint.title, endpoint.id }) catch continue;
                     defer state.allocator.free(label);
@@ -2591,6 +2623,162 @@ test "node draft builder preserves every hidden initial field" {
     try std.testing.expectEqual(initial.stall_after_seconds, hidden_draft.stall_after_seconds);
 }
 
+test "custody child initializer preserves full draft fields and permits backend editing" {
+    const allocator = std.testing.allocator;
+    const initial = Forms.NodeDraft{
+        .title = "Child",
+        .loop_type = "goalBased",
+        .goal_summary = "Finish the task",
+        .goal_predicate = "verify",
+        .poll_interval_seconds = 37,
+        .stall_after_seconds = 240,
+        .metric_command = "measure",
+        .metric_direction = "minimize",
+        .check_description = "Check",
+        .trigger_prompt = "/loop 1h inspect",
+        .first_instruction = "Initial brief",
+        .pauses_before_writes_only = true,
+        .backend = "copilotCLI",
+        .model_tier = "capable",
+        .worktree_repository = "B",
+        .worktree_id = "branch",
+        .worktree_path = "B\\wt",
+        .worktree_branch = "branch",
+        .subgraph_json = "",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+        .claude_permissions = "manual",
+        .copilot_permissions = "ask",
+        .briefing_enabled = false,
+        .activity_enabled = true,
+    };
+    var state = DialogState{ .allocator = allocator, .kind = .node, .parent = null };
+    defer freeValues(&state);
+    try initializeNodeDialog(&state, initial);
+    try std.testing.expectEqualStrings(initial.backend.?, state.values[12]);
+    try std.testing.expectEqualStrings(initial.created_by, state.values[20]);
+    allocator.free(state.values[12]);
+    state.values[12] = try allocator.dupe(u8, "codex");
+    var draft = try buildNodeDraft(allocator, &state, initial);
+    defer draft.deinit(allocator);
+    var expected = initial;
+    expected.backend = "codex";
+    try std.testing.expectEqualDeep(expected, draft);
+}
+
+const CustodyFormGuard = struct {
+    reject: bool = false,
+    fn check(raw: *const anyopaque) !void {
+        const self: *const @This() = @ptrCast(@alignCast(raw));
+        if (self.reject) return error.NodeCreationParentResolved;
+    }
+    fn discard(path: []const u8) !void {
+        try std.testing.expectEqualStrings("synthetic-owned-leaf", path);
+    }
+    fn refuseDiscard(_: []const u8) !void {
+        return error.AccessDenied;
+    }
+};
+
+fn custodyFormAllocationCase(allocator: std.mem.Allocator, outcome: NodeFormTest.Outcome, reject: bool) !void {
+    var owner = NodeContinuation{ .directory = try allocator.dupe(u8, "synthetic-owned-leaf") };
+    defer {
+        _ = owner.abandonWith(allocator, CustodyFormGuard.discard);
+        owner.deinit(allocator);
+    }
+    const initial = Forms.NodeDraft{
+        .title = "Child",
+        .backend = "copilotCLI",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+        .node_id = "44444444-4444-4444-8444-444444444444",
+        .attachment_count = 1,
+        .attachment_paths = .{ "C:\\synthetic\\image.png", "", "", "", "", "", "", "" },
+        .attachment_ids = .{ "55555555-5555-4555-8555-555555555555", "", "", "", "", "", "", "" },
+    };
+    const guard = CustodyFormGuard{ .reject = reject };
+    var transferred = false;
+    const result = NodeFormTest.finish(allocator, initial, outcome, .{ .context = &guard, .check = CustodyFormGuard.check }, &owner, &transferred, CustodyFormGuard.discard) catch |err| {
+        try std.testing.expect(!transferred);
+        if (err == error.NodeCreationParentResolved and reject) return;
+        return err;
+    };
+    switch (result) {
+        .draft, .templates => |value| {
+            var draft = value;
+            defer draft.deinit(allocator);
+            try std.testing.expect(transferred);
+            try std.testing.expectEqualStrings(initial.created_by, draft.created_by);
+            try std.testing.expectEqualStrings(initial.node_id, draft.node_id);
+        },
+        .cancelled => try std.testing.expect(!transferred),
+    }
+}
+
+test "custody child initializer transfer cancel and rejection release every partial allocation" {
+    for (std.enums.values(NodeFormTest.Outcome)) |outcome| {
+        for ([_]bool{ false, true }) |reject|
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyFormAllocationCase, .{ outcome, reject });
+    }
+}
+
+test "custody child cleanup errors retain the synthetic capability without transfer" {
+    const allocator = std.testing.allocator;
+    var owner = NodeContinuation{ .directory = try allocator.dupe(u8, "synthetic-owned-leaf") };
+    defer owner.deinit(allocator);
+    const guard = CustodyFormGuard{};
+    var transferred = false;
+    const result = try NodeFormTest.finish(allocator, .{
+        .title = "",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+    }, .cancel, .{ .context = &guard, .check = CustodyFormGuard.check }, &owner, &transferred, CustodyFormGuard.refuseDiscard);
+    try std.testing.expect(result == .cancelled);
+    try std.testing.expect(!transferred);
+    try std.testing.expectEqual(error.AccessDenied, owner.cleanup_error.?);
+    try std.testing.expectEqualStrings("synthetic-owned-leaf", owner.directory);
+}
+
+fn custodyTemplateAllocationCase(allocator: std.mem.Allocator) !void {
+    const stable = std.testing.allocator;
+    var owner = NodeContinuation{ .directory = try allocator.dupe(u8, "synthetic-owned-leaf") };
+    defer {
+        _ = owner.abandonWith(allocator, CustodyFormGuard.discard);
+        owner.deinit(allocator);
+    }
+    const guard = CustodyFormGuard{};
+    var transferred = false;
+    const result = try NodeFormTest.finish(allocator, .{
+        .title = "Before template",
+        .backend = "codex",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+    }, .templates, .{ .context = &guard, .check = CustodyFormGuard.check }, &owner, &transferred, CustodyFormGuard.discard);
+    var draft = result.templates;
+    defer draft.deinit(allocator);
+    const Templates = @import("TemplateLibrary.zig");
+    var template = try Templates.fromDraft(stable, "Template", .{ .title = "", .first_instruction = "Changed brief" });
+    defer template.deinit(stable);
+    defer {
+        std.debug.assert(std.mem.eql(u8, draft.created_by, "11111111-1111-4111-8111-111111111111"));
+        std.debug.assert(std.mem.eql(u8, draft.backend.?, "codex"));
+        std.debug.assert(std.mem.eql(u8, owner.directory, "synthetic-owned-leaf"));
+    }
+    try Templates.applyOwned(&draft, template, allocator);
+}
+
+test "custody child template application allocation failures retain custody and ownership" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyTemplateAllocationCase, .{});
+    const allocator = std.testing.allocator;
+    var owner = NodeContinuation{ .directory = try allocator.dupe(u8, "synthetic-owned-leaf") };
+    defer owner.deinit(allocator);
+    const guard = CustodyFormGuard{};
+    var transferred = false;
+    try std.testing.expectError(error.MissingFirstInstruction, NodeFormTest.finish(allocator, .{
+        .title = "",
+        .first_instruction = "",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+    }, .accept, .{ .context = &guard, .check = CustodyFormGuard.check }, &owner, &transferred, CustodyFormGuard.discard));
+    try std.testing.expect(!transferred);
+    try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+}
+
 test "node draft builder carries staged attachments and the draft id onto the wire draft" {
     var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
     state.values[1] = @constCast("turnBased");
@@ -3116,7 +3304,6 @@ test "conditional graph fields and validation follow selected types" {
     try std.testing.expectEqual(@as(?i64, 4), edge_draft.cycle_max_iterations);
     try std.testing.expectEqual(@as(?i64, 2), edge_draft.cycle_stop_after_passes);
     try std.testing.expectEqualStrings("D:\\other-project", edge_draft.spawn_target_project_path);
-
 }
 
 test "graph form cancellation leaves draft values untouched" {

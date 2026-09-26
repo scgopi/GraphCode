@@ -9,6 +9,7 @@ pub const NodeTarget = struct {
     unwired: bool = false,
     follows_template: bool = false,
     resolved: bool = false,
+    can_create_child: bool = true,
 };
 
 pub const BackgroundTarget = struct {
@@ -47,6 +48,7 @@ pub const Action = enum {
     stop_node,
     delete_node,
     open_terminal,
+    new_child_node,
     message_node,
     memo_node,
     open_composite,
@@ -104,6 +106,7 @@ const ids = struct {
     const arm_composite = 5108;
     const save_node_template = 5114;
     const detach_template = 5115;
+    const new_child_node = 5119;
     const wire_node = 5109;
     const mark_entry = 5112;
     const edit_edge = 5110;
@@ -140,6 +143,51 @@ pub const MoveProjectMenuItem = struct {
 /// separate accessibility contract model.
 pub fn moveProjectMenuItem() MoveProjectMenuItem {
     return .{ .enabled = Wire.supportsProjectRelocation() };
+}
+
+pub const NodeMenuItem = struct {
+    id: usize = 0,
+    text: []const u8 = "",
+    enabled: bool = true,
+};
+
+pub fn newChildNodeMenuItem(node: NodeTarget) ?NodeMenuItem {
+    if (node.resolved) return null;
+    return .{ .id = ids.new_child_node, .text = "New Child Node...", .enabled = node.can_create_child };
+}
+
+pub const NodeMenuPlan = struct {
+    items: [15]NodeMenuItem = undefined,
+    len: usize = 0,
+
+    fn add(self: *NodeMenuPlan, item: NodeMenuItem) void {
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+};
+
+pub fn nodeMenuPlan(node: NodeTarget) NodeMenuPlan {
+    var plan = NodeMenuPlan{};
+    plan.add(.{ .id = ids.open_terminal, .text = "Open Terminal\tEnter" });
+    if (newChildNodeMenuItem(node)) |item| plan.add(item);
+    if (node.unwired) {
+        plan.add(.{ .id = ids.wire_node, .text = "Wire it up" });
+        plan.add(.{ .id = ids.mark_entry, .text = "Mark as entry" });
+        plan.add(.{});
+    }
+    if (node.composite) {
+        plan.add(.{ .id = ids.open_composite, .text = "Open Group" });
+        plan.add(.{ .id = ids.pilot_composite, .text = "Pilot Once" });
+        plan.add(.{ .id = ids.arm_composite, .text = "Arm Schedule", .enabled = node.can_arm });
+        plan.add(.{});
+    }
+    plan.add(.{ .id = ids.edit_node, .text = "Edit Details...\tCtrl+E" });
+    plan.add(.{ .id = ids.save_node_template, .text = "Save as Template..." });
+    if (node.follows_template) plan.add(.{ .id = ids.detach_template, .text = "Detach from Template" });
+    plan.add(.{ .id = ids.rename_node, .text = "Rename...\tF2" });
+    if (!node.resolved) plan.add(.{ .id = ids.stop_node, .text = "Stop\tCtrl+S" });
+    plan.add(.{ .id = ids.delete_node, .text = "Delete Loop...\tDelete" });
+    return plan;
 }
 
 pub fn show(
@@ -199,24 +247,10 @@ fn buildMenu(target: Target) c.HMENU {
             append(menu, ids.delete_project_loops, "Delete All Loops...");
         },
         .node => |node| {
-            append(menu, ids.open_terminal, "Open Terminal\tEnter");
-            if (node.unwired) {
-                append(menu, ids.wire_node, "Wire it up");
-                append(menu, ids.mark_entry, "Mark as entry");
-                separator(menu);
+            const plan = nodeMenuPlan(node);
+            for (plan.items[0..plan.len]) |item| {
+                if (item.id == 0) separator(menu) else appendEnabled(menu, item.id, item.text, item.enabled);
             }
-            if (node.composite) {
-                append(menu, ids.open_composite, "Open Group");
-                append(menu, ids.pilot_composite, "Pilot Once");
-                appendEnabled(menu, ids.arm_composite, "Arm Schedule", node.can_arm);
-                separator(menu);
-            }
-            append(menu, ids.edit_node, "Edit Details...\tCtrl+E");
-            append(menu, ids.save_node_template, "Save as Template...");
-            if (node.follows_template) append(menu, ids.detach_template, "Detach from Template");
-            append(menu, ids.rename_node, "Rename...\tF2");
-            if (!node.resolved) append(menu, ids.stop_node, "Stop\tCtrl+S");
-            append(menu, ids.delete_node, "Delete Loop...\tDelete");
         },
         .edge => {
             append(menu, ids.edit_edge, "Edit Edge...");
@@ -245,6 +279,7 @@ fn actionForCommand(command: c_int) Action {
         ids.stop_node => .stop_node,
         ids.delete_node => .delete_node,
         ids.open_terminal => .open_terminal,
+        ids.new_child_node => .new_child_node,
         ids.edit_node => .edit_node,
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
@@ -304,6 +339,43 @@ fn toWide(text: []const u8) ?[]u16 {
 }
 
 const std = @import("std");
+
+test "custody child menu plan is unresolved-only and uses its reserved command" {
+    const target = NodeTarget{ .project_path = "B", .id = "11111111-1111-4111-8111-111111111111" };
+    const item = newChildNodeMenuItem(target).?;
+    try std.testing.expectEqual(@as(usize, 5119), item.id);
+    try std.testing.expectEqualStrings("New Child Node...", item.text);
+    try std.testing.expect(item.enabled);
+    try std.testing.expectEqual(Action.new_child_node, actionForCommand(@intCast(item.id)));
+    var resolved = target;
+    resolved.resolved = true;
+    try std.testing.expect(newChildNodeMenuItem(resolved) == null);
+    try std.testing.expectEqual(Action.none, actionForCommand(0));
+}
+
+test "custody child node menu plan preserves existing items when creation is unavailable" {
+    const expected_unresolved = [_]usize{ 5104, 5119, 5109, 5112, 0, 5113, 5107, 5108, 0, 5100, 5114, 5115, 5101, 5102, 5103 };
+    const expected_resolved = [_]usize{ 5104, 5109, 5112, 0, 5113, 5107, 5108, 0, 5100, 5114, 5115, 5101, 5103 };
+    for ([_]bool{ false, true }) |resolved| {
+        const plan = nodeMenuPlan(.{
+            .project_path = "B",
+            .id = "parent",
+            .composite = true,
+            .unwired = true,
+            .follows_template = true,
+            .resolved = resolved,
+            .can_create_child = false,
+        });
+        const expected: []const usize = if (resolved) &expected_resolved else &expected_unresolved;
+        try std.testing.expectEqual(expected.len, plan.len);
+        for (plan.items[0..plan.len], expected) |item, id| {
+            try std.testing.expectEqual(id, item.id);
+            try std.testing.expectEqual(id != 5119 and id != 5108, item.enabled);
+        }
+        try std.testing.expectEqualStrings("Open Terminal\tEnter", plan.items[0].text);
+        try std.testing.expectEqualStrings("Delete Loop...\tDelete", plan.items[plan.len - 1].text);
+    }
+}
 
 test "background menu exposes supported folder actions and gates edge creation" {
     const menu = buildMenu(.{ .background = .{

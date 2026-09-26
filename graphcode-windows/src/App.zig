@@ -1504,16 +1504,135 @@ pub const App = struct {
         return choices;
     }
 
+    const NodeCreationParent = struct { id: []const u8, backend: []const u8, loop_type: []const u8, state: []const u8 };
+
     const NodeCreationContext = struct {
         project_path: []u8,
         composite_id: ?[]u8,
         origin: enum { loaded, recent, inspection, overview_global },
+        // Child contexts and their parent strings belong to ChildNodeCreation's arena.
+        parent: ?NodeCreationParent = null,
 
         fn deinit(self: *NodeCreationContext, allocator: std.mem.Allocator) void {
             allocator.free(self.project_path);
             if (self.composite_id) |id| allocator.free(id);
         }
     };
+
+    const ChildNodeCreation = struct {
+        arena: std.heap.ArenaAllocator,
+        context: NodeCreationContext,
+        popup_project: ?[]const u8,
+        popup_composite: ?[]const u8,
+        popup_client_composite: []const u8,
+        popup_surface: GraphCanvas.Surface,
+        initial: Forms.NodeDraft,
+        choices: []const WorktreeChoice,
+
+        fn deinit(self: *ChildNodeCreation) void {
+            self.arena.deinit();
+        }
+    };
+
+    fn sameOptionalID(left: ?[]const u8, right: ?[]const u8) bool {
+        if (left) |value| return if (right) |other| std.mem.eql(u8, value, other) else false;
+        return right == null;
+    }
+
+    fn childParentNode(self: *const App, path: []const u8, composite_id: ?[]const u8, parent_id: []const u8) !GraphModel.Node {
+        const root = self.model.graphFor(path) orelse return error.NodeCreationProjectClosed;
+        const nodes = if (composite_id) |id| blk: {
+            if (!sameOptionalID(self.model.selected_project_path, path) or
+                !sameOptionalID(self.model.open_composite_id, id))
+                return error.NodeCreationCompositeChanged;
+            const index = GraphModel.findNodeIndexByID(root.nodes.items, id) orelse return error.NodeCreationCompositeChanged;
+            const composite = root.nodes.items[index];
+            if ((!std.mem.eql(u8, composite.loop_type, "composite") and !std.mem.eql(u8, composite.loop_type, "proactive")) or
+                composite.subgraph_json.len == 0)
+                return error.NodeCreationCompositeChanged;
+            break :blk (self.model.graph orelse return error.NodeCreationCompositeChanged).nodes.items;
+        } else root.nodes.items;
+        const index = GraphModel.findNodeIndexByID(nodes, parent_id) orelse return error.NodeCreationParentMissing;
+        return nodes[index];
+    }
+
+    fn captureChildNodeCreation(self: *const App, path: []const u8, composite_id: ?[]const u8, parent_id: []const u8) !ChildNodeCreation {
+        const parent = try self.childParentNode(path, composite_id, parent_id);
+        const settings = self.product_settings orelse return error.NodeCreationSettingsUnavailable;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        const parent_copy = NodeCreationParent{
+            .id = try allocator.dupe(u8, parent.id),
+            .backend = try allocator.dupe(u8, parent.backend),
+            .loop_type = try allocator.dupe(u8, parent.loop_type),
+            .state = try allocator.dupe(u8, parent.state),
+        };
+        var choices: []WorktreeChoice = &.{};
+        if (self.worktree_inspection) |inspection| {
+            if (std.mem.eql(u8, inspection.project_path, path)) {
+                choices = try allocator.alloc(WorktreeChoice, inspection.entries.items.len);
+                for (inspection.entries.items, choices) |entry, *choice| choice.* = .{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .branch = try allocator.dupe(u8, entry.branch),
+                    .is_default = entry.branch.len != 0 and std.mem.eql(u8, entry.branch, inspection.default_branch),
+                };
+            }
+        }
+        return .{
+            .context = .{
+                .project_path = try allocator.dupe(u8, path),
+                .composite_id = if (composite_id) |id| try allocator.dupe(u8, id) else null,
+                .origin = .loaded,
+                .parent = parent_copy,
+            },
+            .popup_project = if (self.model.selected_project_path) |value| try allocator.dupe(u8, value) else null,
+            .popup_composite = if (self.model.open_composite_id) |value| try allocator.dupe(u8, value) else null,
+            .popup_client_composite = try allocator.dupe(u8, self.client.subgraph_node_id),
+            .popup_surface = self.surface,
+            .initial = .{
+                .title = "",
+                .backend = parent_copy.backend,
+                .created_by = parent_copy.id,
+                .model_tier = try allocator.dupe(u8, settings.default_model),
+                .claude_permissions = try allocator.dupe(u8, settings.claude_permissions),
+                .copilot_permissions = try allocator.dupe(u8, settings.copilot_permissions),
+                .briefing_enabled = settings.briefing,
+                .activity_enabled = settings.activity,
+            },
+            .choices = choices,
+            .arena = arena,
+        };
+    }
+
+    fn validateChildParent(self: *const App, context: *const NodeCreationContext) !void {
+        const captured = context.parent orelse return;
+        const parent = try self.childParentNode(context.project_path, context.composite_id, captured.id);
+        if (isResolvedLoopState(captured.state) or isResolvedLoopState(parent.state)) return error.NodeCreationParentResolved;
+        if (!std.mem.eql(u8, parent.loop_type, captured.loop_type)) return error.NodeCreationParentTypeChanged;
+        if (!std.mem.eql(u8, parent.backend, captured.backend)) return error.NodeCreationParentBackendChanged;
+        if (!Forms.isUuid(captured.id)) return error.InvalidCreatedBy;
+        if (!Forms.isBackend(captured.backend)) return error.UnsupportedBackend;
+    }
+
+    fn prepareChildNodeCreation(self: *App, child: *const ChildNodeCreation) !void {
+        if (!sameOptionalID(self.model.selected_project_path, child.popup_project) or
+            !sameOptionalID(self.model.open_composite_id, child.popup_composite) or
+            !std.mem.eql(u8, self.client.subgraph_node_id, child.popup_client_composite) or
+            self.surface != child.popup_surface)
+            return error.NodeCreationPopupChanged;
+        try self.validateChildParent(&child.context);
+        // A root sidebar target may belong to B while A (or B's composite) is showing.
+        if (child.context.composite_id == null and
+            (!sameOptionalID(self.model.selected_project_path, child.context.project_path) or self.model.open_composite_id != null))
+        {
+            if (!self.selectProject(child.context.project_path)) return error.NodeCreationSelectionFailed;
+        }
+        try self.validateNodeCreationContext(&child.context);
+        const graph = self.model.graph orelse return error.NodeCreationProjectClosed;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, child.context.parent.?.id) orelse return error.NodeCreationParentMissing;
+        if (!self.selectNodeIndex(index)) return error.NodeCreationSelectionFailed;
+    }
 
     fn captureNodeCreationContext(self: *const App) !?NodeCreationContext {
         const current_path = self.currentProject() orelse if (self.surface == .overview)
@@ -1557,6 +1676,7 @@ pub const App = struct {
         } else if (self.model.open_composite_id != null or self.client.subgraph_node_id.len != 0) {
             return error.NodeCreationCompositeChanged;
         }
+        try self.validateChildParent(context);
     }
 
     const NodeCreationValidation = struct {
@@ -1583,6 +1703,10 @@ pub const App = struct {
             return;
         }) orelse return;
         defer context.deinit(self.allocator);
+        self.createNodeInContext(&context, null);
+    }
+
+    fn createNodeInContext(self: *App, context: *const NodeCreationContext, child: ?*const ChildNodeCreation) void {
         const path = context.project_path;
         Diagnostics.record(self.allocator, "action", "create-node");
         var continuation = NativeForms.NodeContinuation{};
@@ -1596,33 +1720,35 @@ pub const App = struct {
             }
             continuation.deinit(self.allocator);
         }
-        const guard_context = NodeCreationValidation{ .app = self, .context = &context };
+        const guard_context = NodeCreationValidation{ .app = self, .context = context };
         const validation = NativeForms.NodeValidation{ .context = &guard_context, .check = NodeCreationValidation.check };
-        const settings = self.product_settings orelse return;
         // Generated before the dialog opens (rather than at send time, as every other
         // draft field is) so a file picked mid-dialog can be copied straight into the
         // attachments directory this node will end up owning, instead of a temporary
         // location that would need a second copy once the real id is known.
         var draft_id_buffer: [36]u8 = undefined;
         Forms.generateDraftId(&draft_id_buffer);
-        const initial = Forms.NodeDraft{
-            .title = "",
-            .backend = settings.default_backend,
-            .model_tier = settings.default_model,
-            .claude_permissions = settings.claude_permissions,
-            .copilot_permissions = settings.copilot_permissions,
-            .briefing_enabled = settings.briefing,
-            .activity_enabled = settings.activity,
+        const initial = if (child) |captured| captured.initial else blk: {
+            const settings = self.product_settings orelse return;
+            break :blk Forms.NodeDraft{
+                .title = "",
+                .backend = settings.default_backend,
+                .model_tier = settings.default_model,
+                .claude_permissions = settings.claude_permissions,
+                .copilot_permissions = settings.copilot_permissions,
+                .briefing_enabled = settings.briefing,
+                .activity_enabled = settings.activity,
+            };
         };
         // Allocated once and shared by both the plain and templated forms below
         // so a project with no worktree inspection yet (or none at all, e.g.
         // graphcode://global) degrades to the same explicit empty picker either
         // form would otherwise have to special-case on its own.
-        const choices = self.worktreeChoicesForNodeForm(self.allocator) catch {
+        const choices = if (child) |captured| captured.choices else self.worktreeChoicesForNodeForm(self.allocator) catch {
             self.setStatus("Unable to prepare worktree choices");
             return;
         };
-        defer self.allocator.free(choices);
+        defer if (child == null) self.allocator.free(choices);
         var templates = TemplateLibrary.load(self.allocator, path) catch |err| {
             const detail = std.fmt.allocPrint(
                 self.allocator,
@@ -1699,7 +1825,7 @@ pub const App = struct {
                         self.setStatus("Unable to open saved template picker");
                         return;
                     };
-                    self.validateNodeCreationContext(&context) catch |err| {
+                    self.validateNodeCreationContext(context) catch |err| {
                         primary_error = err;
                         self.setStatus(nodeFormErrorStatus(err));
                         return;
@@ -1720,6 +1846,13 @@ pub const App = struct {
             error.NodeCreationProjectClosed => "Project closed while creating node",
             error.NodeCreationProjectChanged => "Project changed while creating node",
             error.NodeCreationCompositeChanged => "Composite context changed while creating node",
+            error.NodeCreationPopupChanged => "Context changed while the node menu was open",
+            error.NodeCreationParentMissing => "Parent node no longer exists",
+            error.NodeCreationParentResolved => "Parent node has resolved",
+            error.NodeCreationParentTypeChanged => "Parent node type changed while creating child",
+            error.NodeCreationParentBackendChanged => "Parent node backend changed while creating child",
+            error.NodeCreationSelectionFailed => "Unable to select the child node's parent",
+            error.NodeCreationSettingsUnavailable => "Node creation settings are unavailable",
             error.MissingNodeAttachmentOwnership => "Unable to restore node attachment ownership",
             error.NodeAttachmentCleanupFailed => "Unable to discard unused node attachments",
             error.EmptyTitle,
@@ -2607,28 +2740,91 @@ pub const App = struct {
     fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
-        defer self.allocator.free(node_id);
-        const composite = std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive") or
-            std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite");
-        const unwired = self.nodeIsUnwired(graph.nodes.items[index].id);
-        GraphContextMenu.show(
-            self.window.hwnd,
-            .{ .node = .{
+        self.showOwnedNodeContextMenu(graph.project.path, self.model.open_composite_id, graph.nodes.items[index].id, self.nodeIsUnwired(graph.nodes.items[index].id), x, y);
+    }
+
+    const NodeMenuContext = struct {
+        app: *App,
+        menu: *const NodeMenuPreparation,
+
+        fn apply(raw: ?*anyopaque, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
+            const self: *@This() = @ptrCast(@alignCast(raw orelse return));
+            if (action != .new_child_node) return self.app.handleContextAction(action, target);
+            const child = self.menu.childForCreation() catch |err| {
+                self.app.setStatus(nodeFormErrorStatus(err));
+                return;
+            };
+            self.app.prepareChildNodeCreation(child) catch |err| {
+                self.app.setStatus(nodeFormErrorStatus(err));
+                return;
+            };
+            self.app.createNodeInContext(&child.context, child);
+        }
+    };
+
+    const NodeMenuPreparation = struct {
+        allocator: std.mem.Allocator,
+        child: ?ChildNodeCreation,
+        child_error: ?anyerror,
+        target: GraphContextMenu.NodeTarget,
+
+        fn deinit(self: *NodeMenuPreparation) void {
+            if (self.child) |*child| child.deinit();
+            self.allocator.free(self.target.project_path);
+            self.allocator.free(self.target.id);
+        }
+
+        fn childForCreation(self: *const NodeMenuPreparation) !*const ChildNodeCreation {
+            if (self.target.resolved) return error.NodeCreationParentResolved;
+            if (self.child) |*child| return child;
+            return self.child_error orelse error.NodeCreationSettingsUnavailable;
+        }
+    };
+
+    fn prepareNodeMenu(self: *const App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool) !NodeMenuPreparation {
+        const node = try self.childParentNode(path, composite_id, id);
+        const project_path = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(project_path);
+        const node_id = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(node_id);
+        const resolved = isResolvedLoopState(node.state);
+        var child_error: ?anyerror = null;
+        const child: ?ChildNodeCreation = if (resolved) null else self.captureChildNodeCreation(path, composite_id, id) catch |err| blk: {
+            child_error = err;
+            break :blk null;
+        };
+        return .{
+            .allocator = self.allocator,
+            .child = child,
+            .child_error = child_error,
+            .target = .{
                 .project_path = project_path,
                 .id = node_id,
-                .composite = composite,
-                .can_arm = std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted"),
+                .composite = std.mem.eql(u8, node.loop_type, "proactive") or std.mem.eql(u8, node.loop_type, "composite"),
+                .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
                 .unwired = unwired,
-                .follows_template = graph.nodes.items[index].follows_template,
-                .resolved = isResolvedLoopState(graph.nodes.items[index].state),
-            } },
+                .follows_template = node.follows_template,
+                .resolved = resolved,
+                .can_create_child = child != null,
+            },
+        };
+    }
+
+    fn showOwnedNodeContextMenu(self: *App, path: []const u8, composite_id: ?[]const u8, id: []const u8, unwired: bool, x: i32, y: i32) void {
+        var menu = self.prepareNodeMenu(path, composite_id, id, unwired) catch |err| {
+            self.setStatus(if (err == error.OutOfMemory) "Unable to remember the node menu target" else nodeFormErrorStatus(err));
+            return;
+        };
+        defer menu.deinit();
+        if (menu.child_error) |err| self.setStatus(nodeFormErrorStatus(err));
+        var callback = NodeMenuContext{ .app = self, .menu = &menu };
+        GraphContextMenu.show(
+            self.window.hwnd,
+            .{ .node = menu.target },
             x,
             y,
-            self,
-            &onContextAction,
+            &callback,
+            &NodeMenuContext.apply,
         );
     }
 
@@ -2703,58 +2899,21 @@ pub const App = struct {
         const target: GraphContextMenu.Target = switch (target_kind) {
             1 => .{ .project = .{ .path = uia_context_menu_project_path, .remote = false } },
             2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true } },
-            3 => blk: {
-                const graph = self.model.graph orelse return;
-                if (graph.nodes.items.len == 0) return;
-                break :blk .{ .node = .{
-                    .project_path = graph.project.path,
-                    .id = graph.nodes.items[0].id,
-                    .composite = std.mem.eql(u8, graph.nodes.items[0].loop_type, "composite") or
-                        std.mem.eql(u8, graph.nodes.items[0].loop_type, "proactive"),
-                    .can_arm = std.mem.eql(u8, graph.nodes.items[0].pilot_state, "piloted"),
-                    .unwired = self.nodeIsUnwired(graph.nodes.items[0].id),
-                    .follows_template = graph.nodes.items[0].follows_template,
-                    .resolved = isResolvedLoopState(graph.nodes.items[0].state),
-                } };
-            },
+            3 => return self.showNodeContextMenu(0, uia_context_menu_x, uia_context_menu_y),
             4 => return self.showBackgroundContextMenu(uia_context_menu_x, uia_context_menu_y),
             5 => .quick_chats,
             // Sidebar-parity-only targets: expose the composite and unwired
             // loop-menu variants that target 3 (the plain wired first node)
             // cannot reach, so the live gate can assert every menu shape
             // GraphContextMenu.show() renders for a `.node` target.
-            6 => blk: {
-                const graph = self.model.graph orelse return;
-                if (graph.nodes.items.len < 2) return;
-                const node = graph.nodes.items[1];
-                break :blk .{ .node = .{
-                    .project_path = graph.project.path,
-                    .id = node.id,
-                    .composite = std.mem.eql(u8, node.loop_type, "composite") or
-                        std.mem.eql(u8, node.loop_type, "proactive"),
-                    .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
-                    .unwired = self.nodeIsUnwired(node.id),
-                    .follows_template = node.follows_template,
-                    .resolved = isResolvedLoopState(node.state),
-                } };
-            },
-            7 => blk: {
+            6 => return self.showNodeContextMenu(1, uia_context_menu_x, uia_context_menu_y),
+            7 => {
                 const graph = self.model.graph orelse return;
                 const index = GraphModel.findNodeIndexByID(
                     graph.nodes.items,
                     "77777777-7777-4777-8777-777777777777",
                 ) orelse return;
-                const node = graph.nodes.items[index];
-                break :blk .{ .node = .{
-                    .project_path = graph.project.path,
-                    .id = node.id,
-                    .composite = std.mem.eql(u8, node.loop_type, "composite") or
-                        std.mem.eql(u8, node.loop_type, "proactive"),
-                    .can_arm = std.mem.eql(u8, node.pilot_state, "piloted"),
-                    .unwired = self.nodeIsUnwired(node.id),
-                    .follows_template = node.follows_template,
-                    .resolved = isResolvedLoopState(node.state),
-                } };
+                return self.showNodeContextMenu(index, uia_context_menu_x, uia_context_menu_y);
             },
             else => return,
         };
@@ -6624,21 +6783,7 @@ fn onWindowMessage(
                             if (row.index < graph.nodes.items.len) {
                                 var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                                 _ = c.ClientToScreen(hwnd, &screen);
-                                GraphContextMenu.show(
-                                    hwnd,
-                                    .{ .node = .{
-                                        .project_path = path,
-                                        .id = graph.nodes.items[row.index].id,
-                                        .composite = std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "composite") or
-                                            std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "proactive"),
-                                        .can_arm = std.mem.eql(u8, graph.nodes.items[row.index].pilot_state, "piloted"),
-                                        .resolved = isResolvedLoopState(graph.nodes.items[row.index].state),
-                                    } },
-                                    screen.x,
-                                    screen.y,
-                                    app,
-                                    &onContextAction,
-                                );
+                                app.showOwnedNodeContextMenu(path, null, graph.nodes.items[row.index].id, false, screen.x, screen.y);
                             }
                         },
                         .quick_chat => if (row.index < app.model.quick_chats.items.len) {
@@ -7986,6 +8131,689 @@ fn nodeSubmissionTestApp(allocator: std.mem.Allocator) !App {
         .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
+}
+
+const custody_parent_id = "11111111-1111-4111-8111-111111111111";
+const custody_group_id = "22222222-2222-4222-8222-222222222222";
+const custody_graph_a =
+    \\{"event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Parent A","loopType":"turnBased","backend":"claudeCode","state":"running"}],"edges":[]}}}
+;
+const custody_graph_b =
+    \\{"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Parent B","loopType":"sketch","backend":"copilotCLI","state":"idle"},{"id":"22222222-2222-4222-8222-222222222222","title":"Group","loopType":"composite","backend":"claudeCode","state":"idle","subGraph":{"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Nested parent","loopType":"goalBased","backend":"codex","state":"running"}],"edges":[]}}],"edges":[]}}}
+;
+
+fn custodyTestApp() !App {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    errdefer deinitNodeSubmissionTestApp(&app);
+    _ = try app.model.updateFromFrame(custody_graph_a);
+    _ = try app.model.updateFromFrame(custody_graph_b);
+    app.product_settings = try ProductSettings.Settings.init(std.testing.allocator);
+    return app;
+}
+
+fn deinitCustodyTestApp(app: *App) void {
+    if (app.product_settings) |*settings| settings.deinit();
+    app.clearSelection();
+    deinitNodeSubmissionTestApp(app);
+}
+
+test "custody child capture owns clicked root B without selecting it or copying its type" {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try std.testing.expect(app.selectProject("A"));
+    app.client.setSubscription("A");
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings("B", child.context.project_path);
+    try std.testing.expect(child.context.origin == .loaded);
+    try std.testing.expect(child.context.composite_id == null);
+    try std.testing.expectEqualStrings(custody_parent_id, child.initial.created_by);
+    try std.testing.expectEqualStrings("copilotCLI", child.initial.backend.?);
+    try std.testing.expectEqualStrings("turnBased", child.initial.loop_type);
+    try std.testing.expectEqualStrings("", child.initial.title);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try app.prepareChildNodeCreation(&child);
+    try app.validateNodeCreationContext(&child.context);
+    try std.testing.expectEqualStrings("B", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(custody_parent_id, app.model.selected_node_id.?);
+    try std.testing.expectEqualStrings("A", app.client.subscription_path);
+    app.client.sendCreateNodeDraft(child.context.project_path, child.initial);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    const command = app.client.outbound[app.client.outbound_head];
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"projectPath\":\"B\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"createdBy\":\"" ++ custody_parent_id ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"backend\":\"copilotCLI\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"subGraphCommand\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"createEdge\"") == null);
+}
+
+fn custodyPopupWithoutSettingsCase(resolved: bool) !void {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    app.product_settings.?.deinit();
+    app.product_settings = null;
+    if (resolved) try custodyReplaceParentField(&app, .state, "succeeded");
+    var menu = try app.prepareNodeMenu("B", null, custody_parent_id, false);
+    defer menu.deinit();
+    try std.testing.expectEqualStrings("B", menu.target.project_path);
+    try std.testing.expectEqualStrings(custody_parent_id, menu.target.id);
+    try std.testing.expectEqual(resolved, menu.target.resolved);
+    try std.testing.expect(menu.child == null);
+    if (resolved)
+        try std.testing.expect(menu.child_error == null)
+    else
+        try std.testing.expectEqual(error.NodeCreationSettingsUnavailable, menu.child_error.?);
+    try std.testing.expectError(
+        if (resolved) error.NodeCreationParentResolved else error.NodeCreationSettingsUnavailable,
+        menu.childForCreation(),
+    );
+    try custodyExpectExistingMenuActions(menu.target);
+    try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
+fn custodyExpectExistingMenuActions(target: GraphContextMenu.NodeTarget) !void {
+    const plan = GraphContextMenu.nodeMenuPlan(target);
+    for ([_]usize{ 5104, 5101, 5103, 5102 }) |id| {
+        var found = false;
+        for (plan.items[0..plan.len]) |item| {
+            if (item.id == id) {
+                found = true;
+                try std.testing.expect(item.enabled);
+            }
+        }
+        try std.testing.expectEqual(id != 5102 or !target.resolved, found);
+    }
+    if (GraphContextMenu.newChildNodeMenuItem(target)) |item| {
+        try std.testing.expect(!target.resolved);
+        try std.testing.expectEqual(target.can_create_child, item.enabled);
+    } else try std.testing.expect(target.resolved);
+}
+
+test "custody child popup existing actions survive missing settings for unresolved nodes" {
+    try custodyPopupWithoutSettingsCase(false);
+}
+
+test "custody child popup existing actions survive missing settings for resolved nodes" {
+    try custodyPopupWithoutSettingsCase(true);
+}
+
+test "custody child popup owns generic and optional child data through parent and settings loss" {
+    for ([_]bool{ false, true }) |settings_available| {
+        for ([_]bool{ false, true }) |resolved| {
+            var app = try custodyTestApp();
+            defer deinitCustodyTestApp(&app);
+            if (resolved) try custodyReplaceParentField(&app, .state, "succeeded");
+            if (!settings_available) {
+                app.product_settings.?.deinit();
+                app.product_settings = null;
+            }
+            var menu = try app.prepareNodeMenu("B", null, custody_parent_id, false);
+            defer menu.deinit();
+            const node = app.model.graphFor("B").?.nodes.items[0];
+            try std.testing.expect(menu.target.id.ptr != node.id.ptr);
+            try std.testing.expect(menu.target.project_path.ptr != app.model.graphFor("B").?.project.path.ptr);
+            try std.testing.expectEqual(settings_available and !resolved, menu.child != null);
+            try std.testing.expectEqual(settings_available and !resolved, menu.target.can_create_child);
+            if (app.product_settings) |*settings| settings.deinit();
+            app.product_settings = null;
+            try std.testing.expect(app.model.applyLifecycle(.close, "B"));
+            try std.testing.expectEqualStrings("B", menu.target.project_path);
+            try std.testing.expectEqualStrings(custody_parent_id, menu.target.id);
+            try custodyExpectExistingMenuActions(menu.target);
+            if (menu.child) |*child| {
+                try std.testing.expectEqualStrings("copilotCLI", child.initial.backend.?);
+                try std.testing.expectEqualStrings("standard", child.initial.model_tier);
+                try std.testing.expectError(error.NodeCreationProjectClosed, app.prepareChildNodeCreation(child));
+            }
+            try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+            try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        }
+    }
+}
+
+fn custodyPopupAllocationCase(allocator: std.mem.Allocator, settings_available: bool, resolved: bool) !void {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try custodyAddInspection(&app, "B");
+    if (resolved) try custodyReplaceParentField(&app, .state, "succeeded");
+    if (!settings_available) {
+        app.product_settings.?.deinit();
+        app.product_settings = null;
+    }
+    app.allocator = allocator;
+    defer app.allocator = std.testing.allocator;
+    var menu = app.prepareNodeMenu("B", null, custody_parent_id, false) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        return err;
+    };
+    defer menu.deinit();
+    try custodyExpectExistingMenuActions(menu.target);
+    try std.testing.expectEqualStrings("B", menu.target.project_path);
+    try std.testing.expectEqualStrings(custody_parent_id, menu.target.id);
+    try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    if (menu.child_error) |err| if (err == error.OutOfMemory) {
+        try std.testing.expect(menu.child == null);
+        try std.testing.expect(!menu.target.can_create_child);
+        try std.testing.expectError(error.OutOfMemory, menu.childForCreation());
+        return error.OutOfMemory;
+    };
+    try std.testing.expectEqual(settings_available and !resolved, menu.child != null);
+    if (resolved) try std.testing.expect(menu.child_error == null);
+}
+
+test "custody child popup optional snapshot allocation failures preserve generic actions" {
+    for ([_]bool{ false, true }) |settings_available| {
+        for ([_]bool{ false, true }) |resolved|
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyPopupAllocationCase, .{ settings_available, resolved });
+    }
+}
+
+test "custody child distinguishes nested and root parents with identical IDs" {
+    for ([_]bool{ false, true }) |root_target| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        try std.testing.expect(app.selectProject("B"));
+        try std.testing.expect(app.model.openComposite(custody_group_id));
+        app.client.setSubgraphAddress(custody_group_id);
+        var child = try app.captureChildNodeCreation("B", if (root_target) null else custody_group_id, custody_parent_id);
+        defer child.deinit();
+        try std.testing.expectEqualStrings(if (root_target) "copilotCLI" else "codex", child.initial.backend.?);
+        try app.prepareChildNodeCreation(&child);
+        try app.validateNodeCreationContext(&child.context);
+        try std.testing.expectEqualStrings(if (root_target) "" else custody_group_id, app.client.subgraph_node_id);
+        app.client.sendCreateNodeDraft(child.context.project_path, child.initial);
+        try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+        const command = app.client.outbound[app.client.outbound_head];
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, command, .{});
+        defer parsed.deinit();
+        const graph = parsed.value.object.get("graphCommand").?.object;
+        try std.testing.expectEqualStrings("B", graph.get("projectPath").?.string);
+        var node_command = graph.get("command").?.object;
+        if (!root_target) {
+            const addressed = node_command.get("subGraphCommand").?.object;
+            try std.testing.expectEqualStrings(custody_group_id, addressed.get("nodeID").?.string);
+            node_command = addressed.get("command").?.object;
+        }
+        try std.testing.expectEqual(@as(usize, 1), node_command.count());
+        const draft = node_command.get("createNode").?.object.get("_0").?.object;
+        try std.testing.expectEqualStrings(custody_parent_id, draft.get("createdBy").?.string);
+        try std.testing.expectEqualStrings(if (root_target) "copilotCLI" else "codex", draft.get("backend").?.string);
+        try std.testing.expect(Forms.isUuid(draft.get("id").?.string));
+        try std.testing.expect(draft.get("subGraph").? == .null);
+    }
+}
+
+test "custody child popup context changes fail before selection and never rescue the target" {
+    const Change = enum { project, composite, client, surface };
+    for (std.enums.values(Change)) |change| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        try std.testing.expect(app.selectProject("B"));
+        var child = try app.captureChildNodeCreation("A", null, custody_parent_id);
+        defer child.deinit();
+        switch (change) {
+            .project => try std.testing.expect(app.selectProject("A")),
+            .composite => try std.testing.expect(app.model.openComposite(custody_group_id)),
+            .client => app.client.setSubgraphAddress(custody_group_id),
+            .surface => app.surface = .overview,
+        }
+        try std.testing.expectError(error.NodeCreationPopupChanged, app.prepareChildNodeCreation(&child));
+        try std.testing.expectEqualStrings(if (change == .project) "A" else "B", app.model.selected_project_path.?);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
+}
+
+fn custodyReplaceParentField(app: *App, field: enum { backend, loop_type, state }, value: []const u8) !void {
+    const graph = app.model.graphFor("B").?;
+    const node = &app.model.graphs.items[1].nodes.items[GraphModel.findNodeIndexByID(graph.nodes.items, custody_parent_id).?];
+    const destination = switch (field) {
+        .backend => &node.backend,
+        .loop_type => &node.loop_type,
+        .state => &node.state,
+    };
+    const replacement = try app.allocator.dupe(u8, value);
+    app.allocator.free(destination.*);
+    destination.* = replacement;
+}
+
+test "custody child rejects parent changes both before selection and at the final guard" {
+    const Change = enum { deleted, closed, resolved, backend, loop_type };
+    for ([_]bool{ false, true }) |prepared| {
+        for (std.enums.values(Change)) |change| {
+            var app = try custodyTestApp();
+            defer deinitCustodyTestApp(&app);
+            try std.testing.expect(app.selectProject("A"));
+            var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+            defer child.deinit();
+            if (prepared) try app.prepareChildNodeCreation(&child);
+            switch (change) {
+                .deleted => _ = try app.model.updateFromFrame(
+                    \\{"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
+                ),
+                .closed => try std.testing.expect(app.model.applyLifecycle(.close, "B")),
+                .resolved => try custodyReplaceParentField(&app, .state, "succeeded"),
+                .backend => try custodyReplaceParentField(&app, .backend, "claudeCode"),
+                .loop_type => try custodyReplaceParentField(&app, .loop_type, "turnBased"),
+            }
+            const expected: anyerror = switch (change) {
+                .deleted => error.NodeCreationParentMissing,
+                .closed => error.NodeCreationProjectClosed,
+                .resolved => error.NodeCreationParentResolved,
+                .backend => error.NodeCreationParentBackendChanged,
+                .loop_type => error.NodeCreationParentTypeChanged,
+            };
+            if (prepared) {
+                const guard = App.NodeCreationValidation{ .app = &app, .context = &child.context };
+                try std.testing.expectError(expected, App.NodeCreationValidation.check(&guard));
+            } else {
+                try std.testing.expectError(expected, app.prepareChildNodeCreation(&child));
+                try std.testing.expectEqualStrings("A", app.model.selected_project_path.?);
+            }
+            try std.testing.expectEqualStrings("B", child.context.project_path);
+            try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        }
+    }
+}
+
+test "custody child resolved snapshots remain ineligible even if the live parent reopens" {
+    for ([_][]const u8{ "succeeded", "failed", "stalled", "stopped" }) |state| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        try custodyReplaceParentField(&app, .state, state);
+        var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+        defer child.deinit();
+        try custodyReplaceParentField(&app, .state, "running");
+        try std.testing.expectError(error.NodeCreationParentResolved, app.prepareChildNodeCreation(&child));
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
+}
+
+test "custody child permits rename reorder and unresolved progress without retargeting" {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try std.testing.expect(app.selectProject("A"));
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    const refresh =
+        \\{"event":{"graphChanged":{"project":{"path":"B","name":"Renamed project"},"nodes":[{"id":"33333333-3333-4333-8333-333333333333","title":"New first","loopType":"turnBased","backend":"claudeCode","state":"running"},{"id":"11111111-1111-4111-8111-111111111111","title":"Renamed parent","loopType":"sketch","backend":"copilotCLI","state":"running"}],"edges":[]}}}
+    ;
+    _ = try app.model.updateFromFrame(refresh);
+    try app.prepareChildNodeCreation(&child);
+    try std.testing.expectEqual(@as(?usize, 1), app.model.selected_index);
+    _ = try app.model.updateFromFrame(refresh);
+    try app.validateNodeCreationContext(&child.context);
+    try std.testing.expectEqualStrings(custody_parent_id, child.initial.created_by);
+    try std.testing.expectEqualStrings("idle", child.context.parent.?.state);
+}
+
+test "custody child final guards reject foreign same IDs and actual command scope drift" {
+    const Change = enum { project, client, composite, deleted_composite };
+    for (std.enums.values(Change)) |change| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        try std.testing.expect(app.selectProject("B"));
+        try std.testing.expect(app.model.openComposite(custody_group_id));
+        app.client.setSubgraphAddress(custody_group_id);
+        var child = try app.captureChildNodeCreation("B", custody_group_id, custody_parent_id);
+        defer child.deinit();
+        try app.prepareChildNodeCreation(&child);
+        switch (change) {
+            .project => try std.testing.expect(app.selectProject("A")),
+            .client => app.client.setSubgraphAddress(null),
+            .composite => app.model.closeComposite(),
+            .deleted_composite => _ = try app.model.updateFromFrame(
+                \\{"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Root decoy","loopType":"goalBased","backend":"codex","state":"running"}],"edges":[]}}}
+            ),
+        }
+        try std.testing.expectError(
+            if (change == .project) error.NodeCreationProjectChanged else error.NodeCreationCompositeChanged,
+            app.validateNodeCreationContext(&child.context),
+        );
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        try std.testing.expectEqualStrings("B", child.context.project_path);
+    }
+}
+
+fn custodyAddInspection(app: *App, path: []const u8) !void {
+    app.worktree_inspection = .{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(app.allocator),
+        .default_branch = try app.allocator.dupe(u8, "main"),
+        .project_path = try app.allocator.dupe(u8, path),
+    };
+    try app.worktree_inspection.?.entries.append(.{
+        .path = try app.allocator.dupe(u8, "B\\worktree"),
+        .branch = try app.allocator.dupe(u8, "main"),
+    });
+}
+
+test "custody child owns exact-project worktree choices and settings across replacement" {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try custodyAddInspection(&app, "A");
+    var foreign = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer foreign.deinit();
+    try std.testing.expectEqual(@as(usize, 0), foreign.choices.len);
+    WorktreeStatus.deinitInspection(app.allocator, &app.worktree_inspection.?);
+    app.worktree_inspection = null;
+    try custodyAddInspection(&app, "B");
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    WorktreeStatus.deinitInspection(app.allocator, &app.worktree_inspection.?);
+    app.worktree_inspection = null;
+    app.product_settings.?.deinit();
+    app.product_settings = null;
+    _ = try app.model.updateFromFrame(custody_graph_b);
+    try std.testing.expectEqualStrings("B\\worktree", child.choices[0].path);
+    try std.testing.expectEqualStrings("main", child.choices[0].branch);
+    try std.testing.expect(child.choices[0].is_default);
+    try std.testing.expectEqualStrings("standard", child.initial.model_tier);
+    try std.testing.expectEqualStrings("auto", child.initial.claude_permissions);
+    try std.testing.expectEqualStrings("allowEverything", child.initial.copilot_permissions);
+    try app.prepareChildNodeCreation(&child);
+}
+
+test "custody child cannot capture a recent inspection or global fallback parent" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    app.surface = .overview;
+    try custodyAddInspection(&app, "B");
+    _ = try app.model.updateFromFrame(
+        \\{"event":{"recentProjectsListed":[{"path":"B","name":"Beta"}]}}
+    );
+    try std.testing.expectError(error.NodeCreationProjectClosed, app.captureChildNodeCreation("B", null, custody_parent_id));
+    try std.testing.expectError(error.NodeCreationProjectClosed, app.captureChildNodeCreation("graphcode://global", null, custody_parent_id));
+    try std.testing.expect(app.model.selected_project_path == null);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
+fn custodyCaptureAllocationCase(allocator: std.mem.Allocator) !void {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try custodyAddInspection(&app, "B");
+    try std.testing.expect(app.selectProject("B"));
+    try std.testing.expect(app.model.openComposite(custody_group_id));
+    app.client.setSubgraphAddress(custody_group_id);
+    app.allocator = allocator;
+    defer app.allocator = std.testing.allocator;
+    var child = try app.captureChildNodeCreation("B", custody_group_id, custody_parent_id);
+    defer child.deinit();
+    try std.testing.expectEqualStrings("B", app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(custody_group_id, app.model.open_composite_id.?);
+    try std.testing.expectEqualStrings("codex", child.initial.backend.?);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+}
+
+test "custody child capture releases every partial owned snapshot allocation" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyCaptureAllocationCase, .{});
+}
+
+fn custodyLargeSnapshotAllocationCase(allocator: std.mem.Allocator) !void {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try custodyAddInspection(&app, "B");
+    const large = try std.testing.allocator.alloc(u8, 32 * 1024);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    const node = &app.model.graphs.items[1].nodes.items[0];
+    const long_id = try std.testing.allocator.dupe(u8, large);
+    std.testing.allocator.free(node.id);
+    node.id = long_id;
+    const parent_title = try std.testing.allocator.dupe(u8, large);
+    std.testing.allocator.free(node.title);
+    node.title = parent_title;
+    const model = try std.testing.allocator.dupe(u8, large);
+    std.testing.allocator.free(app.product_settings.?.default_model);
+    app.product_settings.?.default_model = model;
+    for (0..12) |_| {
+        try app.worktree_inspection.?.entries.append(.{
+            .path = try std.testing.allocator.dupe(u8, large),
+            .branch = try std.testing.allocator.dupe(u8, large),
+        });
+    }
+    app.allocator = allocator;
+    defer app.allocator = std.testing.allocator;
+    var child = try app.captureChildNodeCreation("B", null, long_id);
+    defer child.deinit();
+    WorktreeStatus.deinitInspection(std.testing.allocator, &app.worktree_inspection.?);
+    app.worktree_inspection = null;
+    app.product_settings.?.deinit();
+    app.product_settings = null;
+    _ = try app.model.updateFromFrame(custody_graph_b);
+    try std.testing.expectEqualStrings(large, child.context.parent.?.id);
+    try std.testing.expectEqualStrings(large, child.initial.model_tier);
+    try std.testing.expectEqual(@as(usize, 13), child.choices.len);
+    try std.testing.expectEqualStrings(large, child.choices[12].path);
+    try std.testing.expectEqualStrings(large, child.choices[12].branch);
+}
+
+test "custody child arena growth and repeated captures free every partial snapshot" {
+    for (0..3) |_| try custodyLargeSnapshotAllocationCase(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyLargeSnapshotAllocationCase, .{});
+}
+
+fn custodyQueueAllocationCase(allocator: std.mem.Allocator) !void {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    try app.prepareChildNodeCreation(&child);
+    var draft = child.initial;
+    draft.node_id = "44444444-4444-4444-8444-444444444444";
+    app.client.allocator = allocator;
+    defer app.client.allocator = std.testing.allocator;
+    app.client.sendCreateNodeDraft(child.context.project_path, draft);
+    if (app.client.outbound_count == 0) {
+        try std.testing.expectEqualStrings("create node command encoding failed", app.client.last_error);
+        return error.OutOfMemory;
+    }
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+}
+
+test "custody child queue allocation failures remain explicit and never double enqueue" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, custodyQueueAllocationCase, .{});
+}
+
+test "custody child selected-ID allocation refusal does not open or enqueue" {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    try std.testing.expect(app.selectProject("B"));
+    try std.testing.expect(app.selectNodeIndex(1));
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    defer app.allocator = std.testing.allocator;
+    try std.testing.expectError(error.NodeCreationSelectionFailed, app.prepareChildNodeCreation(&child));
+    try std.testing.expectEqualStrings(custody_group_id, app.selected_node_id);
+    try std.testing.expectEqualStrings(custody_group_id, app.model.selected_node_id.?);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try std.testing.expectEqualStrings("Unable to select the child node's parent", App.nodeFormErrorStatus(error.NodeCreationSelectionFailed));
+}
+
+test "custody child model selection preparation failure preserves popup and blocks transfer" {
+    for (0..2) |fail_index| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        try std.testing.expect(app.selectProject("B"));
+        try std.testing.expect(app.model.openComposite(custody_group_id));
+        app.client.setSubgraphAddress(custody_group_id);
+        var child = try app.captureChildNodeCreation("A", null, custody_parent_id);
+        defer child.deinit();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        app.model.allocator = failing.allocator();
+        const prepared = app.prepareChildNodeCreation(&child);
+        app.model.allocator = std.testing.allocator;
+        try std.testing.expectError(error.NodeCreationSelectionFailed, prepared);
+        try std.testing.expectEqualStrings("B", app.model.selected_project_path.?);
+        try std.testing.expectEqualStrings(custody_group_id, app.model.open_composite_id.?);
+        try std.testing.expectEqualStrings(custody_group_id, app.client.subgraph_node_id);
+        const guard = App.NodeCreationValidation{ .app = &app, .context = &child.context };
+        var owner = NativeForms.NodeContinuation{ .directory = try app.allocator.dupe(u8, "synthetic-owned-leaf") };
+        defer owner.deinit(app.allocator);
+        var transferred = false;
+        try std.testing.expectError(error.NodeCreationProjectChanged, NativeForms.NodeFormTest.finish(
+            app.allocator,
+            custodyAttachedInitial(&child),
+            .accept,
+            .{ .context = &guard, .check = App.NodeCreationValidation.check },
+            &owner,
+            &transferred,
+            CustodyDiscard.discard,
+        ));
+        try std.testing.expect(!transferred);
+        try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
+}
+
+const CustodyDiscard = struct {
+    var calls: usize = 0;
+    fn discard(path: []const u8) !void {
+        try std.testing.expectEqualStrings("synthetic-owned-leaf", path);
+        calls += 1;
+    }
+};
+
+fn custodyAttachedInitial(child: *const App.ChildNodeCreation) Forms.NodeDraft {
+    var initial = child.initial;
+    initial.node_id = "44444444-4444-4444-8444-444444444444";
+    initial.attachment_count = 1;
+    initial.attachment_ids[0] = "55555555-5555-4555-8555-555555555555";
+    initial.attachment_paths[0] = "C:\\synthetic-only\\image.png";
+    return initial;
+}
+
+test "custody child invalid parent cannot transfer attachments or queue at either form boundary" {
+    const Change = enum { deleted, resolved, backend, loop_type, project, address };
+    for ([_]NativeForms.NodeFormTest.Outcome{ .accept, .templates }) |outcome| {
+        for (std.enums.values(Change)) |change| {
+            var app = try custodyTestApp();
+            defer deinitCustodyTestApp(&app);
+            var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+            defer child.deinit();
+            try app.prepareChildNodeCreation(&child);
+            const guard = App.NodeCreationValidation{ .app = &app, .context = &child.context };
+            switch (change) {
+                .deleted => _ = try app.model.updateFromFrame(
+                    \\{"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
+                ),
+                .resolved => try custodyReplaceParentField(&app, .state, "stopped"),
+                .backend => try custodyReplaceParentField(&app, .backend, "claudeCode"),
+                .loop_type => try custodyReplaceParentField(&app, .loop_type, "goalBased"),
+                .project => try std.testing.expect(app.selectProject("A")),
+                .address => app.client.setSubgraphAddress(custody_group_id),
+            }
+            const expected: anyerror = switch (change) {
+                .deleted => error.NodeCreationParentMissing,
+                .resolved => error.NodeCreationParentResolved,
+                .backend => error.NodeCreationParentBackendChanged,
+                .loop_type => error.NodeCreationParentTypeChanged,
+                .project => error.NodeCreationProjectChanged,
+                .address => error.NodeCreationCompositeChanged,
+            };
+            var owner = NativeForms.NodeContinuation{ .directory = try app.allocator.dupe(u8, "synthetic-owned-leaf") };
+            defer owner.deinit(app.allocator);
+            var transferred = false;
+            CustodyDiscard.calls = 0;
+            try std.testing.expectError(expected, NativeForms.NodeFormTest.finish(
+                app.allocator,
+                custodyAttachedInitial(&child),
+                outcome,
+                .{ .context = &guard, .check = App.NodeCreationValidation.check },
+                &owner,
+                &transferred,
+                CustodyDiscard.discard,
+            ));
+            try std.testing.expect(!transferred);
+            try std.testing.expectEqual(@as(usize, 1), CustodyDiscard.calls);
+            try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+            try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+        }
+    }
+}
+
+test "custody child template continuation retains custody and the edited backend" {
+    var app = try custodyTestApp();
+    defer deinitCustodyTestApp(&app);
+    var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+    defer child.deinit();
+    try app.prepareChildNodeCreation(&child);
+    const guard = App.NodeCreationValidation{ .app = &app, .context = &child.context };
+    const validation = NativeForms.NodeValidation{ .context = &guard, .check = App.NodeCreationValidation.check };
+    var owner = NativeForms.NodeContinuation{ .directory = try app.allocator.dupe(u8, "synthetic-owned-leaf") };
+    defer owner.deinit(app.allocator);
+    var transferred = false;
+    CustodyDiscard.calls = 0;
+    var edited = custodyAttachedInitial(&child);
+    edited.backend = "codex";
+    const picked = try NativeForms.NodeFormTest.finish(app.allocator, edited, .templates, validation, &owner, &transferred, CustodyDiscard.discard);
+    var current = picked.templates;
+    defer current.deinit(app.allocator);
+    try std.testing.expect(transferred);
+    try std.testing.expectEqualStrings("synthetic-owned-leaf", owner.directory);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try app.validateNodeCreationContext(&child.context);
+    var template = try TemplateLibrary.fromDraft(app.allocator, "A reusable task", .{
+        .title = "",
+        .backend = "codex",
+        .first_instruction = "Use the edited backend",
+    });
+    defer template.deinit(app.allocator);
+    try TemplateLibrary.applyOwned(&current, template, app.allocator);
+    try std.testing.expectEqualStrings(custody_parent_id, current.created_by);
+    transferred = false;
+    const accepted = try NativeForms.NodeFormTest.finish(app.allocator, current, .accept, validation, &owner, &transferred, CustodyDiscard.discard);
+    var draft = accepted.draft;
+    defer draft.deinit(app.allocator);
+    try std.testing.expect(transferred);
+    try std.testing.expectEqual(@as(usize, 0), owner.directory.len);
+    try std.testing.expectEqual(@as(usize, 0), CustodyDiscard.calls);
+    try std.testing.expectEqualStrings("codex", draft.backend.?);
+    try std.testing.expectEqualStrings(custody_parent_id, draft.created_by);
+    try std.testing.expectEqualStrings(current.node_id, draft.node_id);
+    app.client.sendCreateNodeDraft(child.context.project_path, draft);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    var parsed = try std.json.parseFromSlice(std.json.Value, app.allocator, app.client.outbound[app.client.outbound_head], .{});
+    defer parsed.deinit();
+    const wire_draft = parsed.value.object.get("graphCommand").?.object.get("command").?.object.get("createNode").?.object.get("_0").?.object;
+    try std.testing.expectEqualStrings(draft.node_id, wire_draft.get("id").?.string);
+    try std.testing.expectEqualStrings(custody_parent_id, wire_draft.get("createdBy").?.string);
+    try std.testing.expectEqualStrings("codex", wire_draft.get("backend").?.string);
+    try std.testing.expectEqual(@as(usize, 1), wire_draft.get("attachments").?.array.items.len);
+}
+
+test "custody child cancellation and rejected template continuation discard once without sending" {
+    for ([_]bool{ false, true }) |invalidate| {
+        var app = try custodyTestApp();
+        defer deinitCustodyTestApp(&app);
+        var child = try app.captureChildNodeCreation("B", null, custody_parent_id);
+        defer child.deinit();
+        try app.prepareChildNodeCreation(&child);
+        const guard = App.NodeCreationValidation{ .app = &app, .context = &child.context };
+        const validation = NativeForms.NodeValidation{ .context = &guard, .check = App.NodeCreationValidation.check };
+        var owner = NativeForms.NodeContinuation{ .directory = try app.allocator.dupe(u8, "synthetic-owned-leaf") };
+        defer owner.deinit(app.allocator);
+        var transferred = false;
+        CustodyDiscard.calls = 0;
+        const result = try NativeForms.NodeFormTest.finish(app.allocator, custodyAttachedInitial(&child), .templates, validation, &owner, &transferred, CustodyDiscard.discard);
+        var draft = result.templates;
+        defer draft.deinit(app.allocator);
+        if (invalidate) {
+            try custodyReplaceParentField(&app, .state, "failed");
+            try std.testing.expectError(error.NodeCreationParentResolved, app.validateNodeCreationContext(&child.context));
+        }
+        transferred = false;
+        const cancelled = try NativeForms.NodeFormTest.finish(app.allocator, draft, .cancel, validation, &owner, &transferred, CustodyDiscard.discard);
+        try std.testing.expect(cancelled == .cancelled);
+        try std.testing.expect(!transferred);
+        try std.testing.expectEqual(@as(usize, 1), CustodyDiscard.calls);
+        try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    }
 }
 
 fn deinitNodeSubmissionTestApp(app: *App) void {
