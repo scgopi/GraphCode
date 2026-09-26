@@ -696,13 +696,13 @@ pub fn worktreeSweep(
         else
             "LOOK BEFORE REMOVING";
         const branch = if (entry.branch.len != 0) entry.branch else entry.path;
-        const size = WorktreeStatus.sizeText(allocator, entry.size_bytes) catch allocator.dupe(u8, "size unavailable") catch &.{};
+        const size = try WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage());
+        defer allocator.free(size);
         state.display_labels[index] = try std.fmt.allocPrint(
             allocator,
             "{s}: {s} - {s} - {s}",
             .{ tier, branch, WorktreeStatus.failureReasonText(entry), size },
         );
-        allocator.free(size);
         state.values[index] = try allocator.dupe(u8, if (WorktreeStatus.sweepSelectable(entry) and WorktreeStatus.decision(entry) == .reclaimable) "true" else "false");
         state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
         state.input_kinds[index] = .checkbox;
@@ -711,12 +711,10 @@ pub fn worktreeSweep(
         state.sweep_paths[index] = entry.path;
     }
     state.field_count = count;
-    var total_bytes: u64 = 0;
     var safe_count: usize = 0;
     var look_count: usize = 0;
     var in_use_count: usize = 0;
     for (entries[0..count]) |entry| {
-        total_bytes += entry.size_bytes;
         if (entry.primary or entry.bound_running) {
             in_use_count += 1;
         } else if (WorktreeStatus.decision(entry) == .reclaimable) {
@@ -725,7 +723,7 @@ pub fn worktreeSweep(
             look_count += 1;
         }
     }
-    const total_text = try WorktreeStatus.sizeText(allocator, total_bytes);
+    const total_text = try WorktreeStatus.sizeCoverageText(allocator, WorktreeStatus.totalSize(entries[0..count]));
     defer allocator.free(total_text);
     const title = try std.fmt.allocPrint(
         allocator,

@@ -4,6 +4,8 @@ pub const Entry = struct {
     path: []u8,
     branch: []u8,
     size_bytes: u64 = 0,
+    size_complete: bool = false,
+    size_error: ?anyerror = null,
     primary: bool = false,
     locked: bool = false,
     prunable: bool = false,
@@ -13,6 +15,20 @@ pub const Entry = struct {
     pushed: bool = false,
     landed: bool = false,
     bound_running: bool = false,
+
+    pub fn sizeCoverage(self: Entry) SizeCoverage {
+        return .{
+            .bytes = self.size_bytes,
+            .complete = self.size_complete and self.size_error == null,
+            .first_error = self.size_error,
+        };
+    }
+
+    fn setSize(self: *Entry, size: SizeCoverage) void {
+        self.size_bytes = size.bytes;
+        self.size_complete = size.complete;
+        self.size_error = size.first_error;
+    }
 };
 
 pub fn explorerParameters(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -57,6 +73,21 @@ pub const Policy = struct {
 };
 
 pub const PolicyParseError = error{MalformedPolicy};
+
+pub const PolicySource = enum { missing, legacy, configured };
+pub const LoadedPolicy = struct { policy: Policy, source: PolicySource };
+pub const PolicyOutcome = union(enum) {
+    not_loaded,
+    known: LoadedPolicy,
+    failed: anyerror,
+
+    pub fn value(self: PolicyOutcome) ?Policy {
+        return switch (self) {
+            .known => |loaded| loaded.policy,
+            else => null,
+        };
+    }
+};
 
 pub fn failureReason(entry: Entry) FailureReason {
     if (entry.primary) return .primary;
@@ -107,6 +138,10 @@ pub fn encodePolicy(allocator: std.mem.Allocator, policy: Policy) ![]u8 {
 }
 
 pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
+    return (try decodePolicyWithSource(bytes)).policy;
+}
+
+fn decodePolicyWithSource(bytes: []const u8) PolicyParseError!LoadedPolicy {
     var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, bytes, .{}) catch return error.MalformedPolicy;
     defer parsed.deinit();
     const object = switch (parsed.value) {
@@ -145,15 +180,27 @@ pub fn decodePolicy(bytes: []const u8) PolicyParseError!Policy {
         };
         policy.applyResolveAction(policy.resolve_action);
     }
-    return policy;
+    return .{ .policy = policy, .source = if (object.count() == 2) .legacy else .configured };
+}
+
+pub fn policyReadOutcome(bytes: anyerror![]const u8) PolicyOutcome {
+    const content = bytes catch |err| return if (err == error.FileNotFound)
+        .{ .known = .{ .policy = .{}, .source = .missing } }
+    else
+        .{ .failed = err };
+    return .{ .known = decodePolicyWithSource(content) catch |err| return .{ .failed = err } };
+}
+
+pub fn loadPolicyOutcome(allocator: std.mem.Allocator, project_path: []const u8) PolicyOutcome {
+    const path = policyPath(allocator, project_path) catch |err| return .{ .failed = err };
+    defer allocator.free(path);
+    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch |err| return policyReadOutcome(err);
+    defer allocator.free(bytes);
+    return policyReadOutcome(bytes);
 }
 
 pub fn loadPolicy(allocator: std.mem.Allocator, project_path: []const u8) Policy {
-    const path = policyPath(allocator, project_path) catch return .{};
-    defer allocator.free(path);
-    const bytes = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch return .{};
-    defer allocator.free(bytes);
-    return decodePolicy(bytes) catch .{};
+    return loadPolicyOutcome(allocator, project_path).value() orelse .{};
 }
 
 pub fn savePolicy(allocator: std.mem.Allocator, project_path: []const u8, policy: Policy) !void {
@@ -173,6 +220,154 @@ pub const Summary = struct {
     total: usize = 0,
     reclaimable: usize = 0,
     blocked: usize = 0,
+};
+
+pub const SizeCoverage = struct {
+    /// A lower bound when measurement is incomplete.
+    bytes: u64 = 0,
+    complete: bool = true,
+    first_error: ?anyerror = null,
+
+    fn recordFile(self: *SizeCoverage, outcome: anyerror!u64) void {
+        const bytes = outcome catch |err| {
+            self.recordFailure(err);
+            return;
+        };
+        self.bytes = std.math.add(u64, self.bytes, bytes) catch |err| {
+            self.recordFailure(err);
+            self.bytes = std.math.maxInt(u64);
+            return;
+        };
+    }
+
+    fn recordFailure(self: *SizeCoverage, err: anyerror) void {
+        self.complete = false;
+        if (self.first_error == null) self.first_error = err;
+    }
+
+    fn include(self: *SizeCoverage, size: SizeCoverage) void {
+        if (size.first_error) |err| self.recordFailure(err);
+        self.complete = self.complete and size.complete;
+        self.recordFile(size.bytes);
+    }
+};
+
+fn directorySizeResult(outcome: anyerror!SizeCoverage) SizeCoverage {
+    return outcome catch |err| {
+        var size = SizeCoverage{};
+        size.recordFailure(err);
+        return size;
+    };
+}
+
+pub fn totalSize(entries: []const Entry) SizeCoverage {
+    var size = SizeCoverage{};
+    for (entries) |entry| size.include(entry.sizeCoverage());
+    return size;
+}
+
+pub const NoticeState = enum { below_threshold, notice, indeterminate };
+
+pub fn noticeState(entries: []const Entry, policy: Policy) NoticeState {
+    return evaluateNotice(summarize(entries), totalSize(entries), policy);
+}
+
+pub fn evaluateNotice(summary: Summary, size: SizeCoverage, policy: Policy) NoticeState {
+    if (summary.total >= policy.notice_count or
+        size.bytes >= @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024)
+        return .notice;
+    return if (size.complete and size.first_error == null) .below_threshold else .indeterminate;
+}
+
+pub const NoticeObservation = struct {
+    summary: Summary,
+    size: SizeCoverage,
+};
+
+pub const StaleReason = enum { bindings_changed, bindings_unavailable, connection_changed, worktrees_changed };
+
+/// Advisory values for notices, not authority to reclaim worktrees.
+pub const NoticeRecord = struct {
+    observation: ?NoticeObservation = null,
+    policy: PolicyOutcome = .not_loaded,
+    stale: ?StaleReason = null,
+    stale_error: ?anyerror = null,
+    refresh_error: ?anyerror = null,
+
+    pub fn inspected(inspection: *const Inspection, policy: PolicyOutcome) NoticeRecord {
+        return .{
+            .observation = .{
+                .summary = summarize(inspection.entries.items),
+                .size = totalSize(inspection.entries.items),
+            },
+            .policy = policy,
+        };
+    }
+
+    pub fn state(self: NoticeRecord) NoticeState {
+        if (self.stale != null or self.refresh_error != null) return .indeterminate;
+        const observation = self.observation orelse return .indeterminate;
+        const policy = self.policy.value() orelse return .indeterminate;
+        return evaluateNotice(observation.summary, observation.size, policy);
+    }
+};
+
+pub const NoticePhase = enum { uninspected, observed, incomplete_size, unknown_policy, stale, failed };
+
+pub const NoticePresentation = struct {
+    phase: NoticePhase,
+    summary: ?Summary = null,
+    state: NoticeState = .indeterminate,
+    failure: ?anyerror = null,
+
+    pub fn fromRecord(record: ?NoticeRecord) ?NoticePresentation {
+        const current = record orelse return .{ .phase = .uninspected };
+        const summary = if (current.observation) |value| value.summary else null;
+        if (current.refresh_error) |err| return .{ .phase = .failed, .summary = summary, .failure = err };
+        const policy_error: ?anyerror = switch (current.policy) {
+            .failed => |err| err,
+            else => null,
+        };
+        if (current.policy.value() == null and (summary != null or policy_error != null))
+            return .{ .phase = .unknown_policy, .summary = summary, .failure = policy_error };
+        if (current.stale != null) return .{ .phase = .stale, .summary = summary, .failure = current.stale_error };
+        const observation = current.observation orelse return .{ .phase = .uninspected };
+        if (!observation.size.complete or observation.size.first_error != null)
+            return .{ .phase = .incomplete_size, .summary = summary, .state = current.state(), .failure = observation.size.first_error };
+        if (observation.summary.total == 0) return null;
+        return .{ .phase = .observed, .summary = summary, .state = current.state() };
+    }
+
+    pub fn label(self: NoticePresentation, allocator: std.mem.Allocator) ![]u8 {
+        const prefix = switch (self.phase) {
+            .uninspected => "Worktrees not inspected",
+            .observed => "Last inspected",
+            .incomplete_size => "Size incomplete",
+            .unknown_policy => "Policy unavailable",
+            .stale => "Stale inspection",
+            .failed => "Inspection failed",
+        };
+        const counts = if (self.summary) |summary| blk: {
+            const count = try std.fmt.allocPrint(allocator, "{d} worktree{s}", .{ summary.total, if (summary.total == 1) "" else "s" });
+            defer allocator.free(count);
+            break :blk if (summary.reclaimable != 0)
+                try std.fmt.allocPrint(allocator, ": {s} - {d} reclaimable", .{ count, summary.reclaimable })
+            else
+                try std.fmt.allocPrint(allocator, ": {s}", .{count});
+        } else try allocator.dupe(u8, "");
+        defer allocator.free(counts);
+        const detail = if (self.failure) |err|
+            try std.fmt.allocPrint(allocator, " ({s})", .{@errorName(err)})
+        else
+            try allocator.dupe(u8, "");
+        defer allocator.free(detail);
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{
+            prefix,
+            counts,
+            if (self.summary != null and self.phase != .observed) " (last inspected)" else "",
+            detail,
+        });
+    }
 };
 
 pub const InspectionError = error{
@@ -215,6 +410,19 @@ pub fn sizeText(allocator: std.mem.Allocator, bytes: u64) ![]u8 {
     if (bytes < 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} KB", .{@as(f64, @floatFromInt(bytes)) / 1024.0});
     if (bytes < 1024 * 1024 * 1024) return std.fmt.allocPrint(allocator, "{d:.1} MB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0)});
     return std.fmt.allocPrint(allocator, "{d:.1} GB", .{@as(f64, @floatFromInt(bytes)) / (1024.0 * 1024.0 * 1024.0)});
+}
+
+pub fn sizeCoverageText(allocator: std.mem.Allocator, size: SizeCoverage) ![]u8 {
+    if (size.complete and size.first_error == null) return sizeText(allocator, size.bytes);
+    if (size.bytes == 0) {
+        if (size.first_error) |err| return std.fmt.allocPrint(allocator, "size unavailable ({s})", .{@errorName(err)});
+        return allocator.dupe(u8, "size not measured");
+    }
+    const measured = try sizeText(allocator, size.bytes);
+    defer allocator.free(measured);
+    if (size.first_error) |err|
+        return std.fmt.allocPrint(allocator, "about {s} measured (size incomplete: {s})", .{ measured, @errorName(err) });
+    return std.fmt.allocPrint(allocator, "about {s} measured (size incomplete)", .{measured});
 }
 
 pub fn canReclaim(entry: Entry, policy: Policy, confirmed: bool) bool {
@@ -261,7 +469,7 @@ pub fn inspect(
     errdefer allocator.free(default_branch);
     for (entries.items, 0..) |*entry, index| {
         entry.primary = index == 0;
-        entry.size_bytes = directorySize(entry.path) catch 0;
+        entry.setSize(directorySizeResult(directorySize(entry.path)));
         for (bindings) |binding| {
             if (std.mem.eql(u8, entry.path, binding.path)) {
                 entry.bound_running = true;
@@ -298,16 +506,18 @@ pub fn inspect(
     };
 }
 
-fn directorySize(path: []const u8) !u64 {
+fn directorySize(path: []const u8) !SizeCoverage {
     var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
     defer dir.close();
     var walker = try dir.walk(std.heap.page_allocator);
     defer walker.deinit();
-    var total: u64 = 0;
-    while (try walker.next()) |item| {
+    var total = SizeCoverage{};
+    while (walker.next() catch |err| {
+        total.recordFailure(err);
+        return total;
+    }) |item| {
         if (item.kind != .file) continue;
-        const stat = item.dir.statFile(item.basename) catch continue;
-        total += stat.size;
+        total.recordFile(if (item.dir.statFile(item.basename)) |stat| stat.size else |err| err);
     }
     return total;
 }
@@ -556,6 +766,287 @@ pub fn deinit(allocator: std.mem.Allocator, entries: *std.array_list.Managed(Ent
         allocator.free(entry.branch);
     }
     entries.deinit();
+}
+
+test "worktree notice sizing failure is not a complete zero" {
+    for ([_]anyerror{ error.FileNotFound, error.AccessDenied }) |failure| {
+        const size = directorySizeResult(failure);
+        try std.testing.expect(!size.complete);
+        try std.testing.expectEqual(@as(u64, 0), size.bytes);
+        try std.testing.expectEqual(@as(?anyerror, failure), size.first_error);
+    }
+}
+
+test "worktree notice sizing stat failure preserves known bytes and original error" {
+    var size = SizeCoverage{};
+    size.recordFile(23);
+    size.recordFile(error.AccessDenied);
+    size.recordFile(19);
+    size.recordFile(error.FileNotFound);
+    try std.testing.expectEqual(@as(u64, 42), size.bytes);
+    try std.testing.expect(!size.complete);
+    try std.testing.expectEqual(@as(?anyerror, error.AccessDenied), size.first_error);
+}
+
+test "worktree notice sizing successful zero and nonzero are complete" {
+    for ([_]u64{ 0, 42 }) |bytes| {
+        var measured = SizeCoverage{};
+        measured.recordFile(bytes);
+        const size = directorySizeResult(measured);
+        try std.testing.expect(size.complete);
+        try std.testing.expectEqual(bytes, size.bytes);
+        try std.testing.expectEqual(@as(?anyerror, null), size.first_error);
+    }
+}
+
+test "worktree notice production inspection compiles without invoking IO" {
+    std.mem.doNotOptimizeAway(&inspect);
+}
+
+test "worktree notice entry mapping retains incomplete coverage and known byte lower bounds" {
+    var entries = [_]Entry{
+        .{ .path = @constCast("measured"), .branch = @constCast("main") },
+        .{ .path = @constCast("partial"), .branch = @constCast("topic") },
+        .{ .path = @constCast("missing"), .branch = @constCast("stale"), .prunable = true },
+    };
+    entries[0].setSize(directorySizeResult(.{ .bytes = 1024 }));
+    var partial = SizeCoverage{};
+    partial.recordFile(2048);
+    partial.recordFile(error.AccessDenied);
+    partial.recordFile(1024);
+    entries[1].setSize(directorySizeResult(partial));
+    entries[2].setSize(directorySizeResult(error.FileNotFound));
+    const size = totalSize(&entries);
+    try std.testing.expectEqual(@as(u64, 4096), size.bytes);
+    try std.testing.expect(!size.complete);
+    try std.testing.expectEqual(@as(?anyerror, error.AccessDenied), size.first_error);
+    try std.testing.expectEqual(@as(u64, 3072), entries[1].size_bytes);
+    try std.testing.expectEqual(@as(?anyerror, error.FileNotFound), entries[2].size_error);
+    try std.testing.expectEqual(NoticeState.indeterminate, noticeState(&entries, .{}));
+}
+
+test "worktree notice count boundaries preserve every Windows inspection row" {
+    var entries = [_]Entry{.{
+        .path = @constCast("worktree"),
+        .branch = @constCast("topic"),
+        .size_complete = true,
+    }} ** 13;
+    entries[0].primary = true;
+    entries[1].prunable = true;
+    entries[2].locked = true;
+    entries[3].branch = @constCast("");
+    const configured = try decodePolicy(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
+    );
+    const cases = [_]struct { policy: Policy, counts: [3]usize }{
+        .{ .policy = .{}, .counts = .{ 7, 8, 9 } },
+        .{ .policy = configured, .counts = .{ 11, 12, 13 } },
+    };
+    for (cases) |case| {
+        for (case.counts, [_]NoticeState{ .below_threshold, .notice, .notice }) |count, expected| {
+            try std.testing.expectEqual(count, summarize(entries[0..count]).total);
+            try std.testing.expectEqual(expected, noticeState(entries[0..count], case.policy));
+        }
+    }
+}
+
+test "worktree notice exact byte boundaries use decoded binary GiB policy" {
+    var entries = [_]Entry{
+        .{ .path = @constCast("primary"), .branch = @constCast("main"), .primary = true, .size_complete = true },
+        .{ .path = @constCast("linked"), .branch = @constCast("topic"), .size_complete = true },
+    };
+    const configured = try decodePolicy(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
+    );
+    const cases = [_]struct { policy: Policy, bytes: [3]u64 }{
+        .{ .policy = .{}, .bytes = .{ 2147483647, 2147483648, 2147483649 } },
+        .{ .policy = configured, .bytes = .{ 4294967295, 4294967296, 4294967297 } },
+    };
+    entries[0].size_bytes = 1024;
+    for (cases) |case| {
+        for (case.bytes, [_]NoticeState{ .below_threshold, .notice, .notice }) |bytes, expected| {
+            entries[1].size_bytes = bytes - 1024;
+            try std.testing.expectEqual(bytes, totalSize(&entries).bytes);
+            try std.testing.expectEqual(expected, noticeState(&entries, case.policy));
+        }
+    }
+}
+
+test "worktree notice unknown coverage differs from zero and independent breaches still warn" {
+    var entries = [_]Entry{.{
+        .path = @constCast("unmeasured"),
+        .branch = @constCast("topic"),
+    }} ** 8;
+    try std.testing.expectEqual(NoticeState.below_threshold, noticeState(&.{}, .{}));
+    try std.testing.expectEqual(NoticeState.indeterminate, noticeState(entries[0..1], .{}));
+    entries[0].setSize(.{});
+    try std.testing.expectEqual(NoticeState.below_threshold, noticeState(entries[0..1], .{}));
+    try std.testing.expectEqual(NoticeState.indeterminate, noticeState(entries[0..2], .{}));
+    try std.testing.expectEqual(NoticeState.notice, noticeState(&entries, .{}));
+    entries[0].setSize(.{ .bytes = 2147483647, .complete = false, .first_error = error.AccessDenied });
+    try std.testing.expectEqual(NoticeState.indeterminate, noticeState(entries[0..2], .{}));
+    entries[0].size_bytes = 2147483648;
+    try std.testing.expectEqual(NoticeState.notice, noticeState(entries[0..2], .{}));
+    try std.testing.expectEqual(@as(?anyerror, error.AccessDenied), totalSize(entries[0..2]).first_error);
+}
+
+test "worktree notice size accumulation saturates without claiming completeness" {
+    var size = SizeCoverage{ .bytes = std.math.maxInt(u64) };
+    size.recordFile(1);
+    try std.testing.expectEqual(std.math.maxInt(u64), size.bytes);
+    try std.testing.expect(!size.complete);
+    try std.testing.expectEqual(@as(?anyerror, error.Overflow), size.first_error);
+}
+
+fn expectNoticeSizeFormatting(allocator: std.mem.Allocator) !void {
+    const cases = [_]struct { size: SizeCoverage, text: []const u8 }{
+        .{ .size = .{}, .text = "0 B" },
+        .{ .size = .{ .bytes = 2048 }, .text = "2.0 KB" },
+        .{ .size = .{ .complete = false }, .text = "size not measured" },
+        .{ .size = .{ .complete = false, .first_error = error.AccessDenied }, .text = "size unavailable (AccessDenied)" },
+        .{ .size = .{ .bytes = 2048, .complete = false }, .text = "about 2.0 KB measured (size incomplete)" },
+        .{ .size = .{ .bytes = 2048, .complete = false, .first_error = error.AccessDenied }, .text = "about 2.0 KB measured (size incomplete: AccessDenied)" },
+    };
+    for (cases) |case| {
+        const text = try sizeCoverageText(allocator, case.size);
+        defer allocator.free(text);
+        try std.testing.expectEqualStrings(case.text, text);
+    }
+}
+
+test "worktree notice size formatting distinguishes zero unknown partial and failures without leaks" {
+    try expectNoticeSizeFormatting(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, expectNoticeSizeFormatting, .{});
+}
+
+test "worktree notice incomplete display does not overstate rounded byte bounds" {
+    const cases = [_]struct { bytes: u64, text: []const u8 }{
+        .{ .bytes = 1535, .text = "about 1.5 KB measured (size incomplete)" },
+        .{ .bytes = 2147483647, .text = "about 2.0 GB measured (size incomplete)" },
+    };
+    for (cases) |case| {
+        var entry = Entry{ .path = @constCast("partial"), .branch = @constCast("topic") };
+        entry.setSize(.{ .bytes = case.bytes, .complete = false });
+        const text = try sizeCoverageText(std.testing.allocator, entry.sizeCoverage());
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(case.text, text);
+        try std.testing.expectEqual(case.bytes, entry.size_bytes);
+        try std.testing.expectEqual(NoticeState.indeterminate, noticeState(&.{entry}, .{}));
+    }
+}
+
+test "worktree notice coverage never changes reclaim decisions" {
+    var entry = Entry{
+        .path = @constCast("safe"),
+        .branch = @constCast("topic"),
+        .pushed = true,
+        .landed = true,
+    };
+    const policy = Policy{ .allow_reclaim = true, .confirm_each_reclaim = true };
+    const cases = [_]SizeCoverage{
+        .{},
+        .{ .bytes = 2147483648 },
+        .{ .complete = false },
+        .{ .bytes = 1024, .complete = false, .first_error = error.AccessDenied },
+    };
+    for (cases) |size| {
+        entry.setSize(size);
+        try std.testing.expectEqual(ReclaimDecision.reclaimable, decision(entry));
+        try std.testing.expect(canReclaim(entry, policy, true));
+        try std.testing.expect(!canReclaim(entry, policy, false));
+        try std.testing.expect(!canReclaim(entry, .{}, true));
+        entry.primary = true;
+        try std.testing.expectEqual(ReclaimDecision.keep, decision(entry));
+        try std.testing.expect(!canReclaim(entry, policy, true));
+        entry.primary = false;
+    }
+}
+
+test "worktree notice policy outcomes distinguish missing legacy configured and unreadable" {
+    const missing = policyReadOutcome(error.FileNotFound);
+    try std.testing.expectEqual(PolicySource.missing, missing.known.source);
+    try std.testing.expectEqual(@as(u32, 8), missing.value().?.notice_count);
+    const legacy = policyReadOutcome("{\"allowReclaim\":true,\"confirmEachReclaim\":true}");
+    try std.testing.expectEqual(PolicySource.legacy, legacy.known.source);
+    try std.testing.expectEqual(@as(u32, 2), legacy.value().?.notice_size_gb);
+    try std.testing.expect(legacy.value().?.allow_reclaim);
+    const configured = policyReadOutcome(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
+    );
+    try std.testing.expectEqual(PolicySource.configured, configured.known.source);
+    try std.testing.expectEqual(@as(u32, 12), configured.value().?.notice_count);
+    try std.testing.expectEqual(@as(u32, 4), configured.value().?.notice_size_gb);
+    const malformed = policyReadOutcome("{");
+    try std.testing.expectEqual(error.MalformedPolicy, malformed.failed);
+    const unreadable = policyReadOutcome(error.AccessDenied);
+    try std.testing.expectEqual(error.AccessDenied, unreadable.failed);
+    try std.testing.expect(malformed.value() == null);
+    try std.testing.expect(unreadable.value() == null);
+    try std.testing.expect(!((unreadable.value() orelse Policy{}).allow_reclaim));
+}
+
+fn expectNoticePresentation(allocator: std.mem.Allocator) !void {
+    const uninspected = NoticePresentation.fromRecord(null).?;
+    const unknown_text = try uninspected.label(allocator);
+    defer allocator.free(unknown_text);
+    try std.testing.expectEqualStrings("Worktrees not inspected", unknown_text);
+    try std.testing.expectEqual(NoticeState.indeterminate, uninspected.state);
+
+    var inspection = Inspection{
+        .entries = std.array_list.Managed(Entry).init(allocator),
+        .project_path = @constCast("C:\\owned"),
+        .default_branch = @constCast("main"),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{ .path = @constCast("tree"), .branch = @constCast("topic"), .pushed = true, .landed = true });
+    const policy = policyReadOutcome(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":2,"noticeCount":1}
+    );
+    var record = NoticeRecord.inspected(&inspection, policy);
+    var presentation = NoticePresentation.fromRecord(record).?;
+    try std.testing.expectEqual(NoticePhase.incomplete_size, presentation.phase);
+    try std.testing.expectEqual(NoticeState.notice, presentation.state);
+    const incomplete = try presentation.label(allocator);
+    defer allocator.free(incomplete);
+    try std.testing.expectEqualStrings("Size incomplete: 1 worktree - 1 reclaimable (last inspected)", incomplete);
+
+    inspection.entries.items[0].setSize(.{ .bytes = 1024 });
+    record = NoticeRecord.inspected(&inspection, policy);
+    const observed = try NoticePresentation.fromRecord(record).?.label(allocator);
+    defer allocator.free(observed);
+    try std.testing.expectEqualStrings("Last inspected: 1 worktree - 1 reclaimable", observed);
+    record.stale = .bindings_changed;
+    presentation = NoticePresentation.fromRecord(record).?;
+    try std.testing.expectEqual(NoticePhase.stale, presentation.phase);
+    try std.testing.expectEqual(NoticeState.indeterminate, presentation.state);
+    record.policy = policyReadOutcome(error.AccessDenied);
+    presentation = NoticePresentation.fromRecord(record).?;
+    try std.testing.expectEqual(NoticePhase.unknown_policy, presentation.phase);
+    try std.testing.expectEqual(NoticeState.indeterminate, presentation.state);
+    const unavailable = try presentation.label(allocator);
+    defer allocator.free(unavailable);
+    try std.testing.expectEqualStrings("Policy unavailable: 1 worktree - 1 reclaimable (last inspected) (AccessDenied)", unavailable);
+
+    record.refresh_error = error.GitFailed;
+    presentation = NoticePresentation.fromRecord(record).?;
+    try std.testing.expectEqual(NoticePhase.failed, presentation.phase);
+    try std.testing.expectEqual(@as(usize, 1), presentation.summary.?.total);
+    const failed = try presentation.label(allocator);
+    defer allocator.free(failed);
+    try std.testing.expectEqualStrings("Inspection failed: 1 worktree - 1 reclaimable (last inspected) (GitFailed)", failed);
+
+    const first_failure = NoticePresentation.fromRecord(.{ .refresh_error = error.GitFailed }).?;
+    try std.testing.expect(first_failure.summary == null);
+    const failed_empty = try first_failure.label(allocator);
+    defer allocator.free(failed_empty);
+    try std.testing.expectEqualStrings("Inspection failed (GitFailed)", failed_empty);
+    inspection.entries.clearRetainingCapacity();
+    try std.testing.expect(NoticePresentation.fromRecord(NoticeRecord.inspected(&inspection, policy)) == null);
+}
+
+test "worktree notice presentation owns values and labels unknown stale and failed observations" {
+    try expectNoticePresentation(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, expectNoticePresentation, .{});
 }
 
 test "parses real git worktree porcelain and summarizes safe rows" {

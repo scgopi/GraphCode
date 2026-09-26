@@ -1,6 +1,7 @@
 const std = @import("std");
 const Wire = @import("Wire.zig");
-pub const WorktreeSummary = @import("WorktreeStatus.zig").Summary;
+const WorktreeStatus = @import("WorktreeStatus.zig");
+pub const WorktreeSummary = WorktreeStatus.Summary;
 
 pub const Node = struct {
     id: []u8,
@@ -134,10 +135,199 @@ fn lifecycleProbeCallback(context: ?*anyopaque, request: LifecycleRequest) void 
     probe.called = true;
 }
 
+fn worktreeBindingFactsDiffer(before: Node, after: Node) bool {
+    return !std.mem.eql(u8, before.worktree_path, after.worktree_path) or
+        !std.mem.eql(u8, before.worktree_branch, after.worktree_branch) or
+        !std.mem.eql(u8, before.state, after.state) or
+        !std.mem.eql(u8, before.loop_type, after.loop_type);
+}
+
+fn uniqueWorktreeNodeIndex(nodes: []const Node, id: []const u8) !?usize {
+    if (id.len == 0) return error.AmbiguousWorktreeNode;
+    var found: ?usize = null;
+    for (nodes, 0..) |node, index| {
+        if (!std.mem.eql(u8, node.id, id)) continue;
+        if (found != null) return error.AmbiguousWorktreeNode;
+        found = index;
+    }
+    return found;
+}
+
+fn flatWorktreeBindingsChanged(previous: []const Node, next: []const Node) !bool {
+    for (previous) |node| {
+        if (node.worktree_path.len == 0) continue;
+        _ = try uniqueWorktreeNodeIndex(previous, node.id);
+        const index = (try uniqueWorktreeNodeIndex(next, node.id)) orelse return true;
+        if (worktreeBindingFactsDiffer(node, next[index])) return true;
+    }
+    for (next) |node| {
+        if (node.worktree_path.len == 0) continue;
+        _ = try uniqueWorktreeNodeIndex(next, node.id);
+        const index = (try uniqueWorktreeNodeIndex(previous, node.id)) orelse return true;
+        if (worktreeBindingFactsDiffer(previous[index], node)) return true;
+    }
+    return false;
+}
+
+const WorktreeBindingComparison = struct {
+    const max_depth = 32;
+    const max_items = 4096;
+    const max_json_work = 2 * Wire.legacy_max_payload;
+    const max_scratch = 8 * Wire.legacy_max_payload;
+
+    allocator: std.mem.Allocator,
+    project: Project,
+    remaining_items: usize = max_items,
+    remaining_json: usize = max_json_work,
+
+    fn consumeItems(self: *@This(), count: usize) !void {
+        if (count > self.remaining_items) return error.WorktreeComparisonLimit;
+        self.remaining_items -= count;
+    }
+
+    fn indexNodes(self: *@This(), nodes: []const Node) !std.StringHashMap(usize) {
+        var indices = std.StringHashMap(usize).init(self.allocator);
+        errdefer indices.deinit();
+        for (nodes, 0..) |node, index| {
+            if (node.id.len == 0) return error.AmbiguousWorktreeNode;
+            const entry = try indices.getOrPut(node.id);
+            if (entry.found_existing) return error.AmbiguousWorktreeNode;
+            entry.value_ptr.* = index;
+        }
+        return indices;
+    }
+
+    fn decode(self: *@This(), node: Node) !Graph {
+        if (!std.mem.eql(u8, node.loop_type, "composite") and
+            !std.mem.eql(u8, node.loop_type, "proactive")) return error.UnsupportedWorktreeSubgraph;
+        const bytes = node.subgraph_json;
+        if (bytes.len > self.remaining_json) return error.WorktreeComparisonLimit;
+        self.remaining_json -= bytes.len;
+
+        var scanner = std.json.Scanner.initCompleteInput(self.allocator, bytes);
+        defer scanner.deinit();
+        var json_depth: usize = 0;
+        while (true) {
+            switch (try scanner.next()) {
+                .object_begin, .array_begin => {
+                    json_depth += 1;
+                    if (json_depth > 4 * max_depth) return error.WorktreeComparisonLimit;
+                },
+                .object_end, .array_end => json_depth -= 1,
+                .end_of_document => break,
+                else => {},
+            }
+        }
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, bytes, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.MalformedSubgraph;
+        const root = parsed.value.object;
+        const json_nodes: []const std.json.Value = if (root.get("nodes")) |value| switch (value) {
+            .array => |array| array.items,
+            else => return error.MalformedSubgraph,
+        } else &.{};
+        if (json_nodes.len > self.remaining_items) return error.WorktreeComparisonLimit;
+        if (root.get("edges")) |value| switch (value) {
+            .array => |array| try self.consumeItems(array.items.len),
+            else => return error.MalformedSubgraph,
+        };
+        var graph = try decodeSubgraph(self.allocator, self.project, bytes);
+        errdefer freeGraph(self.allocator, &graph);
+        if (graph.nodes.items.len != json_nodes.len) return error.MalformedSubgraph;
+        for (json_nodes, graph.nodes.items) |value, decoded| {
+            if (value != .object) return error.MalformedSubgraph;
+            const object = value.object;
+            const id = object.get("id") orelse return error.AmbiguousWorktreeNode;
+            if (id != .string or id.string.len == 0 or !std.mem.eql(u8, id.string, decoded.id))
+                return error.AmbiguousWorktreeNode;
+            if (object.get("subGraph")) |nested| switch (nested) {
+                .null => if (decoded.subgraph_json.len != 0) return error.MalformedSubgraph,
+                .object => if (decoded.subgraph_json.len == 0) return error.MalformedSubgraph,
+                else => return error.UnsupportedWorktreeSubgraph,
+            };
+        }
+        return graph;
+    }
+
+    fn compare(self: *@This(), previous: []const Node, next: []const Node, depth: usize) anyerror!bool {
+        if (depth > max_depth) return error.WorktreeComparisonLimit;
+        try self.consumeItems(previous.len);
+        try self.consumeItems(next.len);
+        var before_indices = try self.indexNodes(previous);
+        defer before_indices.deinit();
+        var after_indices = try self.indexNodes(next);
+        defer after_indices.deinit();
+        for (previous) |node| {
+            const index = after_indices.get(node.id);
+            if (node.worktree_path.len != 0) {
+                const other = next[index orelse return true];
+                if (worktreeBindingFactsDiffer(node, other)) return true;
+            }
+            if (node.subgraph_json.len != 0) {
+                var before = try self.decode(node);
+                defer freeGraph(self.allocator, &before);
+                if (index) |matched| {
+                    const other = next[matched];
+                    if (!std.mem.eql(u8, node.loop_type, other.loop_type)) return true;
+                    if (other.subgraph_json.len != 0) {
+                        if (std.mem.eql(u8, node.subgraph_json, other.subgraph_json)) {
+                            if (try self.compare(before.nodes.items, before.nodes.items, depth + 1)) return true;
+                        } else {
+                            var after = try self.decode(other);
+                            defer freeGraph(self.allocator, &after);
+                            if (try self.compare(before.nodes.items, after.nodes.items, depth + 1)) return true;
+                        }
+                        continue;
+                    }
+                }
+                if (try self.compare(before.nodes.items, &.{}, depth + 1)) return true;
+            }
+        }
+        for (next) |node| {
+            const index = before_indices.get(node.id);
+            if (node.worktree_path.len != 0) {
+                const other = previous[index orelse return true];
+                if (!std.mem.eql(u8, node.worktree_path, other.worktree_path)) return true;
+            }
+            if (node.subgraph_json.len != 0 and (index == null or previous[index.?].subgraph_json.len == 0)) {
+                var added = try self.decode(node);
+                defer freeGraph(self.allocator, &added);
+                if (try self.compare(&.{}, added.nodes.items, depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+};
+
+fn worktreeBindingsChanged(allocator: std.mem.Allocator, project: Project, previous: []const Node, next: []const Node) !bool {
+    if (previous.len > WorktreeBindingComparison.max_items or next.len > WorktreeBindingComparison.max_items - previous.len)
+        return error.WorktreeComparisonLimit;
+    var nested_bytes: usize = 0;
+    var relevant = false;
+    for ([_][]const Node{ previous, next }) |nodes| {
+        for (nodes) |node| {
+            relevant = relevant or node.worktree_path.len != 0 or node.subgraph_json.len != 0;
+            if (node.subgraph_json.len > WorktreeBindingComparison.max_json_work - nested_bytes)
+                return error.WorktreeComparisonLimit;
+            nested_bytes += node.subgraph_json.len;
+        }
+    }
+    if (!relevant) return false;
+    if (nested_bytes == 0) return flatWorktreeBindingsChanged(previous, next);
+    const capacity = @min(WorktreeBindingComparison.max_scratch, 64 * 1024 + (previous.len + next.len) * 256 + nested_bytes * 64);
+    const buffer = try allocator.alloc(u8, capacity);
+    defer allocator.free(buffer);
+    // The region also owns any partially decoded nodes when the existing parser runs out of memory.
+    var scratch = std.heap.FixedBufferAllocator.init(buffer);
+    var comparison = WorktreeBindingComparison{ .allocator = scratch.allocator(), .project = project };
+    return comparison.compare(previous, next, 0) catch |err| return if (err == error.OutOfMemory) error.WorktreeComparisonLimit else err;
+}
+
 pub const GraphSummary = struct {
     project: Project,
     nodes: std.array_list.Managed(Node),
     edges: std.array_list.Managed(Edge),
+    worktree_notice: ?WorktreeStatus.NoticeRecord = null,
 
     fn deinit(self: *GraphSummary, allocator: std.mem.Allocator) void {
         freeProject(allocator, self.project);
@@ -229,6 +419,7 @@ pub const Model = struct {
     }
 
     pub fn beginRestore(self: *Model) void {
+        self.invalidateWorktreeNotices(.connection_changed);
         self.restore_generation += 1;
         self.restore_state = .restoring;
     }
@@ -240,6 +431,7 @@ pub const Model = struct {
 
     pub fn markReconnecting(self: *Model) void {
         // Graph summaries and selection intentionally survive transport loss.
+        self.invalidateWorktreeNotices(.connection_changed);
         self.restore_state = .reconnecting;
     }
 
@@ -290,6 +482,58 @@ pub const Model = struct {
             if (std.mem.eql(u8, summary.project.path, project_path)) return summary;
         }
         return null;
+    }
+
+    fn worktreeNoticeOwner(self: *Model, project_path: []const u8) !*GraphSummary {
+        for (self.graphs.items) |*summary| {
+            if (!std.mem.eql(u8, summary.project.path, project_path)) continue;
+            if (!summary.project.isLocalFilesystem()) return error.UnsupportedWorktreeProject;
+            return summary;
+        }
+        return error.WorktreeProjectClosed;
+    }
+
+    pub fn recordWorktreeInspection(self: *Model, inspection: *const WorktreeStatus.Inspection, policy: WorktreeStatus.PolicyOutcome) !void {
+        const owner = try self.worktreeNoticeOwner(inspection.project_path);
+        owner.worktree_notice = WorktreeStatus.NoticeRecord.inspected(inspection, policy);
+    }
+
+    pub fn recordWorktreeFailure(self: *Model, project_path: []const u8, failure: anyerror) !void {
+        const owner = try self.worktreeNoticeOwner(project_path);
+        var record = owner.worktree_notice orelse WorktreeStatus.NoticeRecord{};
+        record.refresh_error = failure;
+        owner.worktree_notice = record;
+    }
+
+    pub fn recordWorktreePolicy(self: *Model, project_path: []const u8, policy: WorktreeStatus.PolicyOutcome) !void {
+        const owner = try self.worktreeNoticeOwner(project_path);
+        var record = owner.worktree_notice orelse WorktreeStatus.NoticeRecord{};
+        record.policy = policy;
+        owner.worktree_notice = record;
+    }
+
+    pub fn invalidateWorktreeNotices(self: *Model, reason: WorktreeStatus.StaleReason) void {
+        for (self.graphs.items) |*summary| {
+            if (summary.worktree_notice) |*record| {
+                if (record.observation != null) {
+                    record.stale = reason;
+                    record.stale_error = null;
+                }
+            }
+        }
+    }
+
+    fn invalidateForWorktreeBindings(self: *Model, project: Project, previous: []const Node, next: []const Node) void {
+        const changed = worktreeBindingsChanged(self.allocator, project, previous, next) catch |err| {
+            self.invalidateWorktreeNotices(.bindings_unavailable);
+            for (self.graphs.items) |*summary| {
+                if (summary.worktree_notice) |*record| {
+                    if (record.observation != null) record.stale_error = err;
+                }
+            }
+            return;
+        };
+        if (changed) self.invalidateWorktreeNotices(.bindings_changed);
     }
 
     pub fn selectProject(self: *Model, project_path: []const u8) bool {
@@ -389,6 +633,9 @@ pub const Model = struct {
         for (self.open_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
         for (self.recent_projects.items) |project| known = known or std.mem.eql(u8, project.path, path);
         if (!known) return false;
+        if (index) |i| {
+            self.invalidateForWorktreeBindings(self.graphs.items[i].project, self.graphs.items[i].nodes.items, &.{});
+        }
         switch (action) {
             .select => unreachable,
             .close => {
@@ -833,6 +1080,7 @@ pub const Model = struct {
     fn upsertSummary(self: *Model, graph: *const Graph) !void {
         for (self.graphs.items) |*summary| {
             if (!std.mem.eql(u8, summary.project.path, graph.project.path)) continue;
+            self.invalidateForWorktreeBindings(graph.project, summary.nodes.items, graph.nodes.items);
             for (summary.nodes.items) |node| freeNode(self.allocator, node);
             for (summary.edges.items) |edge| freeEdge(self.allocator, edge);
             summary.nodes.clearRetainingCapacity();
@@ -841,6 +1089,7 @@ pub const Model = struct {
             for (graph.edges.items) |edge| try summary.edges.append(try cloneEdge(self.allocator, edge));
             return;
         }
+        self.invalidateForWorktreeBindings(graph.project, &.{}, graph.nodes.items);
         var summary = GraphSummary{
             .project = .{
                 .path = try self.allocator.dupe(u8, graph.project.path),
@@ -1459,6 +1708,359 @@ fn freeGraph(allocator: std.mem.Allocator, graph: *Graph) void {
     }
     graph.nodes.deinit();
     graph.edges.deinit();
+}
+
+fn noticeTestModel(allocator: std.mem.Allocator) !Model {
+    var model = Model.init(allocator);
+    errdefer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\notice-b","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    return model;
+}
+
+fn recordTestNotice(model: *Model, path: []const u8, bytes: u64) !void {
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .project_path = try std.testing.allocator.dupe(u8, path),
+        .default_branch = @constCast("main"),
+    };
+    defer std.testing.allocator.free(inspection.project_path);
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{
+        .path = @constCast("tree"),
+        .branch = @constCast("topic"),
+        .size_bytes = bytes,
+        .size_complete = true,
+        .pushed = true,
+        .landed = true,
+    });
+    try model.recordWorktreeInspection(&inspection, WorktreeStatus.policyReadOutcome(error.FileNotFound));
+    @memset(inspection.project_path, 'x');
+    inspection.entries.items[0].size_bytes = 0;
+}
+
+test "worktree notice observations keep exact owners and outlive inspection storage" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice == null);
+    try std.testing.expect(model.selectProject("C:\\notice-b"));
+    try recordTestNotice(&model, "C:\\notice-b", 4294967296);
+    try std.testing.expectEqual(@as(u64, 2147483648), model.graphFor("C:\\notice-a").?.worktree_notice.?.observation.?.size.bytes);
+    try std.testing.expectEqual(@as(u64, 4294967296), model.graphFor("C:\\notice-b").?.worktree_notice.?.observation.?.size.bytes);
+    std.mem.swap(GraphSummary, &model.graphs.items[0], &model.graphs.items[1]);
+    try std.testing.expect(model.selectProject("C:\\notice-a"));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.notice, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(@as(usize, 1), model.graphFor("C:\\notice-b").?.worktree_notice.?.observation.?.summary.total);
+    try std.testing.expectError(error.WorktreeProjectClosed, recordTestNotice(&model, "C:\\foreign", 1));
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"ssh://host/repo","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expectError(error.UnsupportedWorktreeProject, recordTestNotice(&model, "ssh://host/repo", 2147483648));
+    try std.testing.expect(model.graphFor("ssh://host/repo").?.worktree_notice == null);
+}
+
+test "worktree notice failed refresh and policy outcome never fabricate new counts" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try model.recordWorktreeFailure("C:\\notice-a", error.GitFailed);
+    const failed = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(u64, 2147483648), failed.observation.?.size.bytes);
+    try std.testing.expectEqual(@as(?anyerror, error.GitFailed), failed.refresh_error);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, failed.state());
+    try model.recordWorktreeFailure("C:\\notice-b", error.GitFailed);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice.?.observation == null);
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try model.recordWorktreePolicy("C:\\notice-a", WorktreeStatus.policyReadOutcome(error.AccessDenied));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try model.recordWorktreePolicy("C:\\notice-a", WorktreeStatus.policyReadOutcome(
+        \\{"allowReclaim":false,"confirmEachReclaim":true,"onResolveLanded":"keep","noticeSizeGB":4,"noticeCount":12}
+    ));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.below_threshold, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(@as(?anyerror, error.GitFailed), model.graphFor("C:\\notice-b").?.worktree_notice.?.refresh_error);
+}
+
+test "worktree notice invalidation follows bindings connection and actual owner lifetime" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try recordTestNotice(&model, "C:\\notice-b", 2147483648);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"Renamed","state":"running","position":{"x":900,"y":20},"worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice.?.stale == null);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice.?.stale == null);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"Renamed","state":"succeeded","worktreeBinding":{"path":"C:\\wt-a"}}],"edges":[]}}}
+    );
+    for (model.graphs.items) |graph| try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), graph.worktree_notice.?.stale);
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.notice, model.graphFor("C:\\notice-a").?.worktree_notice.?.state());
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, model.graphFor("C:\\notice-b").?.worktree_notice.?.state());
+    model.markReconnecting();
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .connection_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    try std.testing.expect(model.applyLifecycle(.close, "C:\\notice-a"));
+    try std.testing.expect(model.graphFor("C:\\notice-a") == null);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":5,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice == null);
+    model.beginRestore();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":6,"event":{"graphChanged":{"project":{"path":"C:\\notice-b","name":"Same"},"nodes":[],"edges":[]}}}
+    );
+    model.markRestored();
+    try std.testing.expect(model.graphFor("C:\\notice-a") == null);
+    try std.testing.expect(model.graphFor("C:\\notice-b").?.worktree_notice != null);
+    model.invalidateWorktreeNotices(.worktrees_changed);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .worktrees_changed), model.graphFor("C:\\notice-b").?.worktree_notice.?.stale);
+}
+
+test "worktree notice branch binding changes invalidate otherwise unchanged observations" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a","branch":"main"}}],"edges":[]}}}
+    );
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try recordTestNotice(&model, "C:\\notice-b", 2147483648);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"a","title":"A","state":"running","worktreeBinding":{"path":"C:\\wt-a","branch":"feature"}}],"edges":[]}}}
+    );
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-b").?.worktree_notice.?.stale);
+}
+
+fn loadNestedNoticeTestGraph(model: *Model, subgraph: []const u8, parent_type: []const u8) !void {
+    const frame = try std.mem.concat(std.testing.allocator, u8, &.{
+        "{\"version\":2,\"kind\":\"event\",\"sequence\":20,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"C:\\\\notice-a\",\"name\":\"A\"},\"nodes\":[{\"id\":\"group\",\"title\":\"Group\",\"loopType\":\"",
+        parent_type,
+        "\",\"subGraph\":",
+        subgraph,
+        "}],\"edges\":[]}}}",
+    });
+    defer std.testing.allocator.free(frame);
+    _ = try model.updateFromFrame(frame);
+}
+
+fn recordActiveNestedNotice(model: *Model) !void {
+    const active = model.graph.?;
+    const node = active.nodes.items[findNodeIndexByID(active.nodes.items, "child").?];
+    var inspection = WorktreeStatus.Inspection{
+        .project_path = active.project.path,
+        .default_branch = @constCast("main"),
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{
+        .path = node.worktree_path,
+        .branch = node.worktree_branch,
+        .bound_running = true,
+        .size_bytes = 2147483648,
+        .size_complete = true,
+    });
+    try model.recordWorktreeInspection(&inspection, WorktreeStatus.policyReadOutcome(error.FileNotFound));
+}
+
+test "worktree notice nested binding changes invalidate an active composite inspection" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try std.testing.expectEqualStrings("C:\\nested-a", model.graph.?.nodes.items[0].worktree_path);
+    try recordActiveNestedNotice(&model);
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-b","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expectEqualStrings("C:\\nested-b", model.graph.?.nodes.items[0].worktree_path);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+}
+
+const nested_notice_baseline =
+    \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+;
+
+test "worktree notice nested branch state removal and type changes invalidate by stable scope" {
+    const branch_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"topic"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const state_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"succeeded","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const removal =
+        \\{"nodes":[{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const type_change =
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"goalBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"peer","title":"Peer","state":"idle"}],"edges":[]}
+    ;
+    const cases = [_]struct { graph: []const u8, parent_type: []const u8 = "composite" }{
+        .{ .graph = branch_change },
+        .{ .graph = state_change },
+        .{ .graph = removal },
+        .{ .graph = type_change },
+        .{ .graph = nested_notice_baseline, .parent_type = "turnBased" },
+        .{ .graph = nested_notice_baseline, .parent_type = "proactive" },
+    };
+    for (cases) |case| {
+        var model = try noticeTestModel(std.testing.allocator);
+        defer model.deinit();
+        try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "composite");
+        try std.testing.expect(model.openComposite("group"));
+        try recordActiveNestedNotice(&model);
+        try loadNestedNoticeTestGraph(&model, case.graph, case.parent_type);
+        try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+    }
+}
+
+test "worktree notice nested reorder title and position edits retain the inspected values" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "proactive");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    const previous = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"peer","title":"Renamed peer","state":"idle","position":{"x":10,"y":20}},{"id":"child","title":"Renamed child","loopType":"turnBased","state":"running","position":{"x":90,"y":30},"worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "proactive");
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+    const repeated = model.graphFor("C:\\notice-a").?.nodes.items[0].subgraph_json;
+    const owned_repeat = try std.testing.allocator.dupe(u8, repeated);
+    defer std.testing.allocator.free(owned_repeat);
+    try loadNestedNoticeTestGraph(&model, owned_repeat, "proactive");
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+}
+
+test "worktree notice comparisons recurse into deeper supported scopes" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}},{"id":"inner","loopType":"proactive","subGraph":{"nodes":[{"id":"child","state":"running","worktreeBinding":{"path":"C:\\deep","branch":"main"}}],"edges":[]}}],"edges":[]}
+    , "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    try loadNestedNoticeTestGraph(&model,
+        \\{"nodes":[{"id":"inner","loopType":"proactive","subGraph":{"nodes":[{"id":"child","state":"running","worktreeBinding":{"path":"C:\\deep","branch":"changed"}}],"edges":[]}},{"id":"child","title":"Child","loopType":"turnBased","state":"running","worktreeBinding":{"path":"C:\\nested-a","branch":"main"}}],"edges":[]}
+    , "composite");
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_changed), model.graphFor("C:\\notice-a").?.worktree_notice.?.stale);
+}
+
+test "worktree notice malformed unsupported and ambiguous nested data remain uncertain" {
+    const cases = [_][]const u8{
+        "{\"nodes\":1,\"edges\":[]}",
+        "{bad}",
+        "{\"nodes\":[{\"id\":\"same\"},{\"id\":\"same\"}],\"edges\":[]}",
+        "{\"nodes\":[{\"id\":\"child\",\"subGraph\":{\"nodes\":[],\"edges\":[]}}],\"edges\":[]}",
+    };
+    for (cases) |graph| {
+        var model = try noticeTestModel(std.testing.allocator);
+        defer model.deinit();
+        try loadNestedNoticeTestGraph(&model, graph, "composite");
+        try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+        try loadNestedNoticeTestGraph(&model, graph, "composite");
+        const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+        try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+        try std.testing.expect(record.stale_error != null);
+        try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, record.state());
+        const presentation = WorktreeStatus.NoticePresentation.fromRecord(record).?;
+        try std.testing.expectEqual(WorktreeStatus.NoticePhase.stale, presentation.phase);
+        try std.testing.expectEqual(record.stale_error, presentation.failure);
+    }
+}
+
+test "worktree notice nested comparison OOM retains explicit uncertainty without altering nodes" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, nested_notice_baseline, "composite");
+    try std.testing.expect(model.openComposite("group"));
+    try recordActiveNestedNotice(&model);
+    const owner = model.graphFor("C:\\notice-a").?;
+    const nodes = owner.nodes.items;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    model.allocator = failing.allocator();
+    model.invalidateForWorktreeBindings(owner.project, nodes, nodes);
+    model.allocator = std.testing.allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(?anyerror, error.OutOfMemory), record.stale_error);
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+    try std.testing.expectEqualStrings(nested_notice_baseline, nodes[0].subgraph_json);
+    try std.testing.expectEqual(@as(u64, 2147483648), record.observation.?.size.bytes);
+    try recordActiveNestedNotice(&model);
+    try std.testing.expect(model.graphFor("C:\\notice-a").?.worktree_notice.?.stale_error == null);
+}
+
+test "worktree notice flat title-only comparison does not allocate recursive scratch" {
+    var model = try noticeTestModel(std.testing.allocator);
+    defer model.deinit();
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    const owner = model.graphFor("C:\\notice-a").?;
+    const previous = owner.worktree_notice.?;
+    var edited = owner.nodes.items[0];
+    edited.title = @constCast("A renamed");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    model.allocator = failing.allocator();
+    model.invalidateForWorktreeBindings(owner.project, owner.nodes.items, &.{edited});
+    model.allocator = std.testing.allocator;
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualDeep(previous, model.graphFor("C:\\notice-a").?.worktree_notice.?);
+}
+
+test "worktree notice comparison depth row work and scratch bounds fail closed" {
+    const allocator = std.testing.allocator;
+    var model = try noticeTestModel(allocator);
+    defer model.deinit();
+    const project = model.graphFor("C:\\notice-a").?.project;
+    var comparison = WorktreeBindingComparison{ .allocator = allocator, .project = project };
+    try std.testing.expect(!(try comparison.compare(&.{}, &.{}, 32)));
+    try std.testing.expectError(error.WorktreeComparisonLimit, comparison.compare(&.{}, &.{}, 33));
+    const nodes = try allocator.alloc(Node, 4097);
+    defer allocator.free(nodes);
+    for (nodes) |*node| node.* = .{
+        .id = @constCast("unused"),
+        .title = @constCast(""),
+        .loop_type = @constCast("turnBased"),
+        .state = @constCast("idle"),
+        .activity = @constCast(""),
+        .presence = @constCast(""),
+    };
+    try std.testing.expect(!(try worktreeBindingsChanged(allocator, project, nodes[0..4096], &.{})));
+    try std.testing.expectError(error.WorktreeComparisonLimit, worktreeBindingsChanged(allocator, project, nodes, &.{}));
+    const oversized = try allocator.alloc(u8, 4194305);
+    defer allocator.free(oversized);
+    @memset(oversized, ' ');
+    nodes[0].subgraph_json = oversized;
+    try std.testing.expectError(error.WorktreeComparisonLimit, worktreeBindingsChanged(allocator, project, nodes[0..1], &.{}));
+    var tiny: [1]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&tiny);
+    comparison = .{ .allocator = scratch.allocator(), .project = project };
+    try std.testing.expectError(error.OutOfMemory, comparison.compare(nodes[0..1], &.{}, 0));
+}
+
+test "worktree notice deeply nested identical frames never bypass comparison bounds" {
+    const allocator = std.testing.allocator;
+    var graph = try allocator.dupe(u8, "{\"nodes\":[],\"edges\":[]}");
+    defer allocator.free(graph);
+    for (0..34) |index| {
+        const wrapped = try std.fmt.allocPrint(allocator, "{{\"nodes\":[{{\"id\":\"layer-{d}\",\"loopType\":\"composite\",\"subGraph\":{s}}}],\"edges\":[]}}", .{ index, graph });
+        allocator.free(graph);
+        graph = wrapped;
+    }
+    var model = try noticeTestModel(allocator);
+    defer model.deinit();
+    try loadNestedNoticeTestGraph(&model, graph, "composite");
+    try recordTestNotice(&model, "C:\\notice-a", 2147483648);
+    try loadNestedNoticeTestGraph(&model, graph, "composite");
+    const record = model.graphFor("C:\\notice-a").?.worktree_notice.?;
+    try std.testing.expectEqual(@as(?WorktreeStatus.StaleReason, .bindings_unavailable), record.stale);
+    try std.testing.expectEqual(@as(?anyerror, error.WorktreeComparisonLimit), record.stale_error);
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, record.state());
 }
 
 test "graph snapshots decode escaped project data and presence" {

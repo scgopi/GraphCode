@@ -345,6 +345,17 @@ pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 }
 pub const Surface = enum { project, overview, quick_chats, workspace };
 pub const OverviewHit = struct { graph_index: usize, node_index: usize };
 pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
+pub const overview_worktree_notice_kind = "overview-worktree-notice";
+
+pub fn overviewWorktreeNotice(graph: *const GraphModel.GraphSummary) ?WorktreeStatus.NoticePresentation {
+    if (!graph.project.isLocalFilesystem()) return null;
+    return WorktreeStatus.NoticePresentation.fromRecord(graph.worktree_notice);
+}
+
+pub fn overviewWorktreeNoticeIdentity(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ overview_worktree_notice_kind, project_path });
+}
+
 pub const ZoomControl = enum { out, actual, in, fit };
 pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
 pub const header_actions = [_]HeaderAction{ .review_attention, .inspect_worktrees, .jump, .toggle_panel };
@@ -461,10 +472,7 @@ pub fn loopPanelHasContent(model: *const GraphModel.Model, surface: Surface, qui
 pub fn headerWorktreeNotice(model: *const GraphModel.Model, inspection: *const WorktreeStatus.Inspection, policy: WorktreeStatus.Policy) bool {
     const graph = model.currentGraph() orelse return false;
     if (!graph.project.isLocalFilesystem() or !std.mem.eql(u8, graph.project.path, inspection.project_path)) return false;
-    const summary = WorktreeStatus.summarize(inspection.entries.items);
-    var bytes: u64 = 0;
-    for (inspection.entries.items) |entry| bytes +|= entry.size_bytes;
-    return summary.total >= policy.notice_count or bytes >= @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024;
+    return WorktreeStatus.noticeState(inspection.entries.items, policy) == .notice;
 }
 pub const AttentionAction = enum { reply, inspect };
 pub const ReclaimAction = enum { reclaim, keep };
@@ -677,13 +685,27 @@ fn drawOverview(
     for (model.graphs.items, 0..) |graph, graph_index| {
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
         roundedCard(hdc, lane, Tokens.workspace_rail, false);
-        drawText(hdc, allocator, graph.project.name, lane.left + scaledValue(18, state.zoom), lane.top + scaledValue(16, state.zoom), scaledValue(14, state.zoom), 0x00E8E8E8);
-        const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
-        const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+        const caption = overviewLaneCaption(model, graph_index, bounds, state);
+        drawTextRect(hdc, allocator, graph.project.name, caption.title, scaledValue(14, state.zoom), 0x00E8E8E8, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
+        const open = caption.open;
+        const worktrees = caption.worktrees;
         fill(hdc, open, 0x002D2418);
         fill(hdc, worktrees, 0x00352B1C);
         drawTextRect(hdc, allocator, "Open", open, scaledValue(9, state.zoom), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         drawTextRect(hdc, allocator, "Worktrees", worktrees, scaledValue(8, state.zoom), 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        if (caption.notice) |notice_bounds| {
+            const presentation = overviewWorktreeNotice(&graph).?;
+            const label = presentation.label(allocator) catch null;
+            if (label) |text| {
+                defer allocator.free(text);
+                const is_notice = presentation.state == .notice;
+                fill(hdc, notice_bounds, if (is_notice) @as(c.COLORREF, 0x00352B1C) else 0x00303035);
+                const text_bounds = rect(notice_bounds.left + scaledValue(6, state.zoom), notice_bounds.top, notice_bounds.right - scaledValue(6, state.zoom), notice_bounds.bottom);
+                drawTextRect(hdc, allocator, text, text_bounds, scaledValue(9, state.zoom), if (is_notice) @as(c.COLORREF, 0x00FFCD7A) else 0x00B8B8BE, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
+            } else {
+                drawTextRect(hdc, allocator, "Worktree notice unavailable", notice_bounds, scaledValue(9, state.zoom), 0x00B8B8BE, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
+            }
+        }
         var index: usize = 0;
         while (index < graph.nodes.items.len) : (index += 1) {
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
@@ -759,13 +781,37 @@ pub fn overviewCardBounds(
     );
 }
 
-pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {
-    if (graph_index >= model.graphs.items.len) return null;
+pub const OverviewLaneCaption = struct {
+    title: c.RECT,
+    open: c.RECT,
+    worktrees: c.RECT,
+    notice: ?c.RECT,
+};
+
+pub fn overviewLaneCaption(model: *const GraphModel.Model, graph_index: usize, bounds: c.RECT, state: *const CanvasState) OverviewLaneCaption {
     const lane = overviewLaneBounds(model, graph_index, bounds, state);
     const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
     const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
-    if (insideGraph(x, y, open)) return .open_project;
-    if (insideGraph(x, y, worktrees)) return .inspect_worktrees;
+    const notice = if (graph_index < model.graphs.items.len and overviewWorktreeNotice(&model.graphs.items[graph_index]) != null)
+        rect(open.left - scaledValue(294, state.zoom), open.top, open.left - scaledValue(8, state.zoom), open.bottom)
+    else
+        null;
+    return .{
+        .title = rect(lane.left + scaledValue(18, state.zoom), open.top, (if (notice) |value| value.left else open.left) - scaledValue(10, state.zoom), open.bottom),
+        .open = open,
+        .worktrees = worktrees,
+        .notice = notice,
+    };
+}
+
+pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {
+    if (graph_index >= model.graphs.items.len) return null;
+    const caption = overviewLaneCaption(model, graph_index, bounds, state);
+    if (insideGraph(x, y, caption.open)) return .open_project;
+    if (insideGraph(x, y, caption.worktrees)) return .inspect_worktrees;
+    if (caption.notice) |notice| {
+        if (insideGraph(x, y, bounds) and insideGraph(x, y, notice)) return .inspect_worktrees;
+    }
     return null;
 }
 
@@ -1040,17 +1086,142 @@ test "header notice threshold and owner gating exclude invisible actions" {
         .default_branch = @constCast("main"),
     };
     defer inspection.entries.deinit();
-    try inspection.entries.append(.{ .path = @constCast("C:\\tree"), .branch = @constCast("topic"), .size_bytes = 1024 * 1024 * 1024 - 1 });
+    try inspection.entries.append(.{ .path = @constCast("C:\\tree"), .branch = @constCast("topic"), .size_bytes = 1024 * 1024 * 1024 - 1, .size_complete = true });
     const policy = WorktreeStatus.Policy{ .notice_count = 2, .notice_size_gb = 1 };
     try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
     inspection.entries.items[0].size_bytes += 1;
     try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes += 1;
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
     inspection.entries.items[0].size_bytes = 0;
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
     try inspection.entries.append(inspection.entries.items[0]);
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    try inspection.entries.append(inspection.entries.items[0]);
+    try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.shrinkRetainingCapacity(1);
+    inspection.entries.items[0].size_complete = false;
+    inspection.entries.items[0].size_error = error.AccessDenied;
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, WorktreeStatus.noticeState(inspection.entries.items, policy));
+    try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
+    inspection.entries.items[0].size_bytes = 1024 * 1024 * 1024;
     try std.testing.expect(headerWorktreeNotice(&model, &inspection, policy));
     inspection.project_path = @constCast("C:\\foreign");
     try std.testing.expect(!headerWorktreeNotice(&model, &inspection, policy));
 }
+
+test "worktree notice header never treats nonlocal projects as local inspections" {
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"ssh://host/repo","name":"Remote"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"codespace://name/repo","name":"Codespace"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Global"},"nodes":[],"edges":[]}}}
+        ,
+    };
+    for (frames) |frame| {
+        var model = GraphModel.Model.init(std.testing.allocator);
+        defer model.deinit();
+        _ = try model.updateFromFrame(frame);
+        var inspection = WorktreeStatus.Inspection{
+            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+            .project_path = model.currentGraph().?.project.path,
+            .default_branch = @constCast("main"),
+        };
+        defer inspection.entries.deinit();
+        try inspection.entries.append(.{
+            .path = @constCast("worktree"),
+            .branch = @constCast("topic"),
+            .size_bytes = 2147483648,
+            .size_complete = true,
+        });
+        try std.testing.expect(!headerWorktreeNotice(&model, &inspection, .{}));
+    }
+}
+
+test "worktree notice lane geometry preserves old actions and shares the new chip hit target" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\a","name":"Same"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\b","name":"Same"},"nodes":[],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Global"},"nodes":[],"edges":[]}}}
+        ,
+    };
+    for (frames) |frame| _ = try model.updateFromFrame(frame);
+    const bounds = rect(220, 34, 1200, 900);
+    const state = CanvasState{};
+    const a = overviewLaneCaption(&model, 0, bounds, &state);
+    const b = overviewLaneCaption(&model, 1, bounds, &state);
+    try std.testing.expectEqualDeep(rect(1044, 82, 1100, 102), a.open);
+    try std.testing.expectEqualDeep(rect(1104, 82, 1158, 102), a.worktrees);
+    try std.testing.expectEqualDeep(rect(750, 82, 1036, 102), a.notice.?);
+    try std.testing.expectEqualDeep(rect(750, 198, 1036, 218), b.notice.?);
+    try std.testing.expect(a.title.right < a.notice.?.left);
+    try std.testing.expect(a.notice.?.right < a.open.left);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 760, 92, bounds, &state).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 760, 208, bounds, &state).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 760, 208, bounds, &state) == null);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 740, 92, bounds, &state) == null);
+    try std.testing.expect(overviewLaneCaption(&model, 2, bounds, &state).notice == null);
+    const transformed = CanvasState{ .zoom = 1.5, .pan_x = 17, .pan_y = -9 };
+    try std.testing.expectEqualDeep(rect(1142, 114, 1571, 144), overviewLaneCaption(&model, 0, bounds, &transformed).notice.?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1150, 120, bounds, &transformed).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 1300, 120, bounds, &transformed) == null);
+    const identity_a = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\a");
+    defer std.testing.allocator.free(identity_a);
+    const identity_b = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\b");
+    defer std.testing.allocator.free(identity_b);
+    try std.testing.expectEqualStrings("overview-worktree-notice:C:\\a", identity_a);
+    try std.testing.expect(!std.mem.eql(u8, identity_a, identity_b));
+}
+
+test "worktree notice lane uses production observations for exact count and size boundaries" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\a","name":"A"},"nodes":[],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\b","name":"B"},"nodes":[],"edges":[]}}}
+    );
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .project_path = @constCast("C:\\a"),
+        .default_branch = @constCast("main"),
+    };
+    defer inspection.entries.deinit();
+    for (0..9) |_| try inspection.entries.append(.{
+        .path = @constCast("tree"),
+        .branch = @constCast("topic"),
+        .size_complete = true,
+    });
+    const policy = WorktreeStatus.policyReadOutcome(error.FileNotFound);
+    for ([_]usize{ 7, 8, 9 }, [_]WorktreeStatus.NoticeState{ .below_threshold, .notice, .notice }) |count, expected| {
+        inspection.entries.items.len = count;
+        try model.recordWorktreeInspection(&inspection, policy);
+        const presentation = overviewWorktreeNotice(model.graphFor("C:\\a").?).?;
+        try std.testing.expectEqual(expected, presentation.state);
+        try std.testing.expectEqual(count, presentation.summary.?.total);
+        try std.testing.expectEqual(WorktreeStatus.NoticePhase.uninspected, overviewWorktreeNotice(model.graphFor("C:\\b").?).?.phase);
+    }
+    inspection.entries.items.len = 1;
+    for ([_]u64{ 2147483647, 2147483648, 2147483649 }, [_]WorktreeStatus.NoticeState{ .below_threshold, .notice, .notice }) |bytes, expected| {
+        inspection.entries.items[0].size_bytes = bytes;
+        try model.recordWorktreeInspection(&inspection, policy);
+        try std.testing.expectEqual(expected, overviewWorktreeNotice(model.graphFor("C:\\a").?).?.state);
+    }
+    try model.recordWorktreePolicy("C:\\a", WorktreeStatus.policyReadOutcome(error.AccessDenied));
+    try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, overviewWorktreeNotice(model.graphFor("C:\\a").?).?.state);
+    inspection.entries.clearRetainingCapacity();
+    try model.recordWorktreeInspection(&inspection, policy);
+    try std.testing.expect(overviewWorktreeNotice(model.graphFor("C:\\a").?) == null);
+    try std.testing.expect(overviewLaneCaption(&model, 0, rect(220, 34, 1200, 900), &.{}).notice == null);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1130, 92, rect(220, 34, 1200, 900), &.{}).?);
+}
+
 fn attentionRail(
     hdc: c.HDC,
     allocator: std.mem.Allocator,

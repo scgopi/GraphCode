@@ -1176,6 +1176,55 @@ function Assert-FragmentLinks(
   return $children
 }
 
+function Assert-UiaSandboxPath([string] $sandbox, [string] $path) {
+  $root = [IO.Path]::GetFullPath($sandbox).TrimEnd('\', '/')
+  $candidate = [IO.Path]::GetFullPath($path)
+  if (-not $candidate.StartsWith($root + [IO.Path]::DirectorySeparatorChar,
+      [StringComparison]::OrdinalIgnoreCase)) {
+    throw "UIA fixture path escaped its owned sandbox: $candidate"
+  }
+  return $candidate
+}
+
+function Assert-UiaProviderPathBudget(
+  [string] $sandbox,
+  [string] $localAppData,
+  [AllowNull()] [object] $graphSessionPrefix,
+  [AllowNull()] [object] $zmxSessionPrefix,
+  [AllowNull()] [object] $zmxDirectory
+) {
+  $base = Assert-UiaSandboxPath $sandbox $localAppData
+  if (-not [string]::IsNullOrEmpty([string]$zmxDirectory)) {
+    throw "UIA fixture cannot establish an isolated provider root with inherited ZMX_DIR"
+  }
+  # Exact pinned ZMX formulas: UTF-8 hex session filename, SID directory, and
+  # a separate 16-byte nonce in the pipe name. No SID is queried or logged.
+  $uuid = "00000000-0000-0000-0000-000000000000"
+  $graphSession = if ($null -eq $graphSessionPrefix) { $uuid } else { [string]$graphSessionPrefix + "-" + $uuid }
+  $qualified = [string]$zmxSessionPrefix + $graphSession
+  if ($qualified.Contains('\') -or $qualified.Contains('/') -or $qualified.Contains([char]0)) {
+    throw "UIA fixture inherited session prefixes contain unsupported path characters"
+  }
+  $sidLengthAssumption = 52 # Maximum ordinary S-1-5-21 account SID, not an observed SID.
+  $sidComponent = "s" * $sidLengthAssumption
+  $hexSession = "0" * (2 * [Text.Encoding]::UTF8.GetByteCount($qualified))
+  $lease = Join-Path (Join-Path $base "zmx\ipc") ($sidComponent + "\" + $hexSession + ".endpoint.lease")
+  $null = Assert-UiaSandboxPath $sandbox $lease
+  $endpoint = '\\.\pipe\zmx-' + $sidComponent + '\' + $qualified + '-' + ("0" * 32)
+  # 232 is the reviewed conservative gate budget, not a universal Win32 limit.
+  if ($lease.Length -gt 232 -or $endpoint.Length -ge 256) {
+    throw "UIA fixture provider path budget exceeded: lease=$($lease.Length)/232, pipe=$($endpoint.Length)/255, assumed ordinary-account SID length=$sidLengthAssumption"
+  }
+  return [pscustomobject]@{
+    leaseUtf16 = $lease.Length
+    endpointUtf16 = $endpoint.Length
+    qualifiedSessionUtf8Bytes = [Text.Encoding]::UTF8.GetByteCount($qualified)
+    assumedSidUtf16 = $sidLengthAssumption
+    identityAssumption = "ordinary account SID or shorter; no actual SID measurement"
+    leaseBudget = 232
+  }
+}
+
 $oldZmx = [Environment]::GetEnvironmentVariable("GRAPHCODE_ZMX")
 $oldCwd = [Environment]::GetEnvironmentVariable("GRAPHCODE_GATE_CWD")
 $oldGate = [Environment]::GetEnvironmentVariable("GRAPHCODE_UIA_GATE")
@@ -1204,9 +1253,13 @@ $focusEventRegistered = $false
 $stressJob = $null
 $policyDirectory = $null
 $policyPath = $null
-$policyDirectoryExisted = $false
-$policyExisted = $false
-$policyContents = $null
+$sandboxPath = $null
+$sandboxCreated = $false
+$sandboxCleanupError = $null
+$gateFailure = $null
+$fixtureProjectPath = $null
+$fixtureSafePath = $null
+$fixtureUnsafePath = $null
 $settingsDirectory = $null
 $settingsPath = $null
 $settingsErrorPath = $null
@@ -1214,32 +1267,46 @@ $daemonCommandLogPath = $null
 $shellExecuteLogPath = $null
 $templateDirectory = $null
 try {
+  $sandboxPath = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) `
+    ("gu-" + [guid]::NewGuid().ToString("N"))))
+  New-Item -ItemType Directory -Path $sandboxPath -ErrorAction Stop | Out-Null
+  $sandboxCreated = $true
+  $fixtureProjectPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "project")
+  $fixtureSafePath = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath "fixture-safe")
+  $fixtureUnsafePath = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath "fixture-unsafe")
+  New-Item -ItemType Directory -Path $fixtureProjectPath -ErrorAction Stop | Out-Null
+  $logDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "logs")
+  New-Item -ItemType Directory -Path $logDirectory -ErrorAction Stop | Out-Null
+  Write-Host "UIA_OWNED_SANDBOX=$sandboxPath"
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
-  $env:GRAPHCODE_GATE_CWD = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+  $env:GRAPHCODE_GATE_CWD = $fixtureProjectPath
   $env:GRAPHCODE_UIA_GATE = "1"
   $env:GRAPHCODE_UIA_CONNECTION_FAILURE = "1"
   $env:GRAPHCODE_UIA_UPDATE_AVAILABLE = "1"
   $env:GRAPHCODE_UIA_SHOW_UPDATE = "1"
   $env:USERNAME = "GraphCodeUIAGate"
-  $env:GRAPHCODE_UIA_FIXTURE_ROWS = "C:\fixture-safe|safe,C:\fixture-unsafe|unsafe"
+  $env:GRAPHCODE_UIA_FIXTURE_ROWS = "$fixtureSafePath|safe,$fixtureUnsafePath|unsafe"
   $env:GRAPHCODE_DAEMON_PIPE = "\\.\pipe\graphcode-uia-gate-$PID"
-  $daemonCommandLogPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-daemon-command-$PID.json"
-  $shellExecuteLogPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-shell-execute-$PID.log"
-  Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
+  $daemonCommandLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "daemon-command.json")
+  $shellExecuteLogPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "shell-execute.log")
   $env:GRAPHCODE_UIA_DAEMON_COMMAND_LOG = $daemonCommandLogPath
   $env:GRAPHCODE_UIA_SHELL_EXECUTE_LOG = $shellExecuteLogPath
-  $templateDirectory = Join-Path ([IO.Path]::GetTempPath()) "graphcode-uia-templates-$PID"
+  $templateDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "a")
+  $providerPathBudget = Assert-UiaProviderPathBudget $sandboxPath $templateDirectory `
+    ([Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSION_PREFIX")) `
+    ([Environment]::GetEnvironmentVariable("ZMX_SESSION_PREFIX")) `
+    ([Environment]::GetEnvironmentVariable("ZMX_DIR"))
+  Write-Host ("UIA_PROVIDER_PATH_BUDGET=" + ($providerPathBudget | ConvertTo-Json -Compress))
   $env:LOCALAPPDATA = $templateDirectory
-  $savedTemplates = Join-Path $templateDirectory "GraphCode\templates"
+  $savedTemplates = Assert-UiaSandboxPath $sandboxPath (Join-Path $templateDirectory "GraphCode\templates")
   New-Item -ItemType Directory -Path $savedTemplates -Force | Out-Null
   [IO.File]::WriteAllText(
-    (Join-Path $savedTemplates "uia-release-review.md"),
+    (Assert-UiaSandboxPath $sandboxPath (Join-Path $savedTemplates "uia-release-review.md")),
     "---`nid: 11111111-1111-4111-8111-111111111111`nname: UIA release review`nshape: turn`n---`nReview the release diff.`n"
   )
-  $settingsDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-product-settings-$PID"
-  $settingsPath = Join-Path $settingsDirectory "settings.json"
-  $settingsErrorPath = Join-Path $settingsDirectory "stderr.log"
+  $settingsDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "support")
+  $settingsPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $settingsDirectory "settings.json")
+  $settingsErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "settings-stderr.log")
   New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
   [IO.File]::WriteAllText(
     $settingsPath,
@@ -1251,12 +1318,9 @@ try {
   )
   $env:GRAPHCODE_SUPPORT_DIR = $settingsDirectory
   $env:GRAPHCODE_UIA_RESET_SIDEBAR = "1"
-  $policyDirectory = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode"
-  $policyPath = Join-Path $policyDirectory "worktree-policy.json"
-  $policyDirectoryExisted = Test-Path -LiteralPath $policyDirectory
-  $policyExisted = Test-Path -LiteralPath $policyPath
-  if ($policyExisted) { $policyContents = [IO.File]::ReadAllBytes($policyPath) }
-  $shellErrorPath = Join-Path $env:GRAPHCODE_GATE_CWD ".graphcode-uia-shell-stderr-$PID.log"
+  $policyDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath ".graphcode")
+  $policyPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $policyDirectory "worktree-policy.json")
+  $shellErrorPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $logDirectory "shell-stderr.log")
   if ($ArgumentList.Count -gt 0) {
     $process = Start-Process -FilePath $Shell -ArgumentList $ArgumentList -PassThru -WindowStyle Normal `
       -RedirectStandardError $shellErrorPath
@@ -1762,7 +1826,7 @@ try {
     },
     [pscustomobject]@{
       Id = 3
-      Title = "Worktrees - UIA project (2 total, 1 safe, 1 look, 0 in use, 0 B)"
+      Title = "Worktrees - UIA project (2 total, 1 safe, 1 look, 0 in use, size not measured)"
       Required = @("SAFE TO REMOVE", "LOOK BEFORE REMOVING", "Remove Selected")
     }
   )) {
@@ -2635,12 +2699,12 @@ try {
   $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $initialRowIds "RawView Worktrees")
   $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $initialRowIds "ControlView Worktrees")
   Require ((@($rawRows | ForEach-Object { $_.Current.Name }) -join "|") -eq
-           "C:\fixture-safe|C:\fixture-unsafe") "fixture worktree names were not ordered as expected"
+           "$fixtureSafePath|$fixtureUnsafePath") "fixture worktree names were not ordered as expected"
 
   $selection = $worktrees.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
-  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
-  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq "C:\fixture-unsafe" })[0]
-  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
+  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
+  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureUnsafePath })[0]
+  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
   Require (($null -ne $safeRow) -and ($null -ne $unsafeRow) -and ($null -ne $safeFocusRow)) "missing fixture worktree rows"
   $safeRowId = $safeRow.Current.AutomationId
   $safeRowRuntimeId = Get-RuntimeIdentity $safeRow
@@ -2872,10 +2936,10 @@ try {
            ([GraphCodeUiaGateState]::LiveSourceName -eq $statusTextAfter)) "status LiveRegionChanged did not expose updated text"
 
   $currentRowsBeforeFocus = @(Get-DirectChildren $worktrees $rawWalker)
-  $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq "C:\fixture-safe" })[0]
+  $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
   Require ($null -ne $currentSafe) "safe worktree row disappeared before focus: $(@($currentRowsBeforeFocus | ForEach-Object { $_.Current.AutomationId }) -join ',')"
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
-  Require ($safeFocusRow.Current.Name -eq "C:\fixture-safe") "safe worktree provider became unavailable before focus"
+  Require ($safeFocusRow.Current.Name -eq $fixtureSafePath) "safe worktree provider became unavailable before focus"
   $focusResult = Retain-FocusWithRetry $shellWindow $safeFocusRow $safeRowId "before-retention"
   $focused = $focusResult.Focused
   Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$(Format-AutomationElement $focusResult.Candidate); $(Get-FocusDiagnostics $shellWindow)"
@@ -3498,7 +3562,7 @@ try {
   }
   Require (Test-Path -LiteralPath $daemonCommandLogPath) "Needs-you Stop did not emit a daemon command"
   $needsYouStopCommand = [IO.File]::ReadAllText($daemonCommandLogPath)
-  Require ($needsYouStopCommand -match '"projectPath":"C:\\\\GraphCode\\\\fixture"') `
+  Require (($needsYouStopCommand | ConvertFrom-Json).graphCommand.projectPath -eq $fixtureProjectPath) `
     "Needs-you Stop routed to the wrong project: $needsYouStopCommand"
   Require ($needsYouStopCommand -match '"stopNode":\{"_0":"22222222-2222-4222-8222-222222222222"\}') `
     "Needs-you Stop routed to the wrong loop: $needsYouStopCommand"
@@ -3915,7 +3979,7 @@ try {
     $settingsRowNames = @(Get-DirectChildren $settingsWorktrees $rawWalker |
       ForEach-Object { $_.Current.Name })
     $settingsMessageLoopReady = ($settingsRowNames -join "|") -eq
-      "C:\fixture-unsafe|C:\fixture-safe"
+      "$fixtureUnsafePath|$fixtureSafePath"
   }
   Require $settingsMessageLoopReady "Product Settings fixture shell message loop did not become ready"
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 1)) `
@@ -4158,7 +4222,14 @@ try {
     contextMenuDismissed = $projectMenuClosed
     remoteContextMenuItemCount = $remoteMenuItems.Count
   } | ConvertTo-Json -Compress
+} catch {
+  $gateFailure = $_
+  if ($sandboxCreated) {
+    Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath"
+  }
+  throw
 } finally {
+  try {
   if ($stressJob) {
     Remove-Job -Job $stressJob -Force -ErrorAction SilentlyContinue
   }
@@ -4197,28 +4268,11 @@ try {
     $settingsProcess.Kill()
     $settingsProcess.WaitForExit()
   }
-  if ($policyExisted) {
-    [IO.File]::WriteAllBytes($policyPath, $policyContents)
-  } elseif ($policyPath) {
-    Remove-Item -LiteralPath $policyPath -Force -ErrorAction SilentlyContinue
-    if (-not $policyDirectoryExisted -and
-        -not (Get-ChildItem -LiteralPath $policyDirectory -Force -ErrorAction SilentlyContinue |
-          Select-Object -First 1)) {
-      Remove-Item -LiteralPath $policyDirectory -Force -ErrorAction SilentlyContinue
-    }
-  }
-  if ($settingsDirectory) {
-    Remove-Item -LiteralPath $settingsDirectory -Recurse -Force -ErrorAction SilentlyContinue
-  }
-  if ($daemonCommandLogPath) {
-    Remove-Item -LiteralPath $daemonCommandLogPath -Force -ErrorAction SilentlyContinue
-  }
-  if ($shellExecuteLogPath) {
-    Remove-Item -LiteralPath $shellExecuteLogPath -Force -ErrorAction SilentlyContinue
-  }
-  if ($templateDirectory) {
-    Remove-Item -LiteralPath $templateDirectory -Recurse -Force -ErrorAction SilentlyContinue
-  }
+  } catch {
+    $sandboxCleanupError = $_
+    if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }
+    Write-Host "UIA_CLEANUP_ERROR=$($_.Exception.Message)"
+  } finally {
   if ($null -eq $oldZmx) { Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue }
   else { $env:GRAPHCODE_ZMX = $oldZmx }
   if ($null -eq $oldCwd) { Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue }
@@ -4260,4 +4314,10 @@ try {
   if ($null -eq $oldLocalAppData) {
     Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
   } else { $env:LOCALAPPDATA = $oldLocalAppData }
+  if ($sandboxCreated) {
+    Write-Host "UIA_SANDBOX_RETAINED=$sandboxPath"
+    Write-Host "UIA_SANDBOX_CLEANUP_UNVERIFIED=legacy process teardown does not verify all owned descendants; sandbox and logs retained regardless of assertion outcome"
+  }
+  }
+  if ($sandboxCleanupError -and $null -eq $gateFailure) { throw $sandboxCleanupError }
 }
