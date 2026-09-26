@@ -658,6 +658,7 @@ fn createAccelerators() c.HACCEL {
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.next_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.previous_tab) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 0xBC, .cmd = @intFromEnum(Command.settings) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = @intFromEnum(Command.product_settings) },
     };
     const accelerators = c.CreateAcceleratorTableW(&entries, entries.len);
     if (accelerators == null) {
@@ -670,6 +671,44 @@ fn createAccelerators() c.HACCEL {
         }
     }
     return accelerators;
+}
+
+test "settings accelerator table preserves existing bindings and product destination" {
+    const expected = [_]c.ACCEL{
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'O', .cmd = 4101 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'W', .cmd = 4103 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'J', .cmd = 4201 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_TAB, .cmd = 4202 },
+        .{ .fVirt = c.FVIRTKEY, .key = c.VK_TAB, .cmd = 4203 },
+        .{ .fVirt = c.FSHIFT | c.FVIRTKEY, .key = c.VK_TAB, .cmd = 4204 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'N', .cmd = 4205 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'S', .cmd = 4207 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'T', .cmd = 4301 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'W', .cmd = 4302 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'D', .cmd = 4303 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = 4304 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = 4305 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = 4306 },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = 4402 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = 4403 },
+    };
+    const accelerators = createAccelerators() orelse return error.AcceleratorCreationFailed;
+    defer std.testing.expect(c.DestroyAcceleratorTable(accelerators) != 0) catch
+        @panic("DestroyAcceleratorTable failed");
+    try std.testing.expectEqual(@as(c_int, expected.len), c.CopyAcceleratorTableW(accelerators, null, 0));
+    var entries: [expected.len]c.ACCEL = undefined;
+    const count = c.CopyAcceleratorTableW(accelerators, &entries, entries.len);
+    try std.testing.expectEqual(@as(c_int, expected.len), count);
+    for (expected, entries) |binding, entry| {
+        try std.testing.expectEqual(binding.fVirt, entry.fVirt);
+        try std.testing.expectEqual(binding.key, entry.key);
+        try std.testing.expectEqual(binding.cmd, entry.cmd);
+    }
+    const InputRouter = @import("InputRouter.zig");
+    try std.testing.expectEqual(Command.settings, commandFromId(entries[14].cmd).?);
+    try std.testing.expectEqual(Command.product_settings, commandFromId(entries[15].cmd).?);
+    try std.testing.expectEqual(InputRouter.Action.settings, InputRouter.keyAction(entries[14].key, true, false));
+    try std.testing.expectEqual(InputRouter.Action.product_settings, InputRouter.keyAction(entries[15].key, true, true));
 }
 
 test "native menu exposes the parity command groups" {

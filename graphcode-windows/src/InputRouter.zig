@@ -76,7 +76,7 @@ pub const Action = enum {
 };
 
 pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
-    if (ctrl and shift and key == ',') return .product_settings;
+    if (ctrl and shift and (key == ',' or key == 0xBC)) return .product_settings;
     if (ctrl and shift and key == 'C') return .clone_repository;
     if (ctrl and shift and key == 'X') return .cancel_clone;
     if (ctrl and shift and key == 'R') return .remote_repository;
@@ -230,6 +230,29 @@ test "attention and worktree shortcuts are distinct from ordinary selection" {
 test "OEM comma routes to settings only with control" {
     try std.testing.expectEqual(Action.settings, keyAction(0xBC, true, false));
     try std.testing.expectEqual(Action.none, keyAction(0xBC, false, false));
+}
+
+test "settings comma destinations preserve modifiers and unrelated keys" {
+    const cases = [_]struct { key: usize, actions: [4]Action }{
+        .{ .key = 0xBC, .actions = .{ .none, .none, .settings, .product_settings } },
+        .{ .key = ',', .actions = .{ .none, .none, .settings, .product_settings } },
+        .{ .key = 0xBE, .actions = .{ .none, .none, .none, .none } },
+        .{ .key = '<', .actions = .{ .none, .none, .none, .none } },
+        .{ .key = 'R', .actions = .{ .none, .none, .reconnect, .remote_repository } },
+        .{ .key = 'K', .actions = .{ .none, .none, .none, .codespace_repository } },
+        .{ .key = 0x75, .actions = .{ .none, .none, .none, .none } },
+    };
+    const modifiers = [_]struct { ctrl: bool, shift: bool }{
+        .{ .ctrl = false, .shift = false },
+        .{ .ctrl = false, .shift = true },
+        .{ .ctrl = true, .shift = false },
+        .{ .ctrl = true, .shift = true },
+    };
+    for (cases) |case| {
+        for (modifiers, case.actions) |modifier, expected| {
+            try std.testing.expectEqual(expected, keyAction(case.key, modifier.ctrl, modifier.shift));
+        }
+    }
 }
 
 test "tab variants keep terminal navigation distinct" {

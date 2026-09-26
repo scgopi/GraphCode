@@ -19,8 +19,9 @@ not a synthetic terminal proof.
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
 `Ctrl+N` creates a node, `Ctrl+E` edits the selected node, `Ctrl+J` opens the
-jump palette (also `Ctrl+P`), and `Ctrl+,` opens settings. Mutations are sent as correlated v2
-daemon requests; daemon refusals remain visible as explicit status errors.
+jump palette (also `Ctrl+P`), `Ctrl+,` opens Advanced Connection Settings, and
+`Ctrl+Shift+,` opens product Settings. Mutations are sent as correlated v2 daemon
+requests; daemon refusals remain visible as explicit status errors.
 
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
