@@ -3552,7 +3552,7 @@ try {
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the plain loop context menu was inspected"
   $plainLoopLabels = @($plainLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
-    "Open Terminal`tEnter", "Edit Details...`tCtrl+E", "Save as Template...",
+    "Open Terminal", "Edit Details...", "Save as Template...",
     "Rename...`tF2", "Delete Loop...`tDelete"
   )) {
     Require ($plainLoopLabels -contains $expectedLabel) `
@@ -3585,8 +3585,8 @@ try {
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the composite loop context menu was inspected"
   $compositeLoopLabels = @($compositeLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
-    "Open Terminal`tEnter", "Open Group", "Pilot Once", "Arm Schedule",
-    "Edit Details...`tCtrl+E", "Save as Template...", "Rename...`tF2",
+    "Open Terminal", "Open Group", "Pilot Once", "Arm Schedule",
+    "Edit Details...", "Save as Template...", "Rename...`tF2",
     "Stop`tCtrl+S", "Delete Loop...`tDelete"
   )) {
     Require ($compositeLoopLabels -contains $expectedLabel) `
@@ -3622,8 +3622,8 @@ try {
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the unwired loop context menu was inspected"
   $unwiredLoopLabels = @($unwiredLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
-    "Open Terminal`tEnter", "Wire it up", "Mark as entry",
-    "Edit Details...`tCtrl+E", "Save as Template...", "Rename...`tF2",
+    "Open Terminal", "Wire it up", "Mark as entry",
+    "Edit Details...", "Save as Template...", "Rename...`tF2",
     "Stop`tCtrl+S", "Delete Loop...`tDelete"
   )) {
     Require ($unwiredLoopLabels -contains $expectedLabel) `
