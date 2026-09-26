@@ -5,6 +5,22 @@ import IdentifiedCollections
 @testable import GraphcodeKit
 
 final class GraphCommandInteropTests: XCTestCase {
+  func testSketchPromotionFixturesDecodeWithoutReplacingNodeIdentity() throws {
+    let node = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+    let cases: [(String, SketchPromotion)] = [
+      ("goal", .goal(GoalSpec(summary: "Done \"well\" 雪"))),
+      ("turn", .turn(pausesBeforeWritesOnly: true)),
+      ("timed", .timed(triggerPrompt: "/loop 1h watch \"雪\"")),
+    ]
+    for (target, promotion) in cases {
+      let envelope = try JSONDecoder().decode(
+        RequestEnvelope.self, from: fixture("daemon-v2-promote-\(target).json"))
+      XCTAssertEqual(envelope.command, .graphCommand(
+        projectPath: "C:\\work\\graph",
+        command: .promoteNode(node, promotion: promotion, promotedBy: nil)))
+    }
+  }
+
   func testCreateEdgeWirePayloadDecodesToSwiftGraphCommand() throws {
     let data = try fixture("daemon-v2-create-edge.json")
     let envelope = try JSONDecoder().decode(RequestEnvelope.self, from: data)

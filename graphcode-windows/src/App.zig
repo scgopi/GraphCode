@@ -8,6 +8,7 @@ const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
 const NativeForms = @import("NativeForms.zig");
+const SketchPromotion = @import("SketchPromotion.zig");
 const TemplateLibrary = @import("TemplateLibrary.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const JumpPalette = @import("JumpPalette.zig");
@@ -1724,6 +1725,55 @@ pub const App = struct {
         self.client.sendUpdateNodeForm(current_graph.project.path, current_graph.nodes.items[current_index].id, update);
     }
 
+    fn prepareSketchPromotion(self: *App, context: SketchPromotion.Context, target: ?SketchPromotion.Target) !bool {
+        if (target == null) return false;
+        const plan = try context.selectionPlan(&self.model, self.client.subgraph_node_id);
+        if (plan == .root_project and !self.selectProject(context.project_path))
+            return error.PromotionContextChanged;
+        const graph = self.model.graph orelse return error.PromotionContextChanged;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, context.node_id) orelse return error.PromotionNodeMissing;
+        if (!self.selectNodeIndex(index)) return error.OutOfMemory;
+        try context.validateCurrent(&self.model, self.client.subgraph_node_id);
+        return true;
+    }
+
+    fn promoteSketch(self: *App, stable: GraphContextMenu.NodeTarget, target: SketchPromotion.Target) void {
+        const context = stable.promotion_context orelse {
+            self.setStatus("Unable to retain sketch promotion context. Reopen the loop menu.");
+            return;
+        };
+        if (!std.mem.eql(u8, stable.project_path, context.project_path) or !std.mem.eql(u8, stable.id, context.node_id)) {
+            self.setStatus("Sketch promotion context changed. Reopen the loop menu.");
+            return;
+        }
+        _ = self.prepareSketchPromotion(context.*, target) catch |err| {
+            self.setPromotionError(err);
+            return;
+        };
+        var draft = NativeForms.promotion(self.window.hwnd, self.allocator, target, context.*) catch |err| {
+            self.setPromotionError(err);
+            return;
+        } orelse return;
+        defer draft.deinit(self.allocator);
+        _ = self.client.sendSketchPromotion(&self.model, context.*, draft) catch |err| {
+            self.setPromotionError(err);
+            return;
+        };
+        self.setStatus("Sketch promotion queued; waiting for the daemon.");
+    }
+
+    fn setPromotionError(self: *App, err: anyerror) void {
+        self.setStatus(switch (err) {
+            error.PromotionContextChanged => "Sketch promotion context changed. Nothing was submitted; reopen the loop menu.",
+            error.PromotionNodeMissing => "The sketch was removed. Nothing was submitted.",
+            error.NotSketch => "Only a sketch can be promoted. Nothing was submitted.",
+            error.MissingGoal => "A goal promotion needs what done looks like.",
+            error.PromotionQueueFull => "Unable to queue sketch promotion: daemon queue is full or closed.",
+            error.OutOfMemory => "Unable to allocate sketch promotion fields. Nothing was submitted.",
+            else => "Unable to prepare sketch promotion. Nothing was submitted.",
+        });
+    }
+
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
@@ -2504,29 +2554,55 @@ pub const App = struct {
     fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
-        defer self.allocator.free(node_id);
         const composite = std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive") or
             std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite");
         const unwired = self.nodeIsUnwired(graph.nodes.items[index].id);
-        GraphContextMenu.show(
-            self.window.hwnd,
-            .{ .node = .{
-                .project_path = project_path,
-                .id = node_id,
+        self.showNodePopup(
+            graph.nodes.items[index],
+            .{
+                .project_path = graph.project.path,
+                .id = graph.nodes.items[index].id,
                 .composite = composite,
                 .can_arm = std.mem.eql(u8, graph.nodes.items[index].pilot_state, "piloted"),
                 .unwired = unwired,
                 .follows_template = graph.nodes.items[index].follows_template,
                 .resolved = isResolvedLoopState(graph.nodes.items[index].state),
-            } },
+            },
+            self.model.open_composite_id orelse "",
             x,
             y,
-            self,
-            &onContextAction,
         );
+    }
+
+    fn showNodePopup(self: *App, node: GraphModel.Node, target: GraphContextMenu.NodeTarget, composite_id: []const u8, x: i32, y: i32) void {
+        const path = self.allocator.dupe(u8, target.project_path) catch {
+            self.setStatus("Unable to retain the loop menu project.");
+            return;
+        };
+        defer self.allocator.free(path);
+        const id = self.allocator.dupe(u8, target.id) catch {
+            self.setStatus("Unable to retain the loop menu identity.");
+            return;
+        };
+        defer self.allocator.free(id);
+        var owned = target;
+        owned.project_path = path;
+        owned.id = id;
+        owned.sketch = std.mem.eql(u8, node.loop_type, "sketch");
+        var context: ?SketchPromotion.Context = null;
+        defer if (context) |*value| value.deinit(self.allocator);
+        if (owned.sketch) {
+            context = SketchPromotion.Context.capture(self.allocator, &self.model, path, composite_id, node) catch |err| {
+                self.setPromotionError(err);
+                return;
+            };
+            if (context.?.selectionPlan(&self.model, self.client.subgraph_node_id)) |_| {
+                owned.promotion_context = &context.?;
+            } else |_| {
+                self.setStatus("Sketch promotion is unavailable in this graph context.");
+            }
+        }
+        GraphContextMenu.show(self.window.hwnd, .{ .node = owned }, x, y, self, &onContextAction);
     }
 
     fn showBackgroundContextMenu(self: *App, x: i32, y: i32) void {
@@ -2842,6 +2918,10 @@ pub const App = struct {
                 }
             },
             .node => |stable| {
+                if (GraphContextMenu.promotionTarget(action)) |target_type| {
+                    self.promoteSketch(stable, target_type);
+                    return;
+                }
                 const already_active = if (self.model.graph) |active|
                     std.mem.eql(u8, active.project.path, stable.project_path)
                 else
@@ -6521,20 +6601,19 @@ fn onWindowMessage(
                             if (row.index < graph.nodes.items.len) {
                                 var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                                 _ = c.ClientToScreen(hwnd, &screen);
-                                GraphContextMenu.show(
-                                    hwnd,
-                                    .{ .node = .{
+                                app.showNodePopup(
+                                    graph.nodes.items[row.index],
+                                    .{
                                         .project_path = path,
                                         .id = graph.nodes.items[row.index].id,
                                         .composite = std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "composite") or
                                             std.mem.eql(u8, graph.nodes.items[row.index].loop_type, "proactive"),
                                         .can_arm = std.mem.eql(u8, graph.nodes.items[row.index].pilot_state, "piloted"),
                                         .resolved = isResolvedLoopState(graph.nodes.items[row.index].state),
-                                    } },
+                                    },
+                                    "",
                                     screen.x,
                                     screen.y,
-                                    app,
-                                    &onContextAction,
                                 );
                             }
                         },
@@ -8054,6 +8133,88 @@ test "header detail toggle preserves workspace instead of generic panel navigati
         try std.testing.expect(!app.workspace_controls.panel_visible);
         try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
     }
+}
+
+test "sketch promotion popup adapter cancels and rejects races before one-time cached project selection" {
+    var app: App = .{
+        .allocator = std.testing.allocator,
+        .client = try DaemonClient.initUnstartedForTest(std.testing.allocator),
+        .daemon = undefined,
+        .model = GraphModel.Model.init(std.testing.allocator),
+        .sidebar_state = undefined,
+        .declared_entry_ids = undefined,
+        .kept_worktree_paths = undefined,
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.allocator.free(app.selected_node_id);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"same","title":"A sketch","loopType":"sketch","firstInstruction":"A note"},{"id":"other","title":"Other","loopType":"goalBased"}],"edges":[]}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"B","name":"B"},"nodes":[{"id":"same","title":"B sketch","loopType":"sketch","firstInstruction":"B note"}],"edges":[]}}
+    );
+    app.client.setSubscription("A");
+    var context = try SketchPromotion.Context.capture(app.allocator, &app.model, "B", "", app.model.graphFor("B").?.nodes.items[0]);
+    defer context.deinit(app.allocator);
+    try std.testing.expect(!try app.prepareSketchPromotion(context, null));
+    try std.testing.expectEqualStrings("A", app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings("", app.client.subgraph_node_id);
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try std.testing.expect(app.model.setSelectedID("other"));
+    try std.testing.expectError(error.PromotionContextChanged, app.prepareSketchPromotion(context, .goal));
+    try std.testing.expectEqualStrings("other", app.model.selectedNodeID().?);
+    try std.testing.expect(app.model.setSelectedID("same"));
+    try std.testing.expect(app.selectProject("B"));
+    try std.testing.expectError(error.PromotionContextChanged, app.prepareSketchPromotion(context, .goal));
+    try std.testing.expectEqualStrings("B", app.model.graph.?.project.path);
+    try std.testing.expect(app.selectProject("A"));
+    try std.testing.expect(try app.prepareSketchPromotion(context, .goal));
+    try std.testing.expectEqualStrings("B", app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings("A", app.client.subscription_path);
+    try std.testing.expectError(error.PromotionContextChanged, app.prepareSketchPromotion(context, .goal));
+    try std.testing.expect(!try app.client.sendSketchPromotion(&app.model, context, null));
+    try std.testing.expect(try app.client.sendSketchPromotion(&app.model, context, .{ .goal = "done" }));
+    const command = app.client.outbound[app.client.outbound_head];
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"projectPath\":\"B\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"promoteNode\"") != null);
+    try std.testing.expectEqualStrings("same", app.model.selectedNodeID().?);
+    try std.testing.expectEqualStrings("A", app.client.subscription_path);
+}
+
+test "sketch promotion sidebar root from composite establishes root once and refuses stale form" {
+    var app: App = .{
+        .allocator = std.testing.allocator,
+        .client = try DaemonClient.initUnstartedForTest(std.testing.allocator),
+        .daemon = undefined,
+        .model = GraphModel.Model.init(std.testing.allocator),
+        .sidebar_state = undefined,
+        .declared_entry_ids = undefined,
+        .kept_worktree_paths = undefined,
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.allocator.free(app.selected_node_id);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"same","title":"Root","loopType":"sketch"},{"id":"group","title":"Group","loopType":"proactive","subGraph":{"project":{"path":"A","name":"A"},"nodes":[{"id":"same","title":"Child","loopType":"sketch"}],"edges":[]}}],"edges":[]}}
+    );
+    try std.testing.expect(app.model.openComposite("group"));
+    app.client.setSubgraphAddress("group");
+    var context = try SketchPromotion.Context.capture(app.allocator, &app.model, "A", "", app.model.graphFor("A").?.nodes.items[0]);
+    defer context.deinit(app.allocator);
+    try std.testing.expect(!try app.prepareSketchPromotion(context, null));
+    try std.testing.expectEqualStrings("group", app.client.subgraph_node_id);
+    try std.testing.expectEqualStrings("Child", app.model.graph.?.nodes.items[0].title);
+    try std.testing.expect(try app.prepareSketchPromotion(context, .turn));
+    try std.testing.expectEqualStrings("", app.client.subgraph_node_id);
+    try std.testing.expectEqualStrings("Root", app.model.graph.?.nodes.items[0].title);
+    try std.testing.expect(try app.client.sendSketchPromotion(&app.model, context, .{ .turn = false }));
+    try std.testing.expect(std.mem.indexOf(u8, app.client.outbound[app.client.outbound_head], "subGraphCommand") == null);
+    try std.testing.expect(app.model.openComposite("group"));
+    app.client.setSubgraphAddress("group");
+    try std.testing.expectError(error.PromotionContextChanged, app.client.sendSketchPromotion(&app.model, context, .{ .turn = true }));
+    try std.testing.expectEqualStrings("group", app.client.subgraph_node_id);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
 }
 
 test "header presentation follows destinations and keeps sidebar independent" {

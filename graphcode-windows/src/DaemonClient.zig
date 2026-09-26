@@ -2,8 +2,128 @@ const std = @import("std");
 const FrameBuffer = @import("FrameBuffer.zig").FrameBuffer;
 const Wire = @import("Wire.zig");
 const Forms = @import("Forms.zig");
+const SketchPromotion = @import("SketchPromotion.zig");
 const c = @import("Win32.zig").c;
 const ReconnectDecision = enum { none, ready, drain_timeout };
+
+test "sketch promotion real outbound queue matches Swift fixtures for every variant" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    var model = @import("GraphModel.zig").Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Sketch","loopType":"sketch"}],"edges":[]}}
+    );
+    var context = try SketchPromotion.Context.capture(allocator, &model, model.graph.?.project.path, "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    const drafts = [_]SketchPromotion.Draft{ .{ .goal = "Done \"well\" \u{96ea}" }, .{ .turn = true }, .{ .timed = "/loop 1h watch \"\u{96ea}\"" } };
+    for (drafts, [_][]const u8{ "goal", "turn", "timed" }, 0..) |draft, name, index| {
+        try std.testing.expect(try client.sendSketchPromotion(&model, context, draft));
+        const envelope = try Wire.v2Request(allocator, "00000000-0000-4000-8000-000000000025", client.outbound[index]);
+        defer allocator.free(envelope);
+        const path = try std.fmt.allocPrint(allocator, "fixtures\\daemon-v2-promote-{s}.json", .{name});
+        defer allocator.free(path);
+        const fixture = try std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024);
+        defer allocator.free(fixture);
+        try std.testing.expectEqualStrings(std.mem.trim(u8, fixture, "\r\n"), std.mem.trim(u8, envelope, "\r\n"));
+        const v1 = try Wire.v1Command(allocator, client.outbound[index]);
+        defer allocator.free(v1);
+        try std.testing.expect(std.mem.indexOf(u8, v1, "\"promoteNode\"") != null);
+        _ = try Wire.frameLength(envelope, .v2);
+    }
+    try std.testing.expectEqual(@as(usize, 3), client.outbound_count);
+    try std.testing.expect(client.worker == null);
+}
+
+test "sketch promotion sender refuses changed type deletion foreign scope and invalid data without retargeting" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    var model = @import("GraphModel.zig").Model.init(allocator);
+    defer model.deinit();
+    const frame =
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"same","title":"Sketch","loopType":"sketch","firstInstruction":"original"},{"id":"other","title":"Other","loopType":"sketch"}],"edges":[]}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    var context = try SketchPromotion.Context.capture(allocator, &model, "A", "", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    try std.testing.expectError(error.MissingGoal, client.sendSketchPromotion(&model, context, .{ .goal = "\u{2003}\n" }));
+    try std.testing.expectError(error.MissingCadence, client.sendSketchPromotion(&model, context, .{ .timed = " " }));
+    try std.testing.expect(model.setSelectedID("other"));
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expectEqualStrings("other", model.selectedNodeID().?);
+    try std.testing.expect(model.setSelectedID("same"));
+    client.setSubgraphAddress("other");
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expectEqualStrings("other", client.subgraph_node_id);
+    client.setSubgraphAddress(null);
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"B","name":"B"},"nodes":[{"id":"same","title":"Foreign","loopType":"sketch"}],"edges":[]}}
+    );
+    try std.testing.expect(model.selectProject("B"));
+    try std.testing.expectError(error.PromotionContextChanged, client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expectEqualStrings("B", model.graph.?.project.path);
+    try std.testing.expect(model.selectProject("A"));
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"same","title":"Changed","loopType":"turnBased"}],"edges":[]}}
+    );
+    try std.testing.expectError(error.NotSketch, client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expectEqualStrings("original", context.first_instruction);
+    try std.testing.expectEqualStrings("Sketch", context.title);
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[],"edges":[]}}
+    );
+    try std.testing.expectError(error.PromotionNodeMissing, client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expect(!try client.sendSketchPromotion(&model, context, null));
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+}
+
+test "sketch promotion sender preserves composite address and cleans every serialization allocation" {
+    const allocator = std.testing.allocator;
+    var model = @import("GraphModel.zig").Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"group","title":"Group","loopType":"proactive","subGraph":{"project":{"path":"A","name":"A"},"nodes":[{"id":"child","title":"Sketch","loopType":"sketch"}],"edges":[]}}],"edges":[]}}
+    );
+    try std.testing.expect(model.openComposite("group"));
+    var context = try SketchPromotion.Context.capture(allocator, &model, "A", "group", model.graph.?.nodes.items[0]);
+    defer context.deinit(allocator);
+    try std.testing.expect(model.setSelectedID("child"));
+    const Probe = struct {
+        fn run(test_allocator: std.mem.Allocator, current: *const @import("GraphModel.zig").Model, captured: SketchPromotion.Context) !void {
+            var client = try DaemonClient.initUnstartedForTest(test_allocator);
+            defer client.deinit();
+            client.subgraph_node_id = try test_allocator.dupe(u8, "group");
+            for ([_]SketchPromotion.Draft{ .{ .goal = "done" }, .{ .turn = false }, .{ .timed = "/loop 1h work" } }) |draft| {
+                try std.testing.expect(try client.sendSketchPromotion(current, captured, draft));
+            }
+            try std.testing.expect(std.mem.indexOf(u8, client.outbound[0], "\"subGraphCommand\":{\"nodeID\":\"group\"") != null);
+            try std.testing.expect(std.mem.indexOf(u8, client.outbound[0], "\"_0\":\"child\"") != null);
+            try std.testing.expectEqualStrings("group", client.subgraph_node_id);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &model, context });
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.setSubgraphAddress("group");
+    for (0..DaemonClient.outbound_capacity) |_| try std.testing.expect(try client.sendSketchPromotion(&model, context, .{ .turn = false }));
+    try std.testing.expectError(error.PromotionQueueFull, client.sendSketchPromotion(&model, context, .{ .turn = true }));
+    try std.testing.expectEqual(@as(usize, DaemonClient.outbound_capacity), client.outbound_count);
+}
+
+test "sketch promotion test client has a fixed synthetic endpoint and inactive transport" {
+    var client = try DaemonClient.initUnstartedForTest(std.testing.allocator);
+    defer client.deinit();
+    try std.testing.expectEqualStrings("\\\\.\\pipe\\graphcode-sketch-promotion-unit-test-not-connected", client.pipe_name);
+    try std.testing.expectEqualStrings("00000000-0000-4000-8000-000000000025", &client.client_id);
+    try std.testing.expect(client.worker == null);
+    try std.testing.expect(!client.want_connected);
+    try std.testing.expect(client.pipe == c.INVALID_HANDLE_VALUE);
+    try std.testing.expectEqual(Wire.ConnectionState.disconnected, client.state);
+    try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+    try std.testing.expectEqual(@as(usize, 0), client.inbound_count);
+}
 
 pub const EventCallback = *const fn (
     context: ?*anyopaque,
@@ -71,6 +191,20 @@ pub const DaemonClient = struct {
         makeClientID(&client.client_id);
         client.pipe_name = endpointName(allocator) catch
             try allocator.dupe(u8, "\\\\.\\pipe\\graphcode-daemon-unavailable");
+        return client;
+    }
+
+    pub fn initUnstartedForTest(allocator: std.mem.Allocator) !DaemonClient {
+        comptime {
+            if (!@import("builtin").is_test) @compileError("initUnstartedForTest is only available to tests");
+        }
+        var client = DaemonClient{
+            .allocator = allocator,
+            .frame_buffer = try FrameBuffer.init(allocator, .v2),
+            .client_id = "00000000-0000-4000-8000-000000000025".*,
+        };
+        errdefer client.frame_buffer.deinit();
+        client.pipe_name = try allocator.dupe(u8, "\\\\.\\pipe\\graphcode-sketch-promotion-unit-test-not-connected");
         return client;
     }
 
@@ -517,6 +651,26 @@ pub const DaemonClient = struct {
     ) void {
         const command = Wire.commandGraphUpdateNodeForm(self.allocator, project_path, node_id, update) catch return;
         self.sendCommand(command);
+    }
+
+    pub fn sendSketchPromotion(
+        self: *DaemonClient,
+        model: *const @import("GraphModel.zig").Model,
+        context: SketchPromotion.Context,
+        draft: ?SketchPromotion.Draft,
+    ) !bool {
+        const promotion = draft orelse return false;
+        try context.validateCurrent(model, self.subgraph_node_id);
+        if (!std.mem.eql(u8, model.selectedNodeID() orelse "", context.node_id))
+            return error.PromotionContextChanged;
+        const command = try Wire.commandGraphPromoteNode(self.allocator, context.project_path, context.node_id, promotion);
+        const addressed = if (context.composite_id.len != 0) blk: {
+            defer self.allocator.free(command);
+            break :blk try Wire.addressGraphCommandToSubGraph(self.allocator, command, context.composite_id);
+        } else command;
+        // This is queue insertion, not daemon acceptance or persistence.
+        if (!self.sendCommandInternal(addressed, null)) return error.PromotionQueueFull;
+        return true;
     }
 
     pub fn poll(self: *DaemonClient) void {

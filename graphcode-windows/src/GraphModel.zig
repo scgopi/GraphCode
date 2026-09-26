@@ -16,6 +16,7 @@ pub const Node = struct {
     metric_command: []u8 = &.{},
     metric_direction: []u8 = &.{},
     trigger_prompt: []u8 = &.{},
+    first_instruction: []u8 = &.{},
     check_description: []u8 = &.{},
     model_tier: []u8 = &.{},
     poll_interval_seconds: ?f64 = null,
@@ -1018,6 +1019,8 @@ fn isResolved(state: []const u8) bool {
 }
 
 fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
+    const first_instruction = try allocator.dupe(u8, node.first_instruction);
+    errdefer allocator.free(first_instruction);
     return .{
         .id = try allocator.dupe(u8, node.id),
         .title = try allocator.dupe(u8, node.title),
@@ -1032,6 +1035,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .metric_command = try allocator.dupe(u8, node.metric_command),
         .metric_direction = try allocator.dupe(u8, node.metric_direction),
         .trigger_prompt = try allocator.dupe(u8, node.trigger_prompt),
+        .first_instruction = first_instruction,
         .check_description = try allocator.dupe(u8, node.check_description),
         .model_tier = try allocator.dupe(u8, node.model_tier),
         .poll_interval_seconds = node.poll_interval_seconds,
@@ -1087,6 +1091,8 @@ fn decodeNodes(
         const scalar_object = try withoutJsonObjectField(allocator, object, "subGraph");
         defer allocator.free(scalar_object);
         const samples = jsonMetricSamples(scalar_object, "metricHistory");
+        const first_instruction = try duplicateJsonStringOr(allocator, scalar_object, "firstInstruction", "");
+        errdefer allocator.free(first_instruction);
         try nodes.append(.{
             .id = try duplicateJsonString(allocator, scalar_object, "id"),
             .title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled"),
@@ -1101,6 +1107,7 @@ fn decodeNodes(
             .metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", ""),
             .metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", ""),
             .trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", ""),
+            .first_instruction = first_instruction,
             .check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", ""),
             .model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", ""),
             .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
@@ -1433,11 +1440,54 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.metric_command);
     allocator.free(node.metric_direction);
     allocator.free(node.trigger_prompt);
+    allocator.free(node.first_instruction);
     allocator.free(node.check_description);
     allocator.free(node.model_tier);
     allocator.free(node.worktree_path);
     allocator.free(node.worktree_branch);
     allocator.free(node.subgraph_json);
+}
+
+test "sketch promotion first instruction survives decode clones and source replacement" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"note","title":"Sketch","loopType":"sketch","firstInstruction":"  \u96ea \"note\"  ","triggerPrompt":"not the note","checkDescription":"not the note"},{"id":"empty","title":"Empty","loopType":"sketch"}],"edges":[]}}
+    );
+    const summary = model.graphFor("A").?;
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", summary.nodes.items[0].first_instruction);
+    try std.testing.expectEqualStrings("", summary.nodes.items[1].first_instruction);
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", model.graph.?.nodes.items[0].first_instruction);
+    var copy = try cloneNode(allocator, summary.nodes.items[0]);
+    defer freeNode(allocator, copy);
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"note","title":"Sketch","loopType":"sketch","firstInstruction":"new"}],"edges":[]}}
+    );
+    try std.testing.expectEqualStrings("  \u{96ea} \"note\"  ", copy.first_instruction);
+    try std.testing.expectEqualStrings("new", model.graph.?.nodes.items[0].first_instruction);
+    copy.first_instruction[0] = 'x';
+    try std.testing.expectEqualStrings("new", model.graphFor("A").?.nodes.items[0].first_instruction);
+}
+
+test "sketch promotion first instruction staging cleans failure before legacy aggregate allocations" {
+    const allocator = std.testing.allocator;
+    const source = Node{ .id = @constCast("id"), .title = &.{}, .loop_type = &.{}, .state = &.{}, .activity = &.{}, .presence = &.{}, .first_instruction = @constCast("note") };
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, cloneNode(failing.allocator(), source));
+    }
+    for (0..3) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var nodes = std.array_list.Managed(Node).init(failing.allocator());
+        defer {
+            for (nodes.items) |node| freeNode(failing.allocator(), node);
+            nodes.deinit();
+        }
+        try std.testing.expectError(error.OutOfMemory, decodeNodes(failing.allocator(),
+            \\[{"id":"id","firstInstruction":"note"}]
+        , &nodes));
+    }
 }
 
 fn freeQuickChat(allocator: std.mem.Allocator, chat: QuickChat) void {

@@ -404,6 +404,10 @@ Invoke-Native "Update offer modal deferral executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\UpdateOfferPresentation.zig } finally { Pop-Location }
 }
+Invoke-Native "Sketch promotion executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\SketchPromotion.zig --test-filter 'sketch promotion' } finally { Pop-Location }
+}
 Invoke-Native "Context menu and gate fixture message executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

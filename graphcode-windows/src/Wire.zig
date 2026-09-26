@@ -666,6 +666,72 @@ pub fn commandGraphUpdateNode(
         "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"updateNode\":{{\"_0\":{s},\"update\":{s}}}}}}}}}", .{path, id, update_json});
 }
 
+pub fn commandGraphPromoteNode(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    node_id: []const u8,
+    promotion: @import("SketchPromotion.zig").Draft,
+) ![]u8 {
+    try @import("SketchPromotion.zig").validate(promotion);
+    const path = try quoteJson(allocator, project_path);
+    defer allocator.free(path);
+    const id = try quoteJson(allocator, node_id);
+    defer allocator.free(id);
+    const value = switch (promotion) {
+        .goal, .timed => |text| try quoteJson(allocator, text),
+        .turn => |pause| try allocator.dupe(u8, if (pause) "true" else "false"),
+    };
+    defer allocator.free(value);
+    const payload = switch (promotion) {
+        .goal => try std.fmt.allocPrint(allocator, "{{\"goal\":{{\"_0\":{{\"summary\":{s},\"pollIntervalSeconds\":60,\"metricDirection\":\"maximize\",\"skipsUnchangedWorkspace\":false}}}}}}", .{value}),
+        .turn => try std.fmt.allocPrint(allocator, "{{\"turn\":{{\"pausesBeforeWritesOnly\":{s}}}}}", .{value}),
+        .timed => try std.fmt.allocPrint(allocator, "{{\"timed\":{{\"triggerPrompt\":{s}}}}}", .{value}),
+    };
+    defer allocator.free(payload);
+    return std.fmt.allocPrint(allocator, "{{\"graphCommand\":{{\"projectPath\":{s},\"command\":{{\"promoteNode\":{{\"_0\":{s},\"promotion\":{s},\"promotedBy\":null}}}}}}}}", .{ path, id, payload });
+}
+
+test "sketch promotion serializes the existing Swift turn union without recreating a node" {
+    const command = try commandGraphPromoteNode(std.testing.allocator, "C:\\work\\graph", "11111111-1111-4111-8111-111111111111", .{ .turn = true });
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"promoteNode\":{\"_0\":\"11111111-1111-4111-8111-111111111111\",\"promotion\":{\"turn\":{\"pausesBeforeWritesOnly\":true}},\"promotedBy\":null}}}}",
+        command,
+    );
+}
+
+test "sketch promotion payload retains unicode and obeys existing v2 framing bounds" {
+    const allocator = std.testing.allocator;
+    const text = try allocator.alloc(u8, v2_max_payload);
+    defer allocator.free(text);
+    @memset(text, 'x');
+    const sample = try commandGraphPromoteNode(allocator, "B", "id", .{ .goal = "x" });
+    defer allocator.free(sample);
+    const sample_envelope = try v2Request(allocator, "00000000-0000-4000-8000-000000000025", sample);
+    defer allocator.free(sample_envelope);
+    const boundary = v2_max_payload - sample_envelope.len + 1;
+    for ([_]usize{ boundary, boundary + 1 }) |length| {
+        const command = try commandGraphPromoteNode(allocator, "B", "id", .{ .goal = text[0..length] });
+        defer allocator.free(command);
+        const envelope = try v2Request(allocator, "00000000-0000-4000-8000-000000000025", command);
+        defer allocator.free(envelope);
+        if (length == boundary) {
+            try std.testing.expectEqual(@as(usize, v2_max_payload), envelope.len);
+            _ = try frameLength(envelope, .v2);
+        } else {
+            try std.testing.expectError(error.PayloadTooLarge, frameLength(envelope, .v2));
+        }
+    }
+    const command = try commandGraphPromoteNode(allocator, "B\"\u{96ea}", "id", .{ .goal = "done\n\"quoted\"\u{1f680}" });
+    defer allocator.free(command);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, command, .{});
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("graphCommand").?.object.get("command").?.object.get("promoteNode").?;
+    try std.testing.expect(payload.object.get("promotedBy").? == .null);
+    const summary = payload.object.get("promotion").?.object.get("goal").?.object.get("_0").?.object.get("summary").?.string;
+    try std.testing.expectEqualStrings("done\n\"quoted\"\u{1f680}", summary);
+}
+
 pub fn commandGraphUpdateNodeForm(
     allocator: std.mem.Allocator,
     project_path: []const u8,

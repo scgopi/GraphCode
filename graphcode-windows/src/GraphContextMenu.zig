@@ -1,5 +1,6 @@
 const c = @import("Win32.zig").c;
 const Wire = @import("Wire.zig");
+const SketchPromotion = @import("SketchPromotion.zig");
 
 pub const NodeTarget = struct {
     project_path: []const u8,
@@ -9,6 +10,8 @@ pub const NodeTarget = struct {
     unwired: bool = false,
     follows_template: bool = false,
     resolved: bool = false,
+    sketch: bool = false,
+    promotion_context: ?*const SketchPromotion.Context = null,
 };
 
 pub const BackgroundTarget = struct {
@@ -43,6 +46,9 @@ pub const Target = union(enum) {
 pub const Action = enum {
     none,
     edit_node,
+    promote_goal,
+    promote_turn,
+    promote_timed,
     rename_node,
     stop_node,
     delete_node,
@@ -104,6 +110,9 @@ const ids = struct {
     const arm_composite = 5108;
     const save_node_template = 5114;
     const detach_template = 5115;
+    const promote_goal = 5116;
+    const promote_turn = 5117;
+    const promote_timed = 5118;
     const wire_node = 5109;
     const mark_entry = 5112;
     const edit_edge = 5110;
@@ -140,6 +149,30 @@ pub const MoveProjectMenuItem = struct {
 /// separate accessibility contract model.
 pub fn moveProjectMenuItem() MoveProjectMenuItem {
     return .{ .enabled = Wire.supportsProjectRelocation() };
+}
+
+pub const PromotionItem = struct { id: usize, text: []const u8, action: Action };
+const promotion_items = [_]PromotionItem{
+    .{ .id = ids.promote_goal, .text = "Goal - asks for a done check", .action = .promote_goal },
+    .{ .id = ids.promote_turn, .text = "Turn - asks where to pause", .action = .promote_turn },
+    .{ .id = ids.promote_timed, .text = "Timed - asks for a cadence", .action = .promote_timed },
+};
+
+pub fn promotionItems(node: NodeTarget) []const PromotionItem {
+    return if (node.sketch) &promotion_items else &.{};
+}
+
+pub fn promotionTarget(action: Action) ?SketchPromotion.Target {
+    return switch (action) {
+        .promote_goal => .goal,
+        .promote_turn => .turn,
+        .promote_timed => .timed,
+        else => null,
+    };
+}
+
+pub fn promotionEnabled(node: NodeTarget) bool {
+    return node.sketch and node.promotion_context != null;
 }
 
 pub fn show(
@@ -212,6 +245,19 @@ fn buildMenu(target: Target) c.HMENU {
                 separator(menu);
             }
             append(menu, ids.edit_node, "Edit Details...\tCtrl+E");
+            const items = promotionItems(node);
+            if (items.len != 0) {
+                const submenu = c.CreatePopupMenu() orelse {
+                    _ = c.DestroyMenu(menu);
+                    return null;
+                };
+                for (items) |item| appendEnabled(submenu, item.id, item.text, promotionEnabled(node));
+                if (c.AppendMenuW(menu, c.MF_POPUP | c.MF_STRING, @intFromPtr(submenu), std.unicode.utf8ToUtf16LeStringLiteral("Promote to...").ptr) == 0) {
+                    _ = c.DestroyMenu(submenu);
+                    _ = c.DestroyMenu(menu);
+                    return null;
+                }
+            }
             append(menu, ids.save_node_template, "Save as Template...");
             if (node.follows_template) append(menu, ids.detach_template, "Detach from Template");
             append(menu, ids.rename_node, "Rename...\tF2");
@@ -246,6 +292,9 @@ fn actionForCommand(command: c_int) Action {
         ids.delete_node => .delete_node,
         ids.open_terminal => .open_terminal,
         ids.edit_node => .edit_node,
+        ids.promote_goal => .promote_goal,
+        ids.promote_turn => .promote_turn,
+        ids.promote_timed => .promote_timed,
         ids.open_composite => .open_composite,
         ids.pilot_composite => .pilot_composite,
         ids.arm_composite => .arm_composite,
@@ -304,6 +353,25 @@ fn toWide(text: []const u8) ?[]u16 {
 }
 
 const std = @import("std");
+
+test "sketch promotion real menu plan exposes only three eligible target actions" {
+    var node = NodeTarget{ .project_path = "B", .id = "id" };
+    try std.testing.expectEqual(@as(usize, 0), promotionItems(node).len);
+    node.sketch = true;
+    try std.testing.expectEqual(@as(usize, 3), promotionItems(node).len);
+    try std.testing.expect(!promotionEnabled(node));
+    const context = SketchPromotion.Context{};
+    node.promotion_context = &context;
+    try std.testing.expect(promotionEnabled(node));
+    for (promotionItems(node), [_]SketchPromotion.Target{ .goal, .turn, .timed }) |item, target| {
+        try std.testing.expectEqual(item.action, actionForCommand(@intCast(item.id)));
+        try std.testing.expectEqual(target, promotionTarget(item.action).?);
+    }
+    for (std.enums.values(Action)) |action| {
+        if (action != .promote_goal and action != .promote_turn and action != .promote_timed)
+            try std.testing.expect(promotionTarget(action) == null);
+    }
+}
 
 test "background menu exposes supported folder actions and gates edge creation" {
     const menu = buildMenu(.{ .background = .{

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
+const SketchPromotion = @import("SketchPromotion.zig");
 const DraftAttachments = @import("DraftAttachments.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const Tokens = @import("DesignTokens.zig");
@@ -14,6 +15,8 @@ extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, m
 const DialogState = struct {
     allocator: std.mem.Allocator,
     kind: Kind,
+    promotion_target: SketchPromotion.Target = .goal,
+    promotion_read_failed: bool = false,
     parent: c.HWND,
     result: bool = false,
     closed: bool = false,
@@ -71,9 +74,9 @@ const tile_base_id = 9600;
 const attachment_attach_id = 8;
 const attachment_remove_id = 9;
 
-const Kind = enum { node, edge, update, settings, jump, template_picker, worktree_policy, worktree_sweep };
+const Kind = enum { node, edge, update, promotion, settings, jump, template_picker, worktree_policy, worktree_sweep };
 const InputKind = enum { edit, readonly, combo, checkbox, tiles };
-const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform };
+const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform, promotion_pause, promotion_interval };
 const Choice = struct { label: []const u8, value: []const u8, description: []const u8 = "", accent: u32 = Tokens.canvas_selection };
 pub const EdgeEndpoint = struct { id: []const u8, title: []const u8 };
 pub const WorktreeChoice = struct {
@@ -186,6 +189,17 @@ const transform_choices = [_]Choice{
     .{ .label = "Apply a text template", .value = "template" },
     .{ .label = "Run a script", .value = "script" },
 };
+const promotion_pause_choices = [_]Choice{
+    .{ .label = "After every turn", .value = "false" },
+    .{ .label = "Only before it writes files", .value = "true" },
+};
+const promotion_interval_choices = [_]Choice{
+    .{ .label = "15m", .value = "quarter_hour" },
+    .{ .label = "1h", .value = "hourly" },
+    .{ .label = "6h", .value = "six_hourly" },
+    .{ .label = "Daily", .value = "daily" },
+    .{ .label = "Custom...", .value = "custom" },
+};
 
 fn choices(group: ChoiceGroup) []const Choice {
     return switch (group) {
@@ -197,6 +211,8 @@ fn choices(group: ChoiceGroup) []const Choice {
         .edge_kind => &edge_kind_choices,
         .edge_condition => &edge_condition_choices,
         .transform => &transform_choices,
+        .promotion_pause => &promotion_pause_choices,
+        .promotion_interval => &promotion_interval_choices,
         .none => &.{},
     };
 }
@@ -519,6 +535,62 @@ pub fn update(
     try initializeNodeUpdate(state, initial);
     if (!(try show(state, "Update node", &.{}))) return null;
     return try buildNodeUpdate(state, initial);
+}
+
+pub fn promotion(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    target: SketchPromotion.Target,
+    context: SketchPromotion.Context,
+) !?SketchPromotion.Draft {
+    const state = try allocator.create(DialogState);
+    state.* = .{ .allocator = allocator, .kind = .promotion, .parent = parent, .promotion_target = target };
+    defer {
+        freeValues(state);
+        allocator.destroy(state);
+    }
+    try initializePromotion(state, context.first_instruction);
+    const title = try std.fmt.allocPrint(allocator, "Promote {s} to {s}", .{ context.title, switch (target) {
+        .goal => "Goal",
+        .turn => "Turn",
+        .timed => "Timed",
+    } });
+    defer allocator.free(title);
+    if (!(try show(state, title, &.{}))) return null;
+    return buildPromotion(state);
+}
+
+fn initializePromotion(state: *DialogState, first_instruction: []const u8) !void {
+    state.values[0] = try state.allocator.dupe(u8, switch (state.promotion_target) {
+        .goal => "",
+        .turn => "false",
+        .timed => "hourly",
+    });
+    state.values[1] = try state.allocator.dupe(u8, "");
+    state.values[2] = try state.allocator.dupe(u8, first_instruction);
+}
+
+fn promotionInput(state: *const DialogState) !SketchPromotion.Input {
+    if (state.promotion_read_failed) return error.PromotionFieldReadFailed;
+    var input = SketchPromotion.Input{ .target = state.promotion_target, .first_instruction = state.values[2] };
+    switch (state.promotion_target) {
+        .goal => input.goal = state.values[0],
+        .turn => {
+            if (!std.mem.eql(u8, state.values[0], "true") and !std.mem.eql(u8, state.values[0], "false"))
+                return error.InvalidPromotionChoice;
+            input.pauses_before_writes_only = std.mem.eql(u8, state.values[0], "true");
+        },
+        .timed => {
+            input.interval = std.meta.stringToEnum(SketchPromotion.Interval, state.values[0]) orelse return error.InvalidPromotionChoice;
+            input.custom_interval = state.values[1];
+        },
+    }
+    return input;
+}
+
+fn buildPromotion(state: *const DialogState) !?SketchPromotion.Draft {
+    if (!state.result) return null;
+    return try SketchPromotion.build(state.allocator, try promotionInput(state));
 }
 
 fn initializeNodeUpdate(state: *DialogState, initial: Forms.NodeUpdate) !void {
@@ -949,6 +1021,7 @@ fn configureFields(state: *DialogState) void {
         .node => 15,
         .edge => 10,
         .update => 9,
+        .promotion => if (state.promotion_target == .timed) 2 else 1,
         .settings => 2,
         .jump, .template_picker => 1,
         .worktree_policy => 0,
@@ -984,6 +1057,13 @@ fn configureFields(state: *DialogState) void {
             state.input_kinds[8] = .combo;
             state.choice_groups[8] = .model_tier;
         },
+        .promotion => switch (state.promotion_target) {
+            .goal => {},
+            .turn, .timed => {
+                state.input_kinds[0] = .combo;
+                state.choice_groups[0] = if (state.promotion_target == .turn) .promotion_pause else .promotion_interval;
+            },
+        },
         .template_picker => {
             state.input_kinds[0] = .combo;
         },
@@ -1009,6 +1089,9 @@ fn updateConditionalVisibility(state: *DialogState) void {
             state.visible[5] = !std.mem.eql(u8, state.values[4], "none");
             state.visible[9] = std.mem.eql(u8, state.values[2], "spawn");
         },
+        .promotion => if (state.promotion_target == .timed) {
+            state.visible[1] = std.mem.eql(u8, state.values[0], "custom");
+        },
         else => {},
     }
 }
@@ -1018,6 +1101,7 @@ fn formIntro(kind: Kind) []const u8 {
         .node => "Choose how this loop works. Only the settings that affect that loop type are shown; existing internal graph metadata is preserved.",
         .edge => "Choose or confirm two loops, then describe how work moves between them.",
         .update => "Change only the fields you intend to update. Blank optional fields keep their documented clear-or-unchanged behavior.",
+        .promotion => "Keep this loop's session and history. Add only the decision its new type needs.",
         .worktree_sweep => "Safe rows start selected. Blocked rows remain visible for review. Only committed, pushed, landed, unbound worktrees are eligible; branches remain recoverable from reflog.",
         else => "",
     };
@@ -1046,6 +1130,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
         .node => node_labels[index],
         .edge => edge_labels[index],
         .update => update_labels[index],
+        .promotion => "",
         .settings => settings_labels[index],
         .jump => "Loop title or ID",
         .template_picker => "Saved templates — type to search, then use Up/Down and Enter",
@@ -1054,12 +1139,18 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
 }
 
 fn stateFieldLabel(state: *const DialogState, index: usize) []const u8 {
+    if (state.kind == .promotion) return switch (state.promotion_target) {
+        .goal => "What does done look like?",
+        .turn => "When should it pause for you?",
+        .timed => if (index == 0) "How often?" else "Custom interval (30m, 2h, 3d...)",
+    };
     if (state.kind == .worktree_sweep and state.display_labels[index].len != 0)
         return state.display_labels[index];
     return fieldLabel(state.kind, index);
 }
 
 fn fieldHelp(kind: Kind, index: usize) []const u8 {
+    if (kind == .promotion and index == 1) return "Blank uses 1h. The daemon and agent validate the cadence.";
     if (kind == .node) return switch (index) {
         2 => "Shown at each pause as the bar the loop is aiming for.",
         3 => "This prompt is run whenever the time-based trigger fires.",
@@ -1128,7 +1219,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
             var client: c.RECT = undefined;
             _ = c.GetClientRect(safe_hwnd, &client);
-            createButton(safe_hwnd, value, if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 0, 0);
+            createButton(safe_hwnd, value, if (value.kind == .promotion) "Promote" else if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 0, 0);
             if (value.kind == .node and value.templates_available)
                 createButton(safe_hwnd, value, "Templates", templates_id, 0, 0);
             if (value.kind == .worktree_sweep) createButton(safe_hwnd, value, "Show in Explorer", reveal_id, 0, 0);
@@ -1221,6 +1312,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 persistPolicy(value);
             }
             if (command == ok_id) {
+                if (value.kind == .promotion) value.promotion_read_failed = false;
                 readValues(value);
                 readPolicy(value);
                 if (value.kind == .worktree_sweep and hasDestructiveSelection(value) and !value.confirmation_armed) {
@@ -1758,10 +1850,20 @@ fn rowHeight(state: *const DialogState, index: usize) i32 {
 }
 
 fn showsRecap(kind: Kind) bool {
-    return kind == .node or kind == .edge or kind == .update;
+    return kind == .node or kind == .edge or kind == .update or kind == .promotion;
 }
 
 fn recapText(state: *const DialogState) []const u8 {
+    if (state.kind == .promotion) {
+        const input = promotionInput(state) catch return state.allocator.dupe(u8, "Unable to read promotion fields.") catch &.{};
+        var draft = SketchPromotion.build(state.allocator, input) catch |err| return state.allocator.dupe(u8, promotionErrorReason(err)) catch &.{};
+        defer draft.deinit(state.allocator);
+        return state.allocator.dupe(u8, switch (draft) {
+            .goal => |summary| summary,
+            .turn => |pause| if (pause) "Pause only before writing files." else "Pause after every turn.",
+            .timed => |prompt| prompt,
+        }) catch &.{};
+    }
     const title = switch (state.kind) {
         .node => Forms.resolvedTitle(state.values[0]),
         .edge => state.values[2],
@@ -2026,6 +2128,13 @@ fn readValues(state: *DialogState) void {
 }
 
 fn readValue(state: *DialogState, index: usize) void {
+    if (state.kind == .promotion) {
+        readPromotionValue(state, index) catch {
+            state.promotion_read_failed = true;
+            setStaticText(state, state.validation, "Unable to read promotion fields. Nothing has been submitted.");
+        };
+        return;
+    }
     if (state.edits[index] == null) return;
     switch (state.input_kinds[index]) {
         .tiles => {},
@@ -2059,6 +2168,32 @@ fn readValue(state: *DialogState, index: usize) void {
             state.values[index] = value;
         },
     }
+}
+
+fn readPromotionValue(state: *DialogState, index: usize) !void {
+    const control = state.edits[index] orelse return error.MissingPromotionControl;
+    const value = switch (state.input_kinds[index]) {
+        .combo => blk: {
+            const selected = c.SendMessageW(control, c.CB_GETCURSEL, 0, 0);
+            const options = choices(state.choice_groups[index]);
+            if (selected < 0 or selected >= options.len) return error.InvalidPromotionChoice;
+            break :blk try state.allocator.dupe(u8, options[@intCast(selected)].value);
+        },
+        .edit => blk: {
+            c.SetLastError(0);
+            const length = c.GetWindowTextLengthW(control);
+            if (length == 0 and c.GetLastError() != 0) return error.PromotionFieldReadFailed;
+            const buffer = try state.allocator.alloc(u16, @as(usize, @intCast(length)) + 1);
+            defer state.allocator.free(buffer);
+            c.SetLastError(0);
+            const copied = c.GetWindowTextW(control, buffer.ptr, @intCast(buffer.len));
+            if (copied != length or (copied == 0 and c.GetLastError() != 0)) return error.PromotionFieldReadFailed;
+            break :blk try std.unicode.utf16LeToUtf8Alloc(state.allocator, buffer[0..@intCast(copied)]);
+        },
+        else => return error.InvalidPromotionChoice,
+    };
+    state.allocator.free(state.values[index]);
+    state.values[index] = value;
 }
 
 fn readPolicy(state: *DialogState) void {
@@ -2100,6 +2235,11 @@ fn hasDestructiveSelection(state: *const DialogState) bool {
 
 fn validationReason(state: *DialogState) ?[]const u8 {
     switch (state.kind) {
+        .promotion => {
+            const input = promotionInput(state) catch |err| return promotionErrorReason(err);
+            var draft = SketchPromotion.build(state.allocator, input) catch |err| return promotionErrorReason(err);
+            draft.deinit(state.allocator);
+        },
         .node => {
             const goal_based = std.mem.eql(u8, state.values[1], "goalBased");
             const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch
@@ -2169,6 +2309,14 @@ fn validationReason(state: *DialogState) ?[]const u8 {
     }
 
     return null;
+}
+
+fn promotionErrorReason(err: anyerror) []const u8 {
+    return switch (err) {
+        error.MissingGoal => "Say what done looks like to continue.",
+        error.OutOfMemory => "Unable to allocate promotion fields. Nothing has been submitted.",
+        else => "Unable to read promotion fields. Review the choices before submitting.",
+    };
 }
 
 fn hasUpdateChanges(state: *const DialogState) bool {
@@ -2631,6 +2779,82 @@ test "node update cancellation and close return no result" {
         try std.testing.expect(state.closed);
         try std.testing.expectEqualStrings("Goal", state.initial_values[0]);
     }
+}
+
+test "sketch promotion native adapter binds one decision and owns accepted fields" {
+    const allocator = std.testing.allocator;
+    for ([_]SketchPromotion.Target{ .goal, .turn, .timed }) |target| {
+        var state = DialogState{ .allocator = allocator, .kind = .promotion, .promotion_target = target, .parent = null };
+        defer freeValues(&state);
+        try initializePromotion(&state, " \u{96ea} \"note\" ");
+        configureFields(&state);
+        try std.testing.expectEqual(@as(usize, if (target == .timed) 2 else 1), state.field_count);
+        try std.testing.expectEqualStrings(" \u{96ea} \"note\" ", state.values[2]);
+        if (target == .goal) {
+            try std.testing.expect(validationReason(&state) != null);
+            allocator.free(state.values[0]);
+            state.values[0] = try allocator.dupe(u8, " \u{2003}done \"well\"\n");
+        }
+        try std.testing.expect(validationReason(&state) == null);
+        applyModalCommand(&state, .submit);
+        var result = (try buildPromotion(&state)).?;
+        defer result.deinit(allocator);
+        freeValues(&state);
+        state.values = .{&.{}} ** 256;
+        switch (result) {
+            .goal => |text| try std.testing.expectEqualStrings("done \"well\"", text),
+            .turn => |pause| try std.testing.expect(!pause),
+            .timed => |text| try std.testing.expectEqualStrings("/loop 1h \u{96ea} \"note\"", text),
+        }
+    }
+}
+
+test "sketch promotion native cancellation invalid choices and failed reads never submit" {
+    const allocator = std.testing.allocator;
+    for ([_]ModalCommand{ .cancel, .close }) |command| {
+        var state = DialogState{ .allocator = allocator, .kind = .promotion, .parent = null };
+        defer freeValues(&state);
+        try initializePromotion(&state, "note");
+        applyModalCommand(&state, command);
+        try std.testing.expect((try buildPromotion(&state)) == null);
+    }
+    var state = DialogState{ .allocator = allocator, .kind = .promotion, .promotion_target = .timed, .parent = null };
+    defer freeValues(&state);
+    try initializePromotion(&state, "note");
+    allocator.free(state.values[0]);
+    state.values[0] = try allocator.dupe(u8, "invalid");
+    applyModalCommand(&state, .submit);
+    try std.testing.expectError(error.InvalidPromotionChoice, buildPromotion(&state));
+    allocator.free(state.values[0]);
+    state.values[0] = try allocator.dupe(u8, "custom");
+    configureFields(&state);
+    try std.testing.expect(state.visible[1]);
+    state.promotion_read_failed = true;
+    try std.testing.expectError(error.PromotionFieldReadFailed, buildPromotion(&state));
+    try std.testing.expect(validationReason(&state) != null);
+}
+
+test "sketch promotion native builder frees all allocation failures and preserves long input" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            for ([_]SketchPromotion.Target{ .goal, .turn, .timed }) |target| {
+                var state = DialogState{ .allocator = allocator, .kind = .promotion, .promotion_target = target, .parent = null };
+                defer freeValues(&state);
+                try initializePromotion(&state, "note");
+                if (target == .goal) {
+                    const long = try allocator.alloc(u8, 8192);
+                    @memset(long, 'x');
+                    allocator.free(state.values[0]);
+                    state.values[0] = long;
+                }
+                applyModalCommand(&state, .submit);
+                var result = (try buildPromotion(&state)).?;
+                defer result.deinit(allocator);
+                if (target == .goal) try std.testing.expectEqual(@as(usize, 8192), result.goal.len);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "node update initialization and result release every partial allocation" {
