@@ -1762,7 +1762,7 @@ try {
     },
     [pscustomobject]@{
       Id = 3
-      Title = "Worktrees - UIA project (2 total, 1 safe, 1 look, 0 in use, 0 B)"
+      Title = "Worktrees - UIA project (2 total, 1 safe, 1 look, 0 in use, size not measured)"
       Required = @("SAFE TO REMOVE", "LOOK BEFORE REMOVING", "Remove Selected")
     }
   )) {
