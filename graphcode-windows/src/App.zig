@@ -40,6 +40,8 @@ const Accessibility = @import("Accessibility.zig");
 const Navigation = @import("Navigation.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
 const WorkspaceLifecycle = @import("WorkspaceLifecycle.zig");
+const WorkspaceManager = @import("WorkspaceManager.zig");
+const WorkspaceManagerForm = @import("WorkspaceManagerForm.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
@@ -203,6 +205,12 @@ fn requireIdentifiedClosedWorkspace(comptime Api: type, key: [:0]const u16) !voi
     const windows = try Api.windows(key);
     if (windows.unidentified) return error.UnidentifiedWorkspaceWindow;
     if (windows.target != null) return error.WorkspaceInUse;
+}
+
+fn workspaceManagerWindowState(comptime Api: type, key: [:0]const u16) WorkspaceManager.WindowState {
+    const windows = Api.windows(key) catch return .unavailable;
+    if (windows.unidentified) return .unidentified;
+    return if (windows.target != null) .open else .closed;
 }
 
 fn mutateWorkspaceWith(
@@ -513,6 +521,7 @@ pub const App = struct {
     quick_chats_requested: bool = false,
     selected_quick_chat: ?usize = null,
     workspace_reservation: WorkspaceReservation = .{},
+    workspace_summary_work: WorkspaceManager.SummaryWork = .{},
     workspace_list: ?WorkspaceLifecycle.List = null,
     workspace_path: []u8 = &.{},
     workspace_identity: []u8 = &.{},
@@ -634,6 +643,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.workspace_summary_work.drain();
         if (self.workspace) |workspace| {
             workspace.deinit();
             self.allocator.destroy(workspace);
@@ -5304,6 +5314,11 @@ pub const App = struct {
     }
 
     fn showWorkspaceText(self: *App, dialog_title: []const u8, labels: []const []const u8, initial: []const []const u8) ?NativeDialogs.Result {
+        var lease = NativeForms.ModalLease.acquire() catch {
+            self.setStatus("Close the current dialog before managing workspaces");
+            return null;
+        };
+        defer lease.deinit();
         if (!self.ensureWorkspaceIdentity()) return null;
         return NativeDialogs.textWithDescription(
             self.window.hwnd,
@@ -5387,12 +5402,16 @@ pub const App = struct {
             self.setStatus("Workspace was not found");
             return;
         };
+        self.renameWorkspaceTo(workspace, result.values[1]);
+    }
+
+    fn renameWorkspaceTo(self: *App, workspace: WorkspaceLifecycle.Workspace, new_name: []const u8) void {
         const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
             self.setStatus("User profile could not be resolved");
             return;
         };
         defer self.allocator.free(home);
-        const name = WorkspaceLifecycle.validateName(self.allocator, result.values[1], home) catch {
+        const name = WorkspaceLifecycle.validateName(self.allocator, new_name, home) catch {
             self.setStatus("Workspace name is invalid or already exists");
             return;
         };
@@ -5408,6 +5427,124 @@ pub const App = struct {
         };
         if (!self.refreshWorkspaceList()) return;
         self.setStatus("Workspace renamed");
+    }
+
+    fn manageWorkspaces(self: *App) void {
+        if (NativeForms.isModalActive()) {
+            self.setStatus("Close the current dialog before managing workspaces");
+            return;
+        }
+        if (!self.ensureWorkspaceIdentity()) return;
+        const home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch {
+            self.setStatus("User profile could not be resolved");
+            return;
+        };
+        defer self.allocator.free(home);
+        var known = WorkspaceLifecycle.managerListFromHome(self.allocator, home, self.workspace_path) catch {
+            self.setStatus("Workspace manager list could not be loaded");
+            return;
+        };
+        defer known.deinit(self.allocator);
+        const windows = self.allocator.alloc(WorkspaceManager.WindowState, known.items.len) catch {
+            self.setStatus("Workspace manager could not allocate window states");
+            return;
+        };
+        defer self.allocator.free(windows);
+        for (known.items, windows) |workspace, *state| {
+            const key = workspaceInstanceKey(self.allocator, workspace.path) catch {
+                state.* = .unavailable;
+                continue;
+            };
+            defer self.allocator.free(key);
+            state.* = workspaceManagerWindowState(WorkspaceProcess, key);
+        }
+        var model = WorkspaceManager.Model.init(self.allocator, known.items, self.workspace_identity, windows) catch {
+            self.setStatus("Workspace manager could not capture the workspace list");
+            return;
+        };
+        defer model.deinit();
+        self.workspace_summary_work.start(&model) catch |err| {
+            for (model.rows) |*row| if (!row.is_current) {
+                row.summary = .{ .failed = if (err == error.OutOfMemory) .memory else .worker };
+            };
+        };
+        var action = (WorkspaceManagerForm.show(self.window.hwnd, &model, &self.workspace_summary_work) catch {
+            self.setStatus("Workspace manager could not be completed safely");
+            return;
+        }) orelse return;
+        defer action.deinit(self.allocator);
+        if (!self.validateManagerAction(action)) return;
+        switch (action.kind) {
+            .new => self.createWorkspace(),
+            .open => {
+                const target = action.target.?;
+                if (std.mem.eql(u8, target.identity, self.workspace_identity)) {
+                    self.launchWorkspace(target.path);
+                    return;
+                }
+                // A closed target may still be reserved by a starting instance.
+                const key = workspaceInstanceKey(self.allocator, target.path) catch {
+                    self.setStatus("Workspace identity could not be resolved");
+                    return;
+                };
+                defer self.allocator.free(key);
+                const state = workspaceManagerWindowState(WorkspaceProcess, key);
+                if (state == .unidentified or state == .unavailable) {
+                    self.setStatus("Workspace window ownership could not be verified; close older windows before opening it");
+                    return;
+                }
+                if (state == .closed) {
+                    var reservation = WorkspaceReservation.acquire(self.allocator, target.path) catch |err| {
+                        self.setStatus(workspaceMutationFailure(err));
+                        return;
+                    };
+                    reservation.deinit();
+                }
+                self.launchWorkspace(target.path);
+            },
+            .rename => {
+                const target = action.target.?;
+                const dialog_title = std.fmt.allocPrint(self.allocator, "Rename Workspace - {s}", .{target.name}) catch {
+                    self.setStatus("Workspace name could not be displayed");
+                    return;
+                };
+                defer self.allocator.free(dialog_title);
+                var result = self.showWorkspaceText(dialog_title, &.{"New name"}, &.{target.name}) orelse return;
+                defer result.deinit(self.allocator);
+                if (!self.validateManagerAction(action)) return;
+                self.renameWorkspaceTo(target, result.values[0]);
+            },
+        }
+    }
+
+    fn validateManagerAction(self: *App, action: WorkspaceManager.Action) bool {
+        if (NativeForms.isModalActive() or !self.workspace_summary_work.reap()) {
+            self.setStatus("Workspace action is waiting for the manager to finish");
+            return false;
+        }
+        if (!self.ensureWorkspaceIdentity()) return false;
+        const default_path = WorkspaceLifecycle.defaultPath(self.allocator) catch {
+            self.setStatus("Default workspace identity could not be resolved");
+            return false;
+        };
+        defer self.allocator.free(default_path);
+        const default_identity = WorkspaceLifecycle.pathIdentity(self.allocator, default_path) catch {
+            self.setStatus("Default workspace identity could not be verified");
+            return false;
+        };
+        defer self.allocator.free(default_identity);
+        WorkspaceManager.validateTarget(self.allocator, action, self.workspace_identity, default_identity) catch |err| {
+            self.setStatus(workspaceMutationFailure(err));
+            return false;
+        };
+        if (action.target) |target| {
+            var directory = std.fs.openDirAbsolute(target.path, .{}) catch {
+                self.setStatus("The captured workspace directory is no longer available");
+                return false;
+            };
+            directory.close();
+        }
+        return true;
     }
 
     fn deleteWorkspace(self: *App) void {
@@ -5709,7 +5846,7 @@ fn onWindowMessage(
                     .check_updates => app.checkForUpdates(),
                     .about => app.showAbout(),
                     .workspace_new => app.createWorkspace(),
-                    .workspace_manage => app.setStatus("Use Rename Workspace or Delete Workspace from the Workspace menu"),
+                    .workspace_manage => app.manageWorkspaces(),
                     .workspace_rename => app.renameWorkspace(),
                     .workspace_delete => app.deleteWorkspace(),
                     .workspace_next => app.cycleWorkspace(1),
@@ -7065,6 +7202,28 @@ test "connection settings invalidate lifecycle attribution until the reserved su
     try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, published_key });
     try app.revalidateWorkspaceIdentity();
     try std.testing.expectError(error.WorkspaceInUse, WorkspaceReservation.acquire(allocator, alpha));
+}
+
+test "workspace manager window states use only injected identity lookup and fail closed" {
+    const Probe = struct {
+        var result: MainWindow.WorkspaceWindows = .{};
+        var fail = false;
+        fn windows(key: [:0]const u16) !MainWindow.WorkspaceWindows {
+            try std.testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("owned-test-key"), key);
+            if (fail) return error.WorkspaceWindowOwnerUnknown;
+            return result;
+        }
+    };
+    const key = std.unicode.utf8ToUtf16LeStringLiteral("owned-test-key");
+    Probe.fail = false;
+    Probe.result = .{};
+    try std.testing.expectEqual(WorkspaceManager.WindowState.closed, workspaceManagerWindowState(Probe, key));
+    Probe.result.target = Win32.opaquePointerFromInt(c.HWND, 1);
+    try std.testing.expectEqual(WorkspaceManager.WindowState.open, workspaceManagerWindowState(Probe, key));
+    Probe.result.unidentified = true;
+    try std.testing.expectEqual(WorkspaceManager.WindowState.unidentified, workspaceManagerWindowState(Probe, key));
+    Probe.fail = true;
+    try std.testing.expectEqual(WorkspaceManager.WindowState.unavailable, workspaceManagerWindowState(Probe, key));
 }
 
 test "workspace open routes current restore and cold launch exactly once" {

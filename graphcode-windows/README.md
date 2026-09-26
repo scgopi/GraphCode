@@ -110,9 +110,62 @@ existing destination and preserves the directory's saved files.
 Executable coverage includes production helpers, allocation failures, disposable
 filesystem mutations, exact launch/restore routing, and never-shown native
 controls/windows/menus. This is not a live multi-instance, keyboard, UIA, or
-real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
-provides a structured Manage view, content summaries, creation-order/running-only
-cycling, and recoverable deletion with daemon/session teardown.
+real-daemon walkthrough. The lifecycle parity row remains Partial, including
+running-only cycling and recoverable deletion with daemon/session teardown.
+
+Manage Workspaces now opens a native list with owned workspace names, full paths,
+saved-summary states, and current/default/open-elsewhere or uncertain-window
+refusals. Its discovery order follows macOS: Default first, named directories by
+creation time (ordinal name ties, unreadable dates last), then the current
+workspace outside the home directory if its lexical identity is not already
+listed. This manager-only order does not change the menu or next/previous
+cycling policy above. Manage remains available with zero or one old-menu rows,
+so New and the current-outside-home row stay reachable. Open and targeted Rename
+capture an owned identity, not a row index; New uses the existing guarded
+creation flow. The manager releases
+its modal lease and destroys its controls before any follow-up name dialog.
+Identity, default/current, directory, window ownership, and applicable canonical
+and legacy reservation checks run again before acting. Done is the default;
+Done/Escape cancels any pending handoff without changing the current workspace.
+
+The manager's Delete button is disabled with an explicit explanation: recoverable
+deletion and owned daemon/session teardown are still separate work. This does not
+change the existing Workspace menu's permanent-delete behavior.
+
+Saved summaries are a conservative read-only projection of the existing
+`projects\*.json` graph headers and top-level node arrays, not a new graph decoder.
+Like macOS `Workspace.contents`, they count top-level nodes, not descendants.
+They are labelled **saved top-level loops**, not live totals; this window's live
+total is unavailable because the shell has no reliable workspace-wide inventory.
+Documented `*.mailroom.json` arrays are sidecars; a graph object with that suffix
+is still counted. A missing projects directory is unavailable, while a readable
+empty projects directory has a genuine saved zero count. Invalid consumed fields,
+unreadable files, duplicate exact project paths, or exceeded limits make the whole
+summary unavailable rather than presenting partial counts. Unconsumed graph
+fields are not validated, and a saved summary is not evidence of graph validity.
+
+One App-owned, joinable worker reads only fixed local-drive paths, refusing
+network/device paths and reparse points at each opened component and entry.
+It does not start a daemon, connect to a backend, inspect terminal layouts, or
+activate windows. Limits are 256 directory entries, 1 MiB/file, 8 MiB/workspace,
+32 MiB/dialog, 8 MiB JSON parser scratch, and nesting depth 128; exceeding depth
+is an availability limit, not a claim that a graph is corrupt. Results are cached
+for the dialog. Polling observes completion before copying the final snapshot,
+then joins the worker before stopping updates; a completion racing an earlier
+copy is collected on the next poll, not discarded. Done/Escape cancels without
+waiting for the reader; App retains the job, and reopening cannot start another
+until it has been joined. A requested
+Open/New/Rename waits in the responsive modal until cancellation finishes and
+the reader is joined, then revalidates the captured target. Shutdown cancels and
+joins before App/allocator teardown. A stalled local disk can delay shutdown:
+synchronous reads have no finite cancellation-time guarantee.
+
+Manager coverage is pure owned-data/fixture testing, controlled memory-only
+joined-worker tests, and a Windows ReleaseSafe build, without launching the app
+or exercising native controls, actual user windows, UIA, or real workspaces.
+The parity row remains **Partial**: shown-dialog accessibility/keyboard/layout
+and multi-instance behavior, complete live totals, running-only cycling, and
+recoverable deletion still need their own evidence or implementation.
 
 ## Build
 

@@ -518,7 +518,7 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .product_settings, true);
     setEnabled(hwnd, .reconnect, true);
     setEnabled(hwnd, .check_updates, !state.update_checking);
-    setEnabled(hwnd, .workspace_manage, state.workspaces.len > 1);
+    setEnabled(hwnd, .workspace_manage, true);
     setEnabled(hwnd, .workspace_next, state.workspaces.len > 1);
     setEnabled(hwnd, .workspace_previous, state.workspaces.len > 1);
     setChecked(hwnd, .toggle_sidebar, state.sidebar_visible);
@@ -536,7 +536,7 @@ fn updateWorkspaceMenu(hwnd: c.HWND, workspaces: []const WorkspaceItem) void {
         _ = c.DeleteMenu(menu, 0, c.MF_BYPOSITION);
     }
     append(menu, "New Workspace...", @intFromEnum(Command.workspace_new));
-    appendEnabled(menu, "Manage Workspaces...", @intFromEnum(Command.workspace_manage), workspaces.len > 1);
+    appendEnabled(menu, "Manage Workspaces...", @intFromEnum(Command.workspace_manage), true);
     appendEnabled(menu, "Rename Workspace...", @intFromEnum(Command.workspace_rename), workspaces.len > 1);
     appendEnabled(menu, "Delete Workspace...", @intFromEnum(Command.workspace_delete), workspaces.len > 1);
     separator(menu);

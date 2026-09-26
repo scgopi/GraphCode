@@ -137,6 +137,20 @@ fn releaseModal() void {
     active_state = false;
 }
 
+pub const ModalLease = struct {
+    held: bool = true,
+
+    pub fn acquire() !ModalLease {
+        try acquireModal();
+        return .{};
+    }
+
+    pub fn deinit(self: *ModalLease) void {
+        if (self.held) releaseModal();
+        self.held = false;
+    }
+};
+
 /// Loop-type teaching-tile accents, converted from the exact RGB values macOS
 /// uses for the same four types (LoopTypeAppearance.swift's `accent`), so the
 /// Windows tiles read as the same visual language rather than a new palette.

@@ -9,6 +9,7 @@ pub const Workspace = struct {
     path: []const u8,
     identity: []const u8,
     is_default: bool,
+    created_at: ?i64 = null,
 
     pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -17,6 +18,101 @@ pub const Workspace = struct {
         self.* = undefined;
     }
 };
+
+pub fn copyWorkspace(allocator: std.mem.Allocator, workspace: Workspace) !Workspace {
+    const name = try allocator.dupe(u8, workspace.name);
+    errdefer allocator.free(name);
+    const path = try allocator.dupe(u8, workspace.path);
+    errdefer allocator.free(path);
+    const identity = try pathIdentity(allocator, path);
+    errdefer allocator.free(identity);
+    if (!std.mem.eql(u8, identity, workspace.identity)) return error.WorkspaceIdentityChanged;
+    return .{
+        .name = name,
+        .path = path,
+        .identity = identity,
+        .is_default = workspace.is_default,
+        .created_at = workspace.created_at,
+    };
+}
+
+/// Manager order is independent of the existing menu/cycling order.
+pub fn managerListFromHome(allocator: std.mem.Allocator, home: []const u8, current: []const u8) !List {
+    var found = try listFromHome(allocator, home);
+    defer found.deinit(allocator);
+    for (found.items) |*workspace| {
+        workspace.created_at = directoryCreationTime(workspace.path) catch null;
+    }
+    return managerList(allocator, found.items, home, current);
+}
+
+pub fn managerList(allocator: std.mem.Allocator, known: []const Workspace, home: []const u8, current: []const u8) !List {
+    var values = std.array_list.Managed(Workspace).init(allocator);
+    errdefer {
+        for (values.items) |*workspace| workspace.deinit(allocator);
+        values.deinit();
+    }
+    for (known) |workspace| {
+        var owned = try copyWorkspace(allocator, workspace);
+        errdefer owned.deinit(allocator);
+        for (values.items) |existing| {
+            if (std.mem.eql(u8, existing.identity, owned.identity)) break;
+        } else {
+            try values.append(owned);
+            continue;
+        }
+        owned.deinit(allocator);
+    }
+    std.sort.block(Workspace, values.items, {}, managerLessThan);
+    const identity = try pathIdentity(allocator, current);
+    defer allocator.free(identity);
+    for (values.items) |workspace| {
+        if (std.mem.eql(u8, workspace.identity, identity)) break;
+    } else {
+        const default_path = try std.fs.path.join(allocator, &.{ home, default_directory_name });
+        defer allocator.free(default_path);
+        const default_identity = try pathIdentity(allocator, default_path);
+        defer allocator.free(default_identity);
+        const is_default = std.mem.eql(u8, identity, default_identity);
+        const resolved = try std.fs.path.resolveWindows(allocator, &.{current});
+        defer allocator.free(resolved);
+        const base = std.fs.path.basenameWindows(resolved);
+        const name = if (is_default) "Default" else if (std.mem.startsWith(u8, base, directory_prefix))
+            base[directory_prefix.len..]
+        else
+            base;
+        var owned = try copyWorkspace(allocator, .{
+            .name = name,
+            .path = current,
+            .identity = identity,
+            .is_default = is_default,
+        });
+        errdefer owned.deinit(allocator);
+        try values.append(owned);
+    }
+    return .{ .items = try values.toOwnedSlice() };
+}
+
+fn managerLessThan(_: void, left: Workspace, right: Workspace) bool {
+    if (left.is_default != right.is_default) return left.is_default;
+    if (left.created_at != right.created_at) {
+        if (left.created_at == null) return false;
+        if (right.created_at == null) return true;
+        return left.created_at.? < right.created_at.?;
+    }
+    return std.mem.lessThan(u8, left.name, right.name);
+}
+
+fn directoryCreationTime(path: []const u8) !i64 {
+    var directory = try std.fs.openDirAbsolute(path, .{ .no_follow = true });
+    defer directory.close();
+    const w = std.os.windows;
+    var info: w.FILE_BASIC_INFORMATION = undefined;
+    var io: w.IO_STATUS_BLOCK = undefined;
+    const status = w.ntdll.NtQueryInformationFile(directory.fd, &io, &info, @sizeOf(@TypeOf(info)), .FileBasicInformation);
+    if (status != .SUCCESS) return error.CreationTimeUnavailable;
+    return info.CreationTime;
+}
 
 pub const List = struct {
     items: []Workspace,
@@ -208,6 +304,55 @@ pub fn legacyInstanceName(allocator: std.mem.Allocator, user: []const u8, path: 
 
 fn lessThan(_: void, left: Workspace, right: Workspace) bool {
     return std.ascii.lessThanIgnoreCase(left.name, right.name);
+}
+
+test "workspace manager ordering uses Default creation time ordinal ties unknown last then outside current" {
+    const known = [_]Workspace{
+        .{ .name = "late", .path = "C:\\fixture\\.graphcode-late", .identity = "c:/fixture/.graphcode-late", .is_default = false },
+        .{ .name = "beta", .path = "C:\\fixture\\.graphcode-beta", .identity = "c:/fixture/.graphcode-beta", .is_default = false, .created_at = 2 },
+        .{ .name = "alpha", .path = "C:\\fixture\\.graphcode-alpha", .identity = "c:/fixture/.graphcode-alpha", .is_default = false, .created_at = 2 },
+        .{ .name = "old", .path = "C:\\fixture\\.graphcode-old", .identity = "c:/fixture/.graphcode-old", .is_default = false, .created_at = 1 },
+        .{ .name = "Default", .path = "C:\\fixture\\.graphcode", .identity = "c:/fixture/.graphcode", .is_default = true },
+        .{ .name = "alias", .path = "c:/FIXTURE/.graphcode-alpha/", .identity = "c:/fixture/.graphcode-alpha", .is_default = false },
+    };
+    var found = try managerList(std.testing.allocator, &known, "C:\\fixture", "C:\\Outside\\Workspace");
+    defer found.deinit(std.testing.allocator);
+    const expected = [_][]const u8{ "Default", "old", "alpha", "beta", "late", "Workspace" };
+    try std.testing.expectEqual(expected.len, found.items.len);
+    for (expected, found.items) |name, workspace| try std.testing.expectEqualStrings(name, workspace.name);
+    var current_inside = try managerList(std.testing.allocator, &known, "C:\\fixture", "c:/fixture/.graphcode-alpha/");
+    defer current_inside.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), current_inside.items.len);
+}
+
+test "workspace manager listing owns long unicode names and cleans allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, managerOwnershipCase, .{});
+}
+
+fn managerOwnershipCase(allocator: std.mem.Allocator) !void {
+    const name = "Workspace-\xe5\xb7\xa5\xe4\xbd\x9c-" ** 30;
+    const path = "C:\\fixture\\" ++ name;
+    const identity = try pathIdentity(allocator, path);
+    defer allocator.free(identity);
+    const item = Workspace{ .name = name, .path = path, .identity = identity, .is_default = false };
+    var found = try managerList(allocator, &.{item}, "C:\\fixture", path);
+    defer found.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), found.items.len);
+    try std.testing.expectEqualStrings(name, found.items[0].name);
+    try std.testing.expectEqualStrings(path, found.items[0].path);
+}
+
+test "workspace manager creation metadata only reads explicitly owned fixture" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-new");
+    const home = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    var found = try managerListFromHome(std.testing.allocator, home, home);
+    defer found.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), found.items.len);
+    try std.testing.expect(found.items[0].is_default);
+    try std.testing.expect(found.items[1].created_at != null);
 }
 
 test "workspace names normalize to safe stable directory suffixes" {
