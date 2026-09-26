@@ -294,28 +294,7 @@ pub fn nodeWithTemplates(
         allocator.destroy(state);
     }
 
-    state.values[0] = try allocator.dupe(u8, initial.title);
-    state.values[1] = try allocator.dupe(u8, initial.loop_type);
-    state.values[2] = try allocator.dupe(u8, initial.check_description);
-    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
-    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
-    state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
-    state.values[6] = try allocator.dupe(u8, initial.goal_summary);
-    state.values[7] = try allocator.dupe(u8, initial.goal_predicate);
-    state.values[8] = try dupFloatText(allocator, initial.poll_interval_seconds);
-    state.values[9] = try dupOptionalFloatText(allocator, initial.stall_after_seconds);
-    state.values[10] = try allocator.dupe(u8, initial.metric_command);
-    state.values[11] = try allocator.dupe(u8, initial.metric_direction);
-    state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
-    state.values[13] = try allocator.dupe(u8, initial.model_tier);
-    state.values[14] = try worktreeSelectionText(allocator, worktree_choices, initial.worktree_path);
-    state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
-    state.values[16] = try allocator.dupe(u8, initial.worktree_id);
-    state.values[17] = try allocator.dupe(u8, initial.worktree_path);
-    state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
-    state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
-    state.values[20] = try allocator.dupe(u8, initial.created_by);
-    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    try initializeNodeDraft(state, initial);
     try restoreStagedAttachments(state, initial);
     if (!(try show(state, "Create or edit node", &.{}))) {
         if (!state.template_requested) return .cancelled;
@@ -372,6 +351,32 @@ fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void
         );
     }
     state.attachment_count = initial.attachment_count;
+}
+
+fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
+    const allocator = state.allocator;
+    state.values[0] = try allocator.dupe(u8, initial.title);
+    state.values[1] = try allocator.dupe(u8, initial.loop_type);
+    state.values[2] = try allocator.dupe(u8, initial.check_description);
+    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
+    state.values[4] = try allocator.dupe(u8, initial.first_instruction);
+    state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
+    state.values[6] = try allocator.dupe(u8, initial.goal_summary);
+    state.values[7] = try allocator.dupe(u8, initial.goal_predicate);
+    state.values[8] = try dupFloatText(allocator, initial.poll_interval_seconds);
+    state.values[9] = try dupOptionalFloatText(allocator, initial.stall_after_seconds);
+    state.values[10] = try allocator.dupe(u8, initial.metric_command);
+    state.values[11] = try allocator.dupe(u8, initial.metric_direction);
+    state.values[12] = try allocator.dupe(u8, initial.backend orelse "");
+    state.values[13] = try allocator.dupe(u8, initial.model_tier);
+    state.values[14] = try worktreeSelectionText(allocator, state.node_worktree_choices, initial.worktree_path);
+    state.values[15] = try allocator.dupe(u8, initial.worktree_repository);
+    state.values[16] = try allocator.dupe(u8, initial.worktree_id);
+    state.values[17] = try allocator.dupe(u8, initial.worktree_path);
+    state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
+    state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
+    state.values[20] = try allocator.dupe(u8, initial.created_by);
+    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
 }
 
 fn buildNodeDraft(
@@ -2375,6 +2380,204 @@ test "node worktree picker has an honest empty state and binds only real choices
     try std.testing.expectEqualStrings("fix/picker", selected_choice.branch);
     state.values[14] = @constCast("0");
     try std.testing.expect(selectedWorktreeChoice(&state) == null);
+}
+
+test "node creation ownership current nondefault choice reaches exact wire fields" {
+    const allocator = std.testing.allocator;
+    const Wire = @import("Wire.zig");
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+        .{ .path = "C:\\repo-topic", .branch = "feature/exact-choice", .is_default = false },
+    };
+    var state = DialogState{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_project_path = "C:\\repo",
+        .node_worktree_choices = &choices_value,
+    };
+    defer freeValues(&state);
+    const initial = Forms.NodeDraft{
+        .title = "Exact choice",
+        .first_instruction = "Keep the selected branch",
+        .backend = "codex",
+        .model_tier = "capable",
+        .created_by = "11111111-1111-4111-8111-111111111111",
+        .briefing_enabled = false,
+        .activity_enabled = true,
+    };
+    try initializeNodeDraft(&state, initial);
+    try std.testing.expectEqualStrings("0", state.values[14]);
+    try std.testing.expect(selectedWorktreeChoice(&state) == null);
+    state.values[14][0] = '2';
+    try std.testing.expect(validationReason(&state) == null);
+    var draft = try buildNodeDraft(allocator, &state, initial);
+    defer draft.deinit(allocator);
+    const command = try Wire.commandGraphCreateNodeFull(allocator, state.attachment_project_path, initial.created_by, draft);
+    defer allocator.free(command);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, command, .{});
+    defer parsed.deinit();
+    const graph_command = parsed.value.object.get("graphCommand").?.object;
+    try std.testing.expectEqualStrings("C:\\repo", graph_command.get("projectPath").?.string);
+    const wire_node = graph_command.get("command").?.object.get("createNode").?.object.get("_0").?.object;
+    const worktree = wire_node.get("worktree").?.object;
+    try std.testing.expectEqualStrings("C:\\repo", worktree.get("repositoryPath").?.string);
+    try std.testing.expectEqualStrings("feature/exact-choice", worktree.get("id").?.string);
+    try std.testing.expectEqualStrings("C:\\repo-topic", worktree.get("worktreePath").?.string);
+    try std.testing.expectEqualStrings("feature/exact-choice", worktree.get("branch").?.string);
+    try std.testing.expectEqualStrings(initial.title, wire_node.get("title").?.string);
+    try std.testing.expectEqualStrings(initial.first_instruction, wire_node.get("firstInstruction").?.string);
+    try std.testing.expectEqualStrings(initial.backend.?, wire_node.get("backend").?.string);
+    try std.testing.expectEqualStrings(initial.model_tier, wire_node.get("modelTier").?.string);
+    try std.testing.expectEqualStrings(initial.created_by, wire_node.get("createdBy").?.string);
+    try std.testing.expectEqual(@as(usize, 0), wire_node.get("attachments").?.array.items.len);
+    try std.testing.expectEqual(initial.briefing_enabled, draft.briefing_enabled);
+    try std.testing.expectEqual(initial.activity_enabled, draft.activity_enabled);
+
+    state.values[14][0] = '0';
+    var unbound = try buildNodeDraft(allocator, &state, draft);
+    defer unbound.deinit(allocator);
+    try std.testing.expectEqualStrings("", unbound.worktree_repository);
+    try std.testing.expectEqualStrings("", unbound.worktree_id);
+    try std.testing.expectEqualStrings("", unbound.worktree_path);
+    try std.testing.expectEqualStrings("", unbound.worktree_branch);
+    const unbound_command = try Wire.commandGraphCreateNodeFull(allocator, state.attachment_project_path, initial.created_by, unbound);
+    defer allocator.free(unbound_command);
+    var unbound_parsed = try std.json.parseFromSlice(std.json.Value, allocator, unbound_command, .{});
+    defer unbound_parsed.deinit();
+    const unbound_node = unbound_parsed.value.object.get("graphCommand").?.object.get("command").?.object.get("createNode").?.object.get("_0").?.object;
+    try std.testing.expect(unbound_node.get("worktree").? == .null);
+}
+
+test "node creation ownership restores the same branch through template handoff" {
+    const allocator = std.testing.allocator;
+    const TemplateLibrary = @import("TemplateLibrary.zig");
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+        .{ .path = "C:\\repo-topic", .branch = "feature/restored", .is_default = false },
+    };
+    const initial = Forms.NodeDraft{
+        .title = "Before template",
+        .first_instruction = "",
+        .worktree_repository = "C:\\repo",
+        .worktree_id = "feature/restored",
+        .worktree_path = "C:\\repo-topic",
+        .worktree_branch = "feature/restored",
+        .backend = "codex",
+        .model_tier = "capable",
+    };
+    var state = DialogState{
+        .allocator = allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_project_path = "C:\\repo",
+        .node_worktree_choices = &choices_value,
+    };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, initial);
+    try std.testing.expectEqualStrings("2", state.values[14]);
+    var handoff = try buildNodeDraftUnchecked(allocator, &state, initial);
+    defer handoff.deinit(allocator);
+    try std.testing.expectEqualStrings("", handoff.first_instruction);
+    try TemplateLibrary.applyOwned(&handoff, .{
+        .id = @constCast("template"),
+        .name = @constCast("From template"),
+        .body = @constCast("A template changes the brief, not its branch."),
+        .shape = @constCast("turn"),
+    }, allocator);
+    const reordered_choices = [_]WorktreeChoice{ choices_value[1], choices_value[0] };
+    for ([_][]const WorktreeChoice{ &choices_value, &reordered_choices }, 0..) |choice_list, index| {
+        var restored = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .attachment_project_path = "C:\\repo",
+            .node_worktree_choices = choice_list,
+        };
+        defer freeValues(&restored);
+        try initializeNodeDraft(&restored, handoff);
+        try std.testing.expectEqualStrings(if (index == 0) "2" else "1", restored.values[14]);
+        var draft = try buildNodeDraft(allocator, &restored, handoff);
+        defer draft.deinit(allocator);
+        try std.testing.expectEqualStrings(initial.worktree_repository, draft.worktree_repository);
+        try std.testing.expectEqualStrings(initial.worktree_id, draft.worktree_id);
+        try std.testing.expectEqualStrings(initial.worktree_path, draft.worktree_path);
+        try std.testing.expectEqualStrings(initial.worktree_branch, draft.worktree_branch);
+        try std.testing.expectEqualStrings("From template", draft.title);
+        try std.testing.expectEqualStrings("A template changes the brief, not its branch.", draft.first_instruction);
+        try std.testing.expectEqualStrings(initial.backend.?, draft.backend.?);
+        try std.testing.expectEqualStrings(initial.model_tier, draft.model_tier);
+        applyModalCommand(&restored, .cancel);
+        try std.testing.expect(!restored.result);
+        try std.testing.expect(restored.closed);
+        try std.testing.expectEqualStrings(initial.worktree_path, restored.initial_values[17]);
+    }
+}
+
+test "node creation ownership preserves empty-list and unmatched-path behavior" {
+    const allocator = std.testing.allocator;
+    const initial = Forms.NodeDraft{
+        .title = "Existing binding",
+        .worktree_repository = "C:\\repo",
+        .worktree_id = "original-id",
+        .worktree_path = "C:\\old-worktree",
+        .worktree_branch = "feature/old",
+    };
+    const choices_value = [_]WorktreeChoice{
+        .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+    };
+    for ([_][]const WorktreeChoice{ &.{}, &choices_value }) |choice_list| {
+        var state = DialogState{
+            .allocator = allocator,
+            .kind = .node,
+            .parent = null,
+            .attachment_project_path = "C:\\repo",
+            .node_worktree_choices = choice_list,
+        };
+        defer freeValues(&state);
+        try initializeNodeDraft(&state, initial);
+        try std.testing.expectEqualStrings("0", state.values[14]);
+        try std.testing.expect(selectedWorktreeChoice(&state) == null);
+        var draft = try buildNodeDraft(allocator, &state, initial);
+        defer draft.deinit(allocator);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_repository else "", draft.worktree_repository);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_id else "", draft.worktree_id);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_path else "", draft.worktree_path);
+        try std.testing.expectEqualStrings(if (choice_list.len == 0) initial.worktree_branch else "", draft.worktree_branch);
+    }
+}
+
+test "node creation ownership initializer and selected draft release every partial allocation" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const choices_value = [_]WorktreeChoice{
+                .{ .path = "C:\\repo\\main", .branch = "main", .is_default = true },
+                .{ .path = "C:\\repo-topic", .branch = "feature/allocations", .is_default = false },
+            };
+            var state = DialogState{
+                .allocator = allocator,
+                .kind = .node,
+                .parent = null,
+                .attachment_project_path = "C:\\repo",
+                .node_worktree_choices = &choices_value,
+            };
+            defer freeValues(&state);
+            const initial = Forms.NodeDraft{
+                .title = "Allocation probe",
+                .first_instruction = "Keep every allocation owned",
+                .backend = "codex",
+                .model_tier = "capable",
+            };
+            try initializeNodeDraft(&state, initial);
+            state.values[14][0] = '2';
+            var draft = try buildNodeDraft(allocator, &state, initial);
+            defer draft.deinit(allocator);
+            try std.testing.expectEqualStrings("C:\\repo", draft.worktree_repository);
+            try std.testing.expectEqualStrings("C:\\repo-topic", draft.worktree_path);
+            try std.testing.expectEqualStrings("feature/allocations", draft.worktree_branch);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
 test "node draft builder preserves every hidden initial field" {

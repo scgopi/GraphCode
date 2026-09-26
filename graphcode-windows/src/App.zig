@@ -1477,29 +1477,39 @@ pub const App = struct {
         return GraphModel.findEdgeIndexByID(graph.edges.items, self.selected_edge_id);
     }
 
-    /// A single selectable branch/worktree for the node-creation form's
-    /// prospective picker. Reuses NativeForms.WorktreeChoice (rather than a
-    /// duplicate type) so App can hand its projection straight to
-    /// NativeForms.node/nodeWithTemplates without a conversion.
     pub const WorktreeChoice = NativeForms.WorktreeChoice;
 
-    /// Projects `self.worktree_inspection` into the caller-owned list of
-    /// existing worktree/branch choices a node-creation picker can offer.
-    /// Returns an empty slice — never a fabricated entry — when there is no
-    /// inspection to draw from (for example when creating a node for
-    /// `graphcode://global`, or before any worktree inspection has run for the
-    /// current project); callers must treat an empty slice as "no existing
-    /// worktrees" rather than an error.
-    fn worktreeChoicesForNodeForm(self: *const App, allocator: std.mem.Allocator) ![]WorktreeChoice {
-        const inspection = self.worktree_inspection orelse return &.{};
-        var choices = try allocator.alloc(WorktreeChoice, inspection.entries.items.len);
-        errdefer allocator.free(choices);
+    const NodeFormWorktreeChoices = struct {
+        items: []WorktreeChoice = &.{},
+
+        fn deinit(self: *NodeFormWorktreeChoices, allocator: std.mem.Allocator) void {
+            for (self.items) |choice| {
+                allocator.free(choice.path);
+                allocator.free(choice.branch);
+            }
+            allocator.free(self.items);
+            self.* = .{};
+        }
+    };
+
+    /// The modal pumps graph events that can replace the cached inspection.
+    /// Own its strings and admit only choices for the captured creation project.
+    fn worktreeChoicesForNodeForm(
+        self: *const App,
+        allocator: std.mem.Allocator,
+        project_path: []const u8,
+    ) !NodeFormWorktreeChoices {
+        const inspection = self.worktree_inspection orelse return .{};
+        if (!std.mem.eql(u8, inspection.project_path, project_path)) return .{};
+        var choices = NodeFormWorktreeChoices{
+            .items = try allocator.alloc(WorktreeChoice, inspection.entries.items.len),
+        };
+        for (choices.items) |*choice| choice.* = .{ .path = &.{}, .branch = &.{}, .is_default = false };
+        errdefer choices.deinit(allocator);
         for (inspection.entries.items, 0..) |entry, index| {
-            choices[index] = .{
-                .path = entry.path,
-                .branch = entry.branch,
-                .is_default = entry.branch.len != 0 and std.mem.eql(u8, entry.branch, inspection.default_branch),
-            };
+            choices.items[index].path = try allocator.dupe(u8, entry.path);
+            choices.items[index].branch = try allocator.dupe(u8, entry.branch);
+            choices.items[index].is_default = entry.branch.len != 0 and std.mem.eql(u8, entry.branch, inspection.default_branch);
         }
         return choices;
     }
@@ -1532,11 +1542,11 @@ pub const App = struct {
         // so a project with no worktree inspection yet (or none at all, e.g.
         // graphcode://global) degrades to the same explicit empty picker either
         // form would otherwise have to special-case on its own.
-        const choices = self.worktreeChoicesForNodeForm(self.allocator) catch {
+        var choices = self.worktreeChoicesForNodeForm(self.allocator, path) catch {
             self.setStatus("Unable to prepare worktree choices");
             return;
         };
-        defer self.allocator.free(choices);
+        defer choices.deinit(self.allocator);
         var templates = TemplateLibrary.load(self.allocator, path) catch |err| {
             const detail = std.fmt.allocPrint(
                 self.allocator,
@@ -1548,7 +1558,7 @@ pub const App = struct {
                 self.allocator.free(message);
             }
             self.setStatus("Unable to load saved templates");
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |form_err| {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices.items, initial) catch |form_err| {
                 self.setStatus(nodeFormErrorStatus(form_err));
                 return;
             } orelse return;
@@ -1558,7 +1568,7 @@ pub const App = struct {
         };
         defer templates.deinit();
         if (templates.templates.items.len == 0) {
-            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial) catch |err| {
+            var draft = NativeForms.node(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices.items, initial) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             } orelse return;
@@ -1588,7 +1598,7 @@ pub const App = struct {
         var owns_current = false;
         defer if (owns_current) current.deinit(self.allocator);
         while (true) {
-            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, current, true) catch |err| {
+            const result = NativeForms.nodeWithTemplates(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices.items, current, true) catch |err| {
                 self.setStatus(nodeFormErrorStatus(err));
                 return;
             };
@@ -7890,8 +7900,9 @@ test "worktree choices for node form degrade honestly when there is no inspectio
 
     // No worktree inspection has run (e.g. creating a node for graphcode://global):
     // the picker must see an explicit empty list, never a fabricated entry.
-    const choices = try app.worktreeChoicesForNodeForm(allocator);
-    defer allocator.free(choices);
+    var snapshot = try app.worktreeChoicesForNodeForm(allocator, "graphcode://global");
+    defer snapshot.deinit(allocator);
+    const choices = snapshot.items;
     try std.testing.expectEqual(@as(usize, 0), choices.len);
 }
 
@@ -7920,13 +7931,206 @@ test "worktree choices for node form project real entries and the default branch
     };
     defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
 
-    const choices = try app.worktreeChoicesForNodeForm(allocator);
-    defer allocator.free(choices);
+    var snapshot = try app.worktreeChoicesForNodeForm(allocator, "C:\\repo");
+    defer snapshot.deinit(allocator);
+    const choices = snapshot.items;
     try std.testing.expectEqual(@as(usize, 2), choices.len);
     try std.testing.expectEqualStrings("main", choices[0].branch);
     try std.testing.expect(choices[0].is_default);
     try std.testing.expectEqualStrings("feature/x", choices[1].branch);
     try std.testing.expect(!choices[1].is_default);
+}
+
+fn nodeCreationTestInspection(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    worktree_path: []const u8,
+    branch: []const u8,
+) !WorktreeStatus.Inspection {
+    var entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+    errdefer WorktreeStatus.deinit(allocator, &entries);
+    {
+        const path_copy = try allocator.dupe(u8, worktree_path);
+        errdefer allocator.free(path_copy);
+        const branch_copy = try allocator.dupe(u8, branch);
+        errdefer allocator.free(branch_copy);
+        try entries.append(.{ .path = path_copy, .branch = branch_copy });
+    }
+    const default_branch = try allocator.dupe(u8, "main");
+    errdefer allocator.free(default_branch);
+    return .{
+        .entries = entries,
+        .default_branch = default_branch,
+        .project_path = try allocator.dupe(u8, project_path),
+    };
+}
+
+test "node creation ownership snapshot survives inspection and model replacement" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    defer if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(allocator, inspection);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"C:\\repo-a","name":"Alpha"},"nodes":[],"edges":[]}}}
+    );
+    const project_path = try allocator.dupe(u8, app.currentProject().?);
+    defer allocator.free(project_path);
+    app.worktree_inspection = try nodeCreationTestInspection(allocator, project_path, "C:\\repo-a-topic", "feature/exact-choice");
+    var snapshot_arena = std.heap.ArenaAllocator.init(allocator);
+    defer snapshot_arena.deinit();
+    var snapshot = try app.worktreeChoicesForNodeForm(snapshot_arena.allocator(), project_path);
+    defer snapshot.deinit(snapshot_arena.allocator());
+    const choices = snapshot.items;
+    try std.testing.expectEqual(@as(usize, 1), choices.len);
+    try std.testing.expect(choices[0].path.ptr != app.worktree_inspection.?.entries.items[0].path.ptr);
+    try std.testing.expect(choices[0].branch.ptr != app.worktree_inspection.?.entries.items[0].branch.ptr);
+    @memset(app.worktree_inspection.?.entries.items[0].path, 'x');
+    @memset(app.worktree_inspection.?.entries.items[0].branch, 'x');
+    try std.testing.expectEqualStrings("C:\\repo-a-topic", choices[0].path);
+    try std.testing.expectEqualStrings("feature/exact-choice", choices[0].branch);
+    WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    app.worktree_inspection = null;
+    app.worktree_inspection = try nodeCreationTestInspection(allocator, "C:\\repo-b", "C:\\repo-b-main", "main");
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"a-new","project":{"path":"C:\\repo-a","name":"Alpha refreshed"},"nodes":[],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"b","project":{"path":"C:\\repo-b","name":"Beta"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\repo-b"));
+    try std.testing.expectEqualStrings("C:\\repo-a", project_path);
+    try std.testing.expectEqualStrings("C:\\repo-a-topic", choices[0].path);
+    try std.testing.expectEqualStrings("feature/exact-choice", choices[0].branch);
+    try std.testing.expect(!choices[0].is_default);
+    var original_project_choices = try app.worktreeChoicesForNodeForm(allocator, project_path);
+    defer original_project_choices.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), original_project_choices.items.len);
+    var current_project_choices = try app.worktreeChoicesForNodeForm(allocator, app.currentProject().?);
+    defer current_project_choices.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), current_project_choices.items.len);
+    try std.testing.expectEqualStrings("C:\\repo-b-main", current_project_choices.items[0].path);
+    try std.testing.expectEqualStrings("main", current_project_choices.items[0].branch);
+    try std.testing.expect(current_project_choices.items[0].is_default);
+}
+
+test "node creation ownership refuses a foreign project inspection" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"C:\\repo-a","name":"Alpha"},"nodes":[],"edges":[]}}}
+    );
+    app.worktree_inspection = try nodeCreationTestInspection(allocator, "C:\\repo-b", "C:\\repo-b-main", "main");
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    var snapshot_arena = std.heap.ArenaAllocator.init(allocator);
+    defer snapshot_arena.deinit();
+    var snapshot = try app.worktreeChoicesForNodeForm(snapshot_arena.allocator(), app.currentProject().?);
+    defer snapshot.deinit(snapshot_arena.allocator());
+    const choices = snapshot.items;
+    try std.testing.expectEqual(@as(usize, 0), choices.len);
+    var global_choices = try app.worktreeChoicesForNodeForm(allocator, "graphcode://global");
+    defer global_choices.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), global_choices.items.len);
+}
+
+test "node creation ownership preserves path-only starts and exact project identity" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    app.worktree_inspection = try nodeCreationTestInspection(allocator, "C:\\repo", "C:\\repo-topic", "feature/path-only");
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    try std.testing.expect(app.model.currentGraph() == null);
+    var snapshot = try app.worktreeChoicesForNodeForm(allocator, app.currentProject().?);
+    defer snapshot.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.items.len);
+    try std.testing.expectEqualStrings("feature/path-only", snapshot.items[0].branch);
+    for ([_][]const u8{ "C:\\repo-other", "C:\\Repo", "", "ssh://host/repo", "graphcode://global" }) |foreign_path| {
+        var foreign = try app.worktreeChoicesForNodeForm(allocator, foreign_path);
+        defer foreign.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), foreign.items.len);
+    }
+}
+
+test "node creation ownership releases every partial choice allocation" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    const Probe = struct {
+        fn run(failing_allocator: std.mem.Allocator, source: *const App, expected_count: usize) !void {
+            var choices = try source.worktreeChoicesForNodeForm(failing_allocator, "C:\\repo");
+            defer choices.deinit(failing_allocator);
+            try std.testing.expectEqual(expected_count, choices.items.len);
+            if (expected_count != 0) {
+                try std.testing.expectEqualStrings("C:\\repo-main", choices.items[0].path);
+                try std.testing.expectEqualStrings("main", choices.items[0].branch);
+                try std.testing.expect(choices.items[0].is_default);
+                try std.testing.expectEqualStrings("C:\\repo-topic", choices.items[1].path);
+                try std.testing.expectEqualStrings("feature/second", choices.items[1].branch);
+                try std.testing.expect(!choices.items[1].is_default);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, @as(usize, 0) });
+    app.worktree_inspection = try nodeCreationTestInspection(allocator, "C:\\other", "C:\\repo-main", "main");
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, @as(usize, 0) });
+    const project_path = try allocator.dupe(u8, "C:\\repo");
+    allocator.free(app.worktree_inspection.?.project_path);
+    app.worktree_inspection.?.project_path = project_path;
+    {
+        const path_copy = try allocator.dupe(u8, "C:\\repo-topic");
+        errdefer allocator.free(path_copy);
+        const branch_copy = try allocator.dupe(u8, "feature/second");
+        errdefer allocator.free(branch_copy);
+        try app.worktree_inspection.?.entries.append(.{ .path = path_copy, .branch = branch_copy });
+    }
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, @as(usize, 2) });
+    WorktreeStatus.deinit(allocator, &app.worktree_inspection.?.entries);
+    app.worktree_inspection.?.entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ &app, @as(usize, 0) });
 }
 
 test "worktree row selected reflects sidebar and dialog selection honestly" {
