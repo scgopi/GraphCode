@@ -925,6 +925,10 @@ pub const Workspace = struct {
     }
 
     pub fn focus(self: *Workspace, index: usize) void {
+        self.focusWith(index, c.winghostty_surface_set_focus);
+    }
+
+    fn focusWith(self: *Workspace, index: usize, comptime set_focus: anytype) void {
         if (index >= self.surfaces.len) return;
         if (self.syncing_focus or self.syncing_topology) return;
         self.syncing_focus = true;
@@ -932,11 +936,33 @@ pub const Workspace = struct {
         self.active_surface = index;
         for (&self.surfaces, 0..) |*slot, other_index| {
             if (slot.surface) |surface| {
-                _ = c.winghostty_surface_set_focus(surface, if (index == other_index) 1 else 0);
+                _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
 
         }
         self.persistFocusedSurface(index);
+    }
+
+    pub fn focusRestoredPane(self: *Workspace) !void {
+        try self.focusRestoredPaneWith(c.winghostty_surface_set_focus);
+    }
+
+    fn focusRestoredPaneWith(self: *Workspace, comptime set_focus: anytype) !void {
+        if (self.collapsed or self.layout.tabs.items.len == 0) return;
+        const tab = self.layout.selectedConst() orelse return error.InvalidSelectedTab;
+        if (tab.focused_pane >= tab.panes.items.len) return error.InvalidFocusedPane;
+        const id = tab.panes.items[tab.focused_pane].id;
+        var target: ?usize = null;
+        var any_live_surface = false;
+        for (&self.surfaces, 0..) |*slot, index| {
+            if (slot.surface == null or slot.destroying or slot.destroyed) continue;
+            any_live_surface = true;
+            if (!surfaceIdentityMatches(slot, self.project_path, id)) continue;
+            if (target != null) return error.AmbiguousFocusedSurface;
+            target = index;
+        }
+        if (!any_live_surface) return;
+        self.focusWith(target orelse return error.FocusedSurfaceUnavailable, set_focus);
     }
 
     fn persistFocusedSurface(self: *Workspace, index: usize) void {
@@ -1860,6 +1886,131 @@ fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
         .layout_path = @constCast(""),
         .project_key = @constCast(""),
     };
+}
+
+test "restored workspace focus follows selected tab and focused pane rather than slot zero" {
+    const NativeFocus = struct {
+        var focused: ?*c.winghostty_surface = null;
+        fn set(surface: ?*c.winghostty_surface, focused_: u8) c.winghostty_result {
+            if (focused_ != 0) focused = surface;
+            return c.WINGHOSTTY_OK;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(path);
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.layout_path = path;
+    workspace.project_path = @constCast("focus-project");
+    try workspace.layout.addTab("loop", true);
+    try workspace.layout.addTab("left", false);
+    try workspace.layout.splitFocused(.horizontal, "right");
+    try workspace.layout.save(path);
+    const restored = try WorkspaceLayout.Layout.load(allocator, path, workspace.layout.project_key);
+    workspace.layout.deinit();
+    workspace.layout = restored;
+    // Supplied native handles/focus callback: layout selection and restoration are real.
+    for ([_]usize{ 0, 3, 7 }, [_][]const u8{ "loop", "left", "right" }) |index, id| {
+        workspace.surfaces[index] = .{
+            .surface = @ptrFromInt((index + 1) * 0x1000),
+            .session_name = @constCast(id),
+            .project_path = workspace.project_path,
+        };
+    }
+    workspace.active_surface = 0;
+    NativeFocus.focused = null;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[7].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 7), workspace.active_surface);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected().?.focused_pane);
+    try std.testing.expectEqual(@as(usize, 2), workspace.layout.tabs.items.len);
+    try std.testing.expect(workspace.paneIndex("loop") == null);
+
+    var persisted = try WorkspaceLayout.Layout.load(allocator, path, workspace.layout.project_key);
+    defer persisted.deinit();
+    try std.testing.expectEqual(@as(usize, 1), persisted.selected_tab);
+    try std.testing.expectEqual(@as(usize, 1), persisted.selected().?.focused_pane);
+    try std.testing.expectEqualStrings("right", persisted.selected().?.panes.items[1].id);
+    workspace.active_surface = 3;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[7].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected().?.focused_pane);
+
+    workspace.layout.selected().?.focused_pane = 0;
+    workspace.active_surface = 7;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[3].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 3), workspace.active_surface);
+    try workspace.layout.selectTab(0);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[0].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 0), workspace.active_surface);
+    try workspace.layout.selectTab(1);
+    workspace.focusWith(0, NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[0].surface, NativeFocus.focused);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected().?.focused_pane);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(workspace.surfaces[3].surface, NativeFocus.focused);
+}
+
+test "restored workspace focus refuses unavailable foreign or ambiguous selected surfaces" {
+    const NativeFocus = struct {
+        var calls: usize = 0;
+        fn set(_: ?*c.winghostty_surface, _: u8) c.winghostty_result {
+            calls += 1;
+            return c.WINGHOSTTY_OK;
+        }
+    };
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    workspace.project_path = @constCast("selected-project");
+    workspace.persisting_layout = true;
+    NativeFocus.calls = 0;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try workspace.layout.addTab("first", true);
+    try workspace.layout.addTab("selected", false);
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    workspace.layout.selected_tab = 2;
+    try std.testing.expectError(error.InvalidSelectedTab, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.layout.selected_tab = 1;
+    workspace.surfaces[0] = .{
+        .surface = @ptrFromInt(0x1000),
+        .session_name = @constCast("first"),
+        .project_path = workspace.project_path,
+    };
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5] = .{
+        .surface = @ptrFromInt(0x6000),
+        .session_name = @constCast("selected"),
+        .project_path = @constCast("foreign-project"),
+    };
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].project_path = workspace.project_path;
+    workspace.surfaces[5].destroying = true;
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].destroying = false;
+    workspace.surfaces[5].destroyed = true;
+    try std.testing.expectError(error.FocusedSurfaceUnavailable, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[5].destroyed = false;
+    workspace.surfaces[6] = workspace.surfaces[5];
+    try std.testing.expectError(error.AmbiguousFocusedSurface, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.surfaces[6] = .{};
+    workspace.layout.selected().?.focused_pane = 1;
+    try std.testing.expectError(error.InvalidFocusedPane, workspace.focusRestoredPaneWith(NativeFocus.set));
+    workspace.layout.selected().?.focused_pane = 0;
+    workspace.collapsed = true;
+    try workspace.focusRestoredPaneWith(NativeFocus.set);
+    try std.testing.expectEqual(@as(usize, 0), NativeFocus.calls);
+    try std.testing.expectEqual(@as(usize, 0), workspace.active_surface);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+    try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected().?.focused_pane);
 }
 
 test "onDpiChanged callback adopts the surface's real reported dpi and font scale" {

@@ -15,6 +15,8 @@ window and attaches to the persistent zmx session for its selected node. Surface
 destruction kills only the attach client; zmx owns the session and survives shell
 restarts. The host contract is the accepted two-surface terminal-gate contract,
 not a synthetic terminal proof.
+Workspace reopen and activation restore the selected tab's focused pane rather
+than assuming that terminal slot zero or the last active slot is visible.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
@@ -27,6 +29,15 @@ share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
+
+Pressing and releasing unmodified `F10` enters the native menu bar, including
+while an embedded terminal has focus. The shell passes the original key pair
+to Windows default menu processing only when the release still targets the
+same eligible, app-owned window. Observed focus/activation changes, modal
+disablement, and intervening input cancel the pending pair; modified `F10`
+(including `Shift+F10`) retains its existing input route.
+Both ordinary and system-key plain `F10` messages use this route; an Alt-context
+message is excluded even if the modifier snapshot no longer shows Alt pressed.
 
 `F6` (or View > Focus Window Toolbar) enters the window toolbar; `Shift+F6`
 enters at its last visible control. Within the toolbar, `Tab`/`Shift+Tab` and

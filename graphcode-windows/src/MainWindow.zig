@@ -149,6 +149,7 @@ pub const Window = struct {
     callback: ?MessageCallback = null,
     key_callback: ?KeyCallback = null,
     accelerators: c.HACCEL = null,
+    pending_native_f10: ?struct { down: c.MSG, owner: c.HWND, menu: c.HMENU } = null,
     class_name: [*:0]const u16 = class_name.ptr,
     /// Result of the one-time `SetGestureConfig` registration performed in
     /// `create`. Kept on the struct (rather than discarded) so a failure can
@@ -197,6 +198,7 @@ pub const Window = struct {
     }
 
     pub fn destroy(self: *Window) void {
+        self.pending_native_f10 = null;
         if (self.accelerators != null) {
             _ = c.DestroyAcceleratorTable(self.accelerators);
             self.accelerators = null;
@@ -213,12 +215,92 @@ pub const Window = struct {
             const result = c.GetMessageW(&message, null, 0, 0);
             if (result == 0) break;
             if (result == -1) return error.MessageLoopFailed;
-            if (self.pretranslateKey(&message, KeyContext.capture(self.hwnd, message.hwnd))) continue;
-            if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, &message) != 0)
-                continue;
-            _ = c.TranslateMessage(&message);
-            _ = c.DispatchMessageW(&message);
+            self.dispatchMessage(&message, KeyContext.capture(self.hwnd, message.hwnd), c.GetFocus());
         }
+    }
+
+    pub fn dispatchMessage(self: *Window, message: *c.MSG, keys: KeyContext, focused: c.HWND) void {
+        if (self.pretranslateKey(message, keys)) {
+            self.pending_native_f10 = null;
+            return;
+        }
+        if (self.accelerators != null and c.TranslateAcceleratorW(self.hwnd, self.accelerators, message) != 0) {
+            self.pending_native_f10 = null;
+            return;
+        }
+        if (self.dispatchNativeF10(message, keys, focused)) return;
+        _ = c.TranslateMessage(message);
+        _ = c.DispatchMessageW(message);
+    }
+
+    fn nativeF10TargetEligible(self: *const Window, target: c.HWND, keys: KeyContext, focused: c.HWND) bool {
+        if (!keys.eligible() or keys.ctrl or keys.shift or keys.alt or self.hwnd == null or
+            target == null or focused != target or c.GetMenu(self.hwnd) == null or
+            c.IsWindowEnabled(self.hwnd) == 0 or c.IsWindowEnabled(target) == 0 or
+            (target != self.hwnd and c.IsChild(self.hwnd, target) == 0)) return false;
+        var owner_pid: c.DWORD = 0;
+        var target_pid: c.DWORD = 0;
+        const owner_thread = c.GetWindowThreadProcessId(self.hwnd, &owner_pid);
+        const target_thread = c.GetWindowThreadProcessId(target, &target_pid);
+        return owner_pid != 0 and owner_pid == target_pid and
+            owner_thread == c.GetCurrentThreadId() and target_thread == owner_thread;
+    }
+
+    fn cancelNativeF10ForMessage(self: *Window, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) void {
+        switch (message) {
+            c.WM_CANCELMODE, c.WM_KILLFOCUS, c.WM_ACTIVATE, c.WM_ACTIVATEAPP,
+            c.WM_ENABLE, c.WM_DESTROY, c.WM_NCDESTROY, c.WM_CONTEXTMENU,
+            c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN,
+            c.WM_MBUTTONDOWN, c.WM_XBUTTONDOWN,
+            => self.pending_native_f10 = null,
+            c.WM_KEYDOWN, c.WM_KEYUP, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP => if (wparam != c.VK_F10 or
+                (@as(usize, @bitCast(lparam)) & (1 << 29)) != 0)
+            {
+                self.pending_native_f10 = null;
+            },
+            else => {},
+        }
+    }
+
+    fn dispatchNativeF10(self: *Window, message: *const c.MSG, keys: KeyContext, focused: c.HWND) bool {
+        // Observe eligibility at dispatch boundaries and owner-window notifications;
+        // this is not a global hook for otherwise unobserved focus history.
+        self.cancelNativeF10ForMessage(message.message, message.wParam, message.lParam);
+        if (self.pending_native_f10) |pending| {
+            if (pending.owner != self.hwnd or c.GetMenu(self.hwnd) != pending.menu or
+                !self.nativeF10TargetEligible(pending.down.hwnd, keys, focused))
+                self.pending_native_f10 = null;
+        }
+        // Plain F10 can use the system-key family without Alt (context bit 29).
+        const is_down = message.message == c.WM_KEYDOWN or message.message == c.WM_SYSKEYDOWN;
+        const is_up = message.message == c.WM_KEYUP or message.message == c.WM_SYSKEYUP;
+        if ((!is_down and !is_up) or
+            message.wParam != c.VK_F10) return false;
+        if ((@as(usize, @bitCast(message.lParam)) & (1 << 29)) != 0 or
+            !self.nativeF10TargetEligible(message.hwnd, keys, focused))
+        {
+            self.pending_native_f10 = null;
+            return false;
+        }
+        if (is_down) {
+            if (self.pending_native_f10) |pending| {
+                if (pending.down.message == message.message) return true;
+                self.pending_native_f10 = null;
+                return false;
+            }
+            if ((@as(usize, @bitCast(message.lParam)) & (1 << 30)) != 0) return false;
+            self.pending_native_f10 = .{ .down = message.*, .owner = self.hwnd, .menu = c.GetMenu(self.hwnd) };
+            return true;
+        }
+        const pending = self.pending_native_f10 orelse return false;
+        self.pending_native_f10 = null;
+        const expected_up: c.UINT = if (pending.down.message == c.WM_SYSKEYDOWN) c.WM_SYSKEYUP else c.WM_KEYUP;
+        if (pending.down.hwnd != message.hwnd or message.message != expected_up) return false;
+        // Delay native default processing until a complete eligible pair exists:
+        // WM_CANCELMODE does not clear DefWindowProc's internal F10-down flag.
+        _ = c.DefWindowProcW(pending.down.hwnd, pending.down.message, pending.down.wParam, pending.down.lParam);
+        _ = c.DefWindowProcW(message.hwnd, message.message, message.wParam, message.lParam);
+        return true;
     }
 
     pub fn pretranslateKey(self: *Window, message: *const c.MSG, keys: KeyContext) bool {
@@ -679,6 +761,615 @@ test "native menu exposes the parity command groups" {
     try std.testing.expectEqual(@as(?Command, null), commandFromId(9999));
 }
 
+const NativeMenuDispatchTest = struct {
+    const name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeF10DispatchTest");
+    var menu_commands: usize = 0;
+    var keys_consumed: usize = 0;
+    var command: usize = 0;
+    var contexts: usize = 0;
+    var last_menu_target: c.HWND = null;
+
+    parent: c.HWND,
+    child: c.HWND,
+
+    fn proc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.c) c.LRESULT {
+        if (message == c.WM_COMMAND) {
+            command = wparam & 0xffff;
+            return 0;
+        }
+        if (message == c.WM_CONTEXTMENU) {
+            contexts += 1;
+            return 0;
+        }
+        if (message == c.WM_SYSCOMMAND and (wparam & 0xfff0) == c.SC_KEYMENU) {
+            menu_commands += 1;
+            last_menu_target = hwnd;
+            return 0;
+        }
+        if (message == c.WM_KEYDOWN or message == c.WM_KEYUP or
+            message == c.WM_SYSKEYDOWN or message == c.WM_SYSKEYUP)
+        {
+            keys_consumed += 1;
+            return 0;
+        }
+        return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    fn init() !NativeMenuDispatchTest {
+        var wc = std.mem.zeroes(c.WNDCLASSW);
+        wc.hInstance = c.GetModuleHandleW(null);
+        wc.lpszClassName = name;
+        wc.lpfnWndProc = &proc;
+        if (c.RegisterClassW(&wc) == 0) return error.WindowClassRegistrationFailed;
+        errdefer _ = c.UnregisterClassW(name, wc.hInstance);
+        const parent = c.CreateWindowExW(0, name, name, c.WS_OVERLAPPEDWINDOW, 0, 0, 100, 100,
+            null, null, wc.hInstance, null) orelse return error.WindowCreationFailed;
+        errdefer _ = c.DestroyWindow(parent);
+        try installMenu(parent);
+        const child = c.CreateWindowExW(0, name, name, c.WS_CHILD, 0, 0, 20, 20,
+            parent, null, wc.hInstance, null) orelse return error.WindowCreationFailed;
+        return .{ .parent = parent, .child = child };
+    }
+
+    fn deinit(self: NativeMenuDispatchTest) void {
+        _ = c.DestroyWindow(self.child);
+        _ = c.DestroyWindow(self.parent);
+        _ = c.UnregisterClassW(name, c.GetModuleHandleW(null));
+    }
+
+    fn reset() void {
+        menu_commands = 0;
+        keys_consumed = 0;
+        command = 0;
+        contexts = 0;
+        last_menu_target = null;
+    }
+
+    fn key(target: c.HWND, message: c.UINT) c.MSG {
+        var value = std.mem.zeroes(c.MSG);
+        value.hwnd = target;
+        value.message = message;
+        value.wParam = c.VK_F10;
+        value.lParam = if (message == c.WM_KEYUP or message == c.WM_SYSKEYUP) @as(c.LPARAM, 0xc0440001) else 0x00440001;
+        return value;
+    }
+
+    // Active/visibility and focused HWND facts are supplied for this never-shown fixture.
+    const eligible = KeyContext{
+        .active = true, .owner_enabled = true, .target_owned = true,
+        .target_visible = true, .target_enabled = true,
+    };
+};
+
+test "hidden consuming child requires native F10 default processing" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    try std.testing.expect(c.IsWindowVisible(fixture.parent) == 0);
+    try std.testing.expect(c.IsWindowVisible(fixture.child) == 0);
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    NativeMenuDispatchTest.reset();
+    _ = c.DispatchMessageW(&down);
+    _ = c.DispatchMessageW(&up);
+    try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    _ = c.DefWindowProcW(down.hwnd, down.message, down.wParam, down.lParam);
+    _ = c.DefWindowProcW(up.hwnd, up.message, up.wParam, up.lParam);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+}
+
+test "native F10 dispatch reaches the real menu from a consuming child" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    NativeMenuDispatchTest.reset();
+    const original_down = down;
+    const original_up = up;
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expect(std.meta.eql(original_down, window.pending_native_f10.?.down));
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expect(std.meta.eql(original_down, down));
+    try std.testing.expect(std.meta.eql(original_up, up));
+}
+
+test "native F10 system messages with no Alt context reach the real menu" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    try std.testing.expect(c.IsWindowVisible(fixture.parent) == 0);
+    try std.testing.expect(c.IsWindowVisible(fixture.child) == 0);
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYUP);
+    up.lParam = 0xc0440001;
+    const original_down = down;
+    const original_up = up;
+    try std.testing.expect((@as(usize, @bitCast(down.lParam)) & (1 << 29)) == 0);
+    try std.testing.expect((@as(usize, @bitCast(up.lParam)) & (1 << 29)) == 0);
+
+    NativeMenuDispatchTest.reset();
+    _ = c.DispatchMessageW(&down);
+    _ = c.DispatchMessageW(&up);
+    try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    _ = c.DefWindowProcW(down.hwnd, down.message, down.wParam, down.lParam);
+    _ = c.DefWindowProcW(up.hwnd, up.message, up.wParam, up.lParam);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+
+    NativeMenuDispatchTest.reset();
+    var window = Window{ .hwnd = fixture.parent };
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expect(std.meta.eql(original_down, down));
+    try std.testing.expect(std.meta.eql(original_up, up));
+}
+
+test "native F10 system pairs preserve repeats orphan and cancellation boundaries" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    for ([_]c.HWND{ fixture.parent, fixture.child }) |target| {
+        var down = NativeMenuDispatchTest.key(target, c.WM_SYSKEYDOWN);
+        down.time = 301;
+        down.pt = .{ .x = 7, .y = 11 };
+        var up = NativeMenuDispatchTest.key(target, c.WM_SYSKEYUP);
+        up.time = 351;
+        const original_down = down;
+        const original_up = up;
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, target);
+        var repeat = down;
+        repeat.lParam |= 1 << 30;
+        repeat.time = 327;
+        window.dispatchMessage(&repeat, NativeMenuDispatchTest.eligible, target);
+        window.dispatchMessage(&repeat, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expect(window.pending_native_f10 != null);
+        try std.testing.expect(std.meta.eql(original_down, window.pending_native_f10.?.down));
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+        try std.testing.expect(std.meta.eql(original_down, down));
+        try std.testing.expect(std.meta.eql(original_up, up));
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        window.dispatchMessage(&repeat, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expect(window.pending_native_f10 == null);
+    }
+
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYUP);
+    for ([_]c.UINT{
+        c.WM_CANCELMODE, c.WM_KILLFOCUS, c.WM_ACTIVATE, c.WM_ACTIVATEAPP,
+        c.WM_ENABLE, c.WM_CONTEXTMENU, c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN,
+        c.WM_MBUTTONDOWN, c.WM_XBUTTONDOWN, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP,
+        c.WM_KEYDOWN, c.WM_KEYUP,
+    }) |message_type| {
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        var interruption = std.mem.zeroes(c.MSG);
+        interruption.hwnd = fixture.child;
+        interruption.message = message_type;
+        window.dispatchMessage(&interruption, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    }
+}
+
+test "native F10 rejects Alt context bits even with a plain modifier snapshot" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    for ([_][2]c.UINT{
+        .{ c.WM_KEYDOWN, c.WM_KEYUP },
+        .{ c.WM_SYSKEYDOWN, c.WM_SYSKEYUP },
+    }) |family| {
+        var down = NativeMenuDispatchTest.key(fixture.child, family[0]);
+        var up = NativeMenuDispatchTest.key(fixture.child, family[1]);
+        var alt_down = down;
+        var alt_up = up;
+        alt_down.lParam |= 1 << 29;
+        alt_up.lParam |= 1 << 29;
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&alt_down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&alt_up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expect(window.pending_native_f10 == null);
+
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&alt_up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&alt_down, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+
+        const other_up: c.UINT = if (family[1] == c.WM_KEYUP) c.WM_SYSKEYUP else c.WM_KEYUP;
+        var mismatched_up = up;
+        mismatched_up.message = other_up;
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&mismatched_up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    }
+}
+
+test "native F10 system pairs retain ownership focus modifier and menu exclusions" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYUP);
+    inline for (.{ "ctrl", "shift", "alt", "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |field| {
+        var excluded = NativeMenuDispatchTest.eligible;
+        @field(excluded, field) = !@field(excluded, field);
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, excluded, fixture.child);
+        window.dispatchMessage(&up, excluded, fixture.child);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&up, excluded, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    }
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.parent);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    var different_target = up;
+    different_target.hwnd = fixture.parent;
+    window.dispatchMessage(&different_target, NativeMenuDispatchTest.eligible, fixture.parent);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+
+    _ = c.EnableWindow(fixture.parent, 0);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    _ = c.EnableWindow(fixture.parent, 1);
+    window.dispatchMessage(&down, KeyContext.capture(fixture.parent, fixture.child), fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    const other = c.CreateWindowExW(0, NativeMenuDispatchTest.name, NativeMenuDispatchTest.name,
+        c.WS_OVERLAPPED, 0, 0, 20, 20, null, null, c.GetModuleHandleW(null), null) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(other);
+    var foreign = down;
+    foreign.hwnd = other;
+    window.dispatchMessage(&foreign, NativeMenuDispatchTest.eligible, other);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    const menu = c.GetMenu(fixture.parent);
+    try std.testing.expect(c.SetMenu(fixture.parent, null) != 0);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expect(c.SetMenu(fixture.parent, menu) != 0);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+}
+
+test "native F10 default flag survives WM_CANCELMODE" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    const down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    const up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    NativeMenuDispatchTest.reset();
+    _ = c.DefWindowProcW(down.hwnd, down.message, down.wParam, down.lParam);
+    _ = c.DefWindowProcW(fixture.child, c.WM_CANCELMODE, 0, 0);
+    _ = c.DefWindowProcW(up.hwnd, up.message, up.wParam, up.lParam);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+}
+
+test "native F10 pair preserves original messages and ignores orphan or repeat activation" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    for ([_]c.HWND{ fixture.parent, fixture.child }) |target| {
+        var down = NativeMenuDispatchTest.key(target, c.WM_KEYDOWN);
+        down.time = 12345;
+        down.pt = .{ .x = 17, .y = 29 };
+        var up = NativeMenuDispatchTest.key(target, c.WM_KEYUP);
+        up.time = 12388;
+        const original_down = down;
+        const original_up = up;
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, target);
+        var repeated = down;
+        repeated.lParam |= 1 << 30;
+        repeated.time = 12366;
+        window.dispatchMessage(&repeated, NativeMenuDispatchTest.eligible, target);
+        window.dispatchMessage(&repeated, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expect(std.meta.eql(original_down, window.pending_native_f10.?.down));
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+        try std.testing.expect(std.meta.eql(original_down, down));
+        try std.testing.expect(std.meta.eql(original_up, up));
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+        window.dispatchMessage(&repeated, NativeMenuDispatchTest.eligible, target);
+        try std.testing.expect(window.pending_native_f10 == null);
+    }
+}
+
+test "native F10 interrupted pairs never set the native default flag" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    for ([_]c.UINT{
+        c.WM_CANCELMODE, c.WM_KILLFOCUS, c.WM_ACTIVATE, c.WM_ACTIVATEAPP,
+        c.WM_ENABLE, c.WM_CONTEXTMENU, c.WM_SYSKEYDOWN, c.WM_SYSKEYUP,
+        c.WM_LBUTTONDOWN, c.WM_RBUTTONDOWN, c.WM_MBUTTONDOWN, c.WM_XBUTTONDOWN,
+    }) |message_type| {
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        var interruption = std.mem.zeroes(c.MSG);
+        interruption.hwnd = fixture.child;
+        interruption.message = message_type;
+        window.dispatchMessage(&interruption, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        // A real native orphan release also must not find a flag left by our buffered down.
+        _ = c.DefWindowProcW(up.hwnd, up.message, up.wParam, up.lParam);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    }
+    for ([_]c.UINT{ c.WM_DESTROY, c.WM_NCDESTROY }) |message_type| {
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.cancelNativeF10ForMessage(message_type, 0, 0);
+        try std.testing.expect(window.pending_native_f10 == null);
+    }
+    for ([_]c.UINT{ c.WM_KEYDOWN, c.WM_KEYUP }) |message_type| {
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        var ordinary = down;
+        ordinary.message = message_type;
+        ordinary.wParam = c.VK_LEFT;
+        window.dispatchMessage(&ordinary, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+    }
+}
+
+test "native F10 eligibility changes reject modifiers focus modal and foreign targets" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    var window = Window{ .hwnd = fixture.parent };
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    inline for (.{ "ctrl", "shift", "alt", "active", "owner_enabled", "target_owned", "target_visible", "target_enabled" }) |field| {
+        var excluded = NativeMenuDispatchTest.eligible;
+        @field(excluded, field) = !@field(excluded, field);
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, excluded, fixture.child);
+        window.dispatchMessage(&up, excluded, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&up, excluded, fixture.child);
+        try std.testing.expect(window.pending_native_f10 == null);
+        _ = c.DefWindowProcW(up.hwnd, up.message, up.wParam, up.lParam);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    }
+    // An ineligible intervening dispatch cancels even if eligibility is restored at release.
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    var tick = std.mem.zeroes(c.MSG);
+    tick.hwnd = fixture.parent;
+    tick.message = c.WM_NULL;
+    window.dispatchMessage(&tick, .{}, null);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+
+    // Never acquire a pair when real owner/target native facts contradict supplied context.
+    _ = c.EnableWindow(fixture.parent, 0);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    _ = c.EnableWindow(fixture.parent, 1);
+    _ = c.EnableWindow(fixture.child, 0);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    _ = c.EnableWindow(fixture.child, 1);
+    window.dispatchMessage(&down, KeyContext.capture(fixture.parent, fixture.child), fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, null);
+    try std.testing.expect(window.pending_native_f10 == null);
+    const other = c.CreateWindowExW(0, NativeMenuDispatchTest.name, NativeMenuDispatchTest.name, c.WS_OVERLAPPED,
+        0, 0, 20, 20, null, null, c.GetModuleHandleW(null), null) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(other);
+    var foreign_down = down;
+    foreign_down.hwnd = other;
+    window.dispatchMessage(&foreign_down, NativeMenuDispatchTest.eligible, other);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    var changed_target_up = up;
+    changed_target_up.hwnd = fixture.parent;
+    window.dispatchMessage(&changed_target_up, NativeMenuDispatchTest.eligible, fixture.parent);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    const menu = c.GetMenu(fixture.parent);
+    try std.testing.expect(c.SetMenu(fixture.parent, null) != 0);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expect(window.pending_native_f10 == null);
+    try std.testing.expect(c.SetMenu(fixture.parent, menu) != 0);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+}
+
+test "native F10 dispatch preserves header pretranslation accelerator and context menu ordering" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    const Header = struct {
+        var calls: usize = 0;
+        var consume: bool = false;
+        fn callback(_: ?*anyopaque, _: usize, _: bool, _: bool, _: bool) bool {
+            calls += 1;
+            return consume;
+        }
+    };
+    var window = Window{ .hwnd = fixture.parent, .key_callback = &Header.callback };
+    var entries = [_]c.ACCEL{
+        .{ .fVirt = c.FVIRTKEY, .key = c.VK_F10, .cmd = @intFromEnum(Command.about) },
+    };
+    window.accelerators = c.CreateAcceleratorTableW(&entries, entries.len) orelse return error.AcceleratorCreationFailed;
+    const test_accelerators = window.accelerators;
+    defer _ = c.DestroyAcceleratorTable(test_accelerators);
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    NativeMenuDispatchTest.reset();
+    Header.calls = 0;
+    Header.consume = true;
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 1), Header.calls);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.command);
+    try std.testing.expect(window.pending_native_f10 == null);
+    Header.consume = false;
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 2), Header.calls);
+    try std.testing.expectEqual(@as(usize, @intFromEnum(Command.about)), NativeMenuDispatchTest.command);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+
+    NativeMenuDispatchTest.reset();
+    var system_down = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYDOWN);
+    var system_up = NativeMenuDispatchTest.key(fixture.child, c.WM_SYSKEYUP);
+    window.dispatchMessage(&system_down, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 2), Header.calls);
+    try std.testing.expectEqual(@as(usize, @intFromEnum(Command.about)), NativeMenuDispatchTest.command);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&system_up, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+
+    // Alt-context F10 and context-menu requests remain normal child dispatch.
+    NativeMenuDispatchTest.reset();
+    window.accelerators = null;
+    down.message = c.WM_SYSKEYDOWN;
+    up.message = c.WM_SYSKEYUP;
+    down.lParam |= 1 << 29;
+    up.lParam |= 1 << 29;
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    var context = std.mem.zeroes(c.MSG);
+    context.hwnd = fixture.child;
+    context.message = c.WM_CONTEXTMENU;
+    window.dispatchMessage(&context, NativeMenuDispatchTest.eligible, fixture.child);
+    try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.contexts);
+    try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+}
+
+test "native F10 owner notifications cancel a buffered pair before native processing" {
+    const Probe = struct {
+        var menus: usize = 0;
+        fn callback(_: ?*anyopaque, _: c.HWND, message: c.UINT, wparam: c.WPARAM, _: c.LPARAM, result: *c.LRESULT) callconv(.c) bool {
+            if (message == c.WM_SYSCOMMAND and (wparam & 0xfff0) == c.SC_KEYMENU) {
+                menus += 1;
+                result.* = 0;
+                return true;
+            }
+            return false;
+        }
+    };
+    var window = Window{ .callback = &Probe.callback };
+    const instance = c.GetModuleHandleW(null);
+    try registerClass(instance);
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, class_name.ptr, c.WS_OVERLAPPEDWINDOW,
+        0, 0, 100, 100, null, null, instance, &window) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    try std.testing.expectEqual(hwnd, window.hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    var down = NativeMenuDispatchTest.key(hwnd, c.WM_KEYDOWN);
+    var up = NativeMenuDispatchTest.key(hwnd, c.WM_KEYUP);
+    Probe.menus = 0;
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, hwnd);
+    try std.testing.expect(window.pending_native_f10 != null);
+    _ = c.SendMessageW(hwnd, c.WM_CANCELMODE, 0, 0);
+    try std.testing.expect(window.pending_native_f10 == null);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, hwnd);
+    try std.testing.expectEqual(@as(usize, 0), Probe.menus);
+    window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, hwnd);
+    _ = c.EnableWindow(hwnd, 0);
+    try std.testing.expect(window.pending_native_f10 == null);
+    _ = c.EnableWindow(hwnd, 1);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, hwnd);
+    try std.testing.expectEqual(@as(usize, 0), Probe.menus);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+}
+
+test "native F10 rejects a real owner on another GUI thread" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    const OtherThread = struct {
+        ready: std.Thread.ResetEvent = .{},
+        stop: std.Thread.ResetEvent = .{},
+        hwnd: c.HWND = null,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.hwnd = c.CreateWindowExW(0, NativeMenuDispatchTest.name, NativeMenuDispatchTest.name,
+                c.WS_OVERLAPPEDWINDOW, 0, 0, 50, 50, null, null,
+                c.GetModuleHandleW(null), null);
+            if (self.hwnd == null) {
+                self.failure = error.WindowCreationFailed;
+                self.ready.set();
+                return;
+            }
+            defer _ = c.DestroyWindow(self.hwnd);
+            installMenu(self.hwnd) catch |err| {
+                self.failure = err;
+                self.ready.set();
+                return;
+            };
+            self.ready.set();
+            self.stop.wait();
+        }
+    };
+    var other = OtherThread{};
+    const thread = try std.Thread.spawn(.{}, OtherThread.run, .{&other});
+    defer {
+        other.stop.set();
+        thread.join();
+    }
+    try other.ready.timedWait(5 * std.time.ns_per_s);
+    if (other.failure) |failure| return failure;
+    const window = Window{ .hwnd = other.hwnd };
+    try std.testing.expect(c.IsWindowVisible(other.hwnd) == 0);
+    try std.testing.expect(!window.nativeF10TargetEligible(other.hwnd, NativeMenuDispatchTest.eligible, other.hwnd));
+}
+
 test "pretranslation invokes the real header key classifier only for eligible input" {
     const Probe = struct {
         focused: bool = false,
@@ -1099,6 +1790,7 @@ fn windowProc(
         }
     }
     const value = window orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    value.cancelNativeF10ForMessage(message, wparam, lparam);
     var result: c.LRESULT = 0;
     if (value.callback) |callback| {
         if (callback(value.context, hwnd, message, wparam, lparam, &result)) {
