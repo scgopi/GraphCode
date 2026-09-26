@@ -114,6 +114,60 @@ real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
 provides a structured Manage view, content summaries, creation-order/running-only
 cycling, and recoverable deletion with daemon/session teardown.
 
+## Local worktree Git processes
+
+`WorktreeStatus` runs local Git with explicit `-C` paths and a child-only copy of
+the environment. Windows environment names are matched case-insensitively.
+The following inherited overrides are removed:
+
+| Variables | Reason |
+|---|---|
+| `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_IMPLICIT_WORK_TREE` | Repository/worktree location |
+| `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` | Index and object storage routing |
+| `GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`, `GIT_REPLACE_REF_BASE`, `GIT_NO_REPLACE_OBJECTS`, `GIT_NAMESPACE` | Alternate history/ref interpretation |
+| `GIT_PREFIX`, `GIT_INTERNAL_SUPER_PREFIX`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM` | Inherited repository-discovery context |
+| `GIT_CONFIG`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS` | Config target and invocation-local injected settings, which can override repository settings |
+
+Invocation-local injected configuration is intentionally not preserved.
+Numbered `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` entries are inert without
+`GIT_CONFIG_COUNT`. Ordinary config locations (`GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`, HOME/profile/XDG paths), PATH,
+`GIT_EXEC_PATH`, askpass, SSH and authentication settings remain inherited.
+This is not a sandbox against trusted Git configuration or executables, and it
+does not change reclaim safety, selection, or confirmation policy.
+
+The helper starts no console window, ignores stdin, and uses Zig 0.15.2
+`Child.collectOutput` to drain both pipes with a 1 MiB limit per stream.
+Oversized output reports `StdoutStreamTooLong` or `StderrStreamTooLong`; nonzero
+exit still reports `GitFailed`. Capture/allocation failures terminate and reap
+the owned child; cleanup failures log both error names without command output
+or environment values. Output transfers only after wait succeeds. Removal
+callers free successful output and the complete inspection.
+There is **no production wall-clock timeout or descendant-process-tree guarantee**.
+
+`Tools\windows\Tests\WindowsShell.Tests.ps1` invokes the dedicated regression
+script after the pure WorktreeStatus tests. To run only this no-UI suite:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\WorktreeGitProcess.Tests.ps1 `
+  -Zig <path-to-zig-0.15.2.exe> -EvidenceDirectory <new-owned-directory>
+```
+
+The script creates its own target/outside-control repositories, isolates fixture
+configuration before the first Git command, and gates each test process until
+it belongs to a kill-on-close Windows job. Every case has a 60-second external
+deadline; missing setup and native/test/cleanup failures fail the script.
+Evidence directories must be new and are retained, including failed RED logs.
+Explicit case selections must contain at least one of the exact, case-sensitive
+17 supported names; invalid/empty selections fail during parameter binding
+before setup. The suite also checks that raw Zig invalid selectors return
+`UnknownFixtureScenario` before creating or running repository fixtures.
+Real Git scope/index/object/config and selected-removal coverage is distinct
+from synthetic stream/output-ownership cases. Allocation-failure coverage
+checks allocations and process-handle balance. Standalone module tests remain
+no-spawn; invoking the dedicated test executable without its harness fails.
+These checks are not a GUI, live-provider, or full worktree-parity walkthrough.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and

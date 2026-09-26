@@ -133,6 +133,20 @@ Statuses:
 | Worktree sweep sheet | Safe/look/in-use grouping, size summaries, default selections, reveal, inline destructive confirmation, recovery note | Sweep storage supports 256 rows, real directory sizes and aggregate totals, reveal, and a second destructive confirmation for dirty rows. Focused and Windows-shell coverage pass. The UIA gate opens the real sheet through the gate-only hook and verifies safe/look group rendering and Remove Selected. The fixture proves sheet rendering and interaction affordances, not Git worktree discovery | Validated |
 | Worktree notice chip | Threshold-driven titlebar and lane notice | Titlebar notices are gated by configured count or aggregate-size thresholds. **Still partial:** per-lane chips and UIA boundary walkthroughs have not been added | Partial |
 
+**Bounded worktree subprocess reliability (2026-09-26):** local job-bounded
+`WorktreeGitProcess.Tests.ps1` calls the actual production helper. The baseline
+with only `create_no_window` launch instrumentation reproduced upper/mixed-case
+repository redirection, outside index/object writes, and an unread real-Git
+stderr hang. Child-only environment scoping, concurrent bounded pipe collection,
+and owned-child/result cleanup now cover those cases. Real selected/forced
+removals and synthetic nonempty output from all three mutation paths exercise
+allocation ownership; synthetic auth/config preservation does not use secrets.
+The normal WindowsShell runner invokes this suite. No production wall-clock
+deadline, OS wait/kill fault injection, live UI/provider walkthrough, or full
+parity is claimed. The pre-existing direct `reclaim` command's self-removal
+failure on the tested Windows Git remains unchanged; the synthetic direct-call
+case proves ownership only. All existing Partial rows remain Partial.
+
 ## Updates and dialogs
 
 | macOS surface | Required visible behavior | Windows evidence | Status |
