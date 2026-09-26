@@ -722,10 +722,15 @@ Invoke-Native "App shell executable tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
+  Assert-Contract (Test-Path -LiteralPath $winghosttyLib -PathType Leaf) `
+    "Build the pinned Winghostty host library before App shell tests."
   Push-Location $shellRoot
   try {
-    & $zig test src\App.zig src\AccessibilityProvider.cpp `
-      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+    & $zig test src\App.zig src\AccessibilityProvider.cpp src\FilePicker.c $winghosttyLib `
+      -DUNICODE -D_UNICODE -target x86_64-windows-msvc -lc `
+      -luser32 -lgdi32 -lgdiplus -lmsimg32 -lopengl32 -lkernel32 -limm32 `
+      -lole32 -loleaut32 -luiautomationcore -lshell32 -ladvapi32 -lwinhttp "-I$include"
   } finally { Pop-Location }
 }
 

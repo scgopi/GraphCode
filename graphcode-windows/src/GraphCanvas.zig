@@ -2215,38 +2215,68 @@ test "cross-project overview stacks every open folder as its own lane" {
     var model = GraphModel.Model.init(allocator);
     defer model.deinit();
     const frameA =
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Loop A1","state":"running"},{"id":"a2","title":"Loop A2","state":"running"}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Alpha 1","state":"idle"},{"id":"a2","title":"Alpha 2","state":"idle"},{"id":"a3","title":"Alpha 3","state":"idle"},{"id":"a4","title":"Alpha 4","state":"idle"}],"edges":[]}}}
     ;
     const frameB =
-        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Loop B1","state":"running"}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Beta 1","state":"idle"},{"id":"b2","title":"Beta 2","state":"idle"}],"edges":[]}}}
     ;
     _ = try model.updateFromFrame(frameA);
     _ = try model.updateFromFrame(frameB);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"recentProjectsListed":[{"path":"C","name":"Recent only"}]}}
+    );
     try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
-    var state = CanvasState{};
-    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
-    const laneA = overviewLaneBounds(&model, 0, bounds, &state);
-    const laneB = overviewLaneBounds(&model, 1, bounds, &state);
-    // Every open folder renders as its own lane on the shared canvas: the second
-    // project's lane must start strictly below the first project's lane (not
-    // overlap it), by at least that lane's rendered height plus the inter-lane gap.
-    try std.testing.expect(laneB.top >= laneA.bottom + 20);
-    try std.testing.expectEqual(laneA.left, laneB.left);
-    try std.testing.expectEqual(laneA.right, laneB.right);
-    // Hit testing must resolve a click in the second lane to the second project's
-    // graph index, proving the lanes are independently addressable, not just
-    // visually stacked.
-    const cardB = overviewCardBounds(&model, 1, 0, bounds, &state);
-    const hit = hitTestOverview(&model, cardB.left + 4, cardB.top + 4, &state, bounds) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), hit.graph_index);
-    try std.testing.expectEqual(@as(usize, 0), hit.node_index);
-    // Each lane exposes its own Open/Worktrees action targets, independently
-    // positioned per-lane rather than a single shared control.
-    const laneAOpen = overviewLaneActionAt(&model, 0, laneA.right - 100, laneA.top + 20, bounds, &state);
-    const laneBOpen = overviewLaneActionAt(&model, 1, laneB.right - 100, laneB.top + 20, bounds, &state);
-    try std.testing.expectEqual(OverviewLaneAction.open_project, laneAOpen orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqual(OverviewLaneAction.open_project, laneBOpen orelse return error.TestUnexpectedResult);
+    try std.testing.expect(model.graphFor("C") == null);
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 900);
+    const identity = CanvasState{};
+    try std.testing.expectEqualDeep(rect(244, 72, 1176, 376), overviewLaneBounds(&model, 0, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(244, 396, 1176, 572), overviewLaneBounds(&model, 1, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 240, 482, 326), overviewCardBounds(&model, 0, 3, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 442, 482, 528), overviewCardBounds(&model, 1, 0, bounds, &identity));
+
+    for ([_]CanvasState{
+        .{},
+        .{ .zoom = 0.75, .pan_x = 100, .pan_y = 17 },
+        .{ .zoom = 1.25, .pan_x = -30, .pan_y = -12 },
+    }) |state| {
+        const lane_a = overviewLaneBounds(&model, 0, bounds, &state);
+        const lane_b = overviewLaneBounds(&model, 1, bounds, &state);
+        try std.testing.expect(lane_a.bottom < lane_b.top);
+        try std.testing.expectEqual(lane_a.left, lane_b.left);
+        try std.testing.expectEqual(lane_a.right, lane_b.right);
+        for (model.graphs.items, 0..) |graph, graph_index| {
+            const lane = overviewLaneBounds(&model, graph_index, bounds, &state);
+            for (graph.nodes.items, 0..) |_, node_index| {
+                const card = overviewCardBounds(&model, graph_index, node_index, bounds, &state);
+                try std.testing.expect(card.left >= lane.left and card.right <= lane.right);
+                try std.testing.expect(card.top > lane.top and card.bottom < lane.bottom);
+                try std.testing.expectEqual(
+                    @as(?OverviewHit, .{ .graph_index = graph_index, .node_index = node_index }),
+                    hitTestOverview(&model, card.left + 2, card.top + 2, &state, bounds),
+                );
+            }
+            for ([_]struct { offset: i32, action: OverviewLaneAction }{
+                .{ .offset = 104, .action = .open_project },
+                .{ .offset = 45, .action = .inspect_worktrees },
+            }) |target| {
+                const x = lane.right - scaledValue(target.offset, state.zoom);
+                const y = lane.top + scaledValue(20, state.zoom);
+                try std.testing.expectEqual(target.action, overviewLaneActionAt(&model, graph_index, x, y, bounds, &state).?);
+                try std.testing.expect(overviewLaneActionAt(&model, 1 - graph_index, x, y, bounds, &state) == null);
+                try std.testing.expect(hitTestOverview(&model, x, y, &state, bounds) == null);
+            }
+        }
+        try std.testing.expect(overviewLaneActionAt(&model, 2, lane_b.right - 40, lane_b.top + 20, bounds, &state) == null);
+    }
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
+    );
+    const empty_lane = overviewLaneBounds(&model, 1, bounds, &identity);
+    try std.testing.expectEqualDeep(rect(244, 396, 1176, 492), empty_lane);
+    try std.testing.expectEqual(OverviewLaneAction.open_project, overviewLaneActionAt(&model, 1, 1072, 416, bounds, &identity).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 1131, 416, bounds, &identity).?);
+    try std.testing.expect(hitTestOverview(&model, 264, 444, &identity, bounds) == null);
 }
 
 test "overview and quick chat geometry applies pan and zoom consistently" {

@@ -632,11 +632,6 @@ function Invoke-Task([string] $name) {
       $swiftRuntime = Resolve-SwiftRuntimeDirectory $swift
       Get-ChildItem -LiteralPath $swiftRuntime -Filter *.dll |
         Copy-Item -Destination $daemonRuntime -Force
-      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
-        -ZigExecutable $zig0152
-      if ($LASTEXITCODE -ne 0) {
-        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
-      }
       $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
       $winghosttyRoot = [Environment]::GetEnvironmentVariable(
         "GRAPHCODE_WINGHOSTTY_ROOT"
@@ -651,6 +646,32 @@ function Invoke-Task([string] $name) {
       if (-not (Test-Path -LiteralPath $winghosttyRoot -PathType Container) -or
         -not (Test-Path -LiteralPath $zmxRoot -PathType Container)) {
         throw "Windows shell provider worktrees unavailable; real smoke is mandatory."
+      }
+      $pins = Get-Content (Join-Path $repoRoot "graphcode-windows\provider-pins.json") -Raw |
+        ConvertFrom-Json
+      if (-not (Test-Path -LiteralPath (Join-Path $winghosttyRoot ".git"))) {
+        throw "Winghostty provider root is not a Git worktree: $winghosttyRoot"
+      }
+      $providerStatus = @(git -C $winghosttyRoot status --porcelain --untracked-files=all)
+      if ($LASTEXITCODE -ne 0 -or $providerStatus.Count -ne 0) {
+        throw "Winghostty provider status failed or the worktree is dirty"
+      }
+      $actualWinghosttyPin = git -C $winghosttyRoot rev-parse HEAD
+      if ($LASTEXITCODE -ne 0 -or $actualWinghosttyPin -ne $pins.winghostty.sha) {
+        throw "Winghostty provider does not match the pinned commit"
+      }
+      Invoke-Native "Pinned Winghostty host build for App contracts" {
+        Push-Location $winghosttyRoot
+        try { & $zig0152 build -Demit-win32-host=true } finally { Pop-Location }
+      }
+      $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
+      if (-not (Test-Path -LiteralPath $winghosttyLib -PathType Leaf)) {
+        throw "Pinned Winghostty host build did not produce the App test library"
+      }
+      & (Join-Path $repoRoot "Tools\windows\Tests\WindowsShell.Tests.ps1") `
+        -ZigExecutable $zig0152
+      if ($LASTEXITCODE -ne 0) {
+        throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
       }
       $zig0160 = Resolve-ZigVersion "0.16.0" "GRAPHCODE_ZIG0160"
       Invoke-Native "Pinned GraphCode Windows shell build and smoke" {
