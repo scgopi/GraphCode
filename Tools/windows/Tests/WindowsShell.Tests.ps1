@@ -427,7 +427,7 @@ Invoke-Native "Jump palette executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\JumpPalette.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    & $zig test src\JumpPalette.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Onboarding executable tests" {

@@ -505,6 +505,10 @@ pub const App = struct {
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
     dpi: u32 = Dpi.base_dpi,
     surface: GraphCanvas.Surface = .project,
+    workspace_is_quick_chat: bool = false,
+    header_focus: ?GraphCanvas.HeaderAction = null,
+    header_return_focus: c.HWND = null,
+    header_focus_transition: bool = false,
     canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
     selected_quick_chat: ?usize = null,
@@ -698,6 +702,7 @@ pub const App = struct {
         // for both explicit automation hooks.
         if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
         try self.window.create(self, &onWindowMessage, title.ptr);
+        self.window.key_callback = &onHeaderKey;
         try self.revalidateWorkspaceIdentity();
         if (!self.window.gesture_config_registered) {
             // Non-fatal: the canvas simply falls back to wheel-only zoom (no
@@ -1414,6 +1419,7 @@ pub const App = struct {
         for (self.model.quick_chats.items, 0..) |chat, index| {
             if (!std.mem.eql(u8, chat.id, id)) continue;
             self.selected_quick_chat = index;
+            self.workspace_is_quick_chat = true;
             self.surface = .workspace;
             self.workspace_controls.panel_visible = true;
             self.layoutWorkspace();
@@ -2254,10 +2260,6 @@ pub const App = struct {
     }
 
     fn jumpToNode(self: *App) void {
-        if (self.model.graphs.items.len == 0) {
-            self.setStatus("No graph is open");
-            return;
-        }
         var entries = std.array_list.Managed(JumpPalette.Entry).init(self.allocator);
         defer entries.deinit();
         for (self.model.graphs.items) |graph| {
@@ -2321,6 +2323,7 @@ pub const App = struct {
             return;
         }
         const workspace = if (self.workspace) |value| value else return;
+        self.workspace_is_quick_chat = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
@@ -2934,9 +2937,12 @@ pub const App = struct {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
         var result = NativeDialogs.textWithDescription(
-            self.window.hwnd, self.allocator, "Save as Template",
+            self.window.hwnd,
+            self.allocator,
+            "Save as Template",
             "Name this reusable prompt template. It is stored in your per-user GraphCode library.",
-            &.{"Template name"}, &.{graph.nodes.items[index].title},
+            &.{"Template name"},
+            &.{graph.nodes.items[index].title},
         ) catch {
             self.setStatus("Unable to open template save form");
             return;
@@ -4004,12 +4010,7 @@ pub const App = struct {
                 self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
             },
             .toggle_panel => {
-                self.workspace_controls.apply(.toggle_panel);
-                if (self.workspace_controls.panel_visible) {
-                    self.surface = .workspace;
-                } else if (self.surface == .workspace) {
-                    self.surface = .project;
-                }
+                self.toggleWorkspacePanelState();
                 self.layoutWorkspace();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
@@ -4093,9 +4094,23 @@ pub const App = struct {
         self.handleAction(InputRouter.keyAction(key, ctrl, shift));
     }
 
-    fn toggleWorkspaceDetailPanel(self: *App) void {
+    fn toggleWorkspacePanelState(self: *App) void {
+        self.workspace_controls.apply(.toggle_panel);
+        if (self.workspace_controls.panel_visible) {
+            self.workspace_is_quick_chat = false;
+            self.surface = .workspace;
+        } else if (self.surface == .workspace) {
+            self.surface = .project;
+        }
+    }
+
+    fn toggleWorkspaceDetailPanelState(self: *App) void {
         self.workspace_controls.panel_visible = !self.workspace_controls.panel_visible;
         if (self.workspace_controls.panel_visible) self.surface = .workspace;
+    }
+
+    fn toggleWorkspaceDetailPanel(self: *App) void {
+        self.toggleWorkspaceDetailPanelState();
         self.layoutWorkspace();
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -4105,6 +4120,13 @@ pub const App = struct {
     fn layoutWorkspace(self: *App) void {
         var client: c.RECT = undefined;
         if (c.GetClientRect(self.window.hwnd, &client) == 0) return;
+        const restore_header = self.header_focus != null and c.GetFocus() == self.window.hwnd;
+        const previous_transition = self.header_focus_transition;
+        self.header_focus_transition = previous_transition or restore_header;
+        defer {
+            if (restore_header) _ = c.SetFocus(self.window.hwnd);
+            self.header_focus_transition = previous_transition;
+        }
         if (self.workspace) |workspace| {
             const full_workspace = self.surface == .workspace;
             const activity_height = if (self.workspace_controls.activity_enabled) physicalCoordinate(Tokens.activity_strip_height, self.dpi) else 0;
@@ -4338,9 +4360,150 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn headerPresentation(self: *const App) GraphCanvas.Header {
+        var header = GraphCanvas.Header{ .attention_count = self.model.attentionCount() };
+        if (self.surface == .workspace and self.workspace_is_quick_chat) {
+            header.context = "Quick Chat workspace";
+            if (self.selected_quick_chat) |index| if (index < self.model.quick_chats.items.len) {
+                header.title = self.model.quick_chats.items[index].title;
+            };
+        } else if (self.surface == .overview) {
+            header.title = "Graph";
+            header.context = "All projects";
+        } else if (self.surface == .quick_chats) {
+            header.title = "Quick Chats";
+        } else if (self.model.currentGraph()) |graph| {
+            header.title = graph.project.name;
+            header.context = if (self.surface == .workspace)
+                (if (graph.project.isRemote()) "Workspace / Remote" else if (graph.project.isGlobal()) "Workspace / Global" else "Workspace / Local folder")
+            else
+                (if (graph.project.isRemote()) "Remote" else if (graph.project.isGlobal()) "Global" else "Local folder");
+        }
+        if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.workspace_is_quick_chat)) {
+            header.panel_visible = self.workspace_controls.panel_visible;
+        }
+        if (self.worktree_inspection) |*inspection| {
+            const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
+            if (GraphCanvas.headerWorktreeNotice(&self.model, inspection, policy)) {
+                header.notice = WorktreeStatus.summarize(inspection.entries.items);
+                header.notice_name = self.model.currentGraph().?.project.name;
+            }
+        }
+        return header;
+    }
+
+    fn headerLayout(self: *const App) GraphCanvas.HeaderLayout {
+        return self.headerPresentation().layout(logicalClientRect(self.window.hwnd, self.dpi).right);
+    }
+
+    fn headerOwnsFocus(self: *const App) bool {
+        return self.header_focus != null and c.GetFocus() == self.window.hwnd and
+            MainWindow.keyOwnerEligible(self.window.hwnd, self.window.hwnd);
+    }
+
+    fn syncHeaderFocus(self: *App) void {
+        if (self.header_focus) |action| {
+            if (self.headerLayout().bounds(action) == null) self.header_focus = self.headerLayout().step(action, false);
+        }
+        if (self.accessibility) |*provider| {
+            provider.syncHeaderFocus(if (self.headerOwnsFocus()) GraphCanvas.headerIdentity(self.header_focus.?) else null);
+        }
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn focusHeader(self: *App, action: GraphCanvas.HeaderAction) bool {
+        const hwnd = self.window.hwnd;
+        if (!MainWindow.keyOwnerEligible(hwnd, hwnd) or self.headerLayout().bounds(action) == null) return false;
+        if (self.header_focus == null) self.header_return_focus = c.GetFocus();
+        self.header_focus = action;
+        _ = c.SetFocus(hwnd);
+        if (c.GetFocus() != hwnd) {
+            self.header_focus = null;
+            self.setStatus("Unable to focus window toolbar");
+            return false;
+        }
+        self.syncHeaderFocus();
+        return true;
+    }
+
+    fn leaveHeader(self: *App, restore: bool) void {
+        const target = self.header_return_focus;
+        self.header_focus = null;
+        self.header_return_focus = null;
+        if (restore) {
+            if (MainWindow.keyOwnerEligible(self.window.hwnd, target) and target != self.window.hwnd) {
+                _ = c.SetFocus(target);
+                if (c.GetFocus() != target) self.setStatus("Unable to restore keyboard focus");
+            } else if (self.workspace) |workspace| {
+                if (self.surface == .workspace or self.workspace_controls.panel_visible) workspace.focus(workspace.active_surface);
+            }
+        }
+        self.syncHeaderFocus();
+    }
+
+    fn onHeaderKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+        const self: *App = @ptrCast(@alignCast(context orelse return false));
+        const focused = self.headerOwnsFocus();
+        const command = InputRouter.headerKey(key, ctrl, shift, alt, focused);
+        const layout = self.headerLayout();
+        switch (command) {
+            .none => return false,
+            .enter => {
+                const action = layout.step(null, shift) orelse return false;
+                return self.focusHeader(action);
+            },
+            .exit => self.leaveHeader(true),
+            .next, .previous, .first, .last => {
+                const current = if (command == .first or command == .last) null else self.header_focus;
+                const action = layout.step(current, command == .previous or command == .last) orelse return false;
+                _ = self.focusHeader(action);
+            },
+            .activate => {
+                const action = self.header_focus orelse return false;
+                if (!self.invokeHeader(action)) self.setStatus("Toolbar action is no longer available");
+                self.syncHeaderFocus();
+            },
+        }
+        return true;
+    }
+
+    fn invokeHeader(self: *App, action: GraphCanvas.HeaderAction) bool {
+        if (self.headerLayout().bounds(action) == null) {
+            self.setStatus("Toolbar action is no longer available");
+            return false;
+        }
+        switch (action) {
+            .review_attention => {
+                if (self.model.attention_entries.items.len == 0) return false;
+                self.selectNextAttention();
+                const graph = self.model.currentGraph() orelse return false;
+                const index = self.model.selectedIndex() orelse return false;
+                if (index >= graph.nodes.items.len) return false;
+                const is_attention = for (self.model.attention_entries.items) |entry| {
+                    if (std.mem.eql(u8, entry.project_path, graph.project.path) and
+                        std.mem.eql(u8, entry.node.id, graph.nodes.items[index].id)) break true;
+                } else false;
+                if (!is_attention) return false;
+                const path = self.allocator.dupe(u8, graph.project.path) catch {
+                    self.setStatus("Unable to open attention loop");
+                    return false;
+                };
+                defer self.allocator.free(path);
+                self.openLoopFromAccessibility(path, index);
+            },
+            .inspect_worktrees => self.inspectWorktrees(),
+            .jump => self.jumpToNode(),
+            .toggle_panel => self.toggleWorkspaceDetailPanel(),
+        }
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
+    }
+
     fn syncAccessibility(self: *App) void {
         const provider = if (self.accessibility) |*value| value else return;
         self.syncAccessibilityTo(provider, logicalClientRect(self.window.hwnd, self.dpi));
+        self.syncHeaderFocus();
     }
 
     fn syncAccessibilityTo(self: *App, provider: anytype, client: c.RECT) void {
@@ -4367,37 +4530,26 @@ pub const App = struct {
             &self.sidebar_state,
         ) catch return;
         defer sidebar_rows.deinit(self.allocator);
-        // The native header bar (attention chip, reclaimable-worktree chip,
-        // jump affordance, contextual loop-panel toggle) is drawn on every
-        // destination via GraphCanvas.paint's unconditional header() call, so
-        // it is exposed here unconditionally too, mirroring the same
-        // gating GraphCanvas.headerActionAt uses for hit-testing. Parent
-        // group 1 (rather than 4, the Graph canvas group these chips visually
-        // sit above) matches the existing precedent set by
-        // needs-you-header/activity-header/activity-filter below: those are
-        // likewise global chrome rather than literal project rows, and
-        // reusing group 1 avoids polluting the Graph element's exact,
-        // exhaustively-asserted child set with chrome that isn't part of the
-        // canvas.
-        if (self.model.attentionCount() != 0) {
-            self.appendAccessibilityElement(&elements, &owned_identities, "header-attention", "needs-you", "Review what needs you", 1, .{ .logical = GraphCanvas.headerAttentionRect() }, false, true) catch return;
-        }
-        if (self.worktree_inspection != null) {
-            self.appendAccessibilityElement(&elements, &owned_identities, "header-worktree", "worktrees", "Reclaimable worktrees", 1, .{ .logical = GraphCanvas.headerWorktreeRect() }, false, true) catch return;
-        }
-        self.appendAccessibilityElement(&elements, &owned_identities, "header-jump", "jump", "Jump to Loop", 1, .{ .logical = GraphCanvas.headerJumpRect(client.right) }, false, true) catch return;
-        if (self.model.currentGraph() != null) {
-            self.appendAccessibilityElement(
-                &elements,
-                &owned_identities,
-                "header-toggle-panel",
-                "control",
-                if (self.surface == .workspace) "Hide loop panel" else "Loop panel",
-                1,
-                .{ .logical = GraphCanvas.headerPanelRect(client.right) },
-                false,
-                true,
-            ) catch return;
+        const header = self.headerPresentation();
+        const header_layout = header.layout(client.right);
+        for (GraphCanvas.header_actions) |action| {
+            const logical_bounds = header_layout.bounds(action) orelse continue;
+            const bounds = (AccessibilityBounds{ .logical = logical_bounds }).physicalRect(self.dpi);
+            const name = header.label(self.allocator, action) catch return;
+            owned_identities.append(name) catch {
+                self.allocator.free(name);
+                return;
+            };
+            elements.append(.{
+                .identity = GraphCanvas.headerIdentity(action),
+                .name = name,
+                .parent = 1,
+                .eligible = true,
+                .left = bounds.left,
+                .top = bounds.top,
+                .right = bounds.right,
+                .bottom = bounds.bottom,
+            }) catch return;
         }
 
         for (sidebar_rows.items) |row| {
@@ -4482,7 +4634,7 @@ pub const App = struct {
                 else => {},
             }
         }
-        if (self.surface == .workspace) if (self.selected_quick_chat) |chat_index| {
+        if (self.surface == .workspace and self.workspace_is_quick_chat) if (self.selected_quick_chat) |chat_index| {
             if (chat_index < self.model.quick_chats.items.len) {
                 const chat = self.model.quick_chats.items[chat_index];
                 const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat.id}) catch return;
@@ -4627,7 +4779,10 @@ pub const App = struct {
                         const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
                         const workspace_right = client.right - (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const selected_index = self.model.selectedIndex() orelse 0;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, graph.project.name, 4, .{ .logical = .{ .left = workspace_left, .top = 0, .right = workspace_right, .bottom = Tokens.header_height } }, false, false) catch return;
+                        if (!self.workspace_is_quick_chat) {
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, header.title, 4, .{ .logical = header_layout.identity }, false, false) catch return;
+                            elements.items[elements.items.len - 1].invokable = false;
+                        }
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height } }, false, false) catch return;
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 } }, false, false) catch return;
                         if (selected_index < graph.nodes.items.len and !isResolvedLoopState(graph.nodes.items[selected_index].state)) {
@@ -5026,6 +5181,7 @@ pub const App = struct {
                     for (self.model.quick_chats.items, 0..) |chat, index| {
                         if (!std.mem.eql(u8, chat.id, id)) continue;
                         self.selected_quick_chat = index;
+                        self.workspace_is_quick_chat = true;
                         self.surface = .workspace;
                         self.workspace_controls.panel_visible = true;
                         self.layoutWorkspace();
@@ -5050,10 +5206,10 @@ pub const App = struct {
                 if (index >= list.items.len) return false;
                 self.launchWorkspace(list.items[index].path);
             },
-            .header_attention => self.handleAction(.cycle_attention),
-            .header_worktree => self.inspectWorktrees(),
-            .header_jump => self.handleAction(.jump_next),
-            .header_toggle_panel => self.handleAction(.toggle_panel),
+            .header_attention => return self.invokeHeader(.review_attention),
+            .header_worktree => return self.invokeHeader(.inspect_worktrees),
+            .header_jump => return self.invokeHeader(.jump),
+            .header_toggle_panel => return self.invokeHeader(.toggle_panel),
         }
         self.clampSidebarScroll();
         self.syncAccessibility();
@@ -5063,9 +5219,13 @@ pub const App = struct {
 
     fn openLoopFromAccessibility(self: *App, project_path: []const u8, index: usize) void {
         if (!self.selectProject(project_path)) return;
+        self.workspace_is_quick_chat = false;
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
-        _ = self.selectNodeIndex(index);
+        if (!self.selectNodeIndex(index)) {
+            self.setStatus("Unable to select loop");
+            return;
+        }
         if (std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite") or
             std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive"))
         {
@@ -5537,6 +5697,9 @@ fn onWindowMessage(
                     .product_settings => app.handleAction(.product_settings),
                     .toggle_sidebar => app.handleAction(.toggle_rail),
                     .toggle_workspace => app.handleAction(.toggle_panel),
+                    .focus_header => if (app.headerLayout().step(null, false)) |action| {
+                        _ = app.focusHeader(action);
+                    },
                     .toggle_activity => app.handleAction(.toggle_activity),
                     .zoom_out => app.handleAction(.zoom_out),
                     .actual_size => app.handleAction(.actual_size),
@@ -5593,15 +5756,8 @@ fn onWindowMessage(
                 _ = c.SetWindowExtEx(hdc, logical_right, logical_bottom, null);
                 _ = c.SetViewportExtEx(hdc, client.right, client.bottom, null);
             }
-            const inspection = if (app.worktree_inspection) |*value| blk: {
-                const policy = WorktreeStatus.loadPolicy(app.allocator, value.project_path);
-                const summary = WorktreeStatus.summarize(value.entries.items);
-                var bytes: u64 = 0;
-                for (value.entries.items) |entry| bytes += entry.size_bytes;
-                const threshold_bytes = @as(u64, policy.notice_size_gb) * 1024 * 1024 * 1024;
-                if (summary.total >= policy.notice_count or bytes >= threshold_bytes) break :blk value;
-                break :blk null;
-            } else null;
+            const header = app.headerPresentation();
+            const inspection = if (header.notice != null) &app.worktree_inspection.? else null;
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
@@ -5611,14 +5767,6 @@ fn onWindowMessage(
                 if (app.surface == .workspace) {
                     if (workspaceGraph(&app.model)) |graph| {
                         const workspace_right = logical_right - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
-                        TerminalWorkspace.Workspace.paintWorkspaceToolbar(
-                            hdc,
-                            app.allocator,
-                            if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                            workspace_right,
-                            graph.project.name,
-                            graph.project.path,
-                        );
                         const index = app.model.selectedIndex() orelse 0;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
@@ -5662,6 +5810,7 @@ fn onWindowMessage(
                     }
                 }
             }
+            GraphCanvas.paintHeader(hdc, app.allocator, logical_right, app.status(), header, if (app.headerOwnsFocus()) app.header_focus else null);
             _ = c.SetMapMode(hdc, c.MM_TEXT);
             if (hdc != target_hdc) {
                 const dirty = paint.rcPaint;
@@ -5874,14 +6023,29 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        Accessibility.wm_header_focus => {
+            result.* = 0;
+            for (GraphCanvas.header_actions) |action| {
+                if (Accessibility.worktreeIdentityPayload(GraphCanvas.headerIdentity(action)) == wparam) {
+                    result.* = if (app.focusHeader(action)) 1 else 0;
+                    break;
+                }
+            }
+            return true;
+        },
         c.WM_KEYDOWN => {
+            const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
+            const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
+            const alt = (@as(i32, c.GetKeyState(c.VK_MENU)) & 0x8000) != 0;
+            if (MainWindow.keyOwnerEligible(hwnd, hwnd) and App.onHeaderKey(app, wparam, ctrl, shift, alt)) {
+                result.* = 0;
+                return true;
+            }
             if (wparam == c.VK_ESCAPE) {
                 app.cancelCanvasInteraction();
                 result.* = 0;
                 return true;
             }
-            const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
-            const shift = (@as(i32, c.GetKeyState(c.VK_SHIFT)) & 0x8000) != 0;
             app.handleAction(InputRouter.keyAction(wparam, ctrl, shift));
             app.updateNativeChrome(.state_change);
             result.* = 0;
@@ -5912,24 +6076,13 @@ fn onWindowMessage(
                 return true;
             }
             const client = logicalClientRect(hwnd, app.dpi);
-            if (GraphCanvas.headerActionAt(
-                x,
-                y,
-                client.right,
-                app.model.attentionCount() != 0,
-                app.worktree_inspection != null,
-                app.model.currentGraph() != null,
-            )) |action| {
-                switch (action) {
-                    .review_attention => app.handleAction(.cycle_attention),
-                    .inspect_worktrees => app.inspectWorktrees(),
-                    .jump => app.handleAction(.jump_next),
-                    .toggle_panel => app.handleAction(.toggle_panel),
-                }
-                _ = c.InvalidateRect(hwnd, null, 0);
+            if (app.headerLayout().actionAt(x, y)) |action| {
+                _ = app.focusHeader(action);
+                _ = app.invokeHeader(action);
                 result.* = 0;
                 return true;
             }
+            if (app.header_focus != null) app.leaveHeader(false);
             if (app.model.attentionCount() != 0 and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
                 app.handleAction(.cycle_attention);
                 _ = c.InvalidateRect(hwnd, null, 0);
@@ -6055,6 +6208,7 @@ fn onWindowMessage(
                         } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
                             if (app.selectProject(graph.project.path)) {
+                                app.workspace_is_quick_chat = false;
                                 app.surface = .workspace;
                                 app.workspace_controls.panel_visible = true;
                                 app.layoutWorkspace();
@@ -6263,6 +6417,7 @@ fn onWindowMessage(
                                     return true;
                                 }
                                 if (!app.selectProject(path)) return true;
+                                app.workspace_is_quick_chat = false;
                                 app.surface = .workspace;
                                 app.workspace_controls.panel_visible = true;
                                 app.layoutWorkspace();
@@ -6651,12 +6806,24 @@ fn onWindowMessage(
             }
         },
         c.WM_SETFOCUS => {
+            if (app.header_focus != null) {
+                app.syncHeaderFocus();
+                result.* = 0;
+                return true;
+            }
             if (app.workspace) |workspace| {
                 if (app.surface == .workspace or app.workspace_controls.panel_visible) {
                     workspace.focus(workspace.active_surface);
                 } else {
                     workspace.blurAll();
                 }
+            }
+            result.* = 0;
+            return true;
+        },
+        c.WM_KILLFOCUS => {
+            if (app.header_focus != null and !app.header_focus_transition and c.IsWindowEnabled(hwnd) != 0) {
+                app.leaveHeader(false);
             }
             result.* = 0;
             return true;
@@ -6669,6 +6836,9 @@ fn onWindowMessage(
             // then reassert our own focus policy so a hidden workspace terminal can never win that
             // restoration race and keep stealing focus away from the rest of the app's chrome.
             const activated = (wparam & 0xffff) != c.WA_INACTIVE;
+            const previous_transition = app.header_focus_transition;
+            app.header_focus_transition = previous_transition or (activated and app.header_focus != null);
+            defer app.header_focus_transition = previous_transition;
             result.* = c.DefWindowProcW(hwnd, message, wparam, lparam);
             if (!activated) {
                 // Deactivation (e.g. Alt+Tab away, or another window taking
@@ -6678,7 +6848,10 @@ fn onWindowMessage(
                 // distance.
                 app.canvas.endPinchZoom();
             }
-            if (activated) {
+            if (activated and app.header_focus != null) {
+                _ = c.SetFocus(hwnd);
+                app.syncHeaderFocus();
+            } else if (activated) {
                 if (app.workspace) |workspace| {
                     if (app.surface == .workspace or app.workspace_controls.panel_visible) {
                         workspace.focus(workspace.active_surface);
@@ -7388,9 +7561,56 @@ test "main shell coordinates round trip across common Windows DPI steps" {
     }
 }
 
+test "DPI header layout and pointer targets use the logical width of a hidden native client" {
+    var app: App = .{
+        .allocator = std.testing.allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(std.testing.allocator),
+        .sidebar_state = undefined,
+        .declared_entry_ids = undefined,
+        .kept_worktree_paths = undefined,
+    };
+    defer app.model.deinit();
+    for ([_]struct { dpi: u32, width: i32, height: i32, logical_right: i32, jump: [4]i32 }{
+        .{ .dpi = 96, .width = 1200, .height = 900, .logical_right = 1200, .jump = .{ 288, 5, 452, 29 } },
+        .{ .dpi = 144, .width = 1800, .height = 1350, .logical_right = 1200, .jump = .{ 432, 8, 678, 44 } },
+        .{ .dpi = 192, .width = 2400, .height = 1800, .logical_right = 1200, .jump = .{ 576, 10, 904, 58 } },
+        .{ .dpi = 96, .width = 640, .height = 900, .logical_right = 640, .jump = .{ 221, 5, 385, 29 } },
+        .{ .dpi = 144, .width = 960, .height = 1350, .logical_right = 640, .jump = .{ 332, 8, 578, 44 } },
+        .{ .dpi = 192, .width = 1280, .height = 1800, .logical_right = 640, .jump = .{ 442, 10, 770, 58 } },
+    }) |case| {
+        app.window.hwnd = c.CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+            std.unicode.utf8ToUtf16LeStringLiteral("Hidden header DPI geometry"),
+            c.WS_POPUP,
+            0,
+            0,
+            case.width,
+            case.height,
+            null,
+            null,
+            c.GetModuleHandleW(null),
+            null,
+        ) orelse return error.WindowCreationFailed;
+        defer _ = c.DestroyWindow(app.window.hwnd);
+        app.dpi = case.dpi;
+        try std.testing.expect(c.IsWindowVisible(app.window.hwnd) == 0);
+        try std.testing.expectEqual(case.logical_right, logicalClientRect(app.window.hwnd, app.dpi).right);
+        const layout = app.headerLayout();
+        const physical = (AccessibilityBounds{ .logical = layout.bounds(.jump).? }).physicalRect(app.dpi);
+        try std.testing.expectEqualDeep(case.jump, [4]i32{ physical.left, physical.top, physical.right, physical.bottom });
+        const x = logicalCoordinate(case.jump[0] + 4, app.dpi);
+        const y = logicalCoordinate(case.jump[1] + 4, app.dpi);
+        try std.testing.expectEqual(GraphCanvas.HeaderAction.jump, layout.actionAt(x, y).?);
+        try std.testing.expect(layout.actionAt(logicalCoordinate(case.jump[2] + 4, app.dpi), y) == null);
+    }
+}
+
 const DpiExpectedElement = struct {
     identity: []const u8,
-    bounds: [3][4]i32,
+    bounds: ?[3][4]i32 = null,
 };
 
 const DpiAccessibilitySink = struct {
@@ -7417,19 +7637,23 @@ const DpiAccessibilitySink = struct {
             for (elements) |element| {
                 if (!std.mem.eql(u8, expected.identity, element.identity)) continue;
                 found = true;
+                const bounds = expected.bounds orelse {
+                    std.debug.print("Unexpected UIA element: {s}\n", .{expected.identity});
+                    return error.UnexpectedAccessibilityElement;
+                };
                 const actual = [4]i32{ element.left, element.top, element.right, element.bottom };
-                std.testing.expectEqualDeep(expected.bounds[self.dpi_index], actual) catch |err| {
+                std.testing.expectEqualDeep(bounds[self.dpi_index], actual) catch |err| {
                     std.debug.print("UIA bounds mismatch: {s}, DPI index {d}\n", .{ expected.identity, self.dpi_index });
                     return err;
                 };
             }
-            if (!found) std.debug.print("Missing UIA element: {s}\n", .{expected.identity});
-            try std.testing.expect(found);
+            if (!found and expected.bounds != null) std.debug.print("Missing UIA element: {s}\n", .{expected.identity});
+            try std.testing.expectEqual(expected.bounds != null, found);
         }
     }
 };
 
-fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement) !void {
+fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool) !void {
     const allocator = std.testing.allocator;
     var app: App = .{
         .allocator = allocator,
@@ -7443,6 +7667,7 @@ fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expe
         .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
         .surface = surface,
+        .workspace_is_quick_chat = quick_chat,
         .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
     };
     defer app.client.deinit();
@@ -7453,7 +7678,7 @@ fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expe
     app.ingress_error = try allocator.dupe(u8, "Fixture alert");
     defer allocator.free(app.ingress_error);
     _ = try app.model.updateFromFrame(
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running","createdAt":1,"inputTokens":100,"presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running","createdAt":1,"inputTokens":100,"metricHistory":[{"value":1},{"value":2}],"presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
     );
     try app.model.recent_projects.append(.{ .path = try allocator.dupe(u8, "C"), .name = try allocator.dupe(u8, "Recent") });
     try app.model.quick_chats.append(.{
@@ -7468,6 +7693,12 @@ fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expe
         .project_path = try allocator.dupe(u8, "A"),
     };
     defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    // A notice needs a threshold breach; an empty inspection is not visible chrome.
+    try app.worktree_inspection.?.entries.append(.{
+        .path = try allocator.dupe(u8, "A-worktree"),
+        .branch = try allocator.dupe(u8, "topic"),
+        .size_bytes = 2 * 1024 * 1024 * 1024,
+    });
     var workspaces = [_]WorkspaceLifecycle.Workspace{
         .{ .name = "Fixture", .path = "B", .identity = "b", .is_default = false },
     };
@@ -7504,34 +7735,38 @@ fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expe
 }
 
 test "DPI UIA fixed graph uses physical client bounds" {
-    try expectDpiAccessibility(.project, .{ .{ 220, 34, 1200, 650 }, .{ 330, 51, 1800, 975 }, .{ 440, 68, 2400, 1300 } }, &.{});
+    try expectDpiAccessibility(.project, .{ .{ 220, 34, 1200, 650 }, .{ 330, 51, 1800, 975 }, .{ 440, 68, 2400, 1300 } }, &.{}, false);
 }
 
 test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
     const common = [_]DpiExpectedElement{
-        .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 220, 5, 330, 29 }, .{ 330, 8, 495, 44 }, .{ 440, 10, 660, 58 } } },
-        .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 338, 5, 458, 29 }, .{ 507, 8, 687, 44 }, .{ 676, 10, 916, 58 } } },
-        .{ .identity = "header-jump:jump", .bounds = .{ .{ 640, 5, 800, 29 }, .{ 960, 8, 1200, 44 }, .{ 1280, 10, 1600, 58 } } },
-        .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 810, 5, 920, 29 }, .{ 1215, 8, 1380, 44 }, .{ 1620, 10, 1840, 58 } } },
+        .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 288, 5, 400, 29 }, .{ 432, 8, 600, 44 }, .{ 576, 10, 800, 58 } } },
+        .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
+        .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
         .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 109, 232, 135 }, .{ 18, 164, 348, 203 }, .{ 24, 218, 464, 270 } } },
         .{ .identity = "sidebar-error-footer:ingress", .bounds = .{ .{ 8, 816, 212, 858 }, .{ 12, 1224, 318, 1287 }, .{ 16, 1632, 424, 1716 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
     for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
-        try expectDpiAccessibility(surface, null, &common);
+        try expectDpiAccessibility(surface, null, &common, false);
+        if (surface != .workspace) try expectDpiAccessibility(surface, null, &.{
+            .{ .identity = "header-toggle-panel:control" },
+            .{ .identity = "workspace-toolbar:A" },
+        }, false);
     }
     try expectDpiAccessibility(.project, null, &.{
         .{ .identity = "project-card:A:loop", .bounds = .{ .{ 252, 84, 502, 190 }, .{ 378, 126, 753, 285 }, .{ 504, 168, 1004, 380 } } },
         .{ .identity = "canvas-alert:ingress", .bounds = .{ .{ 244, 556, 1176, 612 }, .{ 366, 834, 1764, 918 }, .{ 488, 1112, 2352, 1224 } } },
-    });
+    }, false);
     try expectDpiAccessibility(.overview, null, &.{
         .{ .identity = "overview-card:A:loop", .bounds = .{ .{ 262, 118, 482, 204 }, .{ 393, 177, 723, 306 }, .{ 524, 236, 964, 408 } } },
-    });
+    }, false);
     try expectDpiAccessibility(.quick_chats, null, &.{
         .{ .identity = "quick-chat-card:chat", .bounds = .{ .{ 262, 88, 482, 152 }, .{ 393, 132, 723, 228 }, .{ 524, 176, 964, 304 } } },
-    });
+    }, false);
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 220, 0, 928, 34 }, .{ 330, 0, 1392, 51 }, .{ 440, 0, 1856, 68 } } },
+        .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 768, 5, 904, 29 }, .{ 1152, 8, 1356, 44 }, .{ 1536, 10, 1808, 58 } } },
+        .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 8, 1, 280, 33 }, .{ 12, 2, 420, 50 }, .{ 16, 2, 560, 66 } } },
         .{ .identity = "workspace-loop-bar:loop", .bounds = .{ .{ 220, 34, 928, 80 }, .{ 330, 51, 1392, 120 }, .{ 440, 68, 1856, 160 } } },
         .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } } },
         .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } } },
@@ -7539,8 +7774,13 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 946, 798, 1182, 830 }, .{ 1419, 1197, 1773, 1245 }, .{ 1892, 1596, 2364, 1660 } } },
         .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 946, 836, 1182, 856 }, .{ 1419, 1254, 1773, 1284 }, .{ 1892, 1672, 2364, 1712 } } },
         .{ .identity = "workspace-detail-usage:loop", .bounds = .{ .{ 946, 856, 1182, 876 }, .{ 1419, 1284, 1773, 1314 }, .{ 1892, 1712, 2364, 1752 } } },
+        .{ .identity = "quick-chat-workspace:chat" },
+    }, false);
+    try expectDpiAccessibility(.workspace, null, &.{
         .{ .identity = "quick-chat-workspace:chat", .bounds = .{ .{ 220, 650, 1200, 900 }, .{ 330, 975, 1800, 1350 }, .{ 440, 1300, 2400, 1800 } } },
-    });
+        .{ .identity = "header-toggle-panel:control" },
+        .{ .identity = "workspace-toolbar:A" },
+    }, true);
 }
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {
@@ -7550,7 +7790,7 @@ test "DPI UIA terminal tab close and controls retain physical geometry" {
         .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
         .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
         .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
-    });
+    }, false);
 }
 
 test "DPI gesture mapper classifies scaled sidebar and graph boundaries" {
@@ -7785,6 +8025,75 @@ test "gesture registration failure formats the exact production diagnostic text"
     var tiny_buf: [4]u8 = undefined;
     const fallback = formatGestureRegistrationFailure(&tiny_buf, 1223);
     try std.testing.expectEqualStrings("Touch pinch-zoom unavailable", fallback);
+}
+
+test "header detail toggle preserves workspace instead of generic panel navigation" {
+    var app: App = .{
+        .allocator = std.testing.allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = undefined,
+        .sidebar_state = undefined,
+        .declared_entry_ids = undefined,
+        .kept_worktree_paths = undefined,
+    };
+    for ([_]bool{ false, true }) |sidebar_visible| {
+        app.surface = .workspace;
+        app.workspace_controls = .{ .rail_visible = sidebar_visible, .panel_visible = true };
+        app.toggleWorkspaceDetailPanelState();
+        try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+        try std.testing.expect(!app.workspace_controls.panel_visible);
+        try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
+        app.toggleWorkspaceDetailPanelState();
+        try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+        try std.testing.expect(app.workspace_controls.panel_visible);
+        try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
+
+        app.toggleWorkspacePanelState();
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expect(!app.workspace_controls.panel_visible);
+        try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
+    }
+}
+
+test "header presentation follows destinations and keeps sidebar independent" {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    try std.testing.expectEqualStrings("GraphCode Windows", app.headerPresentation().title);
+    try std.testing.expect(app.headerPresentation().contains(.jump));
+    try std.testing.expect(!app.headerPresentation().contains(.toggle_panel));
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\test","name":"Test"},"nodes":[{"id":"a","title":"A","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
+        app.surface = surface;
+        for ([_]bool{ false, true }) |sidebar_visible| {
+            app.workspace_controls.rail_visible = sidebar_visible;
+            for ([_]bool{ false, true }) |panel_visible| {
+                app.workspace_controls.panel_visible = panel_visible;
+                const header = app.headerPresentation();
+                try std.testing.expectEqual(surface == .workspace, header.contains(.toggle_panel));
+                if (surface == .workspace) try std.testing.expectEqual(panel_visible, header.panel_visible.?);
+                try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
+            }
+        }
+    }
+    app.workspace_is_quick_chat = true;
+    try std.testing.expect(!app.headerPresentation().contains(.toggle_panel));
+    try std.testing.expectEqualStrings("Quick Chat workspace", app.headerPresentation().context);
 }
 
 test "header UIA identities hash to distinct payloads" {

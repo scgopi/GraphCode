@@ -196,6 +196,39 @@ pub fn show(
     };
 }
 
+test "empty palette creates native search controls and cancels without a selection" {
+    try registerClass();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}) };
+    defer dialog.state.deinit();
+    try dialog.state.filter("");
+    try std.testing.expect(active == null);
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
+        class_name.ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("Hidden empty palette test").ptr,
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
+        0,
+        0,
+        640,
+        430,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    try std.testing.expect(dialog.edit != null and dialog.list != null);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETCOUNT, 0, 0));
+    accept(&dialog);
+    try std.testing.expect(!dialog.accepted and !dialog.closed);
+    _ = c.SendMessageW(hwnd, c.WM_COMMAND, cancel_id, 0);
+    try std.testing.expect(dialog.closed and !dialog.accepted);
+    try std.testing.expect(dialog.state.selectedEntry() == null);
+}
+
 fn registerClass() !void {
     var window_class: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
     window_class.lpfnWndProc = @ptrCast(&windowProc);

@@ -28,6 +28,7 @@ extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
 extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_set_canvas_bounds(provider: *NativeProvider, left: c_int, top: c_int, right: c_int, bottom: c_int) c.HRESULT;
+extern fn gc_uia_set_header_focus(provider: *NativeProvider, identity: ?[*:0]const u8) c.HRESULT;
 extern fn gc_uia_update(
     provider: *NativeProvider,
     status: [*:0]const u8,
@@ -86,6 +87,7 @@ pub const uia_workspace_rename_command: usize = 28;
 pub const uia_workspace_delete_command: usize = 29;
 pub const uia_dynamic_invoke_tag: usize = 0x8000000000000000;
 pub const uia_dynamic_invoke_mask: usize = 0xC000000000000000;
+pub const wm_header_focus: u32 = 0x8000 + 46;
 
 pub fn worktreeIdentityPayload(path: []const u8) usize {
     var hash: u64 = 1469598103934665603;
@@ -246,6 +248,17 @@ pub const Provider = struct {
         const status_z = self.allocator.dupeZ(u8, status) catch return;
         defer self.allocator.free(status_z);
         _ = gc_uia_set_status(native, status_z.ptr);
+    }
+    pub fn syncHeaderFocus(self: *Provider, identity: ?[]const u8) void {
+        if (!builtin.link_libc) return;
+        const native = self.native_provider orelse return;
+        const owned = if (identity) |value| self.allocator.dupeZ(u8, value) catch {
+            std.debug.print("Unable to allocate UIA header focus identity\n", .{});
+            return;
+        } else null;
+        defer if (owned) |value| self.allocator.free(value);
+        const result = gc_uia_set_header_focus(native, if (owned) |value| value.ptr else null);
+        if (result < 0) std.debug.print("Unable to synchronize UIA header focus: {d}\n", .{result});
     }
     /// Reports the real, current client-relative rect of the rendered canvas
     /// so the "graph" fixed UIA element (id 4) exposes accurate
