@@ -141,6 +141,16 @@ toolchain and ignore inherited Visual Studio `INCLUDE`/`LIB` settings. This
 prevents mixed VS/Swift SDK environments from producing false missing-module
 errors for `_complex` or `ucrt`.
 
+Standalone `Tools\windows\Tests\WindowsShell.Tests.ps1` requires the pinned
+Winghostty static host library, not only its headers. After loading the bootstrap
+environment, build that prerequisite before running the native contracts:
+
+```powershell
+Push-Location $env:GRAPHCODE_WINGHOSTTY_ROOT
+try { & $env:GRAPHCODE_ZIG0152 build -Demit-win32-host=true }
+finally { Pop-Location }
+```
+
 `Tools\windows\validate.ps1 -Task windows-shell` performs pin, clean-worktree,
 format, lifecycle-contract, real provider build, and native UI Automation live
 event checks. `Tools\windows\package.ps1` builds and verifies self-contained ZIP

@@ -1,5 +1,53 @@
 $ErrorActionPreference = "Stop"
 
+function Assert-ShellHostPrerequisite([string] $source) {
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+  if ($errors.Count -ne 0) { throw "Validation driver does not parse" }
+  $clauses = @($ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.SwitchStatementAst]
+    }, $true).Clauses | Where-Object { $_.Item1.Value -eq "windows-shell" })
+  if ($clauses.Count -ne 1) { throw "Expected one windows-shell validation branch" }
+  $body = $clauses[0].Item2
+  $commands = @($body.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.CommandAst]
+    }, $true))
+  $build = @($commands | Where-Object {
+      $_.GetCommandName() -eq "Invoke-Native" -and
+        $_.CommandElements[1].Extent.Text -eq '"Pinned Winghostty host build for App contracts"'
+    })
+  $contracts = @($commands | Where-Object {
+      $_.InvocationOperator -eq [Management.Automation.Language.TokenKind]::Ampersand -and
+        $_.CommandElements[0].Extent.Text -match 'Tools\\windows\\Tests\\WindowsShell\.Tests\.ps1'
+    })
+  $smoke = @($commands | Where-Object {
+      $_.GetCommandName() -eq "Invoke-Native" -and
+        $_.CommandElements[1].Extent.Text -eq '"Pinned GraphCode Windows shell build and smoke"'
+    })
+  $guards = @($body.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.IfStatementAst]
+    }, $true))
+  $pin = @($guards | Where-Object { $_.Extent.Text -match '\$actualWinghosttyPin -ne \$pins\.winghostty\.sha' })
+  $clean = @($guards | Where-Object { $_.Extent.Text -match '\$providerStatus\.Count -ne 0' })
+  $library = @($guards | Where-Object { $_.Extent.Text -match 'Test-Path -LiteralPath \$winghosttyLib -PathType Leaf' })
+  foreach ($stage in @(@{ Values = $build }, @{ Values = $contracts }, @{ Values = $smoke },
+      @{ Values = $pin }, @{ Values = $clean }, @{ Values = $library })) {
+    if ($stage.Values.Count -ne 1) { throw "Missing or repeated App host prerequisite stage" }
+  }
+  if ($clean[0].Extent.EndOffset -ge $build[0].Extent.StartOffset -or
+      $pin[0].Extent.EndOffset -ge $build[0].Extent.StartOffset -or
+      $build[0].Extent.EndOffset -ge $library[0].Extent.StartOffset -or
+      $library[0].Extent.EndOffset -ge $contracts[0].Extent.StartOffset -or
+      $contracts[0].Extent.EndOffset -ge $smoke[0].Extent.StartOffset -or
+      $build[0].Extent.Text -notmatch '(?s)Push-Location \$winghosttyRoot.*& \$zig0152 build -Demit-win32-host=true.*finally \{ Pop-Location \}') {
+    throw "Pinned host validation/build must precede App contracts, which must precede live smoke"
+  }
+}
+
 $runner = Join-Path $PSScriptRoot "..\validate.ps1"
 if (-not (Test-Path $runner)) {
   throw "RED: validation runner does not exist at $runner"
@@ -170,6 +218,22 @@ try {
     throw "RED: Windows shell CI does not invoke the shell task containing live UI Automation"
   }
   $runnerSource = Get-Content $runner -Raw
+  Assert-ShellHostPrerequisite $runnerSource
+  $contractCall = [regex]::Match($runnerSource,
+    '(?s)& \(Join-Path \$repoRoot "Tools\\windows\\Tests\\WindowsShell\.Tests\.ps1"\)\s*`\s*-ZigExecutable \$zig0152').Value
+  if (-not $contractCall) { throw "Cannot construct the host prerequisite ordering control" }
+  $earlyContracts = $runnerSource.Replace($contractCall, "").Replace(
+    'Invoke-Native "Pinned Winghostty host build for App contracts"',
+    $contractCall + "`n      " + 'Invoke-Native "Pinned Winghostty host build for App contracts"')
+  foreach ($mutation in @(
+      $runnerSource.Replace('& $zig0152 build -Demit-win32-host=true', 'Write-Output "deliberately skipped build"'),
+      $runnerSource.Replace('"Pinned Winghostty host build for App contracts"', '"deliberately removed prerequisite"'),
+      $earlyContracts
+    )) {
+    $rejected = $false
+    try { Assert-ShellHostPrerequisite $mutation } catch { $rejected = $true }
+    if (-not $rejected) { throw "Host prerequisite contract accepted a deliberate missing-build control" }
+  }
   if ($runnerSource -notmatch '(?s)"packaging" \{\s*& .*?Packaging\.Signing\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run signed catalog integrity contracts"
   }

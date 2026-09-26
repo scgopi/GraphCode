@@ -1118,6 +1118,24 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn applyOverviewLaneAction(self: *App, x: i32, y: i32, bounds: c.RECT) bool {
+        for (self.model.graphs.items, 0..) |_, graph_index| {
+            if (GraphCanvas.overviewLaneActionAt(&self.model, graph_index, x, y, bounds, &self.canvas)) |action| {
+                if (action == .inspect_worktrees) {
+                    if (self.selectProject(self.model.graphs.items[graph_index].project.path)) self.inspectWorktrees();
+                } else if (self.selectProject(self.model.graphs.items[graph_index].project.path)) {
+                    self.surface = .project;
+                    self.workspace_controls.panel_visible = false;
+                    self.layoutWorkspace();
+                    self.layoutEmptyStateControls();
+                    self.rebindWorkspace(self.model.graphs.items[graph_index].project.path);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn queueProject(self: *App, path: []const u8) void {
         if (path.len == 0 or
             std.mem.eql(u8, self.last_project_opened, path) or
@@ -6187,23 +6205,7 @@ fn onWindowMessage(
                 }
                 switch (app.surface) {
                     .overview => {
-                        var lane_action: ?GraphCanvas.OverviewLaneAction = null;
-                        for (app.model.graphs.items, 0..) |_, graph_index| {
-                            if (GraphCanvas.overviewLaneActionAt(&app.model, graph_index, x, y, bounds, &app.canvas)) |action| {
-                                lane_action = action;
-                                if (action == .inspect_worktrees) {
-                                    if (app.selectProject(app.model.graphs.items[graph_index].project.path)) app.inspectWorktrees();
-                                } else if (app.selectProject(app.model.graphs.items[graph_index].project.path)) {
-                                    app.surface = .project;
-                                    app.workspace_controls.panel_visible = false;
-                                    app.layoutWorkspace();
-                                    app.layoutEmptyStateControls();
-                                    app.rebindWorkspace(app.model.graphs.items[graph_index].project.path);
-                                }
-                                break;
-                            }
-                        }
-                        if (lane_action != null) {
+                        if (app.applyOverviewLaneAction(x, y, bounds)) {
                             _ = c.InvalidateRect(hwnd, null, 0);
                         } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
@@ -7791,6 +7793,586 @@ test "DPI UIA terminal tab close and controls retain physical geometry" {
         .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
         .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
     }, false);
+}
+
+const OverviewAccessibilitySink = struct {
+    expected: []const struct {
+        identity: []const u8,
+        name: ?[]const u8 = null,
+        selected: bool = false,
+        bounds: ?[4]i32 = null,
+    },
+    card_count: usize,
+    checked: bool = false,
+    failure: ?anyerror = null,
+
+    fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+        self.checked = true;
+        self.check(elements) catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+        var cards: usize = 0;
+        for (elements) |element| {
+            if (std.mem.startsWith(u8, element.identity, "overview-card:") or
+                std.mem.startsWith(u8, element.identity, "project-card:")) cards += 1;
+        }
+        try std.testing.expectEqual(self.card_count, cards);
+        for (self.expected) |expected| {
+            var matches: usize = 0;
+            for (elements) |element| {
+                if (!std.mem.eql(u8, expected.identity, element.identity)) continue;
+                matches += 1;
+                try std.testing.expectEqual(expected.selected, element.selected);
+                if (expected.name) |name| try std.testing.expectEqualStrings(name, element.name);
+                if (expected.bounds) |bounds|
+                    try std.testing.expectEqualDeep(bounds, [4]i32{ element.left, element.top, element.right, element.bottom });
+            }
+            if (matches != 1) std.debug.print("Expected exactly one overview element: {s}; found {d}\n", .{ expected.identity, matches });
+            try std.testing.expectEqual(@as(usize, 1), matches);
+        }
+    }
+
+    fn expect(self: *@This(), app: *App) !void {
+        self.checked = false;
+        self.failure = null;
+        app.syncAccessibilityTo(self, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        try std.testing.expect(self.checked);
+        if (self.failure) |err| return err;
+    }
+};
+
+fn overviewTestApp(dpi: u32) !App {
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        .workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false },
+        .dpi = dpi,
+    };
+    errdefer deinitOverviewTestApp(&app);
+    app.window.hwnd = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Never shown overview routing test"),
+        c.WS_POPUP,
+        0,
+        0,
+        physicalCoordinate(1200, dpi),
+        physicalCoordinate(900, dpi),
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    return app;
+}
+
+fn deinitOverviewTestApp(app: *App) void {
+    if (app.worktree_dialog) |*dialog| dialog.deinit();
+    if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
+    app.allocator.free(app.selected_node_id);
+    app.allocator.free(app.selected_edge_project_path);
+    app.allocator.free(app.selected_edge_id);
+    app.allocator.free(app.selected_worktree_path);
+    app.allocator.free(app.status_override);
+    app.client.deinit();
+    app.model.deinit();
+    app.sidebar_state.deinit();
+    app.declared_entry_ids.deinit();
+    app.kept_worktree_paths.deinit();
+    if (app.window.hwnd != null) _ = c.DestroyWindow(app.window.hwnd);
+}
+
+fn loadOverviewTestGraphs(app: *App, alpha: []const u8, beta: []const u8) !void {
+    const alpha_nodes =
+        \\[{"id":"a1","title":"Alpha 1","loopType":"turnBased","state":"idle"},{"id":"a2","title":"Alpha 2","loopType":"turnBased","state":"idle"},{"id":"a3","title":"Alpha 3","loopType":"turnBased","state":"idle"},{"id":"a4","title":"Alpha 4","loopType":"turnBased","state":"idle"}]
+    ;
+    const beta_nodes =
+        \\[{"id":"b1","title":"Beta 1","loopType":"turnBased","state":"idle"},{"id":"b2","title":"Beta 2","loopType":"turnBased","state":"idle"}]
+    ;
+    for ([_]struct { path: []const u8, name: []const u8, nodes: []const u8 }{
+        .{ .path = alpha, .name = "Overview Alpha", .nodes = alpha_nodes },
+        .{ .path = beta, .name = "Overview Beta", .nodes = beta_nodes },
+    }, 0..) |project, index| {
+        const path = try std.json.Stringify.valueAlloc(app.allocator, project.path, .{});
+        defer app.allocator.free(path);
+        const frame = try std.fmt.allocPrint(
+            app.allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"id\":\"{s}\",\"project\":{{\"path\":{s},\"name\":\"{s}\"}},\"nodes\":{s},\"edges\":[]}}}}}}",
+            .{ index + 1, project.name, path, project.name, project.nodes },
+        );
+        defer app.allocator.free(frame);
+        _ = try app.model.updateFromFrame(frame);
+    }
+    try std.testing.expectEqual(@as(usize, 2), app.model.graphs.items.len);
+    try std.testing.expectEqual(@as(usize, 4), app.model.graphFor(alpha).?.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), app.model.graphFor(beta).?.nodes.items.len);
+}
+
+fn expectOverviewSelection(app: *App, surface: GraphCanvas.Surface, path: []const u8, node: []const u8) !void {
+    try std.testing.expectEqual(surface, app.surface);
+    try std.testing.expectEqualStrings(path, app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(path, app.model.currentGraph().?.project.path);
+    try std.testing.expectEqualStrings(path, app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings(node, app.model.selected_node_id.?);
+    try std.testing.expectEqualStrings(node, app.model.selected().?.id);
+}
+
+const OverviewTestTarget = struct {
+    project: []const u8,
+    action: GraphCanvas.OverviewLaneAction,
+};
+
+fn overviewTestPreflight(app: *App, x: i32, y: i32, expected: OverviewTestTarget) !c.RECT {
+    if (app.surface != .overview or app.workspace != null or app.header_focus != null or
+        app.accessibility != null or app.empty_open_folder_button != null or
+        app.empty_global_overview_button != null or app.update_thread != null or
+        app.window.callback != null or app.window.key_callback != null or
+        app.client.worker != null or app.client.callback != null or app.client.want_connected or
+        app.client.pipe != c.INVALID_HANDLE_VALUE or
+        app.tray.added or app.smoke or app.sidebar_drag_active or app.canvas.dragging or
+        app.model.attentionCount() != 0 or app.workspace_controls.panel_visible or
+        !app.workspace_controls.rail_visible or app.workspace_controls.activity_enabled or
+        app.window.hwnd == null or c.IsWindowVisible(app.window.hwnd) != 0 or
+        c.GetWindow(app.window.hwnd, c.GW_CHILD) != null)
+        return error.UnsafeOverviewTestState;
+    var process: c.DWORD = 0;
+    if (c.GetWindowThreadProcessId(app.window.hwnd, &process) != c.GetCurrentThreadId() or
+        process != c.GetCurrentProcessId()) return error.UnsafeOverviewTestState;
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
+    const bounds = c.RECT{
+        .left = routing.canvas.left,
+        .top = routing.canvas.top,
+        .right = routing.canvas.right,
+        .bottom = routing.canvas.bottom,
+    };
+    if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom or
+        app.headerLayout().actionAt(x, y) != null or GraphCanvas.hitTestZoomControl(x, y, bounds) != null or
+        logicalCoordinate(physicalCoordinate(x, app.dpi), app.dpi) != x or
+        logicalCoordinate(physicalCoordinate(y, app.dpi), app.dpi) != y)
+        return error.UnsafeOverviewTestPoint;
+    var lane_hits: usize = 0;
+    for (app.model.graphs.items, 0..) |graph, index| {
+        if (GraphCanvas.overviewLaneActionAt(&app.model, index, x, y, bounds, &app.canvas)) |action| {
+            lane_hits += 1;
+            if (!std.mem.eql(u8, expected.project, graph.project.path) or expected.action != action)
+                return error.UnexpectedOverviewTestTarget;
+            if (action == .inspect_worktrees and
+                (!envFlag("GRAPHCODE_UIA_GATE") or envFlag("GRAPHCODE_UIA_SHOW_DIALOGS") or
+                    app.worktree_inspection != null or app.worktree_dialog != null or
+                    !graph.project.isLocalFilesystem()))
+                return error.UnsafeOverviewTestState;
+        }
+    }
+    if (lane_hits != 1) return error.UnexpectedOverviewTestTarget;
+    return bounds;
+}
+
+fn applyOverviewTestLaneAction(app: *App, x: i32, y: i32, expected: OverviewTestTarget) !void {
+    const foreground = c.GetForegroundWindow();
+    const focus = c.GetFocus();
+    const capture = c.GetCapture();
+    // This is the production lane action, not an OS input or mounted-terminal test.
+    const bounds = try overviewTestPreflight(app, x, y, expected);
+    try std.testing.expect(app.applyOverviewLaneAction(x, y, bounds));
+    try std.testing.expectEqual(@as(c_int, 0), c.IsWindowVisible(app.window.hwnd));
+    try std.testing.expectEqual(foreground, c.GetForegroundWindow());
+    try std.testing.expectEqual(focus, c.GetFocus());
+    try std.testing.expectEqual(capture, c.GetCapture());
+}
+
+test "cross-project overview Open actions select exact projects and emit DPI scoped cards" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        try loadOverviewTestGraphs(&app, "A", "B");
+        try std.testing.expect(app.selectProject("A"));
+        try std.testing.expect(app.selectNodeIndex(3));
+        app.openGlobalOverview();
+        try expectOverviewSelection(&app, .overview, "A", "a4");
+        const beta_bounds: [4]i32 = switch (dpi) {
+            96 => .{ 262, 442, 482, 528 },
+            144 => .{ 393, 663, 723, 792 },
+            else => .{ 524, 884, 964, 1056 },
+        };
+        var overview = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
+            .{ .identity = "open-project:A", .selected = true },
+            .{ .identity = "open-project:B" },
+            .{ .identity = "overview-card:A:a1" },
+            .{ .identity = "overview-card:A:a2" },
+            .{ .identity = "overview-card:A:a3" },
+            .{ .identity = "overview-card:A:a4" },
+            .{ .identity = "overview-card:B:b1", .bounds = beta_bounds },
+            .{ .identity = "overview-card:B:b2" },
+        } };
+        try overview.expect(&app);
+
+        try applyOverviewTestLaneAction(&app, 1072, 416, .{ .project = "B", .action = .open_project });
+        try expectOverviewSelection(&app, .project, "B", "b1");
+        try std.testing.expect(!app.workspace_controls.panel_visible);
+        var beta_canvas = OverviewAccessibilitySink{ .card_count = 2, .expected = &.{
+            .{ .identity = "open-project:A" },
+            .{ .identity = "open-project:B", .selected = true },
+            .{ .identity = "project-card:B:b1", .selected = true },
+            .{ .identity = "project-card:B:b2" },
+        } };
+        try beta_canvas.expect(&app);
+
+        app.openGlobalOverview();
+        try applyOverviewTestLaneAction(&app, 1072, 92, .{ .project = "A", .action = .open_project });
+        try expectOverviewSelection(&app, .project, "A", "a1");
+        var alpha_canvas = OverviewAccessibilitySink{ .card_count = 4, .expected = &.{
+            .{ .identity = "open-project:A", .selected = true },
+            .{ .identity = "open-project:B" },
+            .{ .identity = "project-card:A:a1", .selected = true },
+            .{ .identity = "project-card:A:a2" },
+            .{ .identity = "project-card:A:a3" },
+            .{ .identity = "project-card:A:a4" },
+        } };
+        try alpha_canvas.expect(&app);
+
+        app.openGlobalOverview();
+        try expectOverviewSelection(&app, .overview, "A", "a1");
+        try overview.expect(&app);
+        try std.testing.expect(app.workspace == null);
+    }
+}
+
+test "cross-project overview preflight rejects wrong identities and geometry before dispatch" {
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    try loadOverviewTestGraphs(&app, "A", "B");
+    app.openGlobalOverview();
+    try expectOverviewSelection(&app, .overview, "A", "a1");
+    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, 1072, 416, .{
+        .project = "A",
+        .action = .open_project,
+    }));
+    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, 1072, 416, .{
+        .project = "B",
+        .action = .inspect_worktrees,
+    }));
+    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, 520, 450, .{
+        .project = "B",
+        .action = .open_project,
+    }));
+    try std.testing.expectError(error.UnsafeOverviewTestPoint, overviewTestPreflight(&app, 219, 450, .{
+        .project = "B",
+        .action = .open_project,
+    }));
+    try expectOverviewSelection(&app, .overview, "A", "a1");
+    try std.testing.expect(!app.canvas.dragging);
+}
+
+test "cross-project overview refresh emits both projects without changing the selected loop" {
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    try loadOverviewTestGraphs(&app, "A", "B");
+    try std.testing.expect(app.selectProject("B"));
+    try std.testing.expect(app.selectNodeIndex(1));
+    app.openGlobalOverview();
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"Overview Alpha","project":{"path":"A","name":"Overview Alpha"},"nodes":[{"id":"a4","title":"Alpha refreshed","loopType":"turnBased","state":"idle"},{"id":"a1","title":"Alpha 1","loopType":"turnBased","state":"idle"},{"id":"a2","title":"Alpha 2","loopType":"turnBased","state":"idle"},{"id":"a3","title":"Alpha 3","loopType":"turnBased","state":"idle"}],"edges":[]}}}
+    );
+    try expectOverviewSelection(&app, .overview, "B", "b2");
+    var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
+        .{ .identity = "open-project:A" },
+        .{ .identity = "open-project:B", .selected = true },
+        .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 262, 118, 482, 204 } },
+        .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 508, 118, 728, 204 } },
+        .{ .identity = "overview-card:A:a2" },
+        .{ .identity = "overview-card:A:a3" },
+        .{ .identity = "overview-card:B:b1", .bounds = .{ 262, 442, 482, 528 } },
+        .{ .identity = "overview-card:B:b2", .name = "Beta 2" },
+    } };
+    try sink.expect(&app);
+}
+
+fn setOverviewTestEnvironment(name: []const u8, value: ?[]const u8) !void {
+    const key = try std.unicode.utf8ToUtf16LeAllocZ(std.testing.allocator, name);
+    defer std.testing.allocator.free(key);
+    try setWorkspaceTestEnvironment(key.ptr, value);
+}
+
+const OverviewGitEnvironment = struct {
+    previous: std.process.EnvMap,
+
+    fn init(empty_config: []const u8) !@This() {
+        var self = @This(){ .previous = try std.process.getEnvMap(std.testing.allocator) };
+        errdefer self.deinit();
+        var inherited = self.previous.iterator();
+        while (inherited.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                try setOverviewTestEnvironment(entry.key_ptr.*, null);
+        }
+        try setOverviewTestEnvironment("GIT_CONFIG_SYSTEM", empty_config);
+        try setOverviewTestEnvironment("GIT_CONFIG_GLOBAL", empty_config);
+        try setOverviewTestEnvironment("GIT_CONFIG_NOSYSTEM", "1");
+        try setOverviewTestEnvironment("GIT_TERMINAL_PROMPT", "0");
+        return self;
+    }
+
+    fn deinit(self: *@This()) void {
+        var current = std.process.getEnvMap(std.testing.allocator) catch @panic("Unable to read test Git environment");
+        defer current.deinit();
+        var installed = current.iterator();
+        while (installed.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                setOverviewTestEnvironment(entry.key_ptr.*, null) catch @panic("Unable to clear test Git environment");
+        }
+        var previous = self.previous.iterator();
+        while (previous.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                setOverviewTestEnvironment(entry.key_ptr.*, entry.value_ptr.*) catch @panic("Unable to restore Git environment");
+        }
+        self.previous.deinit();
+    }
+};
+
+fn expectOverviewGitEnvironment(expected: *const std.process.EnvMap) !void {
+    var actual = try std.process.getEnvMap(std.testing.allocator);
+    defer actual.deinit();
+    var count: usize = 0;
+    var entries = actual.iterator();
+    while (entries.next()) |entry| {
+        if (!std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_")) continue;
+        count += 1;
+        const value = expected.get(entry.key_ptr.*) orelse return error.UnexpectedGitEnvironmentKey;
+        // Environment values can contain credentials; failed assertions must not print them.
+        try std.testing.expect(std.mem.eql(u8, value, entry.value_ptr.*));
+    }
+    var expected_count: usize = 0;
+    entries = expected.iterator();
+    while (entries.next()) |entry| {
+        if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_")) expected_count += 1;
+    }
+    try std.testing.expectEqual(expected_count, count);
+}
+
+fn overviewGitEnvironmentErrorControl(empty_config: []const u8) !void {
+    var isolated = try OverviewGitEnvironment.init(empty_config);
+    defer isolated.deinit();
+    return error.ExpectedOverviewFixtureFailure;
+}
+
+fn exerciseOverviewWorktreesFixture() !void {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    var directory_open = true;
+    defer if (directory_open) temporary.dir.close();
+    defer temporary.parent_dir.close();
+    const root = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    errdefer std.debug.print("Failed overview Git fixture retained at: {s}\n", .{root});
+    try temporary.dir.writeFile(.{ .sub_path = "empty-git.config", .data = "" });
+    const empty_config = try std.fs.path.join(allocator, &.{ root, "empty-git.config" });
+    defer allocator.free(empty_config);
+    var git_environment = try OverviewGitEnvironment.init(empty_config);
+    defer git_environment.deinit();
+    const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+    const gate_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_GATE");
+    const dialogs_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_SHOW_DIALOGS");
+    const prior_support = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (prior_support) |value| allocator.free(value);
+    const prior_gate = std.process.getEnvVarOwned(allocator, "GRAPHCODE_UIA_GATE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (prior_gate) |value| allocator.free(value);
+    const prior_dialogs = std.process.getEnvVarOwned(allocator, "GRAPHCODE_UIA_SHOW_DIALOGS") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (prior_dialogs) |value| allocator.free(value);
+    defer {
+        setWorkspaceTestEnvironment(support_key, prior_support) catch @panic("Unable to restore test support directory");
+        setWorkspaceTestEnvironment(gate_key, prior_gate) catch @panic("Unable to restore test UIA gate");
+        setWorkspaceTestEnvironment(dialogs_key, prior_dialogs) catch @panic("Unable to restore test dialog setting");
+    }
+    try setWorkspaceTestEnvironment(support_key, root);
+    try setWorkspaceTestEnvironment(gate_key, "1");
+    try setWorkspaceTestEnvironment(dialogs_key, "0");
+    const alpha = try std.fs.path.join(allocator, &.{ root, "alpha" });
+    defer allocator.free(alpha);
+    const beta = try std.fs.path.join(allocator, &.{ root, "beta" });
+    defer allocator.free(beta);
+    for ([_][]const u8{ alpha, beta }) |path| {
+        const initialized = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "-c", "init.templateDir=", "init", "--quiet", "--initial-branch=main", path },
+        });
+        defer allocator.free(initialized.stdout);
+        defer allocator.free(initialized.stderr);
+        if (initialized.term != .Exited or initialized.term.Exited != 0) {
+            std.debug.print("Git fixture initialization failed: {s}\n", .{initialized.stderr});
+            return error.GitFixtureInitializationFailed;
+        }
+        const git_dir = try std.fs.path.join(allocator, &.{ path, ".git" });
+        defer allocator.free(git_dir);
+        var created = try std.fs.cwd().openDir(git_dir, .{});
+        created.close();
+        const resolved = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "-C", path, "rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir", "--show-toplevel" },
+        });
+        defer allocator.free(resolved.stdout);
+        defer allocator.free(resolved.stderr);
+        try std.testing.expect(resolved.term == .Exited and resolved.term.Exited == 0);
+        const expected_roots = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}\n", .{ git_dir, git_dir, path });
+        defer allocator.free(expected_roots);
+        for (expected_roots) |*byte| if (byte.* == '\\') {
+            byte.* = '/';
+        };
+        try std.testing.expectEqualStrings(expected_roots, resolved.stdout);
+    }
+    try temporary.dir.writeFile(.{ .sub_path = "alpha\\sentinel.txt", .data = "alpha preserved" });
+    try temporary.dir.writeFile(.{ .sub_path = "beta\\sentinel.txt", .data = "beta preserved" });
+    for ([_]struct { path: []const u8, other: []const u8, y: i32, node: []const u8 }{
+        .{ .path = beta, .other = alpha, .y = 416, .node = "b1" },
+        .{ .path = alpha, .other = beta, .y = 92, .node = "a1" },
+    }) |target| {
+        var app = try overviewTestApp(96);
+        defer deinitOverviewTestApp(&app);
+        try loadOverviewTestGraphs(&app, alpha, beta);
+        try std.testing.expect(app.selectProject(target.other));
+        app.openGlobalOverview();
+        try std.testing.expect(app.worktree_inspection == null and app.worktree_dialog == null);
+        try applyOverviewTestLaneAction(&app, 1131, target.y, .{ .project = target.path, .action = .inspect_worktrees });
+        try expectOverviewSelection(&app, .overview, target.path, target.node);
+        const inspection = app.worktree_inspection orelse return error.MissingScopedInspection;
+        const dialog = app.worktree_dialog orelse return error.MissingScopedWorktreeDialog;
+        try std.testing.expectEqualStrings(target.path, inspection.project_path);
+        try std.testing.expectEqualStrings(target.path, dialog.project_path);
+        try std.testing.expectEqual(@as(usize, 1), inspection.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 1), dialog.rows.items.len);
+        const expected_git_path = try allocator.dupe(u8, target.path);
+        defer allocator.free(expected_git_path);
+        for (expected_git_path) |*byte| if (byte.* == '\\') {
+            byte.* = '/';
+        };
+        const entry = inspection.entries.items[0];
+        try std.testing.expectEqualStrings(expected_git_path, entry.path);
+        try std.testing.expectEqualStrings(expected_git_path, dialog.rows.items[0].entry.path);
+        try std.testing.expect(entry.primary);
+        try std.testing.expectEqual(WorktreeStatus.ReclaimDecision.keep, WorktreeStatus.decision(entry));
+        try std.testing.expect(!WorktreeStatus.sweepSelectable(entry));
+        const row_identity = try std.fmt.allocPrint(allocator, "worktree:{s}", .{expected_git_path});
+        defer allocator.free(row_identity);
+        const project_identity = try std.fmt.allocPrint(allocator, "open-project:{s}", .{target.path});
+        defer allocator.free(project_identity);
+        const other_identity = try std.fmt.allocPrint(allocator, "open-project:{s}", .{target.other});
+        defer allocator.free(other_identity);
+        var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
+            .{ .identity = row_identity, .name = expected_git_path },
+            .{ .identity = project_identity, .selected = true },
+            .{ .identity = other_identity },
+        } };
+        try sink.expect(&app);
+    }
+    const alpha_bytes = try temporary.dir.readFileAlloc(allocator, "alpha\\sentinel.txt", 100);
+    defer allocator.free(alpha_bytes);
+    const beta_bytes = try temporary.dir.readFileAlloc(allocator, "beta\\sentinel.txt", 100);
+    defer allocator.free(beta_bytes);
+    try std.testing.expectEqualStrings("alpha preserved", alpha_bytes);
+    try std.testing.expectEqualStrings("beta preserved", beta_bytes);
+    var alpha_hash: [32]u8 = undefined;
+    var beta_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(alpha_bytes, &alpha_hash, .{});
+    std.crypto.hash.sha2.Sha256.hash(beta_bytes, &beta_hash, .{});
+    std.debug.print("Overview fixture verified before cleanup: {s} bytes=\"{s}\" sha256={s}; {s} bytes=\"{s}\" sha256={s}\n", .{
+        alpha, alpha_bytes, std.fmt.bytesToHex(alpha_hash, .lower),
+        beta,  beta_bytes,  std.fmt.bytesToHex(beta_hash, .lower),
+    });
+    temporary.dir.close();
+    directory_open = false;
+    try temporary.parent_dir.deleteTree(&temporary.sub_path);
+    std.debug.print("Removed exact successful overview fixture: {s}\n", .{root});
+}
+
+test "cross-project overview Worktrees actions inspect the exact disposable Git project" {
+    try exerciseOverviewWorktreesFixture();
+}
+
+test "cross-project overview Git redirection cannot escape owned fixture roots" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    var directory_open = true;
+    defer if (directory_open) temporary.dir.close();
+    defer temporary.parent_dir.close();
+    const root = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    errdefer std.debug.print("Failed overview outside-control fixture retained at: {s}\n", .{root});
+    try temporary.dir.writeFile(.{ .sub_path = "empty-git.config", .data = "" });
+    const empty_config = try std.fs.path.join(allocator, &.{ root, "empty-git.config" });
+    defer allocator.free(empty_config);
+    var outer_environment = try OverviewGitEnvironment.init(empty_config);
+    defer outer_environment.deinit();
+    const outside = try std.fs.path.join(allocator, &.{ root, "outside" });
+    defer allocator.free(outside);
+    const outside_git = try std.fs.path.join(allocator, &.{ outside, ".git" });
+    defer allocator.free(outside_git);
+    const initialized = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "git", "-c", "init.templateDir=", "init", "--quiet", "--initial-branch=outside-control", outside },
+    });
+    defer allocator.free(initialized.stdout);
+    defer allocator.free(initialized.stderr);
+    try std.testing.expect(initialized.term == .Exited and initialized.term.Exited == 0);
+    try temporary.dir.writeFile(.{ .sub_path = "outside\\sentinel.txt", .data = "outside must stay untouched" });
+    try temporary.dir.writeFile(.{ .sub_path = "outside\\trace.log", .data = "not a fixture trace channel" });
+    const paths = [_][]const u8{ "outside\\.git\\HEAD", "outside\\.git\\config", "outside\\sentinel.txt", "outside\\trace.log" };
+    var before: [paths.len][]u8 = @splat(&.{});
+    defer for (before) |bytes| allocator.free(bytes);
+    for (paths, 0..) |path, index| before[index] = try temporary.dir.readFileAlloc(allocator, path, 4096);
+
+    for ([_]bool{ false, true }) |multiple_redirects| {
+        try setOverviewTestEnvironment("GIT_DIR", outside_git);
+        if (multiple_redirects) {
+            for ([_][]const u8{
+                "GIT_WORK_TREE",        "GIT_COMMON_DIR",                   "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                "GIT_SHALLOW_FILE",     "GIT_CEILING_DIRECTORIES",          "GIT_EXEC_PATH",
+                "GIT_TEMPLATE_DIR",     "GIT_FUTURE_REDIRECTION_CONTROL",
+            }) |key| try setOverviewTestEnvironment(key, outside);
+            const trace = try std.fs.path.join(allocator, &.{ outside, "trace.log" });
+            defer allocator.free(trace);
+            try setOverviewTestEnvironment("GIT_TRACE2_EVENT", trace);
+            try setOverviewTestEnvironment("GIT_CONFIG_COUNT", "1");
+            try setOverviewTestEnvironment("GIT_CONFIG_KEY_0", "init.defaultObjectFormat");
+            try setOverviewTestEnvironment("GIT_CONFIG_VALUE_0", "invalid-overview-format");
+        }
+        var expected = try std.process.getEnvMap(allocator);
+        defer expected.deinit();
+        try std.testing.expectError(error.ExpectedOverviewFixtureFailure, overviewGitEnvironmentErrorControl(empty_config));
+        try expectOverviewGitEnvironment(&expected);
+        const fixture_result = exerciseOverviewWorktreesFixture();
+        try expectOverviewGitEnvironment(&expected);
+        for (paths, before) |path, original| {
+            const after = try temporary.dir.readFileAlloc(allocator, path, 4096);
+            defer allocator.free(after);
+            try std.testing.expectEqualSlices(u8, original, after);
+        }
+        try fixture_result;
+    }
+    std.debug.print("Overview Git redirection controls preserved outside HEAD/config/sentinels and restored success/error environments\n", .{});
+    temporary.dir.close();
+    directory_open = false;
+    try temporary.parent_dir.deleteTree(&temporary.sub_path);
+    std.debug.print("Removed exact successful overview outside-control fixture: {s}\n", .{root});
 }
 
 test "DPI gesture mapper classifies scaled sidebar and graph boundaries" {
