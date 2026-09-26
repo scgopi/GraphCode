@@ -1241,7 +1241,16 @@ test "native F10 dispatch preserves header pretranslation accelerator and contex
     var entries = [_]c.ACCEL{
         .{ .fVirt = c.FVIRTKEY, .key = c.VK_F10, .cmd = @intFromEnum(Command.about) },
     };
-    window.accelerators = c.CreateAcceleratorTableW(&entries, entries.len) orelse return error.AcceleratorCreationFailed;
+    window.accelerators = c.CreateAcceleratorTableW(&entries, entries.len) orelse {
+        const last_error = c.GetLastError();
+        std.log.err("F10 test stage=create-accelerator-table failed: error={d}, count={d}, ACCEL size={d}, alignment={d}", .{
+            last_error, entries.len, @sizeOf(c.ACCEL), @alignOf(c.ACCEL),
+        });
+        for (entries, 0..) |entry, index| {
+            std.log.err("F10 test ACCEL[{d}]: fVirt=0x{x}, key=0x{x}, cmd={d}", .{ index, entry.fVirt, entry.key, entry.cmd });
+        }
+        return error.AcceleratorCreationFailed;
+    };
     const test_accelerators = window.accelerators;
     defer _ = c.DestroyAcceleratorTable(test_accelerators);
     var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
