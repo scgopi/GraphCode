@@ -31,6 +31,27 @@ pub fn build(b: *std.Build) !void {
         "Optional Winghostty static host library",
     ) orelse b.pathJoin(&.{ winghostty_dir, "zig-out", "lib", "winghostty-win32-host.lib" });
 
+    const vt_build = b.addSystemCommand(&.{
+        b.graph.zig_exe,
+        "build",
+        "-Demit-lib-vt=true",
+        // The pinned Windows static archive does not bundle SIMD dependencies.
+        "-Dsimd=false",
+        "-Dtarget=x86_64-windows-msvc",
+        "-Doptimize=ReleaseSafe",
+        "--cache-dir",
+        b.pathFromRoot(".zig-cache\\terminal-vt"),
+        "--global-cache-dir",
+        b.pathFromRoot(".zig-cache\\terminal-vt-global"),
+        "--prefix",
+    });
+    vt_build.setCwd(.{ .cwd_relative = winghostty_dir });
+    const vt_prefix = vt_build.addOutputDirectoryArg("terminal-vt");
+    const vt_library = vt_prefix.path(b, "lib\\ghostty-vt-static.lib");
+    const vt_install = b.addInstallFile(vt_library, "lib\\ghostty-vt-static.lib");
+    const prepare_vt = b.step("prepare-terminal-vt", "Build the pinned scalar VT library for terminal memory tests");
+    prepare_vt.dependOn(&vt_install.step);
+
     const module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -60,6 +81,7 @@ pub fn build(b: *std.Build) !void {
         .flags = &.{ "-Wno-unused-command-line-argument" },
     });
     exe.addObjectFile(.{ .cwd_relative = winghostty_lib });
+    exe.addObjectFile(vt_library);
     for ([_][]const u8{
         "user32",
         "gdi32",

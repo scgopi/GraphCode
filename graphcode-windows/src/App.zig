@@ -803,7 +803,10 @@ pub const App = struct {
         if (uia_gate == null or !std.mem.eql(u8, uia_gate.?, "1") or
             (uia_gate_zmx != null and uia_gate_zmx.?.len > 0))
         {
-            self.workspace = try TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator);
+            self.workspace = TerminalWorkspace.Workspace.init(self.window.hwnd, self.allocator) catch |err| {
+                std.log.err("Terminal workspace initialization failed: {s}", .{@errorName(err)});
+                return err;
+            };
             // Seed the workspace with the real startup DPI captured above so the
             // very first surfaceOptions() (used for the first pane in this
             // workspace) already requests the correct font_scale instead of always

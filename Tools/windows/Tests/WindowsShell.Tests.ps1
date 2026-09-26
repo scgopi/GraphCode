@@ -536,6 +536,21 @@ Invoke-Native "Workspace layout executable tests" {
     & $zig test src\InputRouter.zig
   } finally { Pop-Location }
 }
+Invoke-Native "Terminal VT preparation and memory tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
+  Push-Location $shellRoot
+  try {
+    & $zig build prepare-terminal-vt "-Dwinghostty-dir=$winghosttyRoot"
+    if ($LASTEXITCODE -ne 0) { throw "terminal VT preparation failed" }
+    & $zig test src\TerminalVt.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
+  } finally { Pop-Location }
+}
 Invoke-Native "Terminal input queue tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
@@ -543,12 +558,13 @@ Invoke-Native "Terminal input queue tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
   if (-not (Test-Path -LiteralPath $include -PathType Container)) {
     throw "Winghostty headers are required for terminal input tests."
   }
   Push-Location $shellRoot
   try {
-    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc "-I$include"
+    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
 Invoke-Native "Graph model executable tests" {
@@ -722,10 +738,11 @@ Invoke-Native "App shell executable tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
   Push-Location $shellRoot
   try {
     & $zig test src\App.zig src\AccessibilityProvider.cpp `
-      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include"
+      -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 -loleaut32 -luiautomationcore -lwinhttp "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
 

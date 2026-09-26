@@ -5,6 +5,7 @@ const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
+const TerminalVt = @import("TerminalVt.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -136,6 +137,7 @@ pub const Surface = struct {
     output_events: usize = 0,
     output_result: TerminalOutputResult = .{},
     cells: []c.winghostty_terminal_cell = &.{},
+    vt: ?*TerminalVt.State = null,
     terminal_x: usize = 0,
     terminal_y: usize = 0,
     parser: ParserState = .normal,
@@ -155,6 +157,8 @@ pub const Surface = struct {
     accessibility_selection: ?struct { start: u64, end: u64 } = null,
 
     fn resetOutput(self: *Surface) void {
+        if (self.vt) |state| state.destroy();
+        self.vt = null;
         self.parser = .normal;
         self.csi_value = 0;
         self.csi_have_value = false;
@@ -191,6 +195,7 @@ pub const Workspace = struct {
     surfaces: [max_surfaces]Surface = [_]Surface{.{}} ** max_surfaces,
     active_surface: usize = 0,
     allocator: std.mem.Allocator,
+    experimental_vt: bool = false,
     zmx_path: []u8,
     cwd: []u8,
     recreate_sessions: [max_surfaces][]u8 = [_][]u8{&.{}} ** max_surfaces,
@@ -230,10 +235,12 @@ pub const Workspace = struct {
     dpi: u32 = Dpi.base_dpi,
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !*Workspace {
+        const experimental_vt = try TerminalVt.startupEnabled(allocator_);
         const workspace = try allocator_.create(Workspace);
         workspace.* = .{
             .parent = parent,
             .allocator = allocator_,
+            .experimental_vt = experimental_vt,
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
             .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
             .input_queue = .{ .allocator = allocator_ },
@@ -434,9 +441,11 @@ pub const Workspace = struct {
         self.destroySurface(index);
         self.resetSessionState(index);
         self.recreate_due_ms[index] = 0;
-        const session = try self.allocator.dupe(u8, node_id);
-        errdefer self.allocator.free(session);
-        try self.startSession(index, session);
+        const slot = &self.surfaces[index];
+        slot.session_name = try self.allocator.dupe(u8, node_id);
+        errdefer self.destroySurface(index);
+        slot.project_path = try self.allocator.dupe(u8, self.project_path);
+        try self.startSession(index, slot.session_name);
         if (self.layout.tabs.items.len == 0) {
             try self.layout.addTab(node_id, true);
         } else if (index > 0 and self.layout.tabs.items.len == 1) {
@@ -455,8 +464,6 @@ pub const Workspace = struct {
             return error.WinghosttySurfaceCreateFailed;
         }
 
-        self.surfaces[index].session_name = session;
-        self.surfaces[index].project_path = try self.allocator.dupe(u8, self.project_path);
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
         clearCells(&self.surfaces[index]);
@@ -491,11 +498,12 @@ pub const Workspace = struct {
     }
 
     fn createAttachedSurface(self: *Workspace, session: []const u8) !usize {
-        for (self.surfaces, 0..) |slot, index| {
+        for (&self.surfaces, 0..) |*slot, index| {
             if (slot.surface != null or slot.attach != null) continue;
-            const owned_session = try self.allocator.dupe(u8, session);
-            errdefer self.allocator.free(owned_session);
-            try self.startSession(index, owned_session);
+            slot.session_name = try self.allocator.dupe(u8, session);
+            errdefer self.destroySurface(index);
+            slot.project_path = try self.allocator.dupe(u8, self.project_path);
+            try self.startSession(index, slot.session_name);
             var options = self.surfaceOptions(index);
             const result = c.winghostty_host_create_surface_v2(
                 self.host,
@@ -508,8 +516,6 @@ pub const Workspace = struct {
                 return error.WinghosttySurfaceCreateFailed;
             }
 
-            self.surfaces[index].session_name = owned_session;
-            self.surfaces[index].project_path = try self.allocator.dupe(u8, self.project_path);
             self.surfaces[index].destroyed = false;
             self.surfaces[index].destroying = false;
             clearCells(&self.surfaces[index]);
@@ -1176,6 +1182,8 @@ pub const Workspace = struct {
     }
 
     fn startSession(self: *Workspace, index: usize, session: []const u8) !void {
+        const vt = if (self.experimental_vt) try TerminalVt.State.create(self.allocator, columns, rows) else null;
+        errdefer if (vt) |state| state.destroy();
         const nonreading = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_NONREADING_ATTACH") catch null;
         defer if (nonreading) |value| self.allocator.free(value);
         var attach_args: [4][]const u8 = undefined;
@@ -1200,6 +1208,7 @@ pub const Workspace = struct {
         }
         self.input_mutex.lock();
         self.surfaces[index].attach = child;
+        self.surfaces[index].vt = vt;
         self.input_mutex.unlock();
     }
 
@@ -1214,20 +1223,24 @@ pub const Workspace = struct {
     }
 
     fn enqueueInput(self: *Workspace, index: usize, bytes: []const u8) void {
-        if (bytes.len == 0) return;
+        _ = self.tryEnqueueInput(index, bytes);
+    }
+
+    fn tryEnqueueInput(self: *Workspace, index: usize, bytes: []const u8) bool {
+        if (bytes.len == 0) return true;
         if (bytes.len > input_queue_max_bytes) {
             self.setInputError("terminal input queue overflow: paste is too large");
-            return;
+            return false;
         }
         const copy = self.allocator.dupe(u8, bytes) catch {
             self.setInputError("terminal input queue allocation failed");
-            return;
+            return false;
         };
         self.input_mutex.lock();
         if (self.input_stop) {
             self.input_mutex.unlock();
             self.allocator.free(copy);
-            return;
+            return false;
         }
         self.input_queue.enqueue(index, copy) catch |err| {
             self.input_mutex.unlock();
@@ -1236,10 +1249,22 @@ pub const Workspace = struct {
                 error.InputTooLarge => "terminal input queue overflow: paste is too large",
                 error.InputQueueFull => "terminal input queue overflow",
             });
-            return;
+            return false;
         };
         self.input_condition.signal();
         self.input_mutex.unlock();
+        return true;
+    }
+
+    fn routeVtResponses(self: *Workspace, index: usize) void {
+        const state = self.surfaces[index].vt orelse return;
+        if (state.response_delivery_failed or state.responses().len == 0) return;
+        if (self.tryEnqueueInput(index, state.responses())) {
+            state.consumeResponses();
+        } else {
+            state.response_delivery_failed = true;
+            self.surfaces[index].output_result.vt_error = error.ResponseDeliveryFailed;
+        }
     }
 
     fn stopInputWorker(self: *Workspace) void {
@@ -1441,8 +1466,9 @@ pub const Workspace = struct {
         const surface = slot.surface orelse return;
         const previous = slot.output_result;
         const result = publishTerminalOutput(self.allocator, slot, bytes, NativeTerminalOutput{ .surface = surface });
+        self.routeVtResponses(index);
         self.render_error = result.render_result;
-        if (!std.meta.eql(previous, result)) result.logFailures(index);
+        if (!std.meta.eql(previous, slot.output_result)) slot.output_result.logFailures(index);
     }
 };
 
@@ -1511,29 +1537,40 @@ const TerminalOutputResult = struct {
         "Terminal cell update failed; accessible text was not updated",
         "Terminal accessibility update failed; accessible text is not current",
         "Terminal redraw failed; displayed text is not confirmed",
+        "Experimental terminal VT state failed; rendered content is not confirmed",
+        "Experimental terminal renderer cannot project these cells; rendered content is not confirmed",
+        "Experimental terminal cell update failed; rendered content is not confirmed",
     };
 
     snapshot_error: ?SnapshotError = null,
+    vt_error: ?TerminalVt.Error = null,
+    projection_error: ?error{ UnsupportedHostCell, InvalidGrid } = null,
+    authoritative_vt: bool = false,
     render_result: c.winghostty_result = c.WINGHOSTTY_OK,
     text_result: ?c.winghostty_result = null,
     redraw_result: c.winghostty_result = c.WINGHOSTTY_OK,
 
     fn succeeded(self: TerminalOutputResult) bool {
-        return self.snapshot_error == null and self.render_result == c.WINGHOSTTY_OK and
+        return self.vt_error == null and self.projection_error == null and
+            self.snapshot_error == null and self.render_result == c.WINGHOSTTY_OK and
             self.text_result == c.WINGHOSTTY_OK and self.redraw_result == c.WINGHOSTTY_OK;
     }
 
     fn message(self: TerminalOutputResult) ?[]const u8 {
+        if (self.vt_error != null) return error_messages[4];
         if (self.snapshot_error != null) return error_messages[0];
-        if (self.render_result != c.WINGHOSTTY_OK) return error_messages[1];
+        if (self.render_result != c.WINGHOSTTY_OK) return error_messages[if (self.authoritative_vt) 6 else 1];
         if (self.text_result) |result| {
             if (result != c.WINGHOSTTY_OK) return error_messages[2];
         }
         if (self.redraw_result != c.WINGHOSTTY_OK) return error_messages[3];
+        if (self.projection_error != null) return error_messages[5];
         return null;
     }
 
     fn logFailures(self: TerminalOutputResult, index: usize) void {
+        if (self.vt_error) |err| std.debug.print("Terminal output pane={d} stage=vt error={s}\n", .{ index, @errorName(err) });
+        if (self.projection_error) |err| std.debug.print("Terminal output pane={d} stage=projection error={s}\n", .{ index, @errorName(err) });
         if (self.snapshot_error) |err| std.debug.print("Terminal output pane={d} stage=snapshot error={s}\n", .{ index, @errorName(err) });
         if (self.render_result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=cells result={d}\n", .{ index, self.render_result });
         if (self.text_result) |result| {
@@ -1560,6 +1597,7 @@ const NativeTerminalOutput = struct {
 };
 
 fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []const u8, api: anytype) TerminalOutputResult {
+    if (slot.vt) |state| return publishVtOutput(slot, state, bytes, api);
     feedCells(slot, bytes);
     var result = TerminalOutputResult{};
     const snapshot: ?AccessibilitySnapshot = accessibilitySnapshot(allocator, slot.cells, columns, rows, slot.terminal_x, slot.terminal_y) catch |err| blk: {
@@ -1572,6 +1610,44 @@ fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []
         if (snapshot) |value| result.text_result = api.setText(value.text, value.utf16_length, value.caret);
     }
     result.redraw_result = api.redraw();
+    slot.output_result = result;
+    if (result.succeeded()) slot.output_events += 1;
+    return result;
+}
+
+fn publishVtOutput(slot: *Surface, state: *TerminalVt.State, bytes: []const u8, api: anytype) TerminalOutputResult {
+    var result = TerminalOutputResult{ .authoritative_vt = true };
+    state.feed(bytes) catch |err| {
+        result.vt_error = err;
+    };
+    if (state.snapshot_current) {
+        const snapshot = &state.snapshot.?;
+        var projected: [cell_count]TerminalVt.HostCell = undefined;
+        if (snapshot.columns != columns or snapshot.rows != rows or slot.cells.len != cell_count) {
+            result.projection_error = error.InvalidGrid;
+        } else {
+            TerminalVt.project(snapshot, &projected) catch |err| {
+                result.projection_error = err;
+            };
+        }
+        if (result.projection_error == null) {
+            for (projected, slot.cells) |cell, *out| out.* = .{
+                .codepoint = cell.codepoint,
+                .foreground = cell.fg,
+                .background = cell.bg,
+                .flags = cell.flags,
+            };
+            result.render_result = api.setCells(slot.cells);
+        }
+        // This is authoritative VT text, not a claim about the host's glyphs.
+        // A non-visible caret has no representable host offset.
+        if (snapshot.caret) |caret| {
+            result.text_result = api.setText(snapshot.text, snapshot.utf16.len, caret);
+        } else {
+            result.vt_error = error.InvalidSnapshot;
+        }
+        if (result.projection_error == null) result.redraw_result = api.redraw();
+    }
     slot.output_result = result;
     if (result.succeeded()) slot.output_events += 1;
     return result;
@@ -1611,6 +1687,149 @@ const TerminalOutputProbe = struct {
         return self.redraw_result;
     }
 };
+
+test "terminal VT vertical split UTF8 multiparameter CSI and SGR" {
+    try std.testing.expectEqual(@as(u32, c.WINGHOSTTY_TERMINAL_CELL_FOREGROUND_SET), TerminalVt.HostCell.foreground_set);
+    try std.testing.expectEqual(@as(u32, c.WINGHOSTTY_TERMINAL_CELL_BACKGROUND_SET), TerminalVt.HostCell.background_set);
+    var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer std.testing.allocator.free(slot.cells);
+    defer if (slot.vt) |state| state.destroy();
+    clearCells(&slot);
+    slot.vt = try TerminalVt.State.create(std.testing.allocator, columns, rows);
+    var probe = TerminalOutputProbe{};
+    _ = publishTerminalOutput(std.testing.allocator, &slot, "\xc3", &probe);
+    probe.call_count = 0;
+    _ = publishTerminalOutput(std.testing.allocator, &slot, "\xa9\x1b[2;3H\x1b[38;2;12;34;56mZ", &probe);
+    try std.testing.expectEqual(@as(u32, 0xe9), slot.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u32, 'Z'), slot.cells[columns + 2].codepoint);
+    try std.testing.expectEqual(@as(u32, 0x0c2238), slot.cells[columns + 2].foreground);
+    try std.testing.expect(slot.output_result.succeeded());
+    try std.testing.expectEqual(@as(usize, 2), slot.output_events);
+    try std.testing.expect(std.mem.startsWith(u8, probe.text[0..probe.text_length], "\xc3\xa9"));
+}
+
+test "terminal VT default off preserves the old feed path" {
+    var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer std.testing.allocator.free(slot.cells);
+    clearCells(&slot);
+    var probe = TerminalOutputProbe{};
+    try std.testing.expect(!try TerminalVt.parseFlag(null));
+    try std.testing.expect(slot.vt == null);
+    try std.testing.expect(publishTerminalOutput(std.testing.allocator, &slot, "\xc3\xa9\x1b[2;3H\x1b[38;2;12;34;56mZ", &probe).succeeded());
+    try std.testing.expectEqual(@as(u32, 'Z'), slot.cells[0].codepoint);
+    try std.testing.expect(!slot.output_result.authoritative_vt);
+}
+
+test "terminal VT projection rejection still publishes clusters and routes replies to current pane" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const slot = &workspace.surfaces[5];
+    slot.cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    defer allocator.free(slot.cells);
+    slot.vt = try TerminalVt.State.create(allocator, columns, rows);
+    defer slot.vt.?.destroy();
+    clearCells(slot);
+    var probe = TerminalOutputProbe{};
+    const result = publishTerminalOutput(allocator, slot, "A\xe7\x95\x8ce\xcc\x81\xf0\x9f\x98\x80\x1b[6n", &probe);
+    try std.testing.expectEqual(error.UnsupportedHostCell, result.projection_error.?);
+    try std.testing.expect(result.vt_error == null);
+    try std.testing.expect(!result.succeeded());
+    try std.testing.expectEqual(@as(usize, 0), slot.output_events);
+    try std.testing.expectEqual(@as(usize, 1), probe.call_count);
+    try std.testing.expectEqual(.text, probe.calls[0]);
+    try std.testing.expect(std.mem.startsWith(u8, probe.text[0..probe.text_length], "A\xe7\x95\x8ce\xcc\x81\xf0\x9f\x98\x80"));
+    try std.testing.expectEqual(@as(usize, 6), probe.caret);
+    workspace.routeVtResponses(5);
+    try std.testing.expectEqual(@as(usize, 0), slot.vt.?.responses().len);
+    workspace.routeVtResponses(5);
+    try std.testing.expectEqual(@as(usize, 1), workspace.input_queue.count);
+    const item = workspace.input_queue.dequeue().?;
+    defer allocator.free(item.bytes);
+    try std.testing.expectEqual(@as(usize, 5), item.surface);
+    try std.testing.expectEqualStrings("\x1b[1;7R", item.bytes);
+    try std.testing.expectEqualStrings(result.message().?, workspace.inputStatus("").?);
+    workspace.input_error_message = "terminal input write failed";
+    try std.testing.expectEqualStrings("terminal input write failed", workspace.inputStatus("").?);
+    workspace.input_error_message = "";
+    probe.call_count = 0;
+    const recovered = publishTerminalOutput(allocator, slot, "\x1b[2J\x1b[Hplain", &probe);
+    try std.testing.expect(recovered.succeeded());
+    try std.testing.expectEqualStrings("Terminal output error cleared", workspace.inputStatus(result.message().?).?);
+}
+
+test "terminal VT queue rejection retains bounded responses and never replays" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const state = try TerminalVt.State.create(allocator, columns, rows);
+    defer state.destroy();
+    workspace.surfaces[3].vt = state;
+    for (0..input_queue_capacity) |_| try workspace.input_queue.enqueue(1, try allocator.dupe(u8, "x"));
+    try state.feed("\x1b[6n");
+    workspace.routeVtResponses(3);
+    try std.testing.expect(state.response_delivery_failed);
+    try std.testing.expectEqualStrings("\x1b[1;1R", state.responses());
+    try std.testing.expectEqual(error.ResponseDeliveryFailed, workspace.surfaces[3].output_result.vt_error.?);
+    try std.testing.expectEqualStrings("terminal input queue overflow", workspace.inputStatus("").?);
+    workspace.input_queue.clear();
+    workspace.routeVtResponses(3);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try std.testing.expectError(error.ResponseDeliveryFailed, state.feed("text remains authoritative"));
+    try std.testing.expect(state.snapshot_current);
+}
+
+test "terminal VT swap routes stable owner and cancellation removes only that pane" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const state = try TerminalVt.State.create(allocator, columns, rows);
+    defer state.destroy();
+    workspace.surfaces[2].vt = state;
+    workspace.surfaces[2].surface = @ptrFromInt(1);
+    try state.feed("AB\x1b[6n");
+    moveReplacementSurface(&workspace.surfaces, 0, 2);
+    try std.testing.expect(workspace.surfaces[0].vt.? == state);
+    try std.testing.expect(workspace.surfaces[2].vt == null);
+    workspace.routeVtResponses(0);
+    try workspace.input_queue.enqueue(1, try allocator.dupe(u8, "other pane"));
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.items[0].surface);
+    try std.testing.expectEqualStrings("\x1b[1;3R", workspace.input_queue.items[0].bytes);
+    workspace.cancelSurfaceInput(0);
+    try std.testing.expectEqual(@as(usize, 1), workspace.input_queue.count);
+    const item = workspace.input_queue.dequeue().?;
+    defer allocator.free(item.bytes);
+    try std.testing.expectEqual(@as(usize, 1), item.surface);
+    try std.testing.expectEqualStrings("other pane", item.bytes);
+    try std.testing.expectEqual(@as(usize, 0), state.responses().len);
+    workspace.input_stop = true;
+    try state.feed("\x1b[6n");
+    workspace.routeVtResponses(0);
+    try std.testing.expect(state.response_delivery_failed);
+    try std.testing.expectEqualStrings("\x1b[1;3R", state.responses());
+}
+
+test "terminal VT host publication errors remain explicit with authoritative text" {
+    const allocator = std.testing.allocator;
+    var slot = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(slot.cells);
+    slot.vt = try TerminalVt.State.create(allocator, columns, rows);
+    defer slot.vt.?.destroy();
+    clearCells(&slot);
+    var probe = TerminalOutputProbe{ .render_result = c.WINGHOSTTY_OUT_OF_MEMORY };
+    const result = publishTerminalOutput(allocator, &slot, "A", &probe);
+    try std.testing.expect(!result.succeeded());
+    try std.testing.expectEqual(c.WINGHOSTTY_OK, result.text_result.?);
+    try std.testing.expectEqualStrings(TerminalOutputResult.error_messages[6], result.message().?);
+    try std.testing.expectEqual(@as(usize, 0), slot.output_events);
+    probe = .{ .text_result = c.WINGHOSTTY_OUT_OF_MEMORY };
+    try std.testing.expect(!publishTerminalOutput(allocator, &slot, "B", &probe).succeeded());
+    probe = .{ .redraw_result = c.WINGHOSTTY_OUT_OF_MEMORY };
+    try std.testing.expect(!publishTerminalOutput(allocator, &slot, "C", &probe).succeeded());
+}
 
 test "terminal accessibility feed publishes rendered cells instead of overwritten VT bytes" {
     var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
@@ -1866,32 +2085,115 @@ test "terminal accessibility feed recovery replaces only its own previous status
 }
 
 fn writeInputBounded(handle: c.HANDLE, bytes: []const u8) !usize {
+    return writeInputChunks(bytes, NativeInputWriter{ .handle = handle });
+}
+
+fn writeInputChunks(bytes: []const u8, writer: anytype) !usize {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const amount: c.DWORD = @intCast(@min(bytes.len - offset, 16 * 1024));
+        const amount = @min(bytes.len - offset, 16 * 1024);
+        const written = try writer.write(bytes[offset..][0..amount]);
+        if (written == 0 or written > amount) return error.WriteFailed;
+        offset += written;
+    }
+    return offset;
+}
+
+const NativeInputWriter = struct {
+    handle: c.HANDLE,
+
+    fn write(self: NativeInputWriter, bytes: []const u8) !usize {
         var overlapped = std.mem.zeroes(c.OVERLAPPED);
         overlapped.hEvent = c.CreateEventW(null, 1, 0, null);
         if (overlapped.hEvent == null) return error.WriteFailed;
         defer _ = c.CloseHandle(overlapped.hEvent);
         var written: c.DWORD = 0;
-        if (c.WriteFile(handle, bytes[offset..].ptr, amount, &written, &overlapped) == 0) {
+        if (c.WriteFile(self.handle, bytes.ptr, @intCast(bytes.len), &written, &overlapped) == 0) {
             if (c.GetLastError() != c.ERROR_IO_PENDING) return error.WriteFailed;
             const wait_result = c.WaitForSingleObject(overlapped.hEvent, input_write_timeout_ms);
             if (wait_result == c.WAIT_TIMEOUT) {
-                _ = c.CancelIoEx(handle, &overlapped);
-                waitForCancelledWrite(handle, &overlapped, &written);
+                _ = c.CancelIoEx(self.handle, &overlapped);
+                waitForCancelledWrite(self.handle, &overlapped, &written);
                 return error.WriteTimeout;
             }
             if (wait_result != c.WAIT_OBJECT_0 or
-                c.GetOverlappedResult(handle, &overlapped, &written, 0) == 0)
+                c.GetOverlappedResult(self.handle, &overlapped, &written, 0) == 0)
             {
                 return error.WriteFailed;
             }
         }
-        if (written == 0) return error.WriteFailed;
-        offset += written;
+        return written;
     }
-    return offset;
+};
+
+test "terminal VT queued replies use production partial-write loop without replay after cancellation" {
+    const Writer = struct {
+        received: [64]u8 = undefined,
+        length: usize = 0,
+        calls: usize = 0,
+        cancel_at: ?usize = null,
+
+        fn write(self: *@This(), bytes: []const u8) !usize {
+            self.calls += 1;
+            if (self.cancel_at) |limit| if (self.length >= limit) return error.WriteFailed;
+            const amount = @min(bytes.len, 2);
+            @memcpy(self.received[self.length..][0..amount], bytes[0..amount]);
+            self.length += amount;
+            return amount;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const state = try TerminalVt.State.create(allocator, columns, rows);
+    defer state.destroy();
+    workspace.surfaces[4].vt = state;
+    try state.feed("\x1b[6n\x1b[6n");
+    workspace.routeVtResponses(4);
+    const item = workspace.input_queue.dequeue().?;
+    defer allocator.free(item.bytes);
+    var writer = Writer{};
+    try std.testing.expectEqual(item.bytes.len, try writeInputChunks(item.bytes, &writer));
+    try std.testing.expectEqualStrings(item.bytes, writer.received[0..writer.length]);
+    try std.testing.expect(writer.calls > 1);
+    var cancelled = Writer{ .cancel_at = 2 };
+    try std.testing.expectError(error.WriteFailed, writeInputChunks(item.bytes, &cancelled));
+    try std.testing.expectEqual(@as(usize, 2), cancelled.length);
+    try std.testing.expectEqual(@as(usize, 2), cancelled.calls);
+    workspace.routeVtResponses(4);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+}
+
+test "terminal VT production write loop enforces chunks and zero-progress failure" {
+    const Writer = struct {
+        expected: []const u8,
+        offset: usize = 0,
+        calls: usize = 0,
+        zero: bool = false,
+
+        fn write(self: *@This(), bytes: []const u8) !usize {
+            self.calls += 1;
+            try std.testing.expect(bytes.len <= 16 * 1024);
+            try std.testing.expectEqualSlices(u8, self.expected[self.offset..][0..bytes.len], bytes);
+            if (self.zero) return 0;
+            self.offset += bytes.len;
+            return bytes.len;
+        }
+    };
+    const state = try TerminalVt.State.create(std.testing.allocator, columns, rows);
+    defer state.destroy();
+    try state.feed("\x1b[6n" ** 8000);
+    var writer = Writer{ .expected = state.responses() };
+    try std.testing.expectEqual(state.responses().len, try writeInputChunks(state.responses(), &writer));
+    try std.testing.expectEqual(@as(usize, 3), writer.calls);
+    var zero = Writer{ .expected = state.responses(), .zero = true };
+    try std.testing.expectError(error.WriteFailed, writeInputChunks(state.responses(), &zero));
+    try std.testing.expectEqual(@as(usize, 1), zero.calls);
+    try std.testing.expectEqual(@as(usize, 0), zero.offset);
+    var empty = Writer{ .expected = &.{} };
+    try std.testing.expectEqual(@as(usize, 0), try writeInputChunks("", &empty));
+    try std.testing.expectEqual(@as(usize, 0), empty.calls);
 }
 
 fn waitForCancelledWrite(

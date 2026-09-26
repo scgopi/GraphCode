@@ -16,7 +16,7 @@ destruction kills only the attach client; zmx owns the session and survives shel
 restarts. The host contract is the accepted two-surface terminal-gate contract,
 not a synthetic terminal proof.
 
-The pinned Winghostty child HWND already owns the terminal's UI Automation
+By default, the pinned Winghostty child HWND already owns the terminal's UI Automation
 Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
 120x40 rendered-cell grid, with spaces for empty cells, preserved trailing blanks,
 LF row separators, and independent UTF-16 length/cursor offsets. This deliberately
@@ -32,6 +32,75 @@ path replaces only its own exact failure messages with one neutral error-cleared
 notice; it does not overwrite unrelated statuses or imply a reset pane published
 fresh text. Applied selection, visible caret/geometry, provider range
 conformance, and end-to-end accessibility parity remain unverified or incomplete.
+
+### Experimental VT parser (opt-in, partial renderer support)
+
+Set `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=1` before startup to use the public
+`libghostty-vt` C API from the existing Winghostty pin
+`f5abc059e4ca58b376eb209313aca7784659c679`. An absent variable or exactly `0`
+keeps the existing ASCII path unchanged. Other values, including an empty value,
+fail workspace initialization with `InvalidTerminalVtFlag` and a diagnostic;
+there is no silent fallback.
+
+Each pane owns a stable, heap-allocated terminal and copied viewport snapshot.
+UTF-8 is parsed incrementally; complete grapheme codepoints, wide-cell occupancy,
+styles, resolved/default colors, row wrapping, cursor state, screen identity,
+and scrollbar state are retained. Accessible UTF-8/UTF-16 text includes complete
+clusters and separate cell-to-UTF-16 offsets; wide spacers do not invent spaces
+or split surrogate pairs. This is the authoritative VT viewport, not a claim
+that the native host displayed it. Grapheme clustering follows the provider's
+terminal modes (including mode 2027); GraphCode does not override their defaults.
+
+The normal host still renders one codepoint and two colors per cell using its
+existing 5x7 patterns. It does not implement shaping, clusters, wide glyphs,
+decorations, or cursor pixels. The opt-in projection accepts narrow single
+scalars and colors, flattening inverse/invisible colors. Unsupported cells
+reject the projection explicitly with `UnsupportedHostCell`; they are not
+truncated, replaced by ASCII, or presented as a successful blank frame.
+Previously published cells remain, while authoritative accessible text and valid
+PTY replies can still advance. The status reports that rendered content is
+unconfirmed, and the batch does not count as successful output publication.
+Ordinary legacy output is not subject to this opt-in rejection policy.
+
+Query replies are captured synchronously into a per-pane 64 KiB buffer and
+enqueued through the existing input queue for the current pane slot. Complete
+responses are accepted or an overflow is latched; no partial response is added.
+Accepted bytes are consumed exactly once. A rejected enqueue retains the pending
+bytes and latches a delivery failure with no automatic retry/replay; later replies
+are not accepted in that failed state. Existing input errors take status
+precedence. Native input retains its existing per-write event and 50 ms wait,
+not a whole-buffer deadline. Pane teardown discards its state and queued input.
+
+The public `vt_write` function returns void and logs some internal errors: a
+completed call is **not** proof of parse success. A typed allocator bridge
+latches actual provider allocation failures and marks the state unreliable
+without replay/recovery; normal resize/remap refusal is not an allocation
+failure. Failed VT resize is also non-recovering, since transactional failure
+is not guaranteed. Failed owned snapshots are not published as current.
+OSC 2 titles are retained without UI changes and bells remain a UI no-op.
+The PWD query copies the API's value, but **OSC 7 does not populate it at this
+pin**; an explicit public PWD option roundtrip is not OSC 7 support.
+
+Production remains fixed at **120x40**. Headless tests exercise in-memory resize,
+reflow, scrollback/viewport, all stream chunk boundaries, projection failures,
+allocation failures, and response ownership. Pixel-bound changes do not resize
+the VT because PTY resize negotiation is not implemented. Wheel/selection
+integration, native glyph rendering, visible caret geometry, full TextPattern
+conformance, and end-to-end terminal parity remain separate work. No live
+HWND, UIA, clipboard, device-input, or rendering proof is claimed.
+
+`build.zig` builds the VT library separately from the unchanged Win32 host and
+links its generated static artifact into the application. The
+`prepare-terminal-vt` step installs the same artifact to
+`graphcode-windows\zig-out\lib\ghostty-vt-static.lib` for memory tests.
+The dedicated provider invocation uses Zig 0.15.2, `ReleaseSafe`,
+`x86_64-windows-msvc`, `-Demit-lib-vt=true`, and `-Dsimd=false`: the pinned
+Windows static library does not bundle its SIMD dependencies. This selects
+the existing scalar implementation, not a different parser or provider pin;
+no SIMD performance or benchmark equivalence is claimed. Provider build cwd,
+cache, and prefix are isolated from the host build. The normal Windows shell
+regression runner prepares the artifact before the memory and terminal tests,
+and propagates preparation/test failures.
 
 The graph surface also provides native Win32 create/edit forms for nodes and
 edges, a settings dialog, context menus, and keyboard-accessible actions:
