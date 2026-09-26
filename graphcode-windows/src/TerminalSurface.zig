@@ -132,9 +132,9 @@ pub const Surface = struct {
     destroying: bool = false,
     destroyed: bool = false,
     input_bytes: usize = 0,
+    // Counts batches whose cell, accessibility, and redraw publication calls all succeeded.
     output_events: usize = 0,
-    terminal_buffer: [16 * 1024]u8 = undefined,
-    terminal_buffer_len: usize = 0,
+    output_result: TerminalOutputResult = .{},
     cells: []c.winghostty_terminal_cell = &.{},
     terminal_x: usize = 0,
     terminal_y: usize = 0,
@@ -153,6 +153,16 @@ pub const Surface = struct {
     // by onAccessibilitySelection; kept here so a UIA text pattern for the embedded
     // terminal has real selection data to expose instead of none at all.
     accessibility_selection: ?struct { start: u64, end: u64 } = null,
+
+    fn resetOutput(self: *Surface) void {
+        self.parser = .normal;
+        self.csi_value = 0;
+        self.csi_have_value = false;
+        clearCells(self);
+        self.input_bytes = 0;
+        self.output_events = 0;
+        self.output_result = .{};
+    }
 };
 
 pub fn surfaceIdentityMatches(surface: *const Surface, project_path: []const u8, session: []const u8) bool {
@@ -1008,12 +1018,18 @@ pub const Workspace = struct {
         self.enqueueInput(self.active_surface, text);
     }
 
-    pub fn inputStatus(self: *const Workspace) ?[]const u8 {
+    pub fn inputStatus(self: *const Workspace, current_status: []const u8) ?[]const u8 {
         const workspace: *Workspace = @constCast(self);
         workspace.input_mutex.lock();
         defer workspace.input_mutex.unlock();
-        if (workspace.input_error_message.len == 0) return null;
-        return workspace.input_error_message;
+        if (workspace.input_error_message.len != 0) return workspace.input_error_message;
+        for (&self.surfaces) |*slot| {
+            if (slot.output_result.message()) |message| return message;
+        }
+        for (TerminalOutputResult.error_messages) |message| {
+            if (std.mem.eql(u8, current_status, message)) return "Terminal output error cleared";
+        }
+        return null;
     }
 
     pub fn hasSurface(self: *const Workspace, index: usize) bool {
@@ -1417,42 +1433,437 @@ pub const Workspace = struct {
     }
 
     fn resetSessionState(self: *Workspace, index: usize) void {
-        const slot = &self.surfaces[index];
-        slot.terminal_buffer_len = 0;
-        slot.parser = .normal;
-        slot.csi_value = 0;
-        slot.csi_have_value = false;
-        clearCells(slot);
-        slot.input_bytes = 0;
-        slot.output_events = 0;
+        self.surfaces[index].resetOutput();
     }
 
     fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
         const slot = &self.surfaces[index];
         const surface = slot.surface orelse return;
-        appendOutput(slot, bytes);
-        feedCells(slot, bytes);
-        self.render_error = c.winghostty_surface_set_terminal_cells(
-            surface,
-            columns,
-            rows,
-            slot.cells.ptr,
-            cell_count,
-        );
-        _ = c.winghostty_surface_notify_accessibility_text(
-            surface,
-            slot.terminal_buffer[0..slot.terminal_buffer_len].ptr,
-            slot.terminal_buffer_len,
-            0,
-            slot.terminal_buffer_len,
-            0,
-            0,
-            slot.terminal_buffer_len,
-        );
-        _ = c.winghostty_surface_notify_redraw(surface);
-        slot.output_events += 1;
+        const previous = slot.output_result;
+        const result = publishTerminalOutput(self.allocator, slot, bytes, NativeTerminalOutput{ .surface = surface });
+        self.render_error = result.render_result;
+        if (!std.meta.eql(previous, result)) result.logFailures(index);
     }
 };
+
+const SnapshotError = error{ InvalidGrid, InvalidCell, OutOfMemory };
+
+const AccessibilitySnapshot = struct {
+    text: []u8,
+    utf16_length: usize,
+    caret: usize,
+};
+
+fn encodeAccessibilityCell(raw: u32, buffer: *[4]u8) SnapshotError!u3 {
+    const codepoint = if (raw == 0) ' ' else raw;
+    if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint <= 0x9f) or
+        codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff))
+        return error.InvalidCell;
+    return std.unicode.utf8Encode(@intCast(codepoint), buffer) catch error.InvalidCell;
+}
+
+fn accessibilitySnapshot(
+    allocator: std.mem.Allocator,
+    cells: []const c.winghostty_terminal_cell,
+    grid_columns: usize,
+    grid_rows: usize,
+    cursor_x: usize,
+    cursor_y: usize,
+) SnapshotError!AccessibilitySnapshot {
+    if (grid_columns == 0 or grid_rows == 0) return error.InvalidGrid;
+    const expected = std.math.mul(usize, grid_columns, grid_rows) catch return error.InvalidGrid;
+    if (cells.len != expected) return error.InvalidGrid;
+    const x = @min(cursor_x, grid_columns);
+    const y = @min(cursor_y, grid_rows - 1);
+    var byte_length: usize = grid_rows - 1;
+    var utf16_length: usize = 0;
+    var caret: usize = 0;
+    var encoded: [4]u8 = undefined;
+    for (0..grid_rows) |row| {
+        if (row != 0) utf16_length = std.math.add(usize, utf16_length, 1) catch return error.InvalidGrid;
+        for (0..grid_columns) |column| {
+            if (row == y and column == x) caret = utf16_length;
+            const codepoint = cells[row * grid_columns + column].codepoint;
+            const length = try encodeAccessibilityCell(codepoint, &encoded);
+            byte_length = std.math.add(usize, byte_length, length) catch return error.InvalidGrid;
+            utf16_length = std.math.add(usize, utf16_length, if (codepoint > 0xffff) 2 else 1) catch return error.InvalidGrid;
+        }
+        if (row == y and x == grid_columns) caret = utf16_length;
+    }
+    const text = try allocator.alloc(u8, byte_length);
+    errdefer allocator.free(text);
+    var offset: usize = 0;
+    for (cells, 0..) |cell, index| {
+        if (index != 0 and index % grid_columns == 0) {
+            text[offset] = '\n';
+            offset += 1;
+        }
+        const length = try encodeAccessibilityCell(cell.codepoint, &encoded);
+        @memcpy(text[offset..][0..length], encoded[0..length]);
+        offset += length;
+    }
+    return .{ .text = text, .utf16_length = utf16_length, .caret = caret };
+}
+
+const TerminalOutputResult = struct {
+    const error_messages = [_][]const u8{
+        "Terminal accessibility snapshot failed; accessible text is not current",
+        "Terminal cell update failed; accessible text was not updated",
+        "Terminal accessibility update failed; accessible text is not current",
+        "Terminal redraw failed; displayed text is not confirmed",
+    };
+
+    snapshot_error: ?SnapshotError = null,
+    render_result: c.winghostty_result = c.WINGHOSTTY_OK,
+    text_result: ?c.winghostty_result = null,
+    redraw_result: c.winghostty_result = c.WINGHOSTTY_OK,
+
+    fn succeeded(self: TerminalOutputResult) bool {
+        return self.snapshot_error == null and self.render_result == c.WINGHOSTTY_OK and
+            self.text_result == c.WINGHOSTTY_OK and self.redraw_result == c.WINGHOSTTY_OK;
+    }
+
+    fn message(self: TerminalOutputResult) ?[]const u8 {
+        if (self.snapshot_error != null) return error_messages[0];
+        if (self.render_result != c.WINGHOSTTY_OK) return error_messages[1];
+        if (self.text_result) |result| {
+            if (result != c.WINGHOSTTY_OK) return error_messages[2];
+        }
+        if (self.redraw_result != c.WINGHOSTTY_OK) return error_messages[3];
+        return null;
+    }
+
+    fn logFailures(self: TerminalOutputResult, index: usize) void {
+        if (self.snapshot_error) |err| std.debug.print("Terminal output pane={d} stage=snapshot error={s}\n", .{ index, @errorName(err) });
+        if (self.render_result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=cells result={d}\n", .{ index, self.render_result });
+        if (self.text_result) |result| {
+            if (result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=accessibility result={d}\n", .{ index, result });
+        }
+        if (self.redraw_result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=redraw result={d}\n", .{ index, self.redraw_result });
+    }
+};
+
+const NativeTerminalOutput = struct {
+    surface: *c.winghostty_surface,
+
+    fn setCells(self: NativeTerminalOutput, cells: []const c.winghostty_terminal_cell) c.winghostty_result {
+        return c.winghostty_surface_set_terminal_cells(self.surface, columns, rows, cells.ptr, cells.len);
+    }
+
+    fn setText(self: NativeTerminalOutput, text: []const u8, utf16_length: usize, caret: usize) c.winghostty_result {
+        return c.winghostty_surface_notify_accessibility_text(self.surface, text.ptr, text.len, 0, utf16_length, 0, 0, caret);
+    }
+
+    fn redraw(self: NativeTerminalOutput) c.winghostty_result {
+        return c.winghostty_surface_notify_redraw(self.surface);
+    }
+};
+
+fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []const u8, api: anytype) TerminalOutputResult {
+    feedCells(slot, bytes);
+    var result = TerminalOutputResult{};
+    const snapshot: ?AccessibilitySnapshot = accessibilitySnapshot(allocator, slot.cells, columns, rows, slot.terminal_x, slot.terminal_y) catch |err| blk: {
+        result.snapshot_error = err;
+        break :blk null;
+    };
+    defer if (snapshot) |value| allocator.free(value.text);
+    result.render_result = api.setCells(slot.cells);
+    if (result.render_result == c.WINGHOSTTY_OK) {
+        if (snapshot) |value| result.text_result = api.setText(value.text, value.utf16_length, value.caret);
+    }
+    result.redraw_result = api.redraw();
+    slot.output_result = result;
+    if (result.succeeded()) slot.output_events += 1;
+    return result;
+}
+
+const TerminalOutputProbe = struct {
+    text: [cell_count * 4 + rows - 1]u8 = undefined,
+    text_length: usize = 0,
+    utf16_length: usize = 0,
+    caret: usize = 0,
+    calls: [3]enum { cells, text, redraw } = undefined,
+    call_count: usize = 0,
+    render_result: c.winghostty_result = c.WINGHOSTTY_OK,
+    text_result: c.winghostty_result = c.WINGHOSTTY_OK,
+    redraw_result: c.winghostty_result = c.WINGHOSTTY_OK,
+
+    fn setCells(self: *TerminalOutputProbe, cells: []const c.winghostty_terminal_cell) c.winghostty_result {
+        std.debug.assert(cells.len == cell_count);
+        self.calls[self.call_count] = .cells;
+        self.call_count += 1;
+        return self.render_result;
+    }
+
+    fn setText(self: *TerminalOutputProbe, text: []const u8, utf16_length: usize, caret: usize) c.winghostty_result {
+        self.calls[self.call_count] = .text;
+        self.call_count += 1;
+        @memcpy(self.text[0..text.len], text);
+        self.text_length = text.len;
+        self.utf16_length = utf16_length;
+        self.caret = caret;
+        return self.text_result;
+    }
+
+    fn redraw(self: *TerminalOutputProbe) c.winghostty_result {
+        self.calls[self.call_count] = .redraw;
+        self.call_count += 1;
+        return self.redraw_result;
+    }
+};
+
+test "terminal accessibility feed publishes rendered cells instead of overwritten VT bytes" {
+    var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer std.testing.allocator.free(slot.cells);
+    clearCells(&slot);
+    var probe = TerminalOutputProbe{};
+    try std.testing.expect(publishTerminalOutput(std.testing.allocator, &slot, "AB\rZ\x1b[K", &probe).succeeded());
+    try std.testing.expectEqual(@as(u32, 'Z'), slot.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u32, 0), slot.cells[1].codepoint);
+    try std.testing.expectEqual(@as(usize, cell_count + rows - 1), probe.text_length);
+    for (probe.text[0..probe.text_length], 0..) |byte, index| {
+        const expected: u8 = if (index == 0) 'Z' else if (index % (columns + 1) == columns) '\n' else ' ';
+        try std.testing.expectEqual(expected, byte);
+    }
+    try std.testing.expectEqual(probe.text_length, probe.utf16_length);
+    try std.testing.expectEqual(@as(usize, 1), probe.caret);
+    try std.testing.expectEqual(@as(usize, 3), probe.call_count);
+    try std.testing.expectEqual(.cells, probe.calls[0]);
+    try std.testing.expectEqual(.text, probe.calls[1]);
+    try std.testing.expectEqual(.redraw, probe.calls[2]);
+}
+
+test "terminal accessibility feed preserves parser results across every chunk boundary" {
+    const allocator = std.testing.allocator;
+    const input = "old\x1b[2JAB\rZ\x1b[K\tQ\x08R\nlast";
+    var whole = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(whole.cells);
+    whole.resetOutput();
+    var expected = TerminalOutputProbe{};
+    try std.testing.expect(publishTerminalOutput(allocator, &whole, input, &expected).succeeded());
+    var split = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(split.cells);
+    split.resetOutput();
+    feedCells(&split, input);
+    for (whole.cells, split.cells) |left, right| try std.testing.expect(std.meta.eql(left, right));
+    try std.testing.expectEqual(whole.terminal_x, split.terminal_x);
+    try std.testing.expectEqual(whole.terminal_y, split.terminal_y);
+    try std.testing.expectEqual(whole.parser, split.parser);
+    for (0..input.len + 1) |boundary| {
+        split.resetOutput();
+        var actual = TerminalOutputProbe{};
+        try std.testing.expect(publishTerminalOutput(allocator, &split, input[0..boundary], &actual).succeeded());
+        actual = .{};
+        try std.testing.expect(publishTerminalOutput(allocator, &split, input[boundary..], &actual).succeeded());
+        try std.testing.expectEqualSlices(u8, expected.text[0..expected.text_length], actual.text[0..actual.text_length]);
+        try std.testing.expectEqual(expected.caret, actual.caret);
+        try std.testing.expectEqual(whole.terminal_x, split.terminal_x);
+        try std.testing.expectEqual(whole.terminal_y, split.terminal_y);
+        try std.testing.expectEqual(whole.parser, split.parser);
+        for (whole.cells, split.cells) |left, right| try std.testing.expect(std.meta.eql(left, right));
+    }
+}
+
+test "terminal accessibility feed resets and discards rows rather than retaining raw history" {
+    const allocator = std.testing.allocator;
+    var slot = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(slot.cells);
+    slot.resetOutput();
+    var probe = TerminalOutputProbe{};
+    try std.testing.expect(publishTerminalOutput(allocator, &slot, "old\n", &probe).succeeded());
+    for (0..rows) |_| {
+        probe = .{};
+        try std.testing.expect(publishTerminalOutput(allocator, &slot, "new\n", &probe).succeeded());
+    }
+    try std.testing.expectEqualStrings("new", probe.text[0..3]);
+    try std.testing.expect(std.mem.indexOf(u8, probe.text[0..probe.text_length], "old") == null);
+    try std.testing.expectEqual(@as(usize, (rows - 1) * (columns + 1)), probe.caret);
+    slot.resetOutput();
+    probe = .{};
+    try std.testing.expect(publishTerminalOutput(allocator, &slot, "", &probe).succeeded());
+    try std.testing.expectEqual(@as(usize, cell_count + rows - 1), probe.text_length);
+    try std.testing.expectEqual(@as(usize, rows - 1), std.mem.count(u8, probe.text[0..probe.text_length], "\n"));
+    for (probe.text[0..probe.text_length]) |byte| try std.testing.expect(byte == ' ' or byte == '\n');
+    try std.testing.expectEqual(@as(usize, 0), probe.caret);
+    try std.testing.expectEqual(@as(usize, 1), slot.output_events);
+}
+
+test "terminal accessibility snapshot counts Unicode scalars at the cell representation boundary" {
+    const allocator = std.testing.allocator;
+    var cells = [_]c.winghostty_terminal_cell{std.mem.zeroes(c.winghostty_terminal_cell)} ** 6;
+    const codepoints = [_]u32{ 'A', 0x1f525, 'B', 'e', 0x301, 0 };
+    for (&cells, codepoints) |*cell, codepoint| cell.codepoint = codepoint;
+    const original = cells;
+    // These are serializer inputs; the unchanged ASCII parser does not produce this Unicode grid.
+    const boundaries = [_]usize{ 0, 1, 3, 4, 5, 6, 7, 8 };
+    for (boundaries, 0..) |expected, index| {
+        const snapshot = try accessibilitySnapshot(allocator, &cells, 3, 2, index % 4, index / 4);
+        defer allocator.free(snapshot.text);
+        try std.testing.expectEqualStrings("A\u{1f525}B\ne\u{301} ", snapshot.text);
+        try std.testing.expectEqual(@as(usize, 11), snapshot.text.len);
+        try std.testing.expectEqual(@as(usize, 8), snapshot.utf16_length);
+        try std.testing.expectEqual(expected, snapshot.caret);
+    }
+    const owned = try accessibilitySnapshot(allocator, &cells, 3, 2, std.math.maxInt(usize), std.math.maxInt(usize));
+    defer allocator.free(owned.text);
+    for (cells, original) |left, right| try std.testing.expect(std.meta.eql(left, right));
+    cells[0].codepoint = 'Z';
+    try std.testing.expectEqualStrings("A\u{1f525}B\ne\u{301} ", owned.text);
+    try std.testing.expectEqual(@as(usize, 8), owned.caret);
+
+    var slot = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(slot.cells);
+    slot.resetOutput();
+    for (slot.cells[0..3], codepoints[0..3]) |*cell, codepoint| cell.codepoint = codepoint;
+    slot.terminal_x = 2;
+    var probe = TerminalOutputProbe{};
+    try std.testing.expect(publishTerminalOutput(allocator, &slot, "", &probe).succeeded());
+    try std.testing.expectEqualStrings("A\u{1f525}B", probe.text[0..6]);
+    try std.testing.expectEqual(@as(usize, cell_count + rows - 1 + 3), probe.text_length);
+    try std.testing.expectEqual(@as(usize, cell_count + rows), probe.utf16_length);
+    try std.testing.expectEqual(@as(usize, 3), probe.caret);
+}
+
+test "terminal accessibility snapshot validates shape scalars and allocation" {
+    const allocator = std.testing.allocator;
+    var cells = [_]c.winghostty_terminal_cell{std.mem.zeroes(c.winghostty_terminal_cell)} ** 2;
+    try std.testing.expectError(error.InvalidGrid, accessibilitySnapshot(allocator, &cells, 0, 1, 0, 0));
+    try std.testing.expectError(error.InvalidGrid, accessibilitySnapshot(allocator, &cells, 2, 0, 0, 0));
+    try std.testing.expectError(error.InvalidGrid, accessibilitySnapshot(allocator, &cells, 2, 2, 0, 0));
+    try std.testing.expectError(error.InvalidGrid, accessibilitySnapshot(allocator, &cells, std.math.maxInt(usize), 2, 0, 0));
+    for ([_]u32{ '\n', '\r', 0x1b, 0x7f, 0x85, 0xd800, 0xdfff, 0x110000, std.math.maxInt(u32) }) |invalid| {
+        cells[0].codepoint = invalid;
+        try std.testing.expectError(error.InvalidCell, accessibilitySnapshot(allocator, &cells, 2, 1, 0, 0));
+    }
+    const Probe = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const input = [_]c.winghostty_terminal_cell{std.mem.zeroes(c.winghostty_terminal_cell)} ** 2;
+            const snapshot = try accessibilitySnapshot(alloc, &input, 2, 1, 2, 0);
+            defer alloc.free(snapshot.text);
+            try std.testing.expectEqualStrings("  ", snapshot.text);
+            try std.testing.expectEqual(@as(usize, 2), snapshot.caret);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{});
+}
+
+test "terminal accessibility feed reports staging and outbound failures without false publication" {
+    const allocator = std.testing.allocator;
+    var slot = Surface{ .cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer allocator.free(slot.cells);
+    slot.resetOutput();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var probe = TerminalOutputProbe{};
+    const failed_snapshot = publishTerminalOutput(failing.allocator(), &slot, "A", &probe);
+    try std.testing.expectEqual(error.OutOfMemory, failed_snapshot.snapshot_error.?);
+    try std.testing.expect(failed_snapshot.message() != null);
+    try std.testing.expect(!failed_snapshot.succeeded());
+    try std.testing.expectEqual(@as(usize, 0), slot.output_events);
+    try std.testing.expectEqual(@as(usize, 0), probe.text_length);
+    try std.testing.expectEqual(@as(usize, 2), probe.call_count);
+    try std.testing.expectEqual(.cells, probe.calls[0]);
+    try std.testing.expectEqual(.redraw, probe.calls[1]);
+    try std.testing.expectEqual(@as(u32, 'A'), slot.cells[0].codepoint);
+
+    for (0..3) |stage| {
+        probe = .{};
+        switch (stage) {
+            0 => probe.render_result = c.WINGHOSTTY_RENDERER_ERROR,
+            1 => probe.text_result = c.WINGHOSTTY_OUT_OF_MEMORY,
+            2 => probe.redraw_result = c.WINGHOSTTY_SURFACE_INVALIDATED,
+            else => unreachable,
+        }
+        const result = publishTerminalOutput(allocator, &slot, "\rB", &probe);
+        try std.testing.expect(result.message() != null);
+        try std.testing.expect(!result.succeeded());
+        try std.testing.expectEqual(@as(usize, 0), slot.output_events);
+        try std.testing.expectEqual(if (stage == 0) @as(usize, 2) else 3, probe.call_count);
+        try std.testing.expectEqual(.cells, probe.calls[0]);
+        try std.testing.expectEqual(.redraw, probe.calls[probe.call_count - 1]);
+        if (stage == 0) {
+            try std.testing.expectEqual(@as(usize, 0), probe.text_length);
+            try std.testing.expectEqual(@as(?c.winghostty_result, null), result.text_result);
+        } else {
+            try std.testing.expectEqual(@as(usize, cell_count + rows - 1), probe.text_length);
+            try std.testing.expectEqual(@as(u8, 'B'), probe.text[0]);
+        }
+    }
+    probe = .{};
+    try std.testing.expect(publishTerminalOutput(allocator, &slot, "\rC", &probe).succeeded());
+    try std.testing.expectEqual(@as(usize, 1), slot.output_events);
+    try std.testing.expect(slot.output_result.message() == null);
+}
+
+test "terminal accessibility feed status preserves input errors and other pane failures" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    for (workspace.surfaces[0..2]) |*slot| {
+        slot.cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count);
+        slot.resetOutput();
+    }
+    defer for (workspace.surfaces[0..2]) |*slot| allocator.free(slot.cells);
+    var probe = TerminalOutputProbe{ .text_result = c.WINGHOSTTY_OUT_OF_MEMORY };
+    const failed = publishTerminalOutput(allocator, &workspace.surfaces[0], "A", &probe);
+    try std.testing.expectEqualStrings(failed.message().?, workspace.inputStatus("").?);
+    probe = .{};
+    try std.testing.expect(publishTerminalOutput(allocator, &workspace.surfaces[1], "B", &probe).succeeded());
+    try std.testing.expectEqualStrings(failed.message().?, workspace.inputStatus(failed.message().?).?);
+    workspace.input_error_message = "terminal input write failed";
+    try std.testing.expectEqualStrings(workspace.input_error_message, workspace.inputStatus(failed.message().?).?);
+    workspace.input_error_message = "";
+    workspace.resetSessionState(0);
+    try std.testing.expectEqualStrings("Terminal output error cleared", workspace.inputStatus(failed.message().?).?);
+    try std.testing.expect(!workspace.fatal_error);
+}
+
+test "terminal accessibility feed recovery replaces only its own previous status once" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    const slot = &workspace.surfaces[0];
+    slot.cells = try allocator.alloc(c.winghostty_terminal_cell, cell_count);
+    defer allocator.free(slot.cells);
+    const failures = [_]TerminalOutputResult{
+        .{ .snapshot_error = error.OutOfMemory },
+        .{ .render_result = c.WINGHOSTTY_RENDERER_ERROR },
+        .{ .text_result = c.WINGHOSTTY_OUT_OF_MEMORY },
+        .{ .redraw_result = c.WINGHOSTTY_SURFACE_INVALIDATED },
+    };
+    for (failures) |failure| {
+        slot.resetOutput();
+        slot.output_result = failure;
+        var displayed = workspace.inputStatus("User action complete").?;
+        try std.testing.expectEqualStrings(failure.message().?, displayed);
+        var probe = TerminalOutputProbe{};
+        try std.testing.expect(publishTerminalOutput(allocator, slot, "A", &probe).succeeded());
+        try std.testing.expect(workspace.inputStatus("User action complete") == null);
+        const unrelated = try std.fmt.allocPrint(allocator, "Note: {s}", .{displayed});
+        defer allocator.free(unrelated);
+        try std.testing.expect(workspace.inputStatus(unrelated) == null);
+        displayed = workspace.inputStatus(displayed).?;
+        try std.testing.expectEqualStrings("Terminal output error cleared", displayed);
+        try std.testing.expect(workspace.inputStatus(displayed) == null);
+    }
+
+    const previous_error = failures[0].message().?;
+    workspace.surfaces[1].output_result = failures[1];
+    try std.testing.expectEqualStrings(failures[1].message().?, workspace.inputStatus(previous_error).?);
+    workspace.input_error_message = "terminal input write failed";
+    const input_status = workspace.inputStatus(previous_error).?;
+    try std.testing.expectEqualStrings(workspace.input_error_message, input_status);
+    workspace.resetSessionState(1);
+    try std.testing.expectEqualStrings(input_status, workspace.inputStatus(previous_error).?);
+    workspace.input_error_message = "";
+    try std.testing.expect(workspace.inputStatus(input_status) == null);
+
+    slot.output_result = failures[0];
+    const before_reset = workspace.inputStatus("").?;
+    workspace.resetSessionState(0);
+    try std.testing.expectEqual(@as(usize, 0), slot.output_events);
+    try std.testing.expectEqualStrings("Terminal output error cleared", workspace.inputStatus(before_reset).?);
+    try std.testing.expect(workspace.inputStatus("Terminal output error cleared") == null);
+}
 
 fn writeInputBounded(handle: c.HANDLE, bytes: []const u8) !usize {
     var offset: usize = 0;
@@ -1942,21 +2353,6 @@ fn stateAccent(state: []const u8) u32 {
     if (std.mem.eql(u8, state, "succeeded")) return 0x006BD58D;
     if (std.mem.eql(u8, state, "blocked")) return 0x0049B8FF;
     return 0x00C8C8CC;
-}
-
-fn appendOutput(slot: *Surface, bytes: []const u8) void {
-    if (bytes.len >= slot.terminal_buffer.len) {
-        @memcpy(&slot.terminal_buffer, bytes[bytes.len - slot.terminal_buffer.len ..]);
-        slot.terminal_buffer_len = slot.terminal_buffer.len;
-        return;
-    }
-    if (slot.terminal_buffer_len + bytes.len > slot.terminal_buffer.len) {
-        const overflow = slot.terminal_buffer_len + bytes.len - slot.terminal_buffer.len;
-        std.mem.copyForwards(u8, slot.terminal_buffer[0 .. slot.terminal_buffer_len - overflow], slot.terminal_buffer[overflow..slot.terminal_buffer_len]);
-        slot.terminal_buffer_len -= overflow;
-    }
-    @memcpy(slot.terminal_buffer[slot.terminal_buffer_len..][0..bytes.len], bytes);
-    slot.terminal_buffer_len += bytes.len;
 }
 
 fn clearCells(slot: *Surface) void {

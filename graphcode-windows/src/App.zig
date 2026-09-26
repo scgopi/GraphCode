@@ -5941,7 +5941,7 @@ fn onWindowMessage(
                         }
                     }
                 }
-                if (workspace.inputStatus()) |input_message| app.setStatus(input_message);
+                if (workspace.inputStatus(app.status_override)) |input_message| app.setStatus(input_message);
             }
             if (app.smoke and app.smoke_tick == 8) {
                 app.refreshWorkspace();
