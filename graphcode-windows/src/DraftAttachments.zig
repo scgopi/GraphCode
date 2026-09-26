@@ -39,6 +39,8 @@ pub const IngestError = error{
     SourceUnreadable,
     TooManyAttachments,
     DestinationUnwritable,
+    DestinationExists,
+    DestinationWriteAndCleanupFailed,
 } || std.mem.Allocator.Error;
 
 /// The file extension (no dot, original case), or "" for a dotfile or extension-less
@@ -120,16 +122,24 @@ pub fn attachmentsDirectory(
     return std.fs.path.join(allocator, &.{ support_dir, "memory", slug, draft_id, "attachments" });
 }
 
-/// Copies `source_path` into `dest_dir` as `attachment-<number><.extension>`, refusing
-/// anything unsupported, empty, or over `max_bytes`. Returns the destination's absolute
-/// path, owned by `allocator`. Synchronous and whole-file, like macOS's
-/// `DraftImageImport.write` — the dialog is open and modal, so nothing else is
-/// competing for the bytes in flight.
+/// Copies a bounded file into an exclusively created destination. The random identity
+/// is independent of list position, which can be reused after removal or restoration.
+/// The returned path is allocator-owned; the successful copy belongs to the draft.
 pub fn ingest(
     allocator: std.mem.Allocator,
     source_path: []const u8,
     dest_dir: []const u8,
     number: usize,
+) IngestError![]u8 {
+    return ingestWithIdentity(allocator, source_path, dest_dir, number, std.crypto.random.int(u128));
+}
+
+fn ingestWithIdentity(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    dest_dir: []const u8,
+    number: usize,
+    identity: u128,
 ) IngestError![]u8 {
     const extension = extensionOf(source_path);
     if (!isSupportedExtension(extension)) return error.UnsupportedFileType;
@@ -138,16 +148,36 @@ pub fn ingest(
     const stat = file.stat() catch return error.SourceUnreadable;
     if (stat.size == 0) return error.EmptyFile;
     if (stat.size > max_bytes) return error.FileTooLarge;
-    const data = file.readToEndAlloc(allocator, max_bytes) catch return error.SourceUnreadable;
+    const data = file.readToEndAlloc(allocator, max_bytes) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.FileTooBig => error.FileTooLarge,
+        else => error.SourceUnreadable,
+    };
     defer allocator.free(data);
-    std.fs.cwd().makePath(dest_dir) catch return error.DestinationUnwritable;
-    const dest_path = try std.fmt.allocPrint(allocator, "{s}\\attachment-{d}.{s}", .{ dest_dir, number, extension });
+    if (data.len == 0) return error.EmptyFile;
+    const dest_path = try std.fmt.allocPrint(allocator, "{s}\\attachment-{d}-{x:0>32}.{s}", .{ dest_dir, number, identity, extension });
     errdefer allocator.free(dest_path);
-    var dest_file = std.fs.cwd().createFile(dest_path, .{ .truncate = true }) catch
-        return error.DestinationUnwritable;
-    defer dest_file.close();
-    dest_file.writeAll(data) catch return error.DestinationUnwritable;
+    std.fs.cwd().makePath(dest_dir) catch return error.DestinationUnwritable;
+    try writeStagedFile(dest_path, data, std.fs.File.writeAll);
     return dest_path;
+}
+
+fn writeStagedFile(
+    dest_path: []const u8,
+    data: []const u8,
+    comptime write: fn (std.fs.File, []const u8) anyerror!void,
+) IngestError!void {
+    const file = std.fs.cwd().createFile(dest_path, .{ .exclusive = true }) catch |err| return switch (err) {
+        error.PathAlreadyExists => error.DestinationExists,
+        else => error.DestinationUnwritable,
+    };
+    write(file, data) catch {
+        file.close();
+        // Only successful exclusive creation grants this operation cleanup ownership.
+        std.fs.cwd().deleteFile(dest_path) catch return error.DestinationWriteAndCleanupFailed;
+        return error.DestinationUnwritable;
+    };
+    file.close();
 }
 
 /// Drops a cancelled draft's whole attachment tree. Mirrors macOS
@@ -241,7 +271,7 @@ test "attachmentsDirectory joins support, memory, slug and draft id" {
     );
 }
 
-test "ingest refuses unsupported types, empty files and oversized files" {
+test "ingest refuses unsupported types and empty files and copies accepted bytes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -266,10 +296,87 @@ test "ingest refuses unsupported types, empty files and oversized files" {
     defer allocator.free(ok_path);
     const written = try ingest(allocator, ok_path, attachments_dir, 1);
     defer allocator.free(written);
-    try std.testing.expect(std.mem.endsWith(u8, written, "attachment-1.txt"));
+    try std.testing.expect(std.mem.startsWith(u8, std.fs.path.basename(written), "attachment-1-"));
+    try std.testing.expect(std.mem.endsWith(u8, written, ".txt"));
     const copied = try std.fs.cwd().readFileAlloc(allocator, written, 4096);
     defer allocator.free(copied);
     try std.testing.expectEqualStrings("hello there", copied);
+}
+
+test "staging exclusive reservation preserves an existing candidate" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "original staged bytes" });
+    const source = try tmp.dir.realpathAlloc(allocator, "source.txt");
+    defer allocator.free(source);
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const first = try ingestWithIdentity(allocator, source, root, 1, 42);
+    defer allocator.free(first);
+    try tmp.dir.writeFile(.{ .sub_path = "source.txt", .data = "replacement source bytes" });
+    try std.testing.expectError(error.DestinationExists, ingestWithIdentity(allocator, source, root, 1, 42));
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, first, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("original staged bytes", bytes);
+    const source_bytes = try std.fs.cwd().readFileAlloc(allocator, source, 1024);
+    defer allocator.free(source_bytes);
+    try std.testing.expectEqualStrings("replacement source bytes", source_bytes);
+}
+
+test "staging partial write failure removes only the newly created file" {
+    const Fail = struct {
+        fn write(file: std.fs.File, data: []const u8) !void {
+            try file.writeAll(data[0..1]);
+            return error.InjectedWriteFailure;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "survivor.txt", .data = "keep these bytes" });
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const target = try std.fs.path.join(allocator, &.{ root, "new.txt" });
+    defer allocator.free(target);
+    try std.testing.expectError(error.DestinationUnwritable, writeStagedFile(target, "new bytes", Fail.write));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("new.txt", .{}));
+    const survivor = try tmp.dir.readFileAlloc(allocator, "survivor.txt", 1024);
+    defer allocator.free(survivor);
+    try std.testing.expectEqualStrings("keep these bytes", survivor);
+    try writeStagedFile(target, "new bytes", std.fs.File.writeAll);
+    const committed = try tmp.dir.readFileAlloc(allocator, "new.txt", 1024);
+    defer allocator.free(committed);
+    try std.testing.expectEqualStrings("new bytes", committed);
+}
+
+test "staging accepts exactly ten MiB and rejects one additional byte" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, 10 * 1024 * 1024), max_bytes);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try allocator.alloc(u8, max_bytes);
+    defer allocator.free(data);
+    @memset(data, 'x');
+    try tmp.dir.writeFile(.{ .sub_path = "limit.TXT", .data = data });
+    const source = try tmp.dir.realpathAlloc(allocator, "limit.TXT");
+    defer allocator.free(source);
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const destination = try ingest(allocator, source, root, 1);
+    defer allocator.free(destination);
+    const copied = try std.fs.cwd().readFileAlloc(allocator, destination, max_bytes);
+    defer allocator.free(copied);
+    try std.testing.expectEqualSlices(u8, data, copied);
+    {
+        const source_file = try tmp.dir.openFile("limit.TXT", .{ .mode = .read_write });
+        defer source_file.close();
+        try source_file.seekFromEnd(0);
+        try source_file.writeAll("y");
+    }
+    try std.testing.expectError(error.FileTooLarge, ingest(allocator, source, root, 2));
+    const stat = try tmp.dir.statFile("limit.TXT");
+    try std.testing.expectEqual(@as(u64, max_bytes + 1), stat.size);
 }
 
 test "discardAll removes the whole attachment tree" {
