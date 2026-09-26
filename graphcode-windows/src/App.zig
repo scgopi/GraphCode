@@ -258,10 +258,117 @@ fn workspaceMutationFailure(err: anyerror) []const u8 {
 
 /// Deterministic targets and screen position used only by the live UIA gate's
 /// context-menu hook (`MainWindow.wm_uia_context_menu`).
-const uia_context_menu_project_path = "C:\\GraphCode\\fixture";
 const uia_context_menu_remote_project_path = "ssh://builder/GraphCode";
 const uia_context_menu_x: i32 = 160;
 const uia_context_menu_y: i32 = 160;
+
+fn normalizeUiaFixtureProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const identity = WorkspaceLifecycle.pathIdentity(allocator, path) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => error.InvalidUiaFixtureProject,
+    };
+    defer allocator.free(identity);
+    const normalized = try std.fs.path.resolveWindows(allocator, &.{path});
+    errdefer allocator.free(normalized);
+    const parent = std.fs.path.dirnameWindows(normalized) orelse return error.InvalidUiaFixtureProject;
+    if (parent.len == normalized.len or normalized.len <= 3) return error.InvalidUiaFixtureProject;
+    return normalized;
+}
+
+const UiaFixturePath = enum { project, safe, unsafe, empty, jump, sweep_safe, sweep_unsafe };
+
+fn uiaFixturePath(allocator: std.mem.Allocator, project: []const u8, kind: UiaFixturePath) ![]u8 {
+    return switch (kind) {
+        .project => allocator.dupe(u8, project),
+        .safe => std.fs.path.join(allocator, &.{ project, "fixture-safe" }),
+        .unsafe => std.fs.path.join(allocator, &.{ project, "fixture-unsafe" }),
+        .empty => std.fs.path.join(allocator, &.{ project, "empty" }),
+        .jump => std.fs.path.join(allocator, &.{ project, "jump-fixture" }),
+        .sweep_safe => std.fs.path.join(allocator, &.{ project, "fixture-worktrees", "reclaimable" }),
+        .sweep_unsafe => std.fs.path.join(allocator, &.{ project, "fixture-worktrees", "dirty" }),
+    };
+}
+
+fn uiaFixtureGraphFrame(allocator: std.mem.Allocator, path: []const u8, name: []const u8, sequence: usize, nodes: []const u8, edges: []const u8) ![]u8 {
+    const quoted_path = try std.json.Stringify.valueAlloc(allocator, path, .{});
+    defer allocator.free(quoted_path);
+    const quoted_name = try std.json.Stringify.valueAlloc(allocator, name, .{});
+    defer allocator.free(quoted_name);
+    return std.fmt.allocPrint(allocator, "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{s},\"name\":{s}}},\"nodes\":{s},\"edges\":{s}}}}}}}", .{ sequence, quoted_path, quoted_name, nodes, edges });
+}
+
+const UiaFixtureData = struct {
+    model_arena: *std.heap.ArenaAllocator,
+    model: GraphModel.Model,
+    inspection: WorktreeStatus.Inspection,
+    dialog: WorktreeDialog.Dialog,
+
+    fn init(allocator: std.mem.Allocator, project_path: []const u8) !UiaFixtureData {
+        const project = try normalizeUiaFixtureProject(allocator, project_path);
+        errdefer allocator.free(project);
+        const safe_path = try uiaFixturePath(allocator, project, .safe);
+        defer allocator.free(safe_path);
+        const quoted_safe = try std.json.Stringify.valueAlloc(allocator, safe_path, .{});
+        defer allocator.free(quoted_safe);
+        const nodes = try std.mem.concat(allocator, u8, &.{
+            "[{\"id\":\"11111111-1111-4111-8111-111111111111\",\"title\":\"UIA loop A\",\"loopType\":\"goalBased\",\"state\":\"succeeded\",\"activity\":\"checking tests\",\"presence\":{\"presence\":\"idle\",\"confidence\":\"reported\"},\"createdAt\":788918400,\"goal\":{\"summary\":\"All tests pass\",\"predicate\":\"swift test\",\"metric\":{\"command\":\"coverage\",\"direction\":\"maximize\"}},\"metricHistory\":[{\"value\":1},{\"value\":2},{\"value\":3}],\"usage\":{\"inputTokens\":1200,\"outputTokens\":345},\"modelTier\":\"capable\",\"worktreeBinding\":{\"path\":",
+            quoted_safe,
+            ",\"branch\":\"feature/parity\"}},{\"id\":\"22222222-2222-4222-8222-222222222222\",\"title\":\"UIA loop B\",\"loopType\":\"proactive\",\"state\":\"running\",\"activity\":\"needs response\",\"presence\":{\"presence\":\"awaitingInput\",\"confidence\":\"reported\"},\"createdAt\":788918400,\"usage\":{\"inputTokens\":12,\"outputTokens\":34},\"subGraph\":{\"nodes\":[{\"id\":\"55555555-5555-4555-8555-555555555555\",\"title\":\"UIA nested A\",\"loopType\":\"turnBased\",\"state\":\"idle\"},{\"id\":\"66666666-6666-4666-8666-666666666666\",\"title\":\"UIA nested B\",\"loopType\":\"goalBased\",\"state\":\"running\"}]}}]",
+        });
+        defer allocator.free(nodes);
+        const graph_frame = try uiaFixtureGraphFrame(allocator, project, "UIA project", 1, nodes,
+            \\[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]
+        );
+        defer allocator.free(graph_frame);
+        const model_arena = try allocator.create(std.heap.ArenaAllocator);
+        model_arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            model_arena.deinit();
+            allocator.destroy(model_arena);
+        }
+        var model = GraphModel.Model.init(model_arena.allocator());
+        errdefer model.deinit();
+        const chats_frame =
+            \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"UIA chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"UIA chat B","backend":"copilot","createdAt":1,"activity":null}]}}
+        ;
+        const quoted_project = try std.json.Stringify.valueAlloc(allocator, project, .{});
+        defer allocator.free(quoted_project);
+        const projects_frame = try std.mem.concat(allocator, u8, &.{
+            "{\"version\":2,\"kind\":\"event\",\"sequence\":3,\"event\":{\"recentProjectsListed\":[{\"path\":",
+            quoted_project,
+            ",\"name\":\"Fixture local\"},{\"path\":\"ssh://builder/GraphCode\",\"name\":\"Fixture remote\"}]}}",
+        });
+        defer allocator.free(projects_frame);
+        _ = try model.updateFromFrame(graph_frame);
+        _ = try model.updateFromFrame(chats_frame);
+        _ = try model.updateFromFrame(projects_frame);
+        const graph = model.graph orelse return error.InvalidUiaFixtureData;
+        if (!std.mem.eql(u8, graph.project.path, project) or graph.nodes.items.len != 2 or model.quick_chats.items.len != 2 or model.recent_projects.items.len != 2)
+            return error.InvalidUiaFixtureData;
+        const default_branch = try allocator.dupe(u8, "main");
+        errdefer allocator.free(default_branch);
+        var entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+        errdefer WorktreeStatus.deinit(allocator, &entries);
+        for ([_]bool{ false, true }) |dirty| {
+            const path = try uiaFixturePath(allocator, project, if (dirty) .unsafe else .safe);
+            errdefer allocator.free(path);
+            const branch = try allocator.dupe(u8, if (dirty) "unsafe" else "safe");
+            errdefer allocator.free(branch);
+            try entries.append(.{ .path = path, .branch = branch, .dirty = dirty, .pushed = true, .landed = true });
+        }
+        const inspection = WorktreeStatus.Inspection{ .entries = entries, .default_branch = default_branch, .project_path = project };
+        const dialog = try WorktreeDialog.Dialog.init(allocator, project, entries.items, .{ .allow_reclaim = true });
+        return .{ .model_arena = model_arena, .model = model, .inspection = inspection, .dialog = dialog };
+    }
+
+    fn deinit(self: *UiaFixtureData, allocator: std.mem.Allocator) void {
+        self.dialog.deinit();
+        WorktreeStatus.deinitInspection(allocator, &self.inspection);
+        self.model.deinit();
+        self.model_arena.deinit();
+        allocator.destroy(self.model_arena);
+    }
+};
 
 const InputBounds = struct {
     rail_left: i32,
@@ -491,6 +598,8 @@ pub const App = struct {
     selected_worktree_path: []u8 = &.{},
     reclaim_confirmation_armed: bool = false,
     worktree_dialog: ?WorktreeDialog.Dialog = null,
+    uia_fixture_project_path: []u8 = &.{},
+    uia_fixture_model_arena: ?*std.heap.ArenaAllocator = null,
     accessibility: ?Accessibility.Provider = null,
     sidebar_scroll: i32 = 0,
     sidebar_state: Sidebar.State,
@@ -644,10 +753,12 @@ pub const App = struct {
         self.tray.remove();
         self.model.deinit();
         if (self.accessibility) |*provider| provider.deinit();
+        self.releaseUiaFixtureModelArena();
         if (self.worktree_dialog) |*dialog| dialog.deinit();
         if (self.worktree_inspection) |*inspection| {
             WorktreeStatus.deinitInspection(self.allocator, inspection);
         }
+        if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
@@ -790,7 +901,7 @@ pub const App = struct {
         self.updateNativeChrome(.state_change);
         if (std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_FIXTURE_ROWS")) |fixture| {
             defer self.allocator.free(fixture);
-            self.installUiaFixture(true);
+            if (!self.installUiaFixture(true)) return error.InvalidUiaFixtureData;
             if (envFlag("GRAPHCODE_UIA_SHOW_SWEEP")) self.presentWorktreeSweep();
         } else |_| {}
         const uia_gate = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_UIA_GATE") catch null;
@@ -2599,7 +2710,10 @@ pub const App = struct {
         );
         defer _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
         const target: GraphContextMenu.Target = switch (target_kind) {
-            1 => .{ .project = .{ .path = uia_context_menu_project_path, .remote = false } },
+            1 => .{ .project = .{ .path = self.requiredUiaFixtureProject() catch |err| {
+                self.reportWorktreeError("UIA fixture owner unavailable", err);
+                return;
+            }, .remote = false } },
             2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true } },
             3 => blk: {
                 const graph = self.model.graph orelse return;
@@ -2730,24 +2844,27 @@ pub const App = struct {
         return 1;
     }
 
-    fn ensureUiaFixtureProject(self: *App, min_nodes: usize) void {
+    fn ensureUiaFixtureProject(self: *App, min_nodes: usize) bool {
         const needs_project = self.model.graph == null;
         const needs_nodes = if (self.model.graph) |graph| graph.nodes.items.len < min_nodes else true;
-        if (!needs_project and !needs_nodes) return;
-        const frame =
-            \\{"version":2,"kind":"event","sequence":63,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\fixture","name":"Fixture project"},"nodes":[{"id":"uia-form-source","title":"Planner","state":"idle"},{"id":"uia-form-target","title":"Builder","state":"idle"}],"edges":[]}}}
-        ;
-        _ = self.model.updateFromFrame(frame) catch return;
+        if (!needs_project and !needs_nodes) return true;
+        self.applyUiaFixtureGraph(.project, "Fixture project", 63,
+            \\[{"id":"uia-form-source","title":"Planner","state":"idle"},{"id":"uia-form-target","title":"Builder","state":"idle"}]
+        , "[]") catch |err| {
+            self.reportWorktreeError("Unable to prepare UIA fixture project", err);
+            return false;
+        };
         self.surface = .project;
+        return true;
     }
 
     fn presentUiaEdgeForm(self: *App) void {
-        self.ensureUiaFixtureProject(2);
+        if (!self.ensureUiaFixtureProject(2)) return;
         self.createEdge();
     }
 
     fn presentUiaWorktreePolicyForm(self: *App) void {
-        self.ensureUiaFixtureProject(0);
+        if (!self.ensureUiaFixtureProject(0)) return;
         const project_path = self.currentProject() orelse return;
         const initial = if (self.worktree_dialog) |dialog|
             dialog.policy
@@ -2765,12 +2882,15 @@ pub const App = struct {
     }
 
     fn presentUiaWorktreeSweepForm(self: *App) void {
-        self.ensureUiaFixtureProject(0);
+        if (!self.ensureUiaFixtureProject(0)) return;
         const graph = self.model.graph orelse return;
         if (self.worktree_inspection == null) {
             var entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator);
             entries.append(.{
-                .path = self.allocator.dupe(u8, "C:\\GraphCode\\fixture-worktrees\\reclaimable") catch return,
+                .path = self.ownedUiaFixturePath(.sweep_safe) catch |err| {
+                    self.reportWorktreeError("UIA fixture owner unavailable", err);
+                    return;
+                },
                 .branch = self.allocator.dupe(u8, "uia-fixture-reclaimable") catch return,
                 .size_bytes = 1024,
                 .size_complete = true,
@@ -2778,7 +2898,10 @@ pub const App = struct {
                 .landed = true,
             }) catch return;
             entries.append(.{
-                .path = self.allocator.dupe(u8, "C:\\GraphCode\\fixture-worktrees\\dirty") catch return,
+                .path = self.ownedUiaFixturePath(.sweep_unsafe) catch |err| {
+                    self.reportWorktreeError("UIA fixture owner unavailable", err);
+                    return;
+                },
                 .branch = self.allocator.dupe(u8, "uia-fixture-dirty") catch return,
                 .size_bytes = 2048,
                 .size_complete = true,
@@ -3319,62 +3442,33 @@ pub const App = struct {
         self.inspectWorktreesImpl(false);
     }
 
-    fn installUiaFixture(self: *App, reset_sidebar: bool) void {
-        if (reset_sidebar and envFlag("GRAPHCODE_UIA_RESET_SIDEBAR")) self.sidebar_state.clearExpandedNodes();
-        const graph_frame =
-            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"uia-graph","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"UIA loop A","loopType":"goalBased","state":"succeeded","activity":"checking tests","presence":{"presence":"idle","confidence":"reported"},"createdAt":788918400,"goal":{"summary":"All tests pass","predicate":"swift test","metric":{"command":"coverage","direction":"maximize"}},"metricHistory":[{"value":1},{"value":2},{"value":3}],"usage":{"inputTokens":1200,"outputTokens":345},"modelTier":"capable","worktreeBinding":{"path":"C:\\fixture-safe","branch":"feature/parity"}},{"id":"22222222-2222-4222-8222-222222222222","title":"UIA loop B","loopType":"proactive","state":"running","activity":"needs response","presence":{"presence":"awaitingInput","confidence":"reported"},"createdAt":788918400,"usage":{"inputTokens":12,"outputTokens":34},"subGraph":{"nodes":[{"id":"55555555-5555-4555-8555-555555555555","title":"UIA nested A","loopType":"turnBased","state":"idle"},{"id":"66666666-6666-4666-8666-666666666666","title":"UIA nested B","loopType":"goalBased","state":"running"}]}}],"edges":[{"id":"88888888-8888-4888-8888-888888888888","from":"11111111-1111-4111-8111-111111111111","to":"22222222-2222-4222-8222-222222222222","kind":"handoff"}]}}}
-        ;
-        const chats_frame =
-            \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"UIA chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"UIA chat B","backend":"copilot","createdAt":1,"activity":null}]}}
-        ;
-        const projects_frame =
-            \\{"version":2,"kind":"event","sequence":3,"event":{"recentProjectsListed":[{"path":"C:\\GraphCode\\fixture","name":"Fixture local"},{"path":"ssh://builder/GraphCode","name":"Fixture remote"}]}}
-        ;
-        _ = self.model.updateFromFrame(graph_frame) catch {};
-        _ = self.model.updateFromFrame(chats_frame) catch {};
-        _ = self.model.updateFromFrame(projects_frame) catch {};
-        if (self.model.quick_chats.items.len == 0) {
-            self.model.quick_chats.append(.{
-                .id = self.allocator.dupe(u8, "33333333-3333-4333-8333-333333333333") catch return,
-                .title = self.allocator.dupe(u8, "UIA chat A") catch return,
-                .backend = self.allocator.dupe(u8, "claudeCode") catch return,
-            }) catch return;
-            self.model.quick_chats.append(.{
-                .id = self.allocator.dupe(u8, "44444444-4444-4444-8444-444444444444") catch return,
-                .title = self.allocator.dupe(u8, "UIA chat B") catch return,
-                .backend = self.allocator.dupe(u8, "copilot") catch return,
-            }) catch return;
-        }
-        const project = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_GATE_CWD") catch
-            self.allocator.dupe(u8, "C:\\GraphCode\\fixture") catch return;
-        var inspection = WorktreeStatus.Inspection{
-            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator),
-            .default_branch = self.allocator.dupe(u8, "main") catch {
-                self.allocator.free(project);
-                return;
-            },
-            .project_path = project,
+    fn installUiaFixture(self: *App, reset_sidebar: bool) bool {
+        const project = if (self.uia_fixture_project_path.len != 0)
+            self.allocator.dupe(u8, self.uia_fixture_project_path) catch {
+                self.setStatus("Unable to retain UIA fixture project");
+                return false;
+            }
+        else
+            std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_GATE_CWD") catch |err| {
+                self.reportWorktreeError("UIA fixture requires an owned GRAPHCODE_GATE_CWD", err);
+                return false;
+            };
+        defer self.allocator.free(project);
+        const normalized = normalizeUiaFixtureProject(self.allocator, project) catch |err| {
+            self.reportWorktreeError("Invalid UIA fixture project", err);
+            return false;
         };
-        inspection.entries.append(.{
-            .path = self.allocator.dupe(u8, "C:\\fixture-safe") catch return,
-            .branch = self.allocator.dupe(u8, "safe") catch return,
-            .pushed = true,
-            .landed = true,
-        }) catch return;
-        inspection.entries.append(.{
-            .path = self.allocator.dupe(u8, "C:\\fixture-unsafe") catch return,
-            .branch = self.allocator.dupe(u8, "unsafe") catch return,
-            .dirty = true,
-            .pushed = true,
-            .landed = true,
-        }) catch return;
-        self.worktree_inspection = inspection;
-        self.worktree_dialog = WorktreeDialog.Dialog.init(
-            self.allocator,
-            project,
-            inspection.entries.items,
-            .{ .allow_reclaim = true },
-        ) catch null;
+        defer self.allocator.free(normalized);
+        var directory = std.fs.openDirAbsolute(normalized, .{}) catch |err| {
+            self.reportWorktreeError("UIA fixture project directory is unavailable", err);
+            return false;
+        };
+        directory.close();
+        self.installUiaFixtureData(project) catch |err| {
+            self.reportWorktreeError("Unable to install UIA fixture data", err);
+            return false;
+        };
+        if (reset_sidebar and envFlag("GRAPHCODE_UIA_RESET_SIDEBAR")) self.sidebar_state.clearExpandedNodes();
         if (envFlag("GRAPHCODE_UIA_UPDATE_AVAILABLE")) {
             self.update_lock.lock();
             self.update_state.state = .available;
@@ -3389,6 +3483,90 @@ pub const App = struct {
             self.setIngressError(message);
         } else |_| {}
         self.setStatus("UIA fixture inspection ready");
+        return true;
+    }
+
+    fn installUiaFixtureData(self: *App, project_path: []const u8) !void {
+        if (NativeForms.isModalActive()) return error.UiaFixtureModalActive;
+        const captured = try normalizeUiaFixtureProject(self.allocator, project_path);
+        errdefer self.allocator.free(captured);
+        if (self.uia_fixture_project_path.len != 0 and !std.mem.eql(u8, captured, self.uia_fixture_project_path))
+            return error.UiaFixtureProjectChanged;
+        const data = try UiaFixtureData.init(self.allocator, project_path);
+        if (self.worktree_dialog) |*dialog| dialog.deinit();
+        if (self.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(self.allocator, inspection);
+        self.model.deinit();
+        self.releaseUiaFixtureModelArena();
+        self.model = data.model;
+        self.uia_fixture_model_arena = data.model_arena;
+        self.worktree_inspection = data.inspection;
+        self.worktree_dialog = data.dialog;
+        if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
+        self.uia_fixture_project_path = captured;
+        if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
+        self.selected_worktree_path = &.{};
+        self.reclaim_confirmation_armed = false;
+    }
+
+    fn releaseUiaFixtureModelArena(self: *App) void {
+        if (self.uia_fixture_model_arena) |arena| {
+            arena.deinit();
+            self.allocator.destroy(arena);
+            self.uia_fixture_model_arena = null;
+        }
+    }
+
+    fn resetUiaFixtureModel(self: *App) !void {
+        if (NativeForms.isModalActive()) return error.UiaFixtureModalActive;
+        self.model.deinit();
+        self.releaseUiaFixtureModelArena();
+        self.model = GraphModel.Model.init(self.allocator);
+    }
+
+    fn requiredUiaFixtureProject(self: *const App) ![]const u8 {
+        if (self.uia_fixture_project_path.len == 0) return error.UiaFixtureProjectNotCaptured;
+        return self.uia_fixture_project_path;
+    }
+
+    fn ownedUiaFixturePath(self: *const App, kind: UiaFixturePath) ![]u8 {
+        return uiaFixturePath(self.allocator, try self.requiredUiaFixtureProject(), kind);
+    }
+
+    fn applyUiaFixtureGraph(self: *App, kind: UiaFixturePath, name: []const u8, sequence: usize, nodes: []const u8, edges: []const u8) !void {
+        const path = try self.ownedUiaFixturePath(kind);
+        defer self.allocator.free(path);
+        const frame = try uiaFixtureGraphFrame(self.allocator, path, name, sequence, nodes, edges);
+        defer self.allocator.free(frame);
+        _ = try self.model.updateFromFrame(frame);
+    }
+
+    fn appendUiaFixtureLoop(self: *App) !void {
+        const project = try self.requiredUiaFixtureProject();
+        if (self.uia_fixture_model_arena == null) return error.InvalidUiaFixtureData;
+        const summary = for (self.model.graphs.items) |*graph| {
+            if (std.mem.eql(u8, graph.project.path, project)) break graph;
+        } else return error.InvalidUiaFixtureData;
+        if (GraphModel.findNodeIndexByID(summary.nodes.items, "77777777-7777-4777-8777-777777777777") != null) return;
+        const current = if (self.model.graph) |*graph|
+            if (std.mem.eql(u8, graph.project.path, project)) graph else null
+        else
+            null;
+        const allocator = self.model.allocator;
+        try summary.nodes.ensureUnusedCapacity(1);
+        if (current) |graph| try graph.nodes.ensureUnusedCapacity(1);
+        var additions: [2]GraphModel.Node = undefined;
+        for (additions[0..if (current != null) @as(usize, 2) else 1]) |*extra| {
+            extra.* = .{
+                .id = try allocator.dupe(u8, "77777777-7777-4777-8777-777777777777"),
+                .title = try allocator.dupe(u8, "UIA loop C"),
+                .loop_type = try allocator.dupe(u8, "turnBased"),
+                .state = try allocator.dupe(u8, "idle"),
+                .activity = try allocator.dupe(u8, ""),
+                .presence = try allocator.dupe(u8, "idle"),
+            };
+        }
+        summary.nodes.appendAssumeCapacity(additions[0]);
+        if (current) |graph| graph.nodes.appendAssumeCapacity(additions[1]);
     }
 
     /// True once there is a worktree row the reveal/reclaim commands could
@@ -3582,8 +3760,10 @@ pub const App = struct {
         }
         if (mutation == 9) {
             self.clearIngressError();
-            self.model.deinit();
-            self.model = GraphModel.Model.init(self.allocator);
+            self.resetUiaFixtureModel() catch |err| {
+                self.reportWorktreeError("Unable to reset UIA fixture model", err);
+                return;
+            };
             self.surface = .overview;
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -3591,10 +3771,10 @@ pub const App = struct {
             return;
         }
         if (mutation == 10) {
-            const frame =
-                \\{"version":2,"kind":"event","sequence":50,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\empty","name":"Empty project"},"nodes":[],"edges":[]}}}
-            ;
-            _ = self.model.updateFromFrame(frame) catch return;
+            self.applyUiaFixtureGraph(.empty, "Empty project", 50, "[]", "[]") catch |err| {
+                self.reportWorktreeError("Unable to prepare empty UIA fixture", err);
+                return;
+            };
             self.surface = .project;
             self.layoutEmptyStateControls();
             self.syncAccessibility();
@@ -3606,22 +3786,33 @@ pub const App = struct {
             return;
         }
         if (mutation == 12) {
-            self.deleteProjectLoops("C:\\GraphCode\\empty");
+            const path = self.ownedUiaFixturePath(.empty) catch |err| {
+                self.reportWorktreeError("UIA fixture owner unavailable", err);
+                return;
+            };
+            defer self.allocator.free(path);
+            self.deleteProjectLoops(path);
             return;
         }
         if (mutation == 13) {
-            const frame =
-                \\{"version":2,"kind":"event","sequence":51,"event":{"graphChanged":{"project":{"path":"C:\\GraphCode\\empty","name":"Empty project"},"nodes":[{"id":"edge-source","title":"Planner","state":"idle"},{"id":"edge-target","title":"Builder","state":"idle"}],"edges":[{"id":"edge-delete","from":"edge-source","to":"edge-target","kind":"handoff"}]}}}
-            ;
-            _ = self.model.updateFromFrame(frame) catch return;
+            self.applyUiaFixtureGraph(.empty, "Empty project", 51,
+                \\[{"id":"edge-source","title":"Planner","state":"idle"},{"id":"edge-target","title":"Builder","state":"idle"}]
+            ,
+                \\[{"id":"edge-delete","from":"edge-source","to":"edge-target","kind":"handoff"}]
+            ) catch |err| {
+                self.reportWorktreeError("Unable to prepare edge UIA fixture", err);
+                return;
+            };
             self.deleteEdge(0);
             return;
         }
         if (mutation == 14) {
-            const frame =
-                \\{"version":2,"kind":"event","sequence":52,"event":{"graphChanged":{"id":"uia-jump-graph","project":{"path":"C:\\GraphCode\\jump-fixture","name":"Jump fixture","remote":false},"nodes":[{"id":"jump-cross-project","title":"UIA loop C","loopType":"timeBased","state":"awaitingInput"}],"edges":[]}}}
-            ;
-            _ = self.model.updateFromFrame(frame) catch return;
+            self.applyUiaFixtureGraph(.jump, "Jump fixture", 52,
+                \\[{"id":"jump-cross-project","title":"UIA loop C","loopType":"timeBased","state":"awaitingInput"}]
+            , "[]") catch |err| {
+                self.reportWorktreeError("Unable to prepare jump UIA fixture", err);
+                return;
+            };
             _ = self.model.setSelectedID("11111111-1111-4111-8111-111111111111");
             self.jumpToNode();
             return;
@@ -3631,33 +3822,14 @@ pub const App = struct {
             return;
         }
         if (mutation == 16) {
-            const project_path = "C:\\GraphCode\\fixture";
-            if (self.model.graphFor(project_path)) |graph| {
-                if (GraphModel.findNodeIndexByID(graph.nodes.items, "77777777-7777-4777-8777-777777777777") == null) {
-                    const extra = GraphModel.Node{
-                        .id = self.allocator.dupe(u8, "77777777-7777-4777-8777-777777777777") catch return,
-                        .title = self.allocator.dupe(u8, "UIA loop C") catch return,
-                        .loop_type = self.allocator.dupe(u8, "turnBased") catch return,
-                        .state = self.allocator.dupe(u8, "idle") catch return,
-                        .activity = self.allocator.dupe(u8, "") catch return,
-                        .presence = self.allocator.dupe(u8, "idle") catch return,
-                    };
-                    if (self.model.graph) |*current| if (std.mem.eql(u8, current.project.path, project_path)) {
-                        current.nodes.append(extra) catch return;
-                    };
-                    for (self.model.graphs.items) |*summary| {
-                        if (!std.mem.eql(u8, summary.project.path, project_path)) continue;
-                        summary.nodes.append(.{
-                            .id = self.allocator.dupe(u8, extra.id) catch return,
-                            .title = self.allocator.dupe(u8, extra.title) catch return,
-                            .loop_type = self.allocator.dupe(u8, extra.loop_type) catch return,
-                            .state = self.allocator.dupe(u8, extra.state) catch return,
-                            .activity = self.allocator.dupe(u8, extra.activity) catch return,
-                            .presence = self.allocator.dupe(u8, extra.presence) catch return,
-                        }) catch return;
-                    }
-                }
-            } else return;
+            const project_path = self.requiredUiaFixtureProject() catch |err| {
+                self.reportWorktreeError("UIA fixture owner unavailable", err);
+                return;
+            };
+            self.appendUiaFixtureLoop() catch |err| {
+                self.reportWorktreeError("Unable to extend UIA fixture graph", err);
+                return;
+            };
             self.syncAccessibility();
             _ = c.InvalidateRect(self.window.hwnd, null, 0);
             var rows = Sidebar.appendRows(
@@ -3671,30 +3843,40 @@ pub const App = struct {
             var start_y: ?i32 = null;
             var drop_y: ?i32 = null;
             for (rows.items) |row| {
-                if (row.kind != .loop or row.depth != 0 or row.project_path == null or !std.mem.eql(u8, row.project_path.?, "C:\\GraphCode\\fixture")) continue;
+                if (row.kind != .loop or row.depth != 0 or row.project_path == null or !std.mem.eql(u8, row.project_path.?, project_path)) continue;
                 if (row.index == 0) start_y = row.top + 8;
                 if (row.index == 2) drop_y = row.top + 20;
             }
             if (start_y) |drag_start| {
-                self.beginSidebarRootDrag("C:\\GraphCode\\fixture", "11111111-1111-4111-8111-111111111111", drag_start);
+                self.beginSidebarRootDrag(project_path, "11111111-1111-4111-8111-111111111111", drag_start);
                 self.updateSidebarRootDrag(drop_y orelse (drag_start + 32));
                 _ = self.completeSidebarRootDrag(drop_y orelse (drag_start + 32));
             }
             return;
         }
         if (mutation == 17) {
-            self.handleContextAction(.move_project, .{ .project = .{ .path = "C:\\GraphCode\\fixture", .remote = false } });
+            const path = self.requiredUiaFixtureProject() catch |err| {
+                self.reportWorktreeError("UIA fixture owner unavailable", err);
+                return;
+            };
+            self.handleContextAction(.move_project, .{ .project = .{ .path = path, .remote = false } });
             return;
         }
         if (mutation == 18) {
-            const baseline =
-                \\{"version":2,"kind":"event","sequence":54,"event":{"graphChanged":{"id":"uia-activity","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"idle"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"idle"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"idle"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"idle"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"idle"}],"edges":[]}}}
+            const baseline_nodes =
+                \\[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"idle"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"idle"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"idle"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"idle"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"idle"}]
             ;
-            const changed =
-                \\{"version":2,"kind":"event","sequence":55,"event":{"graphChanged":{"id":"uia-activity","project":{"path":"C:\\GraphCode\\fixture","name":"UIA project","remote":false},"nodes":[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"succeeded"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"failed"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"awaitingInput"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"blocked"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"running"}],"edges":[]}}}
+            const changed_nodes =
+                \\[{"id":"act-1","title":"Activity A","loopType":"goalBased","state":"succeeded"},{"id":"act-2","title":"Activity B","loopType":"goalBased","state":"failed"},{"id":"act-3","title":"Activity C","loopType":"goalBased","state":"awaitingInput"},{"id":"act-4","title":"Activity D","loopType":"goalBased","state":"blocked"},{"id":"act-5","title":"Activity E","loopType":"goalBased","state":"running"}]
             ;
-            _ = self.model.updateFromFrame(baseline) catch return;
-            _ = self.model.updateFromFrame(changed) catch return;
+            self.applyUiaFixtureGraph(.project, "UIA project", 54, baseline_nodes, "[]") catch |err| {
+                self.reportWorktreeError("Unable to prepare activity UIA fixture", err);
+                return;
+            };
+            self.applyUiaFixtureGraph(.project, "UIA project", 55, changed_nodes, "[]") catch |err| {
+                self.reportWorktreeError("Unable to update activity UIA fixture", err);
+                return;
+            };
             self.surface = .project;
             self.workspace_controls.panel_visible = false;
             self.layoutWorkspace();
@@ -3708,9 +3890,7 @@ pub const App = struct {
             return;
         }
         if (mutation == 20) {
-            self.model.deinit();
-            self.model = GraphModel.Model.init(self.allocator);
-            self.installUiaFixture(false);
+            if (!self.installUiaFixture(false)) return;
             self.surface = .project;
             self.workspace_controls.panel_visible = false;
             self.layoutWorkspace();
@@ -3720,6 +3900,11 @@ pub const App = struct {
             return;
         }
         const dialog = if (self.worktree_dialog) |*value| value else return;
+        const target_path = if (mutation == 2 or mutation == 3) self.ownedUiaFixturePath(if (mutation == 2) .safe else .unsafe) catch |err| {
+            self.reportWorktreeError("UIA fixture owner unavailable", err);
+            return;
+        } else null;
+        defer if (target_path) |path| self.allocator.free(path);
         switch (mutation) {
             1 => {
                 if (dialog.rows.items.len > 1)
@@ -3727,7 +3912,7 @@ pub const App = struct {
             },
             2 => {
                 const target = for (dialog.rows.items, 0..) |row, index| {
-                    if (std.mem.eql(u8, row.entry.path, "C:\\fixture-safe")) break index;
+                    if (std.mem.eql(u8, row.entry.path, target_path.?)) break index;
                 } else return;
                 _ = dialog.rows.orderedRemove(target);
                 if (self.selected_worktree_path.len != 0) {
@@ -3737,7 +3922,7 @@ pub const App = struct {
             },
             3 => {
                 const target = for (dialog.rows.items, 0..) |row, index| {
-                    if (std.mem.eql(u8, row.entry.path, "C:\\fixture-unsafe")) break index;
+                    if (std.mem.eql(u8, row.entry.path, target_path.?)) break index;
                 } else return;
                 dialog.rows.items[target].entry.dirty = !dialog.rows.items[target].entry.dirty;
             },
@@ -6409,7 +6594,7 @@ fn onWindowMessage(
                             app.closeCompositeGroup();
                         } else if (GraphCanvas.hitTestReclaimOffer(
                             graph.nodes.items,
-                            if (app.worktree_inspection) |*value| value else null,
+                            app.currentWorktreeInspection(),
                             app.kept_worktree_paths.items,
                             x,
                             y,
@@ -7861,8 +8046,10 @@ fn deinitNoticeTestApp(app: *App) void {
     if (app.worktree_dialog) |*dialog| dialog.deinit();
     if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
     if (app.selected_worktree_path.len != 0) app.allocator.free(app.selected_worktree_path);
+    if (app.uia_fixture_project_path.len != 0) app.allocator.free(app.uia_fixture_project_path);
     app.client.deinit();
     app.model.deinit();
+    app.releaseUiaFixtureModelArena();
     app.sidebar_state.deinit();
     app.declared_entry_ids.deinit();
     app.kept_worktree_paths.deinit();
@@ -8119,6 +8306,191 @@ test "worktree notice root row projection excludes foreign inspection without ch
     try std.testing.expectEqualStrings("C:\\notice-a\\tree-0", app.worktree_dialog.?.rows.items[0].entry.path);
     try std.testing.expect(app.model.selectProject("C:\\notice-a"));
     try std.testing.expect(app.currentWorktreeInspection() != null);
+}
+
+test "worktree notice Reclaim and Keep hit targets require the same inspection owner as paint" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    const frames = [_][]const u8{
+        \\{"version":2,"kind":"event","sequence":20,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Same"},"nodes":[{"id":"resolved","title":"Resolved","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-1"}}],"edges":[]}}}
+        ,
+        \\{"version":2,"kind":"event","sequence":21,"event":{"graphChanged":{"project":{"path":"C:\\notice-b","name":"Same"},"nodes":[{"id":"resolved","title":"Resolved","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-1"}}],"edges":[]}}}
+        ,
+    };
+    for (frames) |frame| _ = try app.model.updateFromFrame(frame);
+    try installNoticeTestInspection(&app, "C:\\notice-a", 2, 1024);
+    try std.testing.expect(app.model.selectProject("C:\\notice-a"));
+    const geometry = GraphCanvas.reclaimOfferBounds(GraphCanvas.nodeBounds(0, &app.canvas));
+    const targets = [_]struct { bounds: c.RECT, action: GraphCanvas.ReclaimAction }{
+        .{ .bounds = geometry.reclaim, .action = .reclaim },
+        .{ .bounds = geometry.keep, .action = .keep },
+    };
+    for (targets) |target| {
+        const hit = GraphCanvas.hitTestReclaimOffer(
+            app.model.graph.?.nodes.items,
+            app.currentWorktreeInspection(),
+            app.kept_worktree_paths.items,
+            target.bounds.left + 1,
+            target.bounds.top + 1,
+            &app.canvas,
+        ) orelse return error.MissingMatchedOwnerHit;
+        try std.testing.expectEqual(target.action, hit.action);
+        try std.testing.expectEqual(@as(usize, 0), hit.node_index);
+    }
+    try std.testing.expect(app.model.selectProject("C:\\notice-b"));
+    try std.testing.expect(app.currentWorktreeInspection() == null);
+    for (targets) |target| {
+        try std.testing.expect(GraphCanvas.hitTestReclaimOffer(
+            app.model.graph.?.nodes.items,
+            app.currentWorktreeInspection(),
+            app.kept_worktree_paths.items,
+            target.bounds.left + 1,
+            target.bounds.top + 1,
+            &app.canvas,
+        ) == null);
+        // The raw foreign snapshot would create an invisible hotspot at the same location.
+        try std.testing.expect(GraphCanvas.hitTestReclaimOffer(
+            app.model.graph.?.nodes.items,
+            &app.worktree_inspection.?,
+            app.kept_worktree_paths.items,
+            target.bounds.left + 1,
+            target.bounds.top + 1,
+            &app.canvas,
+        ) != null);
+    }
+    try std.testing.expectEqualStrings("C:\\notice-a", app.worktree_dialog.?.project_path);
+}
+
+test "worktree notice actual UIA fixture data shares the supplied project identity" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    const project = "D:\\owned-ui-fixture\\project";
+    try app.installUiaFixtureData(project);
+    try std.testing.expectEqualStrings(project, app.model.graph.?.project.path);
+    try std.testing.expectEqualStrings(project, app.worktree_inspection.?.project_path);
+    try std.testing.expectEqualStrings(project, app.worktree_dialog.?.project_path);
+    try std.testing.expect(app.currentWorktreeInspection() != null);
+    try std.testing.expect(!app.worktree_inspection.?.entries.items[0].size_complete);
+}
+
+test "worktree notice actual UIA fixture emits Reclaim and Keep through the production sink" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    try app.installUiaFixtureData("D:\\owned-ui-fixture\\project");
+    app.surface = .project;
+    var sink = DpiAccessibilitySink{
+        .expected = &.{
+            .{ .identity = "reclaim:D:\\owned-ui-fixture\\project:11111111-1111-4111-8111-111111111111", .present = true, .name = "Reclaim", .invokable = true },
+            .{ .identity = "keep:D:\\owned-ui-fixture\\project:11111111-1111-4111-8111-111111111111", .present = true, .name = "Keep", .invokable = true },
+        },
+        .dpi_index = 0,
+    };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
+    const original_owner = app.worktree_inspection.?.project_path;
+    app.worktree_inspection.?.project_path = @constCast("D:\\genuinely-foreign\\project");
+    defer app.worktree_inspection.?.project_path = original_owner;
+    try std.testing.expect(app.currentWorktreeInspection() == null);
+    var foreign = DpiAccessibilitySink{
+        .expected = &.{
+            .{ .identity = "reclaim:D:\\owned-ui-fixture\\project:11111111-1111-4111-8111-111111111111" },
+            .{ .identity = "keep:D:\\owned-ui-fixture\\project:11111111-1111-4111-8111-111111111111" },
+        },
+        .dpi_index = 0,
+    };
+    app.syncAccessibilityTo(&foreign, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(foreign.checked);
+    if (foreign.failure) |err| return err;
+}
+
+fn expectOwnedUiaFixtureData(allocator: std.mem.Allocator) !void {
+    var data = try UiaFixtureData.init(allocator, "D:\\owned-ui-fixture\\project");
+    defer data.deinit(allocator);
+    try std.testing.expectEqualStrings(data.model.graph.?.project.path, data.inspection.project_path);
+    try std.testing.expectEqualStrings(data.inspection.project_path, data.dialog.project_path);
+}
+
+test "worktree notice owned UIA fixture staging handles allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, expectOwnedUiaFixtureData, .{});
+}
+
+test "worktree notice owned UIA fixture resets retain stable heap allocator ownership" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    const project = "D:\\owned-ui-fixture\\project";
+    for (0..3) |_| {
+        try app.installUiaFixtureData(project);
+        const arena = app.uia_fixture_model_arena.?;
+        try std.testing.expectEqual(@intFromPtr(arena), @intFromPtr(app.model.allocator.ptr));
+        try std.testing.expectEqual(@intFromPtr(app.allocator.ptr), @intFromPtr(app.worktree_inspection.?.entries.allocator.ptr));
+        try std.testing.expectEqualStrings(project, app.uia_fixture_project_path);
+        try app.appendUiaFixtureLoop();
+        try app.appendUiaFixtureLoop();
+        try std.testing.expectEqual(@as(usize, 3), app.model.graph.?.nodes.items.len);
+        try std.testing.expectEqual(@as(usize, 3), app.model.graphFor(project).?.nodes.items.len);
+        try app.applyUiaFixtureGraph(.empty, "Empty project", 50, "[]", "[]");
+        try std.testing.expectEqualStrings("D:\\owned-ui-fixture\\project\\empty", app.model.graphFor("D:\\owned-ui-fixture\\project\\empty").?.project.path);
+        const inspection_path = app.worktree_inspection.?.entries.items[0].path;
+        try app.resetUiaFixtureModel();
+        try std.testing.expect(app.uia_fixture_model_arena == null);
+        try std.testing.expectEqual(@intFromPtr(app.allocator.ptr), @intFromPtr(app.model.allocator.ptr));
+        try std.testing.expectEqualStrings("D:\\owned-ui-fixture\\project\\fixture-safe", inspection_path);
+        try std.testing.expectEqualStrings(project, app.worktree_dialog.?.project_path);
+        try std.testing.expectEqualStrings(project, try app.requiredUiaFixtureProject());
+    }
+}
+
+test "worktree notice owned UIA fixture rejects changed missing and invalid owners atomically" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    try std.testing.expectError(error.UiaFixtureProjectNotCaptured, app.requiredUiaFixtureProject());
+    for ([_][]const u8{ "", "relative", "C:relative", "C:\\" }) |path| {
+        try std.testing.expectError(error.InvalidUiaFixtureProject, app.installUiaFixtureData(path));
+        try std.testing.expect(app.uia_fixture_model_arena == null);
+    }
+    try app.installUiaFixtureData("D:\\owned-ui-fixture\\project");
+    const arena = app.uia_fixture_model_arena.?;
+    try std.testing.expectError(error.UiaFixtureProjectChanged, app.installUiaFixtureData("D:\\different-owner\\project"));
+    try std.testing.expectEqual(arena, app.uia_fixture_model_arena.?);
+    try std.testing.expectEqualStrings("D:\\owned-ui-fixture\\project", app.model.graph.?.project.path);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    const result = app.installUiaFixtureData("D:\\owned-ui-fixture\\project");
+    app.allocator = std.testing.allocator;
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(arena, app.uia_fixture_model_arena.?);
+    try std.testing.expectEqualStrings("D:\\owned-ui-fixture\\project", app.worktree_dialog.?.project_path);
+}
+
+test "worktree notice owned UIA fixture paths encode and preserve exact data safety facts" {
+    const allocator = std.testing.allocator;
+    var data = try UiaFixtureData.init(allocator, "D:\\owned fixture\\project-\xc3\xa9");
+    defer data.deinit(allocator);
+    const project = data.inspection.project_path;
+    const graph = data.model.graph.?;
+    try std.testing.expectEqualStrings(project, graph.project.path);
+    try std.testing.expectEqualStrings(project, data.model.recent_projects.items[0].path);
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", graph.nodes.items[0].id);
+    try std.testing.expectEqualStrings("UIA loop A", graph.nodes.items[0].title);
+    try std.testing.expectEqualStrings("succeeded", graph.nodes.items[0].state);
+    try std.testing.expectEqualStrings(graph.nodes.items[0].worktree_path, data.inspection.entries.items[0].path);
+    try std.testing.expectEqual(WorktreeStatus.ReclaimDecision.reclaimable, WorktreeStatus.decision(data.inspection.entries.items[0]));
+    try std.testing.expectEqual(WorktreeStatus.ReclaimDecision.keep, WorktreeStatus.decision(data.inspection.entries.items[1]));
+    for (data.inspection.entries.items) |entry| try std.testing.expect(!entry.size_complete);
+    const size = try WorktreeStatus.sizeCoverageText(allocator, WorktreeStatus.totalSize(data.inspection.entries.items));
+    defer allocator.free(size);
+    try std.testing.expectEqualStrings("size not measured", size);
+    const prefix = try std.mem.concat(allocator, u8, &.{ project, "\\" });
+    defer allocator.free(prefix);
+    inline for (.{ UiaFixturePath.safe, .unsafe, .empty, .jump, .sweep_safe, .sweep_unsafe }) |kind| {
+        const path = try uiaFixturePath(allocator, project, kind);
+        defer allocator.free(path);
+        try std.testing.expect(std.mem.startsWith(u8, path, prefix));
+    }
+    const policy = try WorktreeStatus.policyPath(allocator, project);
+    defer allocator.free(policy);
+    try std.testing.expect(std.mem.startsWith(u8, policy, prefix));
 }
 
 test "worktree notice App resolver owns exact paths across reorder close and allocation failure" {
