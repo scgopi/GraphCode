@@ -8105,7 +8105,68 @@ fn setOverviewTestEnvironment(name: []const u8, value: ?[]const u8) !void {
     try setWorkspaceTestEnvironment(key.ptr, value);
 }
 
-test "cross-project overview Worktrees actions inspect the exact disposable Git project" {
+const OverviewGitEnvironment = struct {
+    previous: std.process.EnvMap,
+
+    fn init(empty_config: []const u8) !@This() {
+        var self = @This(){ .previous = try std.process.getEnvMap(std.testing.allocator) };
+        errdefer self.deinit();
+        var inherited = self.previous.iterator();
+        while (inherited.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                try setOverviewTestEnvironment(entry.key_ptr.*, null);
+        }
+        try setOverviewTestEnvironment("GIT_CONFIG_SYSTEM", empty_config);
+        try setOverviewTestEnvironment("GIT_CONFIG_GLOBAL", empty_config);
+        try setOverviewTestEnvironment("GIT_CONFIG_NOSYSTEM", "1");
+        try setOverviewTestEnvironment("GIT_TERMINAL_PROMPT", "0");
+        return self;
+    }
+
+    fn deinit(self: *@This()) void {
+        var current = std.process.getEnvMap(std.testing.allocator) catch @panic("Unable to read test Git environment");
+        defer current.deinit();
+        var installed = current.iterator();
+        while (installed.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                setOverviewTestEnvironment(entry.key_ptr.*, null) catch @panic("Unable to clear test Git environment");
+        }
+        var previous = self.previous.iterator();
+        while (previous.next()) |entry| {
+            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_"))
+                setOverviewTestEnvironment(entry.key_ptr.*, entry.value_ptr.*) catch @panic("Unable to restore Git environment");
+        }
+        self.previous.deinit();
+    }
+};
+
+fn expectOverviewGitEnvironment(expected: *const std.process.EnvMap) !void {
+    var actual = try std.process.getEnvMap(std.testing.allocator);
+    defer actual.deinit();
+    var count: usize = 0;
+    var entries = actual.iterator();
+    while (entries.next()) |entry| {
+        if (!std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_")) continue;
+        count += 1;
+        const value = expected.get(entry.key_ptr.*) orelse return error.UnexpectedGitEnvironmentKey;
+        // Environment values can contain credentials; failed assertions must not print them.
+        try std.testing.expect(std.mem.eql(u8, value, entry.value_ptr.*));
+    }
+    var expected_count: usize = 0;
+    entries = expected.iterator();
+    while (entries.next()) |entry| {
+        if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_")) expected_count += 1;
+    }
+    try std.testing.expectEqual(expected_count, count);
+}
+
+fn overviewGitEnvironmentErrorControl(empty_config: []const u8) !void {
+    var isolated = try OverviewGitEnvironment.init(empty_config);
+    defer isolated.deinit();
+    return error.ExpectedOverviewFixtureFailure;
+}
+
+fn exerciseOverviewWorktreesFixture() !void {
     const allocator = std.testing.allocator;
     var temporary = std.testing.tmpDir(.{});
     var directory_open = true;
@@ -8114,28 +8175,11 @@ test "cross-project overview Worktrees actions inspect the exact disposable Git 
     const root = try temporary.dir.realpathAlloc(allocator, ".");
     defer allocator.free(root);
     errdefer std.debug.print("Failed overview Git fixture retained at: {s}\n", .{root});
-    var prior_environment = try std.process.getEnvMap(allocator);
-    defer prior_environment.deinit();
-    defer {
-        for ([_][]const u8{ "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM" }) |key|
-            setOverviewTestEnvironment(key, null) catch @panic("Unable to clear test Git configuration");
-        var previous = prior_environment.iterator();
-        while (previous.next()) |entry| {
-            if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_CONFIG"))
-                setOverviewTestEnvironment(entry.key_ptr.*, entry.value_ptr.*) catch @panic("Unable to restore Git configuration");
-        }
-    }
-    var inherited = prior_environment.iterator();
-    while (inherited.next()) |entry| {
-        if (std.ascii.startsWithIgnoreCase(entry.key_ptr.*, "GIT_CONFIG"))
-            try setOverviewTestEnvironment(entry.key_ptr.*, null);
-    }
     try temporary.dir.writeFile(.{ .sub_path = "empty-git.config", .data = "" });
     const empty_config = try std.fs.path.join(allocator, &.{ root, "empty-git.config" });
     defer allocator.free(empty_config);
-    try setOverviewTestEnvironment("GIT_CONFIG_SYSTEM", empty_config);
-    try setOverviewTestEnvironment("GIT_CONFIG_GLOBAL", empty_config);
-    try setOverviewTestEnvironment("GIT_CONFIG_NOSYSTEM", "1");
+    var git_environment = try OverviewGitEnvironment.init(empty_config);
+    defer git_environment.deinit();
     const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
     const gate_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_GATE");
     const dialogs_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_SHOW_DIALOGS");
@@ -8177,6 +8221,23 @@ test "cross-project overview Worktrees actions inspect the exact disposable Git 
             std.debug.print("Git fixture initialization failed: {s}\n", .{initialized.stderr});
             return error.GitFixtureInitializationFailed;
         }
+        const git_dir = try std.fs.path.join(allocator, &.{ path, ".git" });
+        defer allocator.free(git_dir);
+        var created = try std.fs.cwd().openDir(git_dir, .{});
+        created.close();
+        const resolved = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "git", "-C", path, "rev-parse", "--absolute-git-dir", "--path-format=absolute", "--git-common-dir", "--show-toplevel" },
+        });
+        defer allocator.free(resolved.stdout);
+        defer allocator.free(resolved.stderr);
+        try std.testing.expect(resolved.term == .Exited and resolved.term.Exited == 0);
+        const expected_roots = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}\n", .{ git_dir, git_dir, path });
+        defer allocator.free(expected_roots);
+        for (expected_roots) |*byte| if (byte.* == '\\') {
+            byte.* = '/';
+        };
+        try std.testing.expectEqualStrings(expected_roots, resolved.stdout);
     }
     try temporary.dir.writeFile(.{ .sub_path = "alpha\\sentinel.txt", .data = "alpha preserved" });
     try temporary.dir.writeFile(.{ .sub_path = "beta\\sentinel.txt", .data = "beta preserved" });
@@ -8240,6 +8301,78 @@ test "cross-project overview Worktrees actions inspect the exact disposable Git 
     directory_open = false;
     try temporary.parent_dir.deleteTree(&temporary.sub_path);
     std.debug.print("Removed exact successful overview fixture: {s}\n", .{root});
+}
+
+test "cross-project overview Worktrees actions inspect the exact disposable Git project" {
+    try exerciseOverviewWorktreesFixture();
+}
+
+test "cross-project overview Git redirection cannot escape owned fixture roots" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    var directory_open = true;
+    defer if (directory_open) temporary.dir.close();
+    defer temporary.parent_dir.close();
+    const root = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    errdefer std.debug.print("Failed overview outside-control fixture retained at: {s}\n", .{root});
+    try temporary.dir.writeFile(.{ .sub_path = "empty-git.config", .data = "" });
+    const empty_config = try std.fs.path.join(allocator, &.{ root, "empty-git.config" });
+    defer allocator.free(empty_config);
+    var outer_environment = try OverviewGitEnvironment.init(empty_config);
+    defer outer_environment.deinit();
+    const outside = try std.fs.path.join(allocator, &.{ root, "outside" });
+    defer allocator.free(outside);
+    const outside_git = try std.fs.path.join(allocator, &.{ outside, ".git" });
+    defer allocator.free(outside_git);
+    const initialized = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "git", "-c", "init.templateDir=", "init", "--quiet", "--initial-branch=outside-control", outside },
+    });
+    defer allocator.free(initialized.stdout);
+    defer allocator.free(initialized.stderr);
+    try std.testing.expect(initialized.term == .Exited and initialized.term.Exited == 0);
+    try temporary.dir.writeFile(.{ .sub_path = "outside\\sentinel.txt", .data = "outside must stay untouched" });
+    try temporary.dir.writeFile(.{ .sub_path = "outside\\trace.log", .data = "not a fixture trace channel" });
+    const paths = [_][]const u8{ "outside\\.git\\HEAD", "outside\\.git\\config", "outside\\sentinel.txt", "outside\\trace.log" };
+    var before: [paths.len][]u8 = @splat(&.{});
+    defer for (before) |bytes| allocator.free(bytes);
+    for (paths, 0..) |path, index| before[index] = try temporary.dir.readFileAlloc(allocator, path, 4096);
+
+    for ([_]bool{ false, true }) |multiple_redirects| {
+        try setOverviewTestEnvironment("GIT_DIR", outside_git);
+        if (multiple_redirects) {
+            for ([_][]const u8{
+                "GIT_WORK_TREE",        "GIT_COMMON_DIR",                   "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                "GIT_SHALLOW_FILE",     "GIT_CEILING_DIRECTORIES",          "GIT_EXEC_PATH",
+                "GIT_TEMPLATE_DIR",     "GIT_FUTURE_REDIRECTION_CONTROL",
+            }) |key| try setOverviewTestEnvironment(key, outside);
+            const trace = try std.fs.path.join(allocator, &.{ outside, "trace.log" });
+            defer allocator.free(trace);
+            try setOverviewTestEnvironment("GIT_TRACE2_EVENT", trace);
+            try setOverviewTestEnvironment("GIT_CONFIG_COUNT", "1");
+            try setOverviewTestEnvironment("GIT_CONFIG_KEY_0", "init.defaultObjectFormat");
+            try setOverviewTestEnvironment("GIT_CONFIG_VALUE_0", "invalid-overview-format");
+        }
+        var expected = try std.process.getEnvMap(allocator);
+        defer expected.deinit();
+        try std.testing.expectError(error.ExpectedOverviewFixtureFailure, overviewGitEnvironmentErrorControl(empty_config));
+        try expectOverviewGitEnvironment(&expected);
+        const fixture_result = exerciseOverviewWorktreesFixture();
+        try expectOverviewGitEnvironment(&expected);
+        for (paths, before) |path, original| {
+            const after = try temporary.dir.readFileAlloc(allocator, path, 4096);
+            defer allocator.free(after);
+            try std.testing.expectEqualSlices(u8, original, after);
+        }
+        try fixture_result;
+    }
+    std.debug.print("Overview Git redirection controls preserved outside HEAD/config/sentinels and restored success/error environments\n", .{});
+    temporary.dir.close();
+    directory_open = false;
+    try temporary.parent_dir.deleteTree(&temporary.sub_path);
+    std.debug.print("Removed exact successful overview outside-control fixture: {s}\n", .{root});
 }
 
 test "DPI gesture mapper classifies scaled sidebar and graph boundaries" {
