@@ -81,6 +81,11 @@ screenshot pixels; no live/launch mode exists in this script.
 
 ## Rendered Windows capture and replay
 
+The [bundled focus-tint before/after evidence](rendered-windows/README.md)
+contains four original PNGs, a clearly labeled sanitized derivative index, and
+a read-only hash/pixel replay command. It proves the bounded workspace focus
+color correction, not complete Windows/macOS visual parity.
+
 `Tools\windows\capture-visual-baseline.ps1` captures actual application client
 pixels, not a reimplementation of the renderer. Its data is the existing
 `App.installUiaFixture` synthetic graph; **the production rendering path remains

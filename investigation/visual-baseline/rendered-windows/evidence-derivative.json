@@ -1,0 +1,773 @@
+{
+  "schemaVersion": 1,
+  "recordType": "DERIVATIVE: sanitized evidence index; NOT original metadata or Test-RenderedVisualBaseline input",
+  "purpose": "Read-only hash and exact-pixel replay of byte-identical Windows captures",
+  "originalPairSha256": "a7e04a8c1e6225e80a50dea87162d0df1f57053c94a748eaf7d3fed3c354d22f",
+  "originalBeforeAnalysisSha256": "a77108f6c41b04cf8f473a8bb3cb83ced4f142c75162c3cf774618e1dcc0dc79",
+  "originalBeforeRejectionLogSha256": "6801438bed624500bb8fe9a11e7a6079f9088e9279339956b57bb0ea749321ab",
+  "captures": [
+    {
+      "id": "before",
+      "recordType": "DERIVATIVE: compact sanitized summary; not original capture metadata or production comparator input",
+      "originalRecordHashes": [
+        {
+          "sha256": "19e4db178e1e138c667d45103495fab3b3b0e070ba1726afe941363d83f63401",
+          "name": "evidence.json"
+        },
+        {
+          "sha256": "939e09d432fec4abe2f3ff5380f6418ecbc80c68c4579f388ed60d849c689e2d",
+          "name": "reviewed-evidence.json"
+        },
+        {
+          "sha256": "5d8c4bdad59c169fdfcf927a03447ac206a3d29b62c7adccb84c705e34780002",
+          "name": "supervisor.json"
+        },
+        {
+          "sha256": "0e004a879cd190918d2287bf287834a9623b530e48cb8e253c824f12f05c80ea",
+          "name": "independent-cleanup-verification.json"
+        },
+        {
+          "sha256": "765345151a0d360cbcb9fda006c01ff8f6f92eaccd60d5048b90fd2e0096df1b",
+          "name": "measurements.json"
+        }
+      ],
+      "capturedAt": "2026-09-26T01:18:50.1982274Z",
+      "sourceCommit": "3d7c670d8c73088b2f31f89175279dbedbb47563",
+      "sourceTree": "3b5545d5fdf97d0df9ca4e5e78690077ba500b84",
+      "dirtyFileCount": 0,
+      "os": "Microsoft Windows NT 10.0.26200.0",
+      "dpi": 96,
+      "fixture": {
+        "zoom": 1,
+        "daemonState": "disconnected",
+        "name": "App.installUiaFixture"
+      },
+      "renderer": {
+        "daemonSupervisorHook": false,
+        "uiaGate": false
+      },
+      "executable": {
+        "sha256": "f18a7b314d83fed62f68d7a04374a82b27368844a14140d7265d437554b75c14",
+        "artifact": "graphcode-windows\\zig-out\\bin\\graphcode-windows.exe"
+      },
+      "providers": {
+        "zmx": {
+          "sha256": "13c3e7236dd969a34d3e7226dfcb9900f6eacc1b4f6a6d5de9c86d6802f6163b",
+          "artifact": ".graphcode-tools\\providers\\zmx\\zig-out\\bin\\zmx.exe",
+          "pin": "11e20c738b4ebd88031c7a01f1a9d938ee123234"
+        },
+        "winghostty": {
+          "sha256": "fe070fa2f9d4ae40d8811908492f19baadb612a274299f4e122f4c2602487251",
+          "artifact": ".graphcode-tools\\providers\\winghostty\\zig-out\\lib\\winghostty-win32-host.lib",
+          "pin": "f5abc059e4ca58b376eb209313aca7784659c679"
+        }
+      },
+      "sourceHashes": [
+        {
+          "path": "graphcode\\Sources\\Features\\App\\Theme.swift",
+          "sha256": "fd7f8d3140239019a9c0eaec614347eb64ec3db9ef496e4eb31882c821d29e06",
+          "lfSha256": "fd7f8d3140239019a9c0eaec614347eb64ec3db9ef496e4eb31882c821d29e06"
+        },
+        {
+          "path": "graphcode-windows\\src\\App.zig",
+          "sha256": "ab5fb9cce3c872fb61bd5609b4a225923b95ceea005df329887f681b69ecd658",
+          "lfSha256": "83b7775edd15b6cbc3544e14469b99121987afdbb13c85e6c30f5c011cf6c556"
+        },
+        {
+          "path": "graphcode-windows\\src\\AppFont.zig",
+          "sha256": "3bc9740fd19c4059c79ea7c9b6e818910fcf8cbfbb823f75b93ea75f05a44ba8",
+          "lfSha256": "d44af24e47928bea1f8f583b81f4dac91cd86451b81ed5f5f6ad05c914a2b5e2"
+        },
+        {
+          "path": "graphcode-windows\\src\\GdiplusAA.zig",
+          "sha256": "266df72a2b2b00957a9ebb090893266b9511e18b118f4688c616e4c83a7f9174",
+          "lfSha256": "c70ef971a2546c0a58e4e866bf08464243343545a646e73dbda6c385c0cdceb0"
+        },
+        {
+          "path": "graphcode-windows\\src\\GdiGradient.zig",
+          "sha256": "8f19987c964b4e42514e67e6277562082a5c11c802b660b9cce43bcf30b9e8ef",
+          "lfSha256": "71b5d19e6e5ac8eb53983378dd3cf09a36c2df6cd40e5c5890dad8ca7072723a"
+        },
+        {
+          "path": "graphcode-windows\\src\\DesignTokens.zig",
+          "sha256": "f58e7e08a14f5a256e38e22e44c853ed2998e848a20b01c030fd30106547819a",
+          "lfSha256": "63765167c329a5add32a17863b12f053769fa45d54463ddf62519cfe06695553"
+        },
+        {
+          "path": "graphcode-windows\\src\\GraphCanvas.zig",
+          "sha256": "35d448a75bc9dce1c0ec6b5f5a1633af2e38c72c7e8fadb9e2f46dba43f4b31a",
+          "lfSha256": "92d0711d7d698aaac0c3f41747df79c7b62353d91f352e4e4f063930e61339e1"
+        },
+        {
+          "path": "graphcode-windows\\src\\Sidebar.zig",
+          "sha256": "89cf0aec51eb40a64b7e342bed05a8ccb8e46ee681e3db98edff3335a38d39d4",
+          "lfSha256": "7f999cd2084afaef47e73320b83ba941bce11b961e0a0d0ba230c8e80a1c30d7"
+        },
+        {
+          "path": "graphcode-windows\\src\\TerminalSurface.zig",
+          "sha256": "3d18856999b661d9d360e7fd453605eabe15deb5f0da3351afefa5e891f5aea1",
+          "lfSha256": "8e1ec783800df4707de72e7facb3e5479a29fd7a01936320c68cdb2c32b281cc"
+        },
+        {
+          "path": "graphcode-windows\\src\\WindowsProductSettings.zig",
+          "sha256": "a7815df888d0e9997170498a9738825fba7eb8d2841613efb3cd1c4df0700764",
+          "lfSha256": "6c5caf740ebc35f8f74b767718cf8ad8121200c6492280143bd90af37c63ee91"
+        },
+        {
+          "path": "graphcode-windows\\provider-pins.json",
+          "sha256": "fc7ed5c6ef0cb9a25b892b5a1ea985b14811d3bcbf1b2d896d9d3981afff3174",
+          "lfSha256": "9a7135b06aecfb75952993bee9d5df8ebd73b4ab875b541ef5c4aaaa42e98ae6"
+        },
+        {
+          "path": "Tools\\windows\\capture-visual-baseline.ps1",
+          "sha256": "30061b7a756cc58fd7a71c66e0803aa47c5ddd28974f85d379e12c9f4192ebf8",
+          "lfSha256": "b82a5a8b4ee6b5eeca63b27c4768d24dbe5de5aa350e486e1c1153eb5132b084"
+        },
+        {
+          "path": "Tools\\windows\\Test-RenderedVisualBaseline.ps1",
+          "sha256": "838f0c4c2709d3657357650e387d4c6605489fb1a259cca32ae8168c35ad5911",
+          "lfSha256": "5e618d6be6d4e915a22b75a96c6d95de0a634e0a90d6a40dcca57d65439547c4"
+        }
+      ],
+      "setupActions": [
+        {
+          "kind": "UIA InvokePattern",
+          "id": "open-project-2172211874943259166",
+          "name": "UIA project"
+        },
+        {
+          "kind": "native WM_COMMAND",
+          "command": 4408
+        },
+        {
+          "kind": "native WM_COMMAND",
+          "command": 4403
+        },
+        {
+          "kind": "UIA InvokePattern",
+          "id": "loop-row-1542093241360827856",
+          "name": "UIA loop A"
+        }
+      ],
+      "fontSmoothing": {
+        "enabled": 1,
+        "type": 2
+      },
+      "backend": {
+        "clients": 1,
+        "cwd": "private isolated capture cwd; absolute path omitted",
+        "kind": "identity-proven cmd backend with exact zmx server ancestry",
+        "terminalPixelsProveReadability": false
+      },
+      "intervention": {
+        "count": 1,
+        "normalUserFocusValidated": false,
+        "kind": "one identity-proven current foreground zmx attach HWND temporarily hidden",
+        "restoration": [
+          "same owned HWND visibility restored without activation"
+        ]
+      },
+      "cleanup": {
+        "totalElapsedMilliseconds": 10336,
+        "workerExitCode": 0,
+        "watchdogJoined": true,
+        "cleanupElapsedMilliseconds": 90,
+        "exactSurvivors": 0,
+        "namespaceSurvivors": 0,
+        "jobVerifiedEmpty": true,
+        "watchdogFired": false,
+        "executionLimitMilliseconds": 120000,
+        "exactIdentitiesChecked": 15
+      }
+    },
+    {
+      "id": "after",
+      "recordType": "DERIVATIVE: compact sanitized summary; not original capture metadata or production comparator input",
+      "originalRecordHashes": [
+        {
+          "sha256": "a292e0bc2e87eb05cd15da993382b33c70206489d2b001bb6a57e41ca8cd356e",
+          "name": "evidence.json"
+        },
+        {
+          "sha256": "e1edcc1bdff3edfb14b2885e96df3a56a3eba38b5497975171c032c72bb4953f",
+          "name": "reviewed-evidence.json"
+        },
+        {
+          "sha256": "5272c35eb006116e99e70148e66fa9524557cb064dee51069a9f6e310f7266b8",
+          "name": "supervisor.json"
+        },
+        {
+          "sha256": "3b37ccda48e2b5bc230162c0fd0462c48e0ea711d6303adb3eb181e372197a59",
+          "name": "independent-cleanup-verification.json"
+        },
+        {
+          "sha256": "200de7fe64c85ed0429dfe17f4f0be5ec2506c8fe18d43e02396fae695810e6e",
+          "name": "measurements.json"
+        }
+      ],
+      "capturedAt": "2026-09-26T01:48:27.9298308Z",
+      "sourceCommit": "2ba3c5a458189d9a1ebc98b5cb3c2f5b30c09305",
+      "sourceTree": "c20f15e9d2df3d1dd764506b16afd8ef37d2fb45",
+      "dirtyFileCount": 0,
+      "os": "Microsoft Windows NT 10.0.26200.0",
+      "dpi": 96,
+      "fixture": {
+        "name": "App.installUiaFixture",
+        "daemonState": "disconnected",
+        "zoom": 1
+      },
+      "renderer": {
+        "daemonSupervisorHook": false,
+        "uiaGate": false
+      },
+      "executable": {
+        "artifact": "graphcode-windows\\zig-out\\bin\\graphcode-windows.exe",
+        "sha256": "3de0bc6574655365028c11e1eaaf73c2aa29fa2652e98e380ca2ed9d72097114"
+      },
+      "providers": {
+        "zmx": {
+          "artifact": ".graphcode-tools\\providers\\zmx\\zig-out\\bin\\zmx.exe",
+          "pin": "11e20c738b4ebd88031c7a01f1a9d938ee123234",
+          "sha256": "13c3e7236dd969a34d3e7226dfcb9900f6eacc1b4f6a6d5de9c86d6802f6163b"
+        },
+        "winghostty": {
+          "artifact": ".graphcode-tools\\providers\\winghostty\\zig-out\\lib\\winghostty-win32-host.lib",
+          "pin": "f5abc059e4ca58b376eb209313aca7784659c679",
+          "sha256": "fe070fa2f9d4ae40d8811908492f19baadb612a274299f4e122f4c2602487251"
+        }
+      },
+      "sourceHashes": [
+        {
+          "path": "graphcode\\Sources\\Features\\App\\Theme.swift",
+          "sha256": "fd7f8d3140239019a9c0eaec614347eb64ec3db9ef496e4eb31882c821d29e06",
+          "lfSha256": "fd7f8d3140239019a9c0eaec614347eb64ec3db9ef496e4eb31882c821d29e06"
+        },
+        {
+          "path": "graphcode-windows\\src\\App.zig",
+          "sha256": "ab5fb9cce3c872fb61bd5609b4a225923b95ceea005df329887f681b69ecd658",
+          "lfSha256": "83b7775edd15b6cbc3544e14469b99121987afdbb13c85e6c30f5c011cf6c556"
+        },
+        {
+          "path": "graphcode-windows\\src\\AppFont.zig",
+          "sha256": "3bc9740fd19c4059c79ea7c9b6e818910fcf8cbfbb823f75b93ea75f05a44ba8",
+          "lfSha256": "d44af24e47928bea1f8f583b81f4dac91cd86451b81ed5f5f6ad05c914a2b5e2"
+        },
+        {
+          "path": "graphcode-windows\\src\\GdiplusAA.zig",
+          "sha256": "266df72a2b2b00957a9ebb090893266b9511e18b118f4688c616e4c83a7f9174",
+          "lfSha256": "c70ef971a2546c0a58e4e866bf08464243343545a646e73dbda6c385c0cdceb0"
+        },
+        {
+          "path": "graphcode-windows\\src\\GdiGradient.zig",
+          "sha256": "8f19987c964b4e42514e67e6277562082a5c11c802b660b9cce43bcf30b9e8ef",
+          "lfSha256": "71b5d19e6e5ac8eb53983378dd3cf09a36c2df6cd40e5c5890dad8ca7072723a"
+        },
+        {
+          "path": "graphcode-windows\\src\\DesignTokens.zig",
+          "sha256": "c9ccd3c4a3468bc4aee22ca5e8b8ba5b90e83d0ac009ec8d6a1abb860028a158",
+          "lfSha256": "dce0e4551d76a5f5fbb0bf7e3ab0c4cafc79457a9762c63ac8f8f4739e0e0842"
+        },
+        {
+          "path": "graphcode-windows\\src\\GraphCanvas.zig",
+          "sha256": "35d448a75bc9dce1c0ec6b5f5a1633af2e38c72c7e8fadb9e2f46dba43f4b31a",
+          "lfSha256": "92d0711d7d698aaac0c3f41747df79c7b62353d91f352e4e4f063930e61339e1"
+        },
+        {
+          "path": "graphcode-windows\\src\\Sidebar.zig",
+          "sha256": "89cf0aec51eb40a64b7e342bed05a8ccb8e46ee681e3db98edff3335a38d39d4",
+          "lfSha256": "7f999cd2084afaef47e73320b83ba941bce11b961e0a0d0ba230c8e80a1c30d7"
+        },
+        {
+          "path": "graphcode-windows\\src\\TerminalSurface.zig",
+          "sha256": "3d18856999b661d9d360e7fd453605eabe15deb5f0da3351afefa5e891f5aea1",
+          "lfSha256": "8e1ec783800df4707de72e7facb3e5479a29fd7a01936320c68cdb2c32b281cc"
+        },
+        {
+          "path": "graphcode-windows\\src\\WindowsProductSettings.zig",
+          "sha256": "a7815df888d0e9997170498a9738825fba7eb8d2841613efb3cd1c4df0700764",
+          "lfSha256": "6c5caf740ebc35f8f74b767718cf8ad8121200c6492280143bd90af37c63ee91"
+        },
+        {
+          "path": "graphcode-windows\\provider-pins.json",
+          "sha256": "fc7ed5c6ef0cb9a25b892b5a1ea985b14811d3bcbf1b2d896d9d3981afff3174",
+          "lfSha256": "9a7135b06aecfb75952993bee9d5df8ebd73b4ab875b541ef5c4aaaa42e98ae6"
+        },
+        {
+          "path": "Tools\\windows\\capture-visual-baseline.ps1",
+          "sha256": "30061b7a756cc58fd7a71c66e0803aa47c5ddd28974f85d379e12c9f4192ebf8",
+          "lfSha256": "b82a5a8b4ee6b5eeca63b27c4768d24dbe5de5aa350e486e1c1153eb5132b084"
+        },
+        {
+          "path": "Tools\\windows\\Test-RenderedVisualBaseline.ps1",
+          "sha256": "0cf6c034660eadb93e7d4613c48d7d4c6918cddd2ce5d38d52d9e7a738f0aa03",
+          "lfSha256": "35e20b0ca2b3ceb73aee6346a090fbbb4e16900a836d3d9e8a1a76e7111da095"
+        }
+      ],
+      "setupActions": [
+        {
+          "kind": "UIA InvokePattern",
+          "id": "open-project-2172211874943259166",
+          "name": "UIA project"
+        },
+        {
+          "kind": "native WM_COMMAND",
+          "command": 4408
+        },
+        {
+          "kind": "native WM_COMMAND",
+          "command": 4403
+        },
+        {
+          "kind": "UIA InvokePattern",
+          "id": "loop-row-1542093241360827856",
+          "name": "UIA loop A"
+        }
+      ],
+      "fontSmoothing": {
+        "type": 2,
+        "enabled": 1
+      },
+      "backend": {
+        "clients": 1,
+        "cwd": "private isolated capture cwd; absolute path omitted",
+        "kind": "identity-proven cmd backend with exact zmx server ancestry",
+        "terminalPixelsProveReadability": false
+      },
+      "intervention": {
+        "count": 1,
+        "normalUserFocusValidated": false,
+        "kind": "one identity-proven current foreground zmx attach HWND temporarily hidden",
+        "restoration": [
+          "same owned HWND visibility restored without activation"
+        ]
+      },
+      "cleanup": {
+        "totalElapsedMilliseconds": 10472,
+        "workerExitCode": 0,
+        "watchdogJoined": true,
+        "cleanupElapsedMilliseconds": 73,
+        "exactSurvivors": 0,
+        "namespaceSurvivors": 0,
+        "jobVerifiedEmpty": true,
+        "watchdogFired": false,
+        "executionLimitMilliseconds": 120000,
+        "exactIdentitiesChecked": 16
+      }
+    }
+  ],
+  "images": [
+    {
+      "file": "before-workspace.png",
+      "capture": "before",
+      "surface": "workspace",
+      "sha256": "3069e6b5b2f60d71c89d0c4716a403baef2f11b1e47ea3fe69816c6ca2d7acc3",
+      "bytes": 32031,
+      "width": 1264,
+      "height": 761,
+      "dpi": 96,
+      "state": "fixture-loop-attached",
+      "derivation": "None: original lossless PNG bytes copied without crop, resize, re-encoding or retouching"
+    },
+    {
+      "file": "after-canvas-sidebar.png",
+      "capture": "after",
+      "surface": "canvas-sidebar",
+      "sha256": "d6bf8e5a51b6a167a79979230cec5d21b4a16baad6c2373afbf9d553f05df170",
+      "bytes": 43238,
+      "width": 1264,
+      "height": 761,
+      "dpi": 96,
+      "state": "fixture-project-disconnected",
+      "derivation": "None: original lossless PNG bytes copied without crop, resize, re-encoding or retouching"
+    },
+    {
+      "file": "after-dialog.png",
+      "capture": "after",
+      "surface": "dialog",
+      "sha256": "f88ff6b5eb769d672f2326561d414fd80d627ca5ed4288e3f4aa0d17733eabe6",
+      "bytes": 23224,
+      "width": 620,
+      "height": 830,
+      "dpi": 96,
+      "state": "product-settings-unmodified",
+      "derivation": "None: original lossless PNG bytes copied without crop, resize, re-encoding or retouching"
+    },
+    {
+      "file": "after-workspace.png",
+      "capture": "after",
+      "surface": "workspace",
+      "sha256": "e05b00f0692b052c095a36dcc58cfcf96ad9b60c707c303e06a89f34e9028a94",
+      "bytes": 32024,
+      "width": 1264,
+      "height": 761,
+      "dpi": 96,
+      "state": "fixture-loop-attached",
+      "derivation": "None: original lossless PNG bytes copied without crop, resize, re-encoding or retouching"
+    }
+  ],
+  "focusPair": {
+    "comparison": "One opaque focus strip vs current Theme.swift source; no matched current macOS screenshot",
+    "afterCount": 128,
+    "beforeCount": 128,
+    "afterRgb": [
+      10,
+      132,
+      255
+    ],
+    "changedRecordedSources": [
+      "graphcode-windows\\src\\DesignTokens.zig",
+      "Tools\\windows\\Test-RenderedVisualBaseline.ps1"
+    ],
+    "tabBounds": [
+      220.0,
+      84.0,
+      112.0,
+      22.0
+    ],
+    "fixtureSame": true,
+    "workspaceSize": [
+      1264,
+      761
+    ],
+    "dpi": 96,
+    "beforeRgb": [
+      255,
+      132,
+      10
+    ],
+    "rect": [
+      500,
+      130,
+      64,
+      2
+    ]
+  },
+  "pixelChecks": [
+    {
+      "rect": [
+        800,
+        210,
+        8,
+        8
+      ],
+      "file": "after-canvas-sidebar.png",
+      "source": "GraphCanvas.paint/drawGrid: graph left220 top34, grid cell24 at zoom1/pan0; rectangle excludes the adjacent x796/x820 and y202/y226 lines.",
+      "id": "canvas-tone",
+      "pixels": 64,
+      "alpha": 255,
+      "rgb": [
+        10,
+        12,
+        11
+      ]
+    },
+    {
+      "rect": [
+        820,
+        210,
+        1,
+        8
+      ],
+      "file": "after-canvas-sidebar.png",
+      "source": "GraphCanvas.drawGrid: vertical x220+25*24=820, between horizontal lines202/226.",
+      "id": "canvas-grid",
+      "pixels": 8,
+      "alpha": 255,
+      "rgb": [
+        21,
+        24,
+        22
+      ]
+    },
+    {
+      "rect": [
+        480,
+        116,
+        8,
+        8
+      ],
+      "file": "after-canvas-sidebar.png",
+      "source": "GraphCanvas.nodeBounds/drawNode/roundedCard; live canvas-card UIA bounds252,84,250,106; interior right of title, below corner and above state text.",
+      "id": "card-interior",
+      "pixels": 64,
+      "alpha": 255,
+      "rgb": [
+        35,
+        35,
+        38
+      ]
+    },
+    {
+      "rect": [
+        8,
+        300,
+        8,
+        8
+      ],
+      "file": "after-canvas-sidebar.png",
+      "source": "Sidebar.draw fills x0..220 below header34 using workspace_rail; blank margin between loop rows and Chats heading.",
+      "id": "sidebar-interior",
+      "pixels": 64,
+      "alpha": 255,
+      "rgb": [
+        29,
+        29,
+        33
+      ]
+    },
+    {
+      "rect": [
+        8,
+        120,
+        8,
+        8
+      ],
+      "file": "after-dialog.png",
+      "source": "WindowsProductSettings.paintSettings fills client620x830 RGB35,35,38; blank left margin avoids headings and native controls.",
+      "id": "dialog-panel",
+      "pixels": 64,
+      "alpha": 255,
+      "rgb": [
+        35,
+        35,
+        38
+      ]
+    },
+    {
+      "rect": [
+        286,
+        86,
+        12,
+        12
+      ],
+      "file": "after-workspace.png",
+      "source": "TerminalSurface.paintChrome/tabBounds: live Agent tab220,84,112,22; interior after label and before close glyph.",
+      "id": "selected-tab",
+      "pixels": 144,
+      "alpha": 255,
+      "rgb": [
+        60,
+        62,
+        68
+      ]
+    },
+    {
+      "rect": [
+        500,
+        130,
+        64,
+        2
+      ],
+      "file": "after-workspace.png",
+      "source": "TerminalSurface.paintChrome; identical live tab220,84,112,22 -> origin80+tabheight30+paneheight22-2=130. Active strip x500..563/y130..131 must match current Theme.paneFocusTint RGB10,132,255 independently of Windows token.",
+      "id": "pane-focus",
+      "pixels": 128,
+      "alpha": 255,
+      "rgb": [
+        10,
+        132,
+        255
+      ]
+    },
+    {
+      "rect": [
+        500,
+        130,
+        64,
+        2
+      ],
+      "file": "before-workspace.png",
+      "source": "TerminalSurface.paintChrome active pane strip; this is the observed BUG color, not a desired palette expectation",
+      "id": "pane-focus-before",
+      "pixels": 128,
+      "alpha": 255,
+      "rgb": [
+        255,
+        132,
+        10
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "file": "after-canvas-sidebar.png",
+      "region": "selected-card-corner",
+      "rect": [
+        490,
+        84,
+        12,
+        12
+      ],
+      "kind": "coverage",
+      "pixels": 144,
+      "distinctColors": 31,
+      "source": "GraphCanvas.roundedCard GDI+ radius12, selected canvas_selection border at live card top84/right502. Card fill is a third base color; otherPixels must not be equated with antialias coverage.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 14,
+      "foregroundPixels": 14,
+      "otherPixels": 116
+    },
+    {
+      "file": "after-canvas-sidebar.png",
+      "region": "card-title",
+      "rect": [
+        266,
+        104,
+        90,
+        18
+      ],
+      "kind": "coverage",
+      "pixels": 1620,
+      "distinctColors": 27,
+      "source": "GraphCanvas.drawNode: selected entry node bounds252,84,250,106; title x+14/y+20; AppFont14. Native-pixel glyph observation, not legibility or font-face certification.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 1287,
+      "foregroundPixels": 23,
+      "otherPixels": 310
+    },
+    {
+      "file": "after-canvas-sidebar.png",
+      "region": "sidebar-project-label",
+      "rect": [
+        44,
+        222,
+        85,
+        18
+      ],
+      "kind": "coverage",
+      "pixels": 1530,
+      "distinctColors": 31,
+      "source": "Sidebar.draw open_project title x44/row.top222; App UIA bounds top219=row.top-3, width220/height26; AppFont13.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 1168,
+      "foregroundPixels": 28,
+      "otherPixels": 334
+    },
+    {
+      "file": "after-dialog.png",
+      "region": "settings-title",
+      "rect": [
+        36,
+        22,
+        140,
+        32
+      ],
+      "kind": "coverage",
+      "pixels": 4480,
+      "distinctColors": 55,
+      "source": "WindowsProductSettings.paintSettings/settingsText Settings heading36,22..584,54 size24 semibold Segoe request; observation only.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 1440,
+      "foregroundPixels": 317,
+      "otherPixels": 2723
+    },
+    {
+      "file": "after-dialog.png",
+      "region": "native-backend-button-label",
+      "rect": [
+        210,
+        76,
+        220,
+        18
+      ],
+      "kind": "coverage",
+      "pixels": 3960,
+      "distinctColors": 2,
+      "source": "WindowsProductSettings.createSettingsControls native BUTTON6112 at live UIA36,70,548,30. No native LOGFONT was captured; do not infer actual face or compare it to macOS system Picker pixels.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 3329,
+      "foregroundPixels": 631,
+      "otherPixels": 0
+    },
+    {
+      "file": "after-workspace.png",
+      "region": "tab-gradient",
+      "rect": [
+        500,
+        81,
+        8,
+        29
+      ],
+      "kind": "gradient",
+      "pixels": 232,
+      "distinctColors": 6,
+      "source": "TerminalSurface.paintChrome GdiGradient.fillVertical tab_bar y80..110; excludes highlight row80, tab220..332 and controls772..984. Observe two-stop Windows approximation, not matched macOS three-stop glass.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "topRow": {
+        "y": 81,
+        "meanRgb": [
+          33,
+          33,
+          35
+        ]
+      },
+      "bottomRow": {
+        "y": 109,
+        "meanRgb": [
+          28,
+          28,
+          30
+        ]
+      }
+    },
+    {
+      "file": "after-workspace.png",
+      "region": "loop-bar-gradient",
+      "rect": [
+        760,
+        35,
+        8,
+        44
+      ],
+      "kind": "gradient",
+      "pixels": 352,
+      "distinctColors": 12,
+      "source": "TerminalSurface.paintLoopBar; live UIA loopbar220,34,772,46; clear interval before Show in graph, excludes top/bottom lines.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "topRow": {
+        "y": 35,
+        "meanRgb": [
+          35,
+          35,
+          41
+        ]
+      },
+      "bottomRow": {
+        "y": 78,
+        "meanRgb": [
+          30,
+          30,
+          34
+        ]
+      }
+    },
+    {
+      "file": "after-workspace.png",
+      "region": "metric-sparkline",
+      "rect": [
+        1010,
+        660,
+        236,
+        32
+      ],
+      "kind": "coverage",
+      "pixels": 7552,
+      "distinctColors": 30,
+      "source": "GraphCanvas.paintLoopDetailRail/paintMetricSparkline: right rail starts992, sample rect left+18..right-18; footer+86..118; visible three fixture values1/2/3. Observe exact sample pixels, not CoreGraphics equivalence.",
+      "interpretation": "Observation only, not a visual-quality or cross-platform pass threshold",
+      "backgroundPixels": 6705,
+      "foregroundPixels": 250,
+      "otherPixels": 597
+    }
+  ],
+  "limitations": [
+    "Native production renderer with synthetic App.installUiaFixture and deliberately disconnected GraphCode daemon.",
+    "UIA invocation and native WM_COMMAND setup are not keyboard-menu delivery evidence.",
+    "Exact-owned attach HWND hide/restore is harness-assisted visibility, not normal-user focus proof.",
+    "Black terminal area is not terminal content/rendering/readability proof despite verified backend readiness.",
+    "Native font metadata was not captured; glyph colors and system font settings do not establish every-surface font quality.",
+    "Only native 96 DPI was captured; no multi-monitor or other-DPI runtime comparison.",
+    "No compatible current macOS capture; all four visual parity rows remain Partial.",
+    "Private original records retain full paths/process details; this public derivative omits them and cannot substitute for original capture provenance."
+  ]
+}
