@@ -134,6 +134,49 @@ input, and temporary-JSON-lifetime coverage. Run `zig test src\GraphModel.zig`
 for the existing semantic root as well. These are offline allocation simulations,
 not evidence of true OS memory exhaustion or live UI behavior.
 
+Graph decoding resolves immediate JSON object fields, not the first occurrence
+of a key anywhere in a frame. The v2 `event.graphChanged` (or legacy root
+`graphChanged`) supplies the graph; only that graph's `project`, `nodes`, and
+`edges` are used. Nested graphs retain their own arrays and inherit the parent
+project when opened. Metadata, nested children, and key-like string contents
+cannot supply parent fields. The nonfallible subgraph display count remains
+allocation-free and counts only immediate node objects.
+
+Node goal, usage, presence, and worktree fields use their explicit containing
+objects. Canonical goal metric/poll/stall fields take precedence over the
+existing direct-node legacy fields; a missing field in a goal object can use
+that legacy fallback, but an explicit null/wrong-type goal or canonical field
+cannot. Goal summary/predicate come only from `goal`. A present `usage` owns its
+token fields even when empty, null, or the wrong type; only absent usage uses
+direct-node token fields. Within a worktree binding, a string `path` precedes
+`worktreePath`, with the existing alias fallback for absent/nonstring `path`.
+Scalar presence strings and same-object token-count aliases remain supported.
+Duplicate keys retain first-field precedence. Missing/null/wrong-type fields
+keep their existing defaults, including the existing unsigned numeric-prefix
+conversion; this is not a wire-schema or numeric-conversion redesign.
+
+Temporary field indexes/decoded keys and mixed-delimiter stacks use the caller's
+allocator and propagate allocation errors. Values borrow input only during
+decoding; all retained model strings, including raw `subGraph`, are owned.
+Object/array punctuation, key escapes, and primitive tokens are checked using
+scoped traversal and standard JSON lexing. Structural validation advances one
+cursor through nested containers, rather than scanning descendants again at each
+level; work is linear in input size, with stack storage proportional to depth.
+Bounded depth/width tests count actual span-scan byte visits and validator
+iterations, not elapsed time, and exhaustively exercise stack allocation failure.
+Stored `subGraph` contents remain
+opaque until opened (apart from balanced string/container boundaries), preserving
+the malformed-child-string fallback. Other string payloads retain the existing
+`Wire.decodeJsonString` validation when consumed; ignored strings are not newly
+schema-validated. Malformed decoded graph structure reports `MalformedGraph` or
+`MalformedSubgraph`, and invalid decoded string escapes report
+`MalformedJsonString`. Unrelated recursive Wire envelope queries are unchanged.
+
+Run `zig test src\GraphModel.zig --test-filter "field scope"` for key-order,
+root/child identity, escaped-key/string, defaults/precedence, malformed-input,
+temporary-lifetime, and exhaustive allocation-failure regressions. This is pure
+decoder evidence, not live graph rendering or a parity-status promotion.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and

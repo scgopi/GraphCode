@@ -698,33 +698,11 @@ pub const Model = struct {
     }
 
     fn decodeGraph(self: *Model, frame: []const u8) !void {
-        const graph_start = std.mem.indexOf(u8, frame, "\"graphChanged\"") orelse return;
-        const object_start = indexOfByte(frame, graph_start, '{') orelse return;
-        const object_end = findClosing(frame, object_start, '{', '}') orelse return error.MalformedGraph;
-        const graph_json = frame[object_start .. object_end + 1];
-        var graph = Graph{
-            .project = .{ .path = &.{}, .name = &.{} },
-            .nodes = std.array_list.Managed(Node).init(self.allocator),
-            .edges = std.array_list.Managed(Edge).init(self.allocator),
-        };
+        var graph = decodeGraphFrame(self.allocator, frame) catch |err| switch (err) {
+            error.MalformedJson => return error.MalformedGraph,
+            else => return err,
+        } orelse return;
         defer freeGraph(self.allocator, &graph);
-        graph.project.path = try duplicateJsonString(self.allocator, graph_json, "path");
-        graph.project.name = try duplicateJsonString(self.allocator, graph_json, "name");
-
-        if (std.mem.indexOf(u8, graph_json, "\"nodes\"")) |nodes_key| {
-            if (indexOfByte(graph_json, nodes_key, '[')) |nodes_open| {
-                if (findClosing(graph_json, nodes_open, '[', ']')) |nodes_close| {
-                    try decodeNodes(self.allocator, graph_json[nodes_open + 1 .. nodes_close], &graph.nodes);
-                }
-            }
-        }
-        if (std.mem.indexOf(u8, graph_json, "\"edges\"")) |edges_key| {
-            if (indexOfByte(graph_json, edges_key, '[')) |edges_open| {
-                if (findClosing(graph_json, edges_open, '[', ']')) |edges_close| {
-                    try decodeEdges(self.allocator, graph_json[edges_open + 1 .. edges_close], &graph.edges);
-                }
-            }
-        }
         const was_selected = if (self.selected_project_path) |path|
             std.mem.eql(u8, path, graph.project.path)
         else
@@ -1190,19 +1168,318 @@ fn freeAttentionEntry(allocator: std.mem.Allocator, entry: AttentionEntry) void 
     freeNode(allocator, entry.node);
 }
 
+// Values borrow the input; only the field index and decoded keys are temporary
+// allocations. String payloads (notably stored subGraph children) are decoded
+// only when consumed, preserving the malformed-open-subgraph fallback.
+const JsonValue = struct {
+    raw: []const u8 = "null",
+
+    fn container(self: JsonValue, open: u8) ?[]const u8 {
+        return if (self.raw.len != 0 and self.raw[0] == open) self.raw else null;
+    }
+
+    fn isNull(self: JsonValue) bool {
+        return std.mem.eql(u8, self.raw, "null");
+    }
+
+    fn duplicateString(self: JsonValue, allocator: std.mem.Allocator, fallback: []const u8) ![]u8 {
+        return Wire.decodeJsonString(allocator, if (self.raw.len >= 2 and self.raw[0] == '"')
+            self.raw[1 .. self.raw.len - 1]
+        else
+            fallback);
+    }
+
+    fn unsigned(self: JsonValue, comptime T: type) ?T {
+        var end: usize = 0;
+        while (end < self.raw.len and std.ascii.isDigit(self.raw[end])) : (end += 1) {}
+        return std.fmt.parseInt(T, self.raw[0..end], 10) catch null;
+    }
+
+    fn float(self: JsonValue) ?f64 {
+        return std.fmt.parseFloat(f64, self.raw) catch null;
+    }
+
+    fn boolean(self: JsonValue) ?bool {
+        if (std.mem.eql(u8, self.raw, "true")) return true;
+        if (std.mem.eql(u8, self.raw, "false")) return false;
+        return null;
+    }
+};
+
+fn validateJsonScalar(raw: []const u8, string: bool) !void {
+    var fixed = std.heap.FixedBufferAllocator.init(&.{});
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), raw);
+    defer scanner.deinit();
+    scanner.skipValue() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return if (string) error.MalformedJsonString else error.MalformedJson,
+    };
+    const last = scanner.next() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return if (string) error.MalformedJsonString else error.MalformedJson,
+    };
+    if (last != .end_of_document) return error.MalformedJson;
+}
+
+fn jsonStringEquals(raw: []const u8, expected: []const u8) bool {
+    var fixed = std.heap.FixedBufferAllocator.init(&.{});
+    var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), raw);
+    defer scanner.deinit();
+    var offset: usize = 0;
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.OutOfMemory => unreachable, // Scalar string lexing never grows the nesting stack.
+            else => return false,
+        };
+        switch (token) {
+            .string, .partial_string => |chunk| {
+                if (!matchJsonChunk(expected, &offset, chunk)) return false;
+                if (token == .string) return offset == expected.len;
+            },
+            inline .partial_string_escaped_1, .partial_string_escaped_2, .partial_string_escaped_3, .partial_string_escaped_4 => |chunk| {
+                if (!matchJsonChunk(expected, &offset, &chunk)) return false;
+            },
+            else => return false,
+        }
+    }
+}
+
+fn matchJsonChunk(expected: []const u8, offset: *usize, chunk: []const u8) bool {
+    if (chunk.len > expected.len - offset.* or !std.mem.eql(u8, expected[offset.* .. offset.* + chunk.len], chunk)) return false;
+    offset.* += chunk.len;
+    return true;
+}
+
+const JsonTraversalWork = struct {
+    // Counts span/string scan byte visits and validator loop iterations; this
+    // is not an instruction count for standard-library lexing or allocation.
+    span_byte_visits: usize = 0,
+    validator_steps: usize = 0,
+
+    fn visit(work: ?*JsonTraversalWork, count: usize) void {
+        if (@import("builtin").is_test) {
+            if (work) |measured| measured.span_byte_visits += count;
+        }
+    }
+};
+
+const JsonCursor = struct {
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    work: ?*JsonTraversalWork = null,
+
+    fn trim(self: *JsonCursor) void {
+        self.bytes = std.mem.trimLeft(u8, self.bytes, " \t\r\n");
+    }
+
+    fn take(self: *JsonCursor, byte: u8) !void {
+        self.trim();
+        if (self.bytes.len == 0 or self.bytes[0] != byte) return error.MalformedJson;
+        self.bytes = self.bytes[1..];
+    }
+
+    fn stringEnd(bytes: []const u8) !usize {
+        return stringEndMeasured(bytes, null);
+    }
+
+    fn stringEndMeasured(bytes: []const u8, work: ?*JsonTraversalWork) !usize {
+        var index: usize = 1;
+        while (index < bytes.len) : (index += 1) {
+            JsonTraversalWork.visit(work, 1);
+            if (bytes[index] == '"') return index + 1;
+            if (bytes[index] == '\\') {
+                JsonTraversalWork.visit(work, 1);
+                index += 1;
+            }
+        }
+        return error.MalformedJsonString;
+    }
+
+    fn value(self: *JsonCursor) !JsonValue {
+        self.trim();
+        if (self.bytes.len == 0) return error.MalformedJson;
+        const bytes = self.bytes;
+        const end = switch (bytes[0]) {
+            '"' => try stringEndMeasured(bytes, self.work),
+            '{', '[' => blk: {
+                var stack = std.array_list.Managed(u8).init(self.allocator);
+                defer stack.deinit();
+                var index: usize = 0;
+                while (index < bytes.len) {
+                    JsonTraversalWork.visit(self.work, 1);
+                    switch (bytes[index]) {
+                        '"' => {
+                            index += try stringEndMeasured(bytes[index..], self.work);
+                            continue;
+                        },
+                        '{' => try stack.append('}'),
+                        '[' => try stack.append(']'),
+                        '}', ']' => {
+                            if (stack.items.len == 0 or stack.pop().? != bytes[index]) return error.MalformedJson;
+                            if (stack.items.len == 0) break :blk index + 1;
+                        },
+                        else => {},
+                    }
+                    index += 1;
+                }
+                return error.MalformedJson;
+            },
+            else => blk: {
+                const end = std.mem.indexOfAny(u8, bytes, " \t\r\n,]}") orelse bytes.len;
+                JsonTraversalWork.visit(self.work, end + @intFromBool(end < bytes.len));
+                if (end == 0) return error.MalformedJson;
+                try validateJsonScalar(bytes[0..end], false);
+                break :blk end;
+            },
+        };
+        self.bytes = bytes[end..];
+        return .{ .raw = bytes[0..end] };
+    }
+};
+
+const JsonItems = struct {
+    cursor: JsonCursor,
+    open: u8,
+    first: bool = true,
+    done: bool = false,
+    key: JsonValue = .{},
+
+    fn init(allocator: std.mem.Allocator, bytes: []const u8, open: u8) !JsonItems {
+        return initMeasured(allocator, bytes, open, null);
+    }
+
+    fn initMeasured(allocator: std.mem.Allocator, bytes: []const u8, open: u8, work: ?*JsonTraversalWork) !JsonItems {
+        var result = JsonItems{ .cursor = .{ .allocator = allocator, .bytes = bytes, .work = work }, .open = open };
+        try result.cursor.take(open);
+        return result;
+    }
+
+    fn next(self: *JsonItems) !?JsonValue {
+        if (!try self.nextHead()) {
+            if (self.cursor.bytes.len != 0) return error.MalformedJson;
+            return null;
+        }
+        return try self.cursor.value();
+    }
+
+    fn nextHead(self: *JsonItems) !bool {
+        if (self.done) return false;
+        self.cursor.trim();
+        const close: u8 = if (self.open == '{') '}' else ']';
+        if (self.cursor.bytes.len == 0) return error.MalformedJson;
+        if (self.cursor.bytes[0] == close) {
+            try self.cursor.take(close);
+            self.cursor.trim();
+            self.done = true;
+            return false;
+        }
+        if (!self.first) try self.cursor.take(',');
+        self.first = false;
+        if (self.open == '{') {
+            self.cursor.trim();
+            if (self.cursor.bytes.len == 0 or self.cursor.bytes[0] != '"') return error.MalformedJson;
+            self.key = try self.cursor.value();
+            try validateJsonScalar(self.key.raw, true);
+            try self.cursor.take(':');
+        }
+        return true;
+    }
+};
+
+const JsonFields = struct {
+    const Field = struct { key: []u8, value: JsonValue };
+    fields: std.array_list.Managed(Field),
+
+    fn init(allocator: std.mem.Allocator, bytes: []const u8) !JsonFields {
+        var result = JsonFields{ .fields = std.array_list.Managed(Field).init(allocator) };
+        errdefer result.deinit();
+        var items = try JsonItems.init(allocator, bytes, '{');
+        while (try items.next()) |value| {
+            const key = try items.key.duplicateString(allocator, "");
+            errdefer allocator.free(key);
+            try result.fields.append(.{ .key = key, .value = value });
+        }
+        return result;
+    }
+
+    fn deinit(self: *JsonFields) void {
+        for (self.fields.items) |field| self.fields.allocator.free(field.key);
+        self.fields.deinit();
+    }
+
+    fn has(self: *const JsonFields, key: []const u8) bool {
+        for (self.fields.items) |field| {
+            if (std.mem.eql(u8, field.key, key)) return true;
+        }
+        return false;
+    }
+
+    fn get(self: *const JsonFields, key: []const u8) JsonValue {
+        for (self.fields.items) |field| {
+            if (std.mem.eql(u8, field.key, key)) return field.value;
+        }
+        return .{};
+    }
+};
+
+fn validateGraphStructure(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    return validateGraphStructureMeasured(allocator, bytes, null);
+}
+
+fn validateGraphStructureMeasured(allocator: std.mem.Allocator, bytes: []const u8, work: ?*JsonTraversalWork) !void {
+    var stack = std.array_list.Managed(JsonItems).init(allocator);
+    defer stack.deinit();
+    try stack.append(try JsonItems.initMeasured(allocator, bytes, '{', work));
+    while (stack.items.len != 0) {
+        if (@import("builtin").is_test) {
+            if (work) |measured| measured.validator_steps += 1;
+        }
+        const top = &stack.items[stack.items.len - 1];
+        if (!try top.nextHead()) {
+            const remaining = top.cursor.bytes;
+            _ = stack.pop();
+            if (stack.items.len == 0) {
+                if (remaining.len != 0) return error.MalformedJson;
+            } else {
+                stack.items[stack.items.len - 1].cursor.bytes = remaining;
+            }
+            continue;
+        }
+        if (top.open == '{' and jsonStringEquals(top.key.raw, "subGraph")) {
+            _ = try top.cursor.value();
+            continue;
+        }
+        top.cursor.trim();
+        if (top.cursor.bytes.len == 0) return error.MalformedJson;
+        const open = top.cursor.bytes[0];
+        if (open == '{' or open == '[') {
+            // Descend before scanning the child; its final cursor advances the
+            // parent on unwind instead of rescanning every descendant span.
+            const child = try JsonItems.initMeasured(allocator, top.cursor.bytes, open, work);
+            try stack.append(child);
+        } else {
+            _ = try top.cursor.value();
+        }
+    }
+}
+
 fn decodeNodes(
     allocator: std.mem.Allocator,
     bytes: []const u8,
     nodes: *std.array_list.Managed(Node),
 ) !void {
-    var cursor: usize = 0;
-    while (cursor < bytes.len) {
-        const start = indexOfByte(bytes, cursor, '{') orelse break;
-        const end = findClosing(bytes, start, '{', '}') orelse break;
-        const object = bytes[start .. end + 1];
-        const scalar_object = try withoutJsonObjectField(allocator, object, "subGraph");
-        defer allocator.free(scalar_object);
-        const samples = jsonMetricSamples(scalar_object, "metricHistory");
+    var items = try JsonItems.init(allocator, bytes, '[');
+    while (try items.next()) |value| {
+        const object = value.container('{') orelse continue;
+        var fields = try JsonFields.init(allocator, object);
+        defer fields.deinit();
+        var goal = try JsonFields.init(allocator, fields.get("goal").container('{') orelse "{}");
+        defer goal.deinit();
+        var usage = try JsonFields.init(allocator, fields.get("usage").container('{') orelse "{}");
+        defer usage.deinit();
+        var binding = try JsonFields.init(allocator, fields.get("worktreeBinding").container('{') orelse "{}");
+        defer binding.deinit();
+        const samples = try scopedMetricSamples(allocator, fields.get("metricHistory"));
         var node = Node{
             .id = &.{},
             .title = &.{},
@@ -1210,45 +1487,45 @@ fn decodeNodes(
             .state = &.{},
             .activity = &.{},
             .presence = &.{},
-            .poll_interval_seconds = jsonFloat(scalar_object, "pollIntervalSeconds"),
-            .stall_after_seconds = jsonFloat(scalar_object, "stallAfterSeconds"),
-            .created_at = jsonNumber64(scalar_object, "createdAt"),
-            .metric_passes = jsonArrayObjectCount(scalar_object, "metricHistory"),
+            .poll_interval_seconds = scopedFallback(&fields, &goal, "goal", "pollIntervalSeconds").float(),
+            .stall_after_seconds = scopedFallback(&fields, &goal, "goal", "stallAfterSeconds").float(),
+            .created_at = fields.get("createdAt").unsigned(u64),
+            .metric_passes = samples.passes,
             .metric_samples = samples.values,
             .metric_sample_count = samples.count,
-            .token_usage = jsonUsageTotal(scalar_object),
-            .follows_template = hasNonNullJsonField(scalar_object, "templateFollow"),
+            .token_usage = scopedUsageTotal(if (fields.has("usage")) &usage else &fields),
+            .follows_template = !fields.get("templateFollow").isNull(),
         };
         errdefer freeNode(allocator, node);
-        node.id = try duplicateJsonString(allocator, scalar_object, "id");
-        node.title = try duplicateJsonStringOr(allocator, scalar_object, "title", "Untitled");
-        node.loop_type = try duplicateJsonStringOr(allocator, scalar_object, "loopType", "turnBased");
-        node.state = try duplicateJsonStringOr(allocator, scalar_object, "state", "idle");
-        node.activity = try duplicateJsonStringOr(allocator, scalar_object, "activity", "");
-        node.presence = try duplicatePresence(allocator, scalar_object);
-        node.backend = try duplicateJsonStringOr(allocator, scalar_object, "backend", "");
-        node.pilot_state = try duplicateJsonStringOr(allocator, scalar_object, "pilotState", "notPiloted");
-        node.goal_summary = try duplicateJsonStringOr(allocator, scalar_object, "summary", "");
-        node.goal_predicate = try duplicateJsonStringOr(allocator, scalar_object, "predicate", "");
-        node.metric_command = try duplicateJsonStringOr(allocator, scalar_object, "metricCommand", "");
-        node.metric_direction = try duplicateJsonStringOr(allocator, scalar_object, "metricDirection", "");
-        node.trigger_prompt = try duplicateJsonStringOr(allocator, scalar_object, "triggerPrompt", "");
-        node.check_description = try duplicateJsonStringOr(allocator, scalar_object, "checkDescription", "");
-        node.model_tier = try duplicateJsonStringOr(allocator, scalar_object, "modelTier", "");
-        node.worktree_path = try duplicateWorktreePath(allocator, scalar_object);
-        node.worktree_branch = try duplicateWorktreeBranch(allocator, scalar_object);
-        node.subgraph_json = try duplicateJsonObjectOrEmpty(allocator, object, "subGraph");
+        node.id = try fields.get("id").duplicateString(allocator, "");
+        node.title = try fields.get("title").duplicateString(allocator, "Untitled");
+        node.loop_type = try fields.get("loopType").duplicateString(allocator, "turnBased");
+        node.state = try fields.get("state").duplicateString(allocator, "idle");
+        node.activity = try fields.get("activity").duplicateString(allocator, "");
+        const presence = fields.get("presence");
+        if (presence.container('{')) |reading| {
+            var reading_fields = try JsonFields.init(allocator, reading);
+            defer reading_fields.deinit();
+            node.presence = try reading_fields.get("presence").duplicateString(allocator, "");
+        } else {
+            node.presence = try presence.duplicateString(allocator, "");
+        }
+        node.backend = try fields.get("backend").duplicateString(allocator, "");
+        node.pilot_state = try fields.get("pilotState").duplicateString(allocator, "notPiloted");
+        node.goal_summary = try goal.get("summary").duplicateString(allocator, "");
+        node.goal_predicate = try goal.get("predicate").duplicateString(allocator, "");
+        node.metric_command = try scopedFallback(&fields, &goal, "goal", "metricCommand").duplicateString(allocator, "");
+        node.metric_direction = try scopedFallback(&fields, &goal, "goal", "metricDirection").duplicateString(allocator, "");
+        node.trigger_prompt = try fields.get("triggerPrompt").duplicateString(allocator, "");
+        node.check_description = try fields.get("checkDescription").duplicateString(allocator, "");
+        node.model_tier = try fields.get("modelTier").duplicateString(allocator, "");
+        const path_value = binding.get("path");
+        const path = if (path_value.container('"') != null) path_value else binding.get("worktreePath");
+        node.worktree_path = try path.duplicateString(allocator, "");
+        node.worktree_branch = try binding.get("branch").duplicateString(allocator, "");
+        node.subgraph_json = try allocator.dupe(u8, fields.get("subGraph").container('{') orelse "");
         try nodes.append(node);
-        cursor = end + 1;
     }
-}
-
-fn hasNonNullJsonField(object: []const u8, key: []const u8) bool {
-    const marker = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return false;
-    defer std.heap.page_allocator.free(marker);
-    const start = std.mem.indexOf(u8, object, marker) orelse return false;
-    const value = std.mem.trimLeft(u8, object[start + marker.len ..], " \t\r\n");
-    return !std.mem.startsWith(u8, value, "null");
 }
 
 fn decodeEdges(
@@ -1256,184 +1533,128 @@ fn decodeEdges(
     bytes: []const u8,
     edges: *std.array_list.Managed(Edge),
 ) !void {
-    var cursor: usize = 0;
-    while (cursor < bytes.len) {
-        const start = indexOfByte(bytes, cursor, '{') orelse break;
-        const end = findClosing(bytes, start, '{', '}') orelse break;
-        const object = bytes[start .. end + 1];
+    var items = try JsonItems.init(allocator, bytes, '[');
+    while (try items.next()) |value| {
+        const object = value.container('{') orelse continue;
+        var fields = try JsonFields.init(allocator, object);
+        defer fields.deinit();
         var edge = Edge{
             .from = &.{},
             .to = &.{},
             .condition = &.{},
-            .blocks_target = !std.mem.eql(u8, Wire.jsonString(object, "kind") orelse "", "message"),
-            .fired = jsonBool(object, "fired") orelse false,
-            .fire_count = jsonNumber(object, "fireCount") orelse 0,
+            .fired = fields.get("fired").boolean() orelse false,
+            .fire_count = fields.get("fireCount").unsigned(u32) orelse 0,
         };
         errdefer freeEdge(allocator, edge);
-        edge.id = try duplicateJsonStringOr(allocator, object, "id", "");
-        edge.from = try duplicateJsonString(allocator, object, "from");
-        edge.to = try duplicateJsonString(allocator, object, "to");
-        edge.kind = try duplicateJsonStringOr(allocator, object, "kind", "handoff");
-        edge.condition = try duplicateJsonStringOr(allocator, object, "condition", "always");
+        edge.id = try fields.get("id").duplicateString(allocator, "");
+        edge.from = try fields.get("from").duplicateString(allocator, "");
+        edge.to = try fields.get("to").duplicateString(allocator, "");
+        edge.kind = try fields.get("kind").duplicateString(allocator, "handoff");
+        edge.blocks_target = !std.mem.eql(u8, edge.kind, "message");
+        edge.condition = try fields.get("condition").duplicateString(allocator, "always");
         try edges.append(edge);
-        cursor = end + 1;
     }
-}
-
-fn jsonBool(object: []const u8, key: []const u8) ?bool {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return null;
-    const value = object[start + needle.len ..];
-    if (std.mem.startsWith(u8, value, "true")) return true;
-    if (std.mem.startsWith(u8, value, "false")) return false;
-    return null;
-}
-
-fn jsonNumber(object: []const u8, key: []const u8) ?u32 {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return null;
-    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
-    var end: usize = 0;
-    while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseInt(u32, value[0..end], 10) catch null;
-}
-
-fn jsonNumber64(object: []const u8, key: []const u8) ?u64 {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return null;
-    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
-    var end: usize = 0;
-    while (end < value.len and value[end] >= '0' and value[end] <= '9') : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseInt(u64, value[0..end], 10) catch null;
-}
-
-fn jsonArrayObjectCount(object: []const u8, key: []const u8) u32 {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":[", .{key}) catch return 0;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return 0;
-    const close = std.mem.indexOfScalarPos(u8, object, start + needle.len, ']') orelse return 0;
-    var count: u32 = 0;
-    for (object[start + needle.len .. close]) |value| {
-        if (value == '{') count += 1;
-    }
-    return count;
 }
 
 const MetricSamples = struct {
     values: [8]f64 = [_]f64{0} ** 8,
     count: u8 = 0,
+    passes: u32 = 0,
 };
 
-fn jsonMetricSamples(object: []const u8, key: []const u8) MetricSamples {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":[", .{key}) catch return .{};
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return .{};
-    const close = std.mem.indexOfScalarPos(u8, object, start + needle.len, ']') orelse return .{};
-    const array = object[start + needle.len .. close];
+fn scopedMetricSamples(allocator: std.mem.Allocator, value: JsonValue) !MetricSamples {
+    const array = value.container('[') orelse return .{};
     var result = MetricSamples{};
-    var cursor: usize = 0;
-    while (cursor < array.len) {
-        const value_key = std.mem.indexOfPos(u8, array, cursor, "\"value\":") orelse break;
-        const value = std.mem.trimLeft(u8, array[value_key + "\"value\":".len ..], " ");
-        var end: usize = 0;
-        while (end < value.len and (std.ascii.isDigit(value[end]) or value[end] == '.' or value[end] == '-' or value[end] == '+' or value[end] == 'e' or value[end] == 'E')) : (end += 1) {}
-        if (end != 0) {
-            if (std.fmt.parseFloat(f64, value[0..end])) |sample| {
-                if (result.count == result.values.len) {
-                    std.mem.copyForwards(f64, result.values[0 .. result.values.len - 1], result.values[1..]);
-                    result.values[result.values.len - 1] = sample;
-                } else {
-                    result.values[result.count] = sample;
-                    result.count += 1;
-                }
-            } else |_| {}
+    var items = try JsonItems.init(allocator, array, '[');
+    while (try items.next()) |item| {
+        const object = item.container('{') orelse continue;
+        result.passes +|= 1;
+        var fields = try JsonFields.init(allocator, object);
+        defer fields.deinit();
+        if (fields.get("value").float()) |sample| {
+            if (result.count == result.values.len) {
+                std.mem.copyForwards(f64, result.values[0 .. result.values.len - 1], result.values[1..]);
+                result.values[result.values.len - 1] = sample;
+            } else {
+                result.values[result.count] = sample;
+                result.count += 1;
+            }
         }
-        cursor = value_key + "\"value\":".len + end;
     }
     return result;
 }
 
-fn jsonUsageTotal(object: []const u8) ?u32 {
-    const input = jsonNumber(object, "inputTokens") orelse jsonNumber(object, "inputTokenCount") orelse 0;
-    const output = jsonNumber(object, "outputTokens") orelse jsonNumber(object, "outputTokenCount") orelse 0;
+fn scopedUsageTotal(fields: *const JsonFields) ?u32 {
+    const input = fields.get("inputTokens").unsigned(u32) orelse fields.get("inputTokenCount").unsigned(u32) orelse 0;
+    const output = fields.get("outputTokens").unsigned(u32) orelse fields.get("outputTokenCount").unsigned(u32) orelse 0;
     if (input == 0 and output == 0) return null;
     return input +| output;
 }
 
-fn jsonFloat(object: []const u8, key: []const u8) ?f64 {
-    const needle = std.fmt.allocPrint(std.heap.page_allocator, "\"{s}\":", .{key}) catch return null;
-    defer std.heap.page_allocator.free(needle);
-    const start = std.mem.indexOf(u8, object, needle) orelse return null;
-    const value = std.mem.trimLeft(u8, object[start + needle.len ..], " ");
-    var end: usize = 0;
-    while (end < value.len and (std.ascii.isDigit(value[end]) or value[end] == '.' or value[end] == '-' or value[end] == '+' or value[end] == 'e' or value[end] == 'E')) : (end += 1) {}
-    if (end == 0) return null;
-    return std.fmt.parseFloat(f64, value[0..end]) catch null;
+fn scopedFallback(fields: *const JsonFields, nested: *const JsonFields, parent: []const u8, key: []const u8) JsonValue {
+    if (nested.has(key)) return nested.get(key);
+    if (fields.has(parent) and fields.get(parent).container('{') == null) return .{};
+    return fields.get(key);
 }
 
 fn duplicateJsonString(allocator: std.mem.Allocator, object: []const u8, key: []const u8) ![]u8 {
     return Wire.decodeJsonString(allocator, Wire.jsonString(object, key) orelse "");
 }
 
-fn duplicateJsonObjectOrEmpty(
-    allocator: std.mem.Allocator,
-    object: []const u8,
-    key: []const u8,
-) ![]u8 {
-    const needle = try std.fmt.allocPrint(allocator, "\"{s}\":", .{key});
-    defer allocator.free(needle);
-    const key_start = std.mem.indexOf(u8, object, needle) orelse return allocator.dupe(u8, "");
-    const value = std.mem.trimLeft(u8, object[key_start + needle.len ..], " \t\r\n");
-    if (value.len == 0 or value[0] != '{') return allocator.dupe(u8, "");
-    const end = findClosing(value, 0, '{', '}') orelse return allocator.dupe(u8, "");
-    return allocator.dupe(u8, value[0 .. end + 1]);
-}
-
-fn withoutJsonObjectField(
-    allocator: std.mem.Allocator,
-    object: []const u8,
-    key: []const u8,
-) ![]u8 {
-    const needle = try std.fmt.allocPrint(allocator, "\"{s}\":", .{key});
-    defer allocator.free(needle);
-    const key_start = std.mem.indexOf(u8, object, needle) orelse return allocator.dupe(u8, object);
-    const value_start = key_start + needle.len;
-    const value = std.mem.trimLeft(u8, object[value_start..], " \t\r\n");
-    if (value.len == 0 or value[0] != '{') return allocator.dupe(u8, object);
-    const value_offset = @intFromPtr(value.ptr) - @intFromPtr(object.ptr);
-    const end = findClosing(object, value_offset, '{', '}') orelse return allocator.dupe(u8, object);
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ object[0..key_start], object[end + 1 ..] });
-}
-
 pub fn subgraphNodeCount(subgraph_json: []const u8) usize {
-    const nodes_start = std.mem.indexOf(u8, subgraph_json, "\"nodes\":") orelse return 0;
-    const value = std.mem.trimLeft(u8, subgraph_json[nodes_start + "\"nodes\":".len ..], " \t\r\n");
-    if (value.len == 0 or value[0] != '[') return 0;
-    const end = findClosing(value, 0, '[', ']') orelse return 0;
-    var count: usize = 0;
+    // This nonfallible display query remains allocation-free. Decoding performs
+    // structural validation; here only immediate fields/elements are counted.
+    const json = std.mem.trim(u8, subgraph_json, " \t\r\n");
+    if (json.len == 0 or json[0] != '{') return 0;
     var depth: usize = 0;
-    var in_string = false;
-    var escaped = false;
-    for (value[1..end]) |byte| {
-        if (in_string) {
-            if (escaped) escaped = false else if (byte == '\\') escaped = true else if (byte == '"') in_string = false;
+    var index: usize = 0;
+    while (index < json.len) {
+        const byte = json[index];
+        if (byte == '"') {
+            const end = index + (JsonCursor.stringEnd(json[index..]) catch return 0);
+            if (depth == 1 and jsonStringEquals(json[index..end], "nodes")) {
+                var value = std.mem.trimLeft(u8, json[end..], " \t\r\n");
+                if (value.len != 0 and value[0] == ':') {
+                    value = std.mem.trimLeft(u8, value[1..], " \t\r\n");
+                    if (value.len == 0 or value[0] != '[') return 0;
+                    const close = findClosing(value, 0, '[', ']') orelse return 0;
+                    return countImmediateObjects(value[1..close]);
+                }
+            }
+            index = end;
             continue;
         }
+        if (byte == '{' or byte == '[') depth += 1;
+        if (byte == '}' or byte == ']') {
+            if (depth == 0) return 0;
+            depth -= 1;
+            if (depth == 0) return 0;
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn countImmediateObjects(bytes: []const u8) usize {
+    var count: usize = 0;
+    var depth: usize = 0;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const byte = bytes[index];
         if (byte == '"') {
-            in_string = true;
-        } else if (byte == '{') {
-            if (depth == 0) count += 1;
+            index += JsonCursor.stringEnd(bytes[index..]) catch return 0;
+            continue;
+        }
+        if (byte == '{' or byte == '[') {
+            if (byte == '{' and depth == 0) count += 1;
             depth += 1;
-        } else if (byte == '}' and depth != 0) {
+        } else if (byte == '}' or byte == ']') {
+            if (depth == 0) return 0;
             depth -= 1;
         }
+        index += 1;
     }
-    return count;
+    return if (depth == 0) count else 0;
 }
 
 pub fn decodeSubgraph(
@@ -1441,34 +1662,44 @@ pub fn decodeSubgraph(
     parent_project: Project,
     subgraph_json: []const u8,
 ) !Graph {
+    const json = std.mem.trim(u8, subgraph_json, " \t\r\n");
+    return decodeGraphObject(allocator, parent_project, if (json.len == 0 or std.mem.eql(u8, json, "null")) "{}" else json) catch |err| switch (err) {
+        error.MalformedJson => return error.MalformedSubgraph,
+        else => return err,
+    };
+}
+
+fn decodeGraphFrame(allocator: std.mem.Allocator, frame: []const u8) !?Graph {
+    try validateGraphStructure(allocator, frame);
+    var root = try JsonFields.init(allocator, frame);
+    defer root.deinit();
+    var event = try JsonFields.init(allocator, root.get("event").container('{') orelse "{}");
+    defer event.deinit();
+    const value = if (root.has("event")) event.get("graphChanged") else root.get("graphChanged");
+    if (value.isNull()) return null;
+    return try decodeGraphObject(allocator, null, value.container('{') orelse return error.MalformedJson);
+}
+
+fn decodeGraphObject(allocator: std.mem.Allocator, parent_project: ?Project, json: []const u8) !Graph {
+    try validateGraphStructure(allocator, json);
+    var fields = try JsonFields.init(allocator, json);
+    defer fields.deinit();
     var graph = Graph{
-        .project = try cloneProject(allocator, parent_project),
+        .project = .{ .path = &.{}, .name = &.{} },
         .nodes = std.array_list.Managed(Node).init(allocator),
         .edges = std.array_list.Managed(Edge).init(allocator),
     };
     errdefer freeGraph(allocator, &graph);
-    if (std.mem.indexOf(u8, subgraph_json, "\"nodes\"")) |nodes_key| {
-        if (indexOfByte(subgraph_json, nodes_key, '[')) |nodes_open| {
-            const nodes_close = findClosing(subgraph_json, nodes_open, '[', ']') orelse
-                return error.MalformedSubgraph;
-            try decodeNodes(
-                allocator,
-                subgraph_json[nodes_open + 1 .. nodes_close],
-                &graph.nodes,
-            );
-        }
+    if (parent_project) |project| {
+        graph.project = try cloneProject(allocator, project);
+    } else {
+        var project = try JsonFields.init(allocator, fields.get("project").container('{') orelse "{}");
+        defer project.deinit();
+        graph.project.path = try project.get("path").duplicateString(allocator, "");
+        graph.project.name = try project.get("name").duplicateString(allocator, "");
     }
-    if (std.mem.indexOf(u8, subgraph_json, "\"edges\"")) |edges_key| {
-        if (indexOfByte(subgraph_json, edges_key, '[')) |edges_open| {
-            const edges_close = findClosing(subgraph_json, edges_open, '[', ']') orelse
-                return error.MalformedSubgraph;
-            try decodeEdges(
-                allocator,
-                subgraph_json[edges_open + 1 .. edges_close],
-                &graph.edges,
-            );
-        }
-    }
+    if (fields.get("nodes").container('[')) |nodes| try decodeNodes(allocator, nodes, &graph.nodes);
+    if (fields.get("edges").container('[')) |edges| try decodeEdges(allocator, edges, &graph.edges);
     return graph;
 }
 
@@ -1485,35 +1716,6 @@ fn duplicateJsonStringOr(
     fallback: []const u8,
 ) ![]u8 {
     return Wire.decodeJsonString(allocator, Wire.jsonString(object, key) orelse fallback);
-}
-
-fn duplicatePresence(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
-    if (Wire.jsonString(object, "presence")) |value| {
-        return Wire.decodeJsonString(allocator, value);
-    }
-
-    const key = std.mem.indexOf(u8, object, "\"presence\"") orelse
-        return allocator.dupe(u8, "");
-    const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
-    const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
-    const reading = object[open .. close + 1];
-    return duplicateJsonStringOr(allocator, reading, "presence", "");
-}
-
-fn duplicateWorktreePath(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
-    const key = std.mem.indexOf(u8, object, "\"worktreeBinding\"") orelse
-        return allocator.dupe(u8, "");
-    const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
-    const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
-    const binding = object[open .. close + 1];
-    return duplicateJsonStringOr(allocator, binding, "path", Wire.jsonString(binding, "worktreePath") orelse "");
-}
-
-fn duplicateWorktreeBranch(allocator: std.mem.Allocator, object: []const u8) ![]u8 {
-    const key = std.mem.indexOf(u8, object, "\"worktreeBinding\"") orelse return allocator.dupe(u8, "");
-    const open = indexOfByte(object, key, '{') orelse return allocator.dupe(u8, "");
-    const close = findClosing(object, open, '{', '}') orelse return allocator.dupe(u8, "");
-    return duplicateJsonStringOr(allocator, object[open .. close + 1], "branch", "");
 }
 
 fn findClosing(bytes: []const u8, start: usize, open: u8, close: u8) ?usize {
@@ -2155,6 +2357,454 @@ test "composite navigation swaps to nested graph and survives refresh" {
     try std.testing.expect(!model.isCompositeOpen());
     try std.testing.expectEqual(@as(usize, 1), model.graph.?.nodes.items.len);
     try std.testing.expectEqualStrings("parent", model.selected().?.id);
+}
+
+const scopeChildGraph =
+    \\{"nodes":[{"id":"child-a","subGraph":{"nodes":[{"id":"grandchild"}],"edges":[{"id":"grand-edge","from":"grandchild","to":"grandchild"}]}},{"id":"child-b"}],"edges":[{"id":"child-edge","from":"child-a","to":"child-b"}],"project":{"path":"child-project","name":"Child project"}}
+;
+const scopeNodes = "[{\"subGraph\":" ++ scopeChildGraph ++
+    ",\"id\":\"parent-a\"},{\"subGraph\":{\"nodes\":[{\"id\":\"other-child\"}],\"edges\":[{\"id\":\"other-edge\",\"from\":\"other-child\",\"to\":\"other-child\"}]},\"id\":\"parent-b\"}]";
+const scopeEdges = "[{\"id\":\"root-edge\",\"from\":\"parent-a\",\"to\":\"parent-b\"}]";
+const scopeProject = "{\"path\":\"root-project\",\"name\":\"Root project\"}";
+const scopeGraph = "{\"nodes\":" ++ scopeNodes ++ ",\"edges\":" ++ scopeEdges ++ ",\"project\":" ++ scopeProject ++ "}";
+const scopeFrame = "{\"event\":{\"graphChanged\":" ++ scopeGraph ++ "}}";
+
+test "field scope graph edges are independent of root and child property order" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |edges_first| {
+        for ([_][]const u8{ scopeEdges, "[]" }) |edges| {
+            const json = if (edges_first)
+                try std.fmt.allocPrint(allocator, "{{\"edges\":{s},\"nodes\":{s},\"project\":{s}}}", .{ edges, scopeNodes, scopeProject })
+            else
+                try std.fmt.allocPrint(allocator, "{{\"nodes\":{s},\"edges\":{s},\"project\":{s}}}", .{ scopeNodes, edges, scopeProject });
+            defer allocator.free(json);
+            const frame = try std.fmt.allocPrint(allocator, "{{\"graphChanged\":{s}}}", .{json});
+            defer allocator.free(frame);
+            var model = Model.init(allocator);
+            defer model.deinit();
+            try model.decodeGraph(frame);
+            const graph = model.graph.?;
+            try std.testing.expectEqual(@as(usize, if (edges.len == 2) 0 else 1), graph.edges.items.len);
+            if (graph.edges.items.len != 0) try std.testing.expectEqualStrings("root-edge", graph.edges.items[0].id);
+            try std.testing.expectEqual(@as(usize, 2), graph.nodes.items.len);
+            try std.testing.expectEqualStrings("parent-a", graph.nodes.items[0].id);
+        }
+    }
+}
+
+test "field scope project identity never comes from child graphs or metadata" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.decodeGraph(scopeFrame);
+    try std.testing.expectEqualStrings("root-project", model.graph.?.project.path);
+    try std.testing.expectEqualStrings("Root project", model.graph.?.project.name);
+    try std.testing.expectEqualStrings("root-project", model.selected_project_path.?);
+    try std.testing.expectEqualStrings("root-project", model.open_projects.items[0].path);
+}
+
+test "field scope subgraphs retain immediate children and their own edges at every depth" {
+    const allocator = std.testing.allocator;
+    const project = Project{ .path = @constCast("parent-project"), .name = @constCast("Parent") };
+    var graph = try decodeSubgraph(allocator, project, scopeGraph);
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqualStrings("root-edge", graph.edges.items[0].id);
+    var child = try decodeSubgraph(allocator, project, graph.nodes.items[0].subgraph_json);
+    defer freeGraph(allocator, &child);
+    try std.testing.expectEqualStrings("child-edge", child.edges.items[0].id);
+    try std.testing.expectEqual(@as(usize, 2), child.nodes.items.len);
+    var grandchild = try decodeSubgraph(allocator, project, child.nodes.items[0].subgraph_json);
+    defer freeGraph(allocator, &grandchild);
+    try std.testing.expectEqualStrings("grand-edge", grandchild.edges.items[0].id);
+    try std.testing.expectEqualStrings("parent-project", grandchild.project.path);
+    try std.testing.expectEqual(@as(usize, 2), subgraphNodeCount(scopeGraph));
+    try std.testing.expectEqual(@as(usize, 0), subgraphNodeCount("{\"metadata\":" ++ scopeChildGraph ++ ",\"nodes\":[]}"));
+}
+
+test "field scope node and edge scalars do not inherit arbitrary nested fields" {
+    const json =
+        \\{"nodes":[{"metadata":{"id":"wrong","title":"Wrong","state":"failed","backend":"wrong","templateFollow":{},"createdAt":88,"inputTokens":99},"goal":{"metadata":{"summary":"Wrong"},"summary":"Own goal","predicate":"done","metricCommand":"measure","pollIntervalSeconds":12.5},"usage":{"inputTokens":3,"outputTokens":4},"presence":{"metadata":{"presence":"wrong"},"presence":"busy"},"worktreeBinding":{"metadata":{"path":"wrong","branch":"wrong"},"worktreePath":"own-path","branch":"own-branch"},"metricHistory":[{"metadata":{"value":999},"value":2}],"id":"own","title":"Own"}],"edges":[{"metadata":{"id":"wrong","from":"wrong","to":"wrong","kind":"message","fired":true,"fireCount":99},"id":"own-edge","from":"own","to":"own"}]}
+    ;
+    var graph = try decodeSubgraph(std.testing.allocator, .{ .path = &.{}, .name = &.{} }, json);
+    defer freeGraph(std.testing.allocator, &graph);
+    const node = graph.nodes.items[0];
+    try std.testing.expectEqualStrings("own", node.id);
+    try std.testing.expectEqualStrings("Own", node.title);
+    try std.testing.expectEqualStrings("idle", node.state);
+    try std.testing.expectEqualStrings("", node.backend);
+    try std.testing.expect(!node.follows_template);
+    try std.testing.expectEqual(@as(?u64, null), node.created_at);
+    try std.testing.expectEqualStrings("Own goal", node.goal_summary);
+    try std.testing.expectEqualStrings("done", node.goal_predicate);
+    try std.testing.expectEqualStrings("measure", node.metric_command);
+    try std.testing.expectEqual(@as(?f64, 12.5), node.poll_interval_seconds);
+    try std.testing.expectEqual(@as(?u32, 7), node.token_usage);
+    try std.testing.expectEqualStrings("busy", node.presence);
+    try std.testing.expectEqualStrings("own-path", node.worktree_path);
+    try std.testing.expectEqualStrings("own-branch", node.worktree_branch);
+    try std.testing.expectEqual(@as(u32, 1), node.metric_passes);
+    try std.testing.expectEqual(@as(u8, 1), node.metric_sample_count);
+    try std.testing.expectEqual(@as(f64, 2), node.metric_samples[0]);
+    const edge = graph.edges.items[0];
+    try std.testing.expectEqualStrings("own-edge", edge.id);
+    try std.testing.expectEqualStrings("own", edge.from);
+    try std.testing.expectEqualStrings("handoff", edge.kind);
+    try std.testing.expect(edge.blocks_target and !edge.fired);
+    try std.testing.expectEqual(@as(u32, 0), edge.fire_count);
+}
+
+test "field scope keys and delimiters inside scalar text cannot select graph fields" {
+    const frame =
+        \\{"metadata":{"graphChanged":{"project":{"path":"wrong"},"nodes":[],"edges":[]}},"event":{"graphChanged":{"note":"\"nodes\": [{\"id\":\"fake\"}], \"edges\": [{}] } \\ \u2603","nodes":[{"note":"\"id\":\"fake\" } [","id" : "real\u2603","title" : "Brace } quote \" slash \\ \uD83D\uDE80"}],"edges":[],"project":{"note":{"path":"wrong"},"path" : "right","name":"Root"}}}}
+    ;
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.decodeGraph(frame);
+    try std.testing.expectEqualStrings("right", model.graph.?.project.path);
+    try std.testing.expectEqual(@as(usize, 1), model.graph.?.nodes.items.len);
+    try std.testing.expectEqualStrings("real\xe2\x98\x83", model.graph.?.nodes.items[0].id);
+    try std.testing.expectEqualStrings("Brace } quote \" slash \\ \xf0\x9f\x9a\x80", model.graph.?.nodes.items[0].title);
+    try std.testing.expectEqual(@as(usize, 0), model.graph.?.edges.items.len);
+}
+
+test "field scope missing null and wrong-type fields keep defaults without child inheritance" {
+    const allocator = std.testing.allocator;
+    const frames = [_][]const u8{
+        "{\"graphChanged\":{\"metadata\":" ++ scopeGraph ++ "}}",
+        "{\"graphChanged\":{\"metadata\":" ++ scopeGraph ++ ",\"project\":null,\"nodes\":null,\"edges\":null}}",
+        "{\"graphChanged\":{\"metadata\":" ++ scopeGraph ++ ",\"project\":false,\"nodes\":{},\"edges\":\"edges\"}}",
+    };
+    for (frames) |frame| {
+        var model = Model.init(allocator);
+        defer model.deinit();
+        try model.decodeGraph(frame);
+        try std.testing.expectEqualStrings("", model.graph.?.project.path);
+        try std.testing.expectEqualStrings("", model.graph.?.project.name);
+        try std.testing.expectEqual(@as(usize, 0), model.graph.?.nodes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), model.graph.?.edges.items.len);
+    }
+    const json =
+        \\{"nodes":[null,"{not a node}",[{"id":"not-immediate"}],{"id":null,"title":null,"state":{},"goal":null,"presence":null,"worktreeBinding":null,"templateFollow":null,"usage":null,"createdAt":-1,"metricHistory":null}],"edges":[false,[{"id":"not-immediate"}],{"from":null,"to":null,"kind":null,"condition":null,"fired":null,"fireCount":-1}]}
+    ;
+    var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, json);
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqual(@as(usize, 1), graph.nodes.items.len);
+    const node = graph.nodes.items[0];
+    try std.testing.expectEqualStrings("", node.id);
+    try std.testing.expectEqualStrings("Untitled", node.title);
+    try std.testing.expectEqualStrings("idle", node.state);
+    try std.testing.expectEqualStrings("", node.presence);
+    try std.testing.expectEqualStrings("", node.worktree_path);
+    try std.testing.expectEqualStrings("", node.goal_summary);
+    try std.testing.expectEqual(@as(?u64, null), node.created_at);
+    try std.testing.expectEqual(@as(?u32, null), node.token_usage);
+    try std.testing.expect(!node.follows_template);
+    try std.testing.expectEqual(@as(usize, 1), graph.edges.items.len);
+    try std.testing.expectEqualStrings("always", graph.edges.items[0].condition);
+    try std.testing.expectEqualStrings("handoff", graph.edges.items[0].kind);
+    try std.testing.expect(graph.edges.items[0].blocks_target and !graph.edges.items[0].fired);
+    try std.testing.expectEqual(@as(u32, 0), graph.edges.items[0].fire_count);
+}
+
+fn checkScopeDecoder(allocator: std.mem.Allocator) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    {
+        const frame = try allocator.dupe(u8, scopeFrame);
+        defer allocator.free(frame);
+        try model.decodeGraph(frame);
+    }
+    try std.testing.expectEqualStrings("root-project", model.graph.?.project.path);
+    try std.testing.expectEqualStrings("root-edge", model.graph.?.edges.items[0].id);
+    try std.testing.expectEqualStrings("root-edge", model.graphs.items[0].edges.items[0].id);
+    var nested = try decodeSubgraph(allocator, model.graph.?.project, model.graph.?.nodes.items[0].subgraph_json);
+    defer freeGraph(allocator, &nested);
+    try std.testing.expectEqualStrings("child-edge", nested.edges.items[0].id);
+    try std.testing.expectEqualStrings("child-a", nested.nodes.items[0].id);
+}
+
+test "field scope owned strings survive temporary input and every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkScopeDecoder, .{});
+}
+
+test "field scope populated model replacements retain the parent transaction guarantee" {
+    const allocator = std.testing.allocator;
+    const failed_frame = try std.mem.replaceOwned(u8, allocator, ownershipGraphFrame, "\"state\":\"running\"", "\"state\":\"failed\"");
+    defer allocator.free(failed_frame);
+    var before = try initOwnershipModel(allocator, failed_frame, false);
+    defer before.deinit();
+    var after = try initOwnershipModel(allocator, failed_frame, false);
+    defer after.deinit();
+    try after.decodeGraph(scopeFrame);
+    const summary = after.graphFor("root-project") orelse return error.TestExpectedGraph;
+    try std.testing.expectEqualStrings("root-edge", summary.edges.items[0].id);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkModelReplacementOwnership, .{ failed_frame, scopeFrame, false, &before, &after });
+}
+
+test "field scope canonical fields and supported legacy fallbacks have explicit precedence" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        canonical: []const u8,
+        metric: []const u8,
+        poll: ?f64,
+        usage: ?u32,
+    }{
+        .{ .canonical = "", .metric = "legacy", .poll = 9, .usage = 11 },
+        .{ .canonical = ",\"goal\":{},\"usage\":{}", .metric = "legacy", .poll = 9, .usage = null },
+        .{ .canonical = ",\"goal\":null,\"usage\":null", .metric = "", .poll = null, .usage = null },
+        .{ .canonical = ",\"goal\":false,\"usage\":[]", .metric = "", .poll = null, .usage = null },
+        .{ .canonical = ",\"goal\":{\"metricCommand\":\"canonical\",\"pollIntervalSeconds\":3},\"usage\":{\"inputTokens\":5,\"outputTokens\":6}", .metric = "canonical", .poll = 3, .usage = 11 },
+        .{ .canonical = ",\"goal\":{\"metricCommand\":null,\"pollIntervalSeconds\":null},\"usage\":{\"inputTokens\":null,\"outputTokens\":null}", .metric = "", .poll = null, .usage = null },
+        .{ .canonical = ",\"goal\":{\"metricCommand\":{},\"pollIntervalSeconds\":\"3\"},\"usage\":{\"inputTokens\":{},\"outputTokens\":false}", .metric = "", .poll = null, .usage = null },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |canonical_first| {
+            const legacy = "\"metricCommand\":\"legacy\",\"pollIntervalSeconds\":9,\"inputTokens\":11";
+            const json = if (canonical_first and case.canonical.len != 0)
+                try std.fmt.allocPrint(allocator, "{{\"nodes\":[{{{s},{s}}}]}}", .{ case.canonical[1..], legacy })
+            else
+                try std.fmt.allocPrint(allocator, "{{\"nodes\":[{{{s}{s}}}]}}", .{ legacy, case.canonical });
+            defer allocator.free(json);
+            var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, json);
+            defer freeGraph(allocator, &graph);
+            const node = graph.nodes.items[0];
+            try std.testing.expectEqualStrings(case.metric, node.metric_command);
+            try std.testing.expectEqual(case.poll, node.poll_interval_seconds);
+            try std.testing.expectEqual(case.usage, node.token_usage);
+        }
+    }
+    const aliases =
+        \\{"nodes":[{"worktreeBinding":{"path":"preferred","worktreePath":"alias"}},{"worktreeBinding":{"path":null,"worktreePath":"alias"}},{"worktreeBinding":{"path":false,"worktreePath":"alias"}},{"presence":"busy"},{"usage":{"inputTokens":null,"inputTokenCount":2,"outputTokens":3}},{"createdAt":12.5}],"edges":[{"fireCount":1e2}]}
+    ;
+    var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, aliases);
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqualStrings("preferred", graph.nodes.items[0].worktree_path);
+    try std.testing.expectEqualStrings("alias", graph.nodes.items[1].worktree_path);
+    try std.testing.expectEqualStrings("alias", graph.nodes.items[2].worktree_path);
+    try std.testing.expectEqualStrings("busy", graph.nodes.items[3].presence);
+    try std.testing.expectEqual(@as(?u32, 5), graph.nodes.items[4].token_usage);
+    try std.testing.expectEqual(@as(?u64, 12), graph.nodes.items[5].created_at);
+    try std.testing.expectEqual(@as(u32, 1), graph.edges.items[0].fire_count);
+}
+
+fn checkScopeMalformed(allocator: std.mem.Allocator, json: []const u8, expected: anyerror, before: *const Model) !void {
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    const frame = try std.fmt.allocPrint(allocator, "{{\"graphChanged\":{s}}}", .{json});
+    defer allocator.free(frame);
+    model.decodeGraph(frame) catch |err| {
+        try expectModelDataEqual(before, &model);
+        if (err != expected) return err;
+        return;
+    };
+    return error.TestExpectedError;
+}
+
+test "field scope malformed syntax and strings keep meaningful errors and old model data" {
+    const cases = [_]struct { json: []const u8, graph_error: anyerror, subgraph_error: anyerror }{
+        .{ .json = "{\"nodes\":[}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\":[{\"id\":\"x\"}]", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\":[{},]}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\" []}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\":nil}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"metadata\":{\"broken\":},\"nodes\":[]}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\":[{\"createdAt\":01}]}", .graph_error = error.MalformedGraph, .subgraph_error = error.MalformedSubgraph },
+        .{ .json = "{\"nodes\":[{\"title\":\"bad\\q\"}]}", .graph_error = error.MalformedJsonString, .subgraph_error = error.MalformedJsonString },
+        .{ .json = "{\"nodes\":[{\"goal\":{\"metricCommand\":\"bad\\q\"},\"metricCommand\":\"legacy\"}]}", .graph_error = error.MalformedJsonString, .subgraph_error = error.MalformedJsonString },
+        .{ .json = "{\"nodes\":[{\"worktreeBinding\":{\"path\":\"bad\\q\",\"worktreePath\":\"alias\"}}]}", .graph_error = error.MalformedJsonString, .subgraph_error = error.MalformedJsonString },
+        .{ .json = "{\"nodes\":[{\"title\":\"\\uD800\"}]}", .graph_error = error.MalformedJsonString, .subgraph_error = error.MalformedJsonString },
+        .{ .json = "{\"no\\qdes\":[]}", .graph_error = error.MalformedJsonString, .subgraph_error = error.MalformedJsonString },
+    };
+    var before = Model.init(std.testing.allocator);
+    defer before.deinit();
+    try before.decodeGraph(ownershipGraphFrame);
+    for (cases) |case| {
+        try checkScopeMalformed(std.testing.allocator, case.json, case.graph_error, &before);
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, checkScopeMalformed, .{ case.json, case.graph_error, &before });
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, checkMalformedSubgraphOwnership, .{ case.json, case.subgraph_error });
+    }
+}
+
+test "field scope missing graph null graph and empty subgraph retain existing contracts" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try model.decodeGraph(ownershipGraphFrame);
+    for ([_][]const u8{ "{}", "{\"graphChanged\":null}", "{\"event\":{\"graphChanged\":null}}", "{\"metadata\":" ++ scopeFrame ++ "}" }) |frame| {
+        try model.decodeGraph(frame);
+        try expectOwnershipGraph(model.graph.?);
+    }
+    for ([_][]const u8{ "", "null", "{}" }) |json| {
+        var graph = try decodeSubgraph(std.testing.allocator, .{ .path = @constCast("parent"), .name = @constCast("Parent") }, json);
+        defer freeGraph(std.testing.allocator, &graph);
+        try std.testing.expectEqualStrings("parent", graph.project.path);
+        try std.testing.expectEqual(@as(usize, 0), graph.nodes.items.len);
+        try std.testing.expectEqual(@as(usize, 0), graph.edges.items.len);
+    }
+}
+
+fn checkScopeFields(allocator: std.mem.Allocator, json: []const u8) !void {
+    try validateGraphStructure(allocator, json);
+    var fields = try JsonFields.init(allocator, json);
+    defer fields.deinit();
+    try std.testing.expect(fields.get("nodes").container('[') != null);
+    try std.testing.expectEqualStrings(scopeEdges, fields.get("edges").raw);
+}
+
+test "field scope helper handles escaped keys deep nesting and exhaustive allocation failure" {
+    const allocator = std.testing.allocator;
+    const json = "{\"metadata\":" ++ ("[" ** 300) ++ "{\"nodes\":[]}" ++ ("]" ** 300) ++
+        ",\"no\\u0064es\":[[{}],\"{\\\"nodes\\\":[]}\",{\"id\":\"a\"},{\"id\":\"b\"}],\"edges\":" ++ scopeEdges ++ "}";
+    try std.testing.expectEqual(@as(usize, 2), subgraphNodeCount(json));
+    try std.testing.expectEqual(@as(usize, 0), subgraphNodeCount("{\"metadata\":" ++ scopeGraph ++ "}"));
+    try std.testing.checkAllAllocationFailures(allocator, checkScopeFields, .{json});
+}
+
+test "field scope root and composite arrays remain independent under nested key permutations" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |child_edges_first| {
+        for ([_]bool{ false, true }) |root_edges_first| {
+            for ([_]bool{ false, true }) |empty_root| {
+                const child = if (child_edges_first)
+                    "{\"edges\":[{\"id\":\"child-edge\",\"from\":\"child\",\"to\":\"child\"}],\"nodes\":[{\"id\":\"child\"}]}"
+                else
+                    "{\"nodes\":[{\"id\":\"child\"}],\"edges\":[{\"id\":\"child-edge\",\"from\":\"child\",\"to\":\"child\"}]}";
+                const nodes = if (empty_root)
+                    try allocator.dupe(u8, "[]")
+                else
+                    try std.fmt.allocPrint(allocator, "[{{\"id\":\"root\",\"subGraph\":{s}}}]", .{child});
+                defer allocator.free(nodes);
+                const root_arrays = if (root_edges_first)
+                    try std.fmt.allocPrint(allocator, "\"edges\":{s},\"nodes\":{s}", .{ if (empty_root) "[]" else scopeEdges, nodes })
+                else
+                    try std.fmt.allocPrint(allocator, "\"nodes\":{s},\"edges\":{s}", .{ nodes, if (empty_root) "[]" else scopeEdges });
+                defer allocator.free(root_arrays);
+                const json = try std.fmt.allocPrint(allocator, "{{\"metadata\":{s},{s}}}", .{ child, root_arrays });
+                defer allocator.free(json);
+                var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, json);
+                defer freeGraph(allocator, &graph);
+                try std.testing.expectEqual(@as(usize, if (empty_root) 0 else 1), graph.nodes.items.len);
+                try std.testing.expectEqual(@as(usize, if (empty_root) 0 else 1), graph.edges.items.len);
+                if (!empty_root) {
+                    try std.testing.expectEqualStrings("root", graph.nodes.items[0].id);
+                    try std.testing.expectEqualStrings("root-edge", graph.edges.items[0].id);
+                }
+                try std.testing.expectEqual(graph.nodes.items.len, subgraphNodeCount(json));
+                var nested = try decodeSubgraph(allocator, graph.project, if (empty_root) child else graph.nodes.items[0].subgraph_json);
+                defer freeGraph(allocator, &nested);
+                try std.testing.expectEqualStrings("child-edge", nested.edges.items[0].id);
+            }
+        }
+    }
+    const frame =
+        \\{"graphChanged":{"project":{"path":"legacy"},"nodes":[]},"event":{"graphChanged":{"pro\u006aect":{"path":"canonical","name":"First","name":"Second"},"no\u0064es":[{"i\u0064":"first","id":"second"}],"e\u0064ges":[]}}}
+    ;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    try model.decodeGraph(frame);
+    try std.testing.expectEqualStrings("canonical", model.graph.?.project.path);
+    try std.testing.expectEqualStrings("First", model.graph.?.project.name);
+    try std.testing.expectEqualStrings("first", model.graph.?.nodes.items[0].id);
+}
+
+fn traversalFixture(allocator: std.mem.Allocator, depth: usize, width: usize, opaque_subgraph: bool) ![]u8 {
+    var json = std.array_list.Managed(u8).init(allocator);
+    errdefer json.deinit();
+    try json.appendSlice(if (opaque_subgraph) "{\"sub\\u0047raph\":[" else "{\"metadata\":[");
+    for (0..width) |branch| {
+        if (branch != 0) try json.append(',');
+        for (0..depth) |_| try json.appendSlice("{\"nested\":[");
+        try json.appendSlice("{\"value\":1,\"text\":\"brace } quote \\\" slash \\\\ \\u2603\"}");
+        for (0..depth) |_| try json.appendSlice("]}");
+    }
+    try json.appendSlice("],\"nodes\":[],\"edges\":[]}");
+    return json.toOwnedSlice();
+}
+
+test "field scope validator bounds actual traversal work as nesting depth and width grow" {
+    var within_bound = true;
+    for ([_]usize{ 8, 16, 32, 64 }) |depth| {
+        for ([_]usize{ 1, 4, 16 }) |width| {
+            for ([_]bool{ false, true }) |opaque_subgraph| {
+                const json = try traversalFixture(std.testing.allocator, depth, width, opaque_subgraph);
+                defer std.testing.allocator.free(json);
+                var work = JsonTraversalWork{};
+                try validateGraphStructureMeasured(std.testing.allocator, json, &work);
+                std.debug.print("traversal depth={d} width={d} opaque={} bytes={d} span_visits={d} validator_steps={d}\n", .{
+                    depth, width, opaque_subgraph, json.len, work.span_byte_visits, work.validator_steps,
+                });
+                // Count actual span-loop byte visits and validator iterations,
+                // not elapsed time or input-size-derived synthetic operations.
+                if (work.span_byte_visits > 4 * json.len or work.validator_steps > json.len) within_bound = false;
+            }
+        }
+    }
+    try std.testing.expect(within_bound);
+}
+
+fn checkTraversalAllocation(allocator: std.mem.Allocator, json: []const u8, expected: ?anyerror) !void {
+    var work = JsonTraversalWork{};
+    validateGraphStructureMeasured(allocator, json, &work) catch |err| {
+        if (expected) |syntax_error| {
+            if (err == syntax_error) return;
+        }
+        return err;
+    };
+    if (expected != null) return error.TestExpectedError;
+    try std.testing.expect(work.span_byte_visits <= 4 * json.len);
+    try std.testing.expect(work.validator_steps <= json.len);
+}
+
+test "field scope validator single-pass stacks release allocations on success syntax errors and OOM" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |opaque_subgraph| {
+        const json = try traversalFixture(allocator, 64, 4, opaque_subgraph);
+        defer allocator.free(json);
+        try std.testing.checkAllAllocationFailures(allocator, checkTraversalAllocation, .{ json, null });
+        const trailing = try std.mem.concat(allocator, u8, &.{ json, " false" });
+        defer allocator.free(trailing);
+        try std.testing.checkAllAllocationFailures(allocator, checkTraversalAllocation, .{ trailing, error.MalformedJson });
+    }
+    const malformed = [_][]const u8{
+        "{\"metadata\":" ++ ("{\"nested\":[" ** 32) ++ "{}" ++ ("]}" ** 31) ++ "}}",
+        "{\"metadata\":" ++ ("{\"nested\":[" ** 32) ++ "{}," ++ ("]}" ** 32) ++ "}",
+        "{\"metadata\":" ++ ("{\"nested\":[" ** 32) ++ "{\"value\":nil}" ++ ("]}" ** 32) ++ "}",
+        "{\"metadata\":" ++ ("{\"nested\":[" ** 32) ++ "{\"bad\\q\":0}" ++ ("]}" ** 32) ++ "}",
+    };
+    for (malformed, 0..) |json, index| {
+        try std.testing.checkAllAllocationFailures(allocator, checkTraversalAllocation, .{
+            json, if (index == 3) error.MalformedJsonString else error.MalformedJson,
+        });
+    }
+}
+
+fn traversalWideFixture(allocator: std.mem.Allocator, width: usize, opaque_subgraph: bool) ![]u8 {
+    var json = std.array_list.Managed(u8).init(allocator);
+    errdefer json.deinit();
+    try json.appendSlice(if (opaque_subgraph) "{\"subGraph\":{" else "{\"metadata\":{");
+    const values = [_][]const u8{ "null", "true", "123", "\"brace } quote \\\" slash \\\\ \\u2603\"", "{\"n\":1}", "[0,1]" };
+    for (0..width) |index| {
+        if (index != 0) try json.append(',');
+        try json.writer().print("\"field{d}\":{s}", .{ index, values[index % values.len] });
+    }
+    try json.appendSlice("},\"nodes\":[],\"edges\":[]}");
+    return json.toOwnedSlice();
+}
+
+test "field scope validator bounds wide objects and opaque child spans" {
+    for ([_]usize{ 16, 64, 256, 1024 }) |width| {
+        for ([_]bool{ false, true }) |opaque_subgraph| {
+            const json = try traversalWideFixture(std.testing.allocator, width, opaque_subgraph);
+            defer std.testing.allocator.free(json);
+            var work = JsonTraversalWork{};
+            try validateGraphStructureMeasured(std.testing.allocator, json, &work);
+            std.debug.print("wide width={d} opaque={} bytes={d} span_visits={d} validator_steps={d}\n", .{
+                width, opaque_subgraph, json.len, work.span_byte_visits, work.validator_steps,
+            });
+            try std.testing.expect(work.span_byte_visits <= 4 * json.len);
+            try std.testing.expect(work.validator_steps <= json.len);
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, checkTraversalAllocation, .{ json, null });
+        }
+    }
 }
 
 const ownershipGraphJson =
