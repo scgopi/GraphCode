@@ -3995,14 +3995,7 @@ pub const App = struct {
             .focus_previous_pane => if (self.workspace) |workspace| workspace.focusPreviousPane(),
             .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
             .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
-            .show_graph => {
-                self.surface = .project;
-                self.workspace_controls.panel_visible = false;
-                self.workspace_controls.apply(.show_graph);
-                self.layoutWorkspace();
-                self.layoutEmptyStateControls();
-                _ = c.InvalidateRect(self.window.hwnd, null, 0);
-            },
+            .show_graph => self.showInGraph(finishShowGraphNative, syncAccessibility),
             .toggle_rail => {
                 self.workspace_controls.apply(.toggle_rail);
                 self.layoutWorkspace();
@@ -4047,6 +4040,20 @@ pub const App = struct {
             },
             .none => {},
         }
+    }
+
+    fn showInGraph(self: *App, comptime finish_native: fn (*App) void, comptime publish: fn (*App) void) void {
+        self.surface = .project;
+        self.workspace_controls.panel_visible = false;
+        self.workspace_controls.apply(.show_graph);
+        finish_native(self);
+        publish(self);
+    }
+
+    fn finishShowGraphNative(self: *App) void {
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn navigateIdentity(self: *App, offset: isize, attention_only: bool) void {
@@ -4435,7 +4442,8 @@ pub const App = struct {
                 _ = c.SetFocus(target);
                 if (c.GetFocus() != target) self.setStatus("Unable to restore keyboard focus");
             } else if (self.workspace) |workspace| {
-                if (self.surface == .workspace or self.workspace_controls.panel_visible) workspace.focus(workspace.active_surface);
+                if (self.surface == .workspace or self.workspace_controls.panel_visible)
+                    workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
             }
         }
         self.syncHeaderFocus();
@@ -5246,7 +5254,7 @@ pub const App = struct {
             workspace.openNode(0, graph.nodes.items[index].id) catch {
                 self.setStatus("Unable to open selected loop");
             };
-            workspace.focus(0);
+            workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
         }
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -6220,7 +6228,7 @@ fn onWindowMessage(
                                     workspace.openNode(0, graph.nodes.items[hit.node_index].id) catch {
                                         app.setStatus("Unable to open selected loop");
                                     };
-                                    workspace.focus(0);
+                                    workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                                 }
                             }
                         } else {
@@ -6431,7 +6439,7 @@ fn onWindowMessage(
                                     workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
                                         app.setStatus("Unable to open selected loop");
                                     };
-                                    workspace.focus(0);
+                                    workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                                 }
                             }
                         },
@@ -6813,7 +6821,7 @@ fn onWindowMessage(
             }
             if (app.workspace) |workspace| {
                 if (app.surface == .workspace or app.workspace_controls.panel_visible) {
-                    workspace.focus(workspace.active_surface);
+                    workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                 } else {
                     workspace.blurAll();
                 }
@@ -6854,7 +6862,7 @@ fn onWindowMessage(
             } else if (activated) {
                 if (app.workspace) |workspace| {
                     if (app.surface == .workspace or app.workspace_controls.panel_visible) {
-                        workspace.focus(workspace.active_surface);
+                        workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                     } else {
                         workspace.blurAll();
                         _ = c.SetFocus(hwnd);
@@ -7652,6 +7660,84 @@ const DpiAccessibilitySink = struct {
         }
     }
 };
+
+test "Show in Graph shared action publishes project UIA after native effects complete" {
+    const Probe = struct {
+        var native_finished: bool = false;
+        var published_before_native: bool = false;
+        var updates: usize = 0;
+        var workspace_chrome: usize = 0;
+        var selected_card: bool = false;
+        var sink: @This() = .{};
+
+        fn native(app: *App) void {
+            native_finished = app.surface == .project and !app.workspace_controls.panel_visible;
+        }
+        fn publish(app: *App) void {
+            published_before_native = !native_finished;
+            app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        }
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+            updates += 1;
+            workspace_chrome = 0;
+            selected_card = false;
+            for (elements) |element| {
+                if (std.mem.startsWith(u8, element.identity, "workspace-")) workspace_chrome += 1;
+                if (std.mem.eql(u8, element.identity, "project-card:A:loop")) selected_card = element.selected;
+            }
+        }
+    };
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        .surface = .workspace,
+        .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running"}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedID("loop"));
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null, .allocator = allocator, .zmx_path = &.{}, .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, "A"),
+        .layout_path = &.{}, .project_key = &.{},
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("loop", true);
+    app.workspace = &workspace;
+    Probe.native_finished = false;
+    Probe.published_before_native = false;
+    Probe.updates = 0;
+    app.syncAccessibilityTo(&Probe.sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(Probe.workspace_chrome > 0);
+    try std.testing.expect(Probe.selected_card);
+    // Native layout/focus effects and sink storage are supplied; model/action/UIA row production are real.
+    app.showInGraph(Probe.native, Probe.publish);
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(Probe.native_finished);
+    try std.testing.expectEqual(@as(usize, 2), Probe.updates);
+    try std.testing.expectEqual(@as(usize, 0), Probe.workspace_chrome);
+    try std.testing.expect(Probe.selected_card);
+    try std.testing.expect(!Probe.published_before_native);
+    // The UIA route also has its common publication tail; a second publish is idempotent.
+    Probe.publish(&app);
+    try std.testing.expectEqual(@as(usize, 0), Probe.workspace_chrome);
+    try std.testing.expect(Probe.selected_card);
+}
 
 fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool) !void {
     const allocator = std.testing.allocator;
