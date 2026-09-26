@@ -7,11 +7,13 @@ pub const max_name_length: usize = 48;
 pub const Workspace = struct {
     name: []const u8,
     path: []const u8,
+    identity: []const u8,
     is_default: bool,
 
     pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.path);
+        allocator.free(self.identity);
         self.* = undefined;
     }
 };
@@ -34,8 +36,10 @@ pub const NameError = error{
 };
 
 pub fn defaultPath(allocator: std.mem.Allocator) ![]u8 {
-    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
-        return error.UserProfileMissing;
+    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.UserProfileMissing,
+        else => return err,
+    };
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, default_directory_name });
 }
@@ -44,7 +48,10 @@ pub fn currentPath(allocator: std.mem.Allocator) ![]u8 {
     if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value| {
         defer allocator.free(value);
         if (value.len != 0) return resolvePath(allocator, value);
-    } else |_| {}
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
     return defaultPath(allocator);
 }
 
@@ -78,8 +85,11 @@ pub fn validateName(
     errdefer allocator.free(name);
     const path = try workspacePath(allocator, name, home);
     defer allocator.free(path);
-    if (directoryExists(path)) return NameError.NameTaken;
-    return name;
+    std.fs.cwd().access(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return name,
+        else => return err,
+    };
+    return NameError.NameTaken;
 }
 
 pub fn workspacePath(
@@ -90,10 +100,23 @@ pub fn workspacePath(
     return std.fmt.allocPrint(allocator, "{s}\\{s}{s}", .{ home, directory_prefix, name });
 }
 
+pub fn create(allocator: std.mem.Allocator, input: []const u8, home: []const u8) !Workspace {
+    const name = try validateName(allocator, input, home);
+    errdefer allocator.free(name);
+    const path = try workspacePath(allocator, name, home);
+    errdefer allocator.free(path);
+    const identity = try pathIdentity(allocator, path);
+    errdefer allocator.free(identity);
+    try std.fs.makeDirAbsolute(path);
+    return .{ .name = name, .path = path, .identity = identity, .is_default = false };
+}
+
 pub fn resolvePath(allocator: std.mem.Allocator, configured: []const u8) ![]u8 {
     if (isAbsoluteWindowsPath(configured)) return allocator.dupe(u8, configured);
-    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
-        return allocator.dupe(u8, configured);
+    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.UserProfileMissing,
+        else => return err,
+    };
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, configured });
 }
@@ -111,15 +134,9 @@ pub fn listFromHome(allocator: std.mem.Allocator, home: []const u8) !List {
         for (values.items) |*workspace| workspace.deinit(allocator);
         values.deinit();
     }
-    const default_path = try std.fmt.allocPrint(allocator, "{s}\\{s}", .{ home, default_directory_name });
-    defer allocator.free(default_path);
-    try values.append(.{
-        .name = try allocator.dupe(u8, "Default"),
-        .path = try allocator.dupe(u8, default_path),
-        .is_default = true,
-    });
+    try appendWorkspace(allocator, &values, home, default_directory_name, "Default", true);
     var directory = std.fs.openDirAbsolute(home, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound, error.AccessDenied => return .{ .items = try values.toOwnedSlice() },
+        error.FileNotFound => return .{ .items = try values.toOwnedSlice() },
         else => return err,
     };
     defer directory.close();
@@ -129,15 +146,27 @@ pub fn listFromHome(allocator: std.mem.Allocator, home: []const u8) !List {
             continue;
         const suffix = entry.name[directory_prefix.len..];
         if (suffix.len == 0) continue;
-        const path = try std.fmt.allocPrint(allocator, "{s}\\{s}", .{ home, entry.name });
-        try values.append(.{
-            .name = try allocator.dupe(u8, suffix),
-            .path = path,
-            .is_default = false,
-        });
+        try appendWorkspace(allocator, &values, home, entry.name, suffix, false);
     }
     std.sort.block(Workspace, values.items, {}, lessThan);
     return .{ .items = try values.toOwnedSlice() };
+}
+
+fn appendWorkspace(
+    allocator: std.mem.Allocator,
+    values: *std.array_list.Managed(Workspace),
+    home: []const u8,
+    directory_name: []const u8,
+    name: []const u8,
+    is_default: bool,
+) !void {
+    const owned_name = try allocator.dupe(u8, name);
+    errdefer allocator.free(owned_name);
+    const path = try std.fs.path.join(allocator, &.{ home, directory_name });
+    errdefer allocator.free(path);
+    const identity = try pathIdentity(allocator, path);
+    errdefer allocator.free(identity);
+    try values.append(.{ .name = owned_name, .path = path, .identity = identity, .is_default = is_default });
 }
 
 pub fn directoryExists(path: []const u8) bool {
@@ -152,8 +181,29 @@ pub fn isAbsoluteWindowsPath(path: []const u8) bool {
         (path.len >= 2 and path[0] == '/' and path[1] == '/');
 }
 
-pub fn isSamePath(left: []const u8, right: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(left, right);
+pub fn pathIdentity(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const parsed = std.fs.path.windowsParsePath(path);
+    if (!parsed.is_abs or parsed.kind == .None or std.mem.indexOfScalar(u8, path, 0) != null or
+        !std.unicode.utf8ValidateSlice(path)) return error.InvalidWorkspacePath;
+    const identity = try std.fs.path.resolveWindows(allocator, &.{path});
+    for (identity) |*byte| {
+        byte.* = if (byte.* == '\\') '/' else std.ascii.toLower(byte.*);
+    }
+    return identity;
+}
+
+pub fn instanceName(allocator: std.mem.Allocator, user: []const u8, path: []const u8) ![]u8 {
+    const identity = try pathIdentity(allocator, path);
+    defer allocator.free(identity);
+    return legacyInstanceName(allocator, user, identity);
+}
+
+pub fn legacyInstanceName(allocator: std.mem.Allocator, user: []const u8, path: []const u8) ![]u8 {
+    if (user.len == 0 or path.len == 0) return error.InvalidWorkspaceIdentity;
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(path, &digest, .{});
+    const digest_text = std.fmt.bytesToHex(digest, .lower);
+    return std.fmt.allocPrint(allocator, "Local\\graphcode-windows-{s}-{s}", .{ user, digest_text[0..20] });
 }
 
 fn lessThan(_: void, left: Workspace, right: Workspace) bool {
@@ -176,4 +226,148 @@ test "workspace paths use the Windows sibling convention" {
     const path = try workspacePath(std.testing.allocator, "alpha", "C:\\Users\\tester");
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings("C:\\Users\\tester\\.graphcode-alpha", path);
+}
+
+test "workspace enumeration owns every allocation including partial entries" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-alpha");
+    try temporary.dir.makeDir(".graphcode-beta");
+    try temporary.dir.makeDir("unrelated");
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-not-a-directory", .data = "sentinel" });
+    const home = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkWorkspaceList, .{home});
+}
+
+fn checkWorkspaceList(allocator: std.mem.Allocator, home: []const u8) !void {
+    var found = try listFromHome(allocator, home);
+    defer found.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), found.items.len);
+    try std.testing.expectEqualStrings("alpha", found.items[0].name);
+    try std.testing.expectEqualStrings("beta", found.items[1].name);
+    try std.testing.expectEqualStrings("Default", found.items[2].name);
+    try std.testing.expect(found.items[2].is_default);
+    for (found.items[0..2]) |workspace| try std.testing.expect(!workspace.is_default);
+}
+
+test "workspace validation rejects directory and file collisions" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir(".graphcode-existing");
+    try temporary.dir.writeFile(.{ .sub_path = ".graphcode-file", .data = "do-not-overwrite" });
+    const home = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(home);
+    try std.testing.expectError(error.NameTaken, validateName(std.testing.allocator, "Existing", home));
+    try std.testing.expectError(error.NameTaken, validateName(std.testing.allocator, "file", home));
+    const contents = try temporary.dir.readFileAlloc(std.testing.allocator, ".graphcode-file", 100);
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqualStrings("do-not-overwrite", contents);
+}
+
+test "workspace normalization cannot turn input into a traversal path" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "", "...", "/\\", " \t\r\n" }) |input| {
+        try std.testing.expectError(error.EmptyName, normalizeName(allocator, input));
+    }
+    const name = try normalizeName(allocator, "..\\..//Outside workspace");
+    defer allocator.free(name);
+    try std.testing.expectEqualStrings("outside-workspace", name);
+    const path = try workspacePath(allocator, name, "C:\\fixture");
+    defer allocator.free(path);
+    try std.testing.expectEqualStrings("C:\\fixture\\.graphcode-outside-workspace", path);
+}
+
+test "workspace identity normalizes lexical Windows aliases without changing non ASCII bytes" {
+    const allocator = std.testing.allocator;
+    const expected = "c:/users/test/.graphcode-alpha";
+    for ([_][]const u8{
+        "C:\\Users\\Test\\.graphcode-alpha",
+        "c:/users/TEST/.graphcode-alpha/",
+        "C:\\Users\\Test\\ignored\\..\\.\\.graphcode-alpha\\",
+    }) |path| {
+        const identity = try pathIdentity(allocator, path);
+        defer allocator.free(identity);
+        try std.testing.expectEqualStrings(expected, identity);
+        const name = try instanceName(allocator, "fixture", path);
+        defer allocator.free(name);
+        const canonical_name = try instanceName(allocator, "fixture", expected);
+        defer allocator.free(canonical_name);
+        try std.testing.expectEqualStrings(canonical_name, name);
+    }
+    const distinct = try pathIdentity(allocator, "C:\\Users\\Test\\.graphcode-beta");
+    defer allocator.free(distinct);
+    try std.testing.expect(!std.mem.eql(u8, expected, distinct));
+    const unicode = try pathIdentity(allocator, "C:\\Users\\\xc3\x9cber\\.graphcode-alpha");
+    defer allocator.free(unicode);
+    try std.testing.expectEqualStrings("c:/users/\xc3\x9cber/.graphcode-alpha", unicode);
+    const lower_unicode = try pathIdentity(allocator, "C:\\Users\\\xc3\xbcber\\.graphcode-alpha");
+    defer allocator.free(lower_unicode);
+    try std.testing.expect(!std.mem.eql(u8, unicode, lower_unicode));
+    const network = try pathIdentity(allocator, "\\\\Server\\Share\\nested\\..\\.graphcode-alpha\\");
+    defer allocator.free(network);
+    try std.testing.expectEqualStrings("//server/share/.graphcode-alpha", network);
+}
+
+test "workspace identity rejects absent relative and malformed paths" {
+    for ([_][]const u8{ "", "relative", "C:relative", "\\relative", "C:\\bad\x00path", "C:\\\xff" }) |path| {
+        try std.testing.expectError(error.InvalidWorkspacePath, pathIdentity(std.testing.allocator, path));
+    }
+    try std.testing.expectError(error.InvalidWorkspaceIdentity, instanceName(std.testing.allocator, "", "C:\\fixture"));
+}
+
+test "workspace instance identities release partial allocations" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const name = try instanceName(allocator, "fixture", "C:\\Users\\Test\\ignored\\..\\.graphcode-alpha\\");
+            defer allocator.free(name);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "workspace creation normalizes safely and refuses invalid or colliding targets" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    try temporary.dir.writeFile(.{ .sub_path = "unrelated", .data = "untouched" });
+    var created = try create(allocator, "..\\..//My workspace", home);
+    defer created.deinit(allocator);
+    try std.testing.expectEqualStrings("my-workspace", created.name);
+    var directory = try std.fs.openDirAbsolute(created.path, .{});
+    directory.close();
+    try std.testing.expectError(error.NameTaken, create(allocator, "My workspace", home));
+    try std.testing.expectError(error.EmptyName, create(allocator, "...", home));
+    const untouched = try temporary.dir.readFileAlloc(allocator, "unrelated", 100);
+    defer allocator.free(untouched);
+    try std.testing.expectEqualStrings("untouched", untouched);
+    var listed = try listFromHome(allocator, home);
+    defer listed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), listed.items.len);
+}
+
+test "workspace creation allocates before creating any directory" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    const destination = try workspacePath(allocator, "created", home);
+    defer allocator.free(destination);
+    const Probe = struct {
+        fn run(failing: std.mem.Allocator, parent: []const u8, path: []const u8) !void {
+            var created = create(failing, "created", parent) catch |err| {
+                std.fs.cwd().access(path, .{}) catch |access_error| switch (access_error) {
+                    error.FileNotFound => return err,
+                    else => return access_error,
+                };
+                return error.DirectoryCreatedBeforeAllocationCompleted;
+            };
+            defer created.deinit(failing);
+            try std.fs.deleteDirAbsolute(created.path);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ home, destination });
 }

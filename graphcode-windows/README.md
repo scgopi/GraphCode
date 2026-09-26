@@ -68,6 +68,52 @@ logical pass, before the physical frame is copied to the window. Header UIA
 controls use that same logical layout with one physical-boundary conversion;
 the workspace identity region remains separate from the terminal's physical tabs.
 
+## Workspace lifecycle
+
+The Workspace menu lists `Default` and `.graphcode-*` directories under
+`USERPROFILE`, with the current workspace marked by the native checked state.
+New Workspace creates a normalized sibling directory and requests one separate
+app instance using a child-only `GRAPHCODE_SUPPORT_DIR` environment. The child
+does not inherit `GRAPHCODE_DAEMON_PIPE`: it derives its daemon endpoint from
+the new support directory rather than reusing the parent's explicit override.
+The parent's environment and other inherited variables remain unchanged.
+Selecting the current workspace does nothing; selecting an identified running
+workspace restores its exact window rather than the first GraphCode window.
+`Ctrl+Alt+PageUp` / `Ctrl+Alt+PageDown` cycles the discovered list, including
+workspaces not yet open.
+
+Instance reservations, selected identity, and mutation guards share lexical
+Windows path normalization: drive/ASCII case, separators, dot segments, and
+trailing separators. Non-ASCII bytes are preserved; this does not establish
+Unicode case, symlink, junction, or hard-link equivalence. Rename and Delete
+refuse Default, the current workspace, and a workspace reserved by another
+instance. Reservations cover the destructive confirmation and final recheck.
+Compatibility checks include the older raw-path mutex; a same-user GraphCode
+window without identifiable workspace metadata, or an uncertain owner lookup,
+blocks mutations instead of being treated as a closed workspace.
+
+Advanced connection Settings can reconnect to another support directory, but
+that does not migrate every workspace store or layout. If the effective support
+identity differs from the instance's reserved identity, or cannot be verified,
+the shell removes its workspace attribution and blocks lifecycle mutations and
+switching with a persistent restart-required status. It retains the original
+reservation until exit. Restoring the original support directory revalidates
+attribution; pipe-only changes and equivalent lexical paths keep lifecycle
+actions available. No data-store migration is implied by a connection change.
+
+Delete remains permanent. Cancel in the name form and every confirmation result
+other than explicit Yes preserve the workspace; No is the warning's default.
+Accepted form text is captured before native controls are destroyed, with
+allocation/read failures rejecting the result. Rename does not overwrite an
+existing destination and preserves the directory's saved files.
+
+Executable coverage includes production helpers, allocation failures, disposable
+filesystem mutations, exact launch/restore routing, and never-shown native
+controls/windows/menus. This is not a live multi-instance, keyboard, UIA, or
+real-daemon walkthrough. The lifecycle parity row remains Partial: macOS also
+provides a structured Manage view, content summaries, creation-order/running-only
+cycling, and recoverable deletion with daemon/session teardown.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and
