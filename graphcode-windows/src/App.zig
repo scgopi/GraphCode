@@ -7,6 +7,7 @@ const CanvasInput = @import("CanvasInput.zig");
 const CanvasLayoutStore = @import("CanvasLayoutStore.zig");
 const GraphContextMenu = @import("GraphContextMenu.zig");
 const Forms = @import("Forms.zig");
+const EdgeCreation = @import("EdgeCreation.zig");
 const NativeForms = @import("NativeForms.zig");
 const TemplateLibrary = @import("TemplateLibrary.zig");
 const Diagnostics = @import("Diagnostics.zig");
@@ -1727,30 +1728,7 @@ pub const App = struct {
     fn createEdge(self: *App) void {
         const graph = self.model.graph orelse return;
         if (graph.nodes.items.len < 2) return;
-        const path = self.currentProject() orelse return;
-        const endpoints = self.allocator.alloc(NativeForms.EdgeEndpoint, graph.nodes.items.len) catch {
-            self.setStatus("Unable to prepare edge endpoints");
-            return;
-        };
-        defer self.allocator.free(endpoints);
-        for (graph.nodes.items, endpoints) |node, *endpoint| endpoint.* = .{
-            .id = node.id,
-            .title = node.title,
-        };
-        var draft = NativeForms.edgeWithEndpoints(self.window.hwnd, self.allocator, .{
-            .from = graph.nodes.items[0].id,
-            .to = graph.nodes.items[1].id,
-            .kind = "handoff",
-        }, endpoints, false) catch {
-            self.setStatus("Unable to open edge form");
-            return;
-        } orelse return;
-        defer draft.deinit(self.allocator);
-        Forms.validateEdge(draft) catch {
-            self.setStatus("Invalid edge form");
-            return;
-        };
-        self.client.sendCreateEdgeDraft(path, draft);
+        self.createEdgeForm(null);
     }
 
     fn createEdgeBetween(self: *App, source: usize, target: usize) void {
@@ -1760,39 +1738,31 @@ pub const App = struct {
     }
 
     fn createEdgeBetweenIDs(self: *App, source_id: []const u8, target_id: []const u8) void {
-        const graph = self.model.graph orelse return;
         if (std.mem.eql(u8, source_id, target_id)) return;
-        const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
-        defer self.allocator.free(project_path);
-        const from_id = self.allocator.dupe(u8, source_id) catch return;
-        defer self.allocator.free(from_id);
-        const to_id = self.allocator.dupe(u8, target_id) catch return;
-        defer self.allocator.free(to_id);
-        const draft = NativeForms.edge(self.window.hwnd, self.allocator, .{
-            .from = from_id,
-            .to = to_id,
-            .kind = "handoff",
-        }) catch {
-            self.setStatus("Unable to open edge form");
-            return;
-        } orelse return;
-        defer self.allocator.free(draft.from);
-        defer self.allocator.free(draft.to);
-        defer self.allocator.free(draft.kind);
-        Forms.validateEdge(draft) catch {
-            self.setStatus("Invalid edge form");
-            return;
+        self.createEdgeForm(.{ .from = source_id, .to = target_id });
+    }
+
+    const EdgeCreationForm = struct {
+        parent: c.HWND,
+
+        pub fn show(
+            self: EdgeCreationForm,
+            allocator: std.mem.Allocator,
+            initial: Forms.EdgeDraft,
+            endpoints: []const NativeForms.EdgeEndpoint,
+            locked: bool,
+        ) !?Forms.EdgeDraft {
+            if (locked) return NativeForms.edge(self.parent, allocator, initial);
+            return NativeForms.edgeWithEndpoints(self.parent, allocator, initial, endpoints, false);
+        }
+    };
+
+    fn createEdgeForm(self: *App, locked: ?EdgeCreation.LockedEndpoints) void {
+        EdgeCreation.create(self.allocator, &self.model, &self.client, locked, EdgeCreationForm{
+            .parent = self.window.hwnd,
+        }) catch |err| {
+            self.setStatus(EdgeCreation.errorStatus(err));
         };
-        const updated_graph = self.model.graph orelse return;
-        const from_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.from) orelse {
-            self.setStatus("Source loop changed while creating edge");
-            return;
-        };
-        const to_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, draft.to) orelse {
-            self.setStatus("Target loop changed while creating edge");
-            return;
-        };
-        self.client.sendCreateEdge(project_path, updated_graph.nodes.items[from_index].id, updated_graph.nodes.items[to_index].id, draft.kind);
     }
 
     fn openSettings(self: *App) void {
