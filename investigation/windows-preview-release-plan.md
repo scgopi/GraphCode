@@ -10,33 +10,46 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-Assessment date: **2026-10-02**. The verified replacement qualification
-candidate is `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, the normal merge commit
-for [#604](https://github.com/scgopi/GraphCode/pull/604), with parents
-`aa1e0203d6e3d4ff2841cac4cae74a0184720358` and
-`f3b8d5ebae8cd603ff0cdc622d449bf299c1e833`. The local annotated tag/version
-`0.1.78-beta2` peels exactly to that source. Both beta tags remain local and
-unpushed; no beta2 release exists and publication remains false. The candidate
-includes the qualification runbooks
-[#598](https://github.com/scgopi/GraphCode/pull/598), GraphCode Nod runtime and
-launch foundations [#590](https://github.com/scgopi/GraphCode/pull/590) and
-[#592](https://github.com/scgopi/GraphCode/pull/592), and Nod setup
-[#589](https://github.com/scgopi/GraphCode/pull/589), plus the preview-only
-Worktrees safety guard from #604. The earlier implementation history remains
-relevant: resilient Zig downloads
-[#586](https://github.com/scgopi/GraphCode/pull/586), app-native stack `#595`
-(not a GitHub PR) containing [#585](https://github.com/scgopi/GraphCode/pull/585)
-and [#594](https://github.com/scgopi/GraphCode/pull/594), and redirected-profile
-daemon fix [#593](https://github.com/scgopi/GraphCode/pull/593).
+Assessment date: **2026-10-02**. The verified active local qualification
+candidate is `0958109ee41c7215e3ccf91319e5a102d0fb7069`, the normal merge commit
+for [#606](https://github.com/scgopi/GraphCode/pull/606), with parents
+`fc6d40ccba4afc3b073c75b90ebeae60af15497c` and
+`dfdb3cd1cac5359ee024cbe9d166ee191e4b110e`. Candidate source, the clean
+detached build HEAD, `origin/main` at tag creation, and final audited main were
+all exactly that SHA. Later movement of main, if any, does not change this
+frozen identity. The local annotated tag/version `0.1.78-beta3` has tag object
+`0c62e6f21f58c97ca4fbe3154f60887cac2bf52d` and peels exactly to the candidate
+source. The tag is local and unpushed, no beta3 GitHub release exists, and
+publication remains false.
 
-The superseded beta1 candidate remains immutable custody evidence, not a failed
-or deleted artifact: source
-`e62583b192a13dd92986f68fb7883f3358eb9d23`, local tag/version
-`0.1.78-beta1`, and ZIP SHA-256
-`9b5b78478e665ace0d7d297769e707dfb1face46e9ee973386b6216a70ab24e5`.
-Its original eight-file handoff inventory was independently reverified
-unchanged. Retain that handoff as the record of the superseded candidate; it is
-not for transfer or qualification.
+The candidate retains the preview-only Worktrees safety guard from
+[#604](https://github.com/scgopi/GraphCode/pull/604) and adds the LFS-aware
+offline source-custody tooling from #606. Nod is experimental macOS
+functionality and remained unsupported and outside this Windows preview: it
+caused no wait, Nod testing, backend selection, or scope expansion. Merged
+[#600](https://github.com/scgopi/GraphCode/pull/600) and
+[#602](https://github.com/scgopi/GraphCode/pull/602) touched shared daemon/CLI
+source after beta2 but received only ordinary build/package exercise here, not
+a runtime claim. Open [#607](https://github.com/scgopi/GraphCode/pull/607) is
+Nod/macOS app work and is excluded from the frozen candidate assessment.
+
+The superseded beta1 and beta2 candidates remain immutable custody evidence,
+not failed or deleted artifacts:
+
+- beta1 source/tag
+  `e62583b192a13dd92986f68fb7883f3358eb9d23` / `0.1.78-beta1`, ZIP SHA-256
+  `9b5b78478e665ace0d7d297769e707dfb1face46e9ee973386b6216a70ab24e5`,
+  and eight-entry handoff inventory SHA-256
+  `46283ccd3c8d65ae38715bd557fac9be575281f37722e50f540e2e31fdef5acd`;
+- beta2 source/tag
+  `a406a28cb9aec856c934e7253d1a79c2cc6706ed` / `0.1.78-beta2`, ZIP SHA-256
+  `fe8c7dff60e38b04f37b15b474e32c22b670c764e69ecd64db91280cae48ed25`,
+  and eight-entry handoff inventory SHA-256
+  `87cf8ab5720d114621d4aa113694e66b3ee5ca3c2192826223cc0168ef29f862`.
+
+Both historical handoff inventories remain **8/8 valid**. All three beta tags
+remain local and unpushed. Retain beta1 and beta2 as immutable historical
+records; neither is the active transfer or qualification candidate.
 
 At this approved candidate, a row-by-row review of the
 [parity ledger](ui-parity-matrix.md) still contains exactly **98 surfaces:
@@ -68,9 +81,8 @@ to promote a parity row.
 The live release API was checked on this date:
 [v0.1.77](https://github.com/scgopi/GraphCode/releases/tag/v0.1.77), published
 2026-09-29, is the latest stable release and contains only
-`graphcode-macos-arm64.dmg`, not a Windows ZIP. The beta2 candidate described
-below was built locally and remains unpublished and uninstalled; no GitHub
-release or remote tag was created.
+`graphcode-macos-arm64.dmg`, not a Windows ZIP. The beta3 candidate described below was built locally and remains unpublished
+and uninstalled; no GitHub release or remote beta tag was created.
 
 **Engineering distance:** if the proposed profile passes the production flight,
 the remaining release work is bounded qualification and tester handoff, not a
@@ -82,125 +94,120 @@ pass cannot settle that uncertainty.
 
 ### 2026-10-02 local qualification execution record
 
-The local plan was executed through creation and independent hash reverification
-of the replacement Dev Box handoff. Dev Box source restoration later failed, so
-the handoff is not accepted as restorable custody:
+The local plan was executed through creation and independent verification of a
+new LFS-aware offline custody artifact and versioned Dev Box handoff:
 
-- **Phase L0 repository audit — Passed.** The replacement source is the exact
-  #604 merge `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, with parents
-  `aa1e0203d6e3d4ff2841cac4cae74a0184720358` and
-  `f3b8d5ebae8cd603ff0cdc622d449bf299c1e833`. A separate clean detached
-  worktree was used so the candidate could not include this plan's uncommitted
-  documentation update. The ledger parser found a positive **98** rows:
-  **62 Validated** and **36 Partial**, with no Missing, Blocked, or Divergent
-  rows. No row was promoted for the guard or candidate rebuild.
-- **Dependency/provenance audit — Passed.** `Package.resolved` SHA-256 was
+- **Phase L0 repository and concurrent-change audit — Passed.** Candidate
+  source, clean detached HEAD, `origin/main` at tag creation, and final audited
+  main were exactly `0958109ee41c7215e3ccf91319e5a102d0fb7069`, with parents
+  `fc6d40ccba4afc3b073c75b90ebeae60af15497c` and
+  `dfdb3cd1cac5359ee024cbe9d166ee191e4b110e`. The ledger parser found a
+  positive **98** rows: **62 Validated** and **36 Partial**, with zero other
+  statuses. No row was promoted. Open PRs were inventoried: #607 is excluded
+  Nod/macOS work; #587 remains harness-only; #548 is open shared
+  `RemoteGraphAccess`/`ZmxSessionLauncher` work not in the candidate; #274,
+  #263, and #110 are open shared work not in the candidate; and #207 is
+  unrelated macOS app-only work. None invalidates the frozen candidate.
+- **Dependency, toolchain, provider, and executable provenance — Passed.**
+  `Package.resolved` SHA-256 is
   `65c114f5f233c83529930782a0d422aa7a4b7c86160e66c1c955149c398288b8`;
-  `provider-pins.json` SHA-256 was
+  `provider-pins.json` SHA-256 is
   `c1c927e3995cb1b241894658e10698a4c6ca256066254f2a321a5aabb1b675f9`.
-  The declared identities remain Swift 6.3.3, shell Zig 0.15.2, zmx Zig 0.16.0,
-  Winghostty `6286560d0aa3103e068b2b7afa81eac373d870c9`, zmx
-  `785b3fd15dcafd1882b495c831a10f98c201b908`,
-  `swift-collections` 1.6.0 at
-  `a0cb0954ecb21e4e31b0070e6ed5674e8556685a`, and
-  `swift-identified-collections` 1.1.1 at
-  `322d9ffeeba85c9f7c4984b39422ec7cc3c56597`.
-- **Concurrent-change audit — Passed as an inventory, not candidate
-  substitution.** Open candidate-critical work was recorded before selection.
-  The approved beta2 source, peeled tag, package and handoff identities are
-  fixed historical identities even if `origin/main` later advances. Any
-  candidate-byte change still requires a new candidate and restarts downstream
-  evidence.
-- **Approval A reconciliation — Passed.** Approval A for the replacement fixes
-  version/tag `0.1.78-beta2`, a new corporate Microsoft Dev Box, fixed
-  2560x1440 sessions,
-  separate 100%/150% profiles, a minimum 1280x820 app window, screenshot but no
-  video permission, UIA plus native keyboard scope, US and US-International
-  dead keys, fixture-only single-line clipboard tests, three named disposable
-  roots, Copilot CLI 1.0.91 with the default Dev Box model/tier in attended
-  mode, exactly two turns or USD 5 equivalent, no predecessor, and deferred/
-  deferred Worktrees with no full dump. Publication remains unauthorized.
-- **Preview Worktrees guard — Passed for source/package safety, not parity.**
-  [#604](https://github.com/scgopi/GraphCode/pull/604), `Guard Worktrees in the
-  Windows preview`, merged normally as
-  `a406a28cb9aec856c934e7253d1a79c2cc6706ed`. It changed exactly
-  `graphcode-windows/src/App.zig`, `graphcode-windows/src/main.zig`,
-  `graphcode-windows/build.zig`, `Tools/windows/package.ps1`,
-  `Tools/windows/Tests/Packaging.Tests.ps1`, and new
-  `Tools/windows/Tests/WorktreePreviewGuard.Tests.ps1`. Release-candidate
-  packaging enables `-Dworktrees-deferred`; ordinary developer/local builds
-  retain their existing non-deferred behavior. The central unavailable message
-  is exactly `Worktrees are deferred for this preview`, and tests report zero
-  guarded inspection attempts. This is a preview safety guard/deferment, not
-  the speculative asynchronous fix and not parity validation. The #604 evidence
-  was: RED `production Worktrees routes do not expose the required preview
-  deferral message`; GREEN contract **41/41**; focused App **1/1**; full App
-  **778/778**; ReleaseSafe preview binary state `deferred`;
-  `Packaging.Tests.ps1` passed; registered Windows shell unit **52/52**
-  sections and **735/735** tests; registered real packaging validation passed;
-  exact-head CI green. Local native UIA responsiveness was **NotExecuted** to
-  avoid shared-desktop interference and is not a PASS.
-- **Phase L1 preparation — Passed.** The stale fixed-120x40/no-resize account in
-  `graphcode-windows/README.md` was reconciled with current source: pane bounds
-  and cell metrics determine the grid, topology changes queue `zmx resize`, and
-  real backend acceptance/visible wrapping remain unqualified. The Dev Box plan
-  already distinguishes Git as an evidence-checkout prerequisite from installed
-  startup independence. `Tools/windows/Tests/PreviewCore.Qualification.ps1`
-  remains the reused core evidence harness; no new manifest field was justified.
-  `pwsh -NoProfile -File Tools\windows\Tests\PreviewCore.Tests.ps1 -Case All`
-  passed **37/37** pure contract cases, explicitly reporting that no production
-  flight ran. A six-check README/source contract and the positive ledger-count
-  assertion also passed.
-- **Phase L2 candidate build — Passed.** Bootstrap resolved Swift 6.3.3, shell
-  Zig 0.15.2, zmx Zig 0.16.0, Winghostty
-  `6286560d0aa3103e068b2b7afa81eac373d870c9`, and zmx
-  `785b3fd15dcafd1882b495c831a10f98c201b908`. The local annotated tag
-  `0.1.78-beta2` peels exactly to the approved SHA and is not remote. The local
-  beta1 and beta2 tags are both unpushed. The unpublished release build used
-  neither `-Publish` nor `-AllowTagMismatch`.
-- **Candidate verification — Passed.** Both the repository verifier and the
-  extracted standalone `GraphCode-Setup.ps1 -Command Verify` reported one
-  positive PASS. The unsigned 48,134,750-byte ZIP has SHA-256
-  `fe8c7dff60e38b04f37b15b474e32c22b670c764e69ecd64db91280cae48ed25`;
-  its payload manifest contains **50** files and has SHA-256
-  `a1157e47bb6e370b4582377d1a943033c8c01ff902c932b43ea650815f5b719f`.
-  Package metadata records `previewFeatures.worktreesDeferred=true`, and the
-  packaged binary's `--worktrees-preview-state` output is exactly `deferred`.
-  Source SHA, peeled tag SHA and package version agree; signing is
-  `UNSIGNED (not code signed)`; publication is false.
-- **Phase L3 handoff — Failed operational custody qualification.** The
-  self-contained
-  `GraphCode-DevBox-Handoff-0.1.78-beta2` contains the candidate, Approval A,
-  Dev Box plan and a verified source bundle containing the annotated beta2 tag.
-  The source-bundle SHA-256 is
-  `305997657988ce356ba183c83f8517eed2e7065083ef2011b26b96292154bb75`;
-  candidate-manifest SHA-256 is
-  `926acd004fbeec9280ba517d5fc86cca9461d09cd0d2b91f729c951a525ba314`;
-  Approval A SHA-256 is
-  `4b9803c926d29bf15c0003175430812e1c2377633f24f0fc5190239ef6e831e7`;
-  Dev Box plan SHA-256 is
-  `78eed36dd0450d979caf223511a37f0cf30546e30b343e47f7fed3ca1b55da2a`;
-  and the handoff `hashes.sha256` SHA-256 is
-  `87cf8ab5720d114621d4aa113694e66b3ee5ca3c2192826223cc0168ef29f862`.
-  All **8** payload hashes verified, and the coordinator independently
-  reverified those hashes. That evidence proves byte integrity only, not an
-  offline clean restore. On the Dev Box, cloning `GraphCode-source.bundle`
-  caused Git LFS to invoke the standalone-file transfer adapter against the
-  bundle file path and fail. Retrying with LFS smudging disabled resolved HEAD
-  and `0.1.78-beta2^{commit}` to the approved SHA but left **43** tracked PNG
-  files modified. The clean-checkout gate therefore failed and execution
-  stopped; neither attempt is passing evidence. The beta2 commit, local tag,
-  product ZIP, and original handoff remain immutable.
-- **Phases L4-L6 — NotExecuted.** No Dev Box installation, native UI/backend
-  turn, destructive fixture, lifecycle flight, returned evidence bundle,
-  tester packet, Approval B, pushed tag or release asset exists. Dev Box
-  provisioning/profile identities, install/native/UIA/backend/destructive/
-  lifecycle flight, other layouts/IMEs, screen-reader claims, upgrade/rollback,
-  dump, transfer, Approval B and publication are explicitly **NotExecuted**.
-  Product-package identity remains verified, but source custody and the other
-  six alpha gates remain open. Because the product commit, tag, and ZIP do not
-  change, policy requires a newly generated and rehashed handoff/source-custody
-  ZIP, not a fresh candidate build.
+  Swift 6.3.3 hashes to
+  `e1d0a0b20d95a92b22f4906e7ca331a7c8b89be86b2d9a2d215ac24f753e945a`;
+  shell Zig 0.15.2 to
+  `d408dd38eed3e5204af841bcebf70502a4dbbb8399a3a3262be55059370bc018`;
+  and zmx Zig 0.16.0 to
+  `086ce9d47ba42f33a514e1a6e04eb1d4a8fa1d75e0868e0213caad447c91e864`.
+  Winghostty source
+  `6286560d0aa3103e068b2b7afa81eac373d870c9` produced artifact SHA-256
+  `b1aed4f7656ce2a68390c5a304d63b22622426bb9a2bb30d9603130f9bea5aac`;
+  zmx source `785b3fd15dcafd1882b495c831a10f98c201b908` produced artifact SHA-256
+  `71027ffac716c38082335cc7778734dac0811edf86580887d25633f31176baef`.
+  Final executable SHA-256 values are shell
+  `85113b1111530b0974853bd1ee2790fd103f37583dcf8b26af621a3d9bb4508b`,
+  daemon
+  `2d6d2b1a2082de63a7530a006aee3d4df3344d78f94bf07ddd6c0baaa864fab4`,
+  CLI
+  `29c029a2bce2e63838170381bda9da409208a113b2fbf5e59037660fc93245cd`,
+  and zmx
+  `71027ffac716c38082335cc7778734dac0811edf86580887d25633f31176baef`.
+- **Approval A and Worktrees guard reconciliation — Passed for authorized
+  scope.** Approval A remains the bounded Dev Box profile and does not authorize
+  publication or a full dump. Package metadata records
+  `previewFeatures.worktreesDeferred=true`; the binary
+  `--worktrees-preview-state` output is exactly `deferred`; and the exact
+  unavailable reason is `Worktrees are deferred for this preview`. The #604
+  guard remains in force, #560 remains open, and #587 remains open and
+  harness-only at `c249b9f8731741167bd11ca400691f26f0639903`. This is guarded
+  and deferred, not fixed or parity-valid; no dump is authorized.
+- **Candidate build and package verification — Passed.** The local annotated
+  tag/version `0.1.78-beta3`, tag object
+  `0c62e6f21f58c97ca4fbe3154f60887cac2bf52d`, peels exactly to the approved
+  source and is not remote. The unpublished release build used neither
+  `-Publish` nor `-AllowTagMismatch`. The unsigned **48,137,828-byte** candidate
+  ZIP has SHA-256
+  `9533116c025d4883ab7761f20f7e62499408209421f70264a3638e8347d2d0f9`;
+  its **50-file** payload manifest has SHA-256
+  `a2a7e1b8b95eb0dc77f7af8d9039eabee052443bc459be609f7dab90e140fb73`.
+  Package kind is `release-candidate`; signing is
+  `UNSIGNED (not code signed)`; publication is false. Exactly one repository
+  package verification PASS and one extracted setup verification PASS were
+  recorded.
+- **LFS-aware offline source custody — Passed.**
+  `GraphCode-source-custody.zip` is **61,131,130 bytes** with SHA-256
+  `d20a64f78340baed6e417c7f94abae30e81c5abade20c8c53e2df75f3ef38407`.
+  Its internal integrity-manifest SHA-256 is
+  `e5b61571fdc7af34dc862bc9f5e32ad1d8d681727b8a5ba37a402d4d10a6056b`;
+  internal Git bundle SHA-256 is
+  `a25a2e637dd82f9f910cda0ab758a34e61c4a11200a8852f40bbd2c973aad676`;
+  and included `Restore-GraphCodeSource.ps1` SHA-256 is
+  `16bd8010ad5325e72a1166aea35d14497f0a17ebe65039f5a6e88fd9c665455b`.
+  The custody uses Git LFS 3.7.1 and contains **43 objects / 43 tracked files /
+  43 materialized files**, with zero pointers or hash mismatches;
+  `git lfs fsck` passed and source-custody regressions passed **4/4**.
+  Custody `Verify` and `Restore` both passed from a fresh extracted root with
+  process-only network denial (`protocol.http.allow=never`,
+  `protocol.https.allow=never`, `protocol.ssh.allow=never`,
+  `protocol.git.allow=never`, loopback proxies, and terminal prompting
+  disabled). Restore produced the exact detached candidate HEAD, the annotated
+  tag peeled exactly, all 43 LFS files materialized locally, and
+  `git status --short` was empty without a network fetch. The coordinator
+  independently repeated Verify/Restore under the same denial and confirmed
+  exact HEAD/tag, 43 files/43 objects, zero pointers/hash mismatches, and clean
+  status. A corrected assertion was used for `git lfs ls-files --json`'s
+  `{files:[...]}` shape; the successful corrected check is the custody result.
+- **Versioned handoff and evidence inventory — Passed for custody, not
+  transfer.** `GraphCode-DevBox-Handoff-0.1.78-beta3` has `hashes.sha256`
+  SHA-256
+  `ff553f9445c300cafecdced6d4f974a97088ea3b23e45bf9849bd16acbf47813`;
+  all **8/8** payload entries verified: Approval A
+  `12a60b720514043fdfe0608ec8db013f30e0b3adc2afb13f33d50a47b3235131`,
+  candidate manifest
+  `2eaa332f8df4d1e4b42b8fe2cc3f299fb42775f3767103e6ff85c106bdfda30b`,
+  candidate ZIP
+  `9533116c025d4883ab7761f20f7e62499408209421f70264a3638e8347d2d0f9`,
+  ZIP sidecar
+  `ca801e32051085b41668f0e5daee35ad701fd838fad845be5963c7081d1c13c4`,
+  exact candidate Dev Box plan
+  `f250629ad6812049ec1beb5409cfa05afd09433ea5cd1a3818b3fccd9c0cb8b6`,
+  README-FIRST
+  `7a40155238a69fb078ae4c7753e441796f46718a40b913fec8caff4ca05e7985`,
+  source-custody ZIP
+  `d20a64f78340baed6e417c7f94abae30e81c5abade20c8c53e2df75f3ef38407`,
+  and custody sidecar
+  `e1a6f5f067d54f5e41c4a264a16c39a5fb6bd093fdb4b67f23123d6fe227b7ff`.
+  The evidence inventory verified **80/80** entries and has SHA-256
+  `e9c7869a458f83288968dcf46ed954fe3ac6e8c2ff4e0ae0d7eae09da7cd4a48`.
+  README-FIRST requires the included custody restore script and forbids GitHub
+  or bare-bundle cloning. The privacy scan passed after retained provider
+  remotes were sanitized to public URLs.
+- **Phases L4-L6 — NotExecuted.** No Dev Box provisioning/profile identity,
+  transfer, installation, native/UIA/backend/destructive/lifecycle flight,
+  returned evidence bundle, other layout/IME evidence, screen-reader claim,
+  upgrade/rollback, dump, tester packet, Approval B, pushed tag, release asset,
+  or publication exists. Exact artifact is complete for beta3; the other six
+  alpha gates remain open.
 
 ## Delivery lanes
 
@@ -247,8 +254,8 @@ Use these states literally rather than treating "merged" as "release-ready":
 | Checkout-owned build/run/stop | App-native stack `#595`: [#585](https://github.com/scgopi/GraphCode/pull/585) closes [#557](https://github.com/scgopi/GraphCode/issues/557) | **Source/tooling-fixed; real pinned cycle qualified** at merge `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | The final pinned build produced all four executables; run started production daemon before shell in owned roots; stop removed only captured checkout-owned processes and preserved the real profile. This is not installation, native UI, agent, persistence, accessibility, or packaging evidence. |
 | Contributor quick-start documentation | App-native stack `#595`: [#594](https://github.com/scgopi/GraphCode/pull/594) closes [#552](https://github.com/scgopi/GraphCode/issues/552) | **Evidence-only**, merged atomically with #585 | Documents measured bootstrap/build/run/stop durations, status markers, and honest failure/evidence limits; it changes no product behavior or parity status. |
 | Redirected `USERPROFILE` daemon startup | [#593](https://github.com/scgopi/GraphCode/pull/593) closes [#558](https://github.com/scgopi/GraphCode/issues/558) | **Source-fixed; locally/CI qualified** by the direct-process RED/GREEN, 101 XCTest plus 6 Swift Testing cases, release builds, clean smoke, and exact-head Windows/macOS CI | Removes the `0xC000001D` trap. It does not substitute for the installed production-core, onboarding, native-input, terminal, or persistence flight. |
-| Worktrees preview guard | [#604](https://github.com/scgopi/GraphCode/pull/604), merged normally as `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Source safety guard; locally/CI qualified for beta2 packaging** | Release-candidate packaging enables `-Dworktrees-deferred`, reports binary state `deferred`, exposes `Worktrees are deferred for this preview`, and records zero inspection attempts. Normal developer/local builds remain non-deferred. This is not the speculative async fix, native UIA responsiveness evidence, or parity validation. |
-| Worktrees UIA timeout attribution | Open [#587](https://github.com/scgopi/GraphCode/pull/587) at head `c249b9f8731741167bd11ca400691f26f0639903`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Evidence-only, harness-only boundary** | The PR still changes only `Tools/windows/Tests/WindowsShell.Tests.ps1` and `Tools/windows/uia-live-gate.ps1`. Bounded workers and cleanup attribute the synchronous product path; #604 defers that path in beta2 rather than fixing it. #560 and #587 remain open. Any future product fix still requires separately authorized dump-backed attribution. |
+| Worktrees preview guard | [#604](https://github.com/scgopi/GraphCode/pull/604), merged normally as `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Source safety guard; locally/CI qualified for beta3 packaging** | Release-candidate packaging enables `-Dworktrees-deferred`, reports binary state `deferred`, exposes `Worktrees are deferred for this preview`, and records zero inspection attempts. Normal developer/local builds remain non-deferred. This is not the speculative async fix, native UIA responsiveness evidence, or parity validation. |
+| Worktrees UIA timeout attribution | Open [#587](https://github.com/scgopi/GraphCode/pull/587) at head `c249b9f8731741167bd11ca400691f26f0639903`, part of open [#560](https://github.com/scgopi/GraphCode/issues/560) | **Evidence-only, harness-only boundary** | The PR still changes only `Tools/windows/Tests/WindowsShell.Tests.ps1` and `Tools/windows/uia-live-gate.ps1`. Bounded workers and cleanup attribute the synchronous product path; #604 defers that path in beta3 rather than fixing it. #560 and #587 remain open. Any future product fix still requires separately authorized dump-backed attribution. |
 
 ## Provider work deferred for preview prioritization
 
@@ -257,7 +264,8 @@ than continue expanding validation before attempting the installed GraphCode
 core workflow. Preserve their open draft PRs, branches, working changes and
 evidence; pausing is not completion, abandonment or a passing check. The
 accepted GraphCode candidate floor is
-`a406a28cb9aec856c934e7253d1a79c2cc6706ed`; #604 changes no provider pin and
+`0958109ee41c7215e3ccf91319e5a102d0fb7069`; the beta3 candidate changes no
+provider pin and
 neither provider branch is included in the pinned providers. No parity status
 changes here.
 
@@ -359,14 +367,14 @@ Welcome with owned desktop keyboard input.
   and terminal UIA conformance remain incomplete or unqualified. An ASCII-only
   promise is not sufficient for a Copilot/Claude/Codex TUI without witnessing
   its actual output and required interaction.
-- **Worktrees:** beta2 release-candidate packaging sets
+- **Worktrees:** beta3 release-candidate packaging sets
   `-Dworktrees-deferred`, package metadata records
   `previewFeatures.worktreesDeferred=true`, and the packaged binary reports
   `deferred` from `--worktrees-preview-state`. Production Worktrees routes
   return `Worktrees are deferred for this preview`, with zero guarded
   inspection attempts in the focused contracts. Normal developer/local builds
   retain their existing behavior. This removes the starving inspection route
-  from the narrow beta2 preview; it does not implement the speculative async
+  from the narrow beta3 preview; it does not implement the speculative async
   fix, close #560 or #587, qualify local native UIA responsiveness, or promote
   the Worktree notice chip ledger row.
 - **Packaging:** [existing packaging machinery](../Tools/windows/PACKAGING.md)
@@ -450,7 +458,7 @@ observation. Notes distinguish the parts of mixed rows.
 | Mounted background tabs | F + O + E | Qualify exposed continuity | Corrected selectors exclude close buttons, but no new complete live tab/backend round trip is proven. If tabs/splits are offered, switch back to the same session/output/focus without unintended close or input delivery. Defer extra topology automation, not continuity of an exposed control. |
 | Show in Graph | F + P + E | Qualify round trip | Focused live evidence supports action/identity return, not a new complete gate or native Loop-menu route. Verify the production terminal-to-card-to-same-loop transition and focus. Extra hints are polish; wrong destination or stale provider binding is functional. |
 | Add Codespace sheet | O + E | Defer | Only real 403/remediation ran; successful discovery, selection, validated dial and sheet walkthrough remain absent. Keep Codespaces outside this local preview with explicit capability/error handling; do not require new credentials/scopes to qualify the local app. |
-| Worktree notice chip | O + F + P + E | Deferred in beta2; qualify honest status later | Beta2 release-candidate builds replace production Worktrees routes with `Worktrees are deferred for this preview` and never invoke inspection; ordinary developer/local builds retain existing behavior. This safety guard is not the async fix or parity evidence. Automatic discovery, aggregation, authentic review/reclaim and native responsiveness remain unqualified, so the row stays Partial. |
+| Worktree notice chip | O + F + P + E | Deferred in beta3; qualify honest status later | Beta3 release-candidate builds replace production Worktrees routes with `Worktrees are deferred for this preview` and never invoke inspection; ordinary developer/local builds retain existing behavior. This safety guard is not the async fix or parity evidence. Automatic discovery, aggregation, authentic review/reclaim and native responsiveness remain unqualified, so the row stays Partial. |
 | Available update alert | O + F + E | Defer self-update; qualify honest offer | The real feed currently supplies no Windows ZIP, so Install is disabled with a reason. Enabled installation has not run end to end. Manual verified ZIP updates suffice; do not offer a non-Windows or unverified payload as an installable update. |
 | Install progress | O + F + P + E | Defer self-update | Real HTTPS progress/checksum refusal does not prove real Windows extraction/upgrade, especially with the running EXE locked. Keep automatic install outside preview until that flight passes; verify manual upgrade/rollback instead. Progress styling can wait, but integrity and recoverable failure cannot. |
 | Relaunch prompt | O + F + E | Defer self-update | Unit outcome/copy does not prove real installed relaunch or zmx continuity through self-upgrade. Require manual-update reopen continuity for alpha; defer Now/Later automation until a real Windows asset and running-process upgrade flight establish the claimed behavior. |
@@ -474,19 +482,23 @@ input, clipboard, display and destructive tests need an owned Windows desktop
 lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
-- [ ] **Exact artifact:** candidate source
-  `a406a28cb9aec856c934e7253d1a79c2cc6706ed`, version/tag
-  `0.1.78-beta2`, peeled tag SHA, package SHA-256, payload manifest and
-  provider provenance are recorded in
-  `GraphCode-DevBox-Handoff-0.1.78-beta2`. Tag/source match. The actual ZIP and
-  extracted standalone setup each reported exactly one PASS; the package
-  explicitly declares `UNSIGNED (not code signed)`, records
+- [x] **Exact artifact:** candidate source
+  `0958109ee41c7215e3ccf91319e5a102d0fb7069`, version/tag
+  `0.1.78-beta3`, annotated tag object
+  `0c62e6f21f58c97ca4fbe3154f60887cac2bf52d`, package SHA-256
+  `9533116c025d4883ab7761f20f7e62499408209421f70264a3638e8347d2d0f9`,
+  50-file payload manifest SHA-256
+  `a2a7e1b8b95eb0dc77f7af8d9039eabee052443bc459be609f7dab90e140fb73`,
+  and provider provenance are recorded in
+  `GraphCode-DevBox-Handoff-0.1.78-beta3`. Tag/source match. The repository ZIP
+  verifier and extracted standalone setup each reported exactly one PASS; the
+  package explicitly declares `UNSIGNED (not code signed)`, records
   `previewFeatures.worktreesDeferred=true`, reports preview state `deferred`,
   and contains production daemon/CLI/runtime inputs. The coordinator
-  independently reverified the handoff and all eight payload hashes. Those
-  product/package identity checks passed, but the gate remains open because the
-  source custody artifact could not restore its 43 LFS-tracked files into a
-  clean checkout.
+  independently reverified the handoff and all eight payload hashes. The
+  LFS-aware source-custody ZIP verified and restored the exact detached source,
+  annotated tag, and all 43 LFS objects/files under process-only network denial
+  with a clean status.
 - [ ] **Clean installation and recovery:** install the extracted candidate on
   the declared client profile without Git/Swift/Zig/SDK developer dependencies.
   Observe the installed scheduled daemon endpoint and normal app launch.
@@ -532,10 +544,9 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-All **seven** gates remain open. The candidate product/package identity
-subchecks passed, but exact-artifact custody requires a corrected, rehashed
-handoff that restores cleanly. The other gates require evidence that source,
-hosted CI, and hidden-window tests cannot manufacture:
+The **Exact artifact** gate is complete for beta3. The other **six** gates
+remain open and require evidence that source, hosted CI, and hidden-window
+tests cannot manufacture:
 
 | Required external capability | Exact permission/evidence needed |
 |---|---|
@@ -555,15 +566,19 @@ is manual-dispatch only, checks out an **existing tag**, and defaults
 and produces `graphcode-windows-x86_64.zip` plus its `.sha256` sidecar.
 Checksums detect corruption; they do not authenticate the publisher.
 
-The completed local exact-artifact record is the unpublished beta2 candidate:
-source/tag `a406a28cb9aec856c934e7253d1a79c2cc6706ed` /
-`0.1.78-beta2`, ZIP SHA-256
-`fe8c7dff60e38b04f37b15b474e32c22b670c764e69ecd64db91280cae48ed25`,
-and versioned bundle `GraphCode-DevBox-Handoff-0.1.78-beta2`. The beta2 tag is
-local and unpushed, there is no beta2 release, and publication is false. The
-superseded beta1 tag, ZIP and original handoff remain immutable custody
-evidence; do not transfer or qualify beta1 and do not delete or rewrite its
-record.
+The completed local exact-artifact record is the unpublished beta3 candidate:
+source/tag `0958109ee41c7215e3ccf91319e5a102d0fb7069` /
+`0.1.78-beta3`, ZIP SHA-256
+`9533116c025d4883ab7761f20f7e62499408209421f70264a3638e8347d2d0f9`,
+source-custody ZIP SHA-256
+`d20a64f78340baed6e417c7f94abae30e81c5abade20c8c53e2df75f3ef38407`,
+and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-beta3`. The beta3 tag is
+local and unpushed, there is no beta3 release, and publication is false.
+README-FIRST requires restoration through the included
+`Restore-GraphCodeSource.ps1`; it forbids GitHub cloning and bare-bundle
+cloning for this custody path. The superseded beta1 and beta2 tags, ZIPs, and
+original handoffs remain immutable historical evidence; do not transfer or
+qualify them and do not delete or rewrite their records.
 
 After qualification, the maintainer chooses an authorized preview version/tag
 for the **qualified source**, builds with publication disabled, verifies that
@@ -597,11 +612,15 @@ execute either side without relying on hidden session state:
   runs the production/native/backend/lifecycle evidence on a new corporate
   Dev Box, cleans up and returns a hashed evidence bundle. It never publishes.
 
-Both plans now bind the beta2 source SHA, version/tag, ZIP hash,
-provider/toolchain identities and Approval A manifest. Any identity change
-invalidates downstream evidence and restarts qualification from the local
-plan. These documents are procedures, not evidence; they do not change any
-gate or parity status.
+For beta3, the versioned handoff binds the exact candidate source/tag, ZIP,
+source-custody ZIP, provider/toolchain identities, Approval A, and the exact
+candidate Dev Box plan whose SHA-256 is
+`f250629ad6812049ec1beb5409cfa05afd09433ea5cd1a3818b3fccd9c0cb8b6`.
+Use the included custody restore script before any Dev Box qualification; do
+not substitute GitHub or a bare Git bundle. Any identity change invalidates
+downstream evidence and restarts qualification from the local plan. The
+repository plan documents remain procedures, not evidence; they do not change
+any gate or parity status.
 
 ## Assigned work inventory after the clean-clone queue
 
@@ -624,7 +643,7 @@ product evidence.
 | [#557](https://github.com/scgopi/GraphCode/issues/557) | **Closed** by [#585](https://github.com/scgopi/GraphCode/pull/585), merged with upper [#594](https://github.com/scgopi/GraphCode/pull/594) in app-native stack `#595` at `7d5cf3be8a86b7562b527f90d854845a52f2ac82` | Source/tooling-fixed; 4 focused behavioral cases plus a real pinned build/run/stop cycle | The supported entry point builds the runnable layout, launches production daemon before shell in checkout-owned roots, and stops only revalidated captured identities. Full validation and every native/product release gate remain separate. |
 | [#558](https://github.com/scgopi/GraphCode/issues/558) | **Closed** by [#593](https://github.com/scgopi/GraphCode/pull/593), accepted source-fix merge `ca535d0c4042a60ab748f7ff01d6460e9c9ec0d1` from head `285b73e8e5a7634a9033b8e72f950efc703b4f60` | Source-fixed; direct-process behavioral regression, Swift production suite, Windows shell, and mandatory macOS shared CI passed at exact head | The redirected-profile trap is fixed. Continue to use explicit owned support/temp roots for qualification isolation; this closure does not prove installed-product behavior. |
 | [#559](https://github.com/scgopi/GraphCode/issues/559) | **Closed** by [#586](https://github.com/scgopi/GraphCode/pull/586), merged as `c19e277eef2728ef5046770a34fef8f0bbd63f33` | Source/tooling-fixed; 12/12 bootstrap tests plus deterministic Range/resume/stall/mirror/cache/checksum fixtures | Preserve checksum enforcement, bounded retry/timeout behavior, useful partial archives, and explicit mirror semantics. Real ziglang.org transport was not claimed by the PR. |
-| [#560](https://github.com/scgopi/GraphCode/issues/560) | **Open; preview guarded, underlying product lane unresolved** with harness-only open [#587](https://github.com/scgopi/GraphCode/pull/587) at `c249b9f8731741167bd11ca400691f26f0639903` | #604's beta2 contracts prove the deferred message, packaged `deferred` state and zero inspection attempts; #587 still changes only the two harness files and local native UIA responsiveness is NotExecuted | Keep #560 and #587 open. Beta2 safely defers the starving path; it does not fix it. No dump is authorized. Any later source fix requires separate dump authorization, child-process inventory and stack/lock attribution before changing shared product files. |
+| [#560](https://github.com/scgopi/GraphCode/issues/560) | **Open; preview guarded, underlying product lane unresolved** with harness-only open [#587](https://github.com/scgopi/GraphCode/pull/587) at `c249b9f8731741167bd11ca400691f26f0639903` | #604's beta3-retained contracts prove the deferred message, packaged `deferred` state and zero inspection attempts; #587 still changes only the two harness files and local native UIA responsiveness is NotExecuted | Keep #560 and #587 open. Beta3 safely defers the starving path; it does not fix it. No dump is authorized. Any later source fix requires separate dump authorization, child-process inventory and stack/lock attribution before changing shared product files. |
 | [#561](https://github.com/scgopi/GraphCode/issues/561) | **Closed** by [#575](https://github.com/scgopi/GraphCode/pull/575) | Source/tooling-fixed; deep-root positive execution and 21 regression logs | No product gate; preserve positive execution counts and bounded fixture roots. |
 | [#562](https://github.com/scgopi/GraphCode/issues/562) | **Closed** by [#576](https://github.com/scgopi/GraphCode/pull/576) | Source/tooling-fixed; 4/4 isolation tests and 380 runner contracts | Qualification isolation is accepted; installed-product profile behavior remains a separate flight. |
 | [#564](https://github.com/scgopi/GraphCode/issues/564) | **Open; deferred** | No extraction accepted | Keep deferred unless a concrete next-wave overlap requires one small ownership extraction; do not turn the broad split into a preview prerequisite. |
@@ -639,11 +658,13 @@ The bounded source/tooling queue is complete. Remaining work is bottom-up and
 permission-bound; it should not start with another parity-row sweep:
 
 1. **Installed production-core and onboarding qualification - #556:** the
-   exact source-bound beta2 candidate
-   `a406a28cb9aec856c934e7253d1a79c2cc6706ed` was built through
+   exact source-bound beta3 candidate
+   `0958109ee41c7215e3ccf91319e5a102d0fb7069` was built through
    [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route with
-   the #604 release-candidate guard. Its independently reverified handoff now
-   exists; use the authorized Dev Box to run
+   the #604 release-candidate guard. Its independently reverified
+   LFS-aware custody ZIP and versioned handoff now exist; transfer and Dev Box
+   execution are still NotExecuted. After authorization, use the included
+   restore script and the exact candidate Dev Box plan to run
    install → first launch → onboarding → connected Welcome → local project →
    one named authenticated backend → readable input/output → persisted reopen
    → safe exit. This packaged/native-client flight **can close #556** only when
@@ -653,18 +674,18 @@ permission-bound; it should not start with another parity-row sweep:
 2. **Deferred Worktrees and future attribution - #560 / #587:** keep open
    [#587](https://github.com/scgopi/GraphCode/pull/587) harness-only and
    evidence-only at head `c249b9f8731741167bd11ca400691f26f0639903`.
-   #604 already establishes the beta2 source/package safety contract:
+   #604 establishes the safety contract retained by beta3:
    release-candidate builds report `deferred`, show
    `Worktrees are deferred for this preview`, and do not invoke inspection.
    Local native UIA responsiveness remains NotExecuted, and no Dev Box runtime
    evidence exists. Approval A authorizes no full dump and keeps #560 open. A
    future dump-backed diagnosis requires separate authorization and a new
    candidate if product code changes.
-3. **Keep the release gates honest:** all **seven** gates remain open. Candidate
-   product/package identity passed, but exact-artifact custody did not. The
-   installed production-core result, native input and destructive fixture
-   permission, named authenticated backend authorization, exact artifact
-   provenance, and publication permission are independent. A green
+3. **Keep the release gates honest:** **Exact artifact** is complete for beta3;
+   the other **six** gates remain open. The installed production-core result,
+   native input and destructive fixture permission, named authenticated backend
+   authorization, handoff transfer and execution, Approval B, and publication
+   permission are independent. A green
    build/run/stop cycle, a local package, or harness attribution does not
    authorize tester publication or promote a ledger row.
 4. **Keep #564 deferred:** do not split shared files merely to create work.
