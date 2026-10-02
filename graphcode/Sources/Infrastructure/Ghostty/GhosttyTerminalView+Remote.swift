@@ -260,7 +260,8 @@ extension GhosttyTerminalView {
     settings: GraphcodeSettings, briefingPath: String? = nil, hooksFile: URL? = nil,
     remoteSettingsPath: String?, isRemote: Bool = false
   ) -> [String]? {
-    guard backend.supportsResume, var parts = launchPrefix(settings: settings) else {
+    guard backend.supportsResume, var parts = launchPrefix(settings: settings, fresh: false)
+    else {
       return nil
     }
     let presence = backend.presenceArguments(
