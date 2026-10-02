@@ -1,15 +1,198 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory)] [string] $Shell,
+  [string] $Shell = "",
   [string] $Zmx = "",
   [string[]] $ArgumentList = @(),
-  [switch] $SidebarParityOnly
+  [switch] $SidebarParityOnly,
+  [switch] $TimeoutContractOnly,
+  [switch] $DirectChildrenWorker,
+  [long] $WorkerWindowHandle = 0,
+  [string] $WorkerParentAutomationId = "",
+  [string] $WorkerChildAutomationIdPattern = ".*",
+  [ValidateSet("uia", "success", "missing", "failure")] [string] $WorkerFixture = "uia",
+  [int] $WorkerDelayMilliseconds = 0
 )
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
+
+if ($DirectChildrenWorker) {
+  if ($WorkerDelayMilliseconds -gt 0) {
+    [Threading.Thread]::Sleep($WorkerDelayMilliseconds)
+  }
+  if ($WorkerFixture -eq "failure") {
+    throw [InvalidOperationException]::new("UIA_FIXTURE_WORKER_FAILURE")
+  }
+  if ($WorkerFixture -eq "success") {
+    [pscustomobject]@{
+      Status = "ok"
+      Children = @(
+        [pscustomobject]@{ AutomationId = "worktree-row-a"; Name = "Fixture A" },
+        [pscustomobject]@{ AutomationId = "worktree-row-b"; Name = "Fixture B" }
+      )
+    } | ConvertTo-Json -Compress -Depth 4
+    exit 0
+  }
+  if ($WorkerFixture -eq "missing") {
+    [pscustomobject]@{ Status = "parent-not-found"; Children = @() } |
+      ConvertTo-Json -Compress -Depth 3
+    exit 0
+  }
+  if ($WorkerWindowHandle -eq 0 -or [string]::IsNullOrWhiteSpace($WorkerParentAutomationId)) {
+    throw "UIA direct-children worker requires a window handle and parent AutomationId"
+  }
+  $workerRoot = [System.Windows.Automation.AutomationElement]::FromHandle(
+    [IntPtr]$WorkerWindowHandle
+  )
+  $parentCondition = [System.Windows.Automation.PropertyCondition]::new(
+    [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+    $WorkerParentAutomationId
+  )
+  $workerParent = $workerRoot.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants, $parentCondition
+  )
+  if ($null -eq $workerParent) {
+    [pscustomobject]@{ Status = "parent-not-found"; Children = @() } |
+      ConvertTo-Json -Compress -Depth 3
+    exit 0
+  }
+  $workerWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+  $workerChildren = [Collections.Generic.List[object]]::new()
+  $workerChild = $workerWalker.GetFirstChild($workerParent)
+  while ($null -ne $workerChild) {
+    $workerAutomationId = $workerChild.Current.AutomationId
+    if ($workerAutomationId -match $WorkerChildAutomationIdPattern) {
+      $workerChildren.Add([pscustomobject]@{
+          AutomationId = $workerAutomationId
+          Name = $workerChild.Current.Name
+        })
+    }
+    $workerChild = $workerWalker.GetNextSibling($workerChild)
+  }
+  [pscustomobject]@{ Status = "ok"; Children = @($workerChildren.ToArray()) } |
+    ConvertTo-Json -Compress -Depth 4
+  exit 0
+}
+
+function Invoke-IsolatedDirectChildren(
+  [long] $WindowHandle,
+  [string] $ParentAutomationId,
+  [string] $ChildAutomationIdPattern,
+  [int] $TimeoutMilliseconds,
+  [ValidateSet("uia", "success", "missing", "failure")] [string] $Fixture = "uia",
+  [int] $DelayMilliseconds = 0
+) {
+  if ($TimeoutMilliseconds -le 0) {
+    throw "UIA isolated child read requires a positive timeout"
+  }
+  $start = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in @(
+      "-NoProfile", "-NonInteractive", "-File", $PSCommandPath,
+      "-DirectChildrenWorker",
+      "-WorkerWindowHandle", "$WindowHandle",
+      "-WorkerParentAutomationId", $ParentAutomationId,
+      "-WorkerChildAutomationIdPattern", $ChildAutomationIdPattern,
+      "-WorkerFixture", $Fixture,
+      "-WorkerDelayMilliseconds", "$DelayMilliseconds"
+    )) {
+    $start.ArgumentList.Add($argument)
+  }
+  $worker = [Diagnostics.Process]::Start($start)
+  try {
+    if (-not $worker.WaitForExit($TimeoutMilliseconds)) {
+      $workerId = $worker.Id
+      $worker.Kill($true)
+      $joined = $worker.WaitForExit(5000)
+      if (-not $joined) {
+        throw [TimeoutException]::new(
+          "UIA_FRESH_CHILDREN_CLEANUP_TIMEOUT parent=$ParentAutomationId workerPid=$workerId"
+        )
+      }
+      throw [TimeoutException]::new(
+        "UIA_FRESH_CHILDREN_TIMEOUT parent=$ParentAutomationId timeoutMs=$TimeoutMilliseconds " +
+        "workerPid=$workerId joined=$joined"
+      )
+    }
+    $standardOutput = $worker.StandardOutput.ReadToEnd().Trim()
+    $standardError = $worker.StandardError.ReadToEnd().Trim()
+    if ($worker.ExitCode -ne 0) {
+      throw "UIA_FRESH_CHILDREN_WORKER_ERROR parent=$ParentAutomationId " +
+        "exitCode=$($worker.ExitCode) stderr=$standardError stdout=$standardOutput"
+    }
+    if ([string]::IsNullOrWhiteSpace($standardOutput)) {
+      throw "UIA_FRESH_CHILDREN_WORKER_ERROR parent=$ParentAutomationId returned no result"
+    }
+    return ($standardOutput | ConvertFrom-Json -Depth 5)
+  } finally {
+    $worker.Dispose()
+  }
+}
+
+if ($TimeoutContractOnly) {
+  $executed = 0
+  $passed = 0
+
+  $executed++
+  $success = Invoke-IsolatedDirectChildren 0 "worktrees" "^worktree-row-" 2000 "success"
+  if ($success.Status -ne "ok" -or @($success.Children).Count -ne 2) {
+    throw "UIA timeout contract success fixture returned an invalid child snapshot"
+  }
+  $passed++
+
+  $executed++
+  $missing = Invoke-IsolatedDirectChildren 0 "worktrees" "^worktree-row-" 2000 "missing"
+  if ($missing.Status -ne "parent-not-found" -or @($missing.Children).Count -ne 0) {
+    throw "UIA timeout contract missing-parent fixture returned an invalid classification"
+  }
+  $passed++
+
+  $executed++
+  $timeoutClock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    $null = Invoke-IsolatedDirectChildren 0 "worktrees" "^worktree-row-" 250 "success" 60000
+    throw "UIA timeout contract did not stop the stalled worker"
+  } catch [TimeoutException] {
+    $timeoutClock.Stop()
+    if ($_.Exception.Message -notmatch
+        '^UIA_FRESH_CHILDREN_TIMEOUT parent=worktrees timeoutMs=250 workerPid=(\d+) joined=True$') {
+      throw
+    }
+    $workerId = [int]$Matches[1]
+    if ($timeoutClock.ElapsedMilliseconds -ge 3000) {
+      throw "UIA timeout contract exceeded its bound: $($timeoutClock.ElapsedMilliseconds)ms"
+    }
+    if ($null -ne (Get-Process -Id $workerId -ErrorAction SilentlyContinue)) {
+      throw "UIA timeout contract left owned worker PID $workerId running"
+    }
+  }
+  $passed++
+
+  $executed++
+  try {
+    $null = Invoke-IsolatedDirectChildren 0 "worktrees" "^worktree-row-" 2000 "failure"
+    throw "UIA timeout contract accepted a worker failure"
+  } catch [System.Management.Automation.RuntimeException] {
+    if ($_.Exception.Message -notmatch
+        '(?s)^UIA_FRESH_CHILDREN_WORKER_ERROR .*UIA_FIXTURE_WORKER_FAILURE') {
+      throw
+    }
+  }
+  $passed++
+
+  Write-Output "UIA_TIMEOUT_CONTRACT executed=$executed passed=$passed"
+  exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($Shell)) {
+  throw "UIA live gate requires -Shell"
+}
+
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -5474,10 +5657,12 @@ try {
   Require ($overviewCards.Count -eq 2) "overview did not restore synchronized cards before the Worktrees lane check"
   $laneWorktreesScreenX = [int]$graph.Current.BoundingRectangle.Right - 69
   $laneWorktreesScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
-  $worktrees = Find-FragmentById $root "worktrees" $rawWalker
-  Require ($null -ne $worktrees) "missing Worktrees fragment before the overview lane Worktrees check"
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
+  $worktreesBeforeClick = Invoke-IsolatedDirectChildren `
+    ([long]$shellWindow) "worktrees" "^worktree-row-" 2000
+  Require ($worktreesBeforeClick.Status -eq "ok") `
+    "missing Worktrees fragment before the overview lane Worktrees check"
   $laneWorktreesClientX = 0
   $laneWorktreesClientY = 0
   Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -5487,14 +5672,41 @@ try {
   Require ([GraphCodeUiaGateState]::PostMouseClickAt($shellWindow, $laneWorktreesClientX, $laneWorktreesClientY)) `
     "overview lane Worktrees click was rejected"
   $laneWorktreeRows = @()
-  for ($attempt = 0; $attempt -lt 40; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $laneWorktreeRows = @(Get-DirectChildren $worktrees $rawWalker | Where-Object {
-      $_.Current.AutomationId -match '^worktree-row-'
-    })
+  $laneWorktreeTimeouts = 0
+  $laneWorktreeParentMisses = 0
+  $laneWorktreeEmptySnapshots = 0
+  $laneWorktreeDeadline = [DateTime]::UtcNow.AddMilliseconds(5000)
+  while ([DateTime]::UtcNow -lt $laneWorktreeDeadline) {
+    $remainingMilliseconds = [Math]::Max(
+      1, [Math]::Min(1000, [int]($laneWorktreeDeadline - [DateTime]::UtcNow).TotalMilliseconds)
+    )
+    try {
+      $laneWorktreeSnapshot = Invoke-IsolatedDirectChildren `
+        ([long]$shellWindow) "worktrees" "^worktree-row-" $remainingMilliseconds
+    } catch [TimeoutException] {
+      $laneWorktreeTimeouts++
+      Write-Host "UIA_WORKTREES_READ_TIMEOUT attempt=$laneWorktreeTimeouts $($_.Exception.Message)"
+      if ([DateTime]::UtcNow -ge $laneWorktreeDeadline) { throw }
+      continue
+    }
+    if ($laneWorktreeSnapshot.Status -eq "parent-not-found") {
+      $laneWorktreeParentMisses++
+    } elseif ($laneWorktreeSnapshot.Status -eq "ok") {
+      $laneWorktreeRows = @($laneWorktreeSnapshot.Children)
+      if ($laneWorktreeRows.Count -eq 0) { $laneWorktreeEmptySnapshots++ }
+    } else {
+      throw "UIA_FRESH_CHILDREN_WORKER_ERROR parent=worktrees status=$($laneWorktreeSnapshot.Status)"
+    }
     if ($laneWorktreeRows.Count -gt 0) { break }
+    Start-Sleep -Milliseconds 100
   }
-  Require ($laneWorktreeRows.Count -gt 0) "overview lane Worktrees click did not open worktree inspection"
+  Write-Host "UIA_WORKTREES_READ_RESULT rows=$($laneWorktreeRows.Count) " +
+    "isolatedTimeouts=$laneWorktreeTimeouts parentMisses=$laneWorktreeParentMisses " +
+    "emptySnapshots=$laneWorktreeEmptySnapshots"
+  Require ($laneWorktreeRows.Count -gt 0) `
+    "overview lane Worktrees click did not open worktree inspection " +
+    "(isolatedTimeouts=$laneWorktreeTimeouts parentMisses=$laneWorktreeParentMisses " +
+    "emptySnapshots=$laneWorktreeEmptySnapshots)"
   $surfaceActionPatterns["overview-destination"].Invoke()
   Start-Sleep -Milliseconds 500
   $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
