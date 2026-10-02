@@ -37,19 +37,37 @@ The superseded beta1 and beta2 candidates remain immutable custody evidence,
 not failed or deleted artifacts:
 
 - beta1 source/tag
-  `e62583b192a13dd92986f68fb7883f3358eb9d23` / `0.1.78-beta1`, ZIP SHA-256
+  `e62583b192a13dd92986f68fb7883f3358eb9d23` / `0.1.78-beta1`, local annotated
+  tag object `5b8ccf0f5ef4d15b7608cbf12c2d0c1db3f8cee6`, ZIP SHA-256
   `9b5b78478e665ace0d7d297769e707dfb1face46e9ee973386b6216a70ab24e5`,
   and eight-entry handoff inventory SHA-256
   `46283ccd3c8d65ae38715bd557fac9be575281f37722e50f540e2e31fdef5acd`;
 - beta2 source/tag
-  `a406a28cb9aec856c934e7253d1a79c2cc6706ed` / `0.1.78-beta2`, ZIP SHA-256
+  `a406a28cb9aec856c934e7253d1a79c2cc6706ed` / `0.1.78-beta2`, local annotated
+  tag object `7ec6439140cc4c9aed496c9ac21f90f168f3285e`, ZIP SHA-256
   `fe8c7dff60e38b04f37b15b474e32c22b670c764e69ecd64db91280cae48ed25`,
   and eight-entry handoff inventory SHA-256
   `87cf8ab5720d114621d4aa113694e66b3ee5ca3c2192826223cc0168ef29f862`.
 
-Both historical handoff inventories remain **8/8 valid**. All three beta tags
-remain local and unpushed. Retain beta1 and beta2 as immutable historical
-records; neither is the active transfer or qualification candidate.
+Both historical handoff inventories remain **8/8 valid**. The local Windows
+beta1 object, commit, ZIP, and inventory remain unchanged, but the
+`0.1.78-beta1` name is permanently **nonpublishable and superseded** for
+Windows. The remote namespace is occupied by an unrelated Nod/macOS prerelease:
+annotated tag object `7c7b4ebe23e222ad55b4720ecf969913a0a6e8f7`, peeling to
+`23f2182ff429d15191bb84586c711bd3d3274186`, tagged by
+`scgopi <scgopireddy@gmail.com>` at `2026-10-02T22:22:04Z`, with GitHub
+prerelease
+[`0.1.78-beta1 — meet GraphCode Nod`](https://github.com/scgopi/GraphCode/releases/tag/0.1.78-beta1)
+published at `2026-10-02T22:22:16Z`. This namespace collision is not Windows
+candidate drift and does not invalidate beta3. Do not delete, move, overwrite,
+fetch-replace, or push either beta1 tag.
+
+The local Windows beta2 and beta3 tags remain unchanged and unpushed. Remote
+tags `0.1.78-beta2`, `0.1.78-beta3`, `v0.1.78-beta1`,
+`v0.1.78-beta2`, and `v0.1.78-beta3` are absent, and beta3 has no GitHub
+release. Retain beta1 and beta2 as immutable historical records; neither is the
+active transfer or qualification candidate. Nod remains unsupported and
+outside the Windows preview scope.
 
 At this approved candidate, a row-by-row review of the
 [parity ledger](ui-parity-matrix.md) still contains exactly **98 surfaces:
@@ -81,8 +99,11 @@ to promote a parity row.
 The live release API was checked on this date:
 [v0.1.77](https://github.com/scgopi/GraphCode/releases/tag/v0.1.77), published
 2026-09-29, is the latest stable release and contains only
-`graphcode-macos-arm64.dmg`, not a Windows ZIP. The beta3 candidate described below was built locally and remains unpublished
-and uninstalled; no GitHub release or remote beta tag was created.
+`graphcode-macos-arm64.dmg`, not a Windows ZIP. The unrelated Nod/macOS
+`0.1.78-beta1` prerelease and tag occupy that unprefixed name as recorded
+above. The beta3 candidate described below was built locally and remains
+unpublished and uninstalled; remote `0.1.78-beta3` and `v0.1.78-beta3` tags
+are absent and no beta3 GitHub release exists.
 
 **Engineering distance:** if the proposed profile passes the production flight,
 the remaining release work is bounded qualification and tester handoff, not a
@@ -197,8 +218,11 @@ new LFS-aware offline custody artifact and versioned Dev Box handoff:
   `d20a64f78340baed6e417c7f94abae30e81c5abade20c8c53e2df75f3ef38407`,
   and custody sidecar
   `e1a6f5f067d54f5e41c4a264a16c39a5fb6bd093fdb4b67f23123d6fe227b7ff`.
-  The evidence inventory verified **80/80** entries and has SHA-256
-  `e9c7869a458f83288968dcf46ed954fe3ac6e8c2ff4e0ae0d7eae09da7cd4a48`.
+  The retained beta1 namespace-collision record
+  `22-beta1-namespace-collision.json` has SHA-256
+  `696d5eed05ce45a01a91ef4646b66a3489cd8810972eb0da30f5e21cf7571418`.
+  The updated evidence inventory verified **81/81** entries and has SHA-256
+  `75b70c26fb128d8eb072ebbf2de07ce87f1de4036afffe0a99c88769ecfcc008`.
   README-FIRST requires the included custody restore script and forbids GitHub
   or bare-bundle cloning. The privacy scan passed after retained provider
   remotes were sanitized to public URLs.
@@ -578,7 +602,11 @@ README-FIRST requires restoration through the included
 `Restore-GraphCodeSource.ps1`; it forbids GitHub cloning and bare-bundle
 cloning for this custody path. The superseded beta1 and beta2 tags, ZIPs, and
 original handoffs remain immutable historical evidence; do not transfer or
-qualify them and do not delete or rewrite their records.
+qualify them and do not delete or rewrite their records. The local Windows
+beta1 tag object remains retained unchanged, but its `0.1.78-beta1` name is
+permanently nonpublishable because the unrelated Nod/macOS prerelease owns that
+remote namespace. This plan authorizes no remediation or mutation of either
+beta1 tag or release.
 
 After qualification, the maintainer chooses an authorized preview version/tag
 for the **qualified source**, builds with publication disabled, verifies that
