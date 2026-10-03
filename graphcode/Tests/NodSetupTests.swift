@@ -468,12 +468,14 @@ import Testing
 
   static func model(
     _ box: Box, credentials: NodCredentialStore = .inMemory(),
-    flow: CopilotDeviceFlow = CopilotDeviceFlow(clientID: nil, transport: { _ in (Data(), 500) })
+    flow: CopilotDeviceFlow = CopilotDeviceFlow(clientID: nil, transport: { _ in (Data(), 500) }),
+    copilotCLISignInFound: @escaping () -> Bool = { false }
   ) -> NodSetupModel {
     NodSetupModel(
       credentials: credentials, deviceFlow: flow,
       readSettings: { box.settings }, writeSettings: { box.settings = $0 },
-      openURL: { box.opened.append($0) }, claudeCodeSignInFound: { true })
+      openURL: { box.opened.append($0) }, claudeCodeSignInFound: { true },
+      copilotCLISignInFound: copilotCLISignInFound)
   }
 
   @Test func savingAValidKeySignsClaudeIn() throws {
@@ -526,6 +528,35 @@ import Testing
     model.signOut(.copilotSDK)
     #expect(model.copilotPhase == .idle)
     #expect(!model.isSignedIn(.copilotSDK))
+  }
+
+  /// NodRuntime's Copilot engine falls back to the Copilot CLI's own login, so a Mac
+  /// signed in there is signed in for Nod, with nothing of Nod's to sign out of.
+  @Test func theCopilotCLILoginSignsCopilotIn() {
+    var found = false
+    let model = Self.model(Box(), copilotCLISignInFound: { found })
+    #expect(!model.isSignedIn(.copilotSDK))
+    #expect(!model.canStartDeviceFlow)
+
+    found = true
+    model.refreshSignIn()
+
+    #expect(model.isSignedIn(.copilotSDK))
+    #expect(model.usesCopilotCLISignIn)
+    #expect(model.copilotPhase == .signedIn(nil))
+  }
+
+  @Test func nodsOwnTokenWinsOverTheCopilotCLILogin() {
+    let model = Self.model(
+      Box(), credentials: .inMemory([.githubCopilot: "gho_x"]), copilotCLISignInFound: { true })
+    #expect(model.isSignedIn(.copilotSDK))
+    #expect(!model.usesCopilotCLISignIn)
+  }
+
+  /// The runtime reads `github-token` (NodRuntime/src/credentials.ts); a token written under
+  /// any other account never reaches the Copilot engine.
+  @Test func theCopilotTokenIsStoredWhereTheRuntimeReadsIt() {
+    #expect(NodCredential.githubCopilot.rawValue == "github-token")
   }
 
   @Test func anUnconfiguredBuildSaysSo() async {

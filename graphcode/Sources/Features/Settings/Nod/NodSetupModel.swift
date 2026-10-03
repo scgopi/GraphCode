@@ -31,6 +31,8 @@ final class NodSetupModel {
   var copilotPhase: CopilotPhase = .idle
   private(set) var signedIn: [NodEngine: Bool] = [:]
   private(set) var claudeCodeSignInFound = false
+  /// Signed in only through the Copilot CLI's login, which Nod uses but cannot sign out of.
+  private(set) var usesCopilotCLISignIn = false
 
   @ObservationIgnored private let credentials: NodCredentialStore
   @ObservationIgnored private let deviceFlow: CopilotDeviceFlow
@@ -38,6 +40,7 @@ final class NodSetupModel {
   @ObservationIgnored private let writeSettings: (NodSettings) -> Void
   @ObservationIgnored private let openURL: (URL) -> Void
   @ObservationIgnored private var copilotTask: Task<Void, Never>?
+  @ObservationIgnored private let copilotCLISignInFound: () -> Bool
 
   init(
     credentials: NodCredentialStore = .live,
@@ -45,8 +48,10 @@ final class NodSetupModel {
     readSettings: @escaping () -> NodSettings = { SettingsModel.shared.settings.nod },
     writeSettings: @escaping (NodSettings) -> Void = { SettingsModel.shared.settings.nod = $0 },
     openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
-    claudeCodeSignInFound: () -> Bool = { NodClaudeSignIn.claudeCodeSignInFound() }
+    claudeCodeSignInFound: () -> Bool = { NodClaudeSignIn.claudeCodeSignInFound() },
+    copilotCLISignInFound: @escaping () -> Bool = { NodCredentialStore.copilotCLISignInFound() }
   ) {
+    self.copilotCLISignInFound = copilotCLISignInFound
     self.credentials = credentials
     self.deviceFlow = deviceFlow
     self.readSettings = readSettings
@@ -59,6 +64,9 @@ final class NodSetupModel {
 
   func isSignedIn(_ engine: NodEngine) -> Bool { signedIn[engine] ?? false }
 
+  /// Whether this build can run GitHub's device flow — it needs GraphCode's OAuth app id.
+  var canStartDeviceFlow: Bool { deviceFlow.clientID != nil }
+
   func selectEngine(_ engine: NodEngine) {
     settings.switchEngine(to: engine)
   }
@@ -67,6 +75,8 @@ final class NodSetupModel {
     for engine in NodEngine.allCases {
       signedIn[engine] = credentials.isSignedIn(engine)
     }
+    usesCopilotCLISignIn = !isSignedIn(.copilotSDK) && copilotCLISignInFound()
+    if usesCopilotCLISignIn { signedIn[.copilotSDK] = true }
     if isSignedIn(.copilotSDK), copilotPhase == .idle {
       copilotPhase = .signedIn(nil)
     }
