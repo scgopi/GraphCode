@@ -365,6 +365,21 @@ describe("goal loops", () => {
     expect(engine.asks[0]!.model).toBe("haiku");
   });
 
+  test("once the goal holds, a follow-up is answered as chat and never sent back to the goal", async () => {
+    const engine = new FakeEngine(
+      [() => ({ lastMessage: "Fixed." }), () => ({ lastMessage: "Octopuses have three hearts." })],
+      [() => met],
+    );
+    const { runtime, records } = setup(engine, { loopType: "goal", goal });
+    await runtime.start();
+    await runtime.whenIdle();
+    runtime.send("Now tell me a fun fact.", "queue");
+    await runtime.whenIdle();
+    expect(engine.turns).toEqual([goal, "Now tell me a fun fact."]);
+    expect(records.filter((r) => r.type === "goalCheck").map((r) => r.type === "goalCheck" && [r.turn, r.met])).toEqual([[1, true]]);
+    expect(records.filter((r) => r.type === "turnStarted").map((r) => r.type === "turnStarted" && r.origin)).toEqual(["user", "user"]);
+  });
+
   test("the goal is not checked while more messages are queued", async () => {
     let release!: () => void;
     const engine = new FakeEngine([async () => (await new Promise<void>((r) => (release = r)), { lastMessage: "" }), () => ({ lastMessage: "" })], [() => met]);

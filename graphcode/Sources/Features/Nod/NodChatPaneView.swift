@@ -347,6 +347,13 @@ struct NodChatPaneView: View {
           onCompact: { store.send(.compactNowTapped) },
           onRaiseCap: { store.send(.raiseCapTapped) })
       }
+      if store.isStartingRuntime {
+        HStack(spacing: 8) {
+          ProgressView().controlSize(.small)
+          Text("Starting Nod…").font(.system(size: 11.5)).foregroundStyle(.secondary)
+          Spacer()
+        }
+      }
       if let error = store.sendError {
         HStack(spacing: 8) {
           Text(error).font(.system(size: 11.5)).foregroundStyle(NodStyle.failed)

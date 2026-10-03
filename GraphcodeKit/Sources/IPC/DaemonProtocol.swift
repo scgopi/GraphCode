@@ -238,7 +238,8 @@ public indirect enum GraphCommand: Codable, Sendable, Equatable {
   /// composite restarts its workers.
   case restartNode(UUID)
   /// Bring a resolved loop's ended session back on its transcript — sent when a human
-  /// opens the loop. Never re-issues the met goal.
+  /// opens the loop. Never re-issues the met goal. For a chat-surface (Nod) loop that is
+  /// not resolved, starts its session if none is running: no terminal pane does that.
   case resumeSession(UUID)
   /// `restartNode` for every unresolved loop in the graph, workers included.
   case restartSessions

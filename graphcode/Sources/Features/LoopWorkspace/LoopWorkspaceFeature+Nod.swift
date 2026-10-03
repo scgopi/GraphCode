@@ -60,7 +60,17 @@ extension LoopWorkspaceFeature {
     case .editPolicyChosen(let policy):
       state.nodChat?.editPolicy = policy
       return .run { _ in await nodSettings.setEditPolicy(policy) }
+
+    case .runtimeNeeded:
+      return requestNodSession(state)
     }
+  }
+
+  /// Asks graphcoded for this loop's session: resumed if it ended, started if it never ran.
+  /// A no-op while one is alive, so opening the pane can ask unconditionally.
+  func requestNodSession(_ state: State) -> Effect<Action> {
+    let nodeID = state.node.id
+    return nodGraphEffect(state) { send in try await send(.resumeSession(nodeID)) }
   }
 
   func nodGraphLayer(_ state: inout State, _ action: Action) -> Effect<Action> {

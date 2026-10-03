@@ -78,6 +78,8 @@ export class NodRuntime {
   private compactRequested = false;
   private runFailed = false;
   private goalContinuations = 0;
+  /** Set once the goal holds: later turns are follow-up chat, never sent back to the goal. */
+  private goalMet = false;
   private toolStarts = new Map<string, { tool: string; at: number }>();
   private recentTools: string[] = [];
   private lastUsage?: UsageReport;
@@ -213,7 +215,7 @@ export class NodRuntime {
       case "markGoalDone":
         if (!this.goal) throw new Error("this loop has no goal");
         this.goal.markDone();
-        if (!this.busy) await this.goal.check(this.turn, { lastMessage: "", toolResults: [] });
+        if (!this.busy && (await this.goal.check(this.turn, { lastMessage: "", toolResults: [] })).met) this.goalMet = true;
         return;
     }
   }
@@ -307,14 +309,17 @@ export class NodRuntime {
     }
 
     const stoppedEarly = this.stopRequested || result.interrupted || this.runFailed;
-    if (this.goal && !stoppedEarly && this.queue.length === 0) await this.checkGoal(turn, result.lastMessage);
+    if (this.goal && !this.goalMet && !stoppedEarly && this.queue.length === 0) await this.checkGoal(turn, result.lastMessage);
   }
 
   private async checkGoal(turn: number, lastMessage: string): Promise<void> {
     const goal = this.goal!;
     void this.options.presence.presence("busy", "checking the goal");
     const verdict = await goal.check(turn, { lastMessage, toolResults: this.recentTools.slice(-20) });
-    if (verdict.met) return;
+    if (verdict.met) {
+      this.goalMet = true;
+      return;
+    }
     const limit = this.options.maxGoalContinuations ?? 20;
     if (this.goalContinuations >= limit) {
       this.options.log.append({ type: "activity", line: `Goal not met after ${limit} checks · waiting for you` });

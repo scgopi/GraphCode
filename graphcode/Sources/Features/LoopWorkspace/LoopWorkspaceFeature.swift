@@ -428,7 +428,7 @@ extension LoopWorkspaceFeature {
       state.nodChat?.loopTitle = node.title
       state.nodChat?.goal = node.goal?.summary
     }
-    return .none
+    return requestNodSession(state)
   }
 
   /// "Open in zsh tab": typed, not run — the human sees the command at the prompt and

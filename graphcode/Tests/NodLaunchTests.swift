@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
@@ -574,6 +575,29 @@ struct NodGraphStoreTests {
     #expect(resolved?.state == .succeeded)
     #expect(resolved?.resolution?.basis == .nativeGoal)
     #expect(resolved?.resolution?.detail == "1 of 1 clauses met")
+  }
+
+  /// A chat pane has no terminal whose attach would start a session, so opening a Nod loop
+  /// asks for one. A terminal backend's loop is left to its pane.
+  @Test
+  func openingAChatLoopStartsItsSessionOnlyWhenNoneIsRunning() async {
+    let nod = LoopNode(title: "Nod", loopType: .sketch, backend: .nod)
+    let claude = LoopNode(title: "Claude", loopType: .sketch)
+    let started = LockIsolated<[UUID]>([])
+    let alive = LockIsolated(false)
+    var graph = LoopGraph(project: ProjectRef(path: "", name: "p"))
+    graph.nodes.append(contentsOf: [nod, claude])
+    let store = GraphStore(
+      graph: graph,
+      onEnsureSession: { node, _ in started.withValue { $0.append(node.id) } },
+      onSessionAlive: { _, _ in alive.value })
+
+    await store.handle(.resumeSession(claude.id))
+    await store.handle(.resumeSession(nod.id))
+    alive.setValue(true)
+    await store.handle(.resumeSession(nod.id))
+
+    #expect(started.value == [nod.id])
   }
 
   @Test
