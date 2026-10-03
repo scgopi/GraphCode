@@ -205,6 +205,34 @@ struct NodSessionLogTests {
 struct NodLaunchArgumentTests {
   private let nodeID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
 
+  /// A pane can start a Nod session before the daemon does; it must launch it the same way —
+  /// the lineage brief on a fresh start only, and a composite child unattended.
+  @Test
+  func aPaneStartedNodLoopCarriesItsLineageLikeTheDaemon() throws {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/r/graphcode-nod")
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
+    let pane = GhosttyTerminalView(
+      surfaceID: UUID(),
+      sessionName: SurfaceRef(id: nodeID, launchesClaudeCode: true).zmxSessionName,
+      launchesClaudeCode: true, backend: .nod, loopType: .goalBased,
+      lineage: LoopLineage(
+        kind: .compositeChild, sourceNodeID: UUID(), briefPath: "/briefs/child.json"),
+      workingDirectory: nil, onProcessExited: { _ in })
+
+    let fresh = try #require(pane.launchPrefix(settings: GraphcodeSettings()))
+    let resumed = try #require(pane.launchPrefix(settings: GraphcodeSettings(), fresh: false))
+
+    #expect(fresh.contains("'--inherit'"))
+    #expect(fresh.contains("'/briefs/child.json'"))
+    #expect(fresh.contains("'--unattended'"))
+    #expect(!resumed.contains("'--inherit'"))
+    #expect(resumed.contains("'--unattended'"))
+  }
+
   @Test
   func theRuntimeTakesItsPromptAndBriefingByFlag() {
     let nod = CLISessionBackendKind.nod

@@ -33,6 +33,9 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// the settings file on every SwiftUI body pass.
   var pinnedModelTier: ModelTier?
   var loopType: LoopType = .turnBased
+  /// Where a Nod loop came from — its brief and whether it runs unattended — so a pane that
+  /// starts the session launches it exactly as `graphcoded` would.
+  var lineage: LoopLineage?
   /// The prompt this surface's Claude Code session should start with — a time-based
   /// node's `/loop …` directive (see `LoopNode.triggerPrompt`). `nil` for a turn-based
   /// loop's session, which starts bare, and for every plain-shell surface.
@@ -222,8 +225,8 @@ struct GhosttyTerminalView: NSViewRepresentable {
   /// permissions — shared by the fresh launch above and the reboot resume
   /// (`resumeCommand`), so a flag every session needs cannot land in one and not the
   /// other.
-  func launchPrefix(settings: GraphcodeSettings) -> [String]? {
-    if backend == .nod { return nodLaunchPrefix(settings: settings) }
+  func launchPrefix(settings: GraphcodeSettings, fresh: Bool = true) -> [String]? {
+    if backend == .nod { return nodLaunchPrefix(settings: settings, fresh: fresh) }
     guard let executable = backend.executableName else { return nil }
     let tier = ModelTier.resolved(
       pinned: pinnedModelTier, for: loopType, autoSelecting: settings.autoSelectsModel)

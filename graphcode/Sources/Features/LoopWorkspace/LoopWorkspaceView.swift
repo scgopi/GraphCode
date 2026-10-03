@@ -370,6 +370,7 @@ struct LoopWorkspaceView: View {
       backend: store.node.backend,
       pinnedModelTier: store.node.modelTier,
       loopType: store.node.loopType,
+      lineage: store.node.lineage,
       // Only the agent surface of an unattended node starts from a prompt (a time-based
       // loop's `/loop`, a goal-based loop's goal); a turn-based loop's session opens
       // bare, and extra tabs/splits are plain shells either way. A succeeded loop's goal is
