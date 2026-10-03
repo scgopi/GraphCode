@@ -446,6 +446,30 @@ struct NodLaunchArgumentTests {
       try String(contentsOf: file, encoding: .utf8) == "Every paid route goes through UsageGate")
     #expect(NodRuntimeLocator.writeGoal(of: LoopNode(title: "t", backend: .nod)) == nil)
   }
+
+  /// Nod is not on the login shell's PATH, so a headless call that names it bare never
+  /// runs: a blank-titled Nod loop stayed "NewNode", and every summary rewrite failed.
+  @Test
+  func headlessRequestsRunTheBundledRuntimeByPath() throws {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/Apps/Graph Code.app/nod/graphcode-nod")
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
+    let title = try #require(TitleSuggestionClient.invocation(for: .nod)?.last)
+    #expect(
+      title == "exec '/Apps/Graph Code.app/nod/graphcode-nod' -p \"$GRAPHCODE_TITLE_PROMPT\"")
+    let summary = SummaryModelWriter.invocation(forBackend: .nod, prompt: "p")
+    #expect(Array(summary.prefix(3)) == ["/Apps/Graph Code.app/nod/graphcode-nod", "-p", "p"])
+  }
+
+  @Test
+  func noRuntimeMeansNoTitleRequest() {
+    NodRuntimeLocator.rampOverride = false
+    defer { NodRuntimeLocator.rampOverride = nil }
+    #expect(TitleSuggestionClient.invocation(for: .nod) == nil)
+  }
 }
 
 private func failure(of result: Result<Void, NodControlClient.Failure>)

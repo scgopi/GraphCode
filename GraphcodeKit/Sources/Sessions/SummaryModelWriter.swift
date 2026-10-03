@@ -91,8 +91,10 @@ public enum SummaryModelWriter {
     case .pi:
       return ["pi", "-p", "--no-tools", "--no-session", prompt] + model
     case .nod:
-      // The runtime's one-shot print mode — NodRuntime/README.md.
-      return ["graphcode-nod", "-p", prompt] + model
+      // The runtime's one-shot print mode — NodRuntime/README.md. By its path inside the
+      // app: a bare `graphcode-nod` is not on the login shell's PATH, so every rewrite failed.
+      let executable = NodRuntimeLocator.binaryURL()?.path ?? "graphcode-nod"
+      return [executable, "-p", prompt] + model
     }
   }
 

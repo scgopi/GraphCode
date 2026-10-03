@@ -100,7 +100,10 @@ extension TitleSuggestionClient: DependencyKey {
         "exec codex exec --dangerously-bypass-approvals-and-sandbox \"$\(promptVariable)\""
     case .openCode: command = "exec opencode run \"$\(promptVariable)\""
     case .pi: command = "exec pi -p --no-tools --no-session \"$\(promptVariable)\""
-    case .nod: return nil
+    // Never a PATH lookup: Nod ships inside the app and is not on the login shell's PATH.
+    case .nod:
+      guard let binary = NodRuntimeLocator.binaryURL() else { return nil }
+      command = "exec \(PresenceHooks.singleQuoted(binary.path)) -p \"$\(promptVariable)\""
     }
     return ["/bin/zsh", "-i", "-l", "-c", command]
   }
