@@ -101,7 +101,8 @@ public enum RemoteGraphAccess {
 
   /// A shell fragment that lands `files` (home-relative path → content) on the remote
   /// host, or `nil` when there's nothing to send. One `python3 -c` with a base64 JSON
-  /// manifest rather than heredocs or scp: a single argument survives every quoting
+  /// manifest (`deflated` first — see there for the size bound it keeps the dial
+  /// under) rather than heredocs or scp: a single argument survives every quoting
   /// layer between here and the remote shell, needs no extra ssh round-trip, and
   /// content can't collide with a delimiter. Neutered because delivery must never block
   /// the launch it precedes — a session without its briefing is the old behaviour, which
@@ -145,21 +146,29 @@ public enum RemoteGraphAccess {
   /// brief is a pointer at a file that isn't there. That caller
   /// (`ZmxSessionLauncher.remotePromptDelivery`) chains the launch behind this command's
   /// exit status instead, so a failed delivery costs a retry rather than a blind pass.
+  ///
+  /// With a `spool`, the manifest rides the dial's stdin instead of the command line
+  /// (`RemotePayloadSpool`) and the argument names the file it was spooled to.
   public static func installerScript(
     files: [String: String], receipt: (path: String, content: String)? = nil,
-    neutered: Bool = true
+    neutered: Bool = true, spool: RemotePayloadSpool? = nil
   ) -> String? {
-    guard !files.isEmpty else { return nil }
-    let manifest = files.mapValues { Data($0.utf8).base64EncodedString() }
-    guard let json = try? JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+    guard !files.isEmpty,
+      let json = try? JSONSerialization.data(withJSONObject: files, options: [.sortedKeys])
     else { return nil }
+    let payload = deflated(json)
+    let encoded = payload.data.base64EncodedString()
+    let source = "(open(a[1:]).read() if a[:1]==\"@\" else a)"
+    let decode =
+      payload.deflated
+      ? "zlib.decompress(base64.b64decode(\(source)),-15)" : "base64.b64decode(\(source))"
     let program =
-      "import base64,json,os,sys,tempfile; "
-      + "m=json.loads(base64.b64decode(sys.argv[1])); "
+      "import base64,json,os,sys,tempfile,zlib; "
+      + "a=sys.argv[1]; m=json.loads(\(decode)); "
       + "exec('def w(p,c):\\n"
       + " d=os.path.dirname(os.path.expanduser(p))\\n"
       + " os.makedirs(d,exist_ok=True)\\n"
-      + " b=base64.b64decode(c)\\n"
+      + " b=c.encode()\\n"
       + " if p.endswith(\"/bridge-state.json\"):\\n"
       + "  fd,t=tempfile.mkstemp(dir=d)\\n"
       + "  n=os.write(fd,b)\\n"
@@ -171,9 +180,14 @@ public enum RemoteGraphAccess {
       + "'); "
       + "[w(p,c) for p,c in sorted(m.items())]; "
       + "len(sys.argv)>2 and open(os.path.expanduser(sys.argv[2]),'w').write(sys.argv[3])"
-    var argv = ["python3", "-c", program, json.base64EncodedString()]
-    if let receipt { argv += [receipt.path, receipt.content] }
-    let install = argv.map(RemoteProjectLocation.shellQuoted).joined(separator: " ")
+    let argument =
+      spool.map { "\"@\($0.reference(for: encoded))\"" }
+      ?? RemoteProjectLocation.shellQuoted(encoded)
+    var tail: [String] = []
+    if let receipt { tail = [receipt.path, receipt.content] }
+    let install =
+      (["python3", "-c", program].map(RemoteProjectLocation.shellQuoted) + [argument]
+      + tail.map(RemoteProjectLocation.shellQuoted)).joined(separator: " ")
     // stderr into a variable, stdout to `/dev/null` — `2>&1 >/dev/null` in that order,
     // so the substitution keeps the diagnosis and drops the noise.
     return "gc_di_err=$(\(install) 2>&1 >/dev/null); gc_di_rc=$?; "
@@ -194,6 +208,35 @@ public enum RemoteGraphAccess {
         session: "delivery", dial: "install", event: "failed", detailVariable: "gc_di_err")
       + "; fi; "
       + (neutered ? "true" : "[ \"$gc_di_rc\" -eq 0 ]")
+  }
+
+  /// The manifest as raw DEFLATE (`zlib.decompress(…, -15)` on the host), where this
+  /// platform's Foundation can make it. The whole remote command reaches the host's
+  /// login shell as one `-c` argument, and Linux refuses any single argument over
+  /// 128 KiB (`MAX_ARG_STRLEN`) with E2BIG before a byte of it runs. The shim alone was
+  /// ~80 KB once base64'd twice; add a briefing (twice, for Copilot) and a long-lived
+  /// loop's wake digest and the ensure crossed it — so exactly the loops with the most
+  /// memory were never restored after a reboot, and their dial log never said why.
+  static func deflated(_ json: Data) -> (data: Data, deflated: Bool) {
+    #if canImport(Darwin)
+      if let packed = try? (json as NSData).compressed(using: .zlib) as Data {
+        return (packed, true)
+      }
+    #endif
+    return (json, false)
+  }
+
+  /// The inverse of `installerScript`'s payload argument, for tests that assert on what a
+  /// delivery carries.
+  static func manifest(fromInstallerArgument argument: String) -> [String: String]? {
+    guard let data = Data(base64Encoded: argument) else { return nil }
+    var json = data
+    #if canImport(Darwin)
+      if let inflated = try? (data as NSData).decompressed(using: .zlib) as Data {
+        json = inflated
+      }
+    #endif
+    return (try? JSONSerialization.jsonObject(with: json)) as? [String: String]
   }
 
   /// How much of a failed delivery's stderr reaches the dial log — the **last** bytes,
@@ -1299,4 +1342,67 @@ public enum RemoteGraphAccess {
 
     main(sys.argv[1:])
     """#
+}
+
+/// Payloads that ride a dial's stdin rather than its command line.
+///
+/// sshd hands the remote command to the login shell as one `-c` argument, and Linux
+/// refuses any single argument over 128 KiB (`MAX_ARG_STRLEN`) with E2BIG before a byte
+/// of it runs. The daemon's ensure carried the CLI shim, the briefing (twice, for
+/// Copilot) and the loop's wake digest inline, so the loops with the most memory crossed
+/// it: their ensure failed before the first dial-log fragment, every sweep, and after a
+/// reboot their panes waited on graphcoded forever. Spooled, the command line holds
+/// only a byte count and digest per payload, whatever the loop remembers.
+///
+/// The stdin is the daemon's PTY in canonical mode (`PTYProcessSession`), which drops a
+/// line past `MAX_CANON` — 1024 bytes on macOS — so each payload travels as base64
+/// wrapped at 76 columns, which the installer's decode skips over.
+public final class RemotePayloadSpool {
+  private var chunks: [Data] = []
+
+  public init() {}
+
+  /// Registers `text` and returns the shell expression naming the file it lands in.
+  func reference(for text: String) -> String {
+    var wrapped = ""
+    var line = Substring(text)
+    while !line.isEmpty {
+      wrapped += String(line.prefix(76)) + "\n"
+      line = line.dropFirst(76)
+    }
+    chunks.append(Data(wrapped.utf8))
+    return "$gc_pl\(chunks.count - 1)"
+  }
+
+  /// Everything the dial must write to its stdin, in the order the prelude reads it.
+  public var input: Data { chunks.reduce(Data(), +) }
+
+  /// Reads each payload off stdin into its own temporary file, verifying length and
+  /// digest — a short or garbled read leaves the file empty, which the installer then
+  /// reports as a failed delivery in the host's dial log. Then stdin is closed, so
+  /// nothing later in the script can block on a stream that never ends. The alarm
+  /// bounds a dial whose input never arrives.
+  var prelude: String? {
+    guard !chunks.isEmpty else { return nil }
+    let names = chunks.indices.map { "gc_pl\($0)" }
+    let program = """
+      import hashlib,signal,sys
+      signal.alarm(60)
+      a=sys.argv[1:]
+      for i in range(0,len(a),3):
+       n=int(a[i+1]); d=sys.stdin.buffer.read(n)
+       ok=len(d)==n and hashlib.sha256(d).hexdigest()==a[i+2]
+       open(a[i],"wb").write(d if ok else b"")
+      """
+    let specs = zip(names, chunks).map { name, chunk in
+      "\"$\(name)\" \(chunk.count) \(GraphcodeSHA256.hex(chunk))"
+    }
+    return names.map { "\($0)=$(mktemp)" }.joined(separator: " && ")
+      + " && python3 -c \(RemoteProjectLocation.shellQuoted(program)) "
+      + specs.joined(separator: " ") + " 2>/dev/null; exec </dev/null; "
+  }
+
+  var cleanup: String {
+    "rm -f " + chunks.indices.map { "\"$gc_pl\($0)\"" }.joined(separator: " ")
+  }
 }

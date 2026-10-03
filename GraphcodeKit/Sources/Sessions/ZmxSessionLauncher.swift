@@ -1755,6 +1755,20 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
     bridgeState: RemoteBridgeWireState? = nil, onlyAfterReboot: Bool = false
   ) -> [String]? {
+    remoteEnsureDial(
+      forNode: node, at: location, settings: settings, bridgeState: bridgeState,
+      onlyAfterReboot: onlyAfterReboot)?.invocation
+  }
+
+  /// `remoteEnsureInvocation` with the stdin it must be fed: every delivered file rides
+  /// there (`RemotePayloadSpool`), so the command line stays the same few kilobytes
+  /// however much the loop remembers.
+  static func remoteEnsureDial(
+    forNode node: LoopNode, at location: RemoteProjectLocation,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    bridgeState: RemoteBridgeWireState? = nil, onlyAfterReboot: Bool = false
+  ) -> (invocation: [String], input: Data)? {
+    let spool = RemotePayloadSpool()
     let shedPrompt = ShedPromptReport()
     guard
       let zmxArguments = arguments(
@@ -1770,7 +1784,7 @@ public enum ZmxSessionLauncher {
     // prefixed when the prompt was typed in full, which is the ordinary case.
     let launchCommand = remoteQuotedCommand(["zmx"] + zmxArguments)
     let run =
-      remotePromptDelivery(shedPrompt, forNode: node)
+      remotePromptDelivery(shedPrompt, forNode: node, spool: spool)
       .map { "\($0) && \(launchCommand)" } ?? launchCommand
     // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
     // goal behind a per-session folder-trust dialog that nobody is present to answer,
@@ -1796,7 +1810,8 @@ public enum ZmxSessionLauncher {
       .map { $0 + "; " } ?? ""
     let delivery =
       remoteDeliveryScript(
-        forNode: node, at: location, settings: settings, bridgeState: bridgeState
+        forNode: node, at: location, settings: settings, bridgeState: bridgeState,
+        spool: spool
       )
       .map { $0 + "; " } ?? ""
     let create = remoteCreateScript(
@@ -1847,7 +1862,13 @@ public enum ZmxSessionLauncher {
         delivery, ifSessionMissing: check,
         bridgeStateGeneration: bridgeState.map(\.generation))
       + "\(check) >/dev/null 2>&1\(bank) && { \(markerWrite); } || \(repair){ \(missing); }; }"
-    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+    let spooled =
+      spool.prelude.map { "\($0){ \(script); }; gc_rc=$?; \(spool.cleanup); exit $gc_rc" }
+      ?? script
+    return (
+      location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(spooled)),
+      spool.input
+    )
   }
 
   /// The delivery, run when the session is missing **or** the host's shim is out of date.
@@ -1960,7 +1981,7 @@ public enum ZmxSessionLauncher {
   public static func remoteDeliveryScript(
     forNode node: LoopNode?, backend: CLISessionBackendKind? = nil,
     at location: RemoteProjectLocation, settings: GraphcodeSettings,
-    bridgeState: RemoteBridgeWireState? = nil
+    bridgeState: RemoteBridgeWireState? = nil, spool: RemotePayloadSpool? = nil
   ) -> String? {
     _ = bridgeState
     // The shim's receipt, written only once every file has landed — see
@@ -1968,7 +1989,8 @@ public enum ZmxSessionLauncher {
     // without ever claiming a shim the host never received.
     return RemoteGraphAccess.installerScript(
       files: remoteDeliveryFiles(forNode: node, backend: backend, at: location, settings: settings),
-      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp))
+      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp),
+      spool: spool)
   }
 
   /// The delivery for a prompt that moved to a file (issue #57), as its own command
@@ -1988,10 +2010,12 @@ public enum ZmxSessionLauncher {
   /// with it. The node then stays honestly not-running and the next liveness sweep
   /// retries, which is the same posture `startRemote` already takes on a dial that fails.
   static func remotePromptDelivery(
-    _ shedPrompt: ShedPromptReport, forNode node: LoopNode
+    _ shedPrompt: ShedPromptReport, forNode node: LoopNode, spool: RemotePayloadSpool? = nil
   ) -> String? {
     guard let path = shedPrompt.remotePath, let text = shedPrompt.text else { return nil }
-    guard let install = RemoteGraphAccess.installerScript(files: [path: text], neutered: false)
+    guard
+      let install = RemoteGraphAccess.installerScript(
+        files: [path: text], neutered: false, spool: spool)
     else { return nil }
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     // Logged on the remote host's dial log rather than swallowed: a launch that never
@@ -2262,25 +2286,45 @@ public enum ZmxSessionLauncher {
     standardInput: Data? = nil,
     timeout: Duration? = nil
   ) async -> Bool {
+    await runRemoteRetryingCollecting(
+      invocation, attempts: attempts, standardInput: standardInput, timeout: timeout
+    ).succeeded
+  }
+
+  /// `runRemoteRetrying`, keeping what the last attempt printed — ssh's own stderr is
+  /// the only witness to a dial that failed before the remote script began.
+  ///
+  /// The input is written off the calling task: a PTY write blocks until ssh reads it,
+  /// which it does only once the connection is up, and a codespace that is starting can
+  /// hold that for minutes. Once the child exits its slave end closes and a pending
+  /// write fails rather than waiting forever.
+  static func runRemoteRetryingCollecting(
+    _ invocation: [String],
+    attempts: Int = 3,
+    standardInput: Data? = nil,
+    timeout: Duration? = nil
+  ) async -> (succeeded: Bool, output: String) {
     RemoteProjectLocation.prepareControlSocketDirectory()
-    guard attempts > 0 else { return false }
+    guard attempts > 0 else { return (false, "") }
+    var output = ""
     for attempt in 1...attempts {
-      guard !Task.isCancelled else { return false }
+      guard !Task.isCancelled else { return (false, output) }
       guard
         let session = try? PTYProcessSession(
           executable: invocation[0], arguments: Array(invocation.dropFirst()))
-      else { return false }
+      else { return (false, output) }
       if let standardInput {
-        session.sendInput(String(decoding: standardInput, as: UTF8.self) + "\n")
+        let text = String(decoding: standardInput, as: UTF8.self) + "\n"
+        DispatchQueue.global(qos: .utility).async { session.sendInput(text) }
       }
-      if await waitForRemoteProcess(session, timeout: timeout).succeeded {
-        return true
-      }
+      let result = await waitForRemoteProcess(session, timeout: timeout)
+      if result.succeeded { return (true, result.output) }
+      output = result.output
       if attempt < attempts, !Task.isCancelled {
         try? await Task.sleep(for: .seconds(1 << (attempt - 1)))
       }
     }
-    return false
+    return (false, output)
   }
 
   /// The ceiling on a one-shot remote read, below `GraphStore`'s 45s presence deadline so
@@ -2430,15 +2474,40 @@ public enum ZmxSessionLauncher {
     // and the run must share a shell. A failure after the retries is the same posture
     // as the local path: no UI here, the node's state stays honest, opening the loop
     // retries.
-    if let ensure = remoteEnsureInvocation(
+    if let ensure = remoteEnsureDial(
       forNode: node, at: location, bridgeState: bridgeState, onlyAfterReboot: onlyAfterReboot
     ) {
-      if await runRemoteRetrying(ensure) {
+      let result = await runRemoteRetryingCollecting(
+        ensure.invocation, standardInput: ensure.input.isEmpty ? nil : ensure.input)
+      if result.succeeded {
         await CodespaceDialBreaker.shared.record(location, reached: true)
         await CodespaceSSHUser.shared.learnIfNeeded(location)
+      } else if !Task.isCancelled {
+        recordEnsureFailure(
+          node: node, invocation: ensure.invocation, input: ensure.input, output: result.output)
       }
     }
     await RemoteEnsureGate.shared.end(node.id, token: lease)
+  }
+
+  /// A failed ensure, in this daemon's log. The host's dial log hears of an ensure only
+  /// once its script runs, so a dial refused before that — E2BIG, auth, a host that is
+  /// down — left no trace on either machine, and its loop's pane waited forever.
+  static func recordEnsureFailure(
+    node: LoopNode, invocation: [String], input: Data, output: String
+  ) {
+    let tail = String(
+      output.replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+        .suffix(200))
+    DaemonLog.shared.record(
+      "remote-ensure-failed",
+      [
+        ("node", node.id.uuidString),
+        ("argvBytes", String(invocation.map(\.utf8.count).max() ?? 0)),
+        ("stdinBytes", String(input.count)),
+        ("output", tail.trimmingCharacters(in: .whitespaces)),
+      ])
   }
 
   /// Brings back the sessions of finished loops that a reboot of their remote host killed

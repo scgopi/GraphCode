@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
@@ -374,8 +375,7 @@ struct RemoteSessionLaunchTests {
     let tokens = script.split(separator: " ")
     for token in tokens.reversed() {
       let raw = token.trimmingCharacters(in: CharacterSet(charactersIn: "'"))
-      guard let data = Data(base64Encoded: raw),
-        let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+      guard let manifest = RemoteGraphAccess.manifest(fromInstallerArgument: raw)
       else { continue }
       return manifest.keys.sorted()
     }
@@ -514,5 +514,110 @@ extension RemoteSessionLaunchTests {
     let files = ZmxSessionLauncher.remoteDeliveryFiles(
       forNode: node, at: location, settings: GraphcodeSettings())
     #expect(!files.keys.contains { $0.hasSuffix(NodeMemory.promptFileName) })
+  }
+}
+
+/// The daemon's ensure against the remote host's argument limit, and the stdin spool
+/// that keeps it under (`RemotePayloadSpool`).
+@Suite
+struct RemoteEnsureArgumentLimitTests {
+  /// Linux's `MAX_ARG_STRLEN`: the most one argv string may hold, NUL included. sshd
+  /// hands the whole remote command to the login shell as the single `-c` argument, so
+  /// an ensure over it fails `execve` with E2BIG before its first fragment — the dial
+  /// log never hears of it, and after a reboot the loop's pane waits on graphcoded
+  /// forever while siblings with smaller memories come back.
+  private static let linuxArgumentLimit = 131_072
+
+  @Test(arguments: [CLISessionBackendKind.copilotCLI, .claudeCode])
+  func anEnsureFitsOneLinuxArgumentWithAFullMemory(backend: CLISessionBackendKind) throws {
+    let codespace = RemoteProjectLocation(
+      user: nil, host: "curly-space-guide", port: nil, remotePath: "/workspaces/widget",
+      isCodespace: true)
+    let node = LoopNode(
+      title: "Refresh", loopType: .timeBased,
+      triggerPrompt: "/loop 1h refresh the factory", backend: backend)
+    defer { NodeMemory.remove(projectPath: codespace.projectPath, nodeID: node.id) }
+    for pass in 0..<NodeMemory.wakeLineBudget {
+      NodeMemory.append(
+        "pass \(pass) " + String(repeating: "x", count: NodeMemory.maxEntryBytes),
+        projectPath: codespace.projectPath, nodeID: node.id)
+    }
+    #expect(
+      NodeMemory.refinePlaybook(
+        String(repeating: "p", count: NodeMemory.maxPlaybookBytes),
+        projectPath: codespace.projectPath, nodeID: node.id))
+
+    let invocation = try #require(
+      ZmxSessionLauncher.remoteEnsureInvocation(
+        forNode: node, at: codespace, settings: GraphcodeSettings()))
+    let longest = invocation.map(\.utf8.count).max() ?? 0
+    #expect(longest < Self.linuxArgumentLimit, "remote command is \(longest) bytes")
+
+    // Bounded by construction, not by margin: the memory rides stdin, so a loop that
+    // remembers everything costs the command line what one that remembers nothing does.
+    let fresh = LoopNode(
+      title: "Refresh", loopType: .timeBased,
+      triggerPrompt: "/loop 1h refresh the factory", backend: backend)
+    let empty = try #require(
+      ZmxSessionLauncher.remoteEnsureDial(
+        forNode: fresh, at: codespace, settings: GraphcodeSettings()))
+    let full = try #require(
+      ZmxSessionLauncher.remoteEnsureDial(
+        forNode: node, at: codespace, settings: GraphcodeSettings()))
+    let emptyLength = empty.invocation.map(\.utf8.count).max() ?? 0
+    #expect(abs(longest - emptyLength) < 1024)
+    #expect(full.input.count > empty.input.count)
+  }
+
+  @Test
+  func aSpooledDeliveryLandsThroughTheDaemonsOwnPTY() async throws {
+    // The production path end to end, minus ssh: `runRemoteRetryingCollecting` writes
+    // the payload into a canonical-mode PTY, which drops any line past MAX_CANON — a
+    // payload well over that, and over Linux's argument limit, must land byte-exact.
+    let home = FileManager.default.temporaryDirectory
+      .appendingPathComponent("spool-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let noise = (0..<2000).map { _ in
+      Data((0..<57).map { _ in UInt8.random(in: 0...255) }).base64EncodedString()
+    }
+    let text = "'é' $(x)\n" + noise.joined(separator: "\n")
+    let spool = RemotePayloadSpool()
+    let install = try #require(
+      RemoteGraphAccess.installerScript(
+        files: ["~/.graphcode/big.txt": text], neutered: false, spool: spool))
+    let prelude = try #require(spool.prelude)
+    let script =
+      "export HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
+      + "\(prelude){ \(install); }; gc_rc=$?; \(spool.cleanup); exit $gc_rc"
+
+    #expect(script.utf8.count < 16_384)
+    #expect(spool.input.count > Self.linuxArgumentLimit)
+    let result = await ZmxSessionLauncher.runRemoteRetryingCollecting(
+      ["/bin/sh", "-c", script], attempts: 1, standardInput: spool.input,
+      timeout: .seconds(60))
+    #expect(result.succeeded, "\(result.output.suffix(300))")
+    let landed = try String(
+      contentsOf: home.appendingPathComponent(".graphcode/big.txt"), encoding: .utf8)
+    #expect(landed == text)
+  }
+
+  @Test
+  func aFailedEnsureIsLoggedWithItsNodeAndSize() {
+    let node = LoopNode(
+      title: "Refresh", loopType: .timeBased, triggerPrompt: "/loop 1h refresh")
+    let lines = LockIsolated<[String]>([])
+    let tap = DaemonLog.shared.tap { line in lines.withValue { $0.append(line) } }
+    defer { DaemonLog.shared.untap(tap) }
+
+    ZmxSessionLauncher.recordEnsureFailure(
+      node: node, invocation: ["/usr/bin/gh", String(repeating: "x", count: 140_000)],
+      input: Data(count: 42), output: "zsh: argument list too long: zsh\r\n")
+
+    let line = lines.value.first { $0.contains("event=remote-ensure-failed") } ?? ""
+    #expect(line.contains("node=\(node.id.uuidString)"))
+    #expect(line.contains("argvBytes=140000"))
+    #expect(line.contains("stdinBytes=42"))
+    #expect(line.contains("argument list too long"))
   }
 }

@@ -234,11 +234,10 @@ struct RemoteSessionResumeTests {
       script.components(separatedBy: ">> ").dropFirst()
         .allSatisfy { $0.hasPrefix(DialLog.logExpression) })
 
-    // Not a manifest entry — the manifest is the one token that base64-decodes to JSON.
+    // Not a manifest entry — the manifest is the one token that decodes to JSON.
     let files = try #require(
       script.split(whereSeparator: { $0 == " " || $0 == "'" })
-        .compactMap { Data(base64Encoded: String($0)) }
-        .compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        .compactMap { RemoteGraphAccess.manifest(fromInstallerArgument: String($0)) }
         .first)
     #expect(files[RemoteGraphAccess.cliInstallPath] != nil)
     #expect(files[RemoteGraphAccess.shimStampPath] == nil)
