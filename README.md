@@ -5,10 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://trendshift.io/repositories/101061?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-101061" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/101061/daily?language=Swift" alt="scgopi%2FGraphCode | Trendshift" width="250" height="55"/></a>
-</p>
-
-<p align="center">
   <a href="https://graphcode.app/">Website</a> · <a href="https://github.com/scgopi/GraphCode/releases/latest/download/graphcode-macos-arm64.dmg">Download .dmg</a> · <a href="https://github.com/scgopi/GraphCode/releases">All releases</a> · <a href="https://graphcode.app/shortcuts.html">Shortcuts</a>
 </p>
 
