@@ -353,15 +353,20 @@ public actor ProjectRegistry {
   /// dial is a bare `zmx get` — `remoteEnsureInvocation` keeps the hooks write and the
   /// file delivery behind that check precisely so this can be cheap — multiplexed onto
   /// the host's existing `ControlMaster` connection.
-  static let remoteLivenessSweepInterval: Duration = .seconds(60)
+  ///
+  /// A codespace is swept on every `codespaceSweepTicks`th tick only: any of its dials can
+  /// fall back to gh and spend the human's Codespaces API quota (issue #480).
+  static let remoteLivenessSweepInterval: Duration = .seconds(30)
+  static let codespaceSweepTicks = 2
 
-  /// Generous next to the remote sweep's minute: on a healthy machine the condemned
+  /// Generous next to the remote sweep's interval: on a healthy machine the condemned
   /// list is empty and a tick is one file read, but a tick that finds work spawns
   /// processes, and a session that survived three confirmed kill attempts is not going
   /// to die to a faster clock.
   static let condemnedReapInterval: Duration = .seconds(300)
 
   private var remoteSweeper: Task<Void, Never>?
+  private var remoteSweepTick = 0
   private var condemnedReaper: Task<Void, Never>?
 
   /// Started by the first remote project this daemon loads and left running: a store is
@@ -393,9 +398,17 @@ public actor ProjectRegistry {
   /// `RemoteEnsureGate`: one ensure per node at a time, so a slow tick cannot pile a
   /// second dial onto the same session.
   private func sweepRemoteSessions() async {
-    for (path, store) in stores where RemoteProjectLocation.parse(projectPath: path) != nil {
+    remoteSweepTick += 1
+    for (path, store) in stores {
+      guard let location = RemoteProjectLocation.parse(projectPath: path),
+        Self.sweeps(location, onTick: remoteSweepTick)
+      else { continue }
       await store.ensureUnattendedSessionsAlive()
     }
+  }
+
+  static func sweeps(_ location: RemoteProjectLocation, onTick tick: Int) -> Bool {
+    !location.isCodespace || tick % codespaceSweepTicks == 0
   }
 
   /// Takes or drops the sleep assertion to match what is running right now

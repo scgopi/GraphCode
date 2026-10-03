@@ -22,7 +22,7 @@ public struct CodespaceDialSchedule: Equatable, Sendable {
 
   public init(
     freeRetryWindow: Int = 60, holdUntil: Int = 180, pauseAfter: Int = 240,
-    slowRetryInterval: Int = 300
+    slowRetryInterval: Int = 60
   ) {
     self.freeRetryWindow = freeRetryWindow
     self.holdUntil = holdUntil

@@ -77,6 +77,7 @@ struct CodespaceDialScheduleTests {
     #expect(schedule.verdict(secondsDown: 239) == .dial)
     #expect(schedule.verdict(secondsDown: 240) == .paused)
     #expect(schedule.verdict(secondsDown: 86_400) == .paused)
+    #expect(schedule.slowRetryInterval == 60)
   }
 
   // MARK: - The daemon's breaker
@@ -102,15 +103,15 @@ struct CodespaceDialScheduleTests {
     let down = Date(timeIntervalSince1970: 1_000_000)
     await breaker.record(codespace, reached: false, now: down)
 
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(539)))
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(540)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(299)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(300)))
     // One dial per interval for the whole codespace, not one per reader or loop.
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(540)))
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(839)))
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(840)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(300)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(359)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(360)))
     // A failed slow dial leaves the outage clock where it was.
-    await breaker.record(codespace, reached: false, now: down.addingTimeInterval(845))
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(900)))
+    await breaker.record(codespace, reached: false, now: down.addingTimeInterval(365))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(400)))
     #expect(await breaker.permits(codespace, now: down.addingTimeInterval(86_400)))
   }
 
@@ -167,13 +168,13 @@ struct CodespaceDialScheduleTests {
     FileManager.default.createFile(atPath: marker.path, contents: nil)
     try FileManager.default.setAttributes(
       [.modificationDate: down.addingTimeInterval(-60)], ofItemAtPath: marker.path)
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(300)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(250)))
 
     try FileManager.default.setAttributes(
-      [.modificationDate: down.addingTimeInterval(299)], ofItemAtPath: marker.path)
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(300)))
+      [.modificationDate: down.addingTimeInterval(249)], ofItemAtPath: marker.path)
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(250)))
     // Resumed, not a one-off: the next read goes through too.
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(301)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(251)))
   }
 
   @Test
