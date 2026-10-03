@@ -418,16 +418,29 @@ struct NodComposerTextView: NSViewRepresentable {
   func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context)
     -> CGSize?
   {
-    guard let textView = nsView.documentView as? NSTextView,
-      let container = textView.textContainer, let manager = textView.layoutManager
-    else { return nil }
-    let width = proposal.width ?? max(nsView.frame.width, 1)
-    container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
-    manager.ensureLayout(for: container)
+    guard let textView = nsView.documentView as? NSTextView else { return nil }
+    let proposed = proposal.width.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    let width = proposed ?? max(nsView.frame.width, 1)
     return CGSize(
       width: width,
       height: Self.height(
-        forUsedHeight: manager.usedRect(for: container).height, lineHeight: Self.lineHeight))
+        forUsedHeight: Self.usedHeight(of: textView.string, width: width),
+        lineHeight: Self.lineHeight))
+  }
+
+  /// Measured on a scratch layout, never the live one: SwiftUI asks for sizes it will not
+  /// use, and resizing the live container for one of those left the box a line tall while
+  /// the text wrapped to four, so narrowing the pane cut the draft off.
+  static func usedHeight(of text: String, width: CGFloat) -> CGFloat {
+    let storage = NSTextStorage(string: text, attributes: [.font: font])
+    let manager = NSLayoutManager()
+    let container = NSTextContainer(
+      size: NSSize(width: width, height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 0
+    manager.addTextContainer(container)
+    storage.addLayoutManager(manager)
+    manager.ensureLayout(for: container)
+    return manager.usedRect(for: container).height
   }
 
   final class Coordinator: NSObject, NSTextViewDelegate {
