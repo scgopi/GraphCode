@@ -37,8 +37,8 @@ public struct NodSettings: Codable, Equatable, Sendable {
   public var messagesOtherLoops: MessagePolicy
   /// Shell patterns that run without asking, e.g. `swift test *`.
   public var shellAllowlist: [String]
-  /// Per-run cap for unattended loops (timed and composite children), in dollars; 0 is no
-  /// cap. Copilot reports premium requests instead and is capped by its plan.
+  /// Per-run cap for unattended loops (timed and composite children), in dollars; 0, the
+  /// default, is no cap. Copilot reports premium requests instead and is capped by its plan.
   public var spendCapUSD: Double
   /// MCP servers from the project's `.mcp.json` switched off for Nod, by name. The
   /// built-in graphcode server is always on and never listed here.
@@ -55,7 +55,7 @@ public struct NodSettings: Codable, Equatable, Sendable {
     editsOutsideWorktree: Ask = .never,
     messagesOtherLoops: MessagePolicy = .draftForMe,
     shellAllowlist: [String] = [],
-    spendCapUSD: Double = 2,
+    spendCapUSD: Double = 0,
     disabledMCPServers: [String] = []
   ) {
     self.engine = engine
