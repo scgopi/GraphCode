@@ -2515,10 +2515,11 @@ public enum ZmxSessionLauncher {
   /// sessions that are missing *and* were last seen alive in an earlier boot; only those
   /// are dialed again, each behind the same boot gate.
   ///
-  /// The probe itself runs only when a pane of that host has redialed since the last
-  /// probe that answered (`redialStamp`): the one thing left dialing a finished loop's
-  /// host is its pane, and a healthy host has no pane redialing, so the sweep spends
-  /// nothing — a codespace dial spends the human's API quota (issue #480).
+  /// On a codespace the probe runs only when a pane of that host has redialed since the
+  /// last probe that answered (`redialStamp`), or the codespace answered after an outage:
+  /// a codespace dial spends the human's API quota (issue #480). A plain ssh host is
+  /// probed on every sweep, multiplexed over its `ControlMaster`, so its finished loops
+  /// come back with no pane open.
   ///
   /// `nodes` are already the quiet copies the store made (`GraphStore.rebootRestoreCopy`):
   /// the create resumes the banked conversation, or opens on a note, never on the task.
@@ -2552,9 +2553,22 @@ public enum ZmxSessionLauncher {
       .appendingPathComponent("\(location.host).redial")
   }
 
+  /// Touches `redialStamp` from the daemon: a codespace that just answered after an
+  /// outage may have restarted under finished loops whose panes are closed, and nothing
+  /// else would ask `restoreRebootedRemote` to probe it.
+  static func markRedialed(_ location: RemoteProjectLocation) {
+    let stamp = redialStamp(for: location)
+    try? FileManager.default.createDirectory(
+      at: stamp.deletingLastPathComponent(), withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: stamp.path, contents: nil)
+    try? FileManager.default.setAttributes(
+      [.modificationDate: Date()], ofItemAtPath: stamp.path)
+  }
+
   /// Whether a host's panes have redialed since its last answered probe — the only
-  /// state `restoreRebootedRemote` keeps. Stamps from before this daemon started count
-  /// once, so a pane left waiting across a daemon restart is still answered.
+  /// state `restoreRebootedRemote` keeps, and always yes for a plain ssh host. Stamps from
+  /// before this daemon started count once, so a pane left waiting across a daemon
+  /// restart is still answered.
   actor RebootProbeGate {
     static let shared = RebootProbeGate()
 
@@ -2570,6 +2584,7 @@ public enum ZmxSessionLauncher {
     }
 
     func panesRedialed(_ location: RemoteProjectLocation) -> Bool {
+      guard location.isCodespace else { return true }
       guard
         let touched =
           (try? FileManager.default.attributesOfItem(

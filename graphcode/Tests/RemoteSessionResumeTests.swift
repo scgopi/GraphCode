@@ -466,6 +466,38 @@ struct RemoteSessionResumeTests {
 
     #expect(started.value.isEmpty)
   }
+
+  @Test
+  func theLivenessSweepRestartsTheLoopsInsideARunningComposite() async {
+    // A codespace restart kills a piloted composite's workers with everything else, and
+    // they live on its sub-graph, where a sweep of `graph.nodes` never looked.
+    let started = LockIsolated<[UUID]>([])
+    let worker = LoopNode(
+      title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check")
+    let finishedWorker = LoopNode(
+      title: "Done", loopType: .goalBased, goal: GoalSpec(summary: "ship"), state: .succeeded)
+    let reviewer = LoopNode(title: "Review", loopType: .turnBased, checkDescription: "Sound?")
+    let piloted = LoopNode(
+      title: "Routine", loopType: .composite,
+      subGraph: LoopGraph(
+        project: ProjectRef(path: "sub", name: "sub"),
+        nodes: [worker, finishedWorker, reviewer]),
+      pilotState: .piloted)
+    let draftWorker = LoopNode(
+      title: "Draft worker", loopType: .timeBased, triggerPrompt: "/loop 1h Draft")
+    let draft = LoopNode(
+      title: "Draft", loopType: .composite,
+      subGraph: LoopGraph(project: ProjectRef(path: "draft", name: "draft"), nodes: [draftWorker]))
+    let store = GraphStore(
+      graph: LoopGraph(
+        scope: LoopGraphScope(projectPath: location.projectPath, name: "widget"),
+        nodes: [piloted, draft]),
+      onEnsureSession: { node, _ in started.withValue { $0.append(node.id) } })
+
+    await store.ensureUnattendedSessionsAlive()
+
+    #expect(started.value == [worker.id])
+  }
 }
 
 /// A finished unattended loop across a remote reboot: its session comes back as the
@@ -617,25 +649,52 @@ struct RemoteRebootRestoreTests {
   }
 
   @Test
-  func aHealthyHostIsNeverProbed() async throws {
+  func aHealthyCodespaceIsNeverProbed() async throws {
     // The probe is a dial, and on a codespace a dial spends the human's API quota. Only
     // a pane redialing its host is worth one; a host nobody is redialing costs nothing.
+    let codespace = RemoteProjectLocation(
+      host: "fluffy-space-waddle", remotePath: "/workspaces/widget", isCodespace: true)
     let stamp = FileManager.default.temporaryDirectory
       .appendingPathComponent("redial-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: stamp) }
     let gate = ZmxSessionLauncher.RebootProbeGate(stampFor: { _ in stamp })
 
-    #expect(await !gate.panesRedialed(location))
+    #expect(await !gate.panesRedialed(codespace))
 
     FileManager.default.createFile(atPath: stamp.path, contents: nil)
-    #expect(await gate.panesRedialed(location))
+    #expect(await gate.panesRedialed(codespace))
 
-    await gate.probed(location, at: Date().addingTimeInterval(1))
-    #expect(await !gate.panesRedialed(location))
+    await gate.probed(codespace, at: Date().addingTimeInterval(1))
+    #expect(await !gate.panesRedialed(codespace))
 
     try FileManager.default.setAttributes(
       [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: stamp.path)
+    #expect(await gate.panesRedialed(codespace))
+  }
+
+  @Test
+  func aPlainSSHHostIsProbedOnEverySweepWithNoPaneOpen() async {
+    // Its dials ride the host's ControlMaster and spend no quota, so finished loops on a
+    // rebooted ssh host come back without waiting for a pane to redial.
+    let stamp = FileManager.default.temporaryDirectory
+      .appendingPathComponent("redial-\(UUID().uuidString)")
+    let gate = ZmxSessionLauncher.RebootProbeGate(stampFor: { _ in stamp })
+
     #expect(await gate.panesRedialed(location))
+    await gate.probed(location, at: Date().addingTimeInterval(1))
+    #expect(await gate.panesRedialed(location))
+  }
+
+  @Test
+  func plainSSHHostsAreSweptEveryThirtySecondsAndCodespacesEveryMinute() {
+    let codespace = RemoteProjectLocation(
+      host: "fluffy-space-waddle", remotePath: "/workspaces/widget", isCodespace: true)
+
+    #expect(ProjectRegistry.remoteLivenessSweepInterval == .seconds(30))
+    #expect(
+      (1...4).map { ProjectRegistry.sweeps(location, onTick: $0) } == [true, true, true, true])
+    #expect(
+      (1...4).map { ProjectRegistry.sweeps(codespace, onTick: $0) } == [false, true, false, true])
   }
 
   @Test(arguments: [false, true])

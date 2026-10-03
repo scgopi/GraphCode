@@ -1,10 +1,11 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
 @testable import GraphcodeKit
 
 /// One outage schedule for every Codespace dialer (issue #480): retry freely for a
-/// minute, hold until the third, retry until the fourth, then pause until a human asks.
+/// minute, hold until the third, retry until the fourth, then pause to a slow retry.
 /// Every gh run spends the human's Codespaces rate limit, so a dialer that retried on
 /// its own clock forever spent it during every outage.
 ///
@@ -76,6 +77,7 @@ struct CodespaceDialScheduleTests {
     #expect(schedule.verdict(secondsDown: 239) == .dial)
     #expect(schedule.verdict(secondsDown: 240) == .paused)
     #expect(schedule.verdict(secondsDown: 86_400) == .paused)
+    #expect(schedule.slowRetryInterval == 60)
   }
 
   // MARK: - The daemon's breaker
@@ -91,7 +93,45 @@ struct CodespaceDialScheduleTests {
     #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(90)))
     #expect(await breaker.permits(codespace, now: down.addingTimeInterval(200)))
     #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(250)))
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(86_400)))
+  }
+
+  @Test
+  func aPausedCodespaceIsStillDialedOncePerSlowInterval() async throws {
+    // A codespace restarted from outside graphcode can take longer than the four minutes
+    // before the pause; its loops have to come back without a human selecting one.
+    let breaker = CodespaceDialBreaker(markerDirectory: try scratch())
+    let down = Date(timeIntervalSince1970: 1_000_000)
+    await breaker.record(codespace, reached: false, now: down)
+
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(299)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(300)))
+    // One dial per interval for the whole codespace, not one per reader or loop.
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(300)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(359)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(360)))
+    // A failed slow dial leaves the outage clock where it was.
+    await breaker.record(codespace, reached: false, now: down.addingTimeInterval(365))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(400)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(86_400)))
+  }
+
+  @Test
+  func aCodespaceThatAnswersAfterAnOutageAsksForTheRebootProbe() async throws {
+    let recovered = LockIsolated<[String]>([])
+    let breaker = CodespaceDialBreaker(
+      markerDirectory: try scratch(),
+      onRecovered: { location in recovered.withValue { $0.append(location.host) } })
+    let down = Date(timeIntervalSince1970: 1_000_000)
+
+    await breaker.record(codespace, reached: true, now: down)
+    #expect(recovered.value.isEmpty)
+
+    await breaker.record(codespace, reached: false, now: down)
+    await breaker.record(codespace, reached: true, now: down.addingTimeInterval(600))
+    await breaker.record(codespace, reached: true, now: down.addingTimeInterval(601))
+
+    #expect(recovered.value == [codespace.host])
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(602)))
   }
 
   @Test
@@ -128,13 +168,13 @@ struct CodespaceDialScheduleTests {
     FileManager.default.createFile(atPath: marker.path, contents: nil)
     try FileManager.default.setAttributes(
       [.modificationDate: down.addingTimeInterval(-60)], ofItemAtPath: marker.path)
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(300)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(250)))
 
     try FileManager.default.setAttributes(
-      [.modificationDate: down.addingTimeInterval(299)], ofItemAtPath: marker.path)
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(300)))
+      [.modificationDate: down.addingTimeInterval(249)], ofItemAtPath: marker.path)
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(250)))
     // Resumed, not a one-off: the next read goes through too.
-    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(301)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(251)))
   }
 
   @Test

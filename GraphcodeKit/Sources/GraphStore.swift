@@ -4863,6 +4863,16 @@ public actor GraphStore {
     for node in graph.nodes where node.runsUnattended && !node.isResolved {
       ensureSession(node)
     }
+    // The children `pilotComposite` started live on the composite's sub-graph, not in
+    // `graph.nodes`, and a reboot kills their sessions just the same.
+    for composite in graph.nodes
+    where !composite.isResolved
+      && (composite.pilotState == .piloted || composite.pilotState == .armed)
+    {
+      for child in composite.subGraph?.nodes ?? [] where child.runsUnattended && !child.isResolved {
+        ensureSession(child)
+      }
+    }
     let finished = graph.nodes.filter {
       $0.runsUnattended && $0.isResolved && $0.launchFailure == nil
     }
