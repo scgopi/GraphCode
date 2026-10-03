@@ -13,6 +13,42 @@ import Testing
     }
   }
 
+  /// The SDK's `listModels()` answers only "Auto" for some accounts, so the built-in list
+  /// is what the pickers show; it tracks `copilot help config`.
+  @Test func copilotOffersTheCLIsModelsAndKeepsItsDefaults() {
+    let ids = NodModelCatalog.models(for: .copilotSDK).map(\.id)
+    for id in ["claude-fable-5.1", "gpt-6-luna", "gpt-5-mini", "grok-4.5", "kimi-k3", "auto"] {
+      #expect(ids.contains(id))
+    }
+    #expect(NodModelCatalog.model(for: .capable, engine: .copilotSDK).id == "claude-opus-5.5")
+    #expect(NodModelCatalog.model(for: .standard, engine: .copilotSDK).id == "gpt-6-sol")
+    #expect(NodModelCatalog.model(for: .fast, engine: .copilotSDK).id == "gpt-5.6-luna")
+  }
+
+  @Test func copilotIDsReadAsNames() {
+    #expect(NodModelCatalog.copilotModel(id: "gpt-6-sol").displayName == "GPT-6 Sol")
+    #expect(
+      NodModelCatalog.copilotModel(id: "claude-opus-4.8-fast").displayName == "Claude Opus 4.8 Fast"
+    )
+    #expect(
+      NodModelCatalog.copilotModel(id: "mai-code-1.1-flash").displayName == "MAI Code 1.1 Flash")
+    #expect(NodModelCatalog.copilotModel(id: "auto").displayName == "Auto")
+  }
+
+  /// `graphcode-nod --list-models` repeats ids (the SDK listed "auto" twice); each model
+  /// appears once, named as the SDK names it.
+  @Test func aDiscoveredListIsReadOncePerModel() {
+    let json =
+      #"{"engine":"copilot","models":[{"id":"auto","name":"Auto"},{"id":"auto","name":"Auto"},{"id":"o-next","name":"O Next"}]}"#
+
+    let models = NodModelDiscovery.models(from: Data(json.utf8))
+
+    #expect(models.map(\.id) == ["auto", "o-next"])
+    #expect(models.last?.displayName == "O Next")
+    #expect(
+      NodModelDiscovery.models(from: Data(#"{"engine":"claude","models":null}"#.utf8)).isEmpty)
+  }
+
   @Test func defaultsFollowTheDesignPerLoopType() {
     let settings = NodSettings()
     #expect(settings.resolvedModel(for: .sketch).displayName == "Sonnet")

@@ -27,7 +27,7 @@ export const defaultSettings: NodSettings = {
   modelsByLoopType: {},
   shell: "ask",
   network: "ask",
-  editsInWorktree: "reviewHunks",
+  editsInWorktree: "auto",
   editsOutsideWorktree: "never",
   messagesOtherLoops: "draftForMe",
   shellAllowlist: [],

@@ -22,7 +22,8 @@ const USAGE = `graphcode-nod --node <uuid> --cwd <dir> [--engine claude|copilot]
               [--loop-type main|goal|timed|turn|composite] [--goal-file <path>]
               [--briefing <path>] [--resume <conversation-id>] [--inherit <brief.json>]
               [--prompt <text>] [--unattended]
-graphcode-nod -p <prompt> [--engine claude|copilot] [--model <id>]`;
+graphcode-nod -p <prompt> [--engine claude|copilot] [--model <id>]
+graphcode-nod --list-models [--engine copilot]     # JSON: the models this account may use`;
 
 const loopTypes = new Set(["main", "goal", "timed", "turn", "composite"]);
 
@@ -58,6 +59,7 @@ async function main(argv: string[]): Promise<number> {
       inherit: { type: "string" },
       prompt: { type: "string" },
       print: { type: "string", short: "p" },
+      "list-models": { type: "boolean" },
       unattended: { type: "boolean" },
       "exit-when-idle": { type: "boolean" },
       help: { type: "boolean", short: "h" },
@@ -71,6 +73,17 @@ async function main(argv: string[]): Promise<number> {
   const settings = loadSettings();
   const engineKind = (values.engine ?? settings.engine) as NodEngineKind;
   if (engineKind !== "claude" && engineKind !== "copilot") throw new Error(`unknown engine ${engineKind}`);
+
+  if (values["list-models"]) {
+    const engine = makeEngine(engineKind);
+    try {
+      const models = engine.listModels ? await engine.listModels() : undefined;
+      process.stdout.write(JSON.stringify({ engine: engineKind, models: models ?? null }) + "\n");
+      return 0;
+    } finally {
+      await engine.close();
+    }
+  }
 
   if (values.print !== undefined) {
     const engine = makeEngine(engineKind);

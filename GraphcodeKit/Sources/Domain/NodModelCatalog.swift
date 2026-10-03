@@ -12,6 +12,7 @@ public struct NodModel: Equatable, Hashable, Sendable, Identifiable {
     case claude
     case gpt
     case gemini
+    case other
   }
 
   /// The id the engine takes: an alias on the Claude Agent SDK, which keeps resolving to
@@ -39,22 +40,53 @@ public enum NodModelCatalog {
         NodModel(id: "haiku", displayName: "Haiku", family: .claude, tier: .fast),
       ]
     case .copilotSDK:
-      // Read off `copilot help config` at 1.0.84, the list the Copilot SDK shares.
-      return [
-        NodModel(id: "gpt-6-sol", displayName: "GPT-6 Sol", family: .gpt, tier: .standard),
-        NodModel(
-          id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna", family: .gpt, tier: .fast),
-        NodModel(
-          id: "claude-opus-5.5", displayName: "Claude Opus 5.5", family: .claude,
-          tier: .capable),
-        NodModel(
-          id: "claude-sonnet-5", displayName: "Claude Sonnet 5", family: .claude,
-          tier: .standard),
-        NodModel(
-          id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash", family: .gemini,
-          tier: .fast),
-      ]
+      let builtIn = copilotModels
+      return builtIn
+        + discoveredCopilotModels.filter { model in !builtIn.contains { $0.id == model.id } }
     }
+  }
+
+  /// Read off `copilot help config` at 1.0.89. The first model of each tier is that tier's
+  /// default, so the order of the first five matters; the rest follow the CLI's order.
+  static let copilotModels: [NodModel] =
+    [
+      "gpt-6-sol", "gpt-5.6-luna", "claude-opus-5.5", "claude-sonnet-5", "gemini-3.8-flash",
+      "claude-fable-5.1", "claude-fable-5", "claude-opus-5", "claude-opus-4.8",
+      "claude-opus-4.8-fast", "claude-opus-4.7", "claude-sonnet-4.6", "claude-haiku-4.5",
+      "gpt-6-luna", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4",
+      "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5-mini", "mai-code-1.1-flash", "gemini-3.7-flash",
+      "gemini-3.6-flash", "gemini-3.5-flash", "grok-4.5", "kimi-k3", "kimi-k2.7-code", "auto",
+    ].map { copilotModel(id: $0) }
+
+  /// Models the Copilot SDK reported for the signed-in account (`graphcode-nod
+  /// --list-models`) that the built-in list lacks. Set by the app; empty until it has asked.
+  nonisolated(unsafe) public static var discoveredCopilotModels: [NodModel] = []
+
+  /// A Copilot model from its id alone: the SDK's list and the CLI's both give ids, and the
+  /// tier is what a loop type's default needs.
+  public static func copilotModel(id: String, name: String? = nil) -> NodModel {
+    let family: NodModel.Family =
+      id.hasPrefix("claude")
+      ? .claude
+      : id.hasPrefix("gpt")
+        ? .gpt
+        : id.hasPrefix("gemini") ? .gemini : .other
+    let tier: ModelTier =
+      ["haiku", "mini", "flash", "luna", "fast"].contains { id.contains($0) }
+      ? .fast
+      : ["opus", "fable"].contains { id.contains($0) } ? .capable : .standard
+    return NodModel(
+      id: id, displayName: name ?? copilotDisplayName(id), family: family, tier: tier)
+  }
+
+  /// `claude-sonnet-5` → "Claude Sonnet 5", `gpt-6-sol` → "GPT-6 Sol".
+  static func copilotDisplayName(_ id: String) -> String {
+    if id == "auto" { return "Auto" }
+    var words = id.split(separator: "-").map(String.init)
+    if words.first == "gpt", words.count > 1 { words[0...1] = ["GPT-\(words[1])"] }
+    return words.map { word in
+      ["mai"].contains(word) ? word.uppercased() : word.prefix(1).uppercased() + word.dropFirst()
+    }.joined(separator: " ")
   }
 
   /// "Opus · Sonnet · Haiku" or "GPT · Claude · Gemini", the line under each engine card.

@@ -137,7 +137,7 @@ describe("NodRuntime", () => {
 
   test("an in-worktree edit is staged and held until reviewed; the tool runs only when all accepted", async () => {
     const engine = new FakeEngine();
-    const { runtime, records, cwd, labels, presence } = setup(engine);
+    const { runtime, records, cwd, labels, presence } = setup(engine, { settings: { editsInWorktree: "reviewHunks" } });
     const file = join(cwd, "Routes.swift");
     writeFileSync(file, "a\nb\nc\n");
     let authorization: unknown;
@@ -257,7 +257,7 @@ describe("NodRuntime", () => {
 
   test("stop interrupts the turn, rejects pending hunks, denies open asks and clears the queue", async () => {
     const engine = new FakeEngine();
-    const { runtime, records, cwd } = setup(engine, { goal: "it works" });
+    const { runtime, records, cwd } = setup(engine, { goal: "it works", settings: { editsInWorktree: "reviewHunks" } });
     const file = join(cwd, "A.swift");
     writeFileSync(file, "x\n");
     engine.queueTurn(async (cb) => {

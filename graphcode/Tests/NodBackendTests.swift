@@ -182,7 +182,7 @@ struct NodSettingsTests {
     let settings = try JSONDecoder().decode(GraphcodeSettings.self, from: Data("{}".utf8))
 
     #expect(settings.nod == NodSettings())
-    #expect(settings.nod.editsInWorktree == .reviewHunks)
+    #expect(settings.nod.editsInWorktree == .auto)
     #expect(settings.nod.editsOutsideWorktree == .never)
     #expect(settings.nod.messagesOtherLoops == .draftForMe)
   }
