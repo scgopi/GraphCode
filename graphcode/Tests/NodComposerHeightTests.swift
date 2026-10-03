@@ -125,6 +125,41 @@ struct NodComposerHeightTests {
     #expect(visible(box).height >= line * 3 - 1)
   }
 
+  /// Narrowing the pane after typing left the box one line tall while the draft wrapped
+  /// to four: only its last line showed, cut off from the rest.
+  @Test(arguments: [(520, 360), (760, 360)])
+  func aDraftStillFitsAfterThePaneNarrows(from: CGFloat, to: CGFloat) throws {
+    let store = Store(
+      initialState: NodChatFeature.State(
+        nodeID: UUID(), stateDirectory: URL(fileURLWithPath: "/tmp/nod-composer"),
+        loopTitle: "Composer", loopType: .sketch, goal: nil)
+    ) { NodChatFeature() }
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: from, height: 300), styleMask: [.titled],
+      backing: .buffered, defer: false)
+    let host = NSHostingView(rootView: AnyView(NodComposerView(store: store).frame(width: from)))
+    window.contentView = host
+    host.layoutSubtreeIfNeeded()
+    let box = try #require(Self.scrollView(in: host))
+    let textView = try #require(box.documentView as? NSTextView)
+    window.makeFirstResponder(textView)
+    let draft =
+      "Explain why the goal loop keeps restarting after the predicate passes, and check "
+      + "whether the presence hook ever reports idle before the daemon samples it"
+    for character in draft {
+      textView.insertText(String(character), replacementRange: textView.selectedRange())
+      settle(host)
+    }
+
+    host.rootView = AnyView(NodComposerView(store: store).frame(width: to))
+    window.setContentSize(NSSize(width: to, height: 300))
+    for _ in 0..<5 { settle(host) }
+
+    #expect(textView.frame.height > line * 2)
+    #expect(abs(box.frame.height - textView.frame.height) < 2)
+    #expect(visible(box).height >= textView.frame.height - 1)
+  }
+
   @Test
   func aLongDraftShowsFiveLinesAndScrolls() throws {
     let (box, text) = try type((1...10).map { "line \($0)" }.joined(separator: "\n"))
