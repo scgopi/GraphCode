@@ -22,7 +22,6 @@ struct NodComposerView: View {
         onEscape: { store.send(.escapePressed) },
         onTab: chooseFirstMentionAlternate
       )
-      .frame(minHeight: 20, maxHeight: 140)
       .fixedSize(horizontal: false, vertical: true)
       chipRow
     }
@@ -355,29 +354,50 @@ struct NodComposerTextView: NSViewRepresentable {
   /// Returns whether it consumed the ⇥.
   var onTab: () -> Bool
 
+  static let font = NSFont.systemFont(ofSize: 13)
+  /// The box grows with what is typed up to this many lines, then scrolls.
+  static let maximumVisibleLines = 5
+
+  /// The box's height for text laid out `usedHeight` tall: at least one line, at most
+  /// `maximumVisibleLines`.
+  static func height(forUsedHeight usedHeight: CGFloat, lineHeight: CGFloat) -> CGFloat {
+    min(max(usedHeight, lineHeight), lineHeight * CGFloat(maximumVisibleLines))
+  }
+
+  static var lineHeight: CGFloat { NSLayoutManager().defaultLineHeight(for: font) }
+
   func makeCoordinator() -> Coordinator { Coordinator(self) }
 
   func makeNSView(context: Context) -> NSScrollView {
-    let textView = ComposerTextView()
+    let textView = ComposerTextView(frame: .zero)
     textView.delegate = context.coordinator
     textView.coordinator = context.coordinator
     textView.isRichText = false
     textView.allowsUndo = true
     textView.drawsBackground = false
-    textView.font = .systemFont(ofSize: 13)
+    textView.font = Self.font
     textView.textColor = NSColor.white.withAlphaComponent(0.92)
     textView.insertionPointColor = .white
     textView.textContainerInset = .zero
     textView.textContainer?.lineFragmentPadding = 0
+    // Without a maximum size an NSTextView made in code never grows past its first line,
+    // so the box got taller while the text inside stayed one line high.
+    textView.minSize = .zero
+    textView.maxSize = NSSize(
+      width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
     textView.isVerticallyResizable = true
     textView.isHorizontallyResizable = false
     textView.autoresizingMask = [.width]
+    textView.textContainer?.containerSize = NSSize(
+      width: 0, height: CGFloat.greatestFiniteMagnitude)
     textView.textContainer?.widthTracksTextView = true
     textView.placeholder = placeholder
 
-    let scroll = NSScrollView()
+    let scroll = ComposerScrollView()
     scroll.drawsBackground = false
-    scroll.hasVerticalScroller = false
+    scroll.hasVerticalScroller = true
+    scroll.autohidesScrollers = true
+    scroll.scrollerStyle = .overlay
     scroll.documentView = textView
     return scroll
   }
@@ -401,11 +421,13 @@ struct NodComposerTextView: NSViewRepresentable {
     guard let textView = nsView.documentView as? NSTextView,
       let container = textView.textContainer, let manager = textView.layoutManager
     else { return nil }
-    let width = proposal.width ?? 400
+    let width = proposal.width ?? max(nsView.frame.width, 1)
     container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
     manager.ensureLayout(for: container)
-    let height = max(manager.usedRect(for: container).height, 17)
-    return CGSize(width: width, height: min(height, 140))
+    return CGSize(
+      width: width,
+      height: Self.height(
+        forUsedHeight: manager.usedRect(for: container).height, lineHeight: Self.lineHeight))
   }
 
   final class Coordinator: NSObject, NSTextViewDelegate {
@@ -416,6 +438,8 @@ struct NodComposerTextView: NSViewRepresentable {
     func textDidChange(_ notification: Notification) {
       guard let textView = notification.object as? NSTextView else { return }
       parent.text = textView.string
+      // Past five lines the box scrolls; keep the line being typed in view.
+      textView.scrollRangeToVisible(textView.selectedRange())
     }
 
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -435,6 +459,24 @@ struct NodComposerTextView: NSViewRepresentable {
         return parent.onTab()
       default:
         return false
+      }
+    }
+  }
+
+  /// Typing a new line grows the text view before SwiftUI grows the box, and AppKit scrolls
+  /// to the caret in between; the offset outlived the resize and pushed a line out of view.
+  /// After every resize the box shows everything when it fits, and the caret when it does not.
+  final class ComposerScrollView: NSScrollView {
+    override func layout() {
+      super.layout()
+      guard let textView = documentView as? NSTextView else { return }
+      if textView.frame.height <= contentView.bounds.height + 0.5 {
+        if contentView.bounds.origin != .zero {
+          contentView.scroll(to: .zero)
+          reflectScrolledClipView(contentView)
+        }
+      } else {
+        textView.scrollRangeToVisible(textView.selectedRange())
       }
     }
   }
