@@ -178,9 +178,15 @@ struct NodCopilotSignInCard: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       switch model.copilotPhase {
-      case .idle:
+      case .idle where model.canStartDeviceFlow:
         Button("Sign in to GitHub") { model.startCopilotSignIn() }
           .buttonStyle(.borderedProminent)
+      case .idle:
+        Text("Sign in with the Copilot CLI: run copilot login in a terminal, then check again.")
+          .font(.system(size: 12))
+          .foregroundStyle(.white.opacity(0.75))
+          .textSelection(.enabled)
+        Button("Check again") { model.refreshSignIn() }
       case .requesting:
         HStack(spacing: 8) {
           ProgressView().controlSize(.small)
@@ -242,7 +248,12 @@ struct NodCopilotSignInCard: View {
         .foregroundStyle(NodSetupInk.ok)
       VStack(alignment: .leading, spacing: 3) {
         Text(
-          [account.map { "Signed in as \($0.login)" } ?? "Signed in to GitHub", account?.planName]
+          model.usesCopilotCLISignIn
+            ? "Using your Copilot CLI sign-in"
+            : [
+              account.map { "Signed in as \($0.login)" } ?? "Signed in to GitHub",
+              account?.planName,
+            ]
             .compactMap { $0 }.joined(separator: " · ")
         )
         .font(.system(size: 12.5, weight: .medium))
@@ -253,7 +264,9 @@ struct NodCopilotSignInCard: View {
         }
       }
       Spacer(minLength: 4)
-      Button("Sign out") { model.signOut(.copilotSDK) }
+      if !model.usesCopilotCLISignIn {
+        Button("Sign out") { model.signOut(.copilotSDK) }
+      }
     }
     .padding(10)
     .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))

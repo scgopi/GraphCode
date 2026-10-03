@@ -9,7 +9,8 @@ enum NodCredential: String, CaseIterable, Sendable {
   case anthropicAPIKey = "anthropic-api-key"
   /// A Claude subscription token. Only stored when `NodClaudeSignIn.subscriptionLoginAllowed`.
   case claudeSubscription = "claude-subscription"
-  case githubCopilot = "github-copilot"
+  /// The account NodRuntime reads (`KeychainAccount.githubToken` in credentials.ts).
+  case githubCopilot = "github-token"
 
   var engine: NodEngine {
     switch self {
@@ -99,6 +100,16 @@ struct NodCredentialStore: Sendable {
       guard credential.engine == engine else { return false }
       return ((try? read(credential)) ?? nil)?.isEmpty == false
     }
+  }
+
+  /// The Copilot CLI's own GitHub login, which NodRuntime's Copilot engine falls back to
+  /// when Nod holds no token. Attributes only, so it raises no Keychain prompt. Never in
+  /// the test host, whose sign-in assertions must not depend on this Mac's own login.
+  static func copilotCLISignInFound() -> Bool {
+    guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+      return false
+    }
+    return NodClaudeSignIn.genericPasswordExists(service: "copilot-cli")
   }
 
   func signOut(_ engine: NodEngine) throws {
