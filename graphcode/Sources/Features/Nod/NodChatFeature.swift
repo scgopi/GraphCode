@@ -18,7 +18,7 @@ struct NodChatFeature {
     var loopType: LoopType
     var branch: String?
     var goal: String?
-    var editPolicy: NodSettings.EditPolicy = .reviewHunks
+    var editPolicy: NodSettings.EditPolicy = .auto
 
     var transcript = NodTranscript()
     /// The model picked from the chip since the session started; the log only names the

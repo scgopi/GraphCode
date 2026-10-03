@@ -11,7 +11,16 @@ import {
   type SessionConfig,
   type SessionEvent,
 } from "@github/copilot-sdk";
-import type { Engine, EngineFailure, EngineSession, EngineStart, ToolRequest, TurnCallbacks, TurnResult } from "./engine";
+import type {
+  Engine,
+  EngineFailure,
+  EngineSession,
+  EngineStart,
+  ModelListing,
+  ToolRequest,
+  TurnCallbacks,
+  TurnResult,
+} from "./engine";
 import { serverName } from "./mcp";
 import { copilotGraphcodeTools, copilotMcpServers, copilotToolPrefix } from "./mcpServers";
 import type { NodAttachment } from "./protocol";
@@ -151,6 +160,24 @@ export class CopilotEngine implements Engine {
       await session.disconnect().catch(() => {});
       await client.deleteSession(session.sessionId).catch(() => {});
       if (!this.client) await client.stop();
+    }
+  }
+
+  /** The SDK's own list for this account, minus models its policy has switched off. */
+  async listModels(): Promise<ModelListing[]> {
+    const client = this.makeClient(process.cwd());
+    await client.start();
+    try {
+      const models = await client.listModels();
+      return models
+        .filter((model) => model.policy?.state !== "disabled")
+        .map((model) => ({
+          id: model.id,
+          name: model.name,
+          ...(model.billing?.multiplier !== undefined ? { multiplier: model.billing.multiplier } : {}),
+        }));
+    } finally {
+      await client.stop();
     }
   }
 

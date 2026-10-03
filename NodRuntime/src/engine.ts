@@ -72,6 +72,14 @@ export interface TurnResult {
  * adds — the event log, staging, the gate, the goal — sits above this and never
  * branches on which engine it has.
  */
+/** One model the signed-in account can pick, as `graphcode-nod --list-models` prints it. */
+export interface ModelListing {
+  id: string;
+  name: string;
+  /** Premium-request multiplier, when the engine bills that way. */
+  multiplier?: number;
+}
+
 export interface Engine {
   readonly kind: NodEngineKind;
   start(options: EngineStart): Promise<EngineSession>;
@@ -83,5 +91,7 @@ export interface Engine {
   compact(callbacks: TurnCallbacks): Promise<TurnResult>;
   /** A one-shot question with no tools and no conversation — the goal judge and `-p`. */
   ask(prompt: string, model?: string): Promise<string>;
+  /** The models this account may use, when the engine can say; undefined when it can't. */
+  listModels?(): Promise<ModelListing[]>;
   close(): Promise<void>;
 }

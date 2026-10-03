@@ -51,7 +51,7 @@ public struct NodSettings: Codable, Equatable, Sendable {
     goalEvaluatorModel: String? = nil,
     shell: Ask = .ask,
     network: Ask = .ask,
-    editsInWorktree: EditPolicy = .reviewHunks,
+    editsInWorktree: EditPolicy = .auto,
     editsOutsideWorktree: Ask = .never,
     messagesOtherLoops: MessagePolicy = .draftForMe,
     shellAllowlist: [String] = [],

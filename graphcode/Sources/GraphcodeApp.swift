@@ -31,6 +31,8 @@ struct GraphcodeApp: App {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
       FeatureRamps.publishNodFlag(enabled: FeatureRamps.isEnabled(.nod))
       NodRuntimeLocator.installAvailability()
+      NodModelDiscovery.loadCache()
+      NodModelDiscovery.refresh()
     }
     let nodCards = NodLiveCardState()
     NodCardWiring.provider = nodCards
