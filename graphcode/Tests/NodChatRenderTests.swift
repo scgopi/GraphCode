@@ -186,6 +186,26 @@ struct NodChatRenderTests {
     try render("7-composer", width: 720, height: 700, column)
   }
 
+  /// Design 2's composer grows with the draft up to five lines, then scrolls.
+  @Test
+  func theComposerGrowsToFiveLines() throws {
+    let two = store(.monetization) {
+      $0.draft =
+        "Fix /export and add a test that hits the limit.\nAlso log when a request is blocked."
+    }
+    let seven = store(.monetization) {
+      $0.draft = (1...7).map { "Line \($0) of a long instruction for Nod." }.joined(separator: "\n")
+    }
+    let column = VStack(spacing: 24) {
+      NodComposerView(store: two)
+      NodComposerView(store: seven)
+    }
+    .padding(20)
+    .frame(maxHeight: .infinity, alignment: .top)
+    .background(NodStyle.paneBackground)
+    try render("10-composer-lines", width: 720, height: 360, column)
+  }
+
   @Test
   func theGraphLayerSlots() throws {
     var log = NodLog.monetization
