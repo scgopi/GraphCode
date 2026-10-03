@@ -41,6 +41,8 @@ struct NodChatFeature {
     var commentingHunkID: String?
     var hunkComment = ""
     var sendError: String?
+    /// A command is waiting for the runtime the daemon was asked to start or resume.
+    var isStartingRuntime = false
     /// `NodCommand.type`s this runtime has refused — their actions show disabled.
     var unavailableCommands: Set<String> = []
 
@@ -125,12 +127,16 @@ struct NodChatFeature {
       case graphCommand(name: String, argument: String)
       case messageLoop(UUID)
       case editPolicyChosen(NodSettings.EditPolicy)
+      /// Nothing is running behind the pane: ask graphcoded to start or resume the session.
+      case runtimeNeeded
     }
   }
 
   enum NodCommandOutcome: Equatable {
     case sent(NodCommand)
     case failed(NodCommand, NodControlError)
+    /// The runtime was unreachable; it has been asked for and the command is being retried.
+    case waitingForRuntime
   }
 
   /// Commands the runtime refuses until the graph layer behind them ships. A refusal of
@@ -141,6 +147,10 @@ struct NodChatFeature {
 
   @Dependency(\.nodClient) var nodClient
   @Dependency(\.nodSettings) var nodSettings
+  @Dependency(\.continuousClock) var clock
+
+  /// How long a command waits for a runtime that is being started or resumed.
+  static let runtimeWaitAttempts = 30
 
   var body: some ReducerOf<Self> {
     Reduce { state, action in
@@ -298,12 +308,19 @@ struct NodChatFeature {
         state.sendError = nil
         return .none
 
+      case .commandFinished(.waitingForRuntime):
+        state.isStartingRuntime = true
+        state.sendError = nil
+        return .send(.delegate(.runtimeNeeded))
+
       case .commandFinished(.sent(let command)):
+        state.isStartingRuntime = false
         state.sendError = nil
         if case .setModel(let payload) = command { state.chosenModel = payload.model }
         return persistAlwaysAllow(command, state)
 
       case .commandFinished(.failed(let command, let error)):
+        state.isStartingRuntime = false
         if case .rejected = error, Self.gatedCommands.contains(command.type) {
           state.unavailableCommands.insert(command.type)
           return .none
@@ -352,15 +369,28 @@ struct NodChatFeature {
 
   private func command(_ command: NodCommand, _ state: State) -> Effect<Action> {
     let directory = state.stateDirectory
-    return .run { send in
-      do {
-        try await nodClient.send(directory, command)
-        await send(.commandFinished(.sent(command)))
-      } catch let error as NodControlError {
-        await send(.commandFinished(.failed(command, error)))
-      } catch {
-        await send(.commandFinished(.failed(command, .unreachable(error.localizedDescription))))
+    return .run { [clock] send in
+      var lastError = NodControlError.unreachable("no reply")
+      for attempt in 0..<Self.runtimeWaitAttempts {
+        do {
+          try await nodClient.send(directory, command)
+          await send(.commandFinished(.sent(command)))
+          return
+        } catch let error as NodControlError {
+          // A finished loop's session may have been ended to free the machine, and a chat
+          // loop has no terminal whose attach would start one: ask for it, then retry.
+          guard case .unreachable = error else {
+            await send(.commandFinished(.failed(command, error)))
+            return
+          }
+          lastError = error
+        } catch {
+          lastError = .unreachable(error.localizedDescription)
+        }
+        if attempt == 0 { await send(.commandFinished(.waitingForRuntime)) }
+        try await clock.sleep(for: .seconds(1))
       }
+      await send(.commandFinished(.failed(command, lastError)))
     }
   }
 

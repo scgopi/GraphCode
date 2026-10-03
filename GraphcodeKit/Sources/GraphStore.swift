@@ -2535,6 +2535,10 @@ public actor GraphStore {
   /// banked, a remote loop — would otherwise wait for a launch that never comes. The met
   /// goal is never issued again: a session that cannot be resumed opens on a note instead.
   private func resumeResolvedSession(_ nodeID: UUID) async {
+    if let node = graph.nodes[id: nodeID], !node.isResolved {
+      await ensureChatSession(node)
+      return
+    }
     guard let node = graph.nodes[id: nodeID], node.isResolved, node.state != .stopped,
       let onResumeSession
     else { return }
@@ -2548,6 +2552,16 @@ public actor GraphStore {
       + "could not be resumed. Wait for the human's question."
     _ = await onResumeSession(quiet, path)
     scheduleSessionEnd(nodeID)
+  }
+
+  /// A chat-surface loop (Nod) has no terminal pane whose attach would start its session,
+  /// so opening it, or sending to it with nothing running, asks for one here. Unattended
+  /// loops already run; this starts the rest, and is a no-op while a session is alive.
+  private func ensureChatSession(_ node: LoopNode) async {
+    guard node.backend.surface == .chat, node.state != .stopped,
+      await onSessionAlive?(node, graph.project.path) != true
+    else { return }
+    ensureSession(node)
   }
 
   /// Arms the end of a resolved loop's session, after the grace the Settings choose — long

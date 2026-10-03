@@ -28,9 +28,18 @@ struct NodWorkspaceWiringTests {
     }
     await store.send(.chatSurfaceAppeared)
 
-    let nod = TestStore(initialState: workspace(backend: .nod)) { LoopWorkspaceFeature() }
+    let requests = LockIsolated<[String]>([])
+    let nod = TestStore(initialState: workspace(backend: .nod)) {
+      LoopWorkspaceFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { request in requests.withValue { $0.append("\(request)") } }
+    }
     nod.exhaustivity = .off
     await nod.send(.chatSurfaceAppeared)
+    await nod.finish()
+    // No terminal attach starts a chat loop's session, so opening the pane asks for it.
+    #expect(requests.value.count == 1)
+    #expect(requests.value.first?.contains("resumeSession(\(nod.state.node.id))") == true)
     #expect(nod.state.nodChat?.goal == "every paid route enforces the cap")
     #expect(nod.state.nodChat?.loopType == .goalBased)
     #expect(nod.state.nodChat?.nodeID == nod.state.node.id)
@@ -49,6 +58,7 @@ struct NodWorkspaceWiringTests {
         LoopWorkspaceFeature()
       } withDependencies: {
         $0.nodSettings.current = { settings }
+        $0.orchestratorClient.send = { _ in }
       }
       store.exhaustivity = .off
       await store.send(.chatSurfaceAppeared)
@@ -72,6 +82,7 @@ struct NodWorkspaceWiringTests {
         baseDirectory: FileManager.default.temporaryDirectory
           .appendingPathComponent(UUID().uuidString))
       $0.terminalSurfaceClient.typeText = { id, text in box.typed.append((id, text)) }
+      $0.orchestratorClient.send = { _ in }
     }
     store.exhaustivity = .off
     await store.send(.chatSurfaceAppeared)

@@ -34,6 +34,43 @@ struct NodChatFeatureTests {
     return store
   }
 
+  /// A finished loop's session may have ended, and a chat pane cannot attach one into
+  /// being: an unreachable runtime is asked for, and the message is delivered once it is up.
+  @Test
+  func aMessageToAStoppedRuntimeAsksForItAndIsDeliveredWhenItIsUp() async {
+    let attempts = LockIsolated(0)
+    let clock = TestClock()
+    var state = NodChatFeature.State(
+      nodeID: UUID(), stateDirectory: Self.directory, loopTitle: "Monetization",
+      loopType: .goalBased, goal: "Done when every paid route enforces the cap")
+    state.draft = "one more thing"
+    let store = TestStore(initialState: state) {
+      NodChatFeature()
+    } withDependencies: {
+      $0.continuousClock = clock
+      $0.nodClient.send = { _, _ in
+        let attempt = attempts.withValue {
+          $0 += 1
+          return $0
+        }
+        if attempt < 3 { throw NodControlError.unreachable("connect: 2") }
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.returnPressed)
+    await store.skipReceivedActions()
+    #expect(store.state.isStartingRuntime)
+    #expect(store.state.sendError == nil)
+
+    await clock.advance(by: .seconds(2))
+    await store.skipReceivedActions()
+
+    #expect(!store.state.isStartingRuntime)
+    #expect(store.state.sendError == nil)
+    #expect(attempts.value == 3)
+  }
+
   @Test
   func theTailFeedsTheTranscript() async {
     let log = NodLog.monetization
