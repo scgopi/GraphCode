@@ -183,6 +183,7 @@ struct NodSettingsTests {
 
     #expect(settings.nod == NodSettings())
     #expect(settings.nod.editsInWorktree == .auto)
+    #expect(settings.nod.spendCapUSD == 0)
     #expect(settings.nod.editsOutsideWorktree == .never)
     #expect(settings.nod.messagesOtherLoops == .draftForMe)
   }

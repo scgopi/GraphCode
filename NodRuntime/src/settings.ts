@@ -31,7 +31,7 @@ export const defaultSettings: NodSettings = {
   editsOutsideWorktree: "never",
   messagesOtherLoops: "draftForMe",
   shellAllowlist: [],
-  spendCapUSD: 2,
+  spendCapUSD: 0,
   disabledMCPServers: [],
 };
 
