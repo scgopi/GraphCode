@@ -4,7 +4,8 @@ import SwiftUI
 /// plain GraphCode chrome, action blue for actions, orange for "needs you", and muted text
 /// no dimmer than 55% white (review round 2).
 enum NodStyle {
-  static let paneBackground = Color(red: 0.118, green: 0.118, blue: 0.133)  // #1e1e22
+  /// The graph canvas's own tone, so moving between the canvas and a Nod chat keeps one ground.
+  static let paneBackground = Theme.canvasBackground
   static let cardBackground = Color(red: 0.098, green: 0.098, blue: 0.110)  // #19191c
   static let composerBackground = Color(red: 0.149, green: 0.149, blue: 0.165)  // #26262a
   static let bubble = Color.white.opacity(0.07)
