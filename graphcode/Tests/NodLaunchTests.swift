@@ -450,8 +450,9 @@ struct NodLaunchArgumentTests {
   /// Nod is not on the login shell's PATH, so a headless call that names it bare never
   /// runs: a blank-titled Nod loop stayed "NewNode", and every summary rewrite failed.
   @Test
-  func headlessRequestsRunTheBundledRuntimeByPath() throws {
-    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/Apps/Graph Code.app/nod/graphcode-nod")
+  func titleRequestsRunTheBundledRuntimeByPath() throws {
+    NodRuntimeLocator.binaryOverride = URL(
+      fileURLWithPath: "/Apps/Graph Code.app/nod/graphcode-nod")
     NodRuntimeLocator.rampOverride = true
     defer {
       NodRuntimeLocator.binaryOverride = nil
@@ -460,8 +461,29 @@ struct NodLaunchArgumentTests {
     let title = try #require(TitleSuggestionClient.invocation(for: .nod)?.last)
     #expect(
       title == "exec '/Apps/Graph Code.app/nod/graphcode-nod' -p \"$GRAPHCODE_TITLE_PROMPT\"")
+  }
+
+  @Test
+  func summaryRewritesRunTheBundledRuntimeByPath() {
+    NodRuntimeLocator.binaryOverride = URL(fileURLWithPath: "/Apps/nod/graphcode-nod")
+    NodRuntimeLocator.rampOverride = true
+    defer {
+      NodRuntimeLocator.binaryOverride = nil
+      NodRuntimeLocator.rampOverride = nil
+    }
     let summary = SummaryModelWriter.invocation(forBackend: .nod, prompt: "p")
-    #expect(Array(summary.prefix(3)) == ["/Apps/Graph Code.app/nod/graphcode-nod", "-p", "p"])
+    #expect(Array(summary.prefix(3)) == ["/Apps/nod/graphcode-nod", "-p", "p"])
+  }
+
+  /// The login shell splits an unquoted path at its spaces, so a runtime inside an app
+  /// named with one never launched; a bare CLI name is still typed exactly as before.
+  @Test
+  func aRuntimePathWithASpaceSurvivesTheLoginShell() {
+    let spaced = ZmxSessionLauncher.loginShellInvocation(
+      of: "/Apps/Graph Code.app/nod/graphcode-nod", arguments: ["-p", "x"])
+    #expect(spaced[4] == "exec '/Apps/Graph Code.app/nod/graphcode-nod' \"$@\"")
+    let bare = ZmxSessionLauncher.loginShellInvocation(of: "claude", arguments: [])
+    #expect(bare[4] == "exec claude \"$@\"")
   }
 
   @Test

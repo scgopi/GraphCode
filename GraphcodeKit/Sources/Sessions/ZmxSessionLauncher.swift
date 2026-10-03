@@ -402,9 +402,18 @@ public enum ZmxSessionLauncher {
     let prefix = exports.isEmpty ? "" : "env \(exports)"
     // `$0` has to be something, and it shows up in error messages — name it after us.
     return [
-      "/bin/zsh", "-i", "-l", "-c", "exec \(prefix)\(command) \"$@\"\(scriptSuffix)",
+      "/bin/zsh", "-i", "-l", "-c",
+      "exec \(prefix)\(shellWord(command)) \"$@\"\(scriptSuffix)",
       "graphcode",
     ] + arguments
+  }
+
+  /// A bare name like `claude` stays as typed, so every CLI launch is unchanged; a path that
+  /// needs it — Nod's runtime inside an app whose name has a space — is single-quoted.
+  static func shellWord(_ word: String) -> String {
+    let plain = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "/._-+,:@%="))
+    let isPlain = !word.isEmpty && word.unicodeScalars.allSatisfy(plain.contains)
+    return isPlain ? word : PresenceHooks.singleQuoted(word)
   }
 
   /// `zmx get <name> <key>` reads a per-session label. This is the channel a backend's
