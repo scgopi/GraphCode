@@ -117,6 +117,18 @@ fn terminalPasteFailureStatus(err: anyerror) []const u8 {
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
+const wm_folder_open_complete: c.UINT = c.WM_APP + 47;
+
+const FolderOpenApi = struct {
+    fn postMessage(hwnd: c.HWND, message: c.UINT) bool {
+        return c.PostMessageW(hwnd, message, 0, 0) != 0;
+    }
+
+    fn openProject(app: *App, path: []const u8) void {
+        app.openProject(path);
+    }
+};
+
 fn workspaceUser(allocator: std.mem.Allocator) ![]u8 {
     return std.process.getEnvVarOwned(allocator, "USERNAME") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "USER"),
@@ -1073,6 +1085,7 @@ pub const App = struct {
     pending_open_request_id: ?[36]u8 = null,
     pending_open_sent: bool = false,
     pending_sent_path: []u8 = &.{},
+    pending_folder_open_path: []u8 = &.{},
     last_connection_state: Wire.ConnectionState = .disconnected,
     last_project_opened: []const u8 = "",
     accepted_subscription: []const u8 = "",
@@ -1211,6 +1224,7 @@ pub const App = struct {
         if (self.pending_project_path.len != 0) self.allocator.free(self.pending_project_path);
         if (self.pending_rebind_path.len != 0) self.allocator.free(self.pending_rebind_path);
         if (self.pending_sent_path.len != 0) self.allocator.free(self.pending_sent_path);
+        if (self.pending_folder_open_path.len != 0) self.allocator.free(self.pending_folder_open_path);
         if (self.pending_previous_subscription.len != 0) self.allocator.free(self.pending_previous_subscription);
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
         self.workspace_recovery.deinit(self.allocator);
@@ -1681,7 +1695,7 @@ pub const App = struct {
 
     pub fn openFolder(self: *App) void {
         self.clearIngressError();
-        var path: [32768]u16 = undefined;
+        var path: [32768]u16 = [_]u16{0} ** 32768;
         const picked = graphcode_pick_folder(self.window.hwnd, &path, path.len);
         if (picked < 0) {
             self.setIngressError("Unable to open the folder picker");
@@ -1696,8 +1710,31 @@ pub const App = struct {
             self.setStatus("Unable to read the selected folder");
             return;
         };
-        defer self.allocator.free(utf8);
-        self.openProject(utf8);
+        self.scheduleFolderOpenWith(utf8, FolderOpenApi) catch {
+            self.setIngressError("Unable to finish opening the selected folder");
+            self.setStatus("Unable to finish opening the selected folder");
+        };
+    }
+
+    fn scheduleFolderOpenWith(self: *App, owned_path: []u8, comptime Api: type) !void {
+        if (self.pending_folder_open_path.len != 0) {
+            self.allocator.free(owned_path);
+            return error.FolderOpenAlreadyPending;
+        }
+        self.pending_folder_open_path = owned_path;
+        if (!Api.postMessage(self.window.hwnd, wm_folder_open_complete)) {
+            self.pending_folder_open_path = &.{};
+            self.allocator.free(owned_path);
+            return error.FolderOpenDispatchFailed;
+        }
+    }
+
+    fn dispatchPendingFolderOpenWith(self: *App, comptime Api: type) void {
+        if (self.pending_folder_open_path.len == 0) return;
+        const path = self.pending_folder_open_path;
+        self.pending_folder_open_path = &.{};
+        defer self.allocator.free(path);
+        Api.openProject(self, path);
     }
 
     pub fn openGlobalOverview(self: *App) void {
@@ -7211,6 +7248,11 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        wm_folder_open_complete => {
+            app.dispatchPendingFolderOpenWith(FolderOpenApi);
+            result.* = 0;
+            return true;
+        },
         c.WM_ERASEBKGND => {
             // WM_PAINT presents a complete off-screen frame, so erasing first would
             // expose the background between GDI operations and cause visible flicker.
@@ -9679,6 +9721,162 @@ test "graphChanged republishes renamed project card and sidebar accessibility na
     try std.testing.expectEqualStrings("Renamed loop", app.model.graphFor("A").?.nodes.items[0].title);
 }
 
+test "folder picker completion waits for native callback unwind" {
+    const Probe = struct {
+        const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeFolderOpenLifetimeTest");
+        const select_command: c.WPARAM = 1;
+        const cancel_command: c.WPARAM = 2;
+
+        var app: ?*App = null;
+        var callback_active: bool = false;
+        var posted_message: c.UINT = 0;
+        var post_calls: usize = 0;
+        var open_calls: usize = 0;
+        var opened_during_callback: bool = false;
+        var opened_expected_path: bool = false;
+        var schedule_failed: bool = false;
+
+        fn reset() void {
+            app = null;
+            callback_active = false;
+            posted_message = 0;
+            post_calls = 0;
+            open_calls = 0;
+            opened_during_callback = false;
+            opened_expected_path = false;
+            schedule_failed = false;
+        }
+
+        fn postMessage(hwnd: c.HWND, message: c.UINT) bool {
+            post_calls += 1;
+            posted_message = message;
+            return c.PostMessageW(hwnd, message, 0, 0) != 0;
+        }
+
+        fn openProject(_: *App, path: []const u8) void {
+            open_calls += 1;
+            opened_during_callback = callback_active;
+            opened_expected_path = std.mem.eql(u8, path, "C:\\fixtures\\caf\xc3\xa9");
+        }
+
+        fn windowProc(
+            hwnd: c.HWND,
+            message: c.UINT,
+            wparam: c.WPARAM,
+            lparam: c.LPARAM,
+        ) callconv(.winapi) c.LRESULT {
+            if (message == c.WM_COMMAND) {
+                callback_active = true;
+                defer callback_active = false;
+                if (wparam == select_command) {
+                    const value = app.?;
+                    const path = value.allocator.dupe(u8, "C:\\fixtures\\caf\xc3\xa9") catch {
+                        schedule_failed = true;
+                        return 0;
+                    };
+                    value.scheduleFolderOpenWith(path, @This()) catch {
+                        schedule_failed = true;
+                    };
+                }
+                return 0;
+            }
+            if (message == wm_folder_open_complete) {
+                app.?.dispatchPendingFolderOpenWith(@This());
+                return 0;
+            }
+            return c.DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+
+        fn dispatchOne(hwnd: c.HWND) !void {
+            var message: c.MSG = undefined;
+            try std.testing.expect(c.PeekMessageW(
+                &message,
+                hwnd,
+                wm_folder_open_complete,
+                wm_folder_open_complete,
+                c.PM_REMOVE,
+            ) != 0);
+            _ = c.DispatchMessageW(&message);
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = try DaemonClient.initForTesting(allocator),
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    Probe.reset();
+    Probe.app = &app;
+    var window_class = std.mem.zeroes(c.WNDCLASSW);
+    window_class.hInstance = c.GetModuleHandleW(null);
+    window_class.lpszClassName = Probe.class_name;
+    window_class.lpfnWndProc = &Probe.windowProc;
+    if (c.RegisterClassW(&window_class) == 0) return error.WindowClassRegistrationFailed;
+    defer _ = c.UnregisterClassW(Probe.class_name, window_class.hInstance);
+    var hwnd = c.CreateWindowExW(
+        0,
+        Probe.class_name,
+        Probe.class_name,
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        window_class.hInstance,
+        null,
+    ) orelse return error.WindowCreationFailed;
+    app.window.hwnd = hwnd;
+    defer {
+        Probe.app = null;
+        if (hwnd != null) _ = c.DestroyWindow(hwnd);
+        if (app.pending_folder_open_path.len != 0) allocator.free(app.pending_folder_open_path);
+        app.client.deinit();
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+
+    _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
+
+    try std.testing.expect(!Probe.schedule_failed);
+    try std.testing.expectEqual(@as(usize, 1), Probe.post_calls);
+    try std.testing.expectEqual(wm_folder_open_complete, Probe.posted_message);
+    try std.testing.expectEqual(@as(usize, 0), Probe.open_calls);
+    try std.testing.expect(!Probe.opened_during_callback);
+
+    try Probe.dispatchOne(hwnd);
+    try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
+    try std.testing.expect(!Probe.opened_during_callback);
+    try std.testing.expect(Probe.opened_expected_path);
+    app.dispatchPendingFolderOpenWith(Probe);
+    try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
+
+    _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.cancel_command, 0);
+    try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
+    try std.testing.expectEqual(@as(usize, 1), Probe.post_calls);
+
+    _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
+    try Probe.dispatchOne(hwnd);
+    try std.testing.expectEqual(@as(usize, 2), Probe.open_calls);
+    try std.testing.expectEqual(@as(usize, 2), Probe.post_calls);
+
+    _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
+    try std.testing.expectEqual(@as(usize, 3), Probe.post_calls);
+    try std.testing.expectEqual(@as(usize, 2), Probe.open_calls);
+    try std.testing.expect(app.pending_folder_open_path.len != 0);
+    _ = c.DestroyWindow(hwnd);
+    hwnd = null;
+    app.window.hwnd = null;
+}
+
 const GraphPublicationTest = struct {
     var sink: DpiAccessibilitySink = .{ .expected = &.{}, .dpi_index = 0 };
     var publications: usize = 0;
@@ -9716,10 +9914,10 @@ const GraphPublicationTest = struct {
         app.declared_entry_ids.deinit();
         app.kept_worktree_paths.deinit();
         for ([_][]const u8{
-            app.selected_node_id,    app.selected_edge_project_path, app.selected_edge_id,
-            app.last_project_opened, app.accepted_subscription,      app.pending_project_path,
-            app.pending_rebind_path, app.pending_sent_path,          app.pending_previous_subscription,
-            app.status_override,     app.ingress_error,
+            app.selected_node_id,              app.selected_edge_project_path, app.selected_edge_id,
+            app.last_project_opened,           app.accepted_subscription,      app.pending_project_path,
+            app.pending_rebind_path,           app.pending_sent_path,          app.pending_folder_open_path,
+            app.pending_previous_subscription, app.status_override,            app.ingress_error,
         }) |value| if (value.len != 0) app.allocator.free(value);
     }
 
