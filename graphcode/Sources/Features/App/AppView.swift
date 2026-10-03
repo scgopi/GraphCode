@@ -172,7 +172,9 @@ struct AppView: View {
       ),
       titleVisibility: .visible
     ) {
+      // ⌘W raises this, so Return should finish the job without reaching for the mouse.
       Button("Delete", role: .destructive) { confirmPendingDeletion() }
+        .keyboardShortcut(.defaultAction)
       Button("Cancel", role: .cancel) { cancelPendingDeletion() }
     } message: {
       Text(
