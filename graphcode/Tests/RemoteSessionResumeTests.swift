@@ -466,6 +466,38 @@ struct RemoteSessionResumeTests {
 
     #expect(started.value.isEmpty)
   }
+
+  @Test
+  func theLivenessSweepRestartsTheLoopsInsideARunningComposite() async {
+    // A codespace restart kills a piloted composite's workers with everything else, and
+    // they live on its sub-graph, where a sweep of `graph.nodes` never looked.
+    let started = LockIsolated<[UUID]>([])
+    let worker = LoopNode(
+      title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check")
+    let finishedWorker = LoopNode(
+      title: "Done", loopType: .goalBased, goal: GoalSpec(summary: "ship"), state: .succeeded)
+    let reviewer = LoopNode(title: "Review", loopType: .turnBased, checkDescription: "Sound?")
+    let piloted = LoopNode(
+      title: "Routine", loopType: .composite,
+      subGraph: LoopGraph(
+        project: ProjectRef(path: "sub", name: "sub"),
+        nodes: [worker, finishedWorker, reviewer]),
+      pilotState: .piloted)
+    let draftWorker = LoopNode(
+      title: "Draft worker", loopType: .timeBased, triggerPrompt: "/loop 1h Draft")
+    let draft = LoopNode(
+      title: "Draft", loopType: .composite,
+      subGraph: LoopGraph(project: ProjectRef(path: "draft", name: "draft"), nodes: [draftWorker]))
+    let store = GraphStore(
+      graph: LoopGraph(
+        scope: LoopGraphScope(projectPath: location.projectPath, name: "widget"),
+        nodes: [piloted, draft]),
+      onEnsureSession: { node, _ in started.withValue { $0.append(node.id) } })
+
+    await store.ensureUnattendedSessionsAlive()
+
+    #expect(started.value == [worker.id])
+  }
 }
 
 /// A finished unattended loop across a remote reboot: its session comes back as the

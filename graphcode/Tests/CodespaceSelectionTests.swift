@@ -212,4 +212,29 @@ struct CodespaceSelectionTests {
 
     #expect(await waitFor(within: .seconds(5)) { lines(in: log) > pausedAt })
   }
+
+  @Test
+  func aPausedPaneRedialsOnItsOwnAfterTheSlowInterval() async throws {
+    let directory = try scratch()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let log = directory.appendingPathComponent("dials")
+    let marker = directory.appendingPathComponent("space.reconnect")
+    let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
+    let slow = CodespaceDialSchedule(
+      freeRetryWindow: 1, holdUntil: 3, pauseAfter: 4, slowRetryInterval: 3)
+    let pane = try startPane(
+      SSHReconnectLoop.codespaceScript(
+        connect: dial, reconnect: dial, pauseMarker: marker.path, schedule: slow),
+      onATTY: true)
+    defer { pane.process.terminate() }
+
+    #expect(await waitFor { lines(in: log) >= 3 })
+    try await Task.sleep(for: .seconds(5))
+    let pausedAt = lines(in: log)
+
+    // Nobody presses Enter or selects the loop.
+    #expect(await waitFor(within: .seconds(10)) { lines(in: log) >= pausedAt + 2 })
+    #expect(pane.process.isRunning)
+    #expect(!FileManager.default.fileExists(atPath: marker.path))
+  }
 }

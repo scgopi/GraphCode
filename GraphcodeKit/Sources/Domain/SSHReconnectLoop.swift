@@ -41,11 +41,12 @@ public enum SSHReconnectLoop {
 
   /// A Codespace surface's loop: the same dials and exit handling, retried on
   /// `CodespaceDialSchedule` instead of forever, because every gh run spends the human's
-  /// Codespaces rate limit (issue #480). Past `schedule.pauseAfter` it waits for Enter,
-  /// which also touches `pauseMarker` so `graphcoded`'s `CodespaceDialBreaker` resumes
-  /// the codespace's reads and ensures with it. The app touches the same marker when a
-  /// loop of this codespace is selected, which restarts the schedule and redials from any
-  /// wait — held or paused — within a second.
+  /// Codespaces rate limit (issue #480). Past `schedule.pauseAfter` it redials once per
+  /// `schedule.slowRetryInterval`, or at once on Enter, which also touches `pauseMarker`
+  /// so `graphcoded`'s `CodespaceDialBreaker` resumes the codespace's reads and ensures
+  /// with it. The app touches the same marker when a loop of this codespace is selected,
+  /// which restarts the schedule and redials from any wait — held or paused — within a
+  /// second.
   ///
   /// The outage clock restarts only after a dial that lasted `upAfter`, longer than the
   /// five minutes gh can spend waiting for a codespace to start before failing — a
@@ -74,13 +75,15 @@ public enum SSHReconnectLoop {
     // does not count.
     let asked = "{ [ -e \"$gc_stamp\" ] && [ \(marker) -nt \"$gc_stamp\" ]; }"
     let enter = "mkdir -p \(directory) 2>/dev/null; touch \(marker) 2>/dev/null"
-    // On a tty the pause polls, so a selection can end it too. Off one, `read` blocks as
-    // it always did: bash 3.2's `read -t` answers 1 for a timeout and for end of input
-    // alike, and a closed stdin would spin. A pane always has a tty.
+    // On a tty the pause polls, so a selection can end it too, and runs out after the slow
+    // retry interval to redial on the same outage clock. Off one, `read` blocks as it
+    // always did: bash 3.2's `read -t` answers 1 for a timeout and for end of input alike,
+    // and a closed stdin would spin. A pane always has a tty.
     let pause =
-      "if [ -t 0 ]; then while :; do \(asked) && break; "
-      + "read -t 1 gc_line && { \(enter); break; }; done; "
-      + "else read gc_line || exit 0; \(enter); fi; "
+      "gc_ask=; if [ -t 0 ]; then gc_left=\(schedule.slowRetryInterval); "
+      + "while [ \"$gc_left\" -gt 0 ]; do \(asked) && { gc_ask=1; break; }; "
+      + "read -t 1 gc_line && { \(enter); gc_ask=1; break; }; gc_left=$((gc_left - 1)); done; "
+      + "else read gc_line || exit 0; \(enter); gc_ask=1; fi; "
     let waitOrAsk =
       "gc_wait_or_ask() { gc_left=$1; while [ \"$gc_left\" -gt 0 ]; do "
       + "\(asked) && return 0; sleep 1; gc_left=$((gc_left - 1)); done; return 1; }; "
@@ -93,9 +96,10 @@ public enum SSHReconnectLoop {
       + "while :; do gc_out=$(($(date +%s) - gc_down)); "
       + "if [ \"$gc_out\" -ge \(schedule.pauseAfter) ]; then "
       + #"printf '\033[1;33m── Codespace still unreachable (exit %s). Paused to save your "#
-      + #"Codespaces API quota. Press Enter or select the loop to reconnect, Ctrl-C to "#
-      + #"close. ──\033[0m\r\n' "$gc_rc"; "#
-      + pause + "\(restart); "
+      + #"Codespaces API quota; retrying every %ss. Press Enter or select the loop to "#
+      + #"reconnect now, Ctrl-C to close. ──\033[0m\r\n' "$gc_rc" "#
+      + "\(schedule.slowRetryInterval); "
+      + pause + "[ -n \"$gc_ask\" ] && { \(restart); }; "
       + "else "
       + "if [ \"$gc_out\" -ge \(schedule.freeRetryWindow) ] "
       + "&& [ \"$gc_out\" -lt \(schedule.holdUntil) ]; then "

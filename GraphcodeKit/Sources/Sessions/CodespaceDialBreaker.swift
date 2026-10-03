@@ -10,19 +10,30 @@ import Foundation
 /// newer than the outage clears it — holding or paused alike — so the next read or
 /// ensure dials at once. A file rather than a daemon command because the pane is a shell
 /// loop in the app's process, and a `stat` spends nothing.
+///
+/// Paused, one dial per `slowRetryInterval` still goes through, whichever reader or
+/// ensure asks first. The one that reaches the codespace clears the outage for all of
+/// them and calls `onRecovered`, which is how the finished loops on the codespace get
+/// restored as well as the running ones.
 public actor CodespaceDialBreaker {
-  static let shared = CodespaceDialBreaker()
+  static let shared = CodespaceDialBreaker(onRecovered: { location in
+    ZmxSessionLauncher.markRedialed(location)
+  })
 
   private let schedule: CodespaceDialSchedule
   private let markerDirectory: URL
+  private let onRecovered: @Sendable (RemoteProjectLocation) -> Void
   private var downSince: [String: Date] = [:]
+  private var lastPausedDial: [String: Date] = [:]
 
   init(
     schedule: CodespaceDialSchedule = .standard,
-    markerDirectory: URL = CodespaceDialBreaker.defaultMarkerDirectory
+    markerDirectory: URL = CodespaceDialBreaker.defaultMarkerDirectory,
+    onRecovered: @escaping @Sendable (RemoteProjectLocation) -> Void = { _ in }
   ) {
     self.schedule = schedule
     self.markerDirectory = markerDirectory
+    self.onRecovered = onRecovered
   }
 
   public static var defaultMarkerDirectory: URL {
@@ -60,19 +71,37 @@ public actor CodespaceDialBreaker {
   func permits(_ location: RemoteProjectLocation, now: Date = Date()) -> Bool {
     guard location.isCodespace, let since = downSince[location.host] else { return true }
     if reconnectRequested(for: location, after: since) {
-      downSince.removeValue(forKey: location.host)
+      clearOutage(location.host)
       return true
     }
-    return schedule.verdict(secondsDown: now.timeIntervalSince(since)) == .dial
+    switch schedule.verdict(secondsDown: now.timeIntervalSince(since)) {
+    case .dial: return true
+    case .hold: return false
+    case .paused:
+      let pausedAt = since.addingTimeInterval(TimeInterval(schedule.pauseAfter))
+      let last = lastPausedDial[location.host] ?? pausedAt
+      guard now.timeIntervalSince(last) >= TimeInterval(schedule.slowRetryInterval) else {
+        return false
+      }
+      lastPausedDial[location.host] = now
+      return true
+    }
   }
 
   func record(_ location: RemoteProjectLocation, reached: Bool, now: Date = Date()) {
     guard location.isCodespace else { return }
     if reached {
-      downSince.removeValue(forKey: location.host)
+      guard downSince[location.host] != nil else { return }
+      clearOutage(location.host)
+      onRecovered(location)
     } else if downSince[location.host] == nil {
       downSince[location.host] = now
     }
+  }
+
+  private func clearOutage(_ host: String) {
+    downSince.removeValue(forKey: host)
+    lastPausedDial.removeValue(forKey: host)
   }
 
   private func reconnectRequested(for location: RemoteProjectLocation, after since: Date) -> Bool {

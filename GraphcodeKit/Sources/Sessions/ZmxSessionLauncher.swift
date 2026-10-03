@@ -2552,6 +2552,18 @@ public enum ZmxSessionLauncher {
       .appendingPathComponent("\(location.host).redial")
   }
 
+  /// Touches `redialStamp` from the daemon: a codespace that just answered after an
+  /// outage may have restarted under finished loops whose panes are closed, and nothing
+  /// else would ask `restoreRebootedRemote` to probe it.
+  static func markRedialed(_ location: RemoteProjectLocation) {
+    let stamp = redialStamp(for: location)
+    try? FileManager.default.createDirectory(
+      at: stamp.deletingLastPathComponent(), withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: stamp.path, contents: nil)
+    try? FileManager.default.setAttributes(
+      [.modificationDate: Date()], ofItemAtPath: stamp.path)
+  }
+
   /// Whether a host's panes have redialed since its last answered probe — the only
   /// state `restoreRebootedRemote` keeps. Stamps from before this daemon started count
   /// once, so a pane left waiting across a daemon restart is still answered.

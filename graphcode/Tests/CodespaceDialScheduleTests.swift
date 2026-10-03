@@ -1,10 +1,11 @@
+import ComposableArchitecture
 import Foundation
 import Testing
 
 @testable import GraphcodeKit
 
 /// One outage schedule for every Codespace dialer (issue #480): retry freely for a
-/// minute, hold until the third, retry until the fourth, then pause until a human asks.
+/// minute, hold until the third, retry until the fourth, then pause to a slow retry.
 /// Every gh run spends the human's Codespaces rate limit, so a dialer that retried on
 /// its own clock forever spent it during every outage.
 ///
@@ -91,7 +92,45 @@ struct CodespaceDialScheduleTests {
     #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(90)))
     #expect(await breaker.permits(codespace, now: down.addingTimeInterval(200)))
     #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(250)))
-    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(86_400)))
+  }
+
+  @Test
+  func aPausedCodespaceIsStillDialedOncePerSlowInterval() async throws {
+    // A codespace restarted from outside graphcode can take longer than the four minutes
+    // before the pause; its loops have to come back without a human selecting one.
+    let breaker = CodespaceDialBreaker(markerDirectory: try scratch())
+    let down = Date(timeIntervalSince1970: 1_000_000)
+    await breaker.record(codespace, reached: false, now: down)
+
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(539)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(540)))
+    // One dial per interval for the whole codespace, not one per reader or loop.
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(540)))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(839)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(840)))
+    // A failed slow dial leaves the outage clock where it was.
+    await breaker.record(codespace, reached: false, now: down.addingTimeInterval(845))
+    #expect(await !breaker.permits(codespace, now: down.addingTimeInterval(900)))
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(86_400)))
+  }
+
+  @Test
+  func aCodespaceThatAnswersAfterAnOutageAsksForTheRebootProbe() async throws {
+    let recovered = LockIsolated<[String]>([])
+    let breaker = CodespaceDialBreaker(
+      markerDirectory: try scratch(),
+      onRecovered: { location in recovered.withValue { $0.append(location.host) } })
+    let down = Date(timeIntervalSince1970: 1_000_000)
+
+    await breaker.record(codespace, reached: true, now: down)
+    #expect(recovered.value.isEmpty)
+
+    await breaker.record(codespace, reached: false, now: down)
+    await breaker.record(codespace, reached: true, now: down.addingTimeInterval(600))
+    await breaker.record(codespace, reached: true, now: down.addingTimeInterval(601))
+
+    #expect(recovered.value == [codespace.host])
+    #expect(await breaker.permits(codespace, now: down.addingTimeInterval(602)))
   }
 
   @Test
