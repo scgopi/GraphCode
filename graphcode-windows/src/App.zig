@@ -117,11 +117,16 @@ fn terminalPasteFailureStatus(err: anyerror) []const u8 {
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
-const wm_folder_open_complete: c.UINT = c.WM_APP + 47;
+const folder_open_timer_id: usize = 44;
+const folder_open_timer_interval_ms: c.UINT = 1;
 
 const FolderOpenApi = struct {
-    fn postMessage(hwnd: c.HWND, message: c.UINT) bool {
-        return c.PostMessageW(hwnd, message, 0, 0) != 0;
+    fn armTimer(hwnd: c.HWND, id: usize, interval_ms: c.UINT) bool {
+        return c.SetTimer(hwnd, id, interval_ms, null) != 0;
+    }
+
+    fn cancelTimer(hwnd: c.HWND, id: usize) void {
+        _ = c.KillTimer(hwnd, id);
     }
 
     fn openProject(app: *App, path: []const u8) void {
@@ -1722,7 +1727,11 @@ pub const App = struct {
             return error.FolderOpenAlreadyPending;
         }
         self.pending_folder_open_path = owned_path;
-        if (!Api.postMessage(self.window.hwnd, wm_folder_open_complete)) {
+        if (!Api.armTimer(
+            self.window.hwnd,
+            folder_open_timer_id,
+            folder_open_timer_interval_ms,
+        )) {
             self.pending_folder_open_path = &.{};
             self.allocator.free(owned_path);
             return error.FolderOpenDispatchFailed;
@@ -7248,11 +7257,6 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        wm_folder_open_complete => {
-            app.dispatchPendingFolderOpenWith(FolderOpenApi);
-            result.* = 0;
-            return true;
-        },
         c.WM_ERASEBKGND => {
             // WM_PAINT presents a complete off-screen frame, so erasing first would
             // expose the background between GDI operations and cause visible flicker.
@@ -7403,7 +7407,12 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
-        c.WM_TIMER => if (wparam == MainWindow.menu_watchdog_timer_id) {
+        c.WM_TIMER => if (wparam == folder_open_timer_id) {
+            FolderOpenApi.cancelTimer(hwnd, folder_open_timer_id);
+            app.dispatchPendingFolderOpenWith(FolderOpenApi);
+            result.* = 0;
+            return true;
+        } else if (wparam == MainWindow.menu_watchdog_timer_id) {
             _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
             _ = c.EndMenu();
             App.dismissWedgedUiaForm();
@@ -8425,6 +8434,7 @@ fn onWindowMessage(
         c.WM_DESTROY => {
             if (app.accessibility) |*provider| provider.detach();
             app.running = false;
+            FolderOpenApi.cancelTimer(hwnd, folder_open_timer_id);
             _ = c.KillTimer(hwnd, MainWindow.timer_id);
             app.tray.remove();
             c.PostQuitMessage(0);
@@ -9726,13 +9736,20 @@ test "folder picker completion waits for native callback unwind" {
         const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeFolderOpenLifetimeTest");
         const select_command: c.WPARAM = 1;
         const cancel_command: c.WPARAM = 2;
+        const restore_message: c.UINT = c.WM_APP + 91;
 
         var app: ?*App = null;
         var callback_active: bool = false;
         var posted_message: c.UINT = 0;
         var post_calls: usize = 0;
+        var timer_calls: usize = 0;
+        var timer_id: usize = 0;
+        var timer_interval_ms: c.UINT = 0;
+        var cancel_timer_calls: usize = 0;
+        var owner_restored: bool = false;
         var open_calls: usize = 0;
         var opened_during_callback: bool = false;
+        var opened_before_owner_restored: bool = false;
         var opened_expected_path: bool = false;
         var schedule_failed: bool = false;
 
@@ -9741,8 +9758,14 @@ test "folder picker completion waits for native callback unwind" {
             callback_active = false;
             posted_message = 0;
             post_calls = 0;
+            timer_calls = 0;
+            timer_id = 0;
+            timer_interval_ms = 0;
+            cancel_timer_calls = 0;
+            owner_restored = false;
             open_calls = 0;
             opened_during_callback = false;
+            opened_before_owner_restored = false;
             opened_expected_path = false;
             schedule_failed = false;
         }
@@ -9753,9 +9776,22 @@ test "folder picker completion waits for native callback unwind" {
             return c.PostMessageW(hwnd, message, 0, 0) != 0;
         }
 
+        fn armTimer(hwnd: c.HWND, id: usize, interval_ms: c.UINT) bool {
+            timer_calls += 1;
+            timer_id = id;
+            timer_interval_ms = interval_ms;
+            return c.SetTimer(hwnd, id, interval_ms, null) != 0;
+        }
+
+        fn cancelTimer(hwnd: c.HWND, id: usize) void {
+            cancel_timer_calls += 1;
+            _ = c.KillTimer(hwnd, id);
+        }
+
         fn openProject(_: *App, path: []const u8) void {
             open_calls += 1;
             opened_during_callback = callback_active;
+            opened_before_owner_restored = !owner_restored;
             opened_expected_path = std.mem.eql(u8, path, "C:\\fixtures\\caf\xc3\xa9");
         }
 
@@ -9780,22 +9816,33 @@ test "folder picker completion waits for native callback unwind" {
                 }
                 return 0;
             }
-            if (message == wm_folder_open_complete) {
+            if (message == restore_message) {
+                owner_restored = true;
+                return 0;
+            }
+            if (message == c.WM_TIMER and wparam == timer_id) {
+                cancelTimer(hwnd, timer_id);
                 app.?.dispatchPendingFolderOpenWith(@This());
                 return 0;
             }
             return c.DefWindowProcW(hwnd, message, wparam, lparam);
         }
 
-        fn dispatchOne(hwnd: c.HWND) !void {
+        fn dispatchOne(hwnd: c.HWND, message_min: c.UINT, message_max: c.UINT) !void {
             var message: c.MSG = undefined;
-            try std.testing.expect(c.PeekMessageW(
-                &message,
-                hwnd,
-                wm_folder_open_complete,
-                wm_folder_open_complete,
-                c.PM_REMOVE,
-            ) != 0);
+            var available = false;
+            for (0..100) |_| {
+                available = c.PeekMessageW(
+                    &message,
+                    hwnd,
+                    message_min,
+                    message_max,
+                    c.PM_REMOVE,
+                ) != 0;
+                if (available) break;
+                std.Thread.sleep(std.time.ns_per_ms);
+            }
+            try std.testing.expect(available);
             _ = c.DispatchMessageW(&message);
         }
     };
@@ -9847,29 +9894,41 @@ test "folder picker completion waits for native callback unwind" {
     _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
 
     try std.testing.expect(!Probe.schedule_failed);
-    try std.testing.expectEqual(@as(usize, 1), Probe.post_calls);
-    try std.testing.expectEqual(wm_folder_open_complete, Probe.posted_message);
+    try std.testing.expectEqual(@as(usize, 0), Probe.post_calls);
+    try std.testing.expectEqual(@as(usize, 1), Probe.timer_calls);
+    try std.testing.expect(Probe.timer_id != MainWindow.timer_id);
+    try std.testing.expect(Probe.timer_id != MainWindow.menu_watchdog_timer_id);
+    try std.testing.expect(Probe.timer_interval_ms > 0);
     try std.testing.expectEqual(@as(usize, 0), Probe.open_calls);
     try std.testing.expect(!Probe.opened_during_callback);
 
-    try Probe.dispatchOne(hwnd);
+    try std.testing.expect(c.PostMessageW(hwnd, Probe.restore_message, 0, 0) != 0);
+    try Probe.dispatchOne(hwnd, Probe.restore_message, Probe.restore_message);
+    try std.testing.expect(Probe.owner_restored);
+    try Probe.dispatchOne(hwnd, c.WM_TIMER, c.WM_TIMER);
     try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
     try std.testing.expect(!Probe.opened_during_callback);
+    try std.testing.expect(!Probe.opened_before_owner_restored);
     try std.testing.expect(Probe.opened_expected_path);
     app.dispatchPendingFolderOpenWith(Probe);
     try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
+    try std.testing.expectEqual(@as(usize, 1), Probe.cancel_timer_calls);
 
     _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.cancel_command, 0);
     try std.testing.expectEqual(@as(usize, 1), Probe.open_calls);
-    try std.testing.expectEqual(@as(usize, 1), Probe.post_calls);
+    try std.testing.expectEqual(@as(usize, 1), Probe.timer_calls);
 
+    Probe.owner_restored = false;
     _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
-    try Probe.dispatchOne(hwnd);
+    try std.testing.expect(c.PostMessageW(hwnd, Probe.restore_message, 0, 0) != 0);
+    try Probe.dispatchOne(hwnd, Probe.restore_message, Probe.restore_message);
+    try Probe.dispatchOne(hwnd, c.WM_TIMER, c.WM_TIMER);
     try std.testing.expectEqual(@as(usize, 2), Probe.open_calls);
-    try std.testing.expectEqual(@as(usize, 2), Probe.post_calls);
+    try std.testing.expectEqual(@as(usize, 2), Probe.timer_calls);
+    try std.testing.expectEqual(@as(usize, 2), Probe.cancel_timer_calls);
 
     _ = c.SendMessageW(hwnd, c.WM_COMMAND, Probe.select_command, 0);
-    try std.testing.expectEqual(@as(usize, 3), Probe.post_calls);
+    try std.testing.expectEqual(@as(usize, 3), Probe.timer_calls);
     try std.testing.expectEqual(@as(usize, 2), Probe.open_calls);
     try std.testing.expect(app.pending_folder_open_path.len != 0);
     _ = c.DestroyWindow(hwnd);
