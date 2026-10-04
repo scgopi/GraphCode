@@ -8696,6 +8696,12 @@ try {
         $textSent = [GraphCodeUiaGateState]::LastEditTextSent
         $messageFallback = [GraphCodeUiaGateState]::LastEditUsedMessageFallback
       }
+      if ($messageFallback) {
+        Require ($renameProcess.WaitForInputIdle(1000)) `
+          "edge edit $id fallback did not reach native input idle"
+        Require ([GraphCodeUiaGateState]::SetEditTextById($edgeWorkflowWindow, $id, $text)) `
+          "edge edit $id fallback could not restore the exact buffer after queued input"
+      }
       $inputCountsFull = $inputAttempted -and $clearExpected -gt 0 -and
         $clearSent -eq $clearExpected -and $textSent -eq $textExpected
       if ($inputAttempted) {

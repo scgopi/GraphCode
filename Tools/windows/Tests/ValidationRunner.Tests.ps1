@@ -3581,6 +3581,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
       $uiaLiveGateSource -notmatch 'LastEditUsedMessageFallback' -or
       $uiaLiveGateSource -notmatch 'SendMessageString\(edit, 0x000C, UIntPtr\.Zero, text\)' -or
+      $uiaLiveGateSource -notmatch '(?s)if \(\$messageFallback\).*?\$renameProcess\.WaitForInputIdle\(1000\).*?SetEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
       $uiaLiveGateSource -notmatch 'messageFallback=\$messageFallback' -or
       $uiaLiveGateSource -notmatch 'Require \$completed' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
