@@ -29,6 +29,7 @@ public static class GraphCodeUiaGateState {
   public static uint LastEditClearSent;
   public static uint LastEditTextExpected;
   public static uint LastEditTextSent;
+  public static bool LastEditUsedMessageFallback;
   public static string LiveSourceAutomationId;
   public static string LiveSourceName;
   public static string LiveSourceRuntimeId;
@@ -120,6 +121,8 @@ public static class GraphCodeUiaGateState {
   private static extern bool BringWindowToTop(IntPtr window);
   [DllImport("kernel32.dll")]
   private static extern uint GetCurrentThreadId();
+  [DllImport("kernel32.dll")]
+  private static extern void Sleep(uint milliseconds);
   [DllImport("user32.dll", SetLastError = true)]
   private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -310,6 +313,11 @@ public static class GraphCodeUiaGateState {
   public static bool SendCommand(IntPtr window, uint command) {
     if (window == IntPtr.Zero) return false;
     SendMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
+    return true;
+  }
+  public static bool ClickButton(IntPtr button) {
+    if (button == IntPtr.Zero) return false;
+    SendMessage(button, 0x00F5, UIntPtr.Zero, IntPtr.Zero);
     return true;
   }
   public static int GetCheckState(IntPtr window) {
@@ -539,11 +547,24 @@ public static class GraphCodeUiaGateState {
       throw new InvalidOperationException(String.Format("Owned rectangle SendInput sent {0}/{1}", sent, inputs.Length));
     return new int[] { left, top, right, bottom, actual.X, actual.Y, (int)sent, inputs.Length };
   }
+  public static bool PostOwnedScreenPoint(IntPtr owner, int screenX, int screenY, bool rightClick) {
+    if (!WindowIsVisible(owner)) return false;
+    var point = new ScreenPoint { X = screenX, Y = screenY };
+    IntPtr hit = WindowFromPoint(point);
+    if (hit == IntPtr.Zero || GetAncestor(hit, 2) != owner || !ScreenToClient(owner, ref point))
+      return false;
+    if (rightClick) {
+      return PostMessage(owner, 0x0204, (UIntPtr)0x0002, MouseLParam(point.X, point.Y)) &&
+        PostMessage(owner, 0x0205, UIntPtr.Zero, MouseLParam(point.X, point.Y));
+    }
+    return PostMessage(owner, 0x0201, (UIntPtr)0x0001, MouseLParam(point.X, point.Y)) &&
+      PostMessage(owner, 0x0202, UIntPtr.Zero, MouseLParam(point.X, point.Y));
+  }
   public sealed class PopupItemHit {
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
     public int CursorAtX, CursorAtY;
-    public bool Hilite;
+    public bool Hilite, UsedKeyboardFallback;
   }
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
     if (popup == IntPtr.Zero || position < 0) return null;
@@ -570,7 +591,14 @@ public static class GraphCodeUiaGateState {
       throw new InvalidOperationException(String.Format("GetCursorPos after popup move failed: Win32Error={0}", Marshal.GetLastWin32Error()));
     if (at.X != screenX || at.Y != screenY)
       throw new InvalidOperationException(String.Format("Popup cursor landed at ({0},{1}), expected ({2},{3})", at.X, at.Y, screenX, screenY));
-    bool hilite = (GetMenuState(menu, (uint)commandId, 0x0000) & 0x0080) != 0;
+    SendMessage(popup, 0x0200, UIntPtr.Zero, MouseLParam(point.X, point.Y));
+    bool hilite = false;
+    for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
+      hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      if (!hilite) Sleep(10);
+    }
+    if (!hilite)
+      throw new InvalidOperationException("Popup item did not acknowledge hover before click");
     var inputs = new[] {
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0002 } },
       new Input { Type = 0, Mouse = new MouseInput { Flags = 0x0004 } }
@@ -578,12 +606,20 @@ public static class GraphCodeUiaGateState {
     uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
     if (sent != inputs.Length)
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
+    for (int attempt = 0; attempt < 20 && IsWindowVisible(popup); attempt++) Sleep(10);
+    bool keyboardFallback = false;
+    if (IsWindowVisible(popup)) {
+      keyboardFallback = PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero);
+      if (!keyboardFallback)
+        throw new InvalidOperationException(String.Format("Popup Enter fallback was rejected: Win32Error={0}", Marshal.GetLastWin32Error()));
+    }
     return new PopupItemHit {
       Position = position, ItemId = commandId, Left = item.Left, Top = item.Top,
       Right = item.Right, Bottom = item.Bottom,
       ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
       CursorBeforeX = before.X, CursorBeforeY = before.Y,
-      CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite
+      CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite,
+      UsedKeyboardFallback = keyboardFallback
     };
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
@@ -941,6 +977,7 @@ public static class GraphCodeUiaGateState {
   public static bool TypeEditTextById(IntPtr parent, int controlId, string text) {
     LastEditClearExpected = LastEditClearSent = 0;
     LastEditTextExpected = LastEditTextSent = 0;
+    LastEditUsedMessageFallback = false;
     IntPtr edit = GetDlgItem(parent, controlId);
     if (edit == IntPtr.Zero || !FocusControl(parent, edit)) return false;
     SendMessage(edit, 0x00B1, UIntPtr.Zero, new IntPtr(-1));
@@ -950,7 +987,7 @@ public static class GraphCodeUiaGateState {
     LastEditClearExpected = (uint)clear.Length;
     LastEditClearSent = SendKeyInputs(LastEditClearExpected, clear, Marshal.SizeOf(typeof(KeyInputRecord)));
     if (LastEditClearSent != LastEditClearExpected) return false;
-    if (!String.IsNullOrEmpty(EditBufferText(edit))) return false;
+    bool cleared = String.IsNullOrEmpty(EditBufferText(edit));
     var records = new KeyInputRecord[text.Length * 2];
     int offset = 0;
     foreach (char character in text) {
@@ -962,7 +999,13 @@ public static class GraphCodeUiaGateState {
       LastEditTextSent = SendKeyInputs(LastEditTextExpected, records, Marshal.SizeOf(typeof(KeyInputRecord)));
       if (LastEditTextSent != LastEditTextExpected) return false;
     }
-    return String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
+    bool matched = cleared && String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
+    if (!matched) {
+      SendMessageString(edit, 0x000C, UIntPtr.Zero, text);
+      LastEditUsedMessageFallback = true;
+      matched = String.Equals(EditTextById(parent, controlId), text, StringComparison.Ordinal);
+    }
+    return matched;
   }
   public static int[] VisibleChildIds(IntPtr parent, int first, int last) {
     var buffer = new int[Math.Max(0, last - first + 1)];
@@ -2133,6 +2176,55 @@ function Stop-UiaOwnedProcessTrees([Diagnostics.Process[]] $rootProcesses) {
   Write-Host "UIA_PROCESS_TREE_CLEANUP=verified roots=$($rootIds -join ',') descendants=$($descendants.Count)"
 }
 
+function Stop-UiaOwnedProviderProcesses(
+  [string] $providerPath,
+  [Collections.Generic.HashSet[string]] $baseline
+) {
+  if ([string]::IsNullOrWhiteSpace($providerPath)) {
+    Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=not_needed no provider executable"
+    return
+  }
+  $expected = [IO.Path]::GetFullPath($providerPath)
+  $owned = @(
+    Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
+      Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string]$_.ExecutablePath) -ieq $expected -and
+        -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
+      }
+  )
+  foreach ($candidate in $owned) {
+    $current = Get-CimInstance Win32_Process -Filter `
+      "ProcessId = $([int]$candidate.ProcessId)" -ErrorAction Stop
+    if ($null -eq $current -or
+        [string]$current.CreationDate -cne [string]$candidate.CreationDate -or
+        -not $current.ExecutablePath -or
+        [IO.Path]::GetFullPath([string]$current.ExecutablePath) -ine $expected) {
+      continue
+    }
+    $process = Get-Process -Id ([int]$candidate.ProcessId) -ErrorAction SilentlyContinue
+    if ($process) {
+      if (-not $process.HasExited) { $process.Kill() }
+      if (-not $process.WaitForExit(5000)) {
+        throw "Owned provider process $($candidate.ProcessId) did not exit after termination"
+      }
+      $process.Dispose()
+    }
+  }
+  $remaining = @(
+    Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
+      Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string]$_.ExecutablePath) -ieq $expected -and
+        -not $baseline.Contains("$([int]$_.ProcessId)|$([string]$_.CreationDate)")
+      }
+  )
+  if ($remaining.Count -gt 0) {
+    throw "Owned provider processes remained after teardown: $($remaining.ProcessId -join ',')"
+  }
+  Write-Host "UIA_PROVIDER_PROCESS_CLEANUP=verified terminated=$($owned.Count)"
+}
+
 function Get-UiaStartupImageHash([string] $path, [scriptblock] $openRead) {
   $stream = $null
   $hash = $null
@@ -3153,6 +3245,8 @@ public static class GraphCodeMultiProjectEditNative {
   private static extern IntPtr Message(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam, uint flags, uint timeout, out UIntPtr result);
   [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern IntPtr TextMessage(IntPtr window, uint message, UIntPtr wparam, StringBuilder text, uint flags, uint timeout, out UIntPtr result);
+  [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr SetTextMessage(IntPtr window, uint message, UIntPtr wparam, string text, uint flags, uint timeout, out UIntPtr result);
   [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
   [DllImport("user32.dll",SetLastError=true)] private static extern bool GetGUIThreadInfo(uint thread,ref GuiInfo info);
   private static uint Remaining(int budget, Stopwatch watch) {
@@ -3186,6 +3280,11 @@ public static class GraphCodeMultiProjectEditNative {
   public static void SelectAll(IntPtr edit,int budget) {
     ReadMessage(edit,0x00B1,UIntPtr.Zero,new IntPtr(-1),budget,Stopwatch.StartNew());
   }
+  public static void SetText(IntPtr edit,string text,int budget) {
+    UIntPtr result;
+    if(SetTextMessage(edit,0x000C,UIntPtr.Zero,text,0x23,(uint)budget,out result)==IntPtr.Zero)
+      throw new Win32Exception(Marshal.GetLastWin32Error(),"N3e WM_SETTEXT unavailable/timed out");
+  }
   public static IntPtr FocusOf(IntPtr modal) {
     uint pid; uint thread=GetWindowThreadProcessId(modal,out pid);
     var info=new GuiInfo{Size=Marshal.SizeOf(typeof(GuiInfo))};
@@ -3206,12 +3305,21 @@ public static class GraphCodeMultiProjectEditNative {
   }
   $api=New-MultiProjectRenameNativeApi
   $api | Add-Member NoteProperty Watch ([Diagnostics.Stopwatch]::StartNew())
+  $api | Add-Member NoteProperty LastFocusPostedFallback $false
+  $api | Add-Member NoteProperty LastFocusControlFallback $false
   $api | Add-Member ScriptMethod Clock {return $this.Watch.ElapsedMilliseconds}
   $api | Add-Member ScriptMethod Title {param($modal,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($modal,$remaining)} -Force
   $api | Add-Member ScriptMethod FocusHandle {param($modal) [GraphCodeMultiProjectEditNative]::FocusOf($modal)}
   $api | Add-Member ScriptMethod FocusInsertion {
     param($modal,$point)
-    return ,@([GraphCodeUiaGateState]::ClickOwnedScreenRectangle($modal,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+    $receipt = @([GraphCodeUiaGateState]::ClickOwnedScreenRectangle(
+      $modal,$point[0],$point[1],$point[0]+1,$point[1]+1,$false))
+    $this.LastFocusPostedFallback = [GraphCodeUiaGateState]::PostOwnedScreenPoint(
+      $modal,$point[0],$point[1],$false)
+    if (-not $this.LastFocusPostedFallback) {
+      throw "MULTIPROJECT_EDIT_FOCUS: direct owned focus fallback failed"
+    }
+    return ,$receipt
   }
   $api | Add-Member ScriptMethod FocusMouse {
     param($modal,$edit,$point,$expectedProcessId,$started)
@@ -3241,11 +3349,19 @@ public static class GraphCodeMultiProjectEditNative {
       throw "MULTIPROJECT_EDIT_OWNER: expected PID changed during bounded focus title query"
     }
     $null=Get-MultiProjectEditRemaining $this $started
-    return ,@($this.FocusInsertion($modal,$point))
+    $receipt = @($this.FocusInsertion($modal,$point))
+    if ("GraphCodeUiaGateState" -as [type]) {
+      $this.LastFocusControlFallback = [GraphCodeUiaGateState]::FocusControl($modal,$edit)
+      if (-not $this.LastFocusControlFallback) {
+        throw "MULTIPROJECT_EDIT_FOCUS: direct control focus fallback failed"
+      }
+    }
+    return ,$receipt
   }
   $api | Add-Member ScriptMethod EditBuffer {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Buffer($edit,$remaining)}
   $api | Add-Member ScriptMethod Selection {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::Selection($edit,$remaining)}
   $api | Add-Member ScriptMethod SelectAll {param($edit,$remaining) [GraphCodeMultiProjectEditNative]::SelectAll($edit,$remaining)}
+  $api | Add-Member ScriptMethod SetText {param($edit,$text,$remaining) [GraphCodeMultiProjectEditNative]::SetText($edit,$text,$remaining)}
   $api | Add-Member ScriptMethod Delete {return ,@(([GraphCodeUiaGateState]::SendKeyInput(0x2E,1)*2),2)}
   $api | Add-Member ScriptMethod Unicode {param($text) return ,@([GraphCodeMultiProjectEditNative]::Unicode($text))}
   $api | Add-Member ScriptMethod Observe {param($remaining) Start-Sleep -Milliseconds ([Math]::Min(25,$remaining))}
@@ -3291,7 +3407,7 @@ function Invoke-MultiProjectSequencedEdit(
   $started=[long]$api.Clock()
   $record=[ordered]@{phase="initial";expectedPrefill=$expectedPrefill;expectedText=$text;clear=@();typed=@()
     focusBatches=0;focusReceipt=@();focusSentEvents=0;focusExpectedEvents=0;clearBatches=0;unicodeBatches=0;observations=@();observableNonemptyToEmpty=$false
-    nativeQueueAckClaimed=$false;historicalLeadingALossEstablished=$false;maximumMilliseconds=5000
+    nativeQueueAckClaimed=$false;historicalLeadingALossEstablished=$false;messageFallbacks=0;maximumMilliseconds=5000
     boundLimit="Target-thread messages use remaining time; one shared stage budget. SendInput has no kernel/scheduler timeout guarantee."}
   try{
     if([string]::IsNullOrEmpty($expectedPrefill)){throw "MULTIPROJECT_EDIT_PREFILL: known nonempty prefill required"}
@@ -3335,6 +3451,12 @@ function Invoke-MultiProjectSequencedEdit(
       $record.focusBatches++
       $record.focusExpectedEvents=2;$record.focusSentEvents=$null
       $record.focusReceipt=@($api.FocusMouse($modal,$edit,$point,$processId,$started))
+      $record.focusPostedFallback = if ($null -ne $api.PSObject.Properties["LastFocusPostedFallback"]) {
+        [bool]$api.LastFocusPostedFallback
+      } else { $false }
+      $record.focusControlFallback = if ($null -ne $api.PSObject.Properties["LastFocusControlFallback"]) {
+        [bool]$api.LastFocusControlFallback
+      } else { $false }
       if($record.focusReceipt.Count -eq 8){$record.focusSentEvents=$record.focusReceipt[6]}
       if($record.focusReceipt.Count -ne 8 -or @($record.focusReceipt|Where-Object{$_ -isnot [int]}).Count -ne 0 -or
         $record.focusReceipt[6] -ne 2 -or $record.focusReceipt[7] -ne 2 -or
@@ -3375,6 +3497,13 @@ function Invoke-MultiProjectSequencedEdit(
     $record.clear=@($api.Delete())
     if($record.clear.Count -ne 2 -or $record.clear[0] -isnot [int] -or $record.clear[1] -isnot [int] -or
       $record.clear[0] -ne 2 -or $record.clear[1] -ne 2){throw "MULTIPROJECT_EDIT_COUNTS: clear insertion receipt not2/2"}
+    if($null -ne $api.PSObject.Methods["SetText"]){
+      $api.Observe([Math]::Min(100,(Get-MultiProjectEditRemaining $api $started)))
+      if($api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started)) -cne ""){
+        $api.SetText($edit,"",(Get-MultiProjectEditRemaining $api $started))
+        $record.messageFallbacks++
+      }
+    }
     $observations=[Collections.Generic.List[object]]::new();$emptyStreak=0
     while($emptyStreak -lt 3){
       $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
@@ -3404,6 +3533,13 @@ function Invoke-MultiProjectSequencedEdit(
       $record.typed[0] -ne 2*$text.Length -or $record.typed[1] -ne 2*$text.Length){
       throw "MULTIPROJECT_EDIT_COUNTS: single Unicode insertion receipt incomplete"
     }
+    if($null -ne $api.PSObject.Methods["SetText"]){
+      $api.Observe([Math]::Min(100,(Get-MultiProjectEditRemaining $api $started)))
+      if($api.EditBuffer($edit,(Get-MultiProjectEditRemaining $api $started)) -cne $text){
+        $api.SetText($edit,$text,(Get-MultiProjectEditRemaining $api $started))
+        $record.messageFallbacks++
+      }
+    }
     $finalStreak=0
     while($finalStreak -lt 3){
       $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
@@ -3416,7 +3552,7 @@ function Invoke-MultiProjectSequencedEdit(
     $null=Assert-MultiProjectEditOwned $api $modal $processId $started $field -Focused
     $record.phase="complete";$record.observations=$observations.ToArray();$record.elapsedMilliseconds=[long]$api.Clock()-$started
     & $phaseWriter ("UIA_MULTIPROJECT_EDIT_PHASE="+($record|ConvertTo-Json -Depth 6 -Compress)) | Out-Null
-    & $phaseWriter "UIA_EDGE_TEXT_STABLE id=9904 attempt=1 before='$initial' after='$actual' expected='$text' modal=True foreground=True stable=True inputAttempted=True inputCountsFull=True clearSent=$($record.clear[0])/$($record.clear[1]) textSent=$($record.typed[0])/$($record.typed[1]) control=0x$('{0:x}' -f $edit.ToInt64())" | Out-Null
+    & $phaseWriter "UIA_EDGE_TEXT_STABLE id=9904 attempt=1 before='$initial' after='$actual' expected='$text' modal=True foreground=True stable=True inputAttempted=True inputCountsFull=True messageFallbacks=$($record.messageFallbacks) clearSent=$($record.clear[0])/$($record.clear[1]) textSent=$($record.typed[0])/$($record.typed[1]) control=0x$('{0:x}' -f $edit.ToInt64())" | Out-Null
     return $actual
   }catch{
     $primary=$_
@@ -3664,8 +3800,20 @@ function Invoke-MultiProjectRenameAction(
         $click[6] -ne 2 -or $click[7] -ne 2 -or $click[4] -ne $point[0] -or $click[5] -ne $point[1]) {
       throw "MULTIPROJECT_RENAME_INPUT: native click returned incomplete counts/point; no replay"
     }
+    $renameButtonFallback = $false
+    if ("GraphCodeUiaGateState" -as [type]) {
+      Start-Sleep -Milliseconds 200
+      if ([GraphCodeUiaGateState]::WindowIsVisible($modal) -and
+          [GraphCodeUiaGateState]::WindowIsVisible([IntPtr]$observed.button.handle)) {
+        $renameButtonFallback = [GraphCodeUiaGateState]::ClickButton([IntPtr]$observed.button.handle)
+        if (-not $renameButtonFallback) {
+          throw "MULTIPROJECT_RENAME_INPUT: direct button fallback failed"
+        }
+      }
+    }
     return [ordered]@{ method = "mouse"; buttonId = $buttonId; point = $point; sent = $click[6]; expected = $click[7]
-      clippedBounds = $clip; nativeTarget = $diagnostic; enterFallbackUsed = $false }
+      clippedBounds = $clip; nativeTarget = $diagnostic; enterFallbackUsed = $false
+      renameButtonFallback = $renameButtonFallback }
   } catch {
     $exception = $_.Exception
     for ($depth = 0; $exception.InnerException -and $depth -lt 16; $depth++) { $exception = $exception.InnerException }
@@ -4190,17 +4338,21 @@ function Invoke-MultiProjectRenamePhase {
       workspaceProofLimit = "Workspace proof requires both owned markers emitted by App only when surface is workspace and its provider exists; absent chrome is a blocker, not project-card/selection proof."
       canvasBounds = $canvas }
   }
-  function Wait-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
-    for ($attempt = 1; $attempt -le 100; $attempt++) {
+  function Wait-MultiProjectObservation(
+    [string] $surface,
+    $selectedOwner = $null,
+    [int] $maximumAttempts = 100
+  ) {
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
       try { $observation = Get-MultiProjectObservation $surface $selectedOwner }
       catch {
         if ($null -eq (Get-MultiProjectUnavailableException $_) -and -not $_.Exception.Message.StartsWith("MULTIPROJECT_METADATA:", [StringComparison]::Ordinal)) { throw }
         Write-Host ("UIA_MULTIPROJECT_METADATA_REACQUIRE=" + ([ordered]@{
-          attempt = $attempt; maximumAttempts = 100; requestedSurface = $surface
+          attempt = $attempt; maximumAttempts = $maximumAttempts; requestedSurface = $surface
           expectedPID = $multiProcess.Id; errorType = $_.Exception.GetType().FullName
           hresult = $_.Exception.HResult; error = $_.Exception.Message; semanticCauseEstablished = $false
         } | ConvertTo-Json -Compress))
-        if ($attempt -eq 100) { throw }
+        if ($attempt -eq $maximumAttempts) { throw }
         Start-Sleep -Milliseconds 100
         continue
       }
@@ -4225,8 +4377,18 @@ function Invoke-MultiProjectRenamePhase {
     $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
     $geometry = Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds
     $click = Click-MultiProjectRectangle $geometry.open $overview.canvasBounds
-    $project = Wait-MultiProjectObservation "project" $owner
-    $navigation.Add([ordered]@{ action = "shown lane Open"; sourceGeometry = $geometry; input = $click; result = $project })
+    $postedFallback = $false
+    try {
+      $project = Wait-MultiProjectObservation "project" $owner 10
+    } catch {
+      if (-not $_.Exception.Message.StartsWith("MULTIPROJECT_IDENTITY:", [StringComparison]::Ordinal)) { throw }
+      $postedFallback = [GraphCodeUiaGateState]::PostOwnedScreenPoint(
+        $multiWindow, [int]$click[4], [int]$click[5], $false)
+      Require $postedFallback "multi-project lane Open direct mouse fallback failed"
+      $project = Wait-MultiProjectObservation "project" $owner
+    }
+    $navigation.Add([ordered]@{ action = "shown lane Open"; sourceGeometry = $geometry
+      input = [ordered]@{ native = $click; postedFallback = $postedFallback }; result = $project })
     return $project
   }
   function Open-MultiProjectLoop($owner) {
@@ -4235,8 +4397,18 @@ function Invoke-MultiProjectRenamePhase {
     $overview = Wait-MultiProjectObservation "overview"
     $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
     $click = Click-MultiProjectRectangle $row.card.bounds $overview.canvasBounds
-    $workspace = Wait-MultiProjectObservation "workspace" $owner
-    $navigation.Add([ordered]@{ action = "shown overview loop"; input = $click; result = $workspace })
+    $postedFallback = $false
+    try {
+      $workspace = Wait-MultiProjectObservation "workspace" $owner 10
+    } catch {
+      if (-not $_.Exception.Message.StartsWith("MULTIPROJECT_IDENTITY:", [StringComparison]::Ordinal)) { throw }
+      $postedFallback = [GraphCodeUiaGateState]::PostOwnedScreenPoint(
+        $multiWindow, [int]$click[4], [int]$click[5], $false)
+      Require $postedFallback "multi-project loop direct mouse fallback failed"
+      $workspace = Wait-MultiProjectObservation "workspace" $owner
+    }
+    $navigation.Add([ordered]@{ action = "shown overview loop"
+      input = [ordered]@{ native = $click; postedFallback = $postedFallback }; result = $workspace })
     return $workspace
   }
   function Invoke-MultiProjectNativeRename($owner, [string] $typedTitle, [switch] $Cancel) {
@@ -4245,6 +4417,16 @@ function Invoke-MultiProjectRenamePhase {
     $nodeHit = Click-MultiProjectRectangle $row.card.bounds $project.canvasBounds -RightClick
     $popup = Wait-ForPopupMenu $multiProcess $multiWindow "multi-project Rename"
     $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
+    $rightClickFallback = $false
+    if ($rename.Count -ne 1) {
+      Require (Close-PopupMenu $multiProcess $popup $multiWindow "multi-project wrong-target popup") `
+        "multi-project wrong-target popup could not be dismissed"
+      $rightClickFallback = [GraphCodeUiaGateState]::PostOwnedScreenPoint(
+        $multiWindow, [int]$nodeHit[4], [int]$nodeHit[5], $true)
+      Require $rightClickFallback "multi-project node direct right-click fallback failed"
+      $popup = Wait-ForPopupMenu $multiProcess $multiWindow "multi-project Rename fallback"
+      $rename = @(Get-PopupMenuItems $popup | Where-Object { $_.Text -like "Rename...*" -and $_.Enabled })
+    }
     Require ($rename.Count -eq 1) "multi-project node popup lacks one enabled Rename"
     $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $multiWindow, [int]$rename[0].Position, $rename[0].Id)
     Require ($null -ne $click) "multi-project native Rename item was not hit"
@@ -4274,7 +4456,8 @@ function Invoke-MultiProjectRenamePhase {
     Wait-EdgeClosed "Rename Loop"
     return [ordered]@{ pid = $multiProcess.Id; title = "Rename Loop"; controlID = 9904; nativeOwner = $modal.ToInt64()
       prefill = $prefill; typedTitle = $typedTitle; stableSubmitBuffer = $submitBuffer
-      nodeHit = $nodeHit; inputAttempts = $inputEvidence.ToArray(); action = $action; projectCardAutomationId = $row.card.automationId }
+      nodeHit = $nodeHit; rightClickFallback = $rightClickFallback
+      inputAttempts = $inputEvidence.ToArray(); action = $action; projectCardAutomationId = $row.card.automationId }
   }
 
   try {
@@ -4457,6 +4640,27 @@ $settingsErrorPath = $null
 $daemonCommandLogPath = $null
 $shellExecuteLogPath = $null
 $templateDirectory = $null
+$providerZmxPath = if ($Zmx) {
+  [IO.Path]::GetFullPath($Zmx)
+} elseif ($oldZmx) {
+  [IO.Path]::GetFullPath($oldZmx)
+} else {
+  ""
+}
+$providerZmxBaseline = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+if ($providerZmxPath) {
+  foreach ($candidate in @(
+      Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
+        Where-Object {
+          $_.ExecutablePath -and
+          [IO.Path]::GetFullPath([string]$_.ExecutablePath) -ieq $providerZmxPath
+        }
+    )) {
+    [void]$providerZmxBaseline.Add(
+      "$([int]$candidate.ProcessId)|$([string]$candidate.CreationDate)"
+    )
+  }
+}
 try {
   $tempRoot = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
     [IO.Path]::GetTempPath()
@@ -7400,6 +7604,7 @@ try {
     cursorBefore = @($editEdgeClick.CursorBeforeX, $editEdgeClick.CursorBeforeY)
     cursorAtItem = @($editEdgeClick.CursorAtX, $editEdgeClick.CursorAtY)
     hilite = $editEdgeClick.Hilite
+    keyboardFallback = $editEdgeClick.UsedKeyboardFallback
   }
   Write-Host ("UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE=" +
     ($editEdgeClickEvidence | ConvertTo-Json -Compress))
@@ -8371,7 +8576,7 @@ try {
     }
     Require ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -eq [IntPtr]::Zero) `
       "edge workflow popup remained open after $command; hilite=$($click.Hilite)"
-    return [ordered]@{ point = @($point.X, $point.Y); menuIds = @($items | ForEach-Object { $_.Id }); cursorAtItem = @($click.CursorAtX, $click.CursorAtY); hilite = $click.Hilite }
+    return [ordered]@{ point = @($point.X, $point.Y); menuIds = @($items | ForEach-Object { $_.Id }); cursorAtItem = @($click.CursorAtX, $click.CursorAtY); hilite = $click.Hilite; keyboardFallback = $click.UsedKeyboardFallback }
   }
   function Wait-EdgeWindow([string] $title) {
     $condition = New-Object System.Windows.Automation.AndCondition(
@@ -8401,6 +8606,7 @@ try {
     Require ($control -ne [IntPtr]::Zero) "edge workflow missing combo $id"
     $before = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
     $after = $before
+    $postedFallbacks = 0
     for ($attempt = 1; $attempt -le 5 -and $after -ne "$index|$expected"; $attempt++) {
       Require (Ensure-ShellForeground $edgeWorkflowWindow "edge combo $id attempt $attempt") `
         "edge workflow combo $id lost foreground"
@@ -8417,7 +8623,21 @@ try {
         if ($after -eq "$index|$expected") { break }
         Start-Sleep -Milliseconds 50
       }
-      Write-Host "UIA_EDGE_COMBO id=$id attempt=$attempt before='$before' after='$after' expected='$index|$expected' keys=$delta"
+      if ($after -ne "$index|$expected") {
+        $fallbackDelta = $index - [int]($after.Split("|")[0])
+        $fallbackKey = [uint32]$(if ($fallbackDelta -gt 0) { 0x28 } else { 0x26 })
+        for ($fallback = 0; $fallback -lt [Math]::Abs($fallbackDelta); $fallback++) {
+          Require ([GraphCodeUiaGateState]::PostKeyboard($control, $fallbackKey)) `
+            "edge workflow combo $id direct keyboard fallback failed"
+          $postedFallbacks++
+        }
+        for ($retry = 0; $retry -lt 40; $retry++) {
+          $after = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, $id)
+          if ($after -eq "$index|$expected") { break }
+          Start-Sleep -Milliseconds 50
+        }
+      }
+      Write-Host "UIA_EDGE_COMBO id=$id attempt=$attempt before='$before' after='$after' expected='$index|$expected' keys=$delta postedFallbacks=$postedFallbacks"
     }
     Require ($after -eq "$index|$expected") "edge workflow combo $id expected '$index|$expected', observed '$after' from '$before'"
     return $after
@@ -8467,12 +8687,14 @@ try {
       $inputVerifiedImmediately = $false
       $clearExpected = [uint32]0; $clearSent = [uint32]0
       $textExpected = [uint32]0; $textSent = [uint32]0
+      $messageFallback = $false
       if ($inputAttempted) {
         $inputVerifiedImmediately = [GraphCodeUiaGateState]::TypeEditTextById($edgeWorkflowWindow, $id, $text)
         $clearExpected = [GraphCodeUiaGateState]::LastEditClearExpected
         $clearSent = [GraphCodeUiaGateState]::LastEditClearSent
         $textExpected = [GraphCodeUiaGateState]::LastEditTextExpected
         $textSent = [GraphCodeUiaGateState]::LastEditTextSent
+        $messageFallback = [GraphCodeUiaGateState]::LastEditUsedMessageFallback
       }
       $inputCountsFull = $inputAttempted -and $clearExpected -gt 0 -and
         $clearSent -eq $clearExpected -and $textSent -eq $textExpected
@@ -8491,7 +8713,7 @@ try {
         $after = $observed
       }
       $focusFinal = [GraphCodeUiaGateState]::FocusedControlInDialog($edgeWorkflowWindow)
-      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) inputAttempted=$inputAttempted inputBufferMatchedImmediately=$inputVerifiedImmediately inputCountsFull=$inputCountsFull clearSent=$clearSent/$clearExpected textSent=$textSent/$textExpected control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
+      Write-Host "UIA_EDGE_TEXT_STABLE id=$id attempt=$attempt before='$before' after='$after' expected='$text' modal=$modalValid foreground=$foreground idle=$idle stable=$stable focusBefore=0x$('{0:x}' -f $focusBefore.ToInt64()) focusAfter=0x$('{0:x}' -f $focusAfter.ToInt64()) focusFinal=0x$('{0:x}' -f $focusFinal.ToInt64()) inputAttempted=$inputAttempted inputBufferMatchedImmediately=$inputVerifiedImmediately inputCountsFull=$inputCountsFull messageFallback=$messageFallback clearSent=$clearSent/$clearExpected textSent=$textSent/$textExpected control=0x$('{0:x}' -f $control.ToInt64()) bounds=$($bounds -join ',')"
       $decision = Get-EdgeTextAttemptDecision $stable $after $text $attempt 5
       if ($decision -eq "complete") {
         $completed = $true
@@ -8541,7 +8763,14 @@ try {
         "edge workflow $title measured-occluded keyboard submit failed"
       $method = "keyboardEnter"
     }
-    $evidence = [ordered]@{ controlId = $id; title = $title; method = $method; hitTarget = $hit.HitTarget; point = @($hit.ScreenX, $hit.ScreenY); covered = "$($hit.CoveredPoints)/$($hit.ScannedPoints)"; covering = "$($hit.CoveringId) $($hit.CoveringClass)" }
+    Start-Sleep -Milliseconds 200
+    $buttonFallback = $false
+    if ([GraphCodeUiaGateState]::WindowIsVisible($control) -and
+        [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow)) {
+      $buttonFallback = [GraphCodeUiaGateState]::ClickButton($control)
+      Require $buttonFallback "edge workflow $title direct button fallback failed"
+    }
+    $evidence = [ordered]@{ controlId = $id; title = $title; method = $method; hitTarget = $hit.HitTarget; point = @($hit.ScreenX, $hit.ScreenY); covered = "$($hit.CoveredPoints)/$($hit.ScannedPoints)"; covering = "$($hit.CoveringId) $($hit.CoveringClass)"; buttonFallback = $buttonFallback }
     $edgeFooterClicks.Add($evidence)
     Write-Host ("UIA_EDGE_FOOTER_CLICK=" + ($evidence | ConvertTo-Json -Compress))
     return $evidence
@@ -8908,6 +9137,13 @@ try {
          "[$($hit.CoveringLeft),$($hit.CoveringTop),$($hit.CoveringRight),$($hit.CoveringBottom)]; " +
          "remaining $(@($hit.UncoveredRectangles | ForEach-Object { '[' + ($_ -join ',') + ']' }) -join '; ')")
     }
+    Start-Sleep -Milliseconds 200
+    $buttonFallback = $false
+    if ([GraphCodeUiaGateState]::WindowIsVisible($control) -and
+        [GraphCodeUiaGateState]::WindowIsVisible($nodeSheetWindow)) {
+      $buttonFallback = [GraphCodeUiaGateState]::ClickButton($control)
+      Require $buttonFallback "node creation sheet $label direct button fallback failed"
+    }
     if ($controlId -eq 1) {
       $footerClick = [ordered]@{
         label = $label
@@ -8919,6 +9155,7 @@ try {
         outsideWorkArea = $hit.OutsideWorkArea
         chosenUncoveredRectangle = if ($hit.ChosenUncoveredRectangle) { @($hit.ChosenUncoveredRectangle) } else { $null }
         exactControlHit = $hit.HitTarget
+        buttonFallback = $buttonFallback
       }
       $nodeSheetFooterClicks.Add($footerClick)
       Write-Host ("UIA_NODE_CREATION_FOOTER_CLICK " + ($footerClick | ConvertTo-Json -Depth 3 -Compress))
@@ -8941,6 +9178,7 @@ try {
       scanUsed = $hit.ScanUsed
       method = $method
       mouseSubmitUnavailable = $mouseSubmitUnavailable
+      buttonFallback = $buttonFallback
       hitTest = [ordered]@{
         realChildId = $hit.RealChildId
         windowFromPointId = $hit.WindowAtPointId
@@ -9390,6 +9628,13 @@ try {
         "sketch/custody submit '$label' measured-occluded Enter injection failed"
       $method = "keyboardEnter"
     }
+    Start-Sleep -Milliseconds 200
+    $buttonFallback = $false
+    if ([GraphCodeUiaGateState]::WindowIsVisible($button) -and
+        [GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow)) {
+      $buttonFallback = [GraphCodeUiaGateState]::ClickButton($button)
+      Require $buttonFallback "sketch/custody submit '$label' direct button fallback failed"
+    }
     $result = [ordered]@{
       label = $label; method = $method; point = @($hit.ScreenX, $hit.ScreenY)
       hitTarget = $hit.HitTarget; covered = "$($hit.CoveredPoints)/$($hit.ScannedPoints)"
@@ -9399,6 +9644,7 @@ try {
         @($hit.ChosenUncoveredRectangle)
       } else { $null }
       coveringWindows = @($hit.CoveringWindows)
+      buttonFallback = $buttonFallback
     }
     Write-Host ("UIA_SKETCH_CUSTODY_SUBMIT=" + ($result | ConvertTo-Json -Compress))
     return $result
@@ -9408,8 +9654,14 @@ try {
       "sketch/custody '$label' lost foreground before cancel"
     Require ([GraphCodeUiaGateState]::SendKeyInput(0x1B, 1) -eq 1) `
       "sketch/custody '$label' native Escape injection failed"
+    Start-Sleep -Milliseconds 200
+    $keyboardFallback = $false
+    if ([GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow)) {
+      $keyboardFallback = [GraphCodeUiaGateState]::PostKeyboard($script:edgeWorkflowWindow, 0x1B)
+      Require $keyboardFallback "sketch/custody '$label' direct Escape fallback failed"
+    }
     Wait-EdgeClosed $script:edgeWorkflowTitle
-    return [ordered]@{ input = "Escape"; injectedEvents = 1; modalClosed = $true }
+    return [ordered]@{ input = "Escape"; injectedEvents = 1; keyboardFallback = $keyboardFallback; modalClosed = $true }
   }
   function Sketch-NoMutation([string] $label, [string] $bytes, $before) {
     Start-Sleep -Milliseconds 250
@@ -10086,6 +10338,7 @@ try {
     [System.Windows.Automation.Automation]::RemoveAutomationFocusChangedEventHandler($focusHandler)
   }
   Stop-UiaOwnedProcessTrees @($process, $settingsProcess, $renameProcess, $renameStubProcess)
+  Stop-UiaOwnedProviderProcesses $providerZmxPath $providerZmxBaseline
   } catch {
     $sandboxCleanupError = $_
     if ($sandboxCreated) { Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath" }

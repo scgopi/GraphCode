@@ -3267,6 +3267,11 @@ Start-Sleep -Seconds 60
     throw "RED: N3e lacks opt-in independent owner/receipt/publication state and the simultaneous live multi-project rename evidence"
   }
   foreach ($required in @("Test-MultiProjectRenameReceipt", "Get-MultiProjectClippedRectangle", "ClickOwnedScreenRectangle",
+      "PostOwnedScreenPoint", '[int] $maximumAttempts = 100', 'postedFallback = $postedFallback',
+      'rightClickFallback = $rightClickFallback',
+      "SetTextMessage", '$api.PSObject.Methods["SetText"]', "messageFallbacks",
+      "LastFocusPostedFallback", "LastFocusControlFallback",
+      "renameButtonFallback",
       "Wait-MultiProjectPeerSettled", 'Sketch-Field 9904 "rename stable immediately before submit"',
       'Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence', 'source = "live-uia"', "beforeSelection", "afterSelection",
       "Windows unchanged-title rename was incorrectly treated as a no-op", "observedOwnerCount", "observedCardCount",
@@ -3425,9 +3430,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
       $uiaLiveGateSource -notmatch 'SetCursorPos' -or
       $uiaLiveGateSource -notmatch 'GetCursorPos' -or
+      $uiaLiveGateSource -notmatch 'SendMessage\(popup, 0x0200, UIntPtr\.Zero, MouseLParam\(point\.X, point\.Y\)\)' -or
+      $uiaLiveGateSource -notmatch '(?s)private static extern void Sleep\(uint milliseconds\).*?for \(int attempt = 0; attempt < 50 && !hilite; attempt\+\+\).*?GetMenuState\(menu, \(uint\)position, 0x0400\).*?Sleep\(10\).*?if \(!hilite\).*?throw new InvalidOperationException' -or
+      $uiaLiveGateSource -notmatch 'public bool Hilite, UsedKeyboardFallback' -or
+      $uiaLiveGateSource -notmatch '(?s)SendInput\(\(uint\)inputs\.Length.*?for \(int attempt = 0; attempt < 20 && IsWindowVisible\(popup\); attempt\+\+\).*?PostMessage\(popup, 0x0100, \(UIntPtr\)0x0D, IntPtr\.Zero\)' -or
       $uiaLiveGateSource -notmatch 'SendInput' -or
       $uiaLiveGateSource -notmatch 'cursorBefore = @\(\$editEdgeClick\.CursorBeforeX' -or
       $uiaLiveGateSource -notmatch 'hilite = \$editEdgeClick\.Hilite' -or
+      $uiaLiveGateSource -notmatch 'keyboardFallback = \$editEdgeClick\.UsedKeyboardFallback' -or
       $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
       $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
       $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
@@ -3483,6 +3493,11 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
+      $uiaLiveGateSource -notmatch 'function Stop-UiaOwnedProviderProcesses' -or
+      $uiaLiveGateSource -notmatch 'UIA_PROVIDER_PROCESS_CLEANUP=' -or
+      $uiaLiveGateSource -notmatch '\$providerZmxBaseline' -or
+      $uiaLiveGateSource -notmatch '(?s)function Sketch-Submit.*?Start-Sleep -Milliseconds 200.*?\$buttonFallback = \[GraphCodeUiaGateState\]::ClickButton\(\$button\).*?buttonFallback = \$buttonFallback' -or
+      $uiaLiveGateSource -notmatch '(?s)function Sketch-Cancel.*?Start-Sleep -Milliseconds 200.*?\$keyboardFallback = \[GraphCodeUiaGateState\]::PostKeyboard\(\$script:edgeWorkflowWindow, 0x1B\).*?keyboardFallback = \$keyboardFallback' -or
       $uiaLiveGateSource -notmatch '\$sameCardAutomationId = \$renderMenu\.cardId -ceq \$menu\.cardId' -or
       $uiaLiveGateSource -notmatch '(?s)\$renderedPromotedState = \$sameCardAutomationId -and\s*\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
@@ -3551,15 +3566,22 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'UIA_EDGE_MODAL_CENSUS' -or
       $uiaLiveGateSource -notmatch '\$delta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\)' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_COMBO id=\$id attempt=\$attempt' -or
+      $uiaLiveGateSource -notmatch '(?s)\$postedFallbacks = 0.*?\$fallbackDelta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\).*?\[GraphCodeUiaGateState\]::PostKeyboard\(\$control, \$fallbackKey\).*?\$postedFallbacks\+\+' -or
+      $uiaLiveGateSource -notmatch 'postedFallbacks=\$postedFallbacks' -or
       $uiaLiveGateSource -notmatch 'Require \(\$after -eq "\$index\|\$expected"\)' -or
       $uiaLiveGateSource -match '\$Matches\[1\] -in @\(') {
     throw "RED: UIA edge retry/modal/identity proof regressed"
   }
   if ($uiaLiveGateSource -notmatch 'function Edge-TypeText\(' -or
       $uiaLiveGateSource -notmatch 'function Get-EdgeTextAttemptDecision\(' -or
+      $uiaLiveGateSource -notmatch 'public static bool ClickButton\(IntPtr button\)' -or
+      $uiaLiveGateSource -notmatch '(?s)function Edge-Click.*?Start-Sleep -Milliseconds 200.*?\$buttonFallback = \[GraphCodeUiaGateState\]::ClickButton\(\$control\).*?buttonFallback = \$buttonFallback' -or
       $uiaLiveGateSource -notmatch 'Edge-TypeText \$field\.Id \$field\.Text' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_TEXT_STABLE id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::TypeEditTextById\(\$edgeWorkflowWindow, \$id, \$text\)' -or
+      $uiaLiveGateSource -notmatch 'LastEditUsedMessageFallback' -or
+      $uiaLiveGateSource -notmatch 'SendMessageString\(edit, 0x000C, UIntPtr\.Zero, text\)' -or
+      $uiaLiveGateSource -notmatch 'messageFallback=\$messageFallback' -or
       $uiaLiveGateSource -notmatch 'Require \$completed' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy\(\$edgeWorkflowWindow, \$control, \$id\)' -or
       $uiaLiveGateSource -notmatch 'HasVisibleBounds\(\$control\)' -or
@@ -3814,6 +3836,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Require \$nodeSheetClosed' -or
       $uiaLiveGateSource -notmatch 'if \(-not \[GraphCodeUiaGateState\]::WindowIsVisible\(\$nodeSheetWindow\) -or' -or
       $uiaLiveGateSource -notmatch 'UIA_NODE_CREATION_FOOTER_CLICK' -or
+      $uiaLiveGateSource -notmatch '(?s)function Invoke-NodeSheetClick.*?Start-Sleep -Milliseconds 200.*?\$buttonFallback = \[GraphCodeUiaGateState\]::ClickButton\(\$control\).*?buttonFallback = \$buttonFallback' -or
       $uiaLiveGateSource -notmatch 'sub-3px verified uncovered strip') {
     throw "RED: UIA live gate omits modal liveness retry, native closure, or footer-click geometry"
   }

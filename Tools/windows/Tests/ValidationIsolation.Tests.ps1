@@ -159,6 +159,29 @@ AfterEach {
     $env:TMP | Should -BeExactly "before-TMP"
   }
 
+  It "uses an explicit short validation parent and removes only the owned run root" {
+    $missingFunctions.Count | Should -Be 0
+    $shortParent = Join-Path $caseRoot "short"
+    New-Item -ItemType Directory -Force -Path $shortParent | Out-Null
+
+    Invoke-WindowsShellValidationIsolation `
+      -WorkspaceRoot $workspaceRoot `
+      -ValidationRootParent $shortParent `
+      -UserProfileRoot $userProfileRoot `
+      -LocalAppDataRoot $localAppDataRoot `
+      -Action {
+        Set-Content -LiteralPath $capturePath -Value $env:GRAPHCODE_VALIDATION_ROOT
+      }
+
+    $ownedRoot = (Get-Content -LiteralPath $capturePath -Raw).Trim()
+    $ownedRoot.StartsWith(
+      ([IO.Path]::GetFullPath($shortParent)).TrimEnd('\') + '\',
+      [StringComparison]::OrdinalIgnoreCase
+    ) | Should -Be $true
+    Test-Path -LiteralPath $ownedRoot | Should -Be $false
+    Test-Path -LiteralPath $shortParent -PathType Container | Should -Be $true
+  }
+
   It "fails the task when a default-profile artifact changes" {
     $missingFunctions.Count | Should -Be 0
     $defaultSupport = Join-Path $userProfileRoot ".graphcode"
@@ -189,7 +212,7 @@ AfterEach {
     $runnerSource | Should -Match (
       '(?s)foreach \(\$name in \$selected\)\s*\{\s*' +
       'if \(\$name -eq "windows-shell" -and -not \$DryRun\).*' +
-      'Invoke-WindowsShellValidationIsolation.*Invoke-Task "windows-shell"'
+      'Invoke-WindowsShellValidationIsolation.*-ValidationRootParent \$ShellValidationRoot.*Invoke-Task "windows-shell"'
     )
     $runnerSource | Should -Match (
       '(?s)Windows shell validation isolation contract.*' +
