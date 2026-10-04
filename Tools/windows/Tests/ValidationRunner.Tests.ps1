@@ -3433,11 +3433,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'SendMessage\(popup, 0x0200, UIntPtr\.Zero, MouseLParam\(point\.X, point\.Y\)\)' -or
       $uiaLiveGateSource -notmatch '(?s)private static extern void Sleep\(uint milliseconds\).*?for \(int attempt = 0; attempt < 50 && !hilite; attempt\+\+\).*?GetMenuState\(menu, \(uint\)position, 0x0400\).*?Sleep\(10\).*?if \(!hilite\).*?throw new InvalidOperationException' -or
       $uiaLiveGateSource -notmatch 'public bool Hilite, UsedKeyboardFallback' -or
-      $uiaLiveGateSource -notmatch '(?s)SendInput\(\(uint\)inputs\.Length.*?for \(int attempt = 0; attempt < 20 && IsWindowVisible\(popup\); attempt\+\+\).*?PostMessage\(popup, 0x0100, \(UIntPtr\)0x0D, IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch 'UsedSelectItemFallback' -or
+      $uiaLiveGateSource -notmatch 'SendMessage\(popup, 0x01E5, \(UIntPtr\)position, IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch '(?s)SendInput\(\(uint\)inputs\.Length.*?for \(int attempt = 0; attempt < 20 && IsWindowVisible\(popup\); attempt\+\+\).*?PostMessage\(popup, 0x0100, \(UIntPtr\)0x0D, IntPtr\.Zero\).*?PostMessage\(popup, 0x0101, \(UIntPtr\)0x0D, IntPtr\.Zero\)' -or
       $uiaLiveGateSource -notmatch 'SendInput' -or
       $uiaLiveGateSource -notmatch 'cursorBefore = @\(\$editEdgeClick\.CursorBeforeX' -or
       $uiaLiveGateSource -notmatch 'hilite = \$editEdgeClick\.Hilite' -or
       $uiaLiveGateSource -notmatch 'keyboardFallback = \$editEdgeClick\.UsedKeyboardFallback' -or
+      $uiaLiveGateSource -notmatch 'directCommandFallback = \$editEdgeDirectCommandFallback' -or
       $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
       $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
       $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
@@ -3493,6 +3496,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
+      $uiaLiveGateSource -notmatch 'submenuCommandFallback' -or
+      $uiaLiveGateSource -notmatch 'modalCommandFallback' -or
       $uiaLiveGateSource -notmatch 'function Stop-UiaOwnedProviderProcesses' -or
       $uiaLiveGateSource -notmatch 'UIA_PROVIDER_PROCESS_CLEANUP=' -or
       $uiaLiveGateSource -notmatch '\$providerZmxBaseline' -or
@@ -3501,6 +3506,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$sameCardAutomationId = \$renderMenu\.cardId -ceq \$menu\.cardId' -or
       $uiaLiveGateSource -notmatch '(?s)\$renderedPromotedState = \$sameCardAutomationId -and\s*\$promotionChoices\.Count -eq 0 -and \$newChildChoices\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch 'ClickPopupMenuItem' -or
+      $uiaLiveGateSource -notmatch '(?s)public static bool HoverPopupMenuItem.*?FindPopupForMenu\(ownerProcess, menu\).*?SendMessage\(popup, 0x0200, UIntPtr\.Zero, MouseLParam\(client\.X, client\.Y\)\).*?GetMenuState\(menu, \(uint\)position, 0x0400\)' -or
       $uiaLiveGateSource -notmatch 'IsControlOwnedBy' -or
       $uiaLiveGateSource -notmatch 'TypeEditTextById' -or
       $uiaLiveGateSource -notmatch 'Read-EdgeStableText' -or
@@ -3564,6 +3570,8 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch 'FindVisibleProcessWindow\(\[uint32\]\$renameProcess\.Id, \$title\)' -or
       $uiaLiveGateSource -notmatch 'WindowIsVisible\(\$edgeWorkflowWindow\)' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_MODAL_CENSUS' -or
+      $uiaLiveGateSource -notmatch 'commandFallback = \$commandFallback' -or
+      $uiaLiveGateSource -notmatch 'waitCommandFallback' -or
       $uiaLiveGateSource -notmatch '\$delta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\)' -or
       $uiaLiveGateSource -notmatch 'UIA_EDGE_COMBO id=\$id attempt=\$attempt' -or
       $uiaLiveGateSource -notmatch '(?s)\$postedFallbacks = 0.*?\$fallbackDelta = \$index - \[int\]\(\$after\.Split\("\|"\)\[0\]\).*?\[GraphCodeUiaGateState\]::PostKeyboard\(\$control, \$fallbackKey\).*?\$postedFallbacks\+\+' -or

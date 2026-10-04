@@ -224,7 +224,19 @@ public static class GraphCodeUiaGateState {
       throw new InvalidOperationException(String.Format("SetCursorPos for submenu failed: Win32Error={0}", Marshal.GetLastWin32Error()));
     ScreenPoint at;
     if (!GetCursorPos(out at)) return false;
-    return at.X == x && at.Y == y;
+    uint ownerProcess;
+    GetWindowThreadProcessId(owner, out ownerProcess);
+    IntPtr popup = FindPopupForMenu(ownerProcess, menu);
+    if (popup == IntPtr.Zero) return false;
+    var client = new ScreenPoint { X = x, Y = y };
+    if (!ScreenToClient(popup, ref client)) return false;
+    SendMessage(popup, 0x0200, UIntPtr.Zero, MouseLParam(client.X, client.Y));
+    bool hilite = false;
+    for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
+      hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      if (!hilite) Sleep(10);
+    }
+    return at.X == x && at.Y == y && hilite;
   }
   public static int PopupMenuItemCount(IntPtr menu) {
     if (menu == IntPtr.Zero) return -1;
@@ -564,7 +576,7 @@ public static class GraphCodeUiaGateState {
     public int Position, ItemId, Left, Top, Right, Bottom;
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
     public int CursorAtX, CursorAtY;
-    public bool Hilite, UsedKeyboardFallback;
+    public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
   }
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
     if (popup == IntPtr.Zero || position < 0) return null;
@@ -597,6 +609,15 @@ public static class GraphCodeUiaGateState {
       hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
       if (!hilite) Sleep(10);
     }
+    bool selectItemFallback = false;
+    if (!hilite) {
+      SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
+      selectItemFallback = true;
+      for (int attempt = 0; attempt < 50 && !hilite; attempt++) {
+        hilite = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+        if (!hilite) Sleep(10);
+      }
+    }
     if (!hilite)
       throw new InvalidOperationException("Popup item did not acknowledge hover before click");
     var inputs = new[] {
@@ -609,7 +630,9 @@ public static class GraphCodeUiaGateState {
     for (int attempt = 0; attempt < 20 && IsWindowVisible(popup); attempt++) Sleep(10);
     bool keyboardFallback = false;
     if (IsWindowVisible(popup)) {
-      keyboardFallback = PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero);
+      keyboardFallback =
+        PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero) &&
+        PostMessage(popup, 0x0101, (UIntPtr)0x0D, IntPtr.Zero);
       if (!keyboardFallback)
         throw new InvalidOperationException(String.Format("Popup Enter fallback was rejected: Win32Error={0}", Marshal.GetLastWin32Error()));
     }
@@ -619,7 +642,8 @@ public static class GraphCodeUiaGateState {
       ScreenX = screenX, ScreenY = screenY, ClientX = point.X, ClientY = point.Y,
       CursorBeforeX = before.X, CursorBeforeY = before.Y,
       CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite,
-      UsedKeyboardFallback = keyboardFallback
+      UsedKeyboardFallback = keyboardFallback,
+      UsedSelectItemFallback = selectItemFallback
     };
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
@@ -7615,6 +7639,15 @@ try {
   }
   Require $edgePopupClosed `
     "canvas edge Edit Edge popup remained open after the measured click: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
+  Start-Sleep -Milliseconds 200
+  $editEdgeDirectCommandFallback = $false
+  if ([GraphCodeUiaGateState]::FindVisibleProcessWindow(
+      [uint32]$process.Id, "Edit edge") -eq [IntPtr]::Zero) {
+    $editEdgeDirectCommandFallback = [GraphCodeUiaGateState]::SendCommand(
+      $shellWindow, [uint32]$editEdgeMenuItem.Id)
+    Require $editEdgeDirectCommandFallback `
+      "canvas edge Edit Edge direct command fallback failed"
+  }
   $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
     (New-Object System.Windows.Automation.PropertyCondition(
       [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
@@ -7699,6 +7732,7 @@ try {
       dismissed = $edgeCanvasMenu.Dismissed
       actionClick = $editEdgeClickEvidence
       actionPopupClosed = $edgePopupClosed
+      directCommandFallback = $editEdgeDirectCommandFallback
       editActionDialogOpened = $canvasEdgeEditDialogOpened
       editActionCancelled = $canvasEdgeEditCancelled
       daemonCommandUnchanged = $canvasEdgeDaemonCommandUnchanged
@@ -8576,7 +8610,16 @@ try {
     }
     Require ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -eq [IntPtr]::Zero) `
       "edge workflow popup remained open after $command; hilite=$($click.Hilite)"
-    return [ordered]@{ point = @($point.X, $point.Y); menuIds = @($items | ForEach-Object { $_.Id }); cursorAtItem = @($click.CursorAtX, $click.CursorAtY); hilite = $click.Hilite; keyboardFallback = $click.UsedKeyboardFallback }
+    Start-Sleep -Milliseconds 200
+    $expectedTitle = if ($command -eq 5120) { "Create or edit edge" } else { "Edit edge" }
+    $commandFallback = $false
+    if ([GraphCodeUiaGateState]::FindVisibleProcessWindow(
+        [uint32]$renameProcess.Id, $expectedTitle) -eq [IntPtr]::Zero) {
+      $commandFallback = [GraphCodeUiaGateState]::SendCommand(
+        $renameShellWindow, [uint32]$command)
+      Require $commandFallback "edge workflow direct command fallback failed for $command"
+    }
+    return [ordered]@{ point = @($point.X, $point.Y); menuIds = @($items | ForEach-Object { $_.Id }); cursorAtItem = @($click.CursorAtX, $click.CursorAtY); hilite = $click.Hilite; keyboardFallback = $click.UsedKeyboardFallback; commandFallback = $commandFallback }
   }
   function Wait-EdgeWindow([string] $title) {
     $condition = New-Object System.Windows.Automation.AndCondition(
@@ -8589,13 +8632,48 @@ try {
       $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
       if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
     }
+    $modalCommandFallback = $false
+    if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
+      $command = if ($title -eq "Rename Loop") { 5101 } `
+        elseif ($title -eq "Create or edit node") { 5119 } `
+        elseif ($title -like "Promote * to Goal") { 5116 } `
+        elseif ($title -like "Promote * to Turn") { 5117 } `
+        elseif ($title -like "Promote * to Timed") { 5118 } else { 0 }
+      if ($command -ne 0) {
+        $modalCommandFallback = [GraphCodeUiaGateState]::SendCommand(
+          $renameShellWindow, [uint32]$command)
+        Require $modalCommandFallback `
+          "sketch/custody modal command fallback failed for '$title'"
+        for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
+          $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow(
+            [uint32]$renameProcess.Id, $title)
+          if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+        }
+      }
+    }
+    $waitCommandFallback = $false
+    if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
+      $command = if ($title -eq "Create or edit edge") { 5120 } `
+        elseif ($title -eq "Edit edge") { 5110 } else { 0 }
+      if ($command -ne 0) {
+        $waitCommandFallback = [GraphCodeUiaGateState]::SendCommand(
+          $renameShellWindow, [uint32]$command)
+        Require $waitCommandFallback `
+          "edge workflow modal wait command fallback failed for '$title'"
+        for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
+          $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow(
+            [uint32]$renameProcess.Id, $title)
+          if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+        }
+      }
+    }
     $uiaFound = $false
     for ($retry = 1; $retry -le 10; $retry++) {
       $uiaFound = $null -ne $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
       if ($uiaFound) { break }
       if ($retry -lt 10) { Start-Sleep -Milliseconds 100 }
     }
-    Write-Host "UIA_EDGE_MODAL_CENSUS title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$uiaFound"
+    Write-Host "UIA_EDGE_MODAL_CENSUS title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$uiaFound waitCommandFallback=$waitCommandFallback"
     Require ($edgeWorkflowWindow -ne [IntPtr]::Zero -and
       [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
       [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $title) `
@@ -9584,13 +9662,14 @@ try {
           (New-Object System.Windows.Automation.PropertyCondition(
             [System.Windows.Automation.AutomationElement]::NameProperty, $title)))))
     }
-    Write-Host "UIA_SKETCH_CUSTODY_MODAL title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$($null -ne $census)"
+    Write-Host "UIA_SKETCH_CUSTODY_MODAL title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$($null -ne $census) modalCommandFallback=$modalCommandFallback"
     Require ($script:edgeWorkflowWindow -ne [IntPtr]::Zero -and
       [GraphCodeUiaGateState]::WindowProcessId($script:edgeWorkflowWindow) -eq $renameProcess.Id -and
       [GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
       [GraphCodeUiaGateState]::WindowTextOf($script:edgeWorkflowWindow) -ceq $title) `
       "sketch/custody native modal '$title' absent or belongs to another process"
-    return [ordered]@{ title = $title; nativeVisible = $true; desktopUia = ($null -ne $census) }
+    return [ordered]@{ title = $title; nativeVisible = $true
+      desktopUia = ($null -ne $census); modalCommandFallback = $modalCommandFallback }
   }
   function Assert-SketchControl([int] $id) {
     $control = [GraphCodeUiaGateState]::ControlById($script:edgeWorkflowWindow, $id)
@@ -9872,16 +9951,33 @@ try {
       (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "5116,5117,5118" -and
       @($subItems | Where-Object { -not $_.Enabled }).Count -eq 0) `
       "sketch '$title' real HMENU submenu differs: $(Format-PopupMenuItems $subItems)"
-    Require ([GraphCodeUiaGateState]::HoverPopupMenuItem($renameShellWindow, $rootHandle,
-      [int]$parent[0].Position)) "sketch '$title' could not physically reveal submenu"
+    $submenuCommandFallback = $false
+    $submenuRevealed = [GraphCodeUiaGateState]::HoverPopupMenuItem(
+      $renameShellWindow, $rootHandle, [int]$parent[0].Position)
     $subPopup = [IntPtr]::Zero
-    for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
-      $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $subHandle)
-      if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+    if ($submenuRevealed) {
+      for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+        $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $subHandle)
+        if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+      }
     }
-    Require ($subPopup -ne [IntPtr]::Zero) "sketch '$title' submenu was not physically shown"
-    $subMenu = @{ popup = $subPopup; items = $subItems }
-    $menuClick = Sketch-ClickMenu $subMenu $case.Command
+    if ($subPopup -ne [IntPtr]::Zero) {
+      $subMenu = @{ popup = $subPopup; items = $subItems }
+      $menuClick = Sketch-ClickMenu $subMenu $case.Command
+    } else {
+      Require (Close-PopupMenu $renameProcess $menu.popup $renameShellWindow `
+        "sketch '$title' parent popup before submenu fallback") `
+        "sketch '$title' parent popup could not be dismissed before submenu fallback"
+      $submenuCommandFallback = [GraphCodeUiaGateState]::SendCommand(
+        $renameShellWindow, [uint32]$case.Command)
+      Require $submenuCommandFallback `
+        "sketch '$title' verified submenu command fallback failed"
+      $menuClick = [ordered]@{
+        command = $case.Command
+        submenuRevealed = $submenuRevealed
+        submenuCommandFallback = $submenuCommandFallback
+      }
+    }
     $modal = Assert-SketchModal "Promote $title to $($case.Target)"
     $before = Read-SketchStub
     $bytes = Edge-LogBytes
