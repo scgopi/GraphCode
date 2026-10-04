@@ -60,6 +60,7 @@ param(
   [switch] $DryRun,
   [switch] $SkipTrayLive,
   [switch] $SkipWslRemoteE2E,
+  [string] $ShellValidationRoot,
   [string] $SwiftExecutable
 )
 
@@ -328,6 +329,7 @@ function Invoke-WindowsShellValidationIsolation(
   [Parameter(Mandatory)]
   [scriptblock] $Action,
   [string] $WorkspaceRoot = $repoRoot,
+  [string] $ValidationRootParent,
   [string] $UserProfileRoot = $env:USERPROFILE,
   [string] $LocalAppDataRoot = $env:LOCALAPPDATA
 ) {
@@ -335,9 +337,15 @@ function Invoke-WindowsShellValidationIsolation(
   $defaultLocalAppData = Join-Path $LocalAppDataRoot "GraphCode"
   $supportBefore = Get-WindowsShellProfileSnapshot $defaultSupport
   $localAppDataBefore = Get-WindowsShellProfileSnapshot $defaultLocalAppData
-  $validationRoot = Join-Path $WorkspaceRoot (
-    ".build\windows-shell-validation\" + [guid]::NewGuid().ToString("N")
-  )
+  $validationRoot = if ($ValidationRootParent) {
+    $parent = [IO.Path]::GetFullPath($ValidationRootParent)
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Join-Path $parent ([guid]::NewGuid().ToString("N"))
+  } else {
+    Join-Path $WorkspaceRoot (
+      ".build\windows-shell-validation\" + [guid]::NewGuid().ToString("N")
+    )
+  }
   $ownedEnvironment = [ordered]@{
     GRAPHCODE_VALIDATION_ROOT = $validationRoot
     GRAPHCODE_SUPPORT_DIR = Join-Path $validationRoot "support"
@@ -1287,7 +1295,7 @@ if ($selected.Count -eq 0) {
 try {
   foreach ($name in $selected) {
     if ($name -eq "windows-shell" -and -not $DryRun) {
-      Invoke-WindowsShellValidationIsolation -Action {
+      Invoke-WindowsShellValidationIsolation -ValidationRootParent $ShellValidationRoot -Action {
         Invoke-Task "windows-shell"
       }
     } else {
