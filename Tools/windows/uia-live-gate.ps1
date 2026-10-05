@@ -238,6 +238,17 @@ public static class GraphCodeUiaGateState {
     }
     return at.X == x && at.Y == y && hilite;
   }
+  // Keyboard reveal of a real submenu: hilite the parent item (MN_SELECTITEM)
+  // and post VK_RIGHT, the same navigation a keyboard user performs. Unlike a
+  // WM_COMMAND posted to the shell (which TrackPopupMenu/TPM_RETURNCMD menus
+  // never route), this opens the shell's own submenu popup.
+  public static bool RevealSubmenuByKeyboard(IntPtr popup, IntPtr menu, int position) {
+    if (popup == IntPtr.Zero || menu == IntPtr.Zero || !IsWindowVisible(popup)) return false;
+    SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
+    if ((GetMenuState(menu, (uint)position, 0x0400) & 0x0080) == 0) return false;
+    return PostMessage(popup, 0x0100, (UIntPtr)0x27, IntPtr.Zero) &&
+      PostMessage(popup, 0x0101, (UIntPtr)0x27, IntPtr.Zero);
+  }
   public static int PopupMenuItemCount(IntPtr menu) {
     if (menu == IntPtr.Zero) return -1;
     return GetMenuItemCount(menu);
@@ -577,6 +588,7 @@ public static class GraphCodeUiaGateState {
     public int ScreenX, ScreenY, ClientX, ClientY, CursorBeforeX, CursorBeforeY;
     public int CursorAtX, CursorAtY;
     public bool Hilite, UsedKeyboardFallback, UsedSelectItemFallback;
+    public bool HiliteAtEnterFallback, HiliteBeforeEnter;
   }
   public static PopupItemHit ClickPopupMenuItem(IntPtr popup, IntPtr owner, int position, int commandId) {
     if (popup == IntPtr.Zero || position < 0) return null;
@@ -629,7 +641,21 @@ public static class GraphCodeUiaGateState {
       throw new InvalidOperationException(String.Format("SendInput injected {0} of {1} popup mouse events: Win32Error={2}", sent, inputs.Length, Marshal.GetLastWin32Error()));
     for (int attempt = 0; attempt < 20 && IsWindowVisible(popup); attempt++) Sleep(10);
     bool keyboardFallback = false;
+    bool hiliteAtEnterFallback = false;
+    bool hiliteBeforeEnter = false;
     if (IsWindowVisible(popup)) {
+      // Injected clicks can be dropped (or held) by the desktop's input stack,
+      // and the menu can lose its hover hilite meanwhile. Enter with no hilited
+      // item ends TrackPopupMenu with command 0: the popup closes exactly as if
+      // the item had been chosen, but no command reaches the shell. Re-assert
+      // the intended item and prove its hilite immediately before Enter.
+      hiliteAtEnterFallback = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+      SendMessage(popup, 0x01E5, (UIntPtr)position, IntPtr.Zero);
+      hiliteBeforeEnter = (GetMenuState(menu, (uint)position, 0x0400) & 0x0080) != 0;
+    }
+    if (IsWindowVisible(popup)) {
+      if (!hiliteBeforeEnter)
+        throw new InvalidOperationException(String.Format("Popup item {0} was not hilited before the Enter fallback (hilite at fallback={1})", commandId, hiliteAtEnterFallback));
       keyboardFallback =
         PostMessage(popup, 0x0100, (UIntPtr)0x0D, IntPtr.Zero) &&
         PostMessage(popup, 0x0101, (UIntPtr)0x0D, IntPtr.Zero);
@@ -643,7 +669,9 @@ public static class GraphCodeUiaGateState {
       CursorBeforeX = before.X, CursorBeforeY = before.Y,
       CursorAtX = at.X, CursorAtY = at.Y, Hilite = hilite,
       UsedKeyboardFallback = keyboardFallback,
-      UsedSelectItemFallback = selectItemFallback
+      UsedSelectItemFallback = selectItemFallback,
+      HiliteAtEnterFallback = hiliteAtEnterFallback,
+      HiliteBeforeEnter = hiliteBeforeEnter
     };
   }
   // Sidebar.updateBannerRect/updateBannerAt are pixel-only hit-test geometry with
@@ -1126,6 +1154,227 @@ public static class GraphCodeUiaHostInfo {
 }
 "@
 
+# Wait-timeout attribution. Reads only the foreground window's owning process
+# id/name and class (never another application's title or content), every
+# top-level window owned by the shell process, and a PrintWindow capture of the
+# shell's own window (not a screen copy, so no other application is captured).
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class GraphCodeUiaAttribution {
+  private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowEnabled(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern bool IsHungAppWindow(IntPtr window);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetWindow(IntPtr window, uint command);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct Rect { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr window, out Rect rect);
+  [DllImport("user32.dll")]
+  public static extern bool PrintWindow(IntPtr window, IntPtr hdc, uint flags);
+  public sealed class WindowRecord {
+    public long Handle; public long Owner; public string ClassName; public string Title;
+    public bool Visible, Enabled, Hung; public int Left, Top, Right, Bottom;
+  }
+  private static string ClassOf(IntPtr window) {
+    var text = new StringBuilder(256);
+    GetClassName(window, text, text.Capacity);
+    return text.ToString();
+  }
+  public static long ForegroundHandle() { return GetForegroundWindow().ToInt64(); }
+  public static uint ProcessOf(IntPtr window) {
+    if (window == IntPtr.Zero) return 0;
+    uint processId;
+    GetWindowThreadProcessId(window, out processId);
+    return processId;
+  }
+  public static string ClassName(IntPtr window) {
+    return window == IntPtr.Zero ? "" : ClassOf(window);
+  }
+  public static Rect Bounds(IntPtr window) {
+    Rect rect;
+    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return new Rect();
+    return rect;
+  }
+  // Titles are read only for windows owned by processId (the gate's own shell).
+  public static WindowRecord[] ProcessWindows(uint processId) {
+    var results = new List<WindowRecord>();
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner != processId) return true;
+      var title = new StringBuilder(512);
+      GetWindowText(window, title, title.Capacity);
+      Rect rect;
+      GetWindowRect(window, out rect);
+      results.Add(new WindowRecord {
+        Handle = window.ToInt64(), Owner = GetWindow(window, 4).ToInt64(),
+        ClassName = ClassOf(window), Title = title.ToString(),
+        Visible = IsWindowVisible(window), Enabled = IsWindowEnabled(window),
+        Hung = IsHungAppWindow(window),
+        Left = rect.Left, Top = rect.Top, Right = rect.Right, Bottom = rect.Bottom
+      });
+      return true;
+    }, IntPtr.Zero);
+    return results.ToArray();
+  }
+}
+"@
+
+$script:uiaAttributionDirectory = $null
+$script:uiaAttributionSequence = 0
+
+function Save-UiaShellWindowCapture([IntPtr] $window, [string] $path) {
+  $rect = [GraphCodeUiaAttribution]::Bounds($window)
+  $width = $rect.Right - $rect.Left
+  $height = $rect.Bottom - $rect.Top
+  if ($width -le 0 -or $height -le 0) { return "no-bounds" }
+  $bitmap = New-Object System.Drawing.Bitmap $width, $height
+  try {
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $hdc = $graphics.GetHdc()
+      try {
+        # PW_RENDERFULLCONTENT: the window's own content only, never the screen.
+        $printed = [GraphCodeUiaAttribution]::PrintWindow($window, $hdc, 2)
+      } finally { $graphics.ReleaseHdc($hdc) }
+    } finally { $graphics.Dispose() }
+    if (-not $printed) { return "printwindow-failed" }
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    return "saved"
+  } finally { $bitmap.Dispose() }
+}
+
+function Write-UiaWaitAttribution(
+  [string] $Step,
+  [DateTime] $StartedUtc,
+  [int] $TimeoutMilliseconds,
+  [int] $ShellProcessId = 0,
+  [IntPtr] $ShellWindow = [IntPtr]::Zero,
+  $Detail = $null
+) {
+  try {
+    $elapsed = [int]([DateTime]::UtcNow - $StartedUtc).TotalMilliseconds
+    if ($ShellProcessId -eq 0 -and $ShellWindow -ne [IntPtr]::Zero) {
+      $ShellProcessId = [int][GraphCodeUiaAttribution]::ProcessOf($ShellWindow)
+    }
+    $foreground = [IntPtr][GraphCodeUiaAttribution]::ForegroundHandle()
+    $foregroundProcessId = [int][GraphCodeUiaAttribution]::ProcessOf($foreground)
+    $foregroundProcessName = if ($foregroundProcessId -ne 0) {
+      [string](Get-Process -Id $foregroundProcessId -ErrorAction SilentlyContinue).ProcessName
+    } else { "" }
+    $windows = @(if ($ShellProcessId -ne 0) {
+      [GraphCodeUiaAttribution]::ProcessWindows([uint32]$ShellProcessId) | ForEach-Object {
+        [ordered]@{ handle = ("0x{0:x}" -f $_.Handle); owner = ("0x{0:x}" -f $_.Owner)
+          class = $_.ClassName; title = $_.Title; visible = $_.Visible; enabled = $_.Enabled
+          hung = $_.Hung; bounds = @($_.Left, $_.Top, $_.Right, $_.Bottom) }
+      }
+    })
+    if ($ShellWindow -eq [IntPtr]::Zero) {
+      $main = @($windows | Where-Object { $_.class -ceq "GraphCodeWindowsShell" -and $_.visible }) |
+        Select-Object -First 1
+      if ($main) { $ShellWindow = [IntPtr][Convert]::ToInt64($main.handle.Substring(2), 16) }
+    }
+    # The shell reports refused commands (for example a stale edge) only in its
+    # own status fragment, so a missing modal is attributable from its text.
+    $shellStatus = $null
+    if ($ShellWindow -ne [IntPtr]::Zero) {
+      try {
+        $statusElement = [System.Windows.Automation.AutomationElement]::FromHandle($ShellWindow).FindFirst(
+          [System.Windows.Automation.TreeScope]::Children,
+          (New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, "status")))
+        if ($null -ne $statusElement -and $statusElement.Current.ProcessId -eq $ShellProcessId) {
+          $shellStatus = [string]$statusElement.Current.Name
+        }
+      } catch { $shellStatus = "unavailable: $($_.Exception.GetType().Name)" }
+    }
+    $script:uiaAttributionSequence++
+    # Every visible top-level window of the shell process (main window plus
+    # any shell-owned modal), each captured on its own; never the screen.
+    $captures = [Collections.Generic.List[object]]::new()
+    if ($script:uiaAttributionDirectory -and $ShellProcessId -ne 0) {
+      $safeStep = ($Step -replace '[^A-Za-z0-9]+', '-').Trim('-')
+      if ($safeStep.Length -gt 48) { $safeStep = $safeStep.Substring(0, 48) }
+      $captureIndex = 0
+      foreach ($window in @($windows | Where-Object { $_.visible })) {
+        $captureIndex++
+        $captureHandle = [IntPtr][Convert]::ToInt64($window.handle.Substring(2), 16)
+        $capturePath = Join-Path $script:uiaAttributionDirectory `
+          ("uia-wait-{0:D3}-{1}-{2}.png" -f $script:uiaAttributionSequence, $safeStep, $captureIndex)
+        $state = try { Save-UiaShellWindowCapture $captureHandle $capturePath }
+          catch { "error: $($_.Exception.GetType().Name)" }
+        $captures.Add([ordered]@{ handle = $window.handle; class = $window.class; state = $state; path = $capturePath })
+      }
+    }
+    $record = [ordered]@{
+      step = $Step
+      elapsedMilliseconds = $elapsed
+      deadlineMilliseconds = $TimeoutMilliseconds
+      deadlineExceeded = ($TimeoutMilliseconds -gt 0 -and $elapsed -ge $TimeoutMilliseconds)
+      shellProcessId = $ShellProcessId
+      shellWindow = ("0x{0:x}" -f $ShellWindow.ToInt64())
+      foreground = [ordered]@{
+        handle = ("0x{0:x}" -f $foreground.ToInt64())
+        processId = $foregroundProcessId
+        processName = $foregroundProcessName
+        class = [GraphCodeUiaAttribution]::ClassName($foreground)
+        ownedByShell = ($ShellProcessId -ne 0 -and $foregroundProcessId -eq $ShellProcessId)
+      }
+      shellWindows = $windows
+      shellStatus = $shellStatus
+      shellWindowCaptures = $captures.ToArray()
+      detail = $Detail
+    }
+    Write-Host ("UIA_WAIT_TIMEOUT_ATTRIBUTION=" + ($record | ConvertTo-Json -Compress -Depth 6))
+  } catch {
+    Write-Host "UIA_WAIT_TIMEOUT_ATTRIBUTION_ERROR step=$Step error=$($_.Exception.GetType().Name): $($_.Exception.Message)"
+  }
+}
+
+# Diagnostic only, called after an event wait has already missed its deadline
+# and the caller has captured the on-time count it will assert on: keep
+# observing so the log separates late delivery from absent delivery.
+function Write-UiaLateEventAttribution(
+  [string] $Step,
+  [DateTime] $StartedUtc,
+  [int] $TimeoutMilliseconds,
+  [scriptblock] $Observed,
+  [IntPtr] $ShellWindow,
+  [int] $ObservationMilliseconds = 10000
+) {
+  $lateArrival = $null
+  $observer = [Diagnostics.Stopwatch]::StartNew()
+  while ($observer.ElapsedMilliseconds -lt $ObservationMilliseconds) {
+    if (& $Observed) {
+      $lateArrival = [int]([DateTime]::UtcNow - $StartedUtc).TotalMilliseconds
+      break
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  Write-UiaWaitAttribution $Step $StartedUtc $TimeoutMilliseconds 0 $ShellWindow ([ordered]@{
+    eventArrivedAfterDeadline = ($null -ne $lateArrival)
+    eventArrivalMilliseconds = $lateArrival
+    postDeadlineObservationMilliseconds = $ObservationMilliseconds })
+}
+
 function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
@@ -1208,14 +1457,25 @@ function Get-FocusDiagnostics([IntPtr] $expectedWindow) {
   } else {
     $null
   }
+  # Titles and element names are logged only for the gate's own shell process;
+  # another application's foreground window is identified by process and class.
+  $expectedProcessId = [GraphCodeUiaGateState]::WindowProcessId($expectedWindow)
   $focusedDescription = "unavailable"
   try {
     $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-    $focusedDescription = "automationId='$($focusedElement.Current.AutomationId)' name='$($focusedElement.Current.Name)' processId=$($focusedElement.Current.ProcessId)"
+    $focusedProcessId = $focusedElement.Current.ProcessId
+    $focusedDescription = if ($expectedProcessId -ne 0 -and $focusedProcessId -eq $expectedProcessId) {
+      "automationId='$($focusedElement.Current.AutomationId)' name='$($focusedElement.Current.Name)' processId=$focusedProcessId"
+    } else {
+      "foreignProcess=True processId=$focusedProcessId"
+    }
   } catch {
-    $focusedDescription = "error='$($_.Exception.Message)'"
+    $focusedDescription = "error='$($_.Exception.GetType().Name)'"
   }
-  return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$([GraphCodeUiaGateState]::WindowTitle($foreground))' focused={$focusedDescription} activation={$([GraphCodeUiaGateState]::LastActivationDiagnostic)}"
+  $foregroundTitle = if ($expectedProcessId -ne 0 -and $foregroundProcessId -eq $expectedProcessId) {
+    [GraphCodeUiaGateState]::WindowTitle($foreground)
+  } else { "<foreign>" }
+  return "foreground=$(Format-WindowHandle $foreground) expected=$(Format-WindowHandle $expectedWindow) expectedIsForeground=$([GraphCodeUiaGateState]::IsForegroundWindow($expectedWindow)) foregroundPid=$foregroundProcessId foregroundProcess='$($foregroundProcess.ProcessName)' foregroundClass='$([GraphCodeUiaGateState]::WindowClass($foreground))' foregroundTitle='$foregroundTitle' focused={$focusedDescription} activation={$([GraphCodeUiaGateState]::LastActivationDiagnostic)}"
 }
 
 function Wait-ForPopupMenu(
@@ -1225,7 +1485,8 @@ function Wait-ForPopupMenu(
   [int] $TimeoutMilliseconds = 5000,
   [int] $PollMilliseconds = 50
 ) {
-  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $startedUtc = [DateTime]::UtcNow
+  $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $popup = [IntPtr]::Zero
   while ([DateTime]::UtcNow -lt $deadline -and $popup -eq [IntPtr]::Zero) {
     $process.Refresh()
@@ -1237,6 +1498,7 @@ function Wait-ForPopupMenu(
   }
   if ($popup -eq [IntPtr]::Zero) {
     Write-Host "UIA_POPUP_DIAGNOSTICS label=$label $(Get-FocusDiagnostics $ownerWindow)"
+    Write-UiaWaitAttribution "popup menu: $label" $startedUtc $TimeoutMilliseconds $process.Id $ownerWindow
   }
   return $popup
 }
@@ -1342,7 +1604,8 @@ function Close-PopupMenu(
   [int] $PollMilliseconds = 50
 ) {
   $null = [GraphCodeUiaGateState]::DismissPopupMenu($popup, $ownerWindow)
-  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $startedUtc = [DateTime]::UtcNow
+  $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $cancelled = $false
   while ([DateTime]::UtcNow -lt $deadline) {
     if ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$process.Id) -eq [IntPtr]::Zero) {
@@ -1356,6 +1619,7 @@ function Close-PopupMenu(
     Start-Sleep -Milliseconds $PollMilliseconds
   }
   Write-Host "UIA_POPUP_DISMISS_DIAGNOSTICS label=$label cancelSent=$cancelled $(Get-FocusDiagnostics $ownerWindow)"
+  Write-UiaWaitAttribution "popup dismiss: $label" $startedUtc $TimeoutMilliseconds $process.Id $ownerWindow
   return $false
 }
 
@@ -1368,14 +1632,22 @@ function Wait-ForDesktopElement(
   [int] $PollMilliseconds = 50,
   [switch] $RecoverForeground
 ) {
-  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $startedUtc = [DateTime]::UtcNow
+  $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $element = $null
   $foregroundRecoveries = 0
+  $searchCount = 0
+  $searchMaxMilliseconds = 0
+  $searchTotalMilliseconds = 0
   while ([DateTime]::UtcNow -lt $deadline -and $null -eq $element) {
+    $searchTimer = [Diagnostics.Stopwatch]::StartNew()
     $element = $desktop.FindFirst(
       [System.Windows.Automation.TreeScope]::Descendants,
       $condition
     )
+    $searchCount++
+    $searchTotalMilliseconds += $searchTimer.ElapsedMilliseconds
+    $searchMaxMilliseconds = [Math]::Max($searchMaxMilliseconds, $searchTimer.ElapsedMilliseconds)
     if ($null -eq $element) {
       if ($RecoverForeground -and $diagnosticWindow -ne [IntPtr]::Zero -and
           -not [GraphCodeUiaGateState]::IsForegroundWindow($diagnosticWindow)) {
@@ -1400,6 +1672,12 @@ function Wait-ForDesktopElement(
   if ($null -eq $element -and $diagnosticWindow -ne [IntPtr]::Zero) {
     Write-Host "UIA_WAIT_DIAGNOSTICS label=$label foregroundRecoveries=$foregroundRecoveries $(Get-FocusDiagnostics $diagnosticWindow)"
   }
+  if ($null -eq $element) {
+    Write-UiaWaitAttribution "desktop element: $label" $startedUtc $TimeoutMilliseconds 0 $diagnosticWindow ([ordered]@{
+      foregroundRecoveries = $foregroundRecoveries; desktopSearches = $searchCount
+      desktopSearchMaxMilliseconds = $searchMaxMilliseconds
+      desktopSearchTotalMilliseconds = $searchTotalMilliseconds })
+  }
   return $element
 }
 
@@ -1411,7 +1689,8 @@ function Wait-ForDesktopElementGone(
   [int] $TimeoutMilliseconds = 10000,
   [int] $PollMilliseconds = 50
 ) {
-  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $startedUtc = [DateTime]::UtcNow
+  $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $element = $desktop.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     $condition
@@ -1425,6 +1704,9 @@ function Wait-ForDesktopElementGone(
   }
   if ($null -ne $element -and $diagnosticWindow -ne [IntPtr]::Zero) {
     Write-Host "UIA_WAIT_DIAGNOSTICS label=$label-still-present $(Get-FocusDiagnostics $diagnosticWindow)"
+  }
+  if ($null -ne $element) {
+    Write-UiaWaitAttribution "desktop element gone: $label" $startedUtc $TimeoutMilliseconds 0 $diagnosticWindow
   }
   return $null -eq $element
 }
@@ -1527,7 +1809,8 @@ function Ensure-ShellForeground(
   if ([GraphCodeUiaGateState]::IsForegroundWindow($window)) {
     return $true
   }
-  $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+  $startedUtc = [DateTime]::UtcNow
+  $deadline = $startedUtc.AddMilliseconds($TimeoutMilliseconds)
   $acquired = $false
   do {
     Hide-TestProviderZmxWindows
@@ -1539,6 +1822,7 @@ function Ensure-ShellForeground(
   } while (-not $acquired -and [DateTime]::UtcNow -lt $deadline)
   if (-not $acquired) {
     Write-Host "UIA_FOREGROUND_DIAGNOSTICS phase=$label $(Get-FocusDiagnostics $window)"
+    Write-UiaWaitAttribution "foreground: $label" $startedUtc $TimeoutMilliseconds 0 $window
   } else {
     Write-Host "UIA_FOREGROUND_ACQUIRED phase=$label window=$(Format-WindowHandle $window) $([GraphCodeUiaGateState]::LastActivationDiagnostic)"
   }
@@ -4367,6 +4651,7 @@ function Invoke-MultiProjectRenamePhase {
     $selectedOwner = $null,
     [int] $maximumAttempts = 100
   ) {
+    $observationStartedUtc = [DateTime]::UtcNow
     for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
       try { $observation = Get-MultiProjectObservation $surface $selectedOwner }
       catch {
@@ -4384,6 +4669,8 @@ function Invoke-MultiProjectRenamePhase {
       if ($observation.matched) { return $observation }
       Start-Sleep -Milliseconds 100
     }
+    Write-UiaWaitAttribution "multi-project observation: $surface" $observationStartedUtc 0 `
+      $multiProcess.Id $multiWindow ([ordered]@{ attempts = $maximumAttempts })
     $limit = if ($surface -ceq "workspace") { "mandatory owned workspace provider chrome remains unproved" } else { "complete source-supported node/summary roster remains unproved; workspace navigation was not requested" }
     throw "MULTIPROJECT_IDENTITY: requested=$surface exact owner/node/summary roster and requested markers did not converge; $limit`: $($observation | ConvertTo-Json -Depth 6 -Compress)"
   }
@@ -4701,6 +4988,7 @@ try {
   New-Item -ItemType Directory -Path $fixtureProjectPath -ErrorAction Stop | Out-Null
   $logDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "logs")
   New-Item -ItemType Directory -Path $logDirectory -ErrorAction Stop | Out-Null
+  $script:uiaAttributionDirectory = $logDirectory
   Write-Host "UIA_OWNED_SANDBOX=$sandboxPath"
   if ($Zmx) { $env:GRAPHCODE_ZMX = $Zmx }
   $env:GRAPHCODE_GATE_CWD = $fixtureProjectPath
@@ -6249,12 +6537,18 @@ try {
     $removedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $removedHandler
   )
   try {
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.Select()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::SelectedEvents -lt 1; $index++) {
       Start-Sleep -Milliseconds 50
     }
+    $selectedOnTime = [GraphCodeUiaGateState]::SelectedEvents
+    if ($selectedOnTime -ne 1) {
+      Write-UiaLateEventAttribution "ElementSelected after Select" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::SelectedEvents -ge 1 } $process.MainWindowHandle
+    }
     Require (($safeSelection.Current.IsSelected) -and
-             ([GraphCodeUiaGateState]::SelectedEvents -eq 1)) "Select did not raise ElementSelected exactly once"
+             ($selectedOnTime -eq 1)) "Select did not raise ElementSelected exactly once"
     $safeSelection.Select()
     Start-Sleep -Milliseconds 150
     $selectedAfterRepeat = [GraphCodeUiaGateState]::SelectedEvents
@@ -6262,41 +6556,71 @@ try {
     $unsafeRejected = $false
     try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
     Require $unsafeRejected "unsafe SelectionItem.Select was accepted"
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.RemoveFromSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 1; $index++) {
       Start-Sleep -Milliseconds 50
     }
+    $removedOnTime = [GraphCodeUiaGateState]::RemovedEvents
+    if ($removedOnTime -ne 1) {
+      Write-UiaLateEventAttribution "ElementRemovedFromSelection after RemoveFromSelection" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::RemovedEvents -ge 1 } $process.MainWindowHandle
+    }
     $selectionCountAfterRemove = $selection.Current.GetSelection().Count
     Require (($selectionCountAfterRemove -eq 0) -and
-             ([GraphCodeUiaGateState]::RemovedEvents -eq 1)) "RemoveFromSelection did not raise ElementRemovedFromSelection"
+             ($removedOnTime -eq 1)) "RemoveFromSelection did not raise ElementRemovedFromSelection"
     $safeSelection.RemoveFromSelection()
     Start-Sleep -Milliseconds 150
     $removedAfterRepeat = [GraphCodeUiaGateState]::RemovedEvents
     Require ($removedAfterRepeat -eq 1) "idempotent RemoveFromSelection raised a duplicate event"
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.AddToSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::AddedEvents -lt 1; $index++) {
       Start-Sleep -Milliseconds 50
     }
-    Require ([GraphCodeUiaGateState]::AddedEvents -eq 1) "AddToSelection did not raise ElementAddedToSelection"
+    $addedOnTime = [GraphCodeUiaGateState]::AddedEvents
+    if ($addedOnTime -ne 1) {
+      Write-UiaLateEventAttribution "ElementAddedToSelection after AddToSelection" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::AddedEvents -ge 1 } $process.MainWindowHandle
+    }
+    Require ($addedOnTime -eq 1) "AddToSelection did not raise ElementAddedToSelection"
     $safeSelection.AddToSelection()
     Start-Sleep -Milliseconds 150
     $addedAfterRepeat = [GraphCodeUiaGateState]::AddedEvents
     Require ($addedAfterRepeat -eq 1) "idempotent AddToSelection raised a duplicate event"
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.RemoveFromSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 2; $index++) {
       Start-Sleep -Milliseconds 50
     }
-    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 2) "second RemoveFromSelection did not raise an event"
+    $removedOnTime = [GraphCodeUiaGateState]::RemovedEvents
+    if ($removedOnTime -ne 2) {
+      Write-UiaLateEventAttribution "second ElementRemovedFromSelection" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::RemovedEvents -ge 2 } $process.MainWindowHandle
+    }
+    Require ($removedOnTime -eq 2) "second RemoveFromSelection did not raise an event"
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     Require ([GraphCodeUiaGateState]::PostKeyboard($process.MainWindowHandle, 0x28)) "keyboard selection message was rejected"
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::SelectedEvents -lt 2; $index++) {
       Start-Sleep -Milliseconds 50
     }
-    Require ([GraphCodeUiaGateState]::SelectedEvents -eq 2) "App keyboard selection did not raise ElementSelected"
+    $selectedOnTime = [GraphCodeUiaGateState]::SelectedEvents
+    if ($selectedOnTime -ne 2) {
+      Write-UiaLateEventAttribution "ElementSelected after keyboard selection" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::SelectedEvents -ge 2 } $process.MainWindowHandle
+    }
+    Require ($selectedOnTime -eq 2) "App keyboard selection did not raise ElementSelected"
+    $selectionEventStartedUtc = [DateTime]::UtcNow
     Require ([GraphCodeUiaGateState]::PostMouseClick($process.MainWindowHandle)) "mouse selection message was rejected"
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 3; $index++) {
       Start-Sleep -Milliseconds 50
     }
-    Require ([GraphCodeUiaGateState]::RemovedEvents -eq 3) "App mouse selection did not raise ElementRemovedFromSelection"
+    $removedOnTime = [GraphCodeUiaGateState]::RemovedEvents
+    if ($removedOnTime -ne 3) {
+      Write-UiaLateEventAttribution "ElementRemovedFromSelection after mouse selection" $selectionEventStartedUtc 1000 `
+        { [GraphCodeUiaGateState]::RemovedEvents -ge 3 } $process.MainWindowHandle
+    }
+    Require ($removedOnTime -eq 3) "App mouse selection did not raise ElementRemovedFromSelection"
     Require ([GraphCodeUiaGateState]::SelectionSourceAutomationId -eq $safeRowId) "selection event source identity changed"
   } finally {
     [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($selectedEvent, $safeRow, $selectedHandler)
@@ -8601,6 +8925,9 @@ try {
     }
     Require ($null -ne $item) "edge workflow menu lacks enabled $command after republish: $lastMenu; stub=$(Read-UiaTextFile $renameStubResultPath)"
     $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($popup, $renameShellWindow, [int]$item.Position, $command)
+    if ($null -ne $click) {
+      Write-Host "UIA_EDGE_MENU_CLICK command=$command hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter) cursor=$($click.CursorAtX),$($click.CursorAtY) item=$($click.Left),$($click.Top),$($click.Right),$($click.Bottom)"
+    }
     Require ($null -ne $click -and $click.CursorAtX -ge $click.Left -and $click.CursorAtX -lt $click.Right -and
       $click.CursorAtY -ge $click.Top -and $click.CursorAtY -lt $click.Bottom) `
       "edge workflow native menu click missed target $command"
@@ -8627,6 +8954,7 @@ try {
         [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id)),
       (New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty, $title)))
+    $edgeWaitStartedUtc = [DateTime]::UtcNow
     $script:edgeWorkflowWindow = [IntPtr]::Zero
     for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
       $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
@@ -8674,6 +9002,13 @@ try {
       if ($retry -lt 10) { Start-Sleep -Milliseconds 100 }
     }
     Write-Host "UIA_EDGE_MODAL_CENSUS title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$uiaFound waitCommandFallback=$waitCommandFallback"
+    if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
+      Write-UiaWaitAttribution "edge modal: $title" $edgeWaitStartedUtc `
+        (5000 * (1 + [int]$modalCommandFallback + [int]$waitCommandFallback)) `
+        $renameProcess.Id $renameShellWindow ([ordered]@{
+          modalCommandFallback = $modalCommandFallback; waitCommandFallback = $waitCommandFallback
+          popupMenuOpen = ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -ne [IntPtr]::Zero) })
+    }
     Require ($edgeWorkflowWindow -ne [IntPtr]::Zero -and
       [GraphCodeUiaGateState]::WindowIsVisible($edgeWorkflowWindow) -and
       [GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow) -eq $title) `
@@ -9648,6 +9983,7 @@ try {
   }
   function Assert-SketchModal([string] $title) {
     $script:edgeWorkflowTitle = $title
+    $sketchWaitStartedUtc = [DateTime]::UtcNow
     $script:edgeWorkflowWindow = [IntPtr]::Zero
     for ($retry = 0; $retry -lt 100 -and $script:edgeWorkflowWindow -eq [IntPtr]::Zero; $retry++) {
       $script:edgeWorkflowWindow = [GraphCodeUiaGateState]::FindVisibleProcessWindow([uint32]$renameProcess.Id, $title)
@@ -9663,6 +9999,11 @@ try {
             [System.Windows.Automation.AutomationElement]::NameProperty, $title)))))
     }
     Write-Host "UIA_SKETCH_CUSTODY_MODAL title='$title' native=$($script:edgeWorkflowWindow -ne [IntPtr]::Zero) desktopUia=$($null -ne $census) modalCommandFallback=$modalCommandFallback"
+    if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
+      Write-UiaWaitAttribution "sketch/custody modal: $title" $sketchWaitStartedUtc 5000 `
+        $renameProcess.Id $renameShellWindow ([ordered]@{
+          popupMenuOpen = ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -ne [IntPtr]::Zero) })
+    }
     Require ($script:edgeWorkflowWindow -ne [IntPtr]::Zero -and
       [GraphCodeUiaGateState]::WindowProcessId($script:edgeWorkflowWindow) -eq $renameProcess.Id -and
       [GraphCodeUiaGateState]::WindowIsVisible($script:edgeWorkflowWindow) -and
@@ -9920,6 +10261,9 @@ try {
     Require ($item.Count -eq 1) "sketch/custody popup missing enabled ${id}: $(Format-PopupMenuItems $menu.items)"
     $click = [GraphCodeUiaGateState]::ClickPopupMenuItem($menu.popup, $renameShellWindow,
       [int]$item[0].Position, $id)
+    if ($null -ne $click) {
+      Write-Host "UIA_SKETCH_MENU_CLICK command=$id hilite=$($click.Hilite) selectItemFallback=$($click.UsedSelectItemFallback) enterFallback=$($click.UsedKeyboardFallback) hiliteAtEnterFallback=$($click.HiliteAtEnterFallback) hiliteBeforeEnter=$($click.HiliteBeforeEnter)"
+    }
     Require ($null -ne $click -and $click.CursorAtX -ge $click.Left -and
       $click.CursorAtX -lt $click.Right -and $click.CursorAtY -ge $click.Top -and
       $click.CursorAtY -lt $click.Bottom) "sketch/custody physical menu click missed $id"
@@ -9951,7 +10295,7 @@ try {
       (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "5116,5117,5118" -and
       @($subItems | Where-Object { -not $_.Enabled }).Count -eq 0) `
       "sketch '$title' real HMENU submenu differs: $(Format-PopupMenuItems $subItems)"
-    $submenuCommandFallback = $false
+    $submenuKeyboardReveal = $false
     $submenuRevealed = [GraphCodeUiaGateState]::HoverPopupMenuItem(
       $renameShellWindow, $rootHandle, [int]$parent[0].Position)
     $subPopup = [IntPtr]::Zero
@@ -9961,23 +10305,26 @@ try {
         if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
       }
     }
-    if ($subPopup -ne [IntPtr]::Zero) {
-      $subMenu = @{ popup = $subPopup; items = $subItems }
-      $menuClick = Sketch-ClickMenu $subMenu $case.Command
-    } else {
-      Require (Close-PopupMenu $renameProcess $menu.popup $renameShellWindow `
-        "sketch '$title' parent popup before submenu fallback") `
-        "sketch '$title' parent popup could not be dismissed before submenu fallback"
-      $submenuCommandFallback = [GraphCodeUiaGateState]::SendCommand(
-        $renameShellWindow, [uint32]$case.Command)
-      Require $submenuCommandFallback `
-        "sketch '$title' verified submenu command fallback failed"
-      $menuClick = [ordered]@{
-        command = $case.Command
-        submenuRevealed = $submenuRevealed
-        submenuCommandFallback = $submenuCommandFallback
+    if ($subPopup -eq [IntPtr]::Zero) {
+      # Hover did not open the real submenu (injected/posted mouse input is not
+      # delivered reliably on every desktop). Open it with keyboard navigation
+      # of the same native menu; a WM_COMMAND to the shell would be a no-op.
+      $submenuKeyboardReveal = [GraphCodeUiaGateState]::RevealSubmenuByKeyboard(
+        $menu.popup, $rootHandle, [int]$parent[0].Position)
+      Require $submenuKeyboardReveal `
+        "sketch '$title' parent Promote to item could not be selected for keyboard submenu reveal"
+      for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+        $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $subHandle)
+        if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
       }
     }
+    Write-Host "UIA_SKETCH_SUBMENU title='$title' hoverRevealed=$submenuRevealed keyboardReveal=$submenuKeyboardReveal popup=$($subPopup -ne [IntPtr]::Zero)"
+    Require ($subPopup -ne [IntPtr]::Zero) `
+      "sketch '$title' real Promote to submenu popup did not open by hover or keyboard"
+    $subMenu = @{ popup = $subPopup; items = $subItems }
+    $menuClick = Sketch-ClickMenu $subMenu $case.Command
+    $menuClick.submenuRevealed = $submenuRevealed
+    $menuClick.submenuKeyboardReveal = $submenuKeyboardReveal
     $modal = Assert-SketchModal "Promote $title to $($case.Target)"
     $before = Read-SketchStub
     $bytes = Edge-LogBytes
@@ -10417,6 +10764,13 @@ try {
   } | ConvertTo-Json -Depth 8 -Compress
 } catch {
   $gateFailure = $_
+  $failedShell = @($renameProcess, $settingsProcess, $process) | Where-Object {
+    $null -ne $_ -and -not $_.HasExited } | Select-Object -First 1
+  if ($failedShell) {
+    $failureStep = [string]$_.Exception.Message
+    if ($failureStep.Length -gt 240) { $failureStep = $failureStep.Substring(0, 240) }
+    Write-UiaWaitAttribution "gate failure: $failureStep" ([DateTime]::UtcNow) 0 $failedShell.Id
+  }
   if ($sandboxCreated) {
     Write-Host "UIA_FAILED_SANDBOX_RETAINED=$sandboxPath"
   }
