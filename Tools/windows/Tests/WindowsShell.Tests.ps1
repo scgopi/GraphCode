@@ -257,6 +257,11 @@ Assert-Contract ($scrubbedStartupSource -match 'Invoke-Case "registered-project"
   $daemonRoundTripSource -notmatch 'modelCompatibleFrame' -and
   $daemonRoundTripSource -match 'self\.model\.updateFromFrame\(frame\)') `
   "production daemon graph frames must reach the shell model unmodified and render a registered project"
+Assert-Contract ($validationRunnerSource -match
+  '(?s)Scrubbed production shell startup.*?Real daemon wire round trip.*?& pwsh -NoProfile -File.*?DaemonRoundTrip\.Live\.Tests\.ps1.*?Native UI Automation live gate' -and
+  $daemonRoundTripSource -match 'DAEMON_OPEN_CANONICAL' -and
+  $daemonRoundTripSource -match 'eqlIgnoreCase\(&token') `
+  "Windows shell validation must exercise the production daemon wire contract, including canonical open replies"
 $menuTimerBlock = [regex]::Match(
   $appSource,
   '(?s)else if \(wparam == MainWindow\.timer_id\) \{.*?const updated_connection_state'

@@ -56,6 +56,10 @@ const Probe = struct {
     last_kind: Wire.EventKind = .unknown,
     invalid_response: bool = false,
     model_error: bool = false,
+    last_request_id: [36]u8 = undefined,
+    last_request_id_len: usize = 0,
+    last_response_path: [512]u8 = undefined,
+    last_response_path_len: usize = 0,
 
     fn init() Probe {
         return .{ .model = GraphModel.Model.init(allocator) };
@@ -64,9 +68,17 @@ const Probe = struct {
     fn receive(context: ?*anyopaque, frame_ptr: [*]const u8, length: usize) callconv(.c) void {
         const self: *Probe = @ptrCast(@alignCast(context orelse return));
         const frame = frame_ptr[0..length];
-        if (Wire.responseRequestID(frame) != null) {
+        if (Wire.responseRequestID(frame)) |request_id| {
             self.response_count += 1;
             self.last_kind = Wire.eventKind(frame);
+            self.last_request_id_len = @min(request_id.len, self.last_request_id.len);
+            @memcpy(self.last_request_id[0..self.last_request_id_len], request_id[0..self.last_request_id_len]);
+            self.last_response_path_len = 0;
+            if (Wire.copyGraphChangedProjectPath(std.heap.page_allocator, frame) catch null) |path| {
+                defer std.heap.page_allocator.free(path);
+                self.last_response_path_len = @min(path.len, self.last_response_path.len);
+                @memcpy(self.last_response_path[0..self.last_response_path_len], path[0..self.last_response_path_len]);
+            }
             const parsed = std.json.parseFromSlice(
                 std.json.Value,
                 std.heap.page_allocator,
@@ -141,11 +153,18 @@ fn connectProject(client: *DaemonClient, probe: *Probe, path: []const u8) !void 
     }
 
     const before = probe.response_count;
-    if (client.sendOpenProject(path) == null) return error.OpenProjectQueueRejected;
+    const token = client.sendOpenProject(path) orelse return error.OpenProjectQueueRejected;
     try waitForAcceptedResponse(client, probe, before);
     try std.testing.expect(!probe.model_error);
     const canonical_path = try std.mem.replaceOwned(u8, allocator, path, "\\", "/");
     defer allocator.free(canonical_path);
+    // The shell's folder open sends the picker's backslash spelling; the daemon
+    // answers that exact request with its canonical forward-slash spelling.
+    try std.testing.expect(std.mem.indexOfScalar(u8, path, '\\') != null);
+    try std.testing.expect(std.ascii.eqlIgnoreCase(&token, probe.last_request_id[0..probe.last_request_id_len]));
+    try std.testing.expectEqualStrings(canonical_path, probe.last_response_path[0..probe.last_response_path_len]);
+    try std.testing.expect(!std.mem.eql(u8, path, canonical_path));
+    std.debug.print("DAEMON_OPEN_CANONICAL: request correlated; picker spelling differs from daemon canonical path\n", .{});
     try std.testing.expectEqualStrings(canonical_path, probe.model.currentGraph().?.project.path);
     const expected_name = std.fs.path.basename(canonical_path);
     try std.testing.expect(expected_name.len != 0);
