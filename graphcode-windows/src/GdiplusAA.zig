@@ -66,19 +66,68 @@ extern "gdiplus" fn GdipFillPath(graphics: *GpGraphics, brush: *GpBrush, path: *
 extern "gdiplus" fn GdipCreateSolidFill(color: u32, brush: **GpBrush) callconv(.winapi) GpStatus;
 extern "gdiplus" fn GdipDeleteBrush(brush: *GpBrush) callconv(.winapi) GpStatus;
 
+var startup_mutex: std.Thread.Mutex = .{};
 var startup_token: usize = 0;
 var available: bool = false;
 var start_attempted: bool = false;
+var shutdown_requested: bool = false;
 
-/// Attempts to start GDI+ once for the process lifetime. Safe to call
-/// repeatedly (a no-op after the first call). All draw functions below
-/// check `available` and gracefully return false (do nothing) if this
-/// never succeeded, so callers must keep their plain-GDI fallback.
+const SystemStartup = struct {
+    pub fn run() ?usize {
+        var token: usize = 0;
+        var input = GdiplusStartupInput{};
+        if (GdiplusStartup(&token, &input, null) != Ok) return null;
+        return token;
+    }
+};
+
+/// Starts optional GDI+ initialization away from the UI thread. Until the
+/// worker succeeds, every draw call returns false and the caller uses plain GDI.
 pub fn init() void {
-    if (start_attempted) return;
+    initWith(SystemStartup);
+}
+
+pub fn initWith(comptime Startup: type) void {
+    startup_mutex.lock();
+    if (start_attempted or shutdown_requested) {
+        startup_mutex.unlock();
+        return;
+    }
     start_attempted = true;
-    var input = GdiplusStartupInput{};
-    available = GdiplusStartup(&startup_token, &input, null) == Ok;
+    startup_mutex.unlock();
+
+    const Worker = struct {
+        fn run() void {
+            const token = Startup.run() orelse return;
+            startup_mutex.lock();
+            if (shutdown_requested) {
+                startup_mutex.unlock();
+                GdiplusShutdown(token);
+                return;
+            }
+            startup_token = token;
+            available = true;
+            startup_mutex.unlock();
+        }
+    };
+    var worker = std.Thread.spawn(.{}, Worker.run, .{}) catch return;
+    worker.detach();
+}
+
+/// Prevents new GDI+ sessions and releases a completed process-global startup.
+/// A worker still blocked inside Windows remains detached and cannot delay exit.
+pub fn deinit() void {
+    startup_mutex.lock();
+    shutdown_requested = true;
+    if (!available) {
+        startup_mutex.unlock();
+        return;
+    }
+    available = false;
+    const token = startup_token;
+    startup_token = 0;
+    startup_mutex.unlock();
+    GdiplusShutdown(token);
 }
 
 fn colorrefToArgb(colorref: u32) u32 {
@@ -94,16 +143,25 @@ const Session = struct {
 };
 
 fn beginSession(hdc: c.HDC, colorref: u32, width: f32) ?Session {
-    if (!available) return null;
+    startup_mutex.lock();
+    if (!available) {
+        startup_mutex.unlock();
+        return null;
+    }
     var graphics: *GpGraphics = undefined;
-    if (GdipCreateFromHDC(hdc, &graphics) != Ok) return null;
+    if (GdipCreateFromHDC(hdc, &graphics) != Ok) {
+        startup_mutex.unlock();
+        return null;
+    }
     if (GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias) != Ok) {
         _ = GdipDeleteGraphics(graphics);
+        startup_mutex.unlock();
         return null;
     }
     var pen: *GpPen = undefined;
     if (GdipCreatePen1(colorrefToArgb(colorref), width, UnitPixel, &pen) != Ok) {
         _ = GdipDeleteGraphics(graphics);
+        startup_mutex.unlock();
         return null;
     }
     return .{ .graphics = graphics, .pen = pen };
@@ -112,6 +170,7 @@ fn beginSession(hdc: c.HDC, colorref: u32, width: f32) ?Session {
 fn endSession(session: Session) void {
     _ = GdipDeletePen(session.pen);
     _ = GdipDeleteGraphics(session.graphics);
+    startup_mutex.unlock();
 }
 
 /// Draws an anti-aliased straight line. Returns false (drawing nothing)
@@ -174,6 +233,8 @@ pub fn drawRoundedRect(
     border_colorref: u32,
     border_width: f32,
 ) bool {
+    startup_mutex.lock();
+    defer startup_mutex.unlock();
     if (!available) return false;
     var graphics: *GpGraphics = undefined;
     if (GdipCreateFromHDC(hdc, &graphics) != Ok) return false;
