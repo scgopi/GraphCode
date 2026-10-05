@@ -4582,6 +4582,11 @@ function Invoke-MultiProjectRenamePhase {
     Invoke-MultiProjectControl "overview-destination"
     $finalOverview = Wait-MultiProjectObservation "overview"
     Write-MultiProjectPeerReceipt (Read-DaemonCommandLog $peerPath) $afterUnchanged
+    $multiRoot = $null
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    [GC]::Collect()
+    Write-Host "UIA_MULTIPROJECT_PROVIDER_REFERENCES=released_before_exit"
     Require ([GraphCodeUiaGateState]::PostCommand($multiWindow, 0x5002)) "multi-project shell rejected Exit"
     Require ($multiProcess.WaitForExit(5000) -and $multiProcess.ExitCode -eq 0) "multi-project owned shell did not exit cleanly"
     return [ordered]@{
