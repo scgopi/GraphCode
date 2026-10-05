@@ -10,9 +10,112 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-### 2026-10-05 replacement Windows candidate
+### 2026-10-05 replacement Windows candidate (beta7)
 
 The current replacement candidate is
+`e770438af6214267c9d8f7a0de3d4e51bdbd325f`, the merge commit for
+[#631](https://github.com/scgopi/GraphCode/pull/631), with parents
+`8ffa38e5439f53e3a1a6a2a50dce9f8c86e67ab2` and
+`261f7a4d227c08f183c2a1e85043de562d7de242`. It replaces
+`0.1.78-windows.beta6`, which is failed/superseded and immutable. The attended
+beta6 Dev Box passed scrubbed startup and the native folder picker; the CLI
+listed the registered Core fixture, but the shell never showed it.
+
+[#630](https://github.com/scgopi/GraphCode/pull/630) (`8ffa38e5`) fixes the
+root cause.
+
+- The production daemon encodes `graphChanged` as `{"_0":<graph>}`. The shell
+  decoded the wrapper itself, so every real project arrived with an empty path,
+  name and node list.
+- Painting the empty name passed a zero-length undefined pointer to
+  `DrawTextW`, so USER32 faulted and the shell exited with `0xC000041D`.
+- Local cdb attribution placed the fault at `Sidebar.drawText` ← `Sidebar.draw`
+  ← `WM_PAINT`.
+- The beta3 crash after accepting a folder carries the same USER32 signature,
+  so it was most likely this defect rather than the folder-picker timing
+  addressed by #619/#624.
+
+What #630 changed:
+
+- The shell unwraps the associated value, and every `DrawTextW` helper skips
+  empty text.
+- The real-daemon round-trip test no longer normalizes frames before the model
+  sees them.
+- The scrubbed startup gate adds a fifth `registered-project` case. It registers
+  a plain folder through the production daemon and requires the UIA project row
+  to appear and the shell to stay alive.
+
+#630 regression evidence:
+
+- The `registered-project` case was RED against the beta6 package and GREEN
+  against the fix.
+- The real-daemon round trip was RED with the decoder fix reverted and GREEN
+  with it.
+- Exact-head CI run `37351425076` passed Windows shell integration, unit shards
+  and packaging.
+
+[#631](https://github.com/scgopi/GraphCode/pull/631) changes only the UIA live
+gate harness, with no product code.
+
+The local annotated tag/version `0.1.78-windows.beta7` has tag object
+`2944098ea844e26602eff23d5461a52f136b4f80` and peels exactly to the source.
+`origin/main` equalled the candidate at tag creation. It is local, unpushed,
+and unpublished; no remote `windows` tag or release exists.
+
+The unsigned ZIP is **48,220,157 bytes**, SHA-256
+`f2489ceafa622add2d602ee1c9806bf97525699a2926ee84fcefdc42db3cedb1`,
+with **50 files** and payload-manifest SHA-256
+`d207006e826825b6c51706e5e0df647eba33b19cabb9684d3e66f03a44eabf86`.
+Repository and extracted setup verification each reported exactly one PASS.
+Metadata records release-candidate/tag provenance, `UNSIGNED (not code signed)`
+and `previewFeatures.worktreesDeferred=true`. The packaged binary reports
+version `0.1.78-windows.beta7` and Worktrees state `deferred`.
+
+Executable SHA-256 values:
+
+- shell `455a99f4bff2dcceff7c9e10bd5e276d3e428a99fc8d0d224fb2f647ba3c34a7`
+- daemon `2eb05ba35c09e28fb5eed911cef27f3487553b0e5126d2ad254db524d0b4029c`
+- CLI `2e3d58081f6fb201ec7f78300776b9bd05f0ce91791397eb3ec308aa2d49ba1d`
+- zmx `b9818667ec2e694bd73555129bb85dca5c5ace1d6c055d56c292c54dda87595a`
+
+Comparison with beta6:
+
+- The ZIP, payload manifest and shell differ from beta6.
+- The daemon and CLI are byte-identical to beta6; no Swift source changed.
+- zmx was rebuilt from the same pinned commit
+  `785b3fd15dcafd1882b495c831a10f98c201b908`. Its source and package hashes
+  match, but its bytes differ from beta6 at identical size. This is a
+  non-reproducible provider build, not a provider change.
+
+Winghostty and the pinned Swift/Zig executables are unchanged.
+
+The packaged beta7 binaries passed the scrubbed startup gate
+**5/5** locally, with developer-tool paths excluded. In the
+`registered-project` case the Core row was visible, the shell stayed alive and
+no fatal log was written. This is local evidence only; it does not claim the
+attended native-client result.
+
+The LFS-aware custody ZIP SHA-256 is
+`925bb9b0503094be100844459964d900babc22288ff070e6068f33e970f361c3`.
+Create and Verify passed. The included `Restore-GraphCodeSource.ps1` restored
+under file-only Git protocols with exact detached HEAD/tag, zero remotes, clean
+status, and **43 objects / 43 tracked files / 43 materialized files**.
+
+The versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta7` has an
+eight-entry inventory whose `hashes.sha256` SHA-256 is
+`ab18a3e5b7fb8d8cc9dfa5f396d0fc7d1b83b194e10f0a7f172e4aa0374f82cb`; all
+**8/8** entries verified. Its Dev Box plan is byte-identical to beta6's. Its
+README-FIRST requires the attended folder-picker step to show the Core row
+before backend or destructive work.
+
+Open PR audit at freeze time found the same #587, #274, #263, #207 and #110
+as for beta6; none is a required Windows preview fix. Generic `0.1.78-beta1`
+through beta5 and `v0.1.78` releases were inventoried and not mutated. Nod
+remained out of scope.
+
+### Historical beta6 candidate
+
+The superseded beta6 candidate is
 `a0a1a3e83ac6bd54963e25fd5f68df40206fada7`, the merge commit for
 [#628](https://github.com/scgopi/GraphCode/pull/628), with parents
 `1c4fdef9b366dda38328b09e9a9618ee66dded5d` and
@@ -32,9 +135,11 @@ regression retained the beta5 RED result of **80** observations with a live
 process and no window, then passed after the fix with a native window in
 **2** observations. Exact-head CI run `37268447090` passed Windows shell
 integration, all three unit shards, packaging, hardening and Swift. The
-packaged beta6 shell passed all four scrubbed cases locally. A new attended
-Dev Box startup and Ctrl+O rerun are still required; this source/CI evidence
-does not claim that native-client result.
+packaged beta6 shell passed all four scrubbed cases locally. The attended
+Dev Box rerun then passed startup and the native folder picker but failed
+Production core flow: the registered Core project never appeared in the shell.
+That failure is attributed above and fixed by #630; beta6 evidence is retained
+unchanged.
 
 The local annotated tag/version `0.1.78-windows.beta6` has tag object
 `9724633ac537977ef8b8fb25f06adefa5122b0c8` and peels exactly to the source.
@@ -630,14 +735,14 @@ lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
 - [x] **Exact artifact:** candidate source
-  `a0a1a3e83ac6bd54963e25fd5f68df40206fada7`, version/tag
-  `0.1.78-windows.beta6`, annotated tag object
-  `9724633ac537977ef8b8fb25f06adefa5122b0c8`, package SHA-256
-  `5b51a62b0097e3a5f9521bb285add3b21fb9bb79693317091b314809ebe3c982`,
+  `e770438af6214267c9d8f7a0de3d4e51bdbd325f`, version/tag
+  `0.1.78-windows.beta7`, annotated tag object
+  `2944098ea844e26602eff23d5461a52f136b4f80`, package SHA-256
+  `f2489ceafa622add2d602ee1c9806bf97525699a2926ee84fcefdc42db3cedb1`,
   50-file payload manifest SHA-256
-  `5f3d3b897f6137ee3902fac625bba070276c6df77beeb29faf8f1b072181fc83`,
+  `d207006e826825b6c51706e5e0df647eba33b19cabb9684d3e66f03a44eabf86`,
   and provider provenance are recorded in
-  `GraphCode-DevBox-Handoff-0.1.78-windows.beta6`. Tag/source match. The
+  `GraphCode-DevBox-Handoff-0.1.78-windows.beta7`. Tag/source match. The
   repository ZIP verifier and extracted standalone setup each reported exactly
   one PASS; the
   package explicitly declares `UNSIGNED (not code signed)`, records
@@ -692,7 +797,7 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-The **Exact artifact** gate is complete for `0.1.78-windows.beta6`. The other **six** gates
+The **Exact artifact** gate is complete for `0.1.78-windows.beta7`. The other **six** gates
 remain open and require evidence that source, hosted CI, and hidden-window
 tests cannot manufacture:
 
@@ -714,17 +819,17 @@ is manual-dispatch only, checks out an **existing tag**, and defaults
 and produces `graphcode-windows-x86_64.zip` plus its `.sha256` sidecar.
 Checksums detect corruption; they do not authenticate the publisher.
 
-The completed local exact-artifact record is the unpublished Windows beta6
-candidate: source/tag `a0a1a3e83ac6bd54963e25fd5f68df40206fada7` /
-`0.1.78-windows.beta6`, ZIP SHA-256
-`5b51a62b0097e3a5f9521bb285add3b21fb9bb79693317091b314809ebe3c982`,
+The completed local exact-artifact record is the unpublished Windows beta7
+candidate: source/tag `e770438af6214267c9d8f7a0de3d4e51bdbd325f` /
+`0.1.78-windows.beta7`, ZIP SHA-256
+`f2489ceafa622add2d602ee1c9806bf97525699a2926ee84fcefdc42db3cedb1`,
 source-custody ZIP SHA-256
-`3b80a924ce9290bbca67f8c7766996d9deb064178d7dcb3f602c314e01a113a1`,
-and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta6`. The tag
+`925bb9b0503094be100844459964d900babc22288ff070e6068f33e970f361c3`,
+and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta7`. The tag
 is local and unpushed, there is no matching release, and publication is false.
 README-FIRST requires restoration through the included
 `Restore-GraphCodeSource.ps1`; it forbids GitHub cloning and bare-bundle
-cloning for this custody path. The superseded beta1 through beta5 tags, ZIPs, handoffs and retained
+cloning for this custody path. The superseded beta1 through beta6 tags, ZIPs, handoffs and retained
 failure evidence remain immutable; do not transfer or qualify them and do not
 delete or rewrite their records. The local Windows
 beta1 tag object remains retained unchanged, but its `0.1.78-beta1` name is
@@ -764,7 +869,7 @@ execute either side without relying on hidden session state:
   runs the production/native/backend/lifecycle evidence on a new corporate
   Dev Box, cleans up and returns a hashed evidence bundle. It never publishes.
 
-For `0.1.78-windows.beta6`, the versioned handoff binds the exact candidate source/tag, ZIP,
+For `0.1.78-windows.beta7`, the versioned handoff binds the exact candidate source/tag, ZIP,
 source-custody ZIP, provider/toolchain identities, Approval A, and the exact
 candidate Dev Box plan whose SHA-256 is
 `7693ff32e8b76ed99ed5094e8e2c7f3012c72d827b3eb6a374c7a812b8d7a1b6`.
@@ -810,10 +915,10 @@ The bounded source/tooling queue is complete. Remaining work is bottom-up and
 permission-bound; it should not start with another parity-row sweep:
 
 1. **Installed production-core and onboarding qualification - #556:** the
-   exact source-bound Windows beta6 candidate
-   `a0a1a3e83ac6bd54963e25fd5f68df40206fada7` was built through
+   exact source-bound Windows beta7 candidate
+   `e770438af6214267c9d8f7a0de3d4e51bdbd325f` was built through
    [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route with
-   the #604 release-candidate guard and includes #624, #626 and #628. Its independently reverified
+   the #604 release-candidate guard and includes #624, #626, #628 and #630. Its independently reverified
    LFS-aware custody ZIP and versioned handoff now exist; transfer and Dev Box
    execution are still NotExecuted. After authorization, use the included
    restore script and the exact candidate Dev Box plan to run
@@ -834,7 +939,7 @@ permission-bound; it should not start with another parity-row sweep:
    future dump-backed diagnosis requires separate authorization and a new
    candidate if product code changes.
 3. **Keep the release gates honest:** **Exact artifact** is complete for
-   `0.1.78-windows.beta6`;
+   `0.1.78-windows.beta7`;
    the other **six** gates remain open. The installed production-core result,
    native input and destructive fixture permission, named authenticated backend
    authorization, handoff transfer and execution, Approval B, and publication
