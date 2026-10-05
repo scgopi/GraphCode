@@ -292,7 +292,9 @@ Assert-Contract ($appSource -match 'SetMapMode\(hdc, c\.MM_ANISOTROPIC\)' -and
   "custom main-window painting, input, and child layout must share one DPI-scaled coordinate system"
 Assert-Contract ($appSource -match
   'const uia_gate_hook = envFlag\("GRAPHCODE_UIA_GATE"\);' -and
-  $appSource -match 'if \(!daemon_supervisor_test_hook and !uia_gate_hook\) GdiplusAA\.init\(\);') `
+  $appSource -match 'const use_gdiplus = !daemon_supervisor_test_hook and !uia_gate_hook;' -and
+  $appSource -match 'if \(use_gdiplus\) GdiplusAA\.init\(\);' -and
+  $appSource -match 'defer if \(use_gdiplus\) GdiplusAA\.deinit\(\);') `
   "GDI+ helper-window startup must remain outside daemon-handoff and UIA automation hooks"
 Assert-Contract ($appSource -match
   '(?s)app\.smoke_tick >= 16 and\s*app\.client\.connectionState\(\) == \.connected and\s*app\.currentProject\(\) != null and app\.model\.selected\(\) != null and\s*!app\.smoke_action_requested') `
@@ -717,6 +719,15 @@ Invoke-Native "Onboarding executable tests" {
     & $zig test src\WindowsOnboarding.zig -target x86_64-windows-msvc `
       -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
+}
+Invoke-Native "GDI+ asynchronous startup live test" {
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    throw "GRAPHCODE_WINGHOSTTY_ROOT is required for the GDI+ startup live test"
+  }
+  & (Join-Path $PSScriptRoot "GdiplusStartup.Live.Tests.ps1") `
+    -ZigExecutable $zig `
+    -WinghosttyRoot $winghosttyRoot
 }
 Invoke-Native "Product Settings executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent

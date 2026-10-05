@@ -1299,7 +1299,9 @@ pub const App = struct {
         // and UIA live tests depend on deterministic top-level window and
         // foreground behavior, so keep that visual-only subsystem disabled
         // for both explicit automation hooks.
-        if (!daemon_supervisor_test_hook and !uia_gate_hook) GdiplusAA.init();
+        const use_gdiplus = !daemon_supervisor_test_hook and !uia_gate_hook;
+        if (use_gdiplus) GdiplusAA.init();
+        defer if (use_gdiplus) GdiplusAA.deinit();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.window.key_callback = &onShellKey;
         try self.revalidateWorkspaceIdentity();
