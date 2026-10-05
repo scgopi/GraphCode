@@ -1181,7 +1181,8 @@ function Invoke-Task([string] $name) {
           -Stress
       }
       Invoke-Native "Scrubbed production shell startup" {
-        & (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") `
+        & pwsh -NoProfile -File `
+          (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") `
           -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `
           -Daemon (Join-Path $daemonRuntime "graphcoded.exe") `
           -Cli (Join-Path $daemonRuntime "graphcode.exe") `

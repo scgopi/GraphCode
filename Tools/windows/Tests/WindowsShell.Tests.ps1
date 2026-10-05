@@ -224,6 +224,9 @@ $allowedKeysBlock = [regex]::Match(
 Assert-Contract ($validationRunnerSource -match
   '(?s)Pinned GraphCode Windows shell build and smoke.*?Scrubbed production shell startup.*?ScrubbedShellStartup\.Live\.Tests\.ps1.*?Native UI Automation live gate') `
   "Windows shell validation must run the scrubbed production startup gate before UIA"
+Assert-Contract ($validationRunnerSource -match
+  '(?s)Scrubbed production shell startup.*?& pwsh -NoProfile -File.*?ScrubbedShellStartup\.Live\.Tests\.ps1') `
+  "scrubbed production startup must run in an isolated PowerShell process before UIA"
 Assert-Contract $allowedKeysBlock.Success `
   "scrubbed production startup gate must declare an explicit environment allowlist"
 $actualAllowedKeys = @(
