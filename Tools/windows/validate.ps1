@@ -1180,6 +1180,13 @@ function Invoke-Task([string] $name) {
           -SkipTrayLive:$SkipTrayLive `
           -Stress
       }
+      Invoke-Native "Scrubbed production shell startup" {
+        & (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") `
+          -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `
+          -Daemon (Join-Path $daemonRuntime "graphcoded.exe") `
+          -Cli (Join-Path $daemonRuntime "graphcode.exe") `
+          -ScratchRoot (Join-Path $env:TEMP "scrubbed-shell-startup")
+      }
       & (Join-Path $repoRoot "Tools\windows\Tests\TrayDaemon.Tests.ps1") `
         -Executable (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe")
       if ($LASTEXITCODE -ne 0) {

@@ -214,6 +214,38 @@ $traySource = Get-Content (Join-Path $shellRoot "src\Tray.zig") -Raw
 $win32Source = Get-Content (Join-Path $shellRoot "src\Win32.zig") -Raw
 $inputSource = Get-Content (Join-Path $shellRoot "src\InputRouter.zig") -Raw
 $stubSource = Get-Content (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1") -Raw
+$validationRunnerSource = Get-Content (Join-Path $repoRoot "Tools\windows\validate.ps1") -Raw
+$scrubbedStartupSource = Get-Content `
+  (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") -Raw
+$allowedKeysBlock = [regex]::Match(
+  $scrubbedStartupSource,
+  '(?s)\$allowedKeys\s*=\s*@\((.*?)\)'
+)
+Assert-Contract ($validationRunnerSource -match
+  '(?s)Pinned GraphCode Windows shell build and smoke.*?Scrubbed production shell startup.*?ScrubbedShellStartup\.Live\.Tests\.ps1.*?Native UI Automation live gate') `
+  "Windows shell validation must run the scrubbed production startup gate before UIA"
+Assert-Contract $allowedKeysBlock.Success `
+  "scrubbed production startup gate must declare an explicit environment allowlist"
+$actualAllowedKeys = @(
+  [regex]::Matches($allowedKeysBlock.Groups[1].Value, '"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Sort-Object
+)
+$expectedAllowedKeys = @(
+  "APPDATA", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "PATH", "ProgramData",
+  "SystemRoot", "TEMP", "TMP", "USERPROFILE", "windir"
+) | Sort-Object
+Assert-Contract (($actualAllowedKeys -join "|") -ceq ($expectedAllowedKeys -join "|")) `
+  "scrubbed production startup gate must preserve the proven explicit environment allowlist"
+Assert-Contract ($actualAllowedKeys -notcontains "USERNAME" -and
+  $actualAllowedKeys -notcontains "USER" -and
+  $scrubbedStartupSource -match 'developerToolsExcluded=true' -and
+  $scrubbedStartupSource -match 'first-run-escape' -and
+  $scrubbedStartupSource -match 'first-run-skip' -and
+  $scrubbedStartupSource -match 'first-run-complete' -and
+  $scrubbedStartupSource -match 'onboarding-marker' -and
+  $scrubbedStartupSource -match 'event=fatal') `
+  "scrubbed production startup gate must preserve the developer-free onboarding contract"
 $menuTimerBlock = [regex]::Match(
   $appSource,
   '(?s)else if \(wparam == MainWindow\.timer_id\) \{.*?const updated_connection_state'
