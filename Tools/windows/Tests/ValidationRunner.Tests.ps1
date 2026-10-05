@@ -3454,6 +3454,30 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '(?s)canvasContextMenu = \$canvasContextMenuEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary loses nested canvas menu items and edge action measurements"
   }
+  # Enter with no hilited item ends TrackPopupMenu with command 0, so a closed
+  # popup is not proof of selection; the Enter fallback must re-select and
+  # prove the intended item's hilite first.
+  if ($uiaLiveGateSource -notmatch '(?s)for \(int attempt = 0; attempt < 20 && IsWindowVisible\(popup\); attempt\+\+\) Sleep\(10\);.*?hiliteAtEnterFallback = \(GetMenuState\(menu, \(uint\)position, 0x0400\) & 0x0080\) != 0;\s*SendMessage\(popup, 0x01E5, \(UIntPtr\)position, IntPtr\.Zero\);\s*hiliteBeforeEnter = \(GetMenuState\(menu, \(uint\)position, 0x0400\) & 0x0080\) != 0;.*?if \(!hiliteBeforeEnter\)\s*throw new InvalidOperationException.*?PostMessage\(popup, 0x0100, \(UIntPtr\)0x0D, IntPtr\.Zero\)' -or
+      $uiaLiveGateSource -notmatch 'public bool HiliteAtEnterFallback, HiliteBeforeEnter;' -or
+      $uiaLiveGateSource -notmatch 'UIA_EDGE_MENU_CLICK command=\$command .*?hiliteBeforeEnter=\$\(\$click\.HiliteBeforeEnter\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_SKETCH_MENU_CLICK command=\$id .*?hiliteBeforeEnter=\$\(\$click\.HiliteBeforeEnter\)') {
+    throw "RED: UIA popup Enter fallback can close the menu without choosing the intended item"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Write-UiaWaitAttribution' -or
+      $uiaLiveGateSource -notmatch 'UIA_WAIT_TIMEOUT_ATTRIBUTION=' -or
+      $uiaLiveGateSource -notmatch 'PrintWindow\(\$window, \$hdc, 2\)' -or
+      $uiaLiveGateSource -notmatch '(?s)function Get-FocusDiagnostics.*?\$foregroundTitle = if \(\$expectedProcessId -ne 0 -and \$foregroundProcessId -eq \$expectedProcessId\)' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "popup menu: \$label"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "desktop element: \$label"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "desktop element gone: \$label"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "foreground: \$label"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "edge modal: \$title"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "sketch/custody modal: \$title"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "multi-project observation: \$surface"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "gate failure: \$failureStep"' -or
+      $uiaLiveGateSource -notmatch 'Write-UiaLateEventAttribution "ElementSelected after Select"') {
+    throw "RED: UIA wait timeouts are not attributed to step, deadline, foreground owner, shell windows, and a shell-only capture"
+  }
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
       $stubDaemonSource -notmatch 'appliedCreates' -or
       $stubDaemonSource -notmatch '\$nodeLoopTypes\[\$id\]' -or
@@ -3496,7 +3520,10 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
-      $uiaLiveGateSource -notmatch 'submenuCommandFallback' -or
+      $uiaLiveGateSource -notmatch 'public static bool RevealSubmenuByKeyboard\(IntPtr popup, IntPtr menu, int position\)' -or
+      $uiaLiveGateSource -notmatch '\$submenuKeyboardReveal = \[GraphCodeUiaGateState\]::RevealSubmenuByKeyboard\(' -or
+      $uiaLiveGateSource -notmatch 'real Promote to submenu popup did not open by hover or keyboard' -or
+      $uiaLiveGateSource -match 'SendCommand\(\s*\$renameShellWindow, \[uint32\]\$case\.Command\)' -or
       $uiaLiveGateSource -notmatch 'modalCommandFallback' -or
       $uiaLiveGateSource -notmatch 'function Stop-UiaOwnedProviderProcesses' -or
       $uiaLiveGateSource -notmatch 'UIA_PROVIDER_PROCESS_CLEANUP=' -or
