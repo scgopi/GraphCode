@@ -96,6 +96,15 @@ function Wait-NativeWindowClosed([int] $processId, [string] $className, [int] $s
   return $false
 }
 
+function Wait-File([string] $path, [int] $seconds) {
+  $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+  do {
+    if (Test-Path -LiteralPath $path -PathType Leaf) { return $true }
+    Start-Sleep -Milliseconds 50
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $false
+}
+
 function Invoke-Case(
   [string] $name,
   [ValidateSet("escape", "skip", "complete", "marker")]
@@ -169,7 +178,7 @@ function Invoke-Case(
       throw "$name did not retain live shell/daemon after onboarding"
     }
     $markerPath = Join-Path $support "onboarding-seen"
-    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+    if (-not (Wait-File $markerPath 10)) {
       throw "$name did not persist the onboarding marker"
     }
     $logPath = Join-Path $support "graphcode-windows.log"
