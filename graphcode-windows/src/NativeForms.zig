@@ -1392,6 +1392,7 @@ fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT
 fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.selectForDpi(hdc, size, bold);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);

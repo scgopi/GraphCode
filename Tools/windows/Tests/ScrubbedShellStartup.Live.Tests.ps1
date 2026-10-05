@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -105,9 +106,57 @@ function Wait-File([string] $path, [int] $seconds) {
   return $false
 }
 
+function Invoke-ScrubbedCli([string] $name, [string] $root, [string] $support, [string[]] $arguments) {
+  $cliInfo = New-StartInfo $Cli $root
+  $cliInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
+  foreach ($argument in $arguments) { [void]$cliInfo.ArgumentList.Add($argument) }
+  $cliInfo.RedirectStandardOutput = $true
+  $cliInfo.RedirectStandardError = $true
+  $cliProcess = [Diagnostics.Process]::new()
+  $cliProcess.StartInfo = $cliInfo
+  try {
+    if (-not $cliProcess.Start()) { throw "$name CLI '$($arguments[0])' could not start" }
+    $stdout = $cliProcess.StandardOutput.ReadToEndAsync()
+    $stderr = $cliProcess.StandardError.ReadToEndAsync()
+    if (-not $cliProcess.WaitForExit(10000)) { throw "$name CLI '$($arguments[0])' timed out" }
+    return [pscustomobject]@{
+      ExitCode = $cliProcess.ExitCode
+      Output = $stdout.GetAwaiter().GetResult()
+      Error = $stderr.GetAwaiter().GetResult()
+    }
+  } finally {
+    if (-not $cliProcess.HasExited) { $cliProcess.Kill() }
+    $cliProcess.Dispose()
+  }
+}
+
+function Wait-ProjectRow([int] $processId, [string] $projectName, [int] $seconds) {
+  $processCondition = [Windows.Automation.PropertyCondition]::new(
+    [Windows.Automation.AutomationElement]::ProcessIdProperty, $processId)
+  $rowCondition = [Windows.Automation.AndCondition]::new(
+    [Windows.Automation.PropertyCondition]::new(
+      [Windows.Automation.AutomationElement]::ControlTypeProperty,
+      [Windows.Automation.ControlType]::ListItem),
+    [Windows.Automation.PropertyCondition]::new(
+      [Windows.Automation.AutomationElement]::NameProperty, $projectName))
+  $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+  do {
+    $window = [Windows.Automation.AutomationElement]::RootElement.FindFirst(
+      [Windows.Automation.TreeScope]::Children, $processCondition)
+    if ($window) {
+      $row = $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $rowCondition)
+      if ($row -and $row.Current.AutomationId.StartsWith("open-project-", [StringComparison]::Ordinal)) {
+        return $row.Current.AutomationId
+      }
+    }
+    Start-Sleep -Milliseconds 200
+  } while ([DateTime]::UtcNow -lt $deadline)
+  return $null
+}
+
 function Invoke-Case(
   [string] $name,
-  [ValidateSet("escape", "skip", "complete", "marker")]
+  [ValidateSet("escape", "skip", "complete", "marker", "project")]
   [string] $action
 ) {
   $root = Join-Path $ScratchRoot $name
@@ -116,8 +165,15 @@ function Invoke-Case(
   New-Item -ItemType Directory -Force -Path `
     $support,(Join-Path $profile "AppData\Local"),(Join-Path $profile "AppData\Roaming"),(Join-Path $root "temp") |
     Out-Null
-  if ($action -eq "marker") {
+  if ($action -in @("marker", "project")) {
     Set-Content -LiteralPath (Join-Path $support "onboarding-seen") -Value "seen" -NoNewline
+  }
+  # A plain folder, not a Git repository: startup must not need Git on PATH.
+  $projectPath = Join-Path $root "Core"
+  $projectRow = $null
+  if ($action -eq "project") {
+    New-Item -ItemType Directory -Force -Path $projectPath | Out-Null
+    Set-Content -LiteralPath (Join-Path $projectPath "README.md") -Value "fixture" -NoNewline
   }
 
   $daemonProcess = [Diagnostics.Process]::new()
@@ -127,9 +183,19 @@ function Invoke-Case(
   $shellProcess = [Diagnostics.Process]::new()
   $shellProcess.StartInfo = New-StartInfo $Shell $root
   try {
-    if (-not $daemonProcess.Start() -or -not $shellProcess.Start()) {
-      throw "$name could not start production processes"
+    if (-not $daemonProcess.Start()) { throw "$name could not start the production daemon" }
+    if ($action -eq "project") {
+      # Register through the production daemon before the shell starts, as the
+      # native folder picker does, so the shell restores a real daemon graph.
+      $deadline = [DateTime]::UtcNow.AddSeconds(15)
+      do {
+        $status = Invoke-ScrubbedCli $name $root $support @("status", $projectPath)
+        if ($status.ExitCode -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+      } while ([DateTime]::UtcNow -lt $deadline)
+      if ($status.ExitCode -ne 0) { throw "$name could not register the project: $($status.Error)" }
     }
+    if (-not $shellProcess.Start()) { throw "$name could not start the production shell" }
     [void]$daemonProcess.Handle
     [void]$shellProcess.Handle
     $keys = @($shellProcess.StartInfo.Environment.Keys | Sort-Object)
@@ -144,7 +210,7 @@ function Invoke-Case(
     }
 
     $onboarding = Wait-NativeWindow $shellProcess.Id "GraphCodeWindowsOnboarding" 10
-    if ($action -ne "marker") {
+    if ($action -notin @("marker", "project")) {
       if ($onboarding -eq [IntPtr]::Zero) { throw "$name onboarding was not shown" }
       switch ($action) {
         "escape" {
@@ -179,6 +245,18 @@ function Invoke-Case(
     if ($main -eq [IntPtr]::Zero -or $shellProcess.HasExited -or $daemonProcess.HasExited) {
       throw "$name did not retain live shell/daemon after onboarding"
     }
+    if ($action -eq "project") {
+      $projectRow = Wait-ProjectRow $shellProcess.Id "Core" 20
+      if (-not $projectRow) { throw "$name did not show the registered daemon project row" }
+      $survivalDeadline = [DateTime]::UtcNow.AddSeconds(5)
+      do {
+        $shellProcess.Refresh()
+        if ($shellProcess.HasExited) {
+          throw "$name shell exited with 0x$($shellProcess.ExitCode.ToString('X8')) after showing the project"
+        }
+        Start-Sleep -Milliseconds 100
+      } while ([DateTime]::UtcNow -lt $survivalDeadline)
+    }
     $markerPath = Join-Path $support "onboarding-seen"
     if (-not (Wait-File $markerPath 10)) {
       throw "$name did not persist the onboarding marker"
@@ -187,24 +265,13 @@ function Invoke-Case(
     $log = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { "" }
     if ($log -match 'event=fatal') { throw "$name logged a fatal startup event: $log" }
 
-    $cliInfo = New-StartInfo $Cli $root
-    $cliInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
-    [void]$cliInfo.ArgumentList.Add("projects")
-    $cliInfo.RedirectStandardOutput = $true
-    $cliInfo.RedirectStandardError = $true
-    $cliProcess = [Diagnostics.Process]::new()
-    $cliProcess.StartInfo = $cliInfo
-    try {
-      if (-not $cliProcess.Start() -or -not $cliProcess.WaitForExit(10000)) {
-        throw "$name CLI endpoint check timed out"
-      }
-      $stdout = $cliProcess.StandardOutput.ReadToEnd()
-      $stderr = $cliProcess.StandardError.ReadToEnd()
-      if ($cliProcess.ExitCode -ne 0) {
-        throw "$name CLI endpoint rejected the request: $stderr"
-      }
-    } finally {
-      $cliProcess.Dispose()
+    $projects = Invoke-ScrubbedCli $name $root $support @("projects")
+    if ($projects.ExitCode -ne 0) {
+      throw "$name CLI endpoint rejected the request: $($projects.Error)"
+    }
+    $stdout = $projects.Output
+    if ($action -eq "project" -and $stdout -notmatch "(?m)^Core\s") {
+      throw "$name CLI does not list the registered project"
     }
     return [ordered]@{
       name = $name
@@ -214,6 +281,7 @@ function Invoke-Case(
       shellProcessId = $shellProcess.Id
       daemonProcessId = $daemonProcess.Id
       cliOutput = $stdout.Trim()
+      projectRow = $projectRow
       environmentKeys = $keys
       fatalLogAbsent = $true
     }
@@ -235,7 +303,8 @@ $results = @(
   Invoke-Case "first-run-skip" "skip"
   Invoke-Case "first-run-complete" "complete"
   Invoke-Case "onboarding-marker" "marker"
+  Invoke-Case "registered-project" "project"
 )
-if ($results.Count -ne 4) { throw "Scrubbed startup executed $($results.Count)/4 cases" }
+if ($results.Count -ne 5) { throw "Scrubbed startup executed $($results.Count)/5 cases" }
 Write-Output ("SCRUBBED_SHELL_STARTUP: PASS; executed=$($results.Count); " +
   "developerToolsExcluded=true; results=" + ($results | ConvertTo-Json -Compress -Depth 5))

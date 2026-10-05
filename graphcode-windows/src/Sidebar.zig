@@ -1703,6 +1703,30 @@ test "error footer exposes an inset wrapping rect" {
     try std.testing.expect(text.bottom < footer.bottom);
 }
 
+test "sidebar paints an open project whose daemon name is empty" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\unnamed","name":""},"nodes":[{"id":"n1","title":"","state":"idle"}],"edges":[]}}}
+    ;
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqualStrings("", model.graph.?.project.name);
+    var state = State.init(allocator);
+    defer state.deinit();
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const bitmap = c.CreateCompatibleBitmap(screen, 400, 800) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, previous);
+    var draw_allocator = std.heap.DebugAllocator(.{}){};
+    defer std.debug.assert(draw_allocator.deinit() == .ok);
+    draw(hdc, &model, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
+}
+
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
 }
@@ -1726,6 +1750,7 @@ fn drawText(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
@@ -1745,6 +1770,7 @@ fn drawTextRect(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);

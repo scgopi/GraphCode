@@ -3806,6 +3806,7 @@ fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
     defer std.heap.page_allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
