@@ -46,7 +46,7 @@ pub export fn WinMain(
     _: c.INT,
 ) callconv(.winapi) c.INT {
     main() catch |err| {
-        Diagnostics.record(std.heap.c_allocator, "fatal", @errorName(err));
+        Diagnostics.record(std.heap.c_allocator, "fatal", Diagnostics.startupFatalDetail(err));
         return 1;
     };
     return 0;

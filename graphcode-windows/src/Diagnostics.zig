@@ -22,6 +22,7 @@ pub fn record(allocator: std.mem.Allocator, event: []const u8, detail: []const u
     } else {
         file.seekFromEnd(0) catch return;
     }
+
     const line = std.fmt.allocPrint(
         allocator,
         "{d} event={s} detail={s}\r\n",
@@ -29,6 +30,15 @@ pub fn record(allocator: std.mem.Allocator, event: []const u8, detail: []const u
     ) catch return;
     defer allocator.free(line);
     file.writeAll(line) catch {};
+}
+
+pub fn startupFatalDetail(err: anyerror) []const u8 {
+    return switch (err) {
+        error.UserProfileMissing => "operation=resolve_support_directory missing_environment=USERPROFILE",
+        error.WorkspaceUserUnavailable => "operation=reserve_workspace windows_identity=GetUserNameW",
+        error.EnvironmentVariableNotFound => "operation=startup_environment missing_environment=unexpected",
+        else => @errorName(err),
+    };
 }
 
 fn supportDirectory(allocator: std.mem.Allocator) ![]u8 {
@@ -43,4 +53,19 @@ fn supportDirectory(allocator: std.mem.Allocator) ![]u8 {
 test "diagnostic log has a bounded filename and size" {
     try std.testing.expectEqualStrings("graphcode-windows.log", std.fs.path.basename("x\\graphcode-windows.log"));
     try std.testing.expect(max_bytes >= 1024 * 1024);
+}
+
+test "startup fatal diagnostics name the bounded operation without environment values" {
+    try std.testing.expectEqualStrings(
+        "operation=resolve_support_directory missing_environment=USERPROFILE",
+        startupFatalDetail(error.UserProfileMissing),
+    );
+    try std.testing.expectEqualStrings(
+        "operation=reserve_workspace windows_identity=GetUserNameW",
+        startupFatalDetail(error.WorkspaceUserUnavailable),
+    );
+    try std.testing.expectEqualStrings(
+        "operation=startup_environment missing_environment=unexpected",
+        startupFatalDetail(error.EnvironmentVariableNotFound),
+    );
 }

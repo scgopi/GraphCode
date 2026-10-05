@@ -209,11 +209,24 @@ signer state, foreign install root, or unexplained profile mutation.
 Git and developer tools may remain installed on the Dev Box. The proof is that
 startup does not rely on them.
 
-1. Build a process-only environment containing:
+1. Build a process-only environment containing exactly these keys:
 
-   - Windows system paths;
-   - PowerShell/runtime paths needed by the installed package;
-   - installed GraphCode runtime paths.
+   - `SystemRoot`;
+   - `windir`;
+   - `USERPROFILE`;
+   - `LOCALAPPDATA`;
+   - `APPDATA`;
+   - `TEMP`;
+   - `TMP`;
+   - `ProgramData`;
+   - `HOMEDRIVE`;
+   - `HOMEPATH`;
+   - `PATH`.
+
+   `PATH` may contain only Windows system paths, Windows PowerShell, and the
+   installed GraphCode runtime directory. Do not add `USERNAME` or `USER`;
+   GraphCode resolves the Windows account identity through the operating
+   system rather than process environment text.
 
 2. Remove from the candidate process environment:
 
@@ -235,7 +248,11 @@ startup does not rely on them.
 5. Record process tree, executable paths/hashes, and environment-key names
    only. Do not retain secret values.
 
-PASS requires connected Welcome and no hidden developer dependency.
+PASS requires first-run onboarding to close, the main window and daemon to
+remain alive, the CLI endpoint to respond, connected Welcome, no fatal startup
+event, and no hidden developer dependency. A genuinely required variable must
+fail with a bounded diagnostic naming the startup operation and variable; a raw
+`EnvironmentVariableNotFound` diagnostic is a failure.
 
 After this step, restore the one declared Git executable for Git-backed
 project/worktree features and record its path, version, and hash.

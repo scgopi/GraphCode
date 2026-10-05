@@ -62,6 +62,7 @@ const workspace_restart_message = "Workspace identity changed or could not be ve
 const worktrees_deferred_message = "Worktrees are deferred for this preview";
 const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
+const daemon_handoff_test_user_environment = "GRAPHCODE_DAEMON_HANDOFF_TEST_USER";
 const daemon_supervisor_test_property =
     std.unicode.utf8ToUtf16LeStringLiteral("GraphCode.Windows.DaemonSupervisorState");
 
@@ -134,11 +135,38 @@ const FolderOpenApi = struct {
     }
 };
 
+const WorkspaceUserApi = struct {
+    fn read(buffer: [*]u16, size: *c.DWORD) bool {
+        return c.GetUserNameW(buffer, size) != 0;
+    }
+};
+
+fn workspaceUserWith(allocator: std.mem.Allocator, comptime Api: type) ![]u8 {
+    var wide: [257]u16 = [_]u16{0} ** 257;
+    var size: c.DWORD = wide.len;
+    if (!Api.read(&wide, &size) or size == 0 or size > wide.len)
+        return error.WorkspaceUserUnavailable;
+    const length = if (wide[size - 1] == 0) size - 1 else size;
+    if (length == 0) return error.WorkspaceUserUnavailable;
+    return std.unicode.utf16LeToUtf8Alloc(allocator, wide[0..length]);
+}
+
 fn workspaceUser(allocator: std.mem.Allocator) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, "USERNAME") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => std.process.getEnvVarOwned(allocator, "USER"),
-        else => err,
-    };
+    if (envFlag(daemon_supervisor_test_hook_environment)) {
+        const test_user = std.process.getEnvVarOwned(
+            allocator,
+            daemon_handoff_test_user_environment,
+        ) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => null,
+            else => return err,
+        };
+        if (test_user) |user| {
+            if (user.len != 0) return user;
+            allocator.free(user);
+            return error.WorkspaceUserUnavailable;
+        }
+    }
+    return workspaceUserWith(allocator, WorkspaceUserApi);
 }
 
 fn workspaceInstanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16 {
@@ -8800,6 +8828,33 @@ test "workspace reservations exclude lexical aliases and old raw path mutexes" {
     }
     var reacquired = try WorkspaceReservation.acquireForUser(allocator, user, path);
     defer reacquired.deinit();
+}
+
+test "workspace identity uses the Windows account instead of optional environment variables" {
+    const Api = struct {
+        fn read(buffer: [*]u16, size: *c.DWORD) bool {
+            const value = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeUser");
+            if (size.* < value.len) return false;
+            @memcpy(buffer[0..value.len], value);
+            size.* = value.len;
+            return true;
+        }
+    };
+    const user = try workspaceUserWith(std.testing.allocator, Api);
+    defer std.testing.allocator.free(user);
+    try std.testing.expectEqualStrings("GraphCodeUser", user);
+}
+
+test "workspace identity reports a bounded Windows account failure" {
+    const Api = struct {
+        fn read(_: [*]u16, _: *c.DWORD) bool {
+            return false;
+        }
+    };
+    try std.testing.expectError(
+        error.WorkspaceUserUnavailable,
+        workspaceUserWith(std.testing.allocator, Api),
+    );
 }
 
 const WorkspaceMutationFixture = struct {

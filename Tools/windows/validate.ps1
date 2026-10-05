@@ -321,7 +321,28 @@ function Assert-WindowsShellProfileUnchanged(
 ) {
   $after = Get-WindowsShellProfileSnapshot $path
   if (-not [string]::Equals($before, $after, [StringComparison]::Ordinal)) {
-    throw "Windows shell default profile artifact changed: $([IO.Path]::GetFullPath($path))"
+    $beforeState = $before | ConvertFrom-Json
+    $afterState = $after | ConvertFrom-Json
+    $beforeEntries = @{}
+    $afterEntries = @{}
+    foreach ($entry in @($beforeState.entries)) { $beforeEntries[$entry.relativePath] = $entry }
+    foreach ($entry in @($afterState.entries)) { $afterEntries[$entry.relativePath] = $entry }
+    $changes = [Collections.Generic.List[string]]::new()
+    if ([bool]$beforeState.exists -ne [bool]$afterState.exists) {
+      $changes.Add("root:$($beforeState.exists)->$($afterState.exists)")
+    }
+    foreach ($relativePath in @($beforeEntries.Keys + $afterEntries.Keys | Sort-Object -Unique)) {
+      if (-not $beforeEntries.ContainsKey($relativePath)) {
+        $changes.Add("added:$relativePath")
+      } elseif (-not $afterEntries.ContainsKey($relativePath)) {
+        $changes.Add("removed:$relativePath")
+      } elseif (($beforeEntries[$relativePath] | ConvertTo-Json -Compress) -cne
+          ($afterEntries[$relativePath] | ConvertTo-Json -Compress)) {
+        $changes.Add("changed:$relativePath")
+      }
+    }
+    $summary = @($changes | Select-Object -First 20) -join ","
+    throw "Windows shell default profile artifact changed: $([IO.Path]::GetFullPath($path)); changes=$summary"
   }
 }
 
@@ -1179,6 +1200,14 @@ function Invoke-Task([string] $name) {
           -StubResponseDelayMilliseconds 150 `
           -SkipTrayLive:$SkipTrayLive `
           -Stress
+      }
+      Invoke-Native "Scrubbed production shell startup" {
+        & pwsh -NoProfile -File `
+          (Join-Path $repoRoot "Tools\windows\Tests\ScrubbedShellStartup.Live.Tests.ps1") `
+          -Shell (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe") `
+          -Daemon (Join-Path $daemonRuntime "graphcoded.exe") `
+          -Cli (Join-Path $daemonRuntime "graphcode.exe") `
+          -ScratchRoot (Join-Path $env:TEMP "scrubbed-shell-startup")
       }
       & (Join-Path $repoRoot "Tools\windows\Tests\TrayDaemon.Tests.ps1") `
         -Executable (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe")

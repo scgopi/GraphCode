@@ -56,8 +56,7 @@ function Start-HandoffShell(
   $startInfo.Environment["GRAPHCODE_SHELL_REQUIRE_DAEMON"] = "0"
   $startInfo.Environment["GRAPHCODE_DAEMON_HANDOFF_TEST_STATE"] = $daemonStatePath
   $startInfo.Environment["GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK"] = "1"
-  $startInfo.Environment["USERNAME"] = $userName
-  $startInfo.Environment["USER"] = $userName
+  $startInfo.Environment["GRAPHCODE_DAEMON_HANDOFF_TEST_USER"] = $userName
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $startInfo
   if (-not $process.Start()) {
