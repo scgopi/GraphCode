@@ -1120,6 +1120,25 @@ pub fn isCurrentGraphPath(pending: []const u8, accepted: []const u8, path: []con
     return pending.len == 0 or std.mem.eql(u8, path, pending) or std.mem.eql(u8, path, accepted);
 }
 
+/// Whether two local Windows project paths name the same folder spelling apart from
+/// separator choice and ASCII case, as the daemon canonicalizes `C:\a` to `C:/a`.
+pub fn sameLocalProjectPath(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| {
+        const l = if (left == '\\') '/' else std.ascii.toLower(left);
+        const r = if (right == '\\') '/' else std.ascii.toLower(right);
+        if (l != r) return false;
+    }
+    return true;
+}
+
+test "local project path equivalence ignores separators and ASCII case only" {
+    try std.testing.expect(sameLocalProjectPath("C:\\GraphCode-Fixtures\\Core", "C:/GraphCode-Fixtures/Core"));
+    try std.testing.expect(sameLocalProjectPath("c:\\fixtures\\core", "C:/Fixtures/Core"));
+    try std.testing.expect(!sameLocalProjectPath("C:\\Fixtures\\Core", "C:/Fixtures/Core2"));
+    try std.testing.expect(!sameLocalProjectPath("C:\\Fixtures\\Core", "D:/Fixtures/Core"));
+}
+
 pub fn jsonNumber(data: []const u8, key: []const u8) ?u64 {
     var needle_buffer: [128]u8 = undefined;
     if (key.len + 3 > needle_buffer.len) return null;

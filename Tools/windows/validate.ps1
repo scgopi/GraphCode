@@ -1209,6 +1209,14 @@ function Invoke-Task([string] $name) {
           -Cli (Join-Path $daemonRuntime "graphcode.exe") `
           -ScratchRoot (Join-Path $env:TEMP "scrubbed-shell-startup")
       }
+      Invoke-Native "Real daemon wire round trip" {
+        & pwsh -NoProfile -File `
+          (Join-Path $repoRoot "Tools\windows\Tests\DaemonRoundTrip.Live.Tests.ps1") `
+          -DaemonExecutable (Join-Path $daemonRuntime "graphcoded.exe") `
+          -ZigExecutable $zig0152 `
+          -WinghosttyInclude (Join-Path $winghosttyRoot "include") `
+          -ScratchRoot (Join-Path $env:TEMP "daemon-roundtrip")
+      }
       & (Join-Path $repoRoot "Tools\windows\Tests\TrayDaemon.Tests.ps1") `
         -Executable (Join-Path $repoRoot "graphcode-windows\zig-out\bin\graphcode-windows.exe")
       if ($LASTEXITCODE -ne 0) {

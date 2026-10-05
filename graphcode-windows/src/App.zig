@@ -1201,6 +1201,38 @@ pub const App = struct {
         return app;
     }
 
+    /// The daemon answers an open with its canonical spelling of the project path
+    /// (for example `C:/a` for a picker's `C:\a`). When the reply is provably for the
+    /// shell's own in-flight open, adopt that spelling so the reply is not discarded.
+    fn adoptCanonicalOpenPath(self: *App, frame: []const u8, canonical: []const u8) void {
+        if (!self.pending_open_sent or self.pending_sent_path.len == 0) return;
+        if (std.mem.eql(u8, canonical, self.pending_sent_path)) return;
+        const owned = switch (self.client.protocolMode()) {
+            .v2 => blk: {
+                const request_id = self.pending_open_request_id orelse break :blk false;
+                const response_id = Wire.responseRequestID(frame) orelse break :blk false;
+                break :blk std.ascii.eqlIgnoreCase(response_id, &request_id);
+            },
+            .v1 => Wire.sameLocalProjectPath(canonical, self.pending_sent_path),
+        };
+        if (!owned) return;
+        const rebind_is_sent = std.mem.eql(u8, self.pending_rebind_path, self.pending_sent_path);
+        const sent = self.allocator.dupe(u8, canonical) catch return;
+        const rebind: ?[]u8 = if (rebind_is_sent)
+            (self.allocator.dupe(u8, canonical) catch {
+                self.allocator.free(sent);
+                return;
+            })
+        else
+            null;
+        self.allocator.free(self.pending_sent_path);
+        self.pending_sent_path = sent;
+        if (rebind) |value| {
+            self.allocator.free(self.pending_rebind_path);
+            self.pending_rebind_path = value;
+        }
+    }
+
     fn sendPendingOpen(self: *App) void {
         if (self.pending_rebind_path.len == 0 or
             self.client.connectionState() != .connected or
@@ -1485,6 +1517,7 @@ pub const App = struct {
             const path = Wire.copyGraphChangedProjectPath(self.allocator, frame) catch null;
             if (path) |value| {
                 incoming_project_path = value;
+                self.adoptCanonicalOpenPath(frame, value);
                 if (self.client.protocolMode() == .v1 and self.pending_open_sent) {
                     if (!std.mem.eql(u8, value, self.pending_sent_path) and
                         !std.mem.eql(u8, value, self.accepted_subscription)) return;
@@ -1611,7 +1644,8 @@ pub const App = struct {
                     if (self.client.protocolMode() == .v2) {
                         const request_id = self.pending_open_request_id orelse return;
                         const response_id = Wire.responseRequestID(frame) orelse return;
-                        if (!std.mem.eql(u8, response_id, &request_id)) return;
+                        // The daemon echoes the UUID in uppercase.
+                        if (!std.ascii.eqlIgnoreCase(response_id, &request_id)) return;
                     } else if (!self.pending_open_sent) {
                         return;
                     }
@@ -10348,6 +10382,76 @@ test "graph publication v1 queued opens accept the sent owner before the newest 
     try std.testing.expectEqual(@as(u64, 3), app.client.next_request);
     try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
     try F.expectPublished();
+}
+
+test "graph publication adopts the daemon canonical path for the shell's own folder open" {
+    const F = GraphPublicationTest;
+    for ([_]Wire.ProtocolMode{ .v1, .v2 }) |mode| {
+        var app = try F.init(mode);
+        defer F.deinit(&app);
+        try F.seed(&app);
+        // The native folder picker returns a backslash path; the production daemon
+        // replies with its canonical forward-slash spelling of the same folder.
+        app.openProjectWithLayout("C:\\Fixtures\\Core", F.layout);
+        app.client.state = .connected;
+        app.sendPendingOpen();
+        try std.testing.expect(app.pending_open_sent);
+        const request = app.pending_open_request_id;
+        try F.takeOpen(&app, "C:\\Fixtures\\Core");
+        if (mode == .v2) {
+            // An uncorrelated publication for the canonical spelling is not adopted.
+            app.onFrameWithEffects(
+                \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"_0":{"project":{"path":"C:/Fixtures/Core","name":"Core"},"nodes":[],"edges":[]}}}}
+            , F.rebind, F.refresh, F.publish);
+            try std.testing.expect(app.model.graphFor("C:/Fixtures/Core") == null);
+            try std.testing.expectEqualStrings("C:\\Fixtures\\Core", app.pending_rebind_path);
+        }
+        const reply = if (mode == .v2)
+            try std.fmt.allocPrint(app.allocator, "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":\"C:/Fixtures/Core\",\"name\":\"Core\"}},\"nodes\":[],\"edges\":[]}}}}}}}}", .{&upperRequestID(request.?)})
+        else
+            try app.allocator.dupe(u8,
+                \\{"version":1,"kind":"event","event":{"graphChanged":{"_0":{"project":{"path":"C:/Fixtures/Core","name":"Core"},"nodes":[],"edges":[]}}}}
+            );
+        defer app.allocator.free(reply);
+        app.onFrameWithEffects(reply, F.rebind, F.refresh, F.publish);
+        const current = app.model.currentGraph() orelse return error.FolderOpenGraphDropped;
+        try std.testing.expectEqualStrings("C:/Fixtures/Core", current.project.path);
+        try std.testing.expectEqualStrings("Core", current.project.name);
+        try std.testing.expectEqualStrings("C:/Fixtures/Core", app.accepted_subscription);
+        try std.testing.expectEqualStrings("C:/Fixtures/Core", app.client.subscription_path);
+        try std.testing.expectEqualStrings("C:/Fixtures/Core", app.last_project_opened);
+        try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+        try std.testing.expectEqual(@as(usize, 0), app.pending_sent_path.len);
+        try std.testing.expect(!app.pending_open_sent and !app.open_project_pending);
+        try std.testing.expectEqual(@as(usize, 0), app.ingress_error.len);
+    }
+}
+
+/// Swift's `UUID.uuidString` echoes request IDs in uppercase.
+fn upperRequestID(request: [36]u8) [36]u8 {
+    var upper: [36]u8 = undefined;
+    for (request, 0..) |byte, index| upper[index] = std.ascii.toUpper(byte);
+    return upper;
+}
+
+test "graph publication v2 open rejection correlates the daemon's uppercase request ID" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    try F.seed(&app);
+    app.openProjectWithLayout("B", F.layout);
+    app.client.state = .connected;
+    app.sendPendingOpen();
+    const request = app.pending_open_request_id.?;
+    try F.takeOpen(&app, "B");
+    try std.testing.expect(!std.mem.eql(u8, &request, &upperRequestID(request)));
+    const rejection = try std.fmt.allocPrint(app.allocator, "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"errorOccurred\":\"B rejected\"}}}}", .{&upperRequestID(request)});
+    defer app.allocator.free(rejection);
+    app.onFrameWithEffects(rejection, F.rebind, F.refresh, F.publish);
+    try std.testing.expectEqual(@as(usize, 0), app.pending_rebind_path.len);
+    try std.testing.expect(!app.pending_open_sent and !app.open_project_pending);
+    try std.testing.expectEqualStrings("A", app.accepted_subscription);
+    try std.testing.expectEqualStrings("B rejected", app.ingress_error);
 }
 
 test "graph publication v2 superseded opens reject stale graphs and errors without losing latest intent" {
