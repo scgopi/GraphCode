@@ -121,7 +121,9 @@ function Invoke-Case(
   }
 
   $daemonProcess = [Diagnostics.Process]::new()
-  $daemonProcess.StartInfo = New-StartInfo $Daemon $root
+  $daemonInfo = New-StartInfo $Daemon $root
+  $daemonInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
+  $daemonProcess.StartInfo = $daemonInfo
   $shellProcess = [Diagnostics.Process]::new()
   $shellProcess.StartInfo = New-StartInfo $Shell $root
   try {
@@ -186,6 +188,7 @@ function Invoke-Case(
     if ($log -match 'event=fatal') { throw "$name logged a fatal startup event: $log" }
 
     $cliInfo = New-StartInfo $Cli $root
+    $cliInfo.Environment["GRAPHCODE_SUPPORT_DIR"] = $support
     [void]$cliInfo.ArgumentList.Add("projects")
     $cliInfo.RedirectStandardOutput = $true
     $cliInfo.RedirectStandardError = $true
