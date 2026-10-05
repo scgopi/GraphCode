@@ -101,30 +101,11 @@ const Probe = struct {
             }
             self.last_success = true;
         }
-        const model_frame = modelCompatibleFrame(allocator, frame) catch {
-            self.model_error = true;
-            return;
-        };
-        defer allocator.free(model_frame);
-        _ = self.model.updateFromFrame(model_frame) catch {
+        _ = self.model.updateFromFrame(frame) catch {
             self.model_error = true;
         };
     }
 };
-
-fn modelCompatibleFrame(test_allocator: std.mem.Allocator, frame: []const u8) ![]u8 {
-    const parsed = try std.json.parseFromSlice(std.json.Value, test_allocator, frame, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return test_allocator.dupe(u8, frame);
-    const event = parsed.value.object.get("event") orelse return test_allocator.dupe(u8, frame);
-    if (event != .object) return test_allocator.dupe(u8, frame);
-    const graph_changed = event.object.get("graphChanged") orelse return test_allocator.dupe(u8, frame);
-    if (graph_changed != .object) return test_allocator.dupe(u8, frame);
-    const graph = graph_changed.object.get("_0") orelse return test_allocator.dupe(u8, frame);
-    const graph_json = try std.json.Stringify.valueAlloc(test_allocator, graph, .{});
-    defer test_allocator.free(graph_json);
-    return std.fmt.allocPrint(test_allocator, "{{\"graphChanged\":{s}}}", .{graph_json});
-}
 
 fn envOwned(name: []const u8) ![]u8 {
     return std.process.getEnvVarOwned(allocator, name) catch error.MissingDaemonRoundTripEnvironment;
@@ -166,6 +147,9 @@ fn connectProject(client: *DaemonClient, probe: *Probe, path: []const u8) !void 
     const canonical_path = try std.mem.replaceOwned(u8, allocator, path, "\\", "/");
     defer allocator.free(canonical_path);
     try std.testing.expectEqualStrings(canonical_path, probe.model.currentGraph().?.project.path);
+    const expected_name = std.fs.path.basename(canonical_path);
+    try std.testing.expect(expected_name.len != 0);
+    try std.testing.expectEqualStrings(expected_name, probe.model.currentGraph().?.project.name);
 }
 
 fn waitForAcceptedResponse(client: *DaemonClient, probe: *Probe, before: usize) !void {

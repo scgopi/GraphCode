@@ -601,6 +601,7 @@ fn deviceContext(address: usize) c.HDC {
 fn settingsText(hdc: c.HDC, value: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(settings_state.allocator, value) catch return;
     defer settings_state.allocator.free(wide);
+    if (wide.len == 0) return;
     const face = std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
     const font = c.CreateFontW(-size, 0, 0, 0, if (bold) c.FW_SEMIBOLD else c.FW_NORMAL, 0, 0, 0, c.DEFAULT_CHARSET, c.OUT_DEFAULT_PRECIS, c.CLIP_DEFAULT_PRECIS, c.CLEARTYPE_QUALITY, c.DEFAULT_PITCH | c.FF_DONTCARE, face.ptr);
     const old_font = if (font != null) c.SelectObject(hdc, font) else null;

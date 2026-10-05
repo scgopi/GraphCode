@@ -249,6 +249,14 @@ Assert-Contract ($actualAllowedKeys -notcontains "USERNAME" -and
   $scrubbedStartupSource -match 'onboarding-marker' -and
   $scrubbedStartupSource -match 'event=fatal') `
   "scrubbed production startup gate must preserve the developer-free onboarding contract"
+$daemonRoundTripSource = Get-Content (Join-Path $shellRoot "src\DaemonRoundTripTests.zig") -Raw
+Assert-Contract ($scrubbedStartupSource -match 'Invoke-Case "registered-project" "project"' -and
+  $scrubbedStartupSource -match 'Wait-ProjectRow' -and
+  $scrubbedStartupSource -match '"status", \$projectPath' -and
+  $scrubbedStartupSource -match 'executed \$\(\$results\.Count\)/5 cases' -and
+  $daemonRoundTripSource -notmatch 'modelCompatibleFrame' -and
+  $daemonRoundTripSource -match 'self\.model\.updateFromFrame\(frame\)') `
+  "production daemon graph frames must reach the shell model unmodified and render a registered project"
 $menuTimerBlock = [regex]::Match(
   $appSource,
   '(?s)else if \(wparam == MainWindow\.timer_id\) \{.*?const updated_connection_state'

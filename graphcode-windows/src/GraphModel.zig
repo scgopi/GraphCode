@@ -2150,7 +2150,16 @@ fn decodeGraphFrame(allocator: std.mem.Allocator, frame: []const u8) !?Graph {
     defer event.deinit();
     const value = if (root.has("event")) event.get("graphChanged") else root.get("graphChanged");
     if (value.isNull()) return null;
-    return try decodeGraphObject(allocator, null, value.container('{') orelse return error.MalformedJson);
+    const payload = value.container('{') orelse return error.MalformedJson;
+    // The daemon's synthesized Swift coding wraps the unlabeled associated value as
+    // {"_0":<graph>}; the unwrapped form remains accepted for existing fixtures.
+    var wrapper = try JsonFields.init(allocator, payload);
+    defer wrapper.deinit();
+    const graph_json = if (wrapper.has("_0"))
+        wrapper.get("_0").container('{') orelse return error.MalformedJson
+    else
+        payload;
+    return try decodeGraphObject(allocator, null, graph_json);
 }
 
 fn decodeGraphObject(allocator: std.mem.Allocator, parent_project: ?Project, json: []const u8) !Graph {
@@ -3582,6 +3591,23 @@ test "field scope node and edge scalars do not inherit arbitrary nested fields" 
     try std.testing.expectEqualStrings("handoff", edge.kind);
     try std.testing.expect(edge.blocks_target and !edge.fired);
     try std.testing.expectEqual(@as(u32, 0), edge.fire_count);
+}
+
+test "production daemon graphChanged associated-value frame decodes project and nodes" {
+    // Exact shape emitted by the Swift daemon's synthesized DaemonEvent coding:
+    // `case graphChanged(LoopGraph)` travels as {"graphChanged":{"_0":<graph>}}.
+    const frame =
+        \\{"kind":"event","sequence":1,"event":{"graphChanged":{"_0":{"edges":[],"nodes":[{"id":"core-node","title":"Core loop"}],"revision":0,"id":"B566EEB2-0E4E-4162-A067-787F8D7A8306","project":{"name":"Core","lastOpenedAt":812912680.0330639,"path":"C:\/GraphCode-Fixtures\/Core"},"mailroomDigest":{"count":0,"fingerprint":14695981039346656037,"latestID":0}}}}}
+    ;
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try std.testing.expectEqual(Wire.EventKind.graph_changed, try model.updateFromFrame(frame));
+    const summary = model.graphFor("C:/GraphCode-Fixtures/Core") orelse return error.ProductionGraphProjectMissing;
+    try std.testing.expectEqualStrings("Core", summary.project.name);
+    try std.testing.expectEqual(@as(usize, 1), summary.nodes.items.len);
+    try std.testing.expectEqualStrings("Core loop", summary.nodes.items[0].title);
+    try std.testing.expectEqual(@as(usize, 1), model.graphs.items.len);
+    try std.testing.expectEqualStrings("C:/GraphCode-Fixtures/Core", model.graph.?.project.path);
 }
 
 test "field scope keys and delimiters inside scalar text cannot select graph fields" {

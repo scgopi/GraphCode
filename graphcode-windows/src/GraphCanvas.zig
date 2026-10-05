@@ -2192,6 +2192,7 @@ fn drawText(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
@@ -2211,6 +2212,7 @@ fn drawTextRect(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text_value) catch return;
     defer allocator.free(wide);
+    if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);

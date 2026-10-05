@@ -531,6 +531,7 @@ fn text(
 ) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, value) catch return;
     defer allocator.free(wide);
+    if (wide.len == 0) return;
     const face = std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
     const font = c.CreateFontW(
         -size,
