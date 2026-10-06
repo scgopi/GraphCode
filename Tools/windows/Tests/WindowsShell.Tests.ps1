@@ -599,6 +599,17 @@ Assert-Contract ($codespaceDialogSource -match 'WM_CTLCOLORLISTBOX' -and $codesp
 Assert-Contract ($codespaceDialogSource -match 'IsDialogMessageW') `
   "the codespace sheet must remain keyboard navigable"
 
+$zmxSessionSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\ZmxSession.zig") -Raw
+$terminalSurfaceSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\TerminalSurface.zig") -Raw
+$workspaceTeardownSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\WorkspaceTeardown.zig") -Raw
+Assert-Contract ($zmxSessionSource -match '(?s)pub fn child\(.*?\.create_no_window = true;') `
+  "zmx children must be created without a console window"
+Assert-Contract ($terminalSurfaceSource -notmatch 'std\.process\.Child\.init\(' -and
+  $workspaceTeardownSource -notmatch 'std\.process\.Child\.init\(' -and
+  [regex]::Matches($terminalSurfaceSource, 'ZmxSession\.child\(').Count -eq 2 -and
+  [regex]::Matches($workspaceTeardownSource, 'ZmxSession\.child\(').Count -eq 1) `
+  "zmx attach, resize, and kill must spawn through ZmxSession.child so the GUI shell never opens a console window"
+
 $zig = Resolve-TestZig
 Invoke-Native "Accessibility contract executable tests" {
   Push-Location $shellRoot
