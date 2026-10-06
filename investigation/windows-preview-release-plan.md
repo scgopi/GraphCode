@@ -71,7 +71,11 @@ The handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta9` has `hashes.sha256`
 SHA-256 `bd57e1e11c02fb3bc4644c8faf91137bf4e9272c2c01f8dbd0f629af9a108dce`;
 all **8/8** entries verified. Its Dev Box prompt adds a terminal readability and
 session-ownership gate after the Core-visibility gate, before any backend
-credits are spent.
+credits are spent. That prompt's requirement that Stop end the loop's session
+is superseded by the Stop contract in the
+[Dev Box plan](windows-preview-devbox-qualification-plan.md#stop-contract): a
+reachable session receives the daemon's stop request and stays alive, and only
+an unreachable session is killed.
 
 ### Historical beta8 candidate
 
