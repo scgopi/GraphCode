@@ -6,6 +6,7 @@ const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
 const TerminalVt = @import("TerminalVt.zig");
+const ZmxSession = @import("ZmxSession.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -81,8 +82,15 @@ fn attachArguments(
     size: GridSize,
     output: *[5][]const u8,
     size_buffer: []u8,
+    session_buffer: []u8,
 ) ![]const []const u8 {
-    output.* = .{ program, "attach", session, "--size", try formatGridSize(size, size_buffer) };
+    output.* = .{
+        program,
+        "attach",
+        try ZmxSession.nameBuffer(session, session_buffer),
+        "--size",
+        try formatGridSize(size, size_buffer),
+    };
     return output;
 }
 
@@ -92,8 +100,14 @@ fn resizeArguments(
     size: GridSize,
     output: *[4][]const u8,
     size_buffer: []u8,
+    session_buffer: []u8,
 ) ![]const []const u8 {
-    output.* = .{ program, "resize", session, try formatGridSize(size, size_buffer) };
+    output.* = .{
+        program,
+        "resize",
+        try ZmxSession.nameBuffer(session, session_buffer),
+        try formatGridSize(size, size_buffer),
+    };
     return output;
 }
 
@@ -1533,6 +1547,7 @@ pub const Workspace = struct {
         var attach_args: [5][]const u8 = undefined;
         var attach_len: usize = 3;
         var size_buffer: [16]u8 = undefined;
+        var session_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
         if (nonreading != null and std.mem.eql(u8, nonreading.?, "1")) {
             attach_args[0] = "pwsh";
             attach_args[1] = "-NoProfile";
@@ -1546,6 +1561,7 @@ pub const Workspace = struct {
                 size,
                 &attach_args,
                 &size_buffer,
+                &session_buffer,
             )).len;
         }
         var child = std.process.Child.init(attach_args[0..attach_len], self.allocator);
@@ -1668,7 +1684,15 @@ pub const Workspace = struct {
             if (slot.attach == null or slot.surface == null) continue;
             var args: [4][]const u8 = undefined;
             var size_buffer: [16]u8 = undefined;
-            const command = resizeArguments(self.zmx_path, slot.session_name, size, &args, &size_buffer) catch {
+            var session_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
+            const command = resizeArguments(
+                self.zmx_path,
+                slot.session_name,
+                size,
+                &args,
+                &size_buffer,
+                &session_buffer,
+            ) catch {
                 slot.attempted_resize_size = size;
                 slot.pending_resize_size = null;
                 self.setInputError("terminal PTY resize command could not be formatted");
@@ -2014,12 +2038,14 @@ const TerminalOutputResult = struct {
         "Terminal cell update failed; accessible text was not updated",
         "Terminal accessibility update failed; accessible text is not current",
         "Terminal redraw failed; displayed text is not confirmed",
-        "Experimental terminal VT state failed; rendered content is not confirmed",
-        "Experimental terminal renderer cannot project these cells; rendered content is not confirmed",
-        "Experimental terminal cell update failed; rendered content is not confirmed",
+        "Terminal VT state failed; rendered content is not confirmed",
+        "Terminal glyph snapshot cannot represent these cells; rendered content is not confirmed",
+        "Terminal glyph snapshot update failed; rendered content is not confirmed",
+        "Terminal glyph snapshot staging failed; rendered content is not confirmed",
     };
 
     snapshot_error: ?SnapshotError = null,
+    glyph_error: ?SnapshotError = null,
     vt_error: ?TerminalVt.Error = null,
     projection_error: ?error{ UnsupportedHostCell, InvalidGrid } = null,
     authoritative_vt: bool = false,
@@ -2029,13 +2055,15 @@ const TerminalOutputResult = struct {
 
     fn succeeded(self: TerminalOutputResult) bool {
         return self.vt_error == null and self.projection_error == null and
-            self.snapshot_error == null and self.render_result == c.WINGHOSTTY_OK and
-            self.text_result == c.WINGHOSTTY_OK and self.redraw_result == c.WINGHOSTTY_OK;
+            self.snapshot_error == null and self.glyph_error == null and
+            self.render_result == c.WINGHOSTTY_OK and self.text_result == c.WINGHOSTTY_OK and
+            self.redraw_result == c.WINGHOSTTY_OK;
     }
 
     fn message(self: TerminalOutputResult) ?[]const u8 {
         if (self.vt_error != null) return error_messages[4];
         if (self.snapshot_error != null) return error_messages[0];
+        if (self.glyph_error != null) return error_messages[7];
         if (self.render_result != c.WINGHOSTTY_OK) return error_messages[if (self.authoritative_vt) 6 else 1];
         if (self.text_result) |result| {
             if (result != c.WINGHOSTTY_OK) return error_messages[2];
@@ -2049,7 +2077,8 @@ const TerminalOutputResult = struct {
         if (self.vt_error) |err| std.debug.print("Terminal output pane={d} stage=vt error={s}\n", .{ index, @errorName(err) });
         if (self.projection_error) |err| std.debug.print("Terminal output pane={d} stage=projection error={s}\n", .{ index, @errorName(err) });
         if (self.snapshot_error) |err| std.debug.print("Terminal output pane={d} stage=snapshot error={s}\n", .{ index, @errorName(err) });
-        if (self.render_result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=cells result={d}\n", .{ index, self.render_result });
+        if (self.glyph_error) |err| std.debug.print("Terminal output pane={d} stage=glyphs error={s}\n", .{ index, @errorName(err) });
+        if (self.render_result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=glyphs result={d}\n", .{ index, self.render_result });
         if (self.text_result) |result| {
             if (result != c.WINGHOSTTY_OK) std.debug.print("Terminal output pane={d} stage=accessibility result={d}\n", .{ index, result });
         }
@@ -2062,8 +2091,23 @@ const NativeTerminalOutput = struct {
     columns: u32,
     rows: u32,
 
-    fn setCells(self: NativeTerminalOutput, cells: []const c.winghostty_terminal_cell) c.winghostty_result {
-        return c.winghostty_surface_set_terminal_cells(self.surface, self.columns, self.rows, cells.ptr, cells.len);
+    fn setSnapshot(
+        self: NativeTerminalOutput,
+        cells: []const c.winghostty_terminal_cell,
+        glyphs: []const c.winghostty_terminal_glyph,
+        text: []const u8,
+    ) c.winghostty_result {
+        var snapshot: c.winghostty_terminal_snapshot_v2 = undefined;
+        c.winghostty_terminal_snapshot_v2_init(&snapshot);
+        snapshot.columns = self.columns;
+        snapshot.rows = self.rows;
+        snapshot.cells = cells.ptr;
+        snapshot.cell_count = cells.len;
+        snapshot.glyphs = glyphs.ptr;
+        snapshot.glyph_count = glyphs.len;
+        snapshot.text = if (text.len == 0) null else text.ptr;
+        snapshot.text_length = text.len;
+        return c.winghostty_surface_set_terminal_snapshot_v2(self.surface, &snapshot);
     }
 
     fn setText(self: NativeTerminalOutput, text: []const u8, utf16_length: usize, caret: usize) c.winghostty_result {
@@ -2074,6 +2118,108 @@ const NativeTerminalOutput = struct {
         return c.winghostty_surface_notify_redraw(self.surface);
     }
 };
+
+const NativeGlyphSnapshot = struct {
+    cells: ?[]c.winghostty_terminal_cell = null,
+    glyphs: []c.winghostty_terminal_glyph,
+    text: []u8,
+
+    fn deinit(self: NativeGlyphSnapshot, allocator: std.mem.Allocator) void {
+        if (self.cells) |cells| allocator.free(cells);
+        allocator.free(self.glyphs);
+        allocator.free(self.text);
+    }
+};
+
+fn appendGlyphCodepoints(
+    allocator: std.mem.Allocator,
+    text: *std.ArrayList(u8),
+    codepoints: []const u32,
+) !u16 {
+    const start = text.items.len;
+    for (codepoints) |codepoint| {
+        if (codepoint < 0x20 or (codepoint >= 0x7f and codepoint <= 0x9f) or
+            codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff))
+            return error.InvalidCell;
+        var encoded: [4]u8 = undefined;
+        const length = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch
+            return error.InvalidCell;
+        try text.appendSlice(allocator, encoded[0..length]);
+    }
+    return std.math.cast(u16, text.items.len - start) orelse error.InvalidCell;
+}
+
+fn glyphSnapshotFromCells(
+    allocator: std.mem.Allocator,
+    cells: []const c.winghostty_terminal_cell,
+) !NativeGlyphSnapshot {
+    const glyphs = try allocator.alloc(c.winghostty_terminal_glyph, cells.len);
+    errdefer allocator.free(glyphs);
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (cells, glyphs) |cell, *glyph| {
+        const offset = std.math.cast(u32, text.items.len) orelse return error.InvalidCell;
+        const length = if (cell.codepoint == 0 or cell.codepoint == ' ')
+            0
+        else
+            try appendGlyphCodepoints(allocator, &text, &.{cell.codepoint});
+        glyph.* = .{
+            .offset = offset,
+            .length = length,
+            .width = c.WINGHOSTTY_GLYPH_WIDTH_NARROW,
+            .reserved = 0,
+        };
+    }
+    return .{ .glyphs = glyphs, .text = try text.toOwnedSlice(allocator) };
+}
+
+fn glyphSnapshotFromVt(
+    allocator: std.mem.Allocator,
+    snapshot: *const TerminalVt.Snapshot,
+    expected_cell_count: usize,
+) !NativeGlyphSnapshot {
+    if (expected_cell_count != snapshot.cells.len) return error.InvalidGrid;
+    const cells = try allocator.alloc(c.winghostty_terminal_cell, expected_cell_count);
+    errdefer allocator.free(cells);
+    const glyphs = try allocator.alloc(c.winghostty_terminal_glyph, expected_cell_count);
+    errdefer allocator.free(glyphs);
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (snapshot.cells, cells, glyphs) |cell, *out, *glyph| {
+        var fg = cell.foreground orelse snapshot.colors.foreground;
+        var bg = cell.background orelse snapshot.colors.background;
+        if (cell.style.inverse) std.mem.swap(TerminalVt.c.GhosttyColorRgb, &fg, &bg);
+        if (cell.style.invisible) fg = bg;
+        const continuation = cell.wide == TerminalVt.c.GHOSTTY_CELL_WIDE_SPACER_TAIL;
+        const codepoint: u32 = if (continuation or cell.codepoints.len == 0)
+            0
+        else
+            cell.codepoints[0];
+        out.* = .{
+            .codepoint = codepoint,
+            .foreground = (@as(u32, fg.r) << 16) | (@as(u32, fg.g) << 8) | fg.b,
+            .background = (@as(u32, bg.r) << 16) | (@as(u32, bg.g) << 8) | bg.b,
+            .flags = c.WINGHOSTTY_TERMINAL_CELL_FOREGROUND_SET |
+                c.WINGHOSTTY_TERMINAL_CELL_BACKGROUND_SET,
+        };
+        const offset = std.math.cast(u32, text.items.len) orelse return error.InvalidCell;
+        const length = if (continuation or codepoint == 0 or codepoint == ' ')
+            0
+        else
+            try appendGlyphCodepoints(allocator, &text, cell.codepoints);
+        glyph.* = .{
+            .offset = offset,
+            .length = length,
+            .width = switch (cell.wide) {
+                TerminalVt.c.GHOSTTY_CELL_WIDE_WIDE => c.WINGHOSTTY_GLYPH_WIDTH_WIDE,
+                TerminalVt.c.GHOSTTY_CELL_WIDE_SPACER_TAIL => c.WINGHOSTTY_GLYPH_WIDTH_CONTINUATION,
+                else => c.WINGHOSTTY_GLYPH_WIDTH_NARROW,
+            },
+            .reserved = 0,
+        };
+    }
+    return .{ .cells = cells, .glyphs = glyphs, .text = try text.toOwnedSlice(allocator) };
+}
 
 fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []const u8, api: anytype) TerminalOutputResult {
     if (slot.vt) |state| return publishVtOutput(allocator, slot, state, bytes, api);
@@ -2091,11 +2237,23 @@ fn publishTerminalOutput(allocator: std.mem.Allocator, slot: *Surface, bytes: []
         break :blk null;
     };
     defer if (snapshot) |value| allocator.free(value.text);
-    result.render_result = api.setCells(slot.cells);
+    const glyph_snapshot: ?NativeGlyphSnapshot = glyphSnapshotFromCells(allocator, slot.cells) catch |err| blk: {
+        result.glyph_error = switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.InvalidCell,
+        };
+        break :blk null;
+    };
+    defer if (glyph_snapshot) |value| value.deinit(allocator);
+    if (glyph_snapshot) |value| {
+        result.render_result = api.setSnapshot(slot.cells, value.glyphs, value.text);
+    }
     if (result.render_result == c.WINGHOSTTY_OK) {
         if (snapshot) |value| result.text_result = api.setText(value.text, value.utf16_length, value.caret);
     }
-    result.redraw_result = api.redraw();
+    if (glyph_snapshot != null and result.render_result == c.WINGHOSTTY_OK) {
+        result.redraw_result = api.redraw();
+    }
     slot.output_result = result;
     if (result.succeeded()) slot.output_events += 1;
     return result;
@@ -2117,23 +2275,20 @@ fn publishVtOutput(
         if (snapshot.columns != slot.grid.cols or snapshot.rows != slot.grid.rows or slot.cells.len != @as(usize, slot.grid.cols) * slot.grid.rows) {
             result.projection_error = error.InvalidGrid;
         } else {
-            const projected = allocator.alloc(TerminalVt.HostCell, slot.cells.len) catch {
-                result.vt_error = error.OutOfMemory;
-                slot.output_result = result;
-                return result;
+            const projected: ?NativeGlyphSnapshot = glyphSnapshotFromVt(allocator, snapshot, slot.cells.len) catch |err| blk: {
+                switch (err) {
+                    error.OutOfMemory => result.glyph_error = error.OutOfMemory,
+                    else => result.projection_error = error.UnsupportedHostCell,
+                }
+                break :blk null;
             };
-            defer allocator.free(projected);
-            TerminalVt.project(snapshot, projected) catch |err| {
-                result.projection_error = err;
-            };
-            if (result.projection_error == null) {
-                for (projected, slot.cells) |cell, *out| out.* = .{
-                    .codepoint = cell.codepoint,
-                    .foreground = cell.fg,
-                    .background = cell.bg,
-                    .flags = cell.flags,
-                };
-                result.render_result = api.setCells(slot.cells);
+            defer if (projected) |value| value.deinit(allocator);
+            if (projected) |value| {
+                const staged_cells = value.cells.?;
+                result.render_result = api.setSnapshot(staged_cells, value.glyphs, value.text);
+                if (result.render_result == c.WINGHOSTTY_OK) {
+                    @memcpy(slot.cells, staged_cells);
+                }
             }
         }
         // This is authoritative VT text, not a claim about the host's glyphs.
@@ -2143,7 +2298,11 @@ fn publishVtOutput(
         } else {
             result.vt_error = error.InvalidSnapshot;
         }
-        if (result.projection_error == null) result.redraw_result = api.redraw();
+        if (result.projection_error == null and result.glyph_error == null and
+            result.vt_error == null)
+        {
+            result.redraw_result = api.redraw();
+        }
     }
     slot.output_result = result;
     if (result.succeeded()) slot.output_events += 1;
@@ -2153,17 +2312,29 @@ fn publishVtOutput(
 const TerminalOutputProbe = struct {
     text: [cell_count * 4 + rows - 1]u8 = undefined,
     text_length: usize = 0,
+    glyphs: [cell_count]c.winghostty_terminal_glyph = undefined,
+    glyph_text: [cell_count * 4]u8 = undefined,
+    glyph_text_length: usize = 0,
     utf16_length: usize = 0,
     caret: usize = 0,
-    calls: [3]enum { cells, text, redraw } = undefined,
+    calls: [3]enum { snapshot, text, redraw } = undefined,
     call_count: usize = 0,
     render_result: c.winghostty_result = c.WINGHOSTTY_OK,
     text_result: c.winghostty_result = c.WINGHOSTTY_OK,
     redraw_result: c.winghostty_result = c.WINGHOSTTY_OK,
 
-    fn setCells(self: *TerminalOutputProbe, cells: []const c.winghostty_terminal_cell) c.winghostty_result {
+    fn setSnapshot(
+        self: *TerminalOutputProbe,
+        cells: []const c.winghostty_terminal_cell,
+        glyphs: []const c.winghostty_terminal_glyph,
+        text: []const u8,
+    ) c.winghostty_result {
         std.debug.assert(cells.len == cell_count);
-        self.calls[self.call_count] = .cells;
+        std.debug.assert(glyphs.len == cells.len);
+        @memcpy(self.glyphs[0..glyphs.len], glyphs);
+        @memcpy(self.glyph_text[0..text.len], text);
+        self.glyph_text_length = text.len;
+        self.calls[self.call_count] = .snapshot;
         self.call_count += 1;
         return self.render_result;
     }
@@ -2205,19 +2376,81 @@ test "terminal VT vertical split UTF8 multiparameter CSI and SGR" {
     try std.testing.expect(std.mem.startsWith(u8, probe.text[0..probe.text_length], "\xc3\xa9"));
 }
 
-test "terminal VT default off preserves the old feed path" {
+test "terminal output publishes real glyph snapshots instead of pseudo-glyph cells" {
     var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
     defer std.testing.allocator.free(slot.cells);
     clearCells(&slot);
     var probe = TerminalOutputProbe{};
-    try std.testing.expect(!try TerminalVt.parseFlag(null));
+
+    try std.testing.expect(publishTerminalOutput(
+        std.testing.allocator,
+        &slot,
+        "BETA8-TURN-ONE",
+        &probe,
+    ).succeeded());
+    try std.testing.expectEqual(.snapshot, probe.calls[0]);
+    try std.testing.expectEqualStrings(
+        "BETA8-TURN-ONE",
+        probe.glyph_text[0..probe.glyph_text_length],
+    );
+    try std.testing.expectEqual(@as(u16, 1), probe.glyphs[0].length);
+    try std.testing.expectEqual(c.WINGHOSTTY_GLYPH_WIDTH_NARROW, probe.glyphs[0].width);
+}
+
+test "terminal glyph snapshot staging releases every partial allocation" {
+    const allocator = std.testing.allocator;
+    var cells = [_]c.winghostty_terminal_cell{
+        .{ .codepoint = 'A', .foreground = 0xffffff, .background = 0, .flags = 0 },
+        .{ .codepoint = 0, .foreground = 0xffffff, .background = 0, .flags = 0 },
+        .{ .codepoint = 0, .foreground = 0xffffff, .background = 0, .flags = 0 },
+    };
+    var vt_cells = [_]c.winghostty_terminal_cell{
+        .{ .codepoint = 'X', .foreground = 0, .background = 0, .flags = 0 },
+        .{ .codepoint = 'Y', .foreground = 0, .background = 0, .flags = 0 },
+        .{ .codepoint = 'Z', .foreground = 0, .background = 0, .flags = 0 },
+    };
+    const state = try TerminalVt.State.create(allocator, 3, 1);
+    defer state.destroy();
+    try state.feed("A\xe7\x95\x8c");
+    const snapshot = &state.snapshot.?;
+
+    const Probe = struct {
+        fn legacy(failing: std.mem.Allocator, input: []const c.winghostty_terminal_cell) !void {
+            const staged = try glyphSnapshotFromCells(failing, input);
+            defer staged.deinit(failing);
+            try std.testing.expectEqualStrings("A", staged.text);
+        }
+
+        fn vt(
+            failing: std.mem.Allocator,
+            input: *const TerminalVt.Snapshot,
+            output: []c.winghostty_terminal_cell,
+        ) !void {
+            const staged = try glyphSnapshotFromVt(failing, input, output.len);
+            defer staged.deinit(failing);
+            try std.testing.expectEqualStrings("A\xe7\x95\x8c", staged.text);
+            try std.testing.expectEqual(@as(u32, 'A'), staged.cells.?[0].codepoint);
+            try std.testing.expectEqual(@as(u32, 'X'), output[0].codepoint);
+        }
+    };
+
+    try std.testing.checkAllAllocationFailures(allocator, Probe.legacy, .{&cells});
+    try std.testing.checkAllAllocationFailures(allocator, Probe.vt, .{ snapshot, &vt_cells });
+}
+
+test "terminal VT explicit opt-out preserves the legacy feed path" {
+    var slot = Surface{ .cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count) };
+    defer std.testing.allocator.free(slot.cells);
+    clearCells(&slot);
+    var probe = TerminalOutputProbe{};
+    try std.testing.expect(!try TerminalVt.parseFlag("0"));
     try std.testing.expect(slot.vt == null);
     try std.testing.expect(publishTerminalOutput(std.testing.allocator, &slot, "\xc3\xa9\x1b[2;3H\x1b[38;2;12;34;56mZ", &probe).succeeded());
     try std.testing.expectEqual(@as(u32, 'Z'), slot.cells[0].codepoint);
     try std.testing.expect(!slot.output_result.authoritative_vt);
 }
 
-test "terminal VT projection rejection still publishes clusters and routes replies to current pane" {
+test "terminal VT snapshot publishes clusters and routes replies to current pane" {
     const allocator = std.testing.allocator;
     var workspace = try minimalWorkspaceForOptionsTest(allocator);
     defer workspace.layout.deinit();
@@ -2230,12 +2463,21 @@ test "terminal VT projection rejection still publishes clusters and routes repli
     clearCells(slot);
     var probe = TerminalOutputProbe{};
     const result = publishTerminalOutput(allocator, slot, "A\xe7\x95\x8ce\xcc\x81\xf0\x9f\x98\x80\x1b[6n", &probe);
-    try std.testing.expectEqual(error.UnsupportedHostCell, result.projection_error.?);
+    try std.testing.expect(result.projection_error == null);
     try std.testing.expect(result.vt_error == null);
-    try std.testing.expect(!result.succeeded());
-    try std.testing.expectEqual(@as(usize, 0), slot.output_events);
-    try std.testing.expectEqual(@as(usize, 1), probe.call_count);
-    try std.testing.expectEqual(.text, probe.calls[0]);
+    try std.testing.expect(result.succeeded());
+    try std.testing.expectEqual(@as(usize, 1), slot.output_events);
+    try std.testing.expectEqual(@as(usize, 3), probe.call_count);
+    try std.testing.expectEqual(.snapshot, probe.calls[0]);
+    try std.testing.expectEqual(.text, probe.calls[1]);
+    try std.testing.expectEqualStrings(
+        "A\xe7\x95\x8ce\xcc\x81\xf0\x9f\x98\x80",
+        probe.glyph_text[0..probe.glyph_text_length],
+    );
+    try std.testing.expectEqual(c.WINGHOSTTY_GLYPH_WIDTH_NARROW, probe.glyphs[0].width);
+    try std.testing.expectEqual(c.WINGHOSTTY_GLYPH_WIDTH_WIDE, probe.glyphs[1].width);
+    try std.testing.expectEqual(c.WINGHOSTTY_GLYPH_WIDTH_CONTINUATION, probe.glyphs[2].width);
+    try std.testing.expectEqual(@as(u16, 3), probe.glyphs[3].length);
     try std.testing.expect(std.mem.startsWith(u8, probe.text[0..probe.text_length], "A\xe7\x95\x8ce\xcc\x81\xf0\x9f\x98\x80"));
     try std.testing.expectEqual(@as(usize, 6), probe.caret);
     workspace.routeVtResponses(5);
@@ -2246,14 +2488,12 @@ test "terminal VT projection rejection still publishes clusters and routes repli
     defer allocator.free(item.bytes);
     try std.testing.expectEqual(@as(usize, 5), item.surface);
     try std.testing.expectEqualStrings("\x1b[1;7R", item.bytes);
-    try std.testing.expectEqualStrings(result.message().?, workspace.inputStatus("").?);
     workspace.input_error_message = "terminal input write failed";
     try std.testing.expectEqualStrings("terminal input write failed", workspace.inputStatus("").?);
     workspace.input_error_message = "";
     probe.call_count = 0;
     const recovered = publishTerminalOutput(allocator, slot, "\x1b[2J\x1b[Hplain", &probe);
     try std.testing.expect(recovered.succeeded());
-    try std.testing.expectEqualStrings("Terminal output error cleared", workspace.inputStatus(result.message().?).?);
 }
 
 test "terminal VT queue rejection retains bounded responses and never replays" {
@@ -2344,7 +2584,7 @@ test "terminal accessibility feed publishes rendered cells instead of overwritte
     try std.testing.expectEqual(probe.text_length, probe.utf16_length);
     try std.testing.expectEqual(@as(usize, 1), probe.caret);
     try std.testing.expectEqual(@as(usize, 3), probe.call_count);
-    try std.testing.expectEqual(.cells, probe.calls[0]);
+    try std.testing.expectEqual(.snapshot, probe.calls[0]);
     try std.testing.expectEqual(.text, probe.calls[1]);
     try std.testing.expectEqual(.redraw, probe.calls[2]);
 }
@@ -2472,13 +2712,12 @@ test "terminal accessibility feed reports staging and outbound failures without 
     var probe = TerminalOutputProbe{};
     const failed_snapshot = publishTerminalOutput(failing.allocator(), &slot, "A", &probe);
     try std.testing.expectEqual(error.OutOfMemory, failed_snapshot.snapshot_error.?);
+    try std.testing.expectEqual(error.OutOfMemory, failed_snapshot.glyph_error.?);
     try std.testing.expect(failed_snapshot.message() != null);
     try std.testing.expect(!failed_snapshot.succeeded());
     try std.testing.expectEqual(@as(usize, 0), slot.output_events);
     try std.testing.expectEqual(@as(usize, 0), probe.text_length);
-    try std.testing.expectEqual(@as(usize, 2), probe.call_count);
-    try std.testing.expectEqual(.cells, probe.calls[0]);
-    try std.testing.expectEqual(.redraw, probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 0), probe.call_count);
     try std.testing.expectEqual(@as(u32, 'A'), slot.cells[0].codepoint);
 
     for (0..3) |stage| {
@@ -2493,13 +2732,13 @@ test "terminal accessibility feed reports staging and outbound failures without 
         try std.testing.expect(result.message() != null);
         try std.testing.expect(!result.succeeded());
         try std.testing.expectEqual(@as(usize, 0), slot.output_events);
-        try std.testing.expectEqual(if (stage == 0) @as(usize, 2) else 3, probe.call_count);
-        try std.testing.expectEqual(.cells, probe.calls[0]);
-        try std.testing.expectEqual(.redraw, probe.calls[probe.call_count - 1]);
+        try std.testing.expectEqual(if (stage == 0) @as(usize, 1) else 3, probe.call_count);
+        try std.testing.expectEqual(.snapshot, probe.calls[0]);
         if (stage == 0) {
             try std.testing.expectEqual(@as(usize, 0), probe.text_length);
             try std.testing.expectEqual(@as(?c.winghostty_result, null), result.text_result);
         } else {
+            try std.testing.expectEqual(.redraw, probe.calls[probe.call_count - 1]);
             try std.testing.expectEqual(@as(usize, cell_count + rows - 1), probe.text_length);
             try std.testing.expectEqual(@as(u8, 'B'), probe.text[0]);
         }
@@ -4046,17 +4285,46 @@ test "pane geometry clamps sub-cell bounds to one cell and ignores unset metrics
 test "pane attach and resize commands carry geometry outside terminal input" {
     var attach_storage: [5][]const u8 = undefined;
     var attach_size: [16]u8 = undefined;
-    const attach = try attachArguments("zmx.exe", "session-a", .{ .cols = 60, .rows = 12 }, &attach_storage, &attach_size);
-    const expected_attach = [_][]const u8{ "zmx.exe", "attach", "session-a", "--size", "60x12" };
+    var attach_session: [ZmxSession.prefix.len + 128]u8 = undefined;
+    const attach = try attachArguments(
+        "zmx.exe",
+        "session-a",
+        .{ .cols = 60, .rows = 12 },
+        &attach_storage,
+        &attach_size,
+        &attach_session,
+    );
+    const expected_attach = [_][]const u8{ "zmx.exe", "attach", "graphcode-session-a", "--size", "60x12" };
     try std.testing.expectEqual(expected_attach.len, attach.len);
     for (expected_attach, attach) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
 
     var resize_storage: [4][]const u8 = undefined;
     var resize_size: [16]u8 = undefined;
-    const resize = try resizeArguments("zmx.exe", "session-a", .{ .cols = 80, .rows = 24 }, &resize_storage, &resize_size);
-    const expected_resize = [_][]const u8{ "zmx.exe", "resize", "session-a", "80x24" };
+    var resize_session: [ZmxSession.prefix.len + 128]u8 = undefined;
+    const resize = try resizeArguments(
+        "zmx.exe",
+        "session-a",
+        .{ .cols = 80, .rows = 24 },
+        &resize_storage,
+        &resize_size,
+        &resize_session,
+    );
+    const expected_resize = [_][]const u8{ "zmx.exe", "resize", "graphcode-session-a", "80x24" };
     try std.testing.expectEqual(expected_resize.len, resize.len);
     for (expected_resize, resize) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+
+    var canonical_storage: [5][]const u8 = undefined;
+    var canonical_size: [16]u8 = undefined;
+    var canonical_session: [ZmxSession.prefix.len + 128]u8 = undefined;
+    const canonical = try attachArguments(
+        "zmx.exe",
+        "graphcode-session-a",
+        .{ .cols = 60, .rows = 12 },
+        &canonical_storage,
+        &canonical_size,
+        &canonical_session,
+    );
+    try std.testing.expectEqualStrings("graphcode-session-a", canonical[2]);
 }
 
 test "pane bounds partition available area without losing remainder pixels" {

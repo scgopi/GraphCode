@@ -3,6 +3,7 @@ const Lifecycle = @import("WorkspaceLifecycle.zig");
 const Manager = @import("WorkspaceManager.zig");
 const DaemonClient = @import("DaemonClient.zig");
 const Win32 = @import("Win32.zig");
+const ZmxSession = @import("ZmxSession.zig");
 const c = Win32.c;
 
 /// Recoverable workspace deletion, mirroring macOS `WorkspaceClient.delete`: the daemon
@@ -142,11 +143,22 @@ pub fn freeSessionIds(allocator: std.mem.Allocator, ids: [][]u8) void {
 /// missing or unhappy zmx is not allowed to fail an otherwise completed deletion.
 pub fn killArgv(allocator: std.mem.Allocator, zmx_path: []const u8, ids: []const []u8) ![][]const u8 {
     const argv = try allocator.alloc([]const u8, ids.len + 3);
+    errdefer allocator.free(argv);
     argv[0] = zmx_path;
     argv[1] = "kill";
-    for (ids, 0..) |id, index| argv[index + 2] = id;
+    var added: usize = 0;
+    errdefer for (argv[2..][0..added]) |value| allocator.free(value);
+    for (ids, 0..) |id, index| {
+        argv[index + 2] = try ZmxSession.allocName(allocator, id);
+        added += 1;
+    }
     argv[argv.len - 1] = "--force";
     return argv;
+}
+
+fn freeKillArgv(allocator: std.mem.Allocator, argv: [][]const u8) void {
+    for (argv[2 .. argv.len - 1]) |value| allocator.free(value);
+    allocator.free(argv);
 }
 
 fn causeText(cause: ?anyerror) []const u8 {
@@ -329,7 +341,7 @@ pub const Live = struct {
             allocator.dupe(u8, "zmx.exe") catch return 0;
         defer allocator.free(zmx);
         const argv = killArgv(allocator, zmx, ids) catch return 0;
-        defer allocator.free(argv);
+        defer freeKillArgv(allocator, argv);
         var child = std.process.Child.init(argv, allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
@@ -653,15 +665,25 @@ test "workspace recycle always allows undo" {
 
 test "workspace session kill forces every saved id in one invocation" {
     const allocator = std.testing.allocator;
-    var ids = [_][]u8{ @constCast("alpha-id"), @constCast("beta-id") };
+    var ids = [_][]u8{ @constCast("alpha-id"), @constCast("graphcode-beta-id") };
     const argv = try killArgv(allocator, "C:\\tools\\zmx.exe", &ids);
-    defer allocator.free(argv);
+    defer freeKillArgv(allocator, argv);
     try std.testing.expectEqual(@as(usize, 5), argv.len);
     try std.testing.expectEqualStrings("C:\\tools\\zmx.exe", argv[0]);
     try std.testing.expectEqualStrings("kill", argv[1]);
-    try std.testing.expectEqualStrings("alpha-id", argv[2]);
-    try std.testing.expectEqualStrings("beta-id", argv[3]);
+    try std.testing.expectEqualStrings("graphcode-alpha-id", argv[2]);
+    try std.testing.expectEqualStrings("graphcode-beta-id", argv[3]);
     try std.testing.expectEqualStrings("--force", argv[4]);
+
+    const Probe = struct {
+        fn run(failing: std.mem.Allocator, input: []const []u8) !void {
+            const staged = try killArgv(failing, "zmx.exe", input);
+            defer freeKillArgv(failing, staged);
+            try std.testing.expectEqualStrings("graphcode-alpha-id", staged[2]);
+            try std.testing.expectEqualStrings("graphcode-beta-id", staged[3]);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{&ids});
 }
 
 test "workspace session ids come from saved graphs and skip sidecars and unreadable files" {
