@@ -320,10 +320,46 @@ the backend's normal flow outside chat and evidence.
 5. Record backend conversation ID and zmx session name; they must be distinct.
 6. Verify readable current pixels, expected markers, cursor/input, wrapping,
    resize, tab switching, stop, and reopen.
-7. Verify stop affects only the intended loop.
+7. Verify stop affects only the intended loop, using the Stop contract below.
 8. Stop immediately at two turns or the USD 5 ceiling.
 
 Do not record credentials, tokens, private prompts, or unrelated output.
+
+### Stop contract
+
+Stop is the reversible verb. It does not promise to end the loop's session.
+Before pressing Stop, record `zmx list` (names only) and create at least two
+owned sentinel sessions: one unprefixed, and one decoy named
+`graphcode-<another UUID>`. Then press **Stop loop** with native input.
+
+Stop passes only if all of these hold:
+
+- the intended loop's state becomes `stopped` and its Stop control disappears;
+- no other loop changes state;
+- the loop's memory log (`memory\<project>\<loop id>\LOG.txt` under the support
+  directory) records exactly one new stop entry, which takes exactly one of
+  the two paths below, and that path matches what you observe;
+- every other zmx session, including both sentinels, keeps the same PID, and no
+  sentinel receives input;
+- the shell and the production daemon stay responsive.
+
+The two daemon paths are:
+
+| Memory-log entry | Expected observation |
+| --- | --- |
+| `its session was asked to stop looping` | `graphcode-<loop UUID>` is still listed with the same PID. Its terminal shows the daemon's `[graphcode] Stop requested from the graph…` request, which tells the agent to stay in the session. The agent process may stay alive. |
+| `its session could not be reached, so it was killed` | `graphcode-<loop UUID>` is absent from `zmx list` within 15 seconds, and its agent process has exited. |
+
+Classify `TerminalSessionOwnership` and stop if:
+
+- the log claims a kill but the session survives (the beta9 Dev Box result);
+- the log claims a request was delivered but the request appears in no session,
+  or in a different one;
+- a different session dies;
+- the loop does not reach `stopped`.
+
+Do not require a reachable session to end, and do not use `zmx kill` or Restart
+to make Stop pass.
 
 ## Phase D8 — native reachability and input
 
