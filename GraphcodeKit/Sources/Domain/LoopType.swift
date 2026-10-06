@@ -33,8 +33,9 @@ public enum LoopType: String, Codable, CaseIterable, Sendable {
 
   /// Whether `graphcoded` starts this loop's session and keeps it alive across its own
   /// restarts, because nothing else would. A turn-based loop or a sketch is *attended*:
-  /// it only ever runs because a human opened it, so whichever pane opens it owns the
-  /// launch — locally and, over ssh, on the remote host. Every gate that decides who
+  /// it only ever runs because a human opened it. macOS panes own the launch; Windows
+  /// panes ask the daemon with `resumeSession` before attaching. Over ssh the launch
+  /// still happens on the remote host. Every gate that decides who
   /// launches must read this rather than name `turnBased`, which is how remote sketches
   /// came to wait forever for a daemon that deliberately never starts them (#253).
   public var runsUnattended: Bool {

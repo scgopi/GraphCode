@@ -73,6 +73,25 @@ function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
   }
 }
 
+function New-SmokeZmxRoot([string] $Path) {
+  if (Test-Path -LiteralPath $Path) { throw "Smoke zmx root already exists: $Path" }
+  New-Item -ItemType Directory -Path $Path | Out-Null
+  # Elevated runners default the owner to Administrators. zmx requires the token's
+  # actual user SID; set it only on this fresh, test-owned directory.
+  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl = [Security.AccessControl.DirectorySecurity]::new()
+  $acl.SetOwner($sid)
+  $acl.SetAccessRuleProtection($true, $false)
+  $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+      [Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit",
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow))
+  Set-Acl -LiteralPath $Path -AclObject $acl
+  $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier])
+  if ($owner.Value -ne $sid.Value) { throw "Smoke zmx root owner does not match the current user" }
+}
+
 function Test-TestSessionProcess([object] $process) {
   if (-not $process.CommandLine) { return $false }
   foreach ($session in $testSessionIds) {
@@ -291,8 +310,7 @@ try {
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
-  if (Test-Path -LiteralPath $smokeZmxDir) { throw "Smoke zmx root already exists: $smokeZmxDir" }
-  New-Item -ItemType Directory -Path $smokeZmxDir | Out-Null
+  New-SmokeZmxRoot $smokeZmxDir
   $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
   $env:GRAPHCODE_SHELL_SESSION_PREFIX = $sessionPrefix

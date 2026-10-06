@@ -98,6 +98,32 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertFalse(GraphStore.platformPanesLaunchAttendedSessions)
     }
 
+    func testWindowsMainLoopWithoutAnInstructionStillLaunchesItsBackend() throws {
+      let node = LoopNode(title: "Main", loopType: .sketch, backend: .copilotCLI)
+      var settings = GraphcodeSettings()
+      settings.copilotPermissions = .ask
+      let arguments = try XCTUnwrap(ZmxSessionLauncher.arguments(forNode: node, settings: settings))
+      XCTAssertEqual(
+        Array(arguments.prefix(3)),
+        ["run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d"])
+      XCTAssertTrue(arguments.contains("copilot"))
+      XCTAssertFalse(arguments.contains("--interactive"))
+      XCTAssertFalse(arguments.contains("--yolo"))
+      XCTAssertFalse(arguments.contains("/bin/zsh"))
+    }
+
+    func testWindowsAttendedLaunchPreservesInstructionAndAskPermissions() throws {
+      var node = LoopNode(title: "Turn", loopType: .turnBased, backend: .copilotCLI)
+      node.firstInstruction = "Reply with a short confirmation."
+      var settings = GraphcodeSettings()
+      settings.copilotPermissions = .ask
+      let arguments = try XCTUnwrap(ZmxSessionLauncher.arguments(forNode: node, settings: settings))
+      let promptIndex = try XCTUnwrap(arguments.firstIndex(of: "--interactive"))
+      XCTAssertTrue(arguments[promptIndex + 1].hasPrefix("Reply with a short confirmation."))
+      XCTAssertFalse(arguments.contains("--yolo"))
+      XCTAssertFalse(arguments.contains("--autopilot"))
+    }
+
     func testZmxLocatorUsesWindowsExecutableName() {
       XCTAssertEqual(ZmxLocator.binaryURL.lastPathComponent, "zmx.exe")
     }
