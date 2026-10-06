@@ -637,9 +637,9 @@ Assert-Contract ($zmxSessionSource -match '(?s)pub fn child\(.*?\.create_no_wind
   "zmx children must be created without a console window"
 Assert-Contract ($terminalSurfaceSource -notmatch 'std\.process\.Child\.init\(' -and
   $workspaceTeardownSource -notmatch 'std\.process\.Child\.init\(' -and
-  [regex]::Matches($terminalSurfaceSource, 'ZmxSession\.child\(').Count -eq 2 -and
+  [regex]::Matches($terminalSurfaceSource, 'ZmxSession\.child\(').Count -eq 3 -and
   [regex]::Matches($workspaceTeardownSource, 'ZmxSession\.child\(').Count -eq 1) `
-  "zmx attach, resize, and kill must spawn through ZmxSession.child so the GUI shell never opens a console window"
+  "zmx attach, listing, resize, and kill must spawn through ZmxSession.child so the GUI shell never opens a console window"
 
 $zig = Resolve-TestZig
 Invoke-Native "Accessibility contract executable tests" {

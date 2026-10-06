@@ -17,6 +17,8 @@ pub const ChildStdio = enum {
     attach,
     /// One-shot control commands such as `resize` and `kill`.
     control,
+    /// One-shot listings whose output is inspected before attaching.
+    capture,
 };
 
 /// zmx.exe is a console-subsystem program. Spawned from the GUI shell without
@@ -31,7 +33,7 @@ pub fn child(
     var result = std.process.Child.init(argv, allocator);
     result.cwd = cwd;
     result.stdin_behavior = if (stdio == .attach) .Pipe else .Ignore;
-    result.stdout_behavior = if (stdio == .attach) .Pipe else .Ignore;
+    result.stdout_behavior = if (stdio == .attach or stdio == .capture) .Pipe else .Ignore;
     result.stderr_behavior = .Ignore;
     result.create_no_window = true;
     return result;
@@ -63,4 +65,11 @@ test "canonical zmx session names add the ownership prefix exactly once" {
         "graphcode-alpha",
         try nameBuffer("graphcode-alpha", &storage),
     );
+}
+
+test "zmx listing capture has readable output without stdin or a console" {
+    const listing = child(std.testing.allocator, &.{ "zmx.exe", "ls" }, null, .capture);
+    try std.testing.expectEqual(std.process.Child.StdIo.Ignore, listing.stdin_behavior);
+    try std.testing.expectEqual(std.process.Child.StdIo.Pipe, listing.stdout_behavior);
+    try std.testing.expect(listing.create_no_window);
 }

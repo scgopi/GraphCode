@@ -698,12 +698,12 @@ pub const Workspace = struct {
 
     fn spawnListing(self: *Workspace) ?std.process.Child {
         var args: [2][]const u8 = undefined;
-        var child = std.process.Child.init(LoopLaunchWait.probeArguments(self.zmx_path, &args), self.allocator);
-        child.cwd = self.cwd;
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
-        child.create_no_window = true;
+        var child = ZmxSession.child(
+            self.allocator,
+            LoopLaunchWait.probeArguments(self.zmx_path, &args),
+            self.cwd,
+            .capture,
+        );
         child.spawn() catch {
             self.setInputError("Unable to start loop session listing");
             return null;
