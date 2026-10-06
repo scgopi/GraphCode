@@ -49,12 +49,8 @@ $oldStubNodeA = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_A")
 $oldStubNodeB = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_B")
 $oldSessionPrefix = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSION_PREFIX")
 $oldZmxDir = [Environment]::GetEnvironmentVariable("ZMX_DIR")
-# zmx keeps per-session IPC files under its root, named by the hex-encoded session name;
-# beneath the validation root's redirected LOCALAPPDATA a `graphcode-<uuid>` session
-# path passes 260 characters and `zmx run` fails. A short owned root keeps it legal.
-$smokeZmxDir = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else {
-    [IO.Path]::GetPathRoot([string] $repoRoot)
-  }) "gcz-$PID"
+$smokeZmxDir = Join-Path ([IO.Path]::GetPathRoot([string] $repoRoot)) ("gcz-" + [guid]::NewGuid().ToString("N").Substring(0, 12))
+$stubSessionHosts = @{}
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
@@ -88,8 +84,8 @@ function Test-TestSessionProcess([object] $process) {
 }
 
 function Get-ZmxSessionRecords {
-  $names = @($testSessionIds | ForEach-Object { [regex]::Escape($_) })
-  $names += [regex]::Escape($sessionPrefix) + "-[A-Za-z0-9_-]+"
+  $names = @($testSessionIds | ForEach-Object { [regex]::Escape("graphcode-$_") })
+  $names += [regex]::Escape("graphcode-$sessionPrefix") + "-[A-Za-z0-9_-]+"
   $pattern = "(?<![A-Za-z0-9_-])(?:" + ($names -join "|") + ")(?![A-Za-z0-9_-])"
   foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop)) {
     if (-not $process.CommandLine) { continue }
@@ -110,27 +106,6 @@ function Record-TestOwnedSessions {
       [void] $ownedProcessIds.Add($processId)
     }
   }
-}
-
-# The stub stands in for graphcoded, which owns starting a loop's zmx session; the shell
-# only attaches to a loop session that already exists and never creates one.
-function Start-StubLoopSessions {
-  if (-not $UseStubDaemon) { return }
-  foreach ($id in $testSessionIds) {
-    $name = "graphcode-$id"
-    $probe = Start-Process -FilePath $env:GRAPHCODE_ZMX -ArgumentList @("info", $name) `
-      -PassThru -WindowStyle Hidden
-    $probe.WaitForExit()
-    if ($probe.ExitCode -eq 0) { continue }
-    # WaitForExit on the process only: the detached session it starts outlives it.
-    $run = Start-Process -FilePath $env:GRAPHCODE_ZMX -ArgumentList @("run", $name, "-d") `
-      -PassThru -WindowStyle Hidden
-    $run.WaitForExit()
-    if ($run.ExitCode -ne 0) {
-      throw "zmx could not start stub loop session $name (exit $($run.ExitCode))"
-    }
-  }
-  Record-TestOwnedSessions
 }
 
 function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
@@ -156,6 +131,67 @@ function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
       sessions = @($ownedSessionNames)
       processes = $metrics
     } | ConvertTo-Json -Compress -Depth 5))
+}
+
+function Invoke-ZmxProbe([string[]] $Arguments) {
+  $start = [Diagnostics.ProcessStartInfo]::new($env:GRAPHCODE_ZMX)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+  $process = [Diagnostics.Process]::Start($start)
+  $output = $process.StandardOutput.ReadToEndAsync()
+  $errors = $process.StandardError.ReadToEndAsync()
+  try {
+    if (-not $process.WaitForExit(5000)) {
+      $process.Kill()
+      throw "zmx probe timed out: $($Arguments -join ' ')"
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output.Result; Error = $errors.Result }
+  } finally {
+    $process.Dispose()
+  }
+}
+
+# A protocol-only stub cannot launch the agent. Host its two terminal fixtures through
+# zmx's supported foreground daemon entry point, with a real liveness assertion.
+function Start-StubLoopSessions {
+  if (-not $UseStubDaemon) { return }
+  foreach ($id in $testSessionIds) {
+    $name = "graphcode-$id"
+    $listing = Invoke-ZmxProbe @("ls")
+    $livePattern = "(?m)^name=" + [regex]::Escape($name) + "\t(?![^\r\n]*\t(?:ended|exit_code|err)=)"
+    if ($listing.ExitCode -eq 0 -and $listing.Output -match $livePattern) { continue }
+    if ($stubSessionHosts.ContainsKey($name) -and -not $stubSessionHosts[$name].HasExited) {
+      throw "Owned stub session host is running but its task is not live: $name"
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($env:GRAPHCODE_ZMX)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WorkingDirectory = [string] $repoRoot
+    $start.RedirectStandardError = $true
+    foreach ($argument in @("--daemon", $name)) { $start.ArgumentList.Add($argument) }
+    $hostProcess = [Diagnostics.Process]::Start($start)
+    $hostError = $hostProcess.StandardError.ReadToEndAsync()
+    $stubSessionHosts[$name] = $hostProcess
+    [void] $ownedProcessIds.Add($hostProcess.Id)
+    [void] $ownedSessionNames.Add($name)
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+      if ($hostProcess.HasExited) {
+        throw "zmx stub host exited ($($hostProcess.ExitCode)): $name; $($hostError.Result)"
+      }
+      $listing = Invoke-ZmxProbe @("ls")
+      if ($listing.ExitCode -eq 0 -and $listing.Output -match $livePattern) { break }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($listing.ExitCode -ne 0 -or $listing.Output -notmatch $livePattern) {
+      throw "zmx stub session did not become live: $name; $($listing.Error)"
+    }
+    Write-Host "STUB_LOOP_SESSION_LIVE=$name"
+  }
+  Record-TestOwnedSessions
 }
 
 function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
@@ -253,10 +289,11 @@ try {
     throw "GraphCode Windows shell version mismatch: expected $Version, executable reports $reportedVersion"
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
-  New-Item -ItemType Directory -Force -Path $smokeZmxDir | Out-Null
-  $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_GATE_CWD = $repoRoot
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
+  if (Test-Path -LiteralPath $smokeZmxDir) { throw "Smoke zmx root already exists: $smokeZmxDir" }
+  New-Item -ItemType Directory -Path $smokeZmxDir | Out-Null
+  $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
   $env:GRAPHCODE_SHELL_SESSION_PREFIX = $sessionPrefix
   if ($UseStubDaemon) {
@@ -475,7 +512,10 @@ finally {
   } else {
     $env:ZMX_DIR = $oldZmxDir
   }
-  Remove-Item -LiteralPath $smokeZmxDir -Recurse -Force -ErrorAction SilentlyContinue
+  foreach ($hostProcess in $stubSessionHosts.Values) { $hostProcess.Dispose() }
+  if (Test-Path -LiteralPath $smokeZmxDir) {
+    Remove-Item -LiteralPath $smokeZmxDir -Recurse -Force
+  }
   if ($null -eq $oldSessionPrefix) {
     Remove-Item Env:GRAPHCODE_SHELL_SESSION_PREFIX -ErrorAction SilentlyContinue
   } else {

@@ -2,8 +2,8 @@
 //!
 //! `zmx attach` creates a plain shell session when the named one is not reachable, so a
 //! pane that attached first would win the race against the daemon's launch and the loop's
-//! agent would never start. The pane instead probes (`zmx info`, which never creates)
-//! until the session exists, then attaches. Pure state so it is testable without zmx.
+//! agent would never start. The pane instead probes `zmx ls` until the task is live,
+//! then attaches. Pure state so it is testable without zmx.
 
 const std = @import("std");
 const ZmxSession = @import("ZmxSession.zig");

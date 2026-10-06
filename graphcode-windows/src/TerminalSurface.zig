@@ -342,7 +342,7 @@ fn moveReplacementSurface(
 pub const Workspace = struct {
     pub const LaunchOutcome = enum { started, not_started, attach_failed };
     pub const loop_open_timeout_ms = LoopLaunchWait.open_timeout_ms;
-    // A `zmx info` that outlives its wait's deadline by this much is treated as no answer.
+    // A listing that outlives its wait's deadline by this much is treated as no answer.
     const launch_probe_grace_ms: i64 = 5_000;
     const restore_probe_timeout_ms: i64 = 2_000;
     const max_listing_bytes: usize = 1 << 20;
