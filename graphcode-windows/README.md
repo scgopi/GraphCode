@@ -23,9 +23,8 @@ Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
 pane-sized rendered-cell grid, with spaces for empty cells, preserved trailing
 blanks, LF row separators, and independent UTF-16 length/cursor offsets. This
 deliberately replaces the recent raw VT byte stream: the accessible document is
-the current grid, not a transcript or scrollback. The ASCII parser and renderer
-are unchanged; Unicode cell-encoding tests do not establish Unicode terminal
-rendering. Render and accessibility updates remain separate, best-effort calls.
+the current grid, not a transcript or scrollback. Render and accessibility
+updates remain separate, best-effort calls.
 Failures report through the existing status/diagnostic path without empty-text
 fallbacks; a failed accessibility update leaves the provider's last successful
 snapshot, which must not be treated as current renderer state. Producer tests use
@@ -36,14 +35,14 @@ reset pane published fresh text. Applied selection, visible caret/geometry,
 provider range conformance, and end-to-end accessibility parity remain unverified
 or incomplete.
 
-### Experimental VT parser (opt-in, partial renderer support)
+### Terminal VT parser and glyph snapshots
 
-Set `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=1` before startup to use the public
-`libghostty-vt` C API from the existing Winghostty pin
-`6286560d0aa3103e068b2b7afa81eac373d870c9`. An absent variable or exactly `0`
-keeps the existing ASCII path unchanged. Other values, including an empty value,
-fail workspace initialization with `InvalidTerminalVtFlag` and a diagnostic;
-there is no silent fallback.
+The public `libghostty-vt` C API from the existing Winghostty pin
+`6286560d0aa3103e068b2b7afa81eac373d870c9` is the production default. Set
+`GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=0` before startup only as a rollback to the
+limited legacy parser; an absent variable or exactly `1` enables Ghostty VT.
+Other values, including an empty value, fail workspace initialization with
+`InvalidTerminalVtFlag` and a diagnostic; there is no silent fallback.
 
 Each pane owns a stable, heap-allocated terminal and copied viewport snapshot.
 UTF-8 is parsed incrementally; complete grapheme codepoints, wide-cell occupancy,
@@ -54,16 +53,16 @@ or split surrogate pairs. This is the authoritative VT viewport, not a claim
 that the native host displayed it. Grapheme clustering follows the provider's
 terminal modes (including mode 2027); GraphCode does not override their defaults.
 
-The normal host still renders one codepoint and two colors per cell using its
-existing 5x7 patterns. It does not implement shaping, clusters, wide glyphs,
-decorations, or cursor pixels. The opt-in projection accepts narrow single
-scalars and colors, flattening inverse/invisible colors. Unsupported cells
-reject the projection explicitly with `UnsupportedHostCell`; they are not
-truncated, replaced by ASCII, or presented as a successful blank frame.
-Previously published cells remain, while authoritative accessible text and valid
-PTY replies can still advance. The status reports that rendered content is
-unconfirmed, and the batch does not count as successful output publication.
-Ordinary legacy output is not subject to this opt-in rejection policy.
+GraphCode publishes the viewport through Winghostty's v2 terminal snapshot ABI,
+including UTF-8 grapheme spans and narrow, wide, and continuation occupancy.
+Winghostty rasterizes those spans as real GDI glyph coverage rather than its v1
+pseudo-hash fallback. Inverse and invisible colors are flattened into cell
+colors; the current host ABI does not represent the other retained decorations.
+Invalid cells reject the projection explicitly rather than being truncated,
+replaced by ASCII, or presented as a successful blank frame. Previously
+published cells remain, while authoritative accessible text and valid PTY
+replies can still advance. The legacy parser rollback also publishes v2 glyph
+spans, but its parsing behavior remains intentionally limited.
 
 Query replies are captured synchronously into a per-pane 64 KiB buffer and
 enqueued through the existing input queue for the current pane slot. Complete
@@ -90,12 +89,13 @@ the owned cell/VT state and queue `zmx resize <session> <columns>x<rows>` for th
 attached session. Zero-sized or unavailable geometry preserves the previous
 grid rather than collapsing it during minimize/restore. Headless tests exercise
 the state transition, in-memory resize, reflow, scrollback/viewport, stream
-chunk boundaries, projection failures, allocation failures, and response
-ownership. They do not prove that a real backend accepted the resize or that
-visible wrapping and pixels match the negotiated PTY dimensions. Wheel/selection
-integration, native glyph rendering, visible caret geometry, full TextPattern
-conformance, and end-to-end terminal parity remain separate work. No live HWND,
-UIA, clipboard, device-input, backend-resize, or rendering proof is claimed.
+chunk boundaries, v2 glyph spans, projection failures, allocation failures, and
+response ownership. They do not prove that a real backend accepted the resize
+or that visible wrapping and pixels match the negotiated PTY dimensions.
+Wheel/selection integration, live glyph pixels, visible caret geometry, full
+TextPattern conformance, and end-to-end terminal parity remain separate work.
+No live HWND, UIA, clipboard, device-input, backend-resize, or pixel-readability
+proof is claimed.
 
 `build.zig` builds the VT library separately from the unchanged Win32 host and
 links its generated static artifact into the application. The

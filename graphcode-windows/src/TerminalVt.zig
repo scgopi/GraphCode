@@ -22,7 +22,7 @@ pub const Error = error{
 };
 
 pub fn parseFlag(value: ?[]const u8) error{InvalidTerminalVtFlag}!bool {
-    const text = value orelse return false;
+    const text = value orelse return true;
     if (std.mem.eql(u8, text, "0")) return false;
     if (std.mem.eql(u8, text, "1")) return true;
     return error.InvalidTerminalVtFlag;
@@ -30,7 +30,7 @@ pub fn parseFlag(value: ?[]const u8) error{InvalidTerminalVtFlag}!bool {
 
 pub fn startupEnabled(allocator: std.mem.Allocator) !bool {
     const value = std.process.getEnvVarOwned(allocator, environment_name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return false,
+        error.EnvironmentVariableNotFound => return true,
         else => return err,
     };
     defer allocator.free(value);
@@ -458,8 +458,8 @@ fn dimensions(columns: usize, rows: usize) Error![2]u16 {
     return .{ @intCast(columns), @intCast(rows) };
 }
 
-test "VT flag is explicit and default off" {
-    try std.testing.expect(!try parseFlag(null));
+test "VT parser is production default with an explicit legacy opt-out" {
+    try std.testing.expect(try parseFlag(null));
     try std.testing.expect(!try parseFlag("0"));
     try std.testing.expect(try parseFlag("1"));
     for ([_][]const u8{ "", "true", "false", " 1", "2" }) |value|

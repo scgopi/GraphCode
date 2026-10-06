@@ -861,6 +861,12 @@ Invoke-Native "Workspace layout executable tests" {
     & $zig test src\InputRouter.zig
   } finally { Pop-Location }
 }
+Invoke-Native "Zmx session identity executable tests" {
+  Push-Location $shellRoot
+  try {
+    & $zig test src\ZmxSession.zig
+  } finally { Pop-Location }
+}
 Invoke-Native "Terminal VT preparation and memory tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
