@@ -1791,9 +1791,20 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
         child.env_map = &environment;
         child.create_no_window = true;
         child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        const term = try child.spawnAndWait();
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        var errors: std.ArrayList(u8) = .empty;
+        defer errors.deinit(allocator);
+        try child.spawn();
+        try child.collectOutput(allocator, &output, &errors, 64 * 1024);
+        const term = try child.wait();
+        if (term != .Exited or term.Exited != 0) {
+            std.debug.print("fixture Git failed: {any}\nstdout: {s}\nstderr: {s}\n", .{
+                term, output.items, errors.items,
+            });
+        }
         try std.testing.expect(term == .Exited and term.Exited == 0);
     }
 } else void;

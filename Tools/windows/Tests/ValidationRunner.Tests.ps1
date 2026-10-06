@@ -482,6 +482,34 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       $receipt.report.multiProjectPeer.controls.Count -eq 1 -and $receipt.rawJson -ceq $receiptFixture) "whole actual receipt lost custody/bytes"
     return "Actual accepted91dc file fixture only; not claimed as95e success state or current native evidence"
   }
+  function New-MultiReceiptWithResume {
+    $report = New-MultiReceiptReport
+    $peer = $report.multiProjectPeer
+    $id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    $owner = $peer.graphs[1]
+    $response = [ordered]@{ version = 2; kind = "response"; requestID = $id; success = $true }
+    $frame = [ordered]@{ version = 2; kind = "request"; requestID = $id
+      command = [ordered]@{ graphCommand = [ordered]@{ projectPath = $owner.project.path
+        command = [ordered]@{ resumeSession = [ordered]@{ _0 = $owner.nodes[0].id } } } } }
+    $peer.received += [ordered]@{ requestID = $id; frame = $frame; expectedResponse = $response }
+    $peer.answered += [ordered]@{ requestID = $id; response = $response }
+    $peer.receivedCount++; $peer.requestCount++; $peer.responseCount++
+    $report.requestCount++; $report.responseCount++
+    $report.commands += "graphCommand"
+    return $report
+  }
+  Invoke-MultiCase "whole peer receipt accepts a correlated nonmutating session open" {
+    $report = New-MultiReceiptWithResume
+    Assert-MultiProjectCompleteReport $report
+    Assert-MultiCase ($report.multiProjectPeer.applied.Count -eq 2) "session open changed rename accounting"
+    return "Resume acknowledgement is accounted separately from the two exact renames"
+  }
+  Invoke-MultiCase "whole peer receipt rejects a session open for a foreign owner's node" -Negative {
+    $report = New-MultiReceiptWithResume
+    $report.multiProjectPeer.received[-1].frame.command.graphCommand.command.resumeSession._0 =
+      $report.multiProjectPeer.graphs[0].nodes[0].id
+    return Reject-MultiCase { Assert-MultiProjectCompleteReport $report } "MULTIPROJECT_PEER_RECEIPT:"
+  }
   foreach ($mutation in @("missing-top", "unknown-top", "disconnected", "correlation-false", "global-error",
       "global-unanswered", "root-count", "connection-type", "graph-not-sent", "missing-peer", "unknown-peer", "count-type", "count-missing",
       "unanswered", "empty-requests", "request-duplicate", "request-id", "request-kind-type", "request-extra",
