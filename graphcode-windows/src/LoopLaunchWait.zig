@@ -21,8 +21,8 @@ pub const Step = enum { idle, start_probe, attach, give_up };
 /// ended); a loop pane only while the daemon's session is still running. Restoring it
 /// otherwise would create a bare shell under the loop's name, and every later open would
 /// then find the loop "running" and never launch its agent.
-pub fn restoreKeepsPane(launches_agent: bool, session_live: bool) bool {
-    return !launches_agent or session_live;
+pub fn restoreKeepsPane(launches_agent: bool, session_live: ?bool) bool {
+    return !launches_agent or session_live != false;
 }
 
 pub const Wait = struct {
@@ -104,9 +104,8 @@ pub fn listingShowsLive(listing: []const u8, session: []const u8) bool {
             std.mem.indexOf(u8, line, "\texit_code=") != null or
             std.mem.indexOf(u8, line, "\terr=") != null) continue;
         var fields = std.mem.tokenizeAny(u8, line, " \t");
-        while (fields.next()) |field| {
-            if (std.mem.startsWith(u8, field, "name=") and std.mem.eql(u8, field["name=".len..], name)) return true;
-        }
+        const field = fields.next() orelse continue;
+        if (std.mem.startsWith(u8, field, "name=") and std.mem.eql(u8, field["name=".len..], name)) return true;
     }
     return false;
 }
@@ -195,4 +194,15 @@ test "a listed session counts as live only while its task runs" {
     try std.testing.expect(!listingShowsLive(listing, "gone"));
     try std.testing.expect(!listingShowsLive(listing, "00000000-0000-4000-8000-0B492B5F524"));
     try std.testing.expect(!listingShowsLive("", "anything"));
+}
+
+test "a failed listing must not delete a saved loop pane" {
+    try std.testing.expect(restoreKeepsPane(true, null));
+}
+
+test "a session name mentioned in another task command is not a live session" {
+    try std.testing.expect(!listingShowsLive(
+        "name=graphcode-other\tpid=1\tcmd=echo name=graphcode-wanted\n",
+        "wanted",
+    ));
 }

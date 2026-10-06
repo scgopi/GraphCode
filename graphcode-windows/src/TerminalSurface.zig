@@ -602,16 +602,42 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return error.InvalidSurface;
         const slot = &self.surfaces[index];
         if ((slot.surface != null or slot.attach != null) and
-            std.mem.eql(u8, slot.session_name, node_id)) return;
+            std.mem.eql(u8, slot.session_name, node_id))
+        {
+            self.cancelLaunchWait(index);
+            if (timeout_ms > 0) self.launch_outcome = .started;
+            return;
+        }
         const now = nowMilliseconds();
         const explicit = timeout_ms > 0;
         const wait = &self.launch_waits[index];
+        if (!explicit and now < self.passive_retry_due_ms[index]) return;
+        const session = try self.allocator.dupe(u8, node_id);
+        errdefer self.allocator.free(session);
+        // Mount the tab immediately, but not the terminal: pending/failed launches still
+        // need navigable workspace chrome, without creating a session behind the daemon.
+        if (explicit and slot.surface == null and slot.attach == null) {
+            if (self.layout.tabs.items.len == 0) {
+                const previous_next_id = self.layout.next_tab_id;
+                try self.layout.addTab(node_id, true);
+                self.persistLayout() catch |err| {
+                    _ = self.layout.removePane(node_id);
+                    self.layout.next_tab_id = previous_next_id;
+                    return err;
+                };
+            } else if (wait.active() and wait.reports_timeout) {
+                try self.layout.replacePaneID(wait.session, node_id);
+                self.persistLayout() catch |err| {
+                    self.layout.replacePaneID(node_id, wait.session) catch {};
+                    return err;
+                };
+            }
+        }
         if (wait.active() and std.mem.eql(u8, wait.session, node_id)) {
+            self.allocator.free(session);
             wait.extend(now, timeout_ms, explicit);
             return;
         }
-        if (!explicit and now < self.passive_retry_due_ms[index]) return;
-        const session = try self.allocator.dupe(u8, node_id);
         self.cancelLaunchWait(index);
         self.clearRecreateSession(index);
         self.launch_waits[index].begin(session, now, timeout_ms, explicit);
@@ -628,26 +654,46 @@ pub const Workspace = struct {
 
     /// Asks zmx, without attaching or creating, whether a session is running. Bounded so a
     /// wedged zmx cannot hold the UI thread.
-    fn sessionIsLive(self: *Workspace, session: []const u8) bool {
-        var child = self.spawnListing() orelse return false;
+    fn sessionIsLive(self: *Workspace, session: []const u8) ?bool {
+        var child = self.spawnListing() orelse return null;
         var output: std.ArrayListUnmanaged(u8) = .empty;
         defer output.deinit(self.allocator);
         const deadline = nowMilliseconds() + restore_probe_timeout_ms;
         var exit_code: c.DWORD = c.STILL_ACTIVE;
         while (true) {
-            self.drainListing(&child, &output);
-            if (c.GetExitCodeProcess(child.id, &exit_code) == 0) break;
+            self.drainListing(&child, &output) catch {
+                _ = child.kill() catch {};
+                self.setInputError("Unable to read loop session listing");
+                return null;
+            };
+            if (c.GetExitCodeProcess(child.id, &exit_code) == 0) {
+                _ = child.kill() catch {};
+                self.setInputError("Unable to query loop session listing process");
+                return null;
+            }
             if (exit_code != c.STILL_ACTIVE) break;
             if (nowMilliseconds() >= deadline) break;
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
         if (exit_code == c.STILL_ACTIVE) {
             _ = child.kill() catch {};
-            return false;
+            self.setInputError("Loop session listing timed out");
+            return null;
         }
-        self.drainListing(&child, &output);
-        _ = child.wait() catch {};
-        return exit_code == 0 and LoopLaunchWait.listingShowsLive(output.items, session);
+        self.drainListing(&child, &output) catch {
+            _ = child.wait() catch {};
+            self.setInputError("Unable to read loop session listing");
+            return null;
+        };
+        _ = child.wait() catch {
+            self.setInputError("Unable to reap loop session listing process");
+            return null;
+        };
+        if (exit_code != 0) {
+            self.setInputError("Loop session listing failed");
+            return null;
+        }
+        return LoopLaunchWait.listingShowsLive(output.items, session);
     }
 
     fn spawnListing(self: *Workspace) ?std.process.Child {
@@ -658,23 +704,32 @@ pub const Workspace = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Ignore;
         child.create_no_window = true;
-        child.spawn() catch return null;
+        child.spawn() catch {
+            self.setInputError("Unable to start loop session listing");
+            return null;
+        };
         return child;
     }
 
     /// Reads whatever the listing has written so far, so a long one never blocks on a
     /// full pipe. Bounded: the listing is a few hundred bytes per session.
-    fn drainListing(self: *Workspace, child: *std.process.Child, output: *std.ArrayListUnmanaged(u8)) void {
-        const stdout = child.stdout orelse return;
+    fn drainListing(self: *Workspace, child: *std.process.Child, output: *std.ArrayListUnmanaged(u8)) !void {
+        const stdout = child.stdout orelse return error.SessionListingPipeMissing;
         var buffer: [4096]u8 = undefined;
         while (output.items.len < max_listing_bytes) {
             var available: c.DWORD = 0;
-            if (c.PeekNamedPipe(stdout.handle, null, 0, null, &available, null) == 0 or available == 0) return;
+            if (c.PeekNamedPipe(stdout.handle, null, 0, null, &available, null) == 0) {
+                if (c.GetLastError() == c.ERROR_BROKEN_PIPE) return;
+                return error.SessionListingReadFailed;
+            }
+            if (available == 0) return;
             var count: c.DWORD = 0;
-            const want: c.DWORD = @intCast(@min(buffer.len, available));
-            if (c.ReadFile(stdout.handle, &buffer, want, &count, null) == 0 or count == 0) return;
-            output.appendSlice(self.allocator, buffer[0..count]) catch return;
+            const want: c.DWORD = @intCast(@min(buffer.len, available, max_listing_bytes - output.items.len));
+            if (c.ReadFile(stdout.handle, &buffer, want, &count, null) == 0) return error.SessionListingReadFailed;
+            if (count == 0) return;
+            try output.appendSlice(self.allocator, buffer[0..count]);
         }
+        return error.SessionListingTooLarge;
     }
 
     fn pollLaunchWaits(self: *Workspace) void {
@@ -719,7 +774,12 @@ pub const Workspace = struct {
     fn launchProbeOutcome(self: *Workspace, index: usize, overdue: bool) ?LoopLaunchWait.Probe {
         const child = if (self.launch_probes[index]) |*value| value else return null;
         const output = &self.launch_probe_output[index];
-        self.drainListing(child, output);
+        self.drainListing(child, output) catch {
+            _ = child.kill() catch {};
+            self.launch_probes[index] = null;
+            self.setInputError("Unable to read loop session listing");
+            return .missing;
+        };
         var exit_code: c.DWORD = 0;
         if (c.GetExitCodeProcess(child.id, &exit_code) == 0 or
             (exit_code == c.STILL_ACTIVE and overdue))
@@ -729,7 +789,12 @@ pub const Workspace = struct {
             return .missing;
         }
         if (exit_code == c.STILL_ACTIVE) return .running;
-        self.drainListing(child, output);
+        self.drainListing(child, output) catch {
+            _ = child.wait() catch {};
+            self.launch_probes[index] = null;
+            self.setInputError("Unable to read loop session listing");
+            return .missing;
+        };
         _ = child.wait() catch {};
         self.launch_probes[index] = null;
         const live = exit_code == 0 and
@@ -840,7 +905,7 @@ pub const Workspace = struct {
 
     fn createAttachedSurface(self: *Workspace, session: []const u8, initial_grid: GridSize) !usize {
         for (&self.surfaces, 0..) |*slot, index| {
-            if (slot.surface != null or slot.attach != null) continue;
+            if (slot.surface != null or slot.attach != null or self.launch_waits[index].active()) continue;
             slot.session_name = try self.allocator.dupe(u8, session);
             errdefer self.destroySurface(index);
             slot.project_path = try self.allocator.dupe(u8, self.project_path);
@@ -884,7 +949,11 @@ pub const Workspace = struct {
         defer for (ids[0..count]) |id| self.allocator.free(id);
         var pruned = false;
         for (ids[0..count], agents[0..count]) |id, launches_agent| {
-            const live = launches_agent and self.sessionIsLive(id);
+            const live: ?bool = if (launches_agent) self.sessionIsLive(id) else true;
+            if (live == null) {
+                self.queueRestoreRetry(id, error.SessionListingUnavailable, launches_agent);
+                continue;
+            }
             if (!LoopLaunchWait.restoreKeepsPane(launches_agent, live)) {
                 pruned = self.layout.removePane(id) or pruned;
                 continue;
@@ -4070,6 +4139,33 @@ fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
         .layout_path = @constCast(""),
         .project_key = @constCast(""),
     };
+}
+
+test "opening a loop mounts its pending tab without spawning a terminal" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.cancelAllLaunchWaits();
+    const path = "terminal-pending-loop-test.json";
+    workspace.layout_path = @constCast(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+    try workspace.openLaunchedNode(0, "first-loop", LoopLaunchWait.open_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expect(workspace.surfaces[0].attach == null);
+    try std.testing.expect(workspace.surfaces[0].surface == null);
+    try std.testing.expectEqualStrings("first-loop", workspace.layout.tabs.items[0].panes.items[0].id);
+    try workspace.openLaunchedNode(0, "second-loop", LoopLaunchWait.open_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    try std.testing.expectEqualStrings("second-loop", workspace.layout.tabs.items[0].panes.items[0].id);
+}
+
+test "passive loop observation does not create a pending tab" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.cancelAllLaunchWaits();
+    try workspace.openLaunchedNode(0, "idle-loop", 0);
+    try std.testing.expectEqual(@as(usize, 0), workspace.tabCount());
+    try std.testing.expect(workspace.surfaces[0].attach == null);
 }
 
 fn paneResizeWorkspaceForTest(allocator: std.mem.Allocator) !Workspace {
