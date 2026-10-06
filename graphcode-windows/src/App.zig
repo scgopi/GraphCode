@@ -27,6 +27,7 @@ const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
+const LoopBarLayout = @import("LoopBarLayout.zig");
 const Clipboard = @import("Clipboard.zig");
 const Tokens = @import("DesignTokens.zig");
 const Dpi = @import("Dpi.zig");
@@ -955,6 +956,10 @@ fn isResolvedLoopState(state: []const u8) bool {
         std.mem.eql(u8, state, "failed") or
         std.mem.eql(u8, state, "stalled") or
         std.mem.eql(u8, state, "stopped");
+}
+
+fn loopBarRect(rect: LoopBarLayout.Rect) c.RECT {
+    return .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
 }
 
 fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
@@ -6113,14 +6118,19 @@ pub const App = struct {
                         const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
                         const workspace_right = client.right - (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const selected_index = self.model.selectedIndex() orelse 0;
+                        const loop_bar = TerminalWorkspace.loopBarLayout(
+                            workspace_left,
+                            workspace_right,
+                            selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
+                        );
                         if (!self.workspace_is_quick_chat) {
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, header.title, 4, .{ .logical = header_layout.identity }, false, false) catch return;
                             elements.items[elements.items.len - 1].invokable = false;
                         }
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = .{ .left = workspace_left, .top = Tokens.header_height, .right = workspace_right, .bottom = Tokens.header_height + Tokens.loop_bar_height } }, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = .{ .left = workspace_right - 104, .top = Tokens.header_height + 10, .right = workspace_right - 12, .bottom = Tokens.header_height + 36 } }, false, false) catch return;
-                        if (selected_index < graph.nodes.items.len and !isResolvedLoopState(graph.nodes.items[selected_index].state)) {
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = .{ .left = workspace_right - 196, .top = Tokens.header_height + 10, .right = workspace_right - 112, .bottom = Tokens.header_height + 36 } }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
+                        if (loop_bar.stop) |stop| {
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
                         }
                         const panel_toggle = if (self.workspace_controls.panel_visible)
                             GraphCanvas.loopDetailCollapseBounds(client.right)

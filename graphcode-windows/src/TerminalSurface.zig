@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
+const LoopBarLayout = @import("LoopBarLayout.zig");
 const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
@@ -159,14 +160,14 @@ const max_surfaces: usize = 32;
 
 pub const ChromeAction = enum { new_tab, split_right, split_down };
 pub const TabAction = enum { select, close };
-pub const LoopBarAction = enum { stop, show_graph };
+pub const LoopBarAction = LoopBarLayout.Action;
+
+pub fn loopBarLayout(left: i32, right: i32, resolved: bool) LoopBarLayout.Layout {
+    return LoopBarLayout.compute(left, Tokens.header_height, right, resolved);
+}
 
 pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool) ?LoopBarAction {
-    if (y < top or y >= top + Tokens.loop_bar_height) return null;
-    if (x >= right - 104 and x < right - 12) return .show_graph;
-    if (!resolved and x >= right - 196 and x < right - 112) return .stop;
-    _ = left;
-    return null;
+    return LoopBarLayout.compute(left, top, right, resolved).actionAt(x, y);
 }
 
 fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
@@ -1008,18 +1009,16 @@ pub const Workspace = struct {
         resolved: bool,
     ) void {
         const top = Tokens.header_height;
+        const layout = loopBarLayout(left, right, resolved);
         // Theme.loopBar: lit like the tab strip, one step lighter.
         GdiGradient.fillVertical(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.loop_bar_top, Tokens.loop_bar_bottom);
-        fillRect(hdc, .{
-            .left = left + 14,
-            .top = top + 11,
-            .right = left + 18,
-            .bottom = top + 35,
-        }, loopTypeAccent(loop_type));
-        drawUtf8(hdc, title, left + 27, top + 5, 13, 0x00F2F2F7);
-        drawUtf8(hdc, state, left + 190, top + 8, 10, stateAccent(state));
+        if (layout.stripe) |stripe| {
+            fillRect(hdc, .{ .left = stripe.left, .top = stripe.top, .right = stripe.right, .bottom = stripe.bottom }, loopTypeAccent(loop_type));
+        }
+        if (layout.title) |bounds| drawUtf8Bounded(hdc, title, bounds, 13, 0x00F2F2F7);
+        if (layout.state) |bounds| drawUtf8Bounded(hdc, state, bounds, 10, stateAccent(state));
         const live_line = if (activity.len != 0) activity else project_name;
-        drawUtf8(hdc, live_line, left + 27, top + 24, 10, 0x008E8E93);
+        if (layout.activity) |bounds| drawUtf8Bounded(hdc, live_line, bounds, 10, 0x008E8E93);
         var usage: [32]u8 = undefined;
         const usage_text = if (token_usage) |value| std.fmt.bufPrint(&usage, "{d} tokens", .{value}) catch "usage n/a" else "usage n/a";
         var detail: [256]u8 = undefined;
@@ -1029,12 +1028,12 @@ pub const Workspace = struct {
             metric_passes,
             usage_text,
         }) catch "workspace metadata unavailable";
-        drawUtf8(hdc, detail_text, left + 260, top + 10, 9, 0x008E8E93);
-        if (!resolved) {
-            fillRect(hdc, .{ .left = right - 196, .top = top + 10, .right = right - 112, .bottom = top + 36 }, 0x00303035);
-            drawUtf8(hdc, "Stop loop", right - 184, top + 17, 10, 0x00D8D8DC);
+        if (layout.detail) |bounds| drawUtf8Bounded(hdc, detail_text, bounds, 9, 0x008E8E93);
+        if (layout.stop) |stop| {
+            fillRect(hdc, .{ .left = stop.left, .top = stop.top, .right = stop.right, .bottom = stop.bottom }, 0x00303035);
+            drawUtf8(hdc, "Stop loop", stop.left + 12, top + 17, 10, 0x00D8D8DC);
         }
-        drawUtf8(hdc, "Show in graph", right - 100, top + 17, 10, 0x008E8E93);
+        drawUtf8(hdc, "Show in graph", layout.show_graph.left + 4, top + 17, 10, 0x008E8E93);
         // Theme.tabBarShadowLine, blended flat over the loop bar's own bottom stop --
         // the edge where the strip's gloss meets the terminal below it.
         fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.tab_bar_shadow_line);
@@ -4042,6 +4041,22 @@ fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32)
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = c.RECT{ .left = x, .top = y, .right = x + 220, .bottom = y + size + 8 };
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE);
+    _ = c.SelectObject(hdc, old_font);
+}
+
+// Clipped to `bounds`; a run squeezed narrower than its natural width ends in an
+// ellipsis instead of being cut mid-glyph.
+fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, size: i32, color: u32) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
+    defer std.heap.page_allocator.free(wide);
+    if (wide.len == 0) return;
+    const old_font = AppFont.select(hdc, size, false);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var rect = c.RECT{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+    const ellipsis: c_int = if (bounds.width() < LoopBarLayout.natural_text_width) c.DT_END_ELLIPSIS else 0;
+    const format: c.UINT = @intCast(c.DT_LEFT | c.DT_SINGLELINE | ellipsis);
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &rect, format);
     _ = c.SelectObject(hdc, old_font);
 }
 
