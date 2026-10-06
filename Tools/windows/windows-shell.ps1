@@ -105,6 +105,27 @@ function Record-TestOwnedSessions {
   }
 }
 
+# The stub stands in for graphcoded, which owns starting a loop's zmx session; the shell
+# only attaches to a loop session that already exists and never creates one.
+function Start-StubLoopSessions {
+  if (-not $UseStubDaemon) { return }
+  foreach ($id in $testSessionIds) {
+    $name = "graphcode-$id"
+    $probe = Start-Process -FilePath $env:GRAPHCODE_ZMX -ArgumentList @("info", $name) `
+      -PassThru -WindowStyle Hidden
+    $probe.WaitForExit()
+    if ($probe.ExitCode -eq 0) { continue }
+    # WaitForExit on the process only: the detached session it starts outlives it.
+    $run = Start-Process -FilePath $env:GRAPHCODE_ZMX -ArgumentList @("run", $name, "-d") `
+      -PassThru -WindowStyle Hidden
+    $run.WaitForExit()
+    if ($run.ExitCode -ne 0) {
+      throw "zmx could not start stub loop session $name (exit $($run.ExitCode))"
+    }
+  }
+  Record-TestOwnedSessions
+}
+
 function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
   $script:metricSequence++
   $metricPids = if ($focusPids.Count -gt 0) {
@@ -131,6 +152,7 @@ function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
 }
 
 function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
+  Start-StubLoopSessions
   $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
   [void] $ownedProcessIds.Add($script:shellProcess.Id)
   Start-Sleep -Milliseconds 250
@@ -335,6 +357,7 @@ try {
     $env:GRAPHCODE_SHELL_NONREADING_ATTACH = "1"
     $env:GRAPHCODE_SHELL_LARGE_PASTE = "1"
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
+    Start-StubLoopSessions
     $inputDeadline = [DateTime]::UtcNow.AddSeconds(8)
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError

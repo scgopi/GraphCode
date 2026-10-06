@@ -475,11 +475,13 @@ pub fn commandGraphNodeAction(
         });
     }
 
-    if (std.mem.eql(u8, action, "stopNode")) {
+    if (std.mem.eql(u8, action, "stopNode") or std.mem.eql(u8, action, "resumeSession")) {
         return std.mem.concat(allocator, u8, &.{
             "{\"graphCommand\":{\"projectPath\":",
             quoted_path,
-            ",\"command\":{\"stopNode\":{\"_0\":",
+            ",\"command\":{\"",
+            action,
+            "\":{\"_0\":",
             quoted_node,
             "}}}}",
         });
@@ -1280,6 +1282,12 @@ test "graph commands match Swift Codable associated-value shapes" {
     try std.testing.expectEqualStrings(
         "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"stopNode\":{\"_0\":\"11111111-1111-4111-8111-111111111111\"}}}}",
         stop,
+    );
+    const resume_session = try commandGraphNodeAction(allocator, project, node, "resumeSession", null);
+    defer allocator.free(resume_session);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\work\\\\graph\",\"command\":{\"resumeSession\":{\"_0\":\"11111111-1111-4111-8111-111111111111\"}}}}",
+        resume_session,
     );
     const detach_template = try commandGraphDetachTemplate(allocator, project, node);
     defer allocator.free(detach_template);

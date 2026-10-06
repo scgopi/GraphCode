@@ -876,6 +876,8 @@ Invoke-Native "Zmx session identity executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\ZmxSession.zig
+    if ($LASTEXITCODE -ne 0) { throw "zmx session identity tests failed" }
+    & $zig test src\LoopLaunchWait.zig
   } finally { Pop-Location }
 }
 Invoke-Native "Loop bar layout executable tests" {

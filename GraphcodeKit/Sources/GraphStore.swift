@@ -122,6 +122,19 @@ public actor GraphStore {
   /// Whether a local loop's session is alive and not a husk — what decides if a pane
   /// closing may resolve the loop (`sessionPermitsResolution`).
   private let onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
+
+  /// Whether the terminal pane that opens an attended loop launches its session. The Mac
+  /// app's panes do (`GhosttyTerminalView` starts the agent); the Windows shell's panes only
+  /// attach, so there opening a loop (`resumeSession`) is the daemon's cue to start it.
+  private let panesLaunchAttendedSessions: Bool
+
+  public static let platformPanesLaunchAttendedSessions: Bool = {
+    #if os(Windows)
+      false
+    #else
+      true
+    #endif
+  }()
   /// Cross-graph `.spawn`. `GraphStore` owns exactly one graph and cannot reach another,
   /// so it hands the request up to `ProjectRegistry`, which is the layer that knows every
   /// open project — the same split that keeps this actor unaware multi-project routing
@@ -403,10 +416,12 @@ public actor GraphStore {
     recurrence: RecurrenceSink? = nil,
     presenceReadDeadline: Duration = .seconds(45),
     drainLeaseDuration: Duration = .seconds(300),
-    subGraphDepth: Int = 0
+    subGraphDepth: Int = 0,
+    panesLaunchAttendedSessions: Bool = GraphStore.platformPanesLaunchAttendedSessions
   ) {
     self.graph = graph
     self.subGraphDepth = subGraphDepth
+    self.panesLaunchAttendedSessions = panesLaunchAttendedSessions
     self.onGraphChanged = onGraphChanged
     self.onGraphEvent = onGraphEvent
     self.onConnectionFailure = onConnectionFailure
@@ -2555,13 +2570,20 @@ public actor GraphStore {
   }
 
   /// A chat-surface loop (Nod) has no terminal pane whose attach would start its session,
-  /// so opening it, or sending to it with nothing running, asks for one here. Unattended
-  /// loops already run; this starts the rest, and is a no-op while a session is alive.
+  /// so opening it, or sending to it with nothing running, asks for one here. So does an
+  /// attended terminal loop where panes only attach (`panesLaunchAttendedSessions`).
+  /// Unattended loops already run; this starts the rest, and is a no-op while a session is
+  /// alive.
   private func ensureChatSession(_ node: LoopNode) async {
-    guard node.backend.surface == .chat, node.state != .stopped,
+    guard launchesWhenOpened(node), node.state != .stopped,
       await onSessionAlive?(node, graph.project.path) != true
     else { return }
     ensureSession(node)
+  }
+
+  private func launchesWhenOpened(_ node: LoopNode) -> Bool {
+    if node.backend.surface == .chat { return true }
+    return !panesLaunchAttendedSessions && !node.runsUnattended && node.loopType != .composite
   }
 
   /// Arms the end of a resolved loop's session, after the grace the Settings choose — long

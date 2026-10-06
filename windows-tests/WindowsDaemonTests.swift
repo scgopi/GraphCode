@@ -7,6 +7,21 @@ import XCTest
   import WinSDK
 #endif
 
+/// Records the node ids a store asked to launch; `onEnsureSession` is `@Sendable`.
+private final class AttendedLaunchCapture: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorded: [Foundation.UUID] = []
+  func append(_ id: Foundation.UUID) { lock.withLock { recorded.append(id) } }
+  var ids: [Foundation.UUID] { lock.withLock { recorded } }
+}
+
+private final class AttendedLaunchFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var current = false
+  func set(_ value: Bool) { lock.withLock { current = value } }
+  var value: Bool { lock.withLock { current } }
+}
+
 final class WindowsDaemonTests: XCTestCase {
   private actor PredicateCapture {
     private(set) var workingDirectory: String?
@@ -37,6 +52,52 @@ final class WindowsDaemonTests: XCTestCase {
   }
 
   #if os(Windows)
+    // The Windows shell only attaches to a loop's zmx session; it never launches the
+    // agent. Opening an attended loop must therefore get the daemon to start it, or the
+    // attach creates a bare shell and the first instruction is never sent (beta10).
+    func testOpeningAnAttendedLoopStartsItWhenPanesDoNotLaunchSessions() async {
+      let turn = LoopNode(title: "Turn", loopType: .turnBased, backend: .copilotCLI)
+      let sketch = LoopNode(title: "Main", loopType: .sketch, backend: .copilotCLI)
+      let stopped = LoopNode(
+        title: "Stopped", loopType: .turnBased, backend: .copilotCLI, state: .stopped)
+      let group = LoopNode(title: "Group", loopType: .composite)
+      let started = AttendedLaunchCapture()
+      let alive = AttendedLaunchFlag()
+      var graph = LoopGraph(project: ProjectRef(path: "", name: "p"))
+      graph.nodes.append(contentsOf: [turn, sketch, stopped, group])
+      let store = GraphStore(
+        graph: graph,
+        onEnsureSession: { node, _ in started.append(node.id) },
+        onSessionAlive: { _, _ in alive.value },
+        panesLaunchAttendedSessions: false)
+
+      for node in [turn, sketch, stopped, group] { await store.handle(.resumeSession(node.id)) }
+      alive.set(true)
+      await store.handle(.resumeSession(turn.id))
+
+      XCTAssertEqual(started.ids, [turn.id, sketch.id])
+    }
+
+    func testPanesThatLaunchSessionsKeepAttendedLoopsToThemselves() async {
+      let turn = LoopNode(title: "Turn", loopType: .turnBased, backend: .copilotCLI)
+      let started = AttendedLaunchCapture()
+      var graph = LoopGraph(project: ProjectRef(path: "", name: "p"))
+      graph.nodes.append(turn)
+      let store = GraphStore(
+        graph: graph,
+        onEnsureSession: { node, _ in started.append(node.id) },
+        onSessionAlive: { _, _ in false },
+        panesLaunchAttendedSessions: true)
+
+      await store.handle(.resumeSession(turn.id))
+
+      XCTAssertEqual(started.ids, [])
+    }
+
+    func testWindowsPanesDoNotLaunchAttendedSessions() {
+      XCTAssertFalse(GraphStore.platformPanesLaunchAttendedSessions)
+    }
+
     func testZmxLocatorUsesWindowsExecutableName() {
       XCTAssertEqual(ZmxLocator.binaryURL.lastPathComponent, "zmx.exe")
     }

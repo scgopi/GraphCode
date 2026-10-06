@@ -8,6 +8,7 @@ const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
 const TerminalVt = @import("TerminalVt.zig");
 const ZmxSession = @import("ZmxSession.zig");
+const LoopLaunchWait = @import("LoopLaunchWait.zig");
 
 const columns: usize = 120;
 const rows: usize = 40;
@@ -339,6 +340,13 @@ fn moveReplacementSurface(
 }
 
 pub const Workspace = struct {
+    pub const LaunchOutcome = enum { started, not_started, attach_failed };
+    pub const loop_open_timeout_ms = LoopLaunchWait.open_timeout_ms;
+    // A `zmx info` that outlives its wait's deadline by this much is treated as no answer.
+    const launch_probe_grace_ms: i64 = 5_000;
+    const restore_probe_timeout_ms: i64 = 2_000;
+    const max_listing_bytes: usize = 1 << 20;
+
     parent: c.HWND,
     host: ?*c.winghostty_host = null,
     surfaces: [max_surfaces]Surface = [_]Surface{.{}} ** max_surfaces,
@@ -351,6 +359,13 @@ pub const Workspace = struct {
     recreate_due_ms: [max_surfaces]i64 = [_]i64{0} ** max_surfaces,
     recreate_delay_ms: [max_surfaces]i64 = [_]i64{100} ** max_surfaces,
     restore_errors: [max_surfaces][]u8 = [_][]u8{&.{}} ** max_surfaces,
+    // A graph loop's pane attaches only after the daemon's session exists (LoopLaunchWait).
+    launch_waits: [max_surfaces]LoopLaunchWait.Wait = [_]LoopLaunchWait.Wait{.{}} ** max_surfaces,
+    launch_probes: [max_surfaces]?std.process.Child = [_]?std.process.Child{null} ** max_surfaces,
+    launch_probe_output: [max_surfaces]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.empty} ** max_surfaces,
+    daemon_sessions: [max_surfaces]bool = [_]bool{false} ** max_surfaces,
+    passive_retry_due_ms: [max_surfaces]i64 = [_]i64{0} ** max_surfaces,
+    launch_outcome: ?LaunchOutcome = null,
     fatal_error: bool = false,
     render_error: c.winghostty_result = c.WINGHOSTTY_OK,
     input_mutex: std.Thread.Mutex = .{},
@@ -445,6 +460,7 @@ pub const Workspace = struct {
     pub fn deinit(self: *Workspace) void {
         self.stopResizeChild();
         self.stopInputWorker();
+        self.cancelAllLaunchWaits();
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         for (&self.recreate_sessions) |*session| {
             if (session.*.len != 0) self.allocator.free(session.*);
@@ -570,7 +586,177 @@ pub const Workspace = struct {
 
     }
 
+    /// Attaches a pane to a session, creating a plain shell session when none is running —
+    /// right for a shell tab, wrong for a graph loop, whose pane uses `openLaunchedNode`.
     pub fn openNode(self: *Workspace, index: usize, node_id: []const u8) !void {
+        if (index >= self.surfaces.len) return error.InvalidSurface;
+        self.cancelLaunchWait(index);
+        self.daemon_sessions[index] = false;
+        try self.attachNode(index, node_id, false);
+    }
+
+    /// Opens a graph loop's pane once the daemon has started its session, never creating
+    /// one itself. A `timeout_ms` of 0 is a passive check: attach if the loop is already
+    /// running, otherwise leave the pane alone.
+    pub fn openLaunchedNode(self: *Workspace, index: usize, node_id: []const u8, timeout_ms: i64) !void {
+        if (index >= self.surfaces.len) return error.InvalidSurface;
+        const slot = &self.surfaces[index];
+        if ((slot.surface != null or slot.attach != null) and
+            std.mem.eql(u8, slot.session_name, node_id)) return;
+        const now = nowMilliseconds();
+        const explicit = timeout_ms > 0;
+        const wait = &self.launch_waits[index];
+        if (wait.active() and std.mem.eql(u8, wait.session, node_id)) {
+            wait.extend(now, timeout_ms, explicit);
+            return;
+        }
+        if (!explicit and now < self.passive_retry_due_ms[index]) return;
+        const session = try self.allocator.dupe(u8, node_id);
+        self.cancelLaunchWait(index);
+        self.clearRecreateSession(index);
+        self.launch_waits[index].begin(session, now, timeout_ms, explicit);
+    }
+
+    pub fn isAwaitingLaunch(self: *const Workspace, index: usize) bool {
+        return index < self.launch_waits.len and self.launch_waits[index].active();
+    }
+
+    pub fn takeLaunchOutcome(self: *Workspace) ?LaunchOutcome {
+        defer self.launch_outcome = null;
+        return self.launch_outcome;
+    }
+
+    /// Asks zmx, without attaching or creating, whether a session is running. Bounded so a
+    /// wedged zmx cannot hold the UI thread.
+    fn sessionIsLive(self: *Workspace, session: []const u8) bool {
+        var child = self.spawnListing() orelse return false;
+        var output: std.ArrayListUnmanaged(u8) = .empty;
+        defer output.deinit(self.allocator);
+        const deadline = nowMilliseconds() + restore_probe_timeout_ms;
+        var exit_code: c.DWORD = c.STILL_ACTIVE;
+        while (true) {
+            self.drainListing(&child, &output);
+            if (c.GetExitCodeProcess(child.id, &exit_code) == 0) break;
+            if (exit_code != c.STILL_ACTIVE) break;
+            if (nowMilliseconds() >= deadline) break;
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+        if (exit_code == c.STILL_ACTIVE) {
+            _ = child.kill() catch {};
+            return false;
+        }
+        self.drainListing(&child, &output);
+        _ = child.wait() catch {};
+        return exit_code == 0 and LoopLaunchWait.listingShowsLive(output.items, session);
+    }
+
+    fn spawnListing(self: *Workspace) ?std.process.Child {
+        var args: [2][]const u8 = undefined;
+        var child = std.process.Child.init(LoopLaunchWait.probeArguments(self.zmx_path, &args), self.allocator);
+        child.cwd = self.cwd;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        child.create_no_window = true;
+        child.spawn() catch return null;
+        return child;
+    }
+
+    /// Reads whatever the listing has written so far, so a long one never blocks on a
+    /// full pipe. Bounded: the listing is a few hundred bytes per session.
+    fn drainListing(self: *Workspace, child: *std.process.Child, output: *std.ArrayListUnmanaged(u8)) void {
+        const stdout = child.stdout orelse return;
+        var buffer: [4096]u8 = undefined;
+        while (output.items.len < max_listing_bytes) {
+            var available: c.DWORD = 0;
+            if (c.PeekNamedPipe(stdout.handle, null, 0, null, &available, null) == 0 or available == 0) return;
+            var count: c.DWORD = 0;
+            const want: c.DWORD = @intCast(@min(buffer.len, available));
+            if (c.ReadFile(stdout.handle, &buffer, want, &count, null) == 0 or count == 0) return;
+            output.appendSlice(self.allocator, buffer[0..count]) catch return;
+        }
+    }
+
+    fn pollLaunchWaits(self: *Workspace) void {
+        const now = nowMilliseconds();
+        for (&self.launch_waits, 0..) |*wait, index| {
+            if (!wait.active()) continue;
+            const outcome = self.launchProbeOutcome(index, now >= wait.deadline_ms + launch_probe_grace_ms);
+            switch (wait.step(now, outcome)) {
+                .idle => {},
+                .start_probe => self.startLaunchProbe(index),
+                .attach => {
+                    const explicit = wait.reports_timeout;
+                    const session = wait.finish();
+                    defer self.allocator.free(session);
+                    self.attachNode(index, session, true) catch {
+                        if (explicit) self.launch_outcome = .attach_failed;
+                        continue;
+                    };
+                    self.daemon_sessions[index] = true;
+                    if (explicit) {
+                        self.launch_outcome = .started;
+                        self.focusRestoredPane() catch {};
+                    }
+                },
+                .give_up => {
+                    if (wait.reports_timeout) {
+                        self.launch_outcome = .not_started;
+                    } else {
+                        self.passive_retry_due_ms[index] = now + LoopLaunchWait.passive_retry_ms;
+                    }
+                    self.allocator.free(wait.finish());
+                },
+            }
+        }
+    }
+
+    fn startLaunchProbe(self: *Workspace, index: usize) void {
+        self.launch_probe_output[index].clearRetainingCapacity();
+        self.launch_probes[index] = self.spawnListing();
+    }
+
+    fn launchProbeOutcome(self: *Workspace, index: usize, overdue: bool) ?LoopLaunchWait.Probe {
+        const child = if (self.launch_probes[index]) |*value| value else return null;
+        const output = &self.launch_probe_output[index];
+        self.drainListing(child, output);
+        var exit_code: c.DWORD = 0;
+        if (c.GetExitCodeProcess(child.id, &exit_code) == 0 or
+            (exit_code == c.STILL_ACTIVE and overdue))
+        {
+            _ = child.kill() catch {};
+            self.launch_probes[index] = null;
+            return .missing;
+        }
+        if (exit_code == c.STILL_ACTIVE) return .running;
+        self.drainListing(child, output);
+        _ = child.wait() catch {};
+        self.launch_probes[index] = null;
+        const live = exit_code == 0 and
+            LoopLaunchWait.listingShowsLive(output.items, self.launch_waits[index].session);
+        return if (live) .live else .missing;
+    }
+
+    fn cancelLaunchWait(self: *Workspace, index: usize) void {
+        if (self.launch_probes[index]) |*child| {
+            _ = child.kill() catch {};
+            self.launch_probes[index] = null;
+        }
+        self.launch_probe_output[index].clearAndFree(self.allocator);
+        if (self.launch_waits[index].active()) self.allocator.free(self.launch_waits[index].finish());
+    }
+
+    fn cancelAllLaunchWaits(self: *Workspace) void {
+        for (0..max_surfaces) |index| {
+            self.cancelLaunchWait(index);
+            self.daemon_sessions[index] = false;
+            self.passive_retry_due_ms[index] = 0;
+        }
+        self.launch_outcome = null;
+    }
+
+    /// `loop_pane` marks a pane the daemon owns, so a restore never recreates its session.
+    fn attachNode(self: *Workspace, index: usize, node_id: []const u8, loop_pane: bool) !void {
         if (index >= self.surfaces.len) return error.InvalidSurface;
         if (self.surfaces[index].surface != null or self.surfaces[index].attach != null) {
             const old_id = try self.allocator.dupe(u8, self.surfaces[index].session_name);
@@ -581,6 +767,7 @@ pub const Workspace = struct {
                 self.destroySurface(replacement_index);
                 return err;
             };
+            _ = self.layout.setLaunchesAgent(node_id, loop_pane);
             self.persistLayout() catch |err| {
                 self.layout.replacePaneID(node_id, old_id) catch {};
                 self.destroySurface(replacement_index);
@@ -603,7 +790,7 @@ pub const Workspace = struct {
         if (self.layout.tabs.items.len == 0) {
             try self.layout.addTab(node_id, true);
         } else if (index > 0 and self.layout.tabs.items.len == 1) {
-            try self.layout.addTab(node_id, false);
+            try self.layout.addTab(node_id, loop_pane);
         }
         try self.persistLayout();
         var options = self.surfaceOptions(index);
@@ -686,30 +873,41 @@ pub const Workspace = struct {
 
     fn restorePersistedSurfaces(self: *Workspace) void {
         var ids: [max_surfaces][]u8 = undefined;
+        var agents: [max_surfaces]bool = undefined;
         var count: usize = 0;
         for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
             if (count == ids.len) break;
             ids[count] = self.allocator.dupe(u8, pane.id) catch continue;
+            agents[count] = pane.launches_agent;
             count += 1;
         };
         defer for (ids[0..count]) |id| self.allocator.free(id);
-        for (ids[0..count]) |id| {
+        var pruned = false;
+        for (ids[0..count], agents[0..count]) |id, launches_agent| {
+            const live = launches_agent and self.sessionIsLive(id);
+            if (!LoopLaunchWait.restoreKeepsPane(launches_agent, live)) {
+                pruned = self.layout.removePane(id) or pruned;
+                continue;
+            }
             const initial_grid = self.gridForSession(id) catch |err| {
-                self.queueRestoreRetry(id, err);
+                self.queueRestoreRetry(id, err, launches_agent);
                 continue;
             };
             if (self.createAttachedSurface(id, initial_grid)) |index| {
+                self.daemon_sessions[index] = launches_agent;
                 self.clearRestoreError(index);
             } else |err| {
-                self.queueRestoreRetry(id, err);
+                self.queueRestoreRetry(id, err, launches_agent);
             }
         }
+        if (pruned) self.persistLayout() catch {};
         self.syncTopology();
     }
 
-    fn queueRestoreRetry(self: *Workspace, session: []const u8, err: anyerror) void {
+    fn queueRestoreRetry(self: *Workspace, session: []const u8, err: anyerror, daemon_session: bool) void {
         for (self.surfaces, 0..) |slot, index| {
             if (slot.surface == null and slot.attach == null and self.recreate_sessions[index].len == 0) {
+                self.daemon_sessions[index] = daemon_session;
                 self.recreate_sessions[index] = self.allocator.dupe(u8, session) catch &.{};
                 self.recreate_due_ms[index] = nowMilliseconds() + self.recreate_delay_ms[index];
                 const message = std.fmt.allocPrint(self.allocator, "workspace restore pending: {s}", .{@errorName(err)}) catch return;
@@ -730,6 +928,7 @@ pub const Workspace = struct {
     }
 
     fn clearAllRecreateState(self: *Workspace) void {
+        self.cancelAllLaunchWaits();
         for (&self.recreate_sessions, 0..) |*session, index| {
             if (session.*.len != 0) self.allocator.free(session.*);
             session.* = &.{};
@@ -862,7 +1061,8 @@ pub const Workspace = struct {
         const session = if (self.surfaces[index].session_name.len == 0) return else try self.allocator.dupe(u8, self.surfaces[index].session_name);
         defer self.allocator.free(session);
         self.destroySurface(index);
-        try self.openNode(index, session);
+        if (self.daemon_sessions[index]) return self.openLaunchedNode(index, session, 0);
+        try self.attachNode(index, session, false);
     }
 
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
@@ -1067,6 +1267,7 @@ pub const Workspace = struct {
         // sessions server-side, so it's safe to stop draining the local attach pipe while hidden.
         if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
+        self.pollLaunchWaits();
         self.pollRecreates();
         self.pollResizeControl();
     }
@@ -1888,7 +2089,14 @@ pub const Workspace = struct {
             if (session.len == 0 or self.surfaces[index].surface != null or now < self.recreate_due_ms[index]) {
                 continue;
             }
-            self.openNode(index, session) catch {
+            // A loop whose session ended is not re-created as a bare shell; it is re-attached
+            // only if the daemon's session is still there.
+            if (self.daemon_sessions[index]) {
+                self.openLaunchedNode(index, session, 0) catch {};
+                self.clearRecreateSession(index);
+                continue;
+            }
+            self.attachNode(index, session, false) catch {
                 self.recreate_due_ms[index] = now + self.recreate_delay_ms[index];
                 self.recreate_delay_ms[index] = @min(self.recreate_delay_ms[index] * 2, 4_000);
                 continue;
