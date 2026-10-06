@@ -48,6 +48,13 @@ $oldWorkspaceLayout = [Environment]::GetEnvironmentVariable("GRAPHCODE_WORKSPACE
 $oldStubNodeA = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_A")
 $oldStubNodeB = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_B")
 $oldSessionPrefix = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSION_PREFIX")
+$oldZmxDir = [Environment]::GetEnvironmentVariable("ZMX_DIR")
+# zmx keeps per-session IPC files under its root, named by the hex-encoded session name;
+# beneath the validation root's redirected LOCALAPPDATA a `graphcode-<uuid>` session
+# path passes 260 characters and `zmx run` fails. A short owned root keeps it legal.
+$smokeZmxDir = Join-Path $(if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else {
+    [IO.Path]::GetPathRoot([string] $repoRoot)
+  }) "gcz-$PID"
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
@@ -246,6 +253,8 @@ try {
     throw "GraphCode Windows shell version mismatch: expected $Version, executable reports $reportedVersion"
   }
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
+  New-Item -ItemType Directory -Force -Path $smokeZmxDir | Out-Null
+  $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_GATE_CWD = $repoRoot
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
@@ -461,6 +470,12 @@ finally {
   }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
+  if ($null -eq $oldZmxDir) {
+    Remove-Item Env:ZMX_DIR -ErrorAction SilentlyContinue
+  } else {
+    $env:ZMX_DIR = $oldZmxDir
+  }
+  Remove-Item -LiteralPath $smokeZmxDir -Recurse -Force -ErrorAction SilentlyContinue
   if ($null -eq $oldSessionPrefix) {
     Remove-Item Env:GRAPHCODE_SHELL_SESSION_PREFIX -ErrorAction SilentlyContinue
   } else {

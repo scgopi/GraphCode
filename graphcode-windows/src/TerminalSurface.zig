@@ -1257,6 +1257,10 @@ pub const Workspace = struct {
     }
 
     pub fn poll(self: *Workspace) void {
+        // Launch waits run even while collapsed: attaching a loop whose session just came up
+        // is what the old synchronous auto-attach did regardless of visibility, and the
+        // probes are console-less `zmx ls` runs that never touch accessibility.
+        self.pollLaunchWaits();
         // While the workspace is collapsed (not visible as either the full surface or the
         // picture-in-picture panel), skip draining terminal output entirely. Feeding output
         // notifies winghostty's own accessibility layer via
@@ -1267,7 +1271,6 @@ pub const Workspace = struct {
         // sessions server-side, so it's safe to stop draining the local attach pipe while hidden.
         if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
-        self.pollLaunchWaits();
         self.pollRecreates();
         self.pollResizeControl();
     }
