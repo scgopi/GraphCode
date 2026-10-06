@@ -2677,6 +2677,26 @@ test "loop card metadata includes backend elapsed and token usage when reported"
     try std.testing.expect(std.mem.indexOf(u8, metadata, "12k tok") != null);
 }
 
+test "loop age labels show a just-created daemon loop as recent" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    // The daemon's Date counts seconds from 2001-01-01, 978,307,200 behind Unix time.
+    const created = std.time.timestamp() - 978_307_200;
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{{\"graphChanged\":{{\"id\":\"g\",\"project\":{{\"path\":\"A\",\"name\":\"Alpha\"}},\"nodes\":[{{\"id\":\"loop\",\"title\":\"Loop\",\"state\":\"running\",\"createdAt\":{d}.25}}],\"edges\":[]}}}}}}",
+        .{created},
+    );
+    defer allocator.free(frame);
+    _ = try model.updateFromFrame(frame);
+    const node = model.currentGraph().?.nodes.items[0];
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("0m", nodeMetadata(&buffer, node));
+    try std.testing.expectEqualStrings("started just now", loopDetailFooter(&buffer, node));
+    try std.testing.expectEqualStrings("oldest 0m: Loop", attentionAgeLabel(&buffer, node));
+}
+
 test "attention cards expose reason-specific primary actions" {
     const awaiting = GraphModel.Node{
         .id = @constCast("awaiting"),

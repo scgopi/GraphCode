@@ -1631,6 +1631,21 @@ test "sidebar loop presentation preserves type and terminal states" {
     try std.testing.expectEqual(@as(u32, 0x005F5FFF), stateColor("failed"));
 }
 
+test "loop row age reads the daemon's reference-date createdAt" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running","createdAt":812912680.0330639}],"edges":[]}}}
+    );
+    const node = model.currentGraph().?.nodes.items[0];
+    // Five seconds after creation on the Unix clock; the daemon's Date counts from 2001.
+    const now: i64 = 812912680 + 978_307_200 + 5;
+    const age = try elapsedText(allocator, @intCast(node.created_at orelse 0), now);
+    defer allocator.free(age);
+    try std.testing.expectEqualStrings("5s", age);
+}
+
 test "elapsedText renders a compact age and its unit boundaries honestly" {
     const allocator = std.testing.allocator;
     const base: i64 = 788918400;

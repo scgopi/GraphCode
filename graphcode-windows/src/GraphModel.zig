@@ -22,6 +22,7 @@ pub const Node = struct {
     model_tier: []u8 = &.{},
     poll_interval_seconds: ?f64 = null,
     stall_after_seconds: ?f64 = null,
+    /// Whole Unix seconds; see `unixSecondsFromReferenceDate`.
     created_at: ?u64 = null,
     metric_passes: u32 = 0,
     metric_samples: [8]f64 = [_]f64{0} ** 8,
@@ -1782,6 +1783,21 @@ fn validateGraphStructureMeasured(allocator: std.mem.Allocator, bytes: []const u
     }
 }
 
+/// Seconds from the Unix epoch to Swift's reference date, 2001-01-01T00:00:00Z.
+const reference_date_unix_offset: u64 = 978_307_200;
+
+// The daemon encodes `Date` with JSONEncoder's default strategy: possibly
+// fractional seconds since the reference date. Consumers compare against the
+// Unix clock, so convert here. Starter templates stamp the reference date itself
+// as a placeholder, so it and anything earlier stay unknown rather than becoming
+// a decades-old age; results stay below the label helpers' 1e12 millisecond cutoff.
+fn unixSecondsFromReferenceDate(value: JsonValue) ?u64 {
+    const max_reference_seconds: f64 = 1_000_000_000_000 - @as(f64, @floatFromInt(reference_date_unix_offset));
+    const seconds = value.float() orelse return null;
+    if (!(seconds > 0) or seconds >= max_reference_seconds) return null;
+    return @as(u64, @intFromFloat(@floor(seconds))) + reference_date_unix_offset;
+}
+
 fn decodeNodes(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -1808,7 +1824,7 @@ fn decodeNodes(
             .presence = &.{},
             .poll_interval_seconds = scopedFallback(&fields, &goal, "goal", "pollIntervalSeconds").float(),
             .stall_after_seconds = scopedFallback(&fields, &goal, "goal", "stallAfterSeconds").float(),
-            .created_at = fields.get("createdAt").unsigned(u64),
+            .created_at = unixSecondsFromReferenceDate(fields.get("createdAt")),
             .metric_passes = samples.passes,
             .metric_samples = samples.values,
             .metric_sample_count = samples.count,
@@ -3743,9 +3759,24 @@ test "field scope canonical fields and supported legacy fallbacks have explicit 
     try std.testing.expectEqualStrings("alias", graph.nodes.items[2].worktree_path);
     try std.testing.expectEqualStrings("busy", graph.nodes.items[3].presence);
     try std.testing.expectEqual(@as(?u32, 5), graph.nodes.items[4].token_usage);
-    try std.testing.expectEqual(@as(?u64, 12), graph.nodes.items[5].created_at);
+    try std.testing.expectEqual(@as(?u64, 978_307_212), graph.nodes.items[5].created_at);
     try std.testing.expectEqual(@as(i64, 1), graph.edges.items[0].fire_count);
     try std.testing.expectError(error.MalformedEdge, decodeSubgraph(allocator, graph.project, "{\"edges\":[{\"fireCount\":1e2}]}"));
+}
+
+test "node createdAt converts daemon reference-date seconds to Unix seconds" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"nodes":[{"createdAt":812912680.0330639},{"createdAt":0},{"createdAt":-978307200},{"createdAt":-1},{"createdAt":1e300},{"createdAt":"812912680"},{"createdAt":null}],"edges":[]}
+    ;
+    var graph = try decodeSubgraph(allocator, .{ .path = &.{}, .name = &.{} }, json);
+    defer freeGraph(allocator, &graph);
+    try std.testing.expectEqual(@as(usize, 7), graph.nodes.items.len);
+    // 812912680.03s after 2001-01-01T00:00:00Z is 2026-10-05T15:04:40Z.
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), graph.nodes.items[0].created_at);
+    // The reference date itself is the starter-template placeholder; it and
+    // earlier, out-of-range, and non-numeric values have no meaningful age.
+    for (graph.nodes.items[1..]) |node| try std.testing.expectEqual(@as(?u64, null), node.created_at);
 }
 
 fn checkScopeMalformed(allocator: std.mem.Allocator, json: []const u8, expected: anyerror, before: *const Model) !void {
@@ -4044,7 +4075,7 @@ fn expectOwnershipGraph(graph: anytype) !void {
     try std.testing.expectEqualStrings("high", node.model_tier);
     try std.testing.expectEqual(@as(?f64, 12.5), node.poll_interval_seconds);
     try std.testing.expectEqual(@as(?f64, 60), node.stall_after_seconds);
-    try std.testing.expectEqual(@as(?u64, 123), node.created_at);
+    try std.testing.expectEqual(@as(?u64, 978_307_323), node.created_at);
     try std.testing.expectEqual(@as(u32, 2), node.metric_passes);
     try std.testing.expectEqual(@as(u8, 2), node.metric_sample_count);
     try std.testing.expectEqual(@as(f64, 3), node.metric_samples[0]);
