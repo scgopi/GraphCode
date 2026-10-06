@@ -27,6 +27,26 @@ struct SupportDirectoryTests {
   }
 
   @Test
+  func zmxResolutionPrefersAnExecutableSiblingThenTheSupportBin() {
+    // Windows packages zmx.exe beside graphcoded; macOS keeps using the support bin, and
+    // `binaryURL` there is unchanged (asserted above).
+    let install = URL(fileURLWithPath: "/opt/graphcode/bin", isDirectory: true)
+    let support = SupportDirectory.binDirectory
+    let candidates = ZmxLocator.candidates(
+      executableDirectory: install, supportBinDirectory: support, executableName: "zmx")
+    let sibling = install.appendingPathComponent("zmx")
+    let supportZmx = support.appendingPathComponent("zmx")
+
+    #expect(candidates == [sibling, supportZmx])
+    #expect(ZmxLocator.resolve(candidates) { $0 == sibling.path } == sibling)
+    #expect(ZmxLocator.resolve(candidates) { $0 == supportZmx.path } == supportZmx)
+    #expect(ZmxLocator.resolve(candidates) { _ in false } == supportZmx)
+    #if !os(Windows)
+      #expect(ZmxLocator.binaryURL == supportZmx)
+    #endif
+  }
+
+  @Test
   func aBackslashOverrideRemainsRelativeOnDarwin() {
     let home = URL(fileURLWithPath: "/Users/test-user", isDirectory: true)
     let root = SupportDirectory.url(

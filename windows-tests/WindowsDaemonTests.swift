@@ -41,6 +41,34 @@ final class WindowsDaemonTests: XCTestCase {
       XCTAssertEqual(ZmxLocator.binaryURL.lastPathComponent, "zmx.exe")
     }
 
+    // The packaged daemon ships zmx.exe beside itself under %LOCALAPPDATA%\GraphCode;
+    // nothing copies it into the support directory, so the support bin alone left the
+    // daemon unable to launch, message or kill any loop session (beta9 Dev Box).
+    func testZmxLocatorPrefersThePackagedSiblingOfTheRunningExecutable() {
+      let install = URL(fileURLWithPath: #"C:\Users\u\AppData\Local\GraphCode\current\bin"#)
+      let support = URL(fileURLWithPath: #"C:\Users\u\.graphcode\bin"#)
+      let candidates = ZmxLocator.candidates(
+        executableDirectory: install, supportBinDirectory: support, executableName: "zmx.exe")
+      let sibling = install.appendingPathComponent("zmx.exe")
+      let supportZmx = support.appendingPathComponent("zmx.exe")
+
+      XCTAssertEqual(candidates, [sibling, supportZmx])
+      XCTAssertEqual(ZmxLocator.resolve(candidates) { $0 == sibling.path }, sibling)
+      XCTAssertEqual(
+        ZmxLocator.resolve(candidates) { [sibling.path, supportZmx.path].contains($0) }, sibling)
+      XCTAssertEqual(ZmxLocator.resolve(candidates) { $0 == supportZmx.path }, supportZmx)
+      // Neither present: report the support bin, so isInstalled stays false.
+      XCTAssertEqual(ZmxLocator.resolve(candidates) { _ in false }, supportZmx)
+    }
+
+    func testZmxLocatorWithoutAnExecutableDirectoryUsesTheSupportBin() {
+      let support = URL(fileURLWithPath: #"C:\Users\u\.graphcode\bin"#)
+      XCTAssertEqual(
+        ZmxLocator.candidates(
+          executableDirectory: nil, supportBinDirectory: support, executableName: "zmx.exe"),
+        [support.appendingPathComponent("zmx.exe")])
+    }
+
     func testWindowsProviderProbeUsesWhere() {
       let invocation = ProviderPath.probeInvocation(for: "copilot")
       XCTAssertEqual(URL(fileURLWithPath: invocation[0]).lastPathComponent, "where.exe")
