@@ -155,13 +155,22 @@ function Invoke-MultiProjectRequest($peer, $frame) {
   if ($verb -ceq "graphCommand") {
     $command = $frame.command.graphCommand
     Assert-MultiProjectObject $command @("projectPath", "command") "graphCommand"
-    Assert-MultiProjectObject $command.command @("renameNode") "graphCommand.command"
-    $rename = $command.command.renameNode
-    Assert-MultiProjectObject $rename @("_0", "title") "renameNode"
-    Assert-MultiProjectUuid $rename._0 "nodeID"
-    if ($rename.title -isnot [string]) { throw "MULTIPROJECT_TYPE: title must be a string" }
-    if ([string]::IsNullOrWhiteSpace($rename.title)) { throw "MULTIPROJECT_TITLE: title cannot be blank" }
-    $owner = Find-MultiProjectGraph $peer $command.projectPath $rename._0
+    if ($command.command -is [Collections.IDictionary] -and
+        @($command.command.Keys) -ccontains "resumeSession") {
+      Assert-MultiProjectObject $command.command @("resumeSession") "graphCommand.command"
+      $resume = $command.command.resumeSession
+      Assert-MultiProjectObject $resume @("_0") "resumeSession"
+      Assert-MultiProjectUuid $resume._0 "nodeID"
+      $owner = Find-MultiProjectGraph $peer $command.projectPath $resume._0
+    } else {
+      Assert-MultiProjectObject $command.command @("renameNode") "graphCommand.command"
+      $rename = $command.command.renameNode
+      Assert-MultiProjectObject $rename @("_0", "title") "renameNode"
+      Assert-MultiProjectUuid $rename._0 "nodeID"
+      if ($rename.title -isnot [string]) { throw "MULTIPROJECT_TYPE: title must be a string" }
+      if ([string]::IsNullOrWhiteSpace($rename.title)) { throw "MULTIPROJECT_TITLE: title cannot be blank" }
+      $owner = Find-MultiProjectGraph $peer $command.projectPath $rename._0
+    }
     $response = [ordered]@{ version = 2; kind = "response"; requestID = $frame.requestID; success = $true }
   } elseif ($verb -ceq "listRecentProjects") {
     Assert-MultiProjectObject $frame.command.listRecentProjects @() "listRecentProjects"
@@ -182,7 +191,7 @@ function Invoke-MultiProjectRequest($peer, $frame) {
       nodeID = $rename._0; beforeTitle = $owner.nodes[0].title; title = $rename.title })
     $owner.nodes[0].title = $rename.title
   }
-  return [ordered]@{ response = $response; publishPath = if ($null -ne $owner) { $owner.project.path } else { $null } }
+  return [ordered]@{ response = $response; publishPath = if ($null -ne $rename) { $owner.project.path } else { $null } }
 }
 
 function Complete-MultiProjectResponse($peer, $response) {

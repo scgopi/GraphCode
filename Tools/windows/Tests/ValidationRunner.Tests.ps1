@@ -1611,6 +1611,27 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
   Invoke-MultiCase "offscreen target rejected" -Negative {
     return Reject-MultiCase { Get-MultiProjectClippedRectangle @(0,0,50,50) @(220,34,1200,900) } "MULTIPROJECT_BOUNDS"
   }
+  Invoke-MultiCase "resumeSession acknowledges an exact fixture owner without changing its graph" {
+    $state = New-MultiBaseline
+    $before = ConvertTo-MultiProjectCanonicalJson $state.graphs
+    $frame = Copy-MultiProjectValue (New-MultiRequest)
+    $frame.command.graphCommand.command = [ordered]@{ resumeSession = [ordered]@{ _0 = $a } }
+    $result = Invoke-MultiProjectRequest $state $frame
+    Assert-MultiCase ($result.response.success -eq $true -and $null -eq $result.publishPath -and
+      $state.applied.Count -eq 0 -and
+      (ConvertTo-MultiProjectCanonicalJson $state.graphs) -ceq $before) "session open mutated the fixture graph"
+    return "Exact owner accepted; acknowledgement only, no agent launch or graph mutation"
+  }
+  Invoke-MultiCase "resumeSession refuses a node belonging to another project" -Negative {
+    $state = New-MultiBaseline
+    $before = ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)
+    $frame = Copy-MultiProjectValue (New-MultiRequest)
+    $frame.command.graphCommand.command = [ordered]@{ resumeSession = [ordered]@{ _0 = $b } }
+    $result = Reject-MultiCase { Invoke-MultiProjectRequest $state $frame } "MULTIPROJECT_OWNER"
+    Assert-MultiCase ((ConvertTo-MultiProjectCanonicalJson (Get-MultiProjectPeerSnapshot $state)) -ceq $before) `
+      "foreign session open changed peer state"
+    return $result
+  }
   $requestMutations = [ordered]@{
     owner = @{ prefix = "MULTIPROJECT_OWNER"; change = { param($f) $f.command.graphCommand.projectPath = $beta } }
     node = @{ prefix = "MULTIPROJECT_OWNER"; change = { param($f) $f.command.graphCommand.command.renameNode._0 = $b } }
