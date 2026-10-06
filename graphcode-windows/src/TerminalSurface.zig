@@ -1564,11 +1564,7 @@ pub const Workspace = struct {
                 &session_buffer,
             )).len;
         }
-        var child = std.process.Child.init(attach_args[0..attach_len], self.allocator);
-        child.cwd = self.cwd;
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Ignore;
+        var child = ZmxSession.child(self.allocator, attach_args[0..attach_len], self.cwd, .attach);
         try child.spawn();
         if (child.stdin) |stdin| {
             var mode: c.DWORD = c.PIPE_NOWAIT;
@@ -1704,12 +1700,7 @@ pub const Workspace = struct {
                 self.setInputError("terminal PTY resize tracking allocation failed");
                 return;
             };
-            var child = std.process.Child.init(command, self.allocator);
-            child.cwd = self.cwd;
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Ignore;
-            child.stderr_behavior = .Ignore;
-            child.create_no_window = true;
+            var child = ZmxSession.child(self.allocator, command, self.cwd, .control);
             child.spawn() catch {
                 self.allocator.free(session);
                 slot.attempted_resize_size = size;

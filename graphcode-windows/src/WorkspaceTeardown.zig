@@ -342,10 +342,7 @@ pub const Live = struct {
         defer allocator.free(zmx);
         const argv = killArgv(allocator, zmx, ids) catch return 0;
         defer freeKillArgv(allocator, argv);
-        var child = std.process.Child.init(argv, allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
+        var child = ZmxSession.child(allocator, argv, null, .control);
         _ = child.spawnAndWait() catch return 0;
         return ids.len;
     }
