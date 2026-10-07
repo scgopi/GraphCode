@@ -124,6 +124,18 @@ function Start-OwnedDaemon {
     if (@(Get-OwnedDaemon $process.Id).Count -eq 1) {
       $script:daemonStdout = $stdout
       $script:daemonStderr = $stderr
+      # A PID exists before the lifetime mutex and listener are initialized. This is
+      # especially observable on restart, when the Zig test executable is already built.
+      $readyPipe = [IO.Pipes.NamedPipeClientStream]::new(".", $daemonPipe.Substring(9),
+        [IO.Pipes.PipeDirection]::InOut)
+      try {
+        $readyPipe.Connect(15000)
+      } catch {
+        if (-not $process.HasExited) { $process.Kill(); [void]$process.WaitForExit(5000) }
+        throw "Owned daemon did not publish its listener before the round-trip test: $($_.Exception.Message)"
+      } finally {
+        $readyPipe.Dispose()
+      }
       return $process
     }
     Start-Sleep -Milliseconds 100
