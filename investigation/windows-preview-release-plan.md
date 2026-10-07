@@ -10,7 +10,102 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-### 2026-10-06 replacement Windows candidate (beta10)
+### 2026-10-06 replacement Windows candidate (beta12)
+
+The current replacement candidate is `1199de5e631ad71e0f2aff47910e668651ad791f`, the merge commit for
+[#645](https://github.com/scgopi/GraphCode/pull/645), with parents
+`ed30b0cabe8e95fdc085850c6d7fccdb8868c888` and
+`01bb7df031cc34f045d6a5cefc6755222de8c83d`. It replaces
+`0.1.78-windows.beta10`, which is failed/superseded and immutable.
+
+The attended beta10 Dev Box run produced four fixes, each merged with exact-head
+CI green:
+
+- [#640](https://github.com/scgopi/GraphCode/pull/640) spawns zmx children
+  with `CREATE_NO_WINDOW`. Every terminal attach had opened a visible
+  `.\zmx.exe` console that stole foreground.
+- [#641](https://github.com/scgopi/GraphCode/pull/641) reads the daemon's
+  `createdAt` as reference-date seconds. Loops had shown an age of `11323d`.
+- [#642](https://github.com/scgopi/GraphCode/pull/642) shares one
+  `LoopBarLayout` across paint, hit testing and UIA. At narrow widths, text no
+  longer draws under Stop/Show in graph.
+- [#643](https://github.com/scgopi/GraphCode/pull/643) has the shell ask the
+  daemon to start attended loops (`resumeSession`) and attach only to a live
+  session. Opening such a loop had shown a bare shell. #643 changes shared
+  Swift (`GraphStore`, `ZmxSessionLauncher`, `LoopType`), and its exact-head
+  CI included macOS.
+
+Two harness/repository fixes followed:
+
+- [#644](https://github.com/scgopi/GraphCode/pull/644) gives the UIA gate's
+  reopened promotion submenu the keyboard reveal.
+- [#645](https://github.com/scgopi/GraphCode/pull/645) removes a validation
+  workspace layout that #644 committed by mistake.
+
+The local annotated tag `0.1.78-windows.beta11`, at
+`ed30b0cabe8e95fdc085850c6d7fccdb8868c888`, contains that file. It was never
+built and is retained, immutable and unbuilt/superseded.
+
+The root cause is a separate product defect, not fixed here. Unless
+`GRAPHCODE_WORKSPACE_LAYOUT` is set, workspace layouts are written to a relative
+`graphcode-workspace.<key>.json` in the shell's current directory.
+
+#642 and #643 each moved one parity row from `Validated` to `Partial`. The
+**Loop bar** and **Workspace detail screen** rows now have only unit evidence
+or a local walkthrough after a live defect. The parity ledger therefore now
+counts **98 surfaces: 60 Validated and 38 Partial**. The dated audit statements
+elsewhere in this document that cite 62/36 are historical snapshots.
+
+Local Windows-shell validation ran at product-identical sources, `ab47b464` and
+`ca9c48e1`. Both runs passed:
+
+- unit **55/55** sections;
+- App **771/771**;
+- scrubbed startup **5/5**;
+- the real-daemon round trip.
+
+The local live UIA gate **failed** in both runs, at different native-menu
+steps. Attribution showed GraphCode in the foreground with healthy processes;
+this desktop drops injected input (#631). Exact-head CI passed the live UIA gate
+for #643, #644 and #645. No local UIA pass is claimed for this candidate.
+
+The local annotated tag `0.1.78-windows.beta12` has tag object
+`f4dab05a1e535bfa121a46734bf283b4d7b9054b` and peels exactly to the source.
+`origin/main` equalled the candidate at tag creation. The tag is local,
+unpushed and unpublished.
+
+The unsigned ZIP is **48,252,288 bytes**, SHA-256
+`a76976af4c1a6b5e1bc206b5f4c75e508f1dc6c76b6be5c5303e4140993a3f7a`, with
+**50 files** and payload-manifest SHA-256
+`665687e441629b7faea4521dd1e5fb94209edfd9b367b590c51f54ce87ae1304`.
+Repository and extracted setup verification each reported exactly one PASS.
+The binary reports `0.1.78-windows.beta12` and Worktrees state `deferred`, and
+`zmx.exe` ships beside `graphcoded.exe`.
+
+Executable SHA-256 values:
+
+| Binary | SHA-256 |
+| --- | --- |
+| shell | `878f0dbae3243b72d29f6c8a452896f5eaa00a457e37f34d934dcda336f4556c` |
+| daemon | `30761427b73f9876819c42a712c409b57799c097fe2f814249c71fe1ca5fe877` |
+| CLI | `5187457d32a8fe892c3d47155e605010156d4d2b3f9b62118dc9f61450972896` |
+| zmx | `9d2b506cbef2078d91688fda0c2e631fe9daeb8eb3706edda6258a7c9a8d29e2` |
+
+zmx was rebuilt from the same pinned commit, and its source and package hashes
+match. The packaged binaries passed the scrubbed startup gate **5/5**.
+
+The custody ZIP SHA-256 is
+`f22e513de9ae08bee6feb81ee0fd24c66b4d38c34a486e60ff215703a49296a9`. Create,
+Verify and the file-only offline restore passed with **43/43/43** LFS, an exact
+detached HEAD/tag, zero remotes and a clean status.
+
+The handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta12` has a
+`hashes.sha256` with SHA-256
+`4afb67e6d381d20ce52e73ae03aca6ac20ac472537bcbe3ca32bc8ffd8abaead`, and all
+**8/8** entries verified. Its plan is unchanged from beta10. Its prompt adds a
+gate that re-verifies each beta10 finding before any backend credits are spent.
+
+### Historical beta10 candidate
 
 The current replacement candidate is
 `1ae1c25469d2e829f6470b0de39af966969604c7`, the merge commit for
@@ -966,14 +1061,14 @@ lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
 - [x] **Exact artifact:** candidate source
-  `1ae1c25469d2e829f6470b0de39af966969604c7`, version/tag
-  `0.1.78-windows.beta10`, annotated tag object
-  `043f7dae55007b3dc022858432cd768a3ace5103`, package SHA-256
-  `1dab76c4b13c70a49918e96087ed18a061ac953ef2e832332891c7ee159002ae`,
+  `1199de5e631ad71e0f2aff47910e668651ad791f`, version/tag
+  `0.1.78-windows.beta12`, annotated tag object
+  `f4dab05a1e535bfa121a46734bf283b4d7b9054b`, package SHA-256
+  `a76976af4c1a6b5e1bc206b5f4c75e508f1dc6c76b6be5c5303e4140993a3f7a`,
   50-file payload manifest SHA-256
-  `1c464780b15c5717dc2dc5fb4ace64a541b94b24b2e6227001ce98bff95fb969`,
+  `665687e441629b7faea4521dd1e5fb94209edfd9b367b590c51f54ce87ae1304`,
   and provider provenance are recorded in
-  `GraphCode-DevBox-Handoff-0.1.78-windows.beta10`. Tag/source match. The
+  `GraphCode-DevBox-Handoff-0.1.78-windows.beta12`. Tag/source match. The
   repository ZIP verifier and extracted standalone setup each reported exactly
   one PASS; the
   package explicitly declares `UNSIGNED (not code signed)`, records
@@ -1028,7 +1123,7 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-The **Exact artifact** gate is complete for `0.1.78-windows.beta10`. The other **six** gates
+The **Exact artifact** gate is complete for `0.1.78-windows.beta12`. The other **six** gates
 remain open and require evidence that source, hosted CI, and hidden-window
 tests cannot manufacture:
 
@@ -1050,17 +1145,17 @@ is manual-dispatch only, checks out an **existing tag**, and defaults
 and produces `graphcode-windows-x86_64.zip` plus its `.sha256` sidecar.
 Checksums detect corruption; they do not authenticate the publisher.
 
-The completed local exact-artifact record is the unpublished Windows beta10
-candidate: source/tag `1ae1c25469d2e829f6470b0de39af966969604c7` /
-`0.1.78-windows.beta10`, ZIP SHA-256
-`1dab76c4b13c70a49918e96087ed18a061ac953ef2e832332891c7ee159002ae`,
+The completed local exact-artifact record is the unpublished Windows beta12
+candidate: source/tag `1199de5e631ad71e0f2aff47910e668651ad791f` /
+`0.1.78-windows.beta12`, ZIP SHA-256
+`a76976af4c1a6b5e1bc206b5f4c75e508f1dc6c76b6be5c5303e4140993a3f7a`,
 source-custody ZIP SHA-256
-`66b9c9547abd220af7d54ab278523dc24321c0f369991d4f22d0acd08637c74d`,
-and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta10`. The tag
+`f22e513de9ae08bee6feb81ee0fd24c66b4d38c34a486e60ff215703a49296a9`,
+and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta12`. The tag
 is local and unpushed, there is no matching release, and publication is false.
 README-FIRST requires restoration through the included
 `Restore-GraphCodeSource.ps1`; it forbids GitHub cloning and bare-bundle
-cloning for this custody path. The superseded beta1 through beta9 tags, ZIPs, handoffs and retained
+cloning for this custody path. The superseded beta1 through beta11 tags, ZIPs, handoffs and retained
 failure evidence remain immutable; do not transfer or qualify them and do not
 delete or rewrite their records. The local Windows
 beta1 tag object remains retained unchanged, but its `0.1.78-beta1` name is
@@ -1100,7 +1195,7 @@ execute either side without relying on hidden session state:
   runs the production/native/backend/lifecycle evidence on a new corporate
   Dev Box, cleans up and returns a hashed evidence bundle. It never publishes.
 
-For `0.1.78-windows.beta10`, the versioned handoff binds the exact candidate source/tag, ZIP,
+For `0.1.78-windows.beta12`, the versioned handoff binds the exact candidate source/tag, ZIP,
 source-custody ZIP, provider/toolchain identities, Approval A, and the exact
 candidate Dev Box plan whose SHA-256 is
 `9b46083503d1add10c6386b4475e613822d30a8c636d466a40cbc546e7de892b`.
@@ -1146,10 +1241,10 @@ The bounded source/tooling queue is complete. Remaining work is bottom-up and
 permission-bound; it should not start with another parity-row sweep:
 
 1. **Installed production-core and onboarding qualification - #556:** the
-   exact source-bound Windows beta10 candidate
-   `1ae1c25469d2e829f6470b0de39af966969604c7` was built through
+   exact source-bound Windows beta12 candidate
+   `1199de5e631ad71e0f2aff47910e668651ad791f` was built through
    [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route with
-   the #604 release-candidate guard and includes #624, #626, #628, #630, #633, #635 and #638. Its independently reverified
+   the #604 release-candidate guard and includes #624, #626, #628, #630, #633, #635, #638 and #640-#643. Its independently reverified
    LFS-aware custody ZIP and versioned handoff now exist; transfer and Dev Box
    execution are still NotExecuted. After authorization, use the included
    restore script and the exact candidate Dev Box plan to run
@@ -1170,7 +1265,7 @@ permission-bound; it should not start with another parity-row sweep:
    future dump-backed diagnosis requires separate authorization and a new
    candidate if product code changes.
 3. **Keep the release gates honest:** **Exact artifact** is complete for
-   `0.1.78-windows.beta10`;
+   `0.1.78-windows.beta12`;
    the other **six** gates remain open. The installed production-core result,
    native input and destructive fixture permission, named authenticated backend
    authorization, handoff transfer and execution, Approval B, and publication
