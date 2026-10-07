@@ -322,6 +322,8 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (id_ >= 7 && id_ <= 13 && !worktreeFixedEnabledLocked(id_))
+        return UIA_E_ELEMENTNOTENABLED;
       hwnd = state_->hwnd;
       if (isRowKey(id_)) {
         dynamic_bounds = state_->rows.at(id_).bounds;
@@ -454,6 +456,7 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (!worktreeFixedEnabledLocked(id_)) return UIA_E_ELEMENTNOTENABLED;
       hwnd = state_->hwnd;
     }
     if (isRowKey(id_)) {
@@ -778,16 +781,13 @@ class Node final : public IRawElementProviderSimple,
   bool retired_ = false;
 
   bool supportsInvoke() const {
+    if ((id_ >= 7 && id_ <= 20) || (id_ >= 22 && id_ <= 24)) return true;
     std::lock_guard<std::mutex> lock(state_->mutex);
-    if ((id_ >= 7 && id_ <= 20) || (id_ >= 22 && id_ <= 24)) {
-      return (id_ < 7 || id_ > 13) || worktreeFixedEnabledLocked(id_);
-    }
     const auto row = state_->rows.find(id_);
     return row != state_->rows.end() && row->second.invokable;
   }
   bool supportsToggle() const {
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    return (id_ == 12 || id_ == 13) && worktreeFixedEnabledLocked(id_);
+    return id_ == 12 || id_ == 13;
   }
   bool worktreeFixedEnabledLocked(int64_t id) const {
     if (id == 3) return state_->worktrees_available;
