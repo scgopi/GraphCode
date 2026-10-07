@@ -10,7 +10,91 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
-### 2026-10-07 replacement Windows candidate (beta13)
+### 2026-10-07 replacement Windows candidate (beta14)
+
+The current replacement candidate is `d9fe093c9633b33534e7460cba827a75be21d638`. It is the merge commit for
+[#651](https://github.com/scgopi/GraphCode/pull/651), with parents
+`46a9f66f91f3267d4dd73b7f5529880ceb7c2017` and
+`9d40f3345ee52579ff0bc2b4043cfcf6369f8984`. It replaces
+`0.1.78-windows.beta13`, which is failed/superseded and immutable.
+
+It adds the #560 Worktrees work:
+
+- [#649](https://github.com/scgopi/GraphCode/pull/649) moves Worktrees
+  inspection and reclaim onto background workers.
+- [#650](https://github.com/scgopi/GraphCode/pull/650) streams discovery rows
+  before sizing, and adds SSH and Codespace discovery.
+- [#651](https://github.com/scgopi/GraphCode/pull/651) completes reclaim
+  parity, revalidating worktree and branch removal and writing a branch-tip
+  recovery log.
+
+All three merged with exact-head Windows integration and packaging green. They
+are Windows-only, so macOS CI was correctly skipped.
+
+**#649 removes the release-candidate Worktrees deferral.** This package records
+`previewFeatures.worktreesDeferred=false`, and the binary reports `available`.
+
+That conflicts with Approval A's previous `DeferAndGuard` Worktrees decision,
+and with the original candidate stop condition for a missing guard. The
+operator was unavailable to decide. So the handoff's Approval A Worktrees
+decision is now **`AvailableInspectionOnly`**:
+
+- non-destructive inspection on a disposable synthetic fixture is allowed, to
+  qualify the #560 responsiveness fix;
+- **reclaim is not authorized** and must be recorded `NotExecuted`;
+- no dump is authorized.
+
+This narrows rather than expands destructive authority. Explicit operator
+approval is required before any Worktrees reclaim qualification. #560 stays
+open until that packaged evidence exists.
+
+**Local validation.** Full local Windows-shell validation passed at the
+candidate source with `VALIDATE_EXIT=0`:
+
+- **55/55** sections;
+- App **781/781**;
+- scrubbed startup **5/5**;
+- the real-daemon round trip;
+- the live UIA gate.
+
+**Tag.** The local annotated tag `0.1.78-windows.beta14` has tag object
+`7c34da16e042a9e0199c5575d3ff1862f617d52a`, and peels exactly to the source.
+It is local, unpushed and unpublished.
+
+**Package.** The unsigned ZIP is **48,357,906 bytes**, SHA-256
+`1fc95cf409d377899cf048a02005a1587aaf4e31c289360309e5030e0aadaf3d`, with
+**50 files**. Its payload-manifest SHA-256 is
+`65b4b2ebbb64c2c5e489178da57fbaf8779a63b1bf482b677e76e7be9c6903f3`.
+Repository and extracted setup verification each passed once.
+
+Executable SHA-256 values:
+
+| Executable | SHA-256 |
+| --- | --- |
+| shell | `e70c8436c765b61b2dbe5efd14dfc58fe4303454e534d2537f28a2baf07bf802` |
+| daemon | `30761427b73f9876819c42a712c409b57799c097fe2f814249c71fe1ca5fe877` |
+| CLI | `5187457d32a8fe892c3d47155e605010156d4d2b3f9b62118dc9f61450972896` |
+| zmx | `06905f9b0eea35a5eba8ef1f935c2d3507f124065537439c75904dfa8b915875` |
+
+The daemon and CLI are byte-identical to beta13. The packaged binaries passed
+scrubbed startup **5/5**.
+
+**Source custody.** The custody ZIP SHA-256 is
+`52c82d4c5dd6a40ceeb275aae37444990b9a459f94b723b53067b9a97f566f97`. Create,
+Verify and the file-only offline restore all passed:
+
+- **43/43/43** LFS;
+- exact detached HEAD/tag;
+- zero remotes;
+- clean status.
+
+**Handoff.** `GraphCode-DevBox-Handoff-0.1.78-windows.beta14` has
+`hashes.sha256` SHA-256
+`93fdf1fc7f939f496ee6d5273cda6c34174fc12a70c67ff9b33fd265f96e7207`; all
+**8/8** entries verified. The plan is unchanged. The prompt adds an
+inspection-only Worktrees gate that replaces plan Phase D9 for this candidate.
+
+### Historical beta13 candidate
 
 The current replacement candidate is `af3d006146d8d9aad52b5621499d287d862ab3de`, the merge commit for
 [#647](https://github.com/scgopi/GraphCode/pull/647), with parents
@@ -1115,18 +1199,19 @@ lease or equivalent authorized hosted evidence. No desktop available means a
 proof gap, not PASS; hosted server evidence must not be relabelled client proof.
 
 - [x] **Exact artifact:** candidate source
-  `af3d006146d8d9aad52b5621499d287d862ab3de`, version/tag
-  `0.1.78-windows.beta13`, annotated tag object
-  `5073dc1755923c2f7133f3894f82e4886c334917`, package SHA-256
-  `29691fdda6d83b6b97e3d05960f0431d622ae789f0d4ff8ddd36b31ae210944f`,
+  `d9fe093c9633b33534e7460cba827a75be21d638`, version/tag
+  `0.1.78-windows.beta14`, annotated tag object
+  `7c34da16e042a9e0199c5575d3ff1862f617d52a`, package SHA-256
+  `1fc95cf409d377899cf048a02005a1587aaf4e31c289360309e5030e0aadaf3d`,
   50-file payload manifest SHA-256
-  `cd361cb3a82ce884b96ab8d23838dbad518d2f043238ab29dcae28c323d89eee`,
+  `65b4b2ebbb64c2c5e489178da57fbaf8779a63b1bf482b677e76e7be9c6903f3`,
   and provider provenance are recorded in
-  `GraphCode-DevBox-Handoff-0.1.78-windows.beta13`. Tag/source match. The
+  `GraphCode-DevBox-Handoff-0.1.78-windows.beta14`. Tag/source match. The
   repository ZIP verifier and extracted standalone setup each reported exactly
   one PASS; the
   package explicitly declares `UNSIGNED (not code signed)`, records
-  `previewFeatures.worktreesDeferred=true`, reports preview state `deferred`,
+  `previewFeatures.worktreesDeferred=false`, reports preview state `available`
+  (the #649 deferral removal; Approval A limits Worktrees to inspection only),
   and contains production daemon/CLI/runtime inputs. The coordinator
   independently reverified the handoff and all eight payload hashes. The
   LFS-aware source-custody ZIP verified and restored the exact detached source,
@@ -1177,7 +1262,7 @@ proof gap, not PASS; hosted server evidence must not be relabelled client proof.
   steps, recovery locations and a bug-report route. Never ask testers to bypass
   security policy. Invite only after the core gates have actual evidence.
 
-The **Exact artifact** gate is complete for `0.1.78-windows.beta13`. The other **six** gates
+The **Exact artifact** gate is complete for `0.1.78-windows.beta14`. The other **six** gates
 remain open and require evidence that source, hosted CI, and hidden-window
 tests cannot manufacture:
 
@@ -1199,17 +1284,17 @@ is manual-dispatch only, checks out an **existing tag**, and defaults
 and produces `graphcode-windows-x86_64.zip` plus its `.sha256` sidecar.
 Checksums detect corruption; they do not authenticate the publisher.
 
-The completed local exact-artifact record is the unpublished Windows beta13
-candidate: source/tag `af3d006146d8d9aad52b5621499d287d862ab3de` /
-`0.1.78-windows.beta13`, ZIP SHA-256
-`29691fdda6d83b6b97e3d05960f0431d622ae789f0d4ff8ddd36b31ae210944f`,
+The completed local exact-artifact record is the unpublished Windows beta14
+candidate: source/tag `d9fe093c9633b33534e7460cba827a75be21d638` /
+`0.1.78-windows.beta14`, ZIP SHA-256
+`1fc95cf409d377899cf048a02005a1587aaf4e31c289360309e5030e0aadaf3d`,
 source-custody ZIP SHA-256
-`b51128dc95933a6e21b4312436c6c8614162f926d85dc7bcbb93c7710aa15735`,
-and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta13`. The tag
+`52c82d4c5dd6a40ceeb275aae37444990b9a459f94b723b53067b9a97f566f97`,
+and versioned handoff `GraphCode-DevBox-Handoff-0.1.78-windows.beta14`. The tag
 is local and unpushed, there is no matching release, and publication is false.
 README-FIRST requires restoration through the included
 `Restore-GraphCodeSource.ps1`; it forbids GitHub cloning and bare-bundle
-cloning for this custody path. The superseded beta1 through beta12 tags, ZIPs, handoffs and retained
+cloning for this custody path. The superseded beta1 through beta13 tags, ZIPs, handoffs and retained
 failure evidence remain immutable; do not transfer or qualify them and do not
 delete or rewrite their records. The local Windows
 beta1 tag object remains retained unchanged, but its `0.1.78-beta1` name is
@@ -1249,7 +1334,7 @@ execute either side without relying on hidden session state:
   runs the production/native/backend/lifecycle evidence on a new corporate
   Dev Box, cleans up and returns a hashed evidence bundle. It never publishes.
 
-For `0.1.78-windows.beta13`, the versioned handoff binds the exact candidate source/tag, ZIP,
+For `0.1.78-windows.beta14`, the versioned handoff binds the exact candidate source/tag, ZIP,
 source-custody ZIP, provider/toolchain identities, Approval A, and the exact
 candidate Dev Box plan whose SHA-256 is
 `9b46083503d1add10c6386b4475e613822d30a8c636d466a40cbc546e7de892b`.
@@ -1295,10 +1380,11 @@ The bounded source/tooling queue is complete. Remaining work is bottom-up and
 permission-bound; it should not start with another parity-row sweep:
 
 1. **Installed production-core and onboarding qualification - #556:** the
-   exact source-bound Windows beta13 candidate
-   `af3d006146d8d9aad52b5621499d287d862ab3de` was built through
-   [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route with
-   the #604 release-candidate guard and includes #624, #626, #628, #630, #633, #635, #638, #640-#643 and #647. Its independently reverified
+   exact source-bound Windows beta14 candidate
+   `d9fe093c9633b33534e7460cba827a75be21d638` was built through
+   [#578](https://github.com/scgopi/GraphCode/pull/578)'s supported route
+   (the #604 release-candidate guard was retired by #649) and includes #624,
+   #626, #628, #630, #633, #635, #638, #640-#643, #647 and #649-#651. Its independently reverified
    LFS-aware custody ZIP and versioned handoff now exist; transfer and Dev Box
    execution are still NotExecuted. After authorization, use the included
    restore script and the exact candidate Dev Box plan to run
@@ -1319,7 +1405,7 @@ permission-bound; it should not start with another parity-row sweep:
    future dump-backed diagnosis requires separate authorization and a new
    candidate if product code changes.
 3. **Keep the release gates honest:** **Exact artifact** is complete for
-   `0.1.78-windows.beta13`;
+   `0.1.78-windows.beta14`;
    the other **six** gates remain open. The installed production-core result,
    native input and destructive fixture permission, named authenticated backend
    authorization, handoff transfer and execution, Approval B, and publication
