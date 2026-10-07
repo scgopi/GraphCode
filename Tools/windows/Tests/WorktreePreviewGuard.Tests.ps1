@@ -30,6 +30,8 @@ Require ($app.Contains('test "Worktrees inspection action does not block the UI 
   "RED: the real App inspection route has no bounded responsiveness regression"
 Require ($app.Contains('test "Worktrees reclaim action returns before owned provider removal completes"')) `
   "RED: the real App reclaim route has no bounded responsiveness regression"
+Require ($app -match '(?s)pub fn init\(allocator: std\.mem\.Allocator\).*?\.model = GraphModel\.Model\.init\(allocator\)') `
+  "RED: production App initialization does not construct the graph model"
 Require (-not $app.Contains("Worktrees are deferred for this preview")) `
   "RED: production still exposes the retired Worktrees preview deferral"
 Require (-not $build.Contains("worktrees-deferred")) `

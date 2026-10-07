@@ -88,11 +88,11 @@ const WorktreeReclaimRequest = struct {
     runner: WorktreeReclaimRunner,
 
     fn deinit(self: *WorktreeReclaimRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.project_path);
+        if (self.project_path.len != 0) allocator.free(self.project_path);
         for (self.selected) |path| allocator.free(path);
-        allocator.free(self.selected);
+        if (self.selected.len != 0) allocator.free(self.selected);
         for (self.bindings) |binding| allocator.free(binding.path);
-        allocator.free(self.bindings);
+        if (self.bindings.len != 0) allocator.free(self.bindings);
         allocator.destroy(self);
     }
 };
@@ -144,9 +144,9 @@ const WorktreeInspectionRequest = struct {
     runner: WorktreeInspectRunner,
 
     fn deinit(self: *WorktreeInspectionRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.project_path);
+        if (self.project_path.len != 0) allocator.free(self.project_path);
         for (self.bindings) |binding| allocator.free(binding.path);
-        allocator.free(self.bindings);
+        if (self.bindings.len != 0) allocator.free(self.bindings);
         allocator.destroy(self);
     }
 };
@@ -165,7 +165,10 @@ const WorktreeInspectionResult = struct {
     fn deinit(self: *WorktreeInspectionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.project_path);
         switch (self.outcome) {
-            .inspected => |*value| WorktreeStatus.deinitInspection(allocator, &value.inspection),
+            .inspected => |*value| {
+                if (value.inspection.project_path.len != 0)
+                    WorktreeStatus.deinitInspection(allocator, &value.inspection);
+            },
             .failed => {},
         }
     }
@@ -1311,7 +1314,7 @@ pub const App = struct {
             .allocator = allocator,
             .client = client,
             .daemon = .{ .allocator = allocator },
-            .model = undefined,
+            .model = GraphModel.Model.init(allocator),
             .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
             .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
             .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
