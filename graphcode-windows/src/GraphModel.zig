@@ -1742,6 +1742,41 @@ const JsonFields = struct {
     }
 };
 
+fn isLoopState(value: []const u8) bool {
+    return for ([_][]const u8{
+        "idle",
+        "running",
+        "awaitingInput",
+        "blocked",
+        "succeeded",
+        "failed",
+        "stalled",
+        "waiting",
+        "stopped",
+    }) |state| {
+        if (std.mem.eql(u8, value, state)) break true;
+    } else false;
+}
+
+fn decodeLoopState(allocator: std.mem.Allocator, value: JsonValue) ![]u8 {
+    if (value.isNull()) return allocator.dupe(u8, "idle");
+    if (value.container('"') != null) {
+        const state = try value.duplicateString(allocator, "");
+        errdefer allocator.free(state);
+        if (!isLoopState(state)) return error.UnsupportedLoopState;
+        return state;
+    }
+    const object = value.container('{') orelse return error.MalformedLoopState;
+    var fields = try JsonFields.init(allocator, object);
+    defer fields.deinit();
+    if (fields.fields.items.len == 0) return allocator.dupe(u8, "idle");
+    if (fields.fields.items.len != 1) return error.MalformedLoopState;
+    const field = fields.fields.items[0];
+    if (!isLoopState(field.key) or field.value.container('{') == null)
+        return error.UnsupportedLoopState;
+    return allocator.dupe(u8, field.key);
+}
+
 fn validateGraphStructure(allocator: std.mem.Allocator, bytes: []const u8) !void {
     return validateGraphStructureMeasured(allocator, bytes, null);
 }
@@ -1835,7 +1870,7 @@ fn decodeNodes(
         node.id = try fields.get("id").duplicateString(allocator, "");
         node.title = try fields.get("title").duplicateString(allocator, "Untitled");
         node.loop_type = try fields.get("loopType").duplicateString(allocator, "turnBased");
-        node.state = try fields.get("state").duplicateString(allocator, "idle");
+        node.state = try decodeLoopState(allocator, fields.get("state"));
         node.activity = try fields.get("activity").duplicateString(allocator, "");
         const presence = fields.get("presence");
         if (presence.container('{')) |reading| {
@@ -3624,6 +3659,45 @@ test "production daemon graphChanged associated-value frame decodes project and 
     try std.testing.expectEqualStrings("Core loop", summary.nodes.items[0].title);
     try std.testing.expectEqual(@as(usize, 1), model.graphs.items.len);
     try std.testing.expectEqualStrings("C:/GraphCode-Fixtures/Core", model.graph.?.project.path);
+}
+
+test "production LoopState objects decode exhaustively and malformed states preserve the prior graph" {
+    const allocator = std.testing.allocator;
+    var nodes = std.array_list.Managed(Node).init(allocator);
+    defer {
+        for (nodes.items) |node| freeNode(allocator, node);
+        nodes.deinit();
+    }
+    try decodeNodes(
+        allocator,
+        \\[{"id":"idle","state":{"idle":{}}},{"id":"running","state":{"running":{}}},{"id":"awaiting","state":{"awaitingInput":{}}},{"id":"blocked","state":{"blocked":{}}},{"id":"succeeded","state":{"succeeded":{}}},{"id":"failed","state":{"failed":{}}},{"id":"stalled","state":{"stalled":{}}},{"id":"waiting","state":{"waiting":{}}},{"id":"stopped","state":{"stopped":{}}}]
+    ,
+        &nodes,
+    );
+    for (nodes.items, [_][]const u8{
+        "idle",
+        "running",
+        "awaitingInput",
+        "blocked",
+        "succeeded",
+        "failed",
+        "stalled",
+        "waiting",
+        "stopped",
+    }) |node, expected| try std.testing.expectEqualStrings(expected, node.state);
+
+    var model = Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"loop","title":"Loop","state":{"running":{}}}],"edges":[]}}
+    );
+    try std.testing.expectError(
+        error.UnsupportedLoopState,
+        model.updateFromFrame(
+            \\{"graphChanged":{"project":{"path":"C:\\work\\graph","name":"Graph"},"nodes":[{"id":"loop","title":"Loop","state":{"paused":{}}}],"edges":[]}}
+        ),
+    );
+    try std.testing.expectEqualStrings("running", model.currentGraph().?.nodes.items[0].state);
 }
 
 test "field scope keys and delimiters inside scalar text cannot select graph fields" {
