@@ -5000,6 +5000,8 @@ try {
   $fixtureProjectPath = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "project")
   $fixtureSafePath = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath "fixture-safe")
   $fixtureUnsafePath = Assert-UiaSandboxPath $sandboxPath (Join-Path $fixtureProjectPath "fixture-unsafe")
+  $fixtureSafeName = "$fixtureSafePath - safe to reclaim - size pending"
+  $fixtureUnsafeName = "$fixtureUnsafePath - local changes - size pending"
   New-Item -ItemType Directory -Path $fixtureProjectPath -ErrorAction Stop | Out-Null
   $logDirectory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "logs")
   New-Item -ItemType Directory -Path $logDirectory -ErrorAction Stop | Out-Null
@@ -6521,12 +6523,12 @@ try {
   $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $initialRowIds "RawView Worktrees")
   $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $initialRowIds "ControlView Worktrees")
   Require ((@($rawRows | ForEach-Object { $_.Current.Name }) -join "|") -eq
-           "$fixtureSafePath|$fixtureUnsafePath") "fixture worktree names were not ordered as expected"
+           "$fixtureSafeName|$fixtureUnsafeName") "fixture worktree names were not ordered as expected"
 
   $selection = $worktrees.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
-  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
-  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureUnsafePath })[0]
-  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
+  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
+  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureUnsafeName })[0]
+  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
   Require (($null -ne $safeRow) -and ($null -ne $unsafeRow) -and ($null -ne $safeFocusRow)) "missing fixture worktree rows"
   $safeRowId = $safeRow.Current.AutomationId
   $safeRowRuntimeId = Get-RuntimeIdentity $safeRow
@@ -6808,10 +6810,10 @@ try {
            ([GraphCodeUiaGateState]::LiveSourceName -eq $statusTextAfter)) "status LiveRegionChanged did not expose updated text"
 
   $currentRowsBeforeFocus = @(Get-DirectChildren $worktrees $rawWalker)
-  $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq $fixtureSafePath })[0]
+  $currentSafe = @($currentRowsBeforeFocus | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
   Require ($null -ne $currentSafe) "safe worktree row disappeared before focus: $(@($currentRowsBeforeFocus | ForEach-Object { $_.Current.AutomationId }) -join ',')"
   Require ($currentSafe.Current.AutomationId -eq $safeRowId) "safe worktree identity changed before focus: $safeRowId -> $($currentSafe.Current.AutomationId)"
-  Require ($safeFocusRow.Current.Name -eq $fixtureSafePath) "safe worktree provider became unavailable before focus"
+  Require ($safeFocusRow.Current.Name -eq $fixtureSafeName) "safe worktree provider became unavailable before focus"
   $focusResult = Retain-FocusWithRetry $shellWindow $safeFocusRow $safeRowId "before-retention"
   $focused = $focusResult.Focused
   Require ($null -ne $focused) "worktree row could not retain focus against concurrent desktop focus changes; focused=$(Format-AutomationElement $focusResult.Candidate); $(Get-FocusDiagnostics $shellWindow)"
@@ -8410,7 +8412,7 @@ try {
     $settingsRowNames = @(Get-DirectChildren $settingsWorktrees $rawWalker |
       ForEach-Object { $_.Current.Name })
     $settingsMessageLoopReady = ($settingsRowNames -join "|") -eq
-      "$fixtureUnsafePath|$fixtureSafePath"
+      "$fixtureUnsafeName|$fixtureSafeName"
   }
   Require $settingsMessageLoopReady "Product Settings fixture shell message loop did not become ready"
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 1)) `
