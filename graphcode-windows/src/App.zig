@@ -5271,7 +5271,7 @@ pub const App = struct {
         }
         for (inspection.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
-            if (!WorktreeStatus.sweepSelectable(entry)) return false;
+            if (!WorktreeStatus.actionSelectable(entry)) return false;
             if (self.worktree_dialog) |*dialog| {
                 dialog.clearSelection();
                 for (dialog.rows.items, 0..) |row, index| {
@@ -5293,7 +5293,7 @@ pub const App = struct {
     pub fn toggleWorktreeRow(self: *App, index: usize) bool {
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         if (index >= dialog.rows.items.len or
-            !WorktreeStatus.sweepSelectable(dialog.rows.items[index].entry)) return false;
+            !WorktreeStatus.actionSelectable(dialog.rows.items[index].entry)) return false;
         _ = dialog.toggle(index);
         if (self.selected_worktree_path.len != 0) {
             self.allocator.free(self.selected_worktree_path);
@@ -5319,7 +5319,7 @@ pub const App = struct {
             }
         }
         const index = target orelse return false;
-        if (!WorktreeStatus.sweepSelectable(dialog.rows.items[index].entry)) return false;
+        if (!WorktreeStatus.actionSelectable(dialog.rows.items[index].entry)) return false;
         switch (operation) {
             0 => {
                 for (dialog.rows.items) |*row| row.selected = false;
@@ -5767,7 +5767,7 @@ pub const App = struct {
         while (offset < count) : (offset += 1) {
             const next = @mod(@as(i32, @intCast(index)) + delta * @as(i32, @intCast(offset + 1)) +
                 @as(i32, @intCast(count)), @as(i32, @intCast(count)));
-            if (WorktreeStatus.sweepSelectable(inspection.entries.items[@intCast(next)])) {
+            if (WorktreeStatus.actionSelectable(inspection.entries.items[@intCast(next)])) {
                 _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
                 self.ensureWorktreeVisible(@intCast(next));
                 return;
@@ -6659,7 +6659,7 @@ pub const App = struct {
                     if (row.index < dialog.rows.items.len) {
                         const worktree = dialog.rows.items[row.index];
                         const name = WorktreeStatus.rowPresentation(self.allocator, worktree.entry) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, name, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.sweepSelectable(worktree.entry)) catch {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, name, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.actionSelectable(worktree.entry)) catch {
                             self.allocator.free(name);
                             return;
                         };
@@ -14048,6 +14048,13 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
         .pushed = true,
         .landed = true,
     });
+    try app.worktree_inspection.?.entries.append(.{
+        .path = try allocator.dupe(u8, "C:\\repo\\dirty"),
+        .branch = try allocator.dupe(u8, "dirty"),
+        .dirty = true,
+        .pushed = true,
+        .landed = true,
+    });
     defer if (app.selected_worktree_path.len != 0) allocator.free(app.selected_worktree_path);
 
     // Neither the sidebar shortcut nor a dialog has a selection.
@@ -14063,6 +14070,7 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     var dialog = try WorktreeDialog.Dialog.init(allocator, "C:\\repo", &.{
         .{ .path = try allocator.dupe(u8, "C:\\repo\\wt-main"), .branch = try allocator.dupe(u8, "main") },
         .{ .path = try allocator.dupe(u8, "C:\\repo\\locked"), .branch = try allocator.dupe(u8, "topic"), .locked = true, .pushed = true, .landed = true },
+        .{ .path = try allocator.dupe(u8, "C:\\repo\\dirty"), .branch = try allocator.dupe(u8, "dirty"), .dirty = true, .pushed = true, .landed = true },
     }, .{});
     defer {
         for (dialog.rows.items) |row| {
@@ -14081,6 +14089,8 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     try std.testing.expect(app.selectWorktreeRow("C:\\repo\\locked"));
     try std.testing.expect(app.worktree_dialog.?.rows.items[1].selected);
     try std.testing.expectEqualStrings("C:\\repo\\locked", app.selected_worktree_path);
+    try std.testing.expect(!app.selectWorktreeRow("C:\\repo\\dirty"));
+    try std.testing.expect(!app.worktree_dialog.?.rows.items[2].selected);
 }
 
 test "gesture registration outcome survives later startup setStatus calls" {

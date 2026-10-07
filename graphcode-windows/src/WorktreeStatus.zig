@@ -468,6 +468,13 @@ pub fn requiresUnlock(entry: Entry) bool {
     return entry.locked and sweepSelectable(entry);
 }
 
+pub fn actionSelectable(entry: Entry) bool {
+    if (!sweepSelectable(entry)) return false;
+    var unlocked = entry;
+    unlocked.locked = false;
+    return decision(unlocked) == .reclaimable;
+}
+
 pub fn discardsFiles(entry: Entry) bool {
     return !entry.prunable and (entry.dirty or entry.untracked or entry.conflicted);
 }
@@ -2025,6 +2032,20 @@ test "sweep selection allows dirty and locked rows but rejects owned and bound r
         .path = @constCast("locked"),
         .branch = @constCast("locked"),
         .locked = true,
+    }));
+    try std.testing.expect(actionSelectable(.{
+        .path = @constCast("locked"),
+        .branch = @constCast("locked"),
+        .locked = true,
+        .pushed = true,
+        .landed = true,
+    }));
+    try std.testing.expect(!actionSelectable(.{
+        .path = @constCast("dirty"),
+        .branch = @constCast("dirty"),
+        .dirty = true,
+        .pushed = true,
+        .landed = true,
     }));
     try std.testing.expect(!sweepSelectable(.{
         .path = @constCast("running"),
