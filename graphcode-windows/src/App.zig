@@ -4386,8 +4386,9 @@ pub const App = struct {
     fn isLocalGitRepository(self: *const App, project_path: []const u8) bool {
         const marker = std.fs.path.join(self.allocator, &.{ project_path, ".git" }) catch return false;
         defer self.allocator.free(marker);
-        std.fs.cwd().access(marker, .{}) catch return false;
-        return true;
+        const wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, marker) catch return false;
+        defer self.allocator.free(wide);
+        return c.GetFileAttributesW(wide.ptr) != c.INVALID_FILE_ATTRIBUTES;
     }
 
     fn acceptWorktreeInspection(self: *App, inspection: WorktreeStatus.Inspection, policy: WorktreeStatus.PolicyOutcome) !void {
