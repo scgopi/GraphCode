@@ -1795,7 +1795,8 @@ pub const App = struct {
                     if (self.model.currentGraph()) |selected| {
                         if (!selected.project.isGlobal() and
                             selected.worktree_notice == null and
-                            !self.worktreeProviderBusy() and
+                            (self.worktree_loading_path.len == 0 or
+                                !std.mem.eql(u8, self.worktree_loading_path, selected.project.path)) and
                             (selected.project.isRemote() or self.isLocalGitRepository(selected.project.path)))
                         {
                             self.inspectWorktreesImpl(false);
@@ -4549,7 +4550,7 @@ pub const App = struct {
                     request.deinit(self.allocator);
                     return;
                 },
-                .show_sweep = request.show_sweep,
+                .show_sweep = false,
                 .outcome = .{ .failed = err },
             });
             request.deinit(self.allocator);
@@ -7217,7 +7218,7 @@ pub const App = struct {
                     self.setStatus("Unable to select worktree notice project");
                     return false;
                 };
-                if (!std.mem.eql(u8, selected.project.path, path) or !selected.project.isLocalFilesystem()) {
+                if (!std.mem.eql(u8, selected.project.path, path) or selected.project.isGlobal()) {
                     self.setStatus("Worktree notice project changed before inspection");
                     return false;
                 }
@@ -14638,6 +14639,8 @@ test "project switch cancels stale Worktrees UI application before the latest ow
 }
 
 test "remote and Codespace Worktrees discovery stays at the provider boundary" {
+    try std.testing.expect(RemoteWorktrees.sameRemotePath("/workspaces/repo", "/workspaces/repo/"));
+    try std.testing.expect(!RemoteWorktrees.sameRemotePath("/workspaces/repo", "/workspaces/repo-linked"));
     const RemoteFixture = struct {
         var ssh_calls = std.atomic.Value(usize).init(0);
         var codespace_calls = std.atomic.Value(usize).init(0);

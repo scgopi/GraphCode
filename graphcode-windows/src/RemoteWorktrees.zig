@@ -15,6 +15,12 @@ const Location = struct {
     }
 };
 
+pub fn sameRemotePath(left: []const u8, right: []const u8) bool {
+    const normalized_left = if (left.len > 1) std.mem.trimRight(u8, left, "/") else left;
+    const normalized_right = if (right.len > 1) std.mem.trimRight(u8, right, "/") else right;
+    return std.mem.eql(u8, normalized_left, normalized_right);
+}
+
 pub fn inspectFactsWithCancel(
     allocator: std.mem.Allocator,
     project_uri: []const u8,
@@ -33,7 +39,7 @@ pub fn inspectFactsWithCancel(
     for (entries.items, 0..) |*entry, index| {
         if (cancellation) |value| try value.check();
         entry.primary = index == 0;
-        entry.opened_checkout = index == 0;
+        entry.opened_checkout = sameRemotePath(location.path, entry.path);
         for (bindings) |binding| {
             if (std.mem.eql(u8, binding.path, entry.path)) {
                 entry.bound_running = true;
@@ -177,24 +183,38 @@ fn runRemote(
             try args.appendSlice(&.{ "gh", "codespace", "ssh", "-c", location.destination, "--", command });
         },
     }
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = args.items,
-        .max_output_bytes = 1024 * 1024,
-    });
-    defer allocator.free(result.stderr);
+    var child = std.process.Child.init(args.items, allocator);
+    child.create_no_window = true;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    var stdout: std.ArrayList(u8) = .empty;
+    defer stdout.deinit(allocator);
+    var stderr: std.ArrayList(u8) = .empty;
+    defer stderr.deinit(allocator);
+    try child.spawn();
+    var waited = false;
+    errdefer |primary_error| if (!waited) {
+        _ = child.kill() catch |cleanup_error| {
+            if (cleanup_error == error.AlreadyTerminated) {
+                _ = child.wait() catch |wait_error| {
+                    std.log.err("Remote worktree failure {s}; child reap failed: {s}", .{ @errorName(primary_error), @errorName(wait_error) });
+                };
+            } else {
+                std.log.err("Remote worktree failure {s}; child cleanup failed: {s}", .{ @errorName(primary_error), @errorName(cleanup_error) });
+            }
+        };
+    };
+    const output_limit = 1024 * 1024;
+    try child.collectOutput(allocator, &stdout, &stderr, output_limit);
+    const term = try child.wait();
+    waited = true;
     if (cancellation) |value| try value.check();
-    switch (result.term) {
-        .Exited => |code| if (code != 0) {
-            allocator.free(result.stdout);
-            return error.RemoteCommandFailed;
-        },
-        else => {
-            allocator.free(result.stdout);
-            return error.RemoteCommandFailed;
-        },
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.RemoteCommandFailed,
+        else => return error.RemoteCommandFailed,
     }
-    return result.stdout;
+    return stdout.toOwnedSlice(allocator);
 }
 
 fn parseLocation(allocator: std.mem.Allocator, uri: []const u8) !Location {
