@@ -81,7 +81,7 @@ const WorktreeReclaimRunner = *const fn (
     bool,
     bool,
     ?WorktreeStatus.Cancellation,
-) anyerror!usize;
+) anyerror!WorktreeStatus.ReclaimReport;
 const WorktreeReclaimKind = enum { sweep, selected, offer };
 const WorktreeReclaimRequest = struct {
     generation: u64,
@@ -139,8 +139,8 @@ fn runWorktreeReclaim(
     confirmed: bool,
     allow_forced: bool,
     cancellation: ?WorktreeStatus.Cancellation,
-) anyerror!usize {
-    return WorktreeStatus.reclaimSelectedWithPolicyModeCancel(
+) anyerror!WorktreeStatus.ReclaimReport {
+    return WorktreeStatus.reclaimSelectedDetailedWithCancel(
         allocator,
         project_path,
         selected,
@@ -154,9 +154,10 @@ fn runWorktreeReclaim(
 const WorktreeReclaimResult = struct {
     project_path: []u8,
     kind: WorktreeReclaimKind,
-    outcome: anyerror!usize,
+    outcome: anyerror!WorktreeStatus.ReclaimReport,
 
     fn deinit(self: *WorktreeReclaimResult, allocator: std.mem.Allocator) void {
+        if (self.outcome) |*report| report.deinit() else |_| {}
         allocator.free(self.project_path);
     }
 };
@@ -1227,6 +1228,7 @@ pub const App = struct {
     worktree_inspection_results: std.ArrayList(WorktreeInspectionResult) = .empty,
     worktree_loading_path: []u8 = &.{},
     worktree_state: []u8 = &.{},
+    worktree_reclaim_receipts: []u8 = &.{},
     worktree_reclaim_runner: WorktreeReclaimRunner = runWorktreeReclaim,
     worktree_reclaim_generation: u64 = 0,
     worktree_reclaim_cancellation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -1438,6 +1440,7 @@ pub const App = struct {
         if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
         if (self.worktree_state.len != 0) self.allocator.free(self.worktree_state);
+        if (self.worktree_reclaim_receipts.len != 0) self.allocator.free(self.worktree_reclaim_receipts);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
@@ -2100,6 +2103,10 @@ pub const App = struct {
                 if (self.worktree_state.len != 0) {
                     self.allocator.free(self.worktree_state);
                     self.worktree_state = &.{};
+                }
+                if (self.worktree_reclaim_receipts.len != 0) {
+                    self.allocator.free(self.worktree_reclaim_receipts);
+                    self.worktree_reclaim_receipts = &.{};
                 }
                 if (self.selected_worktree_path.len != 0) {
                     self.allocator.free(self.selected_worktree_path);
@@ -4431,7 +4438,7 @@ pub const App = struct {
         ) catch null;
         if (state) |message| {
             defer self.allocator.free(message);
-            self.setWorktreeState(message);
+            self.setWorktreeStateWithReceipts(message);
         }
         self.reportWorktreeError("Worktree inspection failed", failure);
     }
@@ -4678,7 +4685,7 @@ pub const App = struct {
                 value.inspection.project_path = &.{};
                 if (self.worktree_inspection) |inspection| {
                     if (inspection.entries.items.len == 0)
-                        self.setWorktreeState("No linked worktrees in this repository.")
+                        self.setWorktreeStateWithReceipts("No linked worktrees in this repository.")
                     else
                         self.setWorktreeState("Worktrees found. Calculating sizes...");
                 }
@@ -4764,7 +4771,7 @@ pub const App = struct {
         const inspection = if (self.worktree_inspection) |*value| value else return;
         if (!std.mem.eql(u8, inspection.project_path, project_path)) return;
         if (inspection.entries.items.len == 0) {
-            self.setWorktreeState("No linked worktrees in this repository.");
+            self.setWorktreeStateWithReceipts("No linked worktrees in this repository.");
             self.setStatus("No linked worktrees in this repository.");
             return;
         }
@@ -4786,7 +4793,7 @@ pub const App = struct {
                 if (failures == 1) "" else "s",
             });
         const owned = message catch return;
-        self.setWorktreeState(owned);
+        self.setWorktreeStateWithReceipts(owned);
         self.allocator.free(owned);
         self.setStatus(self.worktree_state);
     }
@@ -4862,6 +4869,10 @@ pub const App = struct {
             bindings_initialized += 1;
         }
         self.worktree_reclaim_done = false;
+        if (self.worktree_reclaim_receipts.len != 0) {
+            self.allocator.free(self.worktree_reclaim_receipts);
+            self.worktree_reclaim_receipts = &.{};
+        }
         self.worktree_reclaim_thread = std.Thread.spawn(
             .{},
             worktreeReclaimWorker,
@@ -4917,7 +4928,7 @@ pub const App = struct {
         self.worktree_reclaim_lock.unlock();
         if (result) |*completed| {
             defer completed.deinit(self.allocator);
-            const removed = completed.outcome catch |err| {
+            var report = completed.outcome catch |err| {
                 self.setStatus(switch (err) {
                     error.GitFailed => "Git refused to remove a selected worktree",
                     error.PolicyDisabled => "Reclaim disabled by project worktree policy",
@@ -4927,15 +4938,28 @@ pub const App = struct {
                 });
                 return;
             };
+            defer report.deinit();
+            completed.outcome = error.ResultConsumed;
+            const failures = report.failureCount();
             const message = switch (completed.kind) {
-                .sweep => std.fmt.allocPrint(self.allocator, "Worktree Sweep removed {d} worktrees", .{removed}),
-                .selected => std.fmt.allocPrint(self.allocator, "Reclaimed {d} selected worktrees", .{removed}),
-                .offer => self.allocator.dupe(u8, "Resolved worktree reclaimed"),
+                .sweep => if (failures == 0)
+                    std.fmt.allocPrint(self.allocator, "Worktree Sweep removed {d} worktrees and {d} branches", .{ report.removed_worktrees, report.deleted_branches })
+                else
+                    std.fmt.allocPrint(self.allocator, "Worktree Sweep partial: {d} worktrees removed, {d} branches deleted, {d} rows need attention", .{ report.removed_worktrees, report.deleted_branches, failures }),
+                .selected => if (failures == 0)
+                    std.fmt.allocPrint(self.allocator, "Reclaimed {d} worktrees and deleted {d} branches", .{ report.removed_worktrees, report.deleted_branches })
+                else
+                    std.fmt.allocPrint(self.allocator, "Reclaim partial: {d} worktrees removed, {d} branches deleted, {d} rows need attention", .{ report.removed_worktrees, report.deleted_branches, failures }),
+                .offer => if (failures == 0)
+                    self.allocator.dupe(u8, "Resolved worktree and branch reclaimed")
+                else
+                    self.allocator.dupe(u8, "Resolved worktree reclaim needs attention"),
             } catch {
                 self.setStatus("Worktree removal complete");
                 return;
             };
             self.replaceStatus(message);
+            self.worktree_reclaim_receipts = WorktreeStatus.reclaimReportPresentation(self.allocator, report) catch &.{};
             const current = self.currentProject() orelse return;
             if (std.mem.eql(u8, current, completed.project_path)) self.inspectWorktreesImpl(false);
         }
@@ -5247,7 +5271,7 @@ pub const App = struct {
         }
         for (inspection.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
-            if (WorktreeStatus.decision(entry) != .reclaimable) return false;
+            if (!WorktreeStatus.sweepSelectable(entry)) return false;
             if (self.worktree_dialog) |*dialog| {
                 dialog.clearSelection();
                 for (dialog.rows.items, 0..) |row, index| {
@@ -5269,7 +5293,7 @@ pub const App = struct {
     pub fn toggleWorktreeRow(self: *App, index: usize) bool {
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         if (index >= dialog.rows.items.len or
-            WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
+            !WorktreeStatus.sweepSelectable(dialog.rows.items[index].entry)) return false;
         _ = dialog.toggle(index);
         if (self.selected_worktree_path.len != 0) {
             self.allocator.free(self.selected_worktree_path);
@@ -5295,7 +5319,7 @@ pub const App = struct {
             }
         }
         const index = target orelse return false;
-        if (WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
+        if (!WorktreeStatus.sweepSelectable(dialog.rows.items[index].entry)) return false;
         switch (operation) {
             0 => {
                 for (dialog.rows.items) |*row| row.selected = false;
@@ -5743,7 +5767,7 @@ pub const App = struct {
         while (offset < count) : (offset += 1) {
             const next = @mod(@as(i32, @intCast(index)) + delta * @as(i32, @intCast(offset + 1)) +
                 @as(i32, @intCast(count)), @as(i32, @intCast(count)));
-            if (WorktreeStatus.decision(inspection.entries.items[@intCast(next)]) == .reclaimable) {
+            if (WorktreeStatus.sweepSelectable(inspection.entries.items[@intCast(next)])) {
                 _ = self.selectWorktreeRow(inspection.entries.items[@intCast(next)].path);
                 self.ensureWorktreeVisible(@intCast(next));
                 return;
@@ -6282,6 +6306,23 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn setWorktreeStateWithReceipts(self: *App, value: []const u8) void {
+        if (self.worktree_reclaim_receipts.len == 0) {
+            self.setWorktreeState(value);
+            return;
+        }
+        const combined = std.fmt.allocPrint(
+            self.allocator,
+            "{s}\n{s}",
+            .{ value, self.worktree_reclaim_receipts },
+        ) catch {
+            self.setWorktreeState(value);
+            return;
+        };
+        defer self.allocator.free(combined);
+        self.setWorktreeState(combined);
+    }
+
     fn replaceStatus(self: *App, value: []u8) void {
         self.workspace_recovery.active = false;
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
@@ -6618,7 +6659,7 @@ pub const App = struct {
                     if (row.index < dialog.rows.items.len) {
                         const worktree = dialog.rows.items[row.index];
                         const name = WorktreeStatus.rowPresentation(self.allocator, worktree.entry) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, name, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, name, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.sweepSelectable(worktree.entry)) catch {
                             self.allocator.free(name);
                             return;
                         };
@@ -14000,6 +14041,14 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
         .project_path = try allocator.dupe(u8, "C:\\repo"),
     };
     defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    try app.worktree_inspection.?.entries.append(.{
+        .path = try allocator.dupe(u8, "C:\\repo\\locked"),
+        .branch = try allocator.dupe(u8, "topic"),
+        .locked = true,
+        .pushed = true,
+        .landed = true,
+    });
+    defer if (app.selected_worktree_path.len != 0) allocator.free(app.selected_worktree_path);
 
     // Neither the sidebar shortcut nor a dialog has a selection.
     try std.testing.expect(!app.worktreeRowSelected());
@@ -14013,6 +14062,7 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     // A dialog is open but nothing is checked in it yet.
     var dialog = try WorktreeDialog.Dialog.init(allocator, "C:\\repo", &.{
         .{ .path = try allocator.dupe(u8, "C:\\repo\\wt-main"), .branch = try allocator.dupe(u8, "main") },
+        .{ .path = try allocator.dupe(u8, "C:\\repo\\locked"), .branch = try allocator.dupe(u8, "topic"), .locked = true, .pushed = true, .landed = true },
     }, .{});
     defer {
         for (dialog.rows.items) |row| {
@@ -14027,6 +14077,10 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     // Checking a row in the dialog makes it selected even with no sidebar path.
     _ = app.worktree_dialog.?.toggle(0);
     try std.testing.expect(app.worktreeRowSelected());
+    app.worktree_dialog.?.clearSelection();
+    try std.testing.expect(app.selectWorktreeRow("C:\\repo\\locked"));
+    try std.testing.expect(app.worktree_dialog.?.rows.items[1].selected);
+    try std.testing.expectEqualStrings("C:\\repo\\locked", app.selected_worktree_path);
 }
 
 test "gesture registration outcome survives later startup setStatus calls" {
@@ -14745,7 +14799,7 @@ test "Worktrees reclaim action returns before owned provider removal completes" 
         var selected_count = std.atomic.Value(usize).init(0);
 
         fn run(
-            _: std.mem.Allocator,
+            allocator_arg: std.mem.Allocator,
             _: []const u8,
             selected: []const []const u8,
             _: []const WorktreeStatus.Binding,
@@ -14753,11 +14807,13 @@ test "Worktrees reclaim action returns before owned provider removal completes" 
             _: bool,
             _: bool,
             _: ?WorktreeStatus.Cancellation,
-        ) anyerror!usize {
+        ) anyerror!WorktreeStatus.ReclaimReport {
             selected_count.store(selected.len, .monotonic);
             _ = calls.fetchAdd(1, .monotonic);
             std.Thread.sleep(300 * std.time.ns_per_ms);
-            return selected.len;
+            var report = WorktreeStatus.ReclaimReport.init(allocator_arg);
+            report.removed_worktrees = selected.len;
+            return report;
         }
     };
     const ImmediateInspectionFailure = struct {

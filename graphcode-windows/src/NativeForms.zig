@@ -1133,7 +1133,9 @@ pub fn worktreeSweep(
     }
     const count = @min(entries.len, state.values.len);
     for (entries[0..count], 0..) |entry, index| {
-        const tier = if (WorktreeStatus.decision(entry) == .reclaimable)
+        const tier = if (entry.locked)
+            "UNLOCK THEN REMOVE"
+        else if (WorktreeStatus.decision(entry) == .reclaimable)
             "SAFE TO REMOVE"
         else if (entry.bound_running or entry.primary)
             "IN USE"
@@ -1487,7 +1489,7 @@ fn formIntro(kind: Kind) []const u8 {
         .edge => "Choose or confirm two loops, then describe how work moves between them.",
         .update => "Change only the fields you intend to update. Blank optional fields keep their documented clear-or-unchanged behavior.",
         .promotion => "Keep this loop's session and history. Add only the decision its new type needs.",
-        .worktree_sweep => "Safe rows start selected. Blocked rows remain visible for review. Only committed, pushed, landed, unbound worktrees are eligible; branches remain recoverable from reflog.",
+        .worktree_sweep => "Safe rows start selected. Locked owned rows can be selected and are unlocked before removal. Deleted branch tips are recorded in ~/.graphcode/removed-branches.log.",
         else => "",
     };
 }

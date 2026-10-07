@@ -405,6 +405,16 @@ recoverable deletion still need their own evidence or implementation.
 the environment. `RemoteWorktrees` runs the same read-only discovery over SSH or
 `gh codespace ssh`, and uses remote `du -sk` for streamed size updates. Windows
 environment names are matched case-insensitively.
+
+Reclaim re-inspects every selected local row immediately before mutation and verifies
+that the worktree still belongs to the captured repository, its branch and tip have
+not moved, and the branch is neither the current nor a protected/default branch.
+Locked owned rows remain selectable and are unlocked before removal. After removing a
+worktree, GraphCode appends `<ISO-8601 timestamp> <branch> <tip> <worktree path>` to
+`~/.graphcode/removed-branches.log`, flushes that record, and only then deletes the
+branch with Git's expected-old-tip compare-and-swap semantics. If logging or branch
+deletion fails, the branch is preserved and the row reports partial success; other
+selected rows continue and retain individual success/failure receipts.
 The App never runs inspection or reclaim on the Win32 message thread: it captures
 the project, bindings, selection, and policy into owned requests, shows
 reading, size-pending, empty, partial-error, and completed states in pixels and UIA,

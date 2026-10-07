@@ -110,7 +110,7 @@ pub const Dialog = struct {
     }
 };
 
-test "multi-select requires explicit confirmation and fails closed" {
+test "locked rows are selectable and remain confirmation gated" {
     var entries = [_]WorktreeStatus.Entry{
         .{ .path = @constCast("C:\\safe ☃"), .branch = @constCast("safe"), .pushed = true, .landed = true },
         .{ .path = @constCast("C:\\locked"), .branch = @constCast("locked"), .locked = true, .pushed = true, .landed = true },
@@ -120,12 +120,9 @@ test "multi-select requires explicit confirmation and fails closed" {
     try std.testing.expect(dialog.toggle(0));
     try std.testing.expectError(error.PolicyDisabled, dialog.armConfirmation());
     dialog.policy.allow_reclaim = true;
-    // toggle() already refuses to select a locked row, so force the selection bit
-    // directly to prove armConfirmation() is independently fail-closed rather than
-    // relying solely on the toggle-level guard.
-    try std.testing.expect(!dialog.toggle(1));
-    dialog.rows.items[1].selected = true;
-    try std.testing.expectError(error.UnsafeSelection, dialog.armConfirmation());
+    try std.testing.expect(dialog.toggle(1));
+    try dialog.armConfirmation();
+    try std.testing.expect(dialog.canConfirm());
 }
 
 test "reveal preserves Unicode path and uses Explorer verb" {
