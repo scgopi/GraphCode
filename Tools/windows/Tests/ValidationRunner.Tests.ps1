@@ -3572,6 +3572,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'public static bool RevealSubmenuByKeyboard\(IntPtr popup, IntPtr menu, int position\)' -or
       $uiaLiveGateSource -notmatch '\$submenuKeyboardReveal = \[GraphCodeUiaGateState\]::RevealSubmenuByKeyboard\(' -or
       $uiaLiveGateSource -notmatch 'real Promote to submenu popup did not open by hover or keyboard' -or
+      $uiaLiveGateSource -notmatch '(?s)\$reopen = Open-SketchNodeMenu \$title.*?\$reopenKeyboardReveal = \[GraphCodeUiaGateState\]::RevealSubmenuByKeyboard\(.*?Turn promotion submenu did not reopen by hover or keyboard' -or
       $uiaLiveGateSource -match 'SendCommand\(\s*\$renameShellWindow, \[uint32\]\$case\.Command\)' -or
       $uiaLiveGateSource -notmatch 'modalCommandFallback' -or
       $uiaLiveGateSource -notmatch 'function Stop-UiaOwnedProviderProcesses' -or

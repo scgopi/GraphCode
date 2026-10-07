@@ -10374,17 +10374,32 @@ try {
       $reopen = Open-SketchNodeMenu $title
       $parent = @($reopen.items | Where-Object { $_.Text -eq "Promote to..." -and $_.Enabled })
       Require ($parent.Count -eq 1) "cancelled sketch promotion disappeared from menu"
-      $handle = [GraphCodeUiaGateState]::NativeSubMenu(
-        [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup), [int]$parent[0].Position)
-      Require ([GraphCodeUiaGateState]::HoverPopupMenuItem($renameShellWindow,
-        [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup), [int]$parent[0].Position)) `
-        "Turn promotion submenu did not reopen"
+      $reopenRoot = [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup)
+      $handle = [GraphCodeUiaGateState]::NativeSubMenu($reopenRoot, [int]$parent[0].Position)
+      $reopenKeyboardReveal = $false
+      $reopenHoverRevealed = [GraphCodeUiaGateState]::HoverPopupMenuItem($renameShellWindow,
+        $reopenRoot, [int]$parent[0].Position)
       $subPopup = [IntPtr]::Zero
-      for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
-        $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $handle)
-        if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+      if ($reopenHoverRevealed) {
+        for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+          $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $handle)
+          if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+        }
       }
-      Require ($subPopup -ne [IntPtr]::Zero) "Turn promotion submenu did not reopen natively"
+      if ($subPopup -eq [IntPtr]::Zero) {
+        # Same keyboard reveal as the first open: injected hover is not delivered
+        # on every desktop, and a WM_COMMAND to the shell would be a no-op.
+        $reopenKeyboardReveal = [GraphCodeUiaGateState]::RevealSubmenuByKeyboard(
+          $reopen.popup, $reopenRoot, [int]$parent[0].Position)
+        Require $reopenKeyboardReveal `
+          "Turn promotion parent item could not be selected for keyboard submenu reveal"
+        for ($retry = 0; $retry -lt 60 -and $subPopup -eq [IntPtr]::Zero; $retry++) {
+          $subPopup = [GraphCodeUiaGateState]::FindPopupForMenu([uint32]$renameProcess.Id, $handle)
+          if ($subPopup -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 }
+        }
+      }
+      Write-Host "UIA_SKETCH_SUBMENU_REOPEN title='$title' hoverRevealed=$reopenHoverRevealed keyboardReveal=$reopenKeyboardReveal popup=$($subPopup -ne [IntPtr]::Zero)"
+      Require ($subPopup -ne [IntPtr]::Zero) "Turn promotion submenu did not reopen by hover or keyboard"
       $null = Sketch-ClickMenu @{ popup = $subPopup; items = @(Get-NativeMenuItems $handle) } 5117
       $modal = Assert-SketchModal "Promote $title to Turn"
       $submitFields = @{ pause = Sketch-Combo 9100 1 "Only before it writes files" }
