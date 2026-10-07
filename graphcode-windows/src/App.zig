@@ -10448,6 +10448,30 @@ test "graph publication adopts the daemon canonical path for the shell's own fol
     }
 }
 
+test "open workspace applies production stopped state and removes Stop control" {
+    const F = GraphPublicationTest;
+    var app = try F.init(.v2);
+    defer F.deinit(&app);
+    try F.seed(&app);
+    app.surface = .workspace;
+
+    app.onFrameWithEffects(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"_0":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"other","title":"Other","state":{"idle":{}}},{"id":"loop","title":"Beta loop","state":{"stopped":{}}}],"edges":[]}}}}
+    , F.rebind, F.refresh, F.publish);
+
+    const graph = workspaceGraph(&app.model) orelse return error.WorkspaceGraphMissing;
+    const selected_index = app.model.selectedIndex() orelse return error.WorkspaceSelectionMissing;
+    try std.testing.expectEqualStrings("loop", graph.nodes.items[selected_index].id);
+    try std.testing.expectEqualStrings("stopped", graph.nodes.items[selected_index].state);
+    const loop_bar = TerminalWorkspace.loopBarLayout(
+        Tokens.sidebar_width,
+        1200 - Tokens.loop_detail_width,
+        isResolvedLoopState(graph.nodes.items[selected_index].state),
+    );
+    try std.testing.expect(loop_bar.stop == null);
+    try std.testing.expectEqual(@as(usize, 1), F.publications);
+}
+
 /// Swift's `UUID.uuidString` echoes request IDs in uppercase.
 fn upperRequestID(request: [36]u8) [36]u8 {
     var upper: [36]u8 = undefined;
