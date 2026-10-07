@@ -1562,6 +1562,7 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
         try std.fs.cwd().makeDir(target);
         try std.fs.cwd().makeDir(outside);
         try fixtureGit(&.{ "git", "-C", target, "init", "-q", "-b", "main" });
+        try fixtureGit(&.{ "git", "-C", target, "config", "--global", "--get", "graphcode.sentinel" });
         try fixtureGit(&.{ "git", "-C", outside, "init", "-q", "-b", "outside" });
         try fixtureGit(&.{ "git", "-C", target, "config", "graphcode.identity", "target" });
         try fixtureGit(&.{ "git", "-C", outside, "config", "graphcode.identity", "outside-control" });
@@ -1781,7 +1782,10 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
             try environment.put(entry.key_ptr.*, entry.value_ptr.*);
         }
         try environment.put("GIT_CONFIG_NOSYSTEM", "1");
-        try environment.put("GIT_CONFIG_GLOBAL", "NUL");
+        // The harness supplies an isolated config file. Newer Git builds reject the
+        // Windows NUL device as a config path before fixture initialization can run.
+        const fixture_config = inherited.get("GIT_CONFIG_GLOBAL") orelse return error.FixtureGitConfigMissing;
+        try environment.put("GIT_CONFIG_GLOBAL", fixture_config);
         const real_git = try std.process.getEnvVarOwned(allocator, "GRAPHCODE_WORKTREE_TEST_REAL_GIT");
         defer allocator.free(real_git);
         const fixture_args = try allocator.dupe([]const u8, args);
@@ -1791,9 +1795,20 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
         child.env_map = &environment;
         child.create_no_window = true;
         child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        const term = try child.spawnAndWait();
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        var errors: std.ArrayList(u8) = .empty;
+        defer errors.deinit(allocator);
+        try child.spawn();
+        try child.collectOutput(allocator, &output, &errors, 64 * 1024);
+        const term = try child.wait();
+        if (term != .Exited or term.Exited != 0) {
+            std.debug.print("fixture Git failed: {any}\nstdout: {s}\nstderr: {s}\n", .{
+                term, output.items, errors.items,
+            });
+        }
         try std.testing.expect(term == .Exited and term.Exited == 0);
     }
 } else void;

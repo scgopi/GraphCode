@@ -1268,9 +1268,20 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
     shedPrompt: ShedPromptReport? = nil
   ) -> [String]? {
-    guard let prompt = node.sessionPrompt(forProjectPath: projectPath), !prompt.isEmpty else {
-      return node.backend == .nod
-        ? nodRunArguments(forNode: node, projectPath: projectPath, settings: settings) : nil
+    let prompt: String
+    if let opening = node.sessionPrompt(forProjectPath: projectPath), !opening.isEmpty {
+      prompt = opening
+    } else {
+      if node.backend == .nod {
+        return nodRunArguments(forNode: node, projectPath: projectPath, settings: settings)
+      }
+      #if os(Windows)
+        // Windows panes only attach; even an empty Main loop needs a daemon launch.
+        guard node.loopType == .sketch else { return nil }
+        prompt = ""
+      #else
+        return nil
+      #endif
     }
     // A backend graphcode can't launch has no argv. `canHost` already refuses to create
     // such a node, so this is the belt to that braces — but silently starting the wrong

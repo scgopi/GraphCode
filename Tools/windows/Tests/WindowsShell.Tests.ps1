@@ -333,16 +333,47 @@ Assert-Contract ($shellSource -match '(?s)\$evidence = .*?STUB_DAEMON_EVIDENCE_J
   "stub protocol evidence is not emitted before validation can fail"
 Assert-Contract ($shellSource -notmatch '\$env:GRAPHCODE_ZMX list') `
   "session tracking must not block on unrelated zmx namespaces"
+Assert-Contract ($shellSource -notmatch 'ASSUME_LOOP_SESSIONS') `
+  "smoke must verify real loop sessions, not bypass launch readiness"
+& {
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput(
+    $shellSource, [ref]$tokens, [ref]$errors)
+  $function = $ast.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "New-SmokeZmxRoot"
+    }, $true)
+  Assert-Contract ($null -ne $function) "smoke zmx root initializer is missing"
+  . ([scriptblock]::Create($function.Extent.Text))
+  $ownedRoot = Join-Path ([IO.Path]::GetTempPath()) ("zmx-owner-test-" + [guid]::NewGuid().ToString("N"))
+  try {
+    New-SmokeZmxRoot $ownedRoot
+    $acl = Get-Acl -LiteralPath $ownedRoot
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    Assert-Contract ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $sid.Value) `
+      "smoke root owner must be the user SID, not Administrators"
+    Assert-Contract $acl.AreAccessRulesProtected "smoke root must not inherit foreign access"
+    $refused = $false
+    try { New-SmokeZmxRoot $ownedRoot } catch { $refused = $true }
+    Assert-Contract $refused "smoke must never take ownership of a preexisting directory"
+  } finally {
+    if (Test-Path -LiteralPath $ownedRoot) { Remove-Item -LiteralPath $ownedRoot -Recurse -Force }
+  }
+}
 & {
   $sessionPrefix = "gs-owned"
   $testSessionIds = @("11111111-1111-4111-8111-111111111111")
   $processFixtures = @(
-    [pscustomobject]@{ ProcessId = 101; CommandLine = 'zmx.exe --daemon gs-owned-pane' },
-    [pscustomobject]@{ ProcessId = 102; CommandLine = 'zmx.exe attach "11111111-1111-4111-8111-111111111111"' },
-    [pscustomobject]@{ ProcessId = 103; CommandLine = 'zmx.exe --daemon gs-other-pane' },
-    [pscustomobject]@{ ProcessId = 104; CommandLine = 'zmx.exe --daemon prefix-gs-owned-pane' },
-    [pscustomobject]@{ ProcessId = 105; CommandLine = 'zmx.exe --daemon 11111111-1111-4111-8111-111111111111-suffix' },
-    [pscustomobject]@{ ProcessId = 106; CommandLine = $null }
+    [pscustomobject]@{ ProcessId = 101; CommandLine = 'zmx.exe --daemon graphcode-gs-owned-pane' },
+    [pscustomobject]@{ ProcessId = 102; CommandLine = 'zmx.exe attach "graphcode-11111111-1111-4111-8111-111111111111"' },
+    [pscustomobject]@{ ProcessId = 103; CommandLine = 'zmx.exe --daemon graphcode-gs-other-pane' },
+    [pscustomobject]@{ ProcessId = 104; CommandLine = 'zmx.exe --daemon prefix-graphcode-gs-owned-pane' },
+    [pscustomobject]@{ ProcessId = 105; CommandLine = 'zmx.exe --daemon graphcode-11111111-1111-4111-8111-111111111111-suffix' },
+    [pscustomobject]@{ ProcessId = 106; CommandLine = $null },
+    [pscustomobject]@{ ProcessId = 107; CommandLine = 'zmx.exe --daemon gs-owned-pane' },
+    [pscustomobject]@{ ProcessId = 108; CommandLine = 'zmx.exe attach 11111111-1111-4111-8111-111111111111' }
   )
   function Get-CimInstance { $processFixtures }
   $tokens = $null
@@ -359,7 +390,7 @@ Assert-Contract ($shellSource -notmatch '\$env:GRAPHCODE_ZMX list') `
   Assert-Contract (($records.Pid -join ",") -eq "101,102") `
     "session tracking included a foreign or partial-match process"
   Assert-Contract (($records.Name -join ",") -eq
-    "gs-owned-pane,11111111-1111-4111-8111-111111111111") `
+    "graphcode-gs-owned-pane,graphcode-11111111-1111-4111-8111-111111111111") `
     "session tracking did not preserve exact owned names"
 }
 if ($shellSource -match '(?m)^\s*Write-OwnedResourceMetrics\s*$') {
@@ -606,9 +637,9 @@ Assert-Contract ($zmxSessionSource -match '(?s)pub fn child\(.*?\.create_no_wind
   "zmx children must be created without a console window"
 Assert-Contract ($terminalSurfaceSource -notmatch 'std\.process\.Child\.init\(' -and
   $workspaceTeardownSource -notmatch 'std\.process\.Child\.init\(' -and
-  [regex]::Matches($terminalSurfaceSource, 'ZmxSession\.child\(').Count -eq 2 -and
+  [regex]::Matches($terminalSurfaceSource, 'ZmxSession\.child\(').Count -eq 3 -and
   [regex]::Matches($workspaceTeardownSource, 'ZmxSession\.child\(').Count -eq 1) `
-  "zmx attach, resize, and kill must spawn through ZmxSession.child so the GUI shell never opens a console window"
+  "zmx attach, listing, resize, and kill must spawn through ZmxSession.child so the GUI shell never opens a console window"
 
 $zig = Resolve-TestZig
 Invoke-Native "Accessibility contract executable tests" {
@@ -876,6 +907,8 @@ Invoke-Native "Zmx session identity executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\ZmxSession.zig
+    if ($LASTEXITCODE -ne 0) { throw "zmx session identity tests failed" }
+    & $zig test src\LoopLaunchWait.zig
   } finally { Pop-Location }
 }
 Invoke-Native "Loop bar layout executable tests" {

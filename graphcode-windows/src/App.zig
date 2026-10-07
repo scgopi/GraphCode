@@ -1695,17 +1695,34 @@ pub const App = struct {
     fn refreshWorkspace(self: *App) void {
         const workspace = if (self.workspace) |value| value else return;
         const graph = if (self.model.graph) |value| value else return;
-        if (graph.nodes.items.len > 0 and !workspace.hasSurface(0)) {
-            workspace.openNode(0, graph.nodes.items[0].id) catch {
-                self.setStatus("Unable to attach terminal A");
+        // Only shows loops that are already running: attaching here must never create a
+        // session, or a loop's agent loses the race to a bare shell (LoopLaunchWait).
+        for (0..@min(graph.nodes.items.len, 2)) |pane| {
+            if (workspace.hasSurface(pane) or workspace.isAwaitingLaunch(pane)) continue;
+            workspace.openLaunchedNode(pane, graph.nodes.items[pane].id, 0) catch {
+                self.setStatus(if (pane == 0) "Unable to attach terminal A" else "Unable to attach terminal B");
             };
         }
+    }
 
-        if (graph.nodes.items.len > 1 and !workspace.hasSurface(1)) {
-            workspace.openNode(1, graph.nodes.items[1].id) catch {
-                self.setStatus("Unable to attach terminal B");
-            };
-        }
+    /// Asks the daemon to start an attended loop's agent — a no-op for a loop already
+    /// running — and opens its pane once that session exists, never as a bare shell.
+    fn openGraphLoop(self: *App, workspace: *TerminalWorkspace.Workspace, project_path: []const u8, node_id: []const u8) void {
+        self.client.sendNodeAction(project_path, node_id, "resumeSession", null);
+        workspace.openLaunchedNode(0, node_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch {
+            self.setStatus("Unable to open selected loop");
+            return;
+        };
+        if (workspace.isAwaitingLaunch(0)) self.setStatus("Starting loop");
+    }
+
+    fn reportLaunchOutcome(self: *App, workspace: *TerminalWorkspace.Workspace) void {
+        const outcome = workspace.takeLaunchOutcome() orelse return;
+        self.setStatus(switch (outcome) {
+            .started => "Loop opened",
+            .not_started => "Loop session did not start; check the loop's agent and try again",
+            .attach_failed => "Unable to open selected loop",
+        });
     }
 
     fn rebindWorkspace(self: *App, path: []const u8) void {
@@ -3313,14 +3330,13 @@ pub const App = struct {
             return;
         }
         const workspace = if (self.workspace) |value| value else return;
+        const project_path = self.currentProject() orelse return;
         self.workspace_is_quick_chat = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
-        workspace.openNode(0, graph.nodes.items[index].id) catch {
-            self.setStatus("Unable to open selected node");
-        };
+        self.openGraphLoop(workspace, project_path, graph.nodes.items[index].id);
     }
 
     fn stopSelectedNode(self: *App) void {
@@ -6638,9 +6654,7 @@ pub const App = struct {
         self.clearEdgeSelection();
         self.rebindWorkspace(project_path);
         if (self.workspace) |workspace| {
-            workspace.openNode(0, graph.nodes.items[index].id) catch {
-                self.setStatus("Unable to open selected loop");
-            };
+            self.openGraphLoop(workspace, project_path, graph.nodes.items[index].id);
             workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
         }
         self.syncAccessibility();
@@ -7551,6 +7565,7 @@ fn onWindowMessage(
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
             if (app.workspace) |workspace| {
                 workspace.poll();
+                app.reportLaunchOutcome(workspace);
                 if (!app.smoke_workspace_restart_observed) {
                     if (app.smoke_restart_index) |index| {
                         if (workspace.surfaceIdentityReady(index, app.smoke_restart_session, workspace.projectPath())) {
@@ -7823,9 +7838,7 @@ fn onWindowMessage(
                                 app.rebindWorkspace(graph.project.path);
                                 _ = app.selectNodeIndex(hit.node_index);
                                 if (app.workspace) |workspace| {
-                                    workspace.openNode(0, graph.nodes.items[hit.node_index].id) catch {
-                                        app.setStatus("Unable to open selected loop");
-                                    };
+                                    app.openGraphLoop(workspace, graph.project.path, graph.nodes.items[hit.node_index].id);
                                     workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                                 }
                             }
@@ -8034,9 +8047,7 @@ fn onWindowMessage(
                                 if (row.index >= selected_graph.nodes.items.len) return true;
                                 _ = app.selectNodeIndex(row.index);
                                 if (app.workspace) |workspace| {
-                                    workspace.openNode(0, selected_graph.nodes.items[row.index].id) catch {
-                                        app.setStatus("Unable to open selected loop");
-                                    };
+                                    app.openGraphLoop(workspace, path, selected_graph.nodes.items[row.index].id);
                                     workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
                                 }
                             }

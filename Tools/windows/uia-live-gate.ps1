@@ -2796,14 +2796,25 @@ function Assert-MultiProjectCompleteReport($report) {
     if ($verb -ceq "graphCommand") {
       $command = $frame.command.graphCommand
       Assert-MultiProjectReceiptObject $command @("projectPath","command") "graph command"
-      Assert-MultiProjectReceiptObject $command.command @("renameNode") "inner command"
-      Assert-MultiProjectReceiptObject $command.command.renameNode @("_0","title") "rename"
-      Assert-MultiProjectReceiptId $command.command.renameNode._0
-      if ($command.projectPath -isnot [string] -or -not $owners.ContainsKey($command.projectPath) -or
-          $command.projectPath -cne $peer.graphs[0].project.path -or
-          $command.command.renameNode._0 -cne $owners[$command.projectPath].nodes[0].id -or
-          $command.command.renameNode.title -isnot [string] -or [string]::IsNullOrWhiteSpace($command.command.renameNode.title)) {
-        throw "MULTIPROJECT_PEER_RECEIPT: actual rename owner/value mismatch"
+      if ($command.command -is [Collections.IDictionary] -and
+          @($command.command.Keys) -ccontains "resumeSession") {
+        Assert-MultiProjectReceiptObject $command.command @("resumeSession") "inner command"
+        Assert-MultiProjectReceiptObject $command.command.resumeSession @("_0") "session open"
+        Assert-MultiProjectReceiptId $command.command.resumeSession._0
+        if ($command.projectPath -isnot [string] -or -not $owners.ContainsKey($command.projectPath) -or
+            $command.command.resumeSession._0 -cne $owners[$command.projectPath].nodes[0].id) {
+          throw "MULTIPROJECT_PEER_RECEIPT: actual session-open owner mismatch"
+        }
+      } else {
+        Assert-MultiProjectReceiptObject $command.command @("renameNode") "inner command"
+        Assert-MultiProjectReceiptObject $command.command.renameNode @("_0","title") "rename"
+        Assert-MultiProjectReceiptId $command.command.renameNode._0
+        if ($command.projectPath -isnot [string] -or -not $owners.ContainsKey($command.projectPath) -or
+            $command.projectPath -cne $peer.graphs[0].project.path -or
+            $command.command.renameNode._0 -cne $owners[$command.projectPath].nodes[0].id -or
+            $command.command.renameNode.title -isnot [string] -or [string]::IsNullOrWhiteSpace($command.command.renameNode.title)) {
+          throw "MULTIPROJECT_PEER_RECEIPT: actual rename owner/value mismatch"
+        }
       }
     } elseif ($verb -ceq "openProject") {
       Assert-MultiProjectReceiptObject $frame.command.openProject @("path") "openProject"
@@ -2869,13 +2880,17 @@ function Assert-MultiProjectCompleteReport($report) {
     if ($application.requestID -isnot [string] -or -not $requests.ContainsKey($application.requestID) -or
         $applied.ContainsKey($application.requestID)) { throw "MULTIPROJECT_PEER_RECEIPT: application correlation missing/duplicated" }
     $wire = $requests[$application.requestID].frame.command.graphCommand
-    if ($null -eq $wire -or $application.projectPath -cne $wire.projectPath -or
+    if ($null -eq $wire -or -not $wire.command.Contains("renameNode") -or
+        $application.projectPath -cne $wire.projectPath -or
         $application.projectPath -isnot [string] -or $application.nodeID -isnot [string] -or $application.title -isnot [string] -or
         $application.nodeID -cne $wire.command.renameNode._0 -or $application.title -cne $wire.command.renameNode.title -or
         $application.beforeTitle -isnot [string]) { throw "MULTIPROJECT_PEER_RECEIPT: actual application differs from received wire" }
     $applied.Add($application.requestID,$application)
   }
-  if (@($peer.received | Where-Object { $_.frame.command.Contains("graphCommand") }).Count -ne 2) {
+  if (@($peer.received | Where-Object {
+      $_.frame.command.Contains("graphCommand") -and
+        $_.frame.command.graphCommand.command.Contains("renameNode")
+    }).Count -ne 2) {
     throw "MULTIPROJECT_PEER_RECEIPT: received/applied rename count differs"
   }
   $control = $peer.controls[0]

@@ -214,6 +214,17 @@ pub const Layout = struct {
         return error.InvalidSurface;
     }
 
+    /// Records whether a pane's session is a loop the daemon starts (see `Pane`).
+    pub fn setLaunchesAgent(self: *Layout, id: []const u8, launches_agent: bool) bool {
+        for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
+            if (std.mem.eql(u8, pane.id, id)) {
+                pane.launches_agent = launches_agent;
+                return true;
+            }
+        };
+        return false;
+    }
+
     pub fn removePane(self: *Layout, id: []const u8) bool {
         for (self.tabs.items, 0..) |*tab, tab_index| {
             for (tab.panes.items, 0..) |pane, pane_index| {
@@ -431,6 +442,20 @@ test "validated persistence rejects corruption and scopes projects" {
         "workspace-layout-test.json",
         "project-b",
     ));
+}
+
+test "a loop opened into a shell tab's slot is persisted as a loop pane" {
+    var layout = try Layout.init(std.testing.allocator, "project-a");
+    defer layout.deinit();
+    try layout.addTab("shell-tab", false);
+    try layout.replacePaneID("shell-tab", "loop-node");
+    try std.testing.expect(layout.setLaunchesAgent("loop-node", true));
+    try std.testing.expect(!layout.setLaunchesAgent("missing", true));
+    try layout.save("workspace-layout-agent-test.json");
+    defer std.fs.cwd().deleteFile("workspace-layout-agent-test.json") catch {};
+    var restored = try Layout.load(std.testing.allocator, "workspace-layout-agent-test.json", "project-a");
+    defer restored.deinit();
+    try std.testing.expect(restored.tabs.items[0].panes.items[0].launches_agent);
 }
 
 test "generated surface IDs are unique across tabs" {

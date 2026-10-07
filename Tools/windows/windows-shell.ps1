@@ -48,6 +48,9 @@ $oldWorkspaceLayout = [Environment]::GetEnvironmentVariable("GRAPHCODE_WORKSPACE
 $oldStubNodeA = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_A")
 $oldStubNodeB = [Environment]::GetEnvironmentVariable("GRAPHCODE_STUB_NODE_B")
 $oldSessionPrefix = [Environment]::GetEnvironmentVariable("GRAPHCODE_SHELL_SESSION_PREFIX")
+$oldZmxDir = [Environment]::GetEnvironmentVariable("ZMX_DIR")
+$smokeZmxDir = Join-Path ([IO.Path]::GetPathRoot([string] $repoRoot)) ("gcz-" + [guid]::NewGuid().ToString("N").Substring(0, 12))
+$stubSessionHosts = @{}
 $workspaceLayoutBase = Join-Path $shellRoot "graphcode-workspace-$PID.json"
 $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
@@ -70,6 +73,25 @@ function Assert-Equal([string] $actual, [string] $expected, [string] $label) {
   }
 }
 
+function New-SmokeZmxRoot([string] $Path) {
+  if (Test-Path -LiteralPath $Path) { throw "Smoke zmx root already exists: $Path" }
+  New-Item -ItemType Directory -Path $Path | Out-Null
+  # Elevated runners default the owner to Administrators. zmx requires the token's
+  # actual user SID; set it only on this fresh, test-owned directory.
+  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl = [Security.AccessControl.DirectorySecurity]::new()
+  $acl.SetOwner($sid)
+  $acl.SetAccessRuleProtection($true, $false)
+  $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+      [Security.AccessControl.InheritanceFlags]"ContainerInherit,ObjectInherit",
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow))
+  Set-Acl -LiteralPath $Path -AclObject $acl
+  $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier])
+  if ($owner.Value -ne $sid.Value) { throw "Smoke zmx root owner does not match the current user" }
+}
+
 function Test-TestSessionProcess([object] $process) {
   if (-not $process.CommandLine) { return $false }
   foreach ($session in $testSessionIds) {
@@ -81,8 +103,8 @@ function Test-TestSessionProcess([object] $process) {
 }
 
 function Get-ZmxSessionRecords {
-  $names = @($testSessionIds | ForEach-Object { [regex]::Escape($_) })
-  $names += [regex]::Escape($sessionPrefix) + "-[A-Za-z0-9_-]+"
+  $names = @($testSessionIds | ForEach-Object { [regex]::Escape("graphcode-$_") })
+  $names += [regex]::Escape("graphcode-$sessionPrefix") + "-[A-Za-z0-9_-]+"
   $pattern = "(?<![A-Za-z0-9_-])(?:" + ($names -join "|") + ")(?![A-Za-z0-9_-])"
   foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop)) {
     if (-not $process.CommandLine) { continue }
@@ -130,7 +152,69 @@ function Write-OwnedResourceMetrics([string] $phase, [int[]] $focusPids = @()) {
     } | ConvertTo-Json -Compress -Depth 5))
 }
 
+function Invoke-ZmxProbe([string[]] $Arguments) {
+  $start = [Diagnostics.ProcessStartInfo]::new($env:GRAPHCODE_ZMX)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+  $process = [Diagnostics.Process]::Start($start)
+  $output = $process.StandardOutput.ReadToEndAsync()
+  $errors = $process.StandardError.ReadToEndAsync()
+  try {
+    if (-not $process.WaitForExit(5000)) {
+      $process.Kill()
+      throw "zmx probe timed out: $($Arguments -join ' ')"
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output.Result; Error = $errors.Result }
+  } finally {
+    $process.Dispose()
+  }
+}
+
+# A protocol-only stub cannot launch the agent. Host its two terminal fixtures through
+# zmx's supported foreground daemon entry point, with a real liveness assertion.
+function Start-StubLoopSessions {
+  if (-not $UseStubDaemon) { return }
+  foreach ($id in $testSessionIds) {
+    $name = "graphcode-$id"
+    $listing = Invoke-ZmxProbe @("ls")
+    $livePattern = "(?m)^name=" + [regex]::Escape($name) + "\t(?![^\r\n]*\t(?:ended|exit_code|err)=)"
+    if ($listing.ExitCode -eq 0 -and $listing.Output -match $livePattern) { continue }
+    if ($stubSessionHosts.ContainsKey($name) -and -not $stubSessionHosts[$name].HasExited) {
+      throw "Owned stub session host is running but its task is not live: $name"
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($env:GRAPHCODE_ZMX)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.WorkingDirectory = [string] $repoRoot
+    $start.RedirectStandardError = $true
+    foreach ($argument in @("--daemon", $name)) { $start.ArgumentList.Add($argument) }
+    $hostProcess = [Diagnostics.Process]::Start($start)
+    $hostError = $hostProcess.StandardError.ReadToEndAsync()
+    $stubSessionHosts[$name] = $hostProcess
+    [void] $ownedProcessIds.Add($hostProcess.Id)
+    [void] $ownedSessionNames.Add($name)
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+      if ($hostProcess.HasExited) {
+        throw "zmx stub host exited ($($hostProcess.ExitCode)): $name; $($hostError.Result)"
+      }
+      $listing = Invoke-ZmxProbe @("ls")
+      if ($listing.ExitCode -eq 0 -and $listing.Output -match $livePattern) { break }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($listing.ExitCode -ne 0 -or $listing.Output -notmatch $livePattern) {
+      throw "zmx stub session did not become live: $name; $($listing.Error)"
+    }
+    Write-Host "STUB_LOOP_SESSION_LIVE=$name"
+  }
+  Record-TestOwnedSessions
+}
+
 function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
+  Start-StubLoopSessions
   $script:shellProcess = Start-Process -FilePath $app -ArgumentList $arguments -PassThru -WindowStyle Hidden
   [void] $ownedProcessIds.Add($script:shellProcess.Id)
   Start-Sleep -Milliseconds 250
@@ -226,6 +310,8 @@ try {
   $env:GRAPHCODE_ZMX = Join-Path $ZmxRoot "zig-out\bin\zmx.exe"
   $env:GRAPHCODE_GATE_CWD = $repoRoot
   $env:GRAPHCODE_SHELL_WORKSPACE_ACTIONS = "1"
+  New-SmokeZmxRoot $smokeZmxDir
+  $env:ZMX_DIR = $smokeZmxDir
   $env:GRAPHCODE_WORKSPACE_LAYOUT = $workspaceLayoutBase
   $env:GRAPHCODE_SHELL_SESSION_PREFIX = $sessionPrefix
   if ($UseStubDaemon) {
@@ -335,6 +421,7 @@ try {
     $env:GRAPHCODE_SHELL_NONREADING_ATTACH = "1"
     $env:GRAPHCODE_SHELL_LARGE_PASTE = "1"
     Remove-Item -LiteralPath $inputError -Force -ErrorAction SilentlyContinue
+    Start-StubLoopSessions
     $inputDeadline = [DateTime]::UtcNow.AddSeconds(8)
     $inputApp = Start-Process -FilePath $app -ArgumentList @("--smoke") -PassThru `
       -RedirectStandardError $inputError
@@ -438,6 +525,15 @@ finally {
   }
   Remove-Item Env:GRAPHCODE_ZMX -ErrorAction SilentlyContinue
   Remove-Item Env:GRAPHCODE_GATE_CWD -ErrorAction SilentlyContinue
+  if ($null -eq $oldZmxDir) {
+    Remove-Item Env:ZMX_DIR -ErrorAction SilentlyContinue
+  } else {
+    $env:ZMX_DIR = $oldZmxDir
+  }
+  foreach ($hostProcess in $stubSessionHosts.Values) { $hostProcess.Dispose() }
+  if (Test-Path -LiteralPath $smokeZmxDir) {
+    Remove-Item -LiteralPath $smokeZmxDir -Recurse -Force
+  }
   if ($null -eq $oldSessionPrefix) {
     Remove-Item Env:GRAPHCODE_SHELL_SESSION_PREFIX -ErrorAction SilentlyContinue
   } else {
