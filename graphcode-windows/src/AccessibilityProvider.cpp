@@ -59,6 +59,10 @@ struct State {
   int64_t focused = 0;
   bool allow_reclaim = false;
   bool confirm_each_reclaim = true;
+  bool worktrees_available = false;
+  bool worktree_dialog_open = false;
+  bool worktree_row_selected = false;
+  bool worktree_busy = false;
   bool active = true;
   // Real, current client-relative rect of the rendered canvas ("graph" fixed
   // element, id_ == 4). Populated by gc_uia_set_canvas_bounds; until the app
@@ -131,7 +135,7 @@ class Node final : public IRawElementProviderSimple,
       *out = static_cast<ISelectionProvider *>(this);
     else if (iid == __uuidof(ISelectionItemProvider) && supportsSelectionItem())
       *out = static_cast<ISelectionItemProvider *>(this);
-    else if (iid == __uuidof(IToggleProvider) && (id_ == 12 || id_ == 13))
+    else if (iid == __uuidof(IToggleProvider) && supportsToggle())
       *out = static_cast<IToggleProvider *>(this);
     else
       return E_NOINTERFACE;
@@ -165,7 +169,7 @@ class Node final : public IRawElementProviderSimple,
       *value = static_cast<ISelectionProvider *>(this);
     else if (id == UIA_SelectionItemPatternId && supportsSelectionItem())
       *value = static_cast<ISelectionItemProvider *>(this);
-    else if (id == UIA_TogglePatternId && (id_ == 12 || id_ == 13))
+    else if (id == UIA_TogglePatternId && supportsToggle())
       *value = static_cast<IToggleProvider *>(this);
     else
       return S_FALSE;
@@ -191,6 +195,9 @@ class Node final : public IRawElementProviderSimple,
       } else if (property == UIA_ControlTypePropertyId) {
         integer_value = controlTypeLocked();
         kind = kInteger;
+      } else if (property == UIA_IsOffscreenPropertyId) {
+        bool_value = id_ >= 7 && id_ <= 13;
+        kind = kBool;
       } else if (property == UIA_IsKeyboardFocusablePropertyId ||
                  property == UIA_IsEnabledPropertyId ||
                  property == UIA_IsControlElementPropertyId ||
@@ -199,14 +206,17 @@ class Node final : public IRawElementProviderSimple,
           const Row &row = state_->rows.at(id_);
           const bool sidebar_error_footer =
               row.identity.rfind("sidebar-error-footer:", 0) == 0 ||
-              row.identity.rfind("workspace-toolbar:", 0) == 0;
+              row.identity.rfind("workspace-toolbar:", 0) == 0 ||
+              row.identity.rfind("worktree-loading:", 0) == 0;
           bool_value = sidebar_error_footer
               ? (property != UIA_IsKeyboardFocusablePropertyId)
               : true;
           if (property == UIA_IsEnabledPropertyId && isHeader(row.identity))
             bool_value = IsWindowEnabled(state_->hwnd) != FALSE;
         } else {
-          bool_value = true;
+          bool_value = property == UIA_IsEnabledPropertyId && id_ >= 3 && id_ <= 13
+              ? worktreeFixedEnabledLocked(id_)
+              : true;
         }
         kind = kBool;
       } else if (property == UIA_HasKeyboardFocusPropertyId) {
@@ -312,6 +322,8 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (id_ >= 7 && id_ <= 13 && !worktreeFixedEnabledLocked(id_))
+        return UIA_E_ELEMENTNOTENABLED;
       hwnd = state_->hwnd;
       if (isRowKey(id_)) {
         dynamic_bounds = state_->rows.at(id_).bounds;
@@ -334,6 +346,9 @@ class Node final : public IRawElementProviderSimple,
       value->top = origin.y + dynamic_bounds.top;
       value->width = dynamic_bounds.right - dynamic_bounds.left;
       value->height = dynamic_bounds.bottom - dynamic_bounds.top;
+    } else if (id_ >= 7 && id_ <= 13) {
+      value->width = 0;
+      value->height = 0;
     } else if (has_canvas_bounds) {
       // The "graph" fixed element (id_ == 4) reflects the real, current
       // rendered canvas rect once the app has reported one, instead of the
@@ -441,6 +456,7 @@ class Node final : public IRawElementProviderSimple,
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
       if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (!worktreeFixedEnabledLocked(id_)) return UIA_E_ELEMENTNOTENABLED;
       hwnd = state_->hwnd;
     }
     if (isRowKey(id_)) {
@@ -577,7 +593,9 @@ class Node final : public IRawElementProviderSimple,
   void update(const char *status, const char **identities, const char **names,
               const int *parents, const int *selected, const int *eligible,
               const int *invokable, const int *bounds, int count, bool allow_reclaim,
-              bool confirm_each_reclaim) {
+              bool confirm_each_reclaim, bool worktrees_available,
+              bool worktree_dialog_open, bool worktree_row_selected,
+              bool worktree_busy) {
     std::wstring old_status;
     std::wstring new_status;
     Node *status_node = nullptr;
@@ -602,6 +620,10 @@ class Node final : public IRawElementProviderSimple,
       const bool old_confirm_reclaim = state_->confirm_each_reclaim;
       state_->allow_reclaim = allow_reclaim;
       state_->confirm_each_reclaim = confirm_each_reclaim;
+      state_->worktrees_available = worktrees_available;
+      state_->worktree_dialog_open = worktree_dialog_open;
+      state_->worktree_row_selected = worktree_row_selected;
+      state_->worktree_busy = worktree_busy;
 
       std::unordered_map<int64_t, Row> next_rows;
       std::vector<int64_t> next_order;
@@ -763,6 +785,20 @@ class Node final : public IRawElementProviderSimple,
     std::lock_guard<std::mutex> lock(state_->mutex);
     const auto row = state_->rows.find(id_);
     return row != state_->rows.end() && row->second.invokable;
+  }
+  bool supportsToggle() const {
+    return id_ == 12 || id_ == 13;
+  }
+  bool worktreeFixedEnabledLocked(int64_t id) const {
+    if (id == 3) return state_->worktrees_available;
+    if (id == 7 || id == 10) return state_->worktrees_available && !state_->worktree_busy;
+    if (id == 8 || id == 9)
+      return state_->worktrees_available && state_->worktree_row_selected &&
+          !state_->worktree_busy;
+    if (id >= 11 && id <= 13)
+      return state_->worktrees_available && state_->worktree_dialog_open &&
+          !state_->worktree_busy;
+    return true;
   }
   bool isAvailableLocked() const {
     return state_->active && !retired_ && isKeyAvailableLocked(id_);
@@ -953,6 +989,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           row.identity.rfind("workspace-switch:", 0) == 0 ? L"workspace-switch-" :
           row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
+          row.identity.rfind("worktree-loading:", 0) == 0 ? L"worktree-loading-" :
           row.identity.rfind("header-attention:", 0) == 0 ? L"header-attention-" :
           row.identity.rfind("header-worktree:", 0) == 0 ? L"header-worktree-" :
           row.identity.rfind("header-jump:", 0) == 0 ? L"header-jump-" :
@@ -982,6 +1019,7 @@ class Node final : public IRawElementProviderSimple,
       if (row.identity.rfind("sidebar-error-footer:", 0) == 0) {
         return UIA_TextControlTypeId;
       }
+      if (row.identity.rfind("worktree-loading:", 0) == 0) return UIA_TextControlTypeId;
       const bool action =
           row.identity.rfind("sidebar-section:", 0) == 0 ||
           row.identity.rfind("needs-you-header:", 0) == 0 ||
@@ -1142,7 +1180,9 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
                                   const int *parents, const int *selected,
                                   const int *eligible, const int *invokable,
                                   const int *bounds, int count, int allow_reclaim,
-                                  int confirm_each_reclaim) {
+                                  int confirm_each_reclaim, int worktrees_available,
+                                  int worktree_dialog_open, int worktree_row_selected,
+                                  int worktree_busy) {
   if (!provider || count < 0 || !validUtf8(status) ||
       (count > 0 && (!identities || !names || !parents || !selected ||
                      !eligible || !invokable))) return E_INVALIDARG;
@@ -1153,7 +1193,9 @@ extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char
   auto *root = static_cast<Node *>(provider);
   root->update(status, identities, names, parents, selected, eligible,
                invokable, bounds, count,
-               allow_reclaim != 0, confirm_each_reclaim != 0);
+               allow_reclaim != 0, confirm_each_reclaim != 0,
+               worktrees_available != 0, worktree_dialog_open != 0,
+               worktree_row_selected != 0, worktree_busy != 0);
   return S_OK;
 }
 

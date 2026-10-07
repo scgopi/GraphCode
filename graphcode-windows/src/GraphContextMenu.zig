@@ -19,6 +19,7 @@ pub const BackgroundTarget = struct {
     project_path: []const u8,
     local_filesystem: bool,
     can_create_edge: bool,
+    worktrees_available: bool = true,
 };
 
 pub const EdgeTarget = struct {
@@ -33,6 +34,7 @@ pub const QuickChatTarget = struct {
 pub const ProjectTarget = struct {
     path: []const u8,
     remote: bool,
+    worktrees_available: bool = true,
 };
 
 pub const Target = union(enum) {
@@ -251,8 +253,8 @@ fn buildMenu(target: Target) c.HMENU {
     switch (target) {
         .background => |background| {
             if (!std.mem.eql(u8, background.project_path, "graphcode://global")) {
-                appendEnabled(menu, ids.inspect_project_worktrees, "Worktrees...", background.local_filesystem);
-                appendEnabled(menu, ids.project_settings, "Project Settings...", background.local_filesystem);
+                appendEnabled(menu, ids.inspect_project_worktrees, "Worktrees...", background.local_filesystem and background.worktrees_available);
+                appendEnabled(menu, ids.project_settings, "Project Settings...", background.local_filesystem and background.worktrees_available);
                 appendEnabled(menu, ids.reveal_project, "Show in Explorer", background.local_filesystem);
                 separator(menu);
             }
@@ -263,8 +265,8 @@ fn buildMenu(target: Target) c.HMENU {
             append(menu, ids.open_project, "Open Project");
             append(menu, ids.new_project_loop, "New Loop...\tCtrl+N");
             separator(menu);
-            append(menu, ids.inspect_project_worktrees, "Worktrees...");
-            append(menu, ids.project_settings, "Project Settings...");
+            appendEnabled(menu, ids.inspect_project_worktrees, "Worktrees...", project.worktrees_available);
+            appendEnabled(menu, ids.project_settings, "Project Settings...", project.worktrees_available);
             if (project.remote)
                 append(menu, ids.remote_project_info, "Remote Connection Info")
             else

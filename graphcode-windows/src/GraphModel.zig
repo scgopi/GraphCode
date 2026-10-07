@@ -526,7 +526,7 @@ pub const Model = struct {
     fn worktreeNoticeOwner(self: *Model, project_path: []const u8) !*GraphSummary {
         for (self.graphs.items) |*summary| {
             if (!std.mem.eql(u8, summary.project.path, project_path)) continue;
-            if (!summary.project.isLocalFilesystem()) return error.UnsupportedWorktreeProject;
+            if (summary.project.isGlobal()) return error.UnsupportedWorktreeProject;
             return summary;
         }
         return error.WorktreeProjectClosed;
@@ -2333,8 +2333,12 @@ test "sketch promotion first instruction single owner cleans every clone and dec
     const Probe = struct {
         fn clone(allocator: std.mem.Allocator) !void {
             const source = Node{
-                .id = @constCast("id"), .title = @constCast("Sketch"), .loop_type = @constCast("sketch"),
-                .state = @constCast("idle"), .activity = &.{}, .presence = &.{},
+                .id = @constCast("id"),
+                .title = @constCast("Sketch"),
+                .loop_type = @constCast("sketch"),
+                .state = @constCast("idle"),
+                .activity = &.{},
+                .presence = &.{},
                 .first_instruction = @constCast("Owned \"note\" \u{96ea}"),
                 .check_description = @constCast("allocated after the note"),
             };
@@ -2442,8 +2446,11 @@ test "worktree notice observations keep exact owners and outlive inspection stor
     _ = try model.updateFromFrame(
         \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"ssh://host/repo","name":"Same"},"nodes":[],"edges":[]}}}
     );
-    try std.testing.expectError(error.UnsupportedWorktreeProject, recordTestNotice(&model, "ssh://host/repo", 2147483648));
-    try std.testing.expect(model.graphFor("ssh://host/repo").?.worktree_notice == null);
+    try recordTestNotice(&model, "ssh://host/repo", 2147483648);
+    try std.testing.expectEqual(
+        WorktreeStatus.NoticeState.notice,
+        model.graphFor("ssh://host/repo").?.worktree_notice.?.state(),
+    );
 }
 
 test "worktree notice failed refresh and policy outcome never fabricate new counts" {

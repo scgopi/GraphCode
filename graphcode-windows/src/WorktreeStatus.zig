@@ -11,6 +11,7 @@ extern "kernel32" fn GetFileInformationByHandleEx(
 pub const Entry = struct {
     path: []u8,
     branch: []u8,
+    head: []u8 = @constCast(&.{}),
     size_bytes: u64 = 0,
     size_complete: bool = false,
     size_error: ?anyerror = null,
@@ -114,7 +115,7 @@ pub fn failureReason(entry: Entry) FailureReason {
 pub fn failureReasonText(entry: Entry) []const u8 {
     return switch (failureReason(entry)) {
         .primary => "primary checkout",
-        .locked => "locked",
+        .locked => "locked - unlock before removal",
         .prunable => "prunable/stale",
         .dirty => "local changes",
         .untracked => "untracked files",
@@ -431,6 +432,23 @@ pub const Binding = struct {
     path: []const u8,
 };
 
+pub const Cancellation = struct {
+    generation: *const std.atomic.Value(u64),
+    expected: u64,
+
+    pub fn cancelled(self: Cancellation) bool {
+        return self.generation.load(.acquire) != self.expected;
+    }
+
+    pub fn check(self: ?Cancellation) !void {
+        if (self) |value| if (value.cancelled()) return error.Cancelled;
+    }
+};
+
+fn checkCancellation(cancellation: ?Cancellation) !void {
+    if (cancellation) |value| try value.check();
+}
+
 pub const ReclaimDecision = enum { reclaimable, keep };
 
 pub fn decision(entry: Entry) ReclaimDecision {
@@ -443,7 +461,18 @@ pub fn decision(entry: Entry) ReclaimDecision {
 }
 
 pub fn sweepSelectable(entry: Entry) bool {
-    return !entry.primary and !entry.locked and !entry.bound_running;
+    return !entry.primary and !entry.bound_running;
+}
+
+pub fn requiresUnlock(entry: Entry) bool {
+    return entry.locked and sweepSelectable(entry);
+}
+
+pub fn actionSelectable(entry: Entry) bool {
+    if (!sweepSelectable(entry)) return false;
+    var unlocked = entry;
+    unlocked.locked = false;
+    return decision(unlocked) == .reclaimable;
 }
 
 pub fn discardsFiles(entry: Entry) bool {
@@ -468,6 +497,19 @@ pub fn sizeCoverageText(allocator: std.mem.Allocator, size: SizeCoverage) ![]u8 
     if (size.first_error) |err|
         return std.fmt.allocPrint(allocator, "about {s} measured (size incomplete: {s})", .{ measured, @errorName(err) });
     return std.fmt.allocPrint(allocator, "about {s} measured (size incomplete)", .{measured});
+}
+
+pub fn rowPresentation(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
+    const size = if (!entry.size_complete and entry.size_error == null and entry.size_bytes == 0)
+        try allocator.dupe(u8, "size pending")
+    else
+        try sizeCoverageText(allocator, entry.sizeCoverage());
+    defer allocator.free(size);
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} - {s} - {s}",
+        .{ entry.path, failureReasonText(entry), size },
+    );
 }
 
 pub fn canReclaim(entry: Entry, policy: Policy, confirmed: bool) bool {
@@ -503,21 +545,47 @@ pub fn inspect(
     project_path: []const u8,
     bindings: []const Binding,
 ) !Inspection {
+    return inspectWithCancel(allocator, project_path, bindings, null);
+}
+
+pub fn inspectWithCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const Binding,
+    cancellation: ?Cancellation,
+) !Inspection {
+    var inspection = try inspectFactsWithCancel(allocator, project_path, bindings, cancellation);
+    errdefer deinitInspection(allocator, &inspection);
+    for (inspection.entries.items) |*entry| {
+        try checkCancellation(cancellation);
+        if (!entry.opened_checkout and !entry.prunable) {
+            entry.setSize(measureSizeWithCancel(entry.path, cancellation));
+        }
+    }
+    try checkCancellation(cancellation);
+    return inspection;
+}
+
+pub fn inspectFactsWithCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const Binding,
+    cancellation: ?Cancellation,
+) !Inspection {
     if (project_path.len == 0) return error.EmptyProjectPath;
-    const list = try runGit(allocator, &.{
+    try checkCancellation(cancellation);
+    const list = try runGitWithCancel(allocator, &.{
         "git", "-C", project_path, "worktree", "list", "--porcelain",
-    });
+    }, cancellation);
     defer allocator.free(list.output);
     var entries = try parse(allocator, list.output);
     errdefer deinit(allocator, &entries);
-    const default_branch = try discoverDefault(allocator, project_path, entries.items);
+    const default_branch = try discoverDefaultWithCancel(allocator, project_path, entries.items, cancellation);
     errdefer allocator.free(default_branch);
     for (entries.items, 0..) |*entry, index| {
+        try checkCancellation(cancellation);
         entry.primary = index == 0;
         entry.opened_checkout = try sameWindowsPath(allocator, project_path, entry.path);
-        if (!entry.opened_checkout and !entry.prunable) {
-            entry.setSize(directorySizeResult(directorySize(entry.path)));
-        }
         for (bindings) |binding| {
             if (std.mem.eql(u8, entry.path, binding.path)) {
                 entry.bound_running = true;
@@ -525,9 +593,9 @@ pub fn inspect(
             }
         }
         if (entry.primary or entry.prunable) continue;
-        const status = try runGit(allocator, &.{
+        const status = try runGitWithCancel(allocator, &.{
             "git", "-C", entry.path, "status", "--porcelain=v1", "--untracked-files=all",
-        });
+        }, cancellation);
         defer allocator.free(status.output);
         var lines = std.mem.splitScalar(u8, status.output, '\n');
         while (lines.next()) |raw| {
@@ -539,19 +607,25 @@ pub fn inspect(
                 (line[0] == 'A' and line[1] == 'A') or
                 (line[0] == 'D' and line[1] == 'D')) entry.conflicted = true;
         }
-        entry.pushed = succeedsGit(allocator, &.{
+        entry.pushed = succeedsGitWithCancel(allocator, &.{
             "git", "-C", entry.path, "rev-parse", "--verify", "@{u}",
-        }) and zeroCommitsAhead(allocator, entry.path);
-        entry.landed = succeedsGit(allocator, &.{
+        }, cancellation) and zeroCommitsAheadWithCancel(allocator, entry.path, cancellation);
+        entry.landed = succeedsGitWithCancel(allocator, &.{
             "git",        "-C",           project_path, "merge-base", "--is-ancestor",
             entry.branch, default_branch,
-        });
+        }, cancellation);
+        try checkCancellation(cancellation);
     }
+    try checkCancellation(cancellation);
     return .{
         .entries = entries,
         .default_branch = default_branch,
         .project_path = try allocator.dupe(u8, project_path),
     };
+}
+
+pub fn measureSizeWithCancel(path: []const u8, cancellation: ?Cancellation) SizeCoverage {
+    return directorySizeResult(directorySizeWithCancel(path, cancellation));
 }
 
 fn allocatedFileSize(file: std.fs.File) anyerror!u64 {
@@ -584,6 +658,10 @@ fn sameWindowsPath(allocator: std.mem.Allocator, left: []const u8, right: []cons
 }
 
 fn directorySize(path: []const u8) !SizeCoverage {
+    return directorySizeWithCancel(path, null);
+}
+
+fn directorySizeWithCancel(path: []const u8, cancellation: ?Cancellation) !SizeCoverage {
     var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
     defer dir.close();
     var walker = try dir.walk(std.heap.page_allocator);
@@ -593,6 +671,7 @@ fn directorySize(path: []const u8) !SizeCoverage {
         total.recordFailure(err);
         return total;
     }) |item| {
+        try checkCancellation(cancellation);
         if (item.kind != .file) continue;
         const file = item.dir.openFile(item.basename, .{}) catch |err| {
             total.recordFile(err);
@@ -653,19 +732,51 @@ pub fn reclaimSelectedWithPolicyMode(
     confirmed: bool,
     allow_forced: bool,
 ) !usize {
+    return reclaimSelectedWithPolicyModeCancel(
+        allocator,
+        project_path,
+        selected,
+        bindings,
+        policy,
+        confirmed,
+        allow_forced,
+        null,
+    );
+}
+
+pub fn reclaimSelectedWithPolicyModeCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    policy: Policy,
+    confirmed: bool,
+    allow_forced: bool,
+    cancellation: ?Cancellation,
+) !usize {
+    try checkCancellation(cancellation);
     if (!policy.allow_reclaim) return error.PolicyDisabled;
     if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
     if (selected.len == 0) return error.UnsafeSelection;
-    var inspection = try inspect(allocator, project_path, bindings);
+    var inspection = try inspectWithCancel(allocator, project_path, bindings, cancellation);
     defer deinitInspection(allocator, &inspection);
     try validateSelectedMode(allocator, inspection.entries.items, selected, bindings, allow_forced);
     var removed: usize = 0;
     for (selected) |path| {
+        try checkCancellation(cancellation);
         const entry = selectedEntry(inspection.entries.items, path) orelse return error.UnsafeSelection;
+        if (entry.locked) {
+            const unlock = try runGitWithCancel(
+                allocator,
+                &.{ "git", "-C", project_path, "worktree", "unlock", path },
+                cancellation,
+            );
+            allocator.free(unlock.output);
+        }
         const result = if (allow_forced and discardsFiles(entry))
-            try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path })
+            try runGitWithCancel(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path }, cancellation)
         else
-            try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+            try runGitWithCancel(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path }, cancellation);
         allocator.free(result.output);
         removed += 1;
     }
@@ -699,20 +810,424 @@ pub fn validateSelectedMode(
         }
         const entry = selectedEntry(entries, path) orelse return error.UnsafeSelection;
         if (!sweepSelectable(entry)) return error.UnsafeSelection;
-        if (!allow_forced and decision(entry) != .reclaimable) return error.UnsafeSelection;
+        var unlocked = entry;
+        unlocked.locked = false;
+        if (!allow_forced and decision(unlocked) != .reclaimable) return error.UnsafeSelection;
     }
+}
+
+pub const ReclaimStage = enum {
+    validate,
+    unlock,
+    remove_worktree,
+    recovery_log,
+    delete_branch,
+    complete,
+};
+
+pub const ReclaimDisposition = enum {
+    removed,
+    worktree_removed_branch_preserved,
+    failed,
+};
+
+pub const ReclaimReceipt = struct {
+    path: []u8,
+    branch: []u8,
+    tip: []u8,
+    stage: ReclaimStage,
+    disposition: ReclaimDisposition,
+    failure: ?anyerror = null,
+
+    fn deinit(self: *ReclaimReceipt, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.branch);
+        allocator.free(self.tip);
+    }
+};
+
+pub const ReclaimReport = struct {
+    receipts: std.array_list.Managed(ReclaimReceipt),
+    removed_worktrees: usize = 0,
+    deleted_branches: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) ReclaimReport {
+        return .{ .receipts = std.array_list.Managed(ReclaimReceipt).init(allocator) };
+    }
+
+    pub fn deinit(self: *ReclaimReport) void {
+        for (self.receipts.items) |*receipt| receipt.deinit(self.receipts.allocator);
+        self.receipts.deinit();
+    }
+
+    pub fn failureCount(self: ReclaimReport) usize {
+        var count: usize = 0;
+        for (self.receipts.items) |receipt| if (receipt.disposition != .removed) {
+            count += 1;
+        };
+        return count;
+    }
+};
+
+pub fn reclaimReportPresentation(allocator: std.mem.Allocator, report: ReclaimReport) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    for (report.receipts.items, 0..) |receipt, index| {
+        if (index != 0) try output.appendSlice(allocator, "\n");
+        const outcome = switch (receipt.disposition) {
+            .removed => if (receipt.branch.len == 0) "removed worktree" else "removed worktree and branch",
+            .worktree_removed_branch_preserved => "removed worktree; branch preserved",
+            .failed => "not removed",
+        };
+        if (receipt.failure) |failure| {
+            try output.writer(allocator).print(
+                "{s}: {s} at {s} ({s})",
+                .{ receipt.path, outcome, @tagName(receipt.stage), @errorName(failure) },
+            );
+        } else {
+            try output.writer(allocator).print("{s}: {s}", .{ receipt.path, outcome });
+        }
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+fn appendReceipt(
+    report: *ReclaimReport,
+    entry: Entry,
+    stage: ReclaimStage,
+    disposition: ReclaimDisposition,
+    failure: ?anyerror,
+) !void {
+    const allocator = report.receipts.allocator;
+    var receipt = ReclaimReceipt{
+        .path = try allocator.dupe(u8, entry.path),
+        .branch = try allocator.dupe(u8, entry.branch),
+        .tip = try allocator.dupe(u8, entry.head),
+        .stage = stage,
+        .disposition = disposition,
+        .failure = failure,
+    };
+    errdefer receipt.deinit(allocator);
+    try report.receipts.append(receipt);
+}
+
+fn trimmedGitOutput(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    cancellation: ?Cancellation,
+) ![]u8 {
+    const result = try runGitWithCancel(allocator, args, cancellation);
+    defer allocator.free(result.output);
+    const value = std.mem.trim(u8, result.output, " \r\n");
+    if (value.len == 0) return error.GitFailed;
+    return allocator.dupe(u8, value);
+}
+
+fn repositoryIdentity(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    cancellation: ?Cancellation,
+) ![]u8 {
+    const common = try trimmedGitOutput(
+        allocator,
+        &.{ "git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir" },
+        cancellation,
+    );
+    defer allocator.free(common);
+    return resolvedWindowsPath(allocator, common);
+}
+
+fn validateProjectOwnership(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    expected_repository: []const u8,
+    cancellation: ?Cancellation,
+) !void {
+    const current = try repositoryIdentity(allocator, project_path, cancellation);
+    defer allocator.free(current);
+    if (!std.ascii.eqlIgnoreCase(current, expected_repository)) return error.RepositoryIdentityChanged;
+}
+
+fn validateRepositoryOwnership(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    worktree_path: []const u8,
+    expected_repository: []const u8,
+    cancellation: ?Cancellation,
+) !void {
+    try validateProjectOwnership(allocator, project_path, expected_repository, cancellation);
+    const worktree = try repositoryIdentity(allocator, worktree_path, cancellation);
+    defer allocator.free(worktree);
+    if (!std.ascii.eqlIgnoreCase(worktree, expected_repository)) return error.RepositoryIdentityChanged;
+}
+
+fn shortDefaultBranch(default_branch: []const u8) []const u8 {
+    const prefix = "refs/remotes/origin/";
+    if (std.mem.startsWith(u8, default_branch, prefix)) return default_branch[prefix.len..];
+    if (std.mem.startsWith(u8, default_branch, "origin/")) return default_branch["origin/".len..];
+    return default_branch;
+}
+
+fn validateBranchIdentity(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    entry: Entry,
+    default_branch: []const u8,
+    cancellation: ?Cancellation,
+) !void {
+    if (entry.branch.len == 0) return;
+    if (std.mem.eql(u8, entry.branch, shortDefaultBranch(default_branch)) or
+        std.mem.eql(u8, entry.branch, "main") or
+        std.mem.eql(u8, entry.branch, "master"))
+        return error.ProtectedBranch;
+    const current = trimmedGitOutput(
+        allocator,
+        &.{ "git", "-C", project_path, "symbolic-ref", "--quiet", "--short", "HEAD" },
+        cancellation,
+    ) catch |err| switch (err) {
+        error.GitFailed => null,
+        else => return err,
+    };
+    defer if (current) |value| allocator.free(value);
+    if (current) |value| if (std.mem.eql(u8, value, entry.branch)) return error.CurrentBranch;
+    const ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{entry.branch});
+    defer allocator.free(ref);
+    const tip = try trimmedGitOutput(allocator, &.{ "git", "-C", project_path, "rev-parse", "--verify", ref }, cancellation);
+    defer allocator.free(tip);
+    if (entry.head.len == 0 or !std.mem.eql(u8, tip, entry.head)) return error.BranchTipChanged;
+}
+
+fn validateBranchNotCheckedOut(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    branch: []const u8,
+) !void {
+    const list = try runGit(allocator, &.{
+        "git", "-C", project_path, "worktree", "list", "--porcelain",
+    });
+    defer allocator.free(list.output);
+    var entries = try parse(allocator, list.output);
+    defer deinit(allocator, &entries);
+    for (entries.items) |entry| {
+        if (std.mem.eql(u8, entry.branch, branch)) return error.CurrentBranch;
+    }
+}
+
+fn recoveryLogPath(allocator: std.mem.Allocator) ![]u8 {
+    const home = std.process.getEnvVarOwned(allocator, "USERPROFILE") catch
+        try std.process.getEnvVarOwned(allocator, "HOME");
+    defer allocator.free(home);
+    return std.fs.path.join(allocator, &.{ home, ".graphcode", "removed-branches.log" });
+}
+
+fn appendRecoveryRecord(
+    allocator: std.mem.Allocator,
+    entry: Entry,
+) !void {
+    const path = try recoveryLogPath(allocator);
+    defer allocator.free(path);
+    const directory = std.fs.path.dirname(path) orelse return error.InvalidRecoveryLogPath;
+    try std.fs.cwd().makePath(directory);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = false, .lock = .exclusive });
+    defer file.close();
+    try file.seekFromEnd(0);
+    var buffer: [64]u8 = undefined;
+    const timestamp = try formatIso8601Utc(&buffer, std.time.timestamp());
+    const record = try std.fmt.allocPrint(
+        allocator,
+        "{s} {s} {s} {s}\n",
+        .{ timestamp, entry.branch, entry.head, entry.path },
+    );
+    defer allocator.free(record);
+    try file.writeAll(record);
+    try file.sync();
+}
+
+fn deleteBranchExpected(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    branch: []const u8,
+    expected_tip: []const u8,
+    cancellation: ?Cancellation,
+) !void {
+    const ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{branch});
+    defer allocator.free(ref);
+    const deleted = runGitWithCancel(
+        allocator,
+        &.{ "git", "-C", project_path, "update-ref", "-d", ref, expected_tip },
+        cancellation,
+    ) catch |err| {
+        if (err == error.GitFailed) {
+            const current = trimmedGitOutput(
+                allocator,
+                &.{ "git", "-C", project_path, "rev-parse", "--verify", ref },
+                cancellation,
+            ) catch return err;
+            defer allocator.free(current);
+            if (!std.mem.eql(u8, current, expected_tip)) return error.BranchTipChanged;
+        }
+        return err;
+    };
+    allocator.free(deleted.output);
+}
+
+fn formatIso8601Utc(buffer: *[64]u8, unix_seconds: i64) ![]const u8 {
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(unix_seconds) };
+    const epoch_day = epoch_seconds.getEpochDay();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    return std.fmt.bufPrint(
+        buffer,
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+        .{
+            year_day.year,
+            month_day.month.numeric(),
+            month_day.day_index + 1,
+            day_seconds.getHoursIntoDay(),
+            day_seconds.getMinutesIntoHour(),
+            day_seconds.getSecondsIntoMinute(),
+        },
+    );
+}
+
+pub fn reclaimSelectedDetailedWithCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    policy: Policy,
+    confirmed: bool,
+    allow_forced: bool,
+    cancellation: ?Cancellation,
+) !ReclaimReport {
+    try checkCancellation(cancellation);
+    if (!policy.allow_reclaim) return error.PolicyDisabled;
+    if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
+    if (selected.len == 0) return error.UnsafeSelection;
+
+    var captured = try inspectFactsWithCancel(allocator, project_path, bindings, cancellation);
+    defer deinitInspection(allocator, &captured);
+    try validateSelectedMode(allocator, captured.entries.items, selected, bindings, allow_forced);
+    const expected_repository = try repositoryIdentity(allocator, project_path, cancellation);
+    defer allocator.free(expected_repository);
+
+    var report = ReclaimReport.init(allocator);
+    errdefer report.deinit();
+    for (selected) |path| {
+        try checkCancellation(cancellation);
+        const expected = selectedEntry(captured.entries.items, path) orelse unreachable;
+        var current = inspectFactsWithCancel(allocator, project_path, bindings, cancellation) catch |err| {
+            try appendReceipt(&report, expected, .validate, .failed, err);
+            continue;
+        };
+        defer deinitInspection(allocator, &current);
+        const entry = selectedEntry(current.entries.items, path) orelse {
+            try appendReceipt(&report, expected, .validate, .failed, error.WorktreeIdentityChanged);
+            continue;
+        };
+        if (!std.mem.eql(u8, expected.branch, entry.branch) or
+            !std.mem.eql(u8, expected.head, entry.head))
+        {
+            try appendReceipt(&report, expected, .validate, .failed, error.BranchTipChanged);
+            continue;
+        }
+        validateRepositoryOwnership(allocator, project_path, path, expected_repository, cancellation) catch |err| {
+            try appendReceipt(&report, expected, .validate, .failed, err);
+            continue;
+        };
+        validateBranchIdentity(allocator, project_path, entry, current.default_branch, cancellation) catch |err| {
+            try appendReceipt(&report, expected, .validate, .failed, err);
+            continue;
+        };
+        if (entry.locked) {
+            const unlock = runGit(
+                allocator,
+                &.{ "git", "-C", project_path, "worktree", "unlock", path },
+            ) catch |err| {
+                try appendReceipt(&report, expected, .unlock, .failed, err);
+                continue;
+            };
+            allocator.free(unlock.output);
+        }
+        validateRepositoryOwnership(allocator, project_path, path, expected_repository, null) catch |err| {
+            try appendReceipt(&report, expected, .remove_worktree, .failed, err);
+            continue;
+        };
+        validateBranchIdentity(allocator, project_path, entry, current.default_branch, null) catch |err| {
+            try appendReceipt(&report, expected, .remove_worktree, .failed, err);
+            continue;
+        };
+        const removal = if (allow_forced and discardsFiles(entry))
+            runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path })
+        else
+            runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+        const removed = removal catch |err| {
+            try appendReceipt(&report, expected, .remove_worktree, .failed, err);
+            continue;
+        };
+        allocator.free(removed.output);
+        report.removed_worktrees += 1;
+        if (entry.branch.len == 0) {
+            try appendReceipt(&report, expected, .complete, .removed, null);
+            continue;
+        }
+        appendRecoveryRecord(allocator, entry) catch |err| {
+            try appendReceipt(&report, expected, .recovery_log, .worktree_removed_branch_preserved, err);
+            continue;
+        };
+        validateProjectOwnership(allocator, project_path, expected_repository, null) catch |err| {
+            try appendReceipt(&report, expected, .delete_branch, .worktree_removed_branch_preserved, err);
+            continue;
+        };
+        validateBranchIdentity(allocator, project_path, entry, current.default_branch, null) catch |err| {
+            try appendReceipt(&report, expected, .delete_branch, .worktree_removed_branch_preserved, err);
+            continue;
+        };
+        validateBranchNotCheckedOut(allocator, project_path, entry.branch) catch |err| {
+            try appendReceipt(&report, expected, .delete_branch, .worktree_removed_branch_preserved, err);
+            continue;
+        };
+        deleteBranchExpected(allocator, project_path, entry.branch, entry.head, null) catch |err| {
+            try appendReceipt(&report, expected, .delete_branch, .worktree_removed_branch_preserved, err);
+            continue;
+        };
+        report.deleted_branches += 1;
+        try appendReceipt(&report, expected, .complete, .removed, null);
+    }
+    return report;
 }
 
 const GitResult = struct { output: []u8 };
 
 fn succeedsGit(allocator: std.mem.Allocator, args: []const []const u8) bool {
-    const result = runGit(allocator, args) catch return false;
+    return succeedsGitWithCancel(allocator, args, null);
+}
+
+fn succeedsGitWithCancel(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    cancellation: ?Cancellation,
+) bool {
+    const result = runGitWithCancel(allocator, args, cancellation) catch return false;
     allocator.free(result.output);
     return true;
 }
 
 fn zeroCommitsAhead(allocator: std.mem.Allocator, path: []const u8) bool {
-    const result = runGit(allocator, &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" }) catch return false;
+    return zeroCommitsAheadWithCancel(allocator, path, null);
+}
+
+fn zeroCommitsAheadWithCancel(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    cancellation: ?Cancellation,
+) bool {
+    const result = runGitWithCancel(
+        allocator,
+        &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" },
+        cancellation,
+    ) catch return false;
     defer allocator.free(result.output);
     return std.mem.eql(u8, std.mem.trim(u8, result.output, " \r\n"), "0");
 }
@@ -730,14 +1245,34 @@ fn landedOnDefault(allocator: std.mem.Allocator, project: []const u8, branch: []
 }
 
 fn discoverDefault(allocator: std.mem.Allocator, project: []const u8, entries: []const Entry) ![]u8 {
-    const origin = runGit(allocator, &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }) catch null;
+    return discoverDefaultWithCancel(allocator, project, entries, null);
+}
+
+fn discoverDefaultWithCancel(
+    allocator: std.mem.Allocator,
+    project: []const u8,
+    entries: []const Entry,
+    cancellation: ?Cancellation,
+) ![]u8 {
+    try checkCancellation(cancellation);
+    const origin = runGitWithCancel(
+        allocator,
+        &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" },
+        cancellation,
+    ) catch null;
+    try checkCancellation(cancellation);
     if (origin) |result| {
         defer allocator.free(result.output);
         const value = std.mem.trim(u8, result.output, " \r\n");
         if (value.len != 0) return allocator.dupe(u8, value);
     }
     for ([_][]const u8{ "main", "master" }) |candidate| {
-        if (succeedsGit(allocator, &.{ "git", "-C", project, "rev-parse", "--verify", candidate })) {
+        try checkCancellation(cancellation);
+        if (succeedsGitWithCancel(
+            allocator,
+            &.{ "git", "-C", project, "rev-parse", "--verify", candidate },
+            cancellation,
+        )) {
             return allocator.dupe(u8, candidate);
         }
     }
@@ -762,6 +1297,15 @@ fn clearGitRepositoryEnvironment(environment: *std.process.EnvMap) void {
 }
 
 fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
+    return runGitWithCancel(allocator, args, null);
+}
+
+fn runGitWithCancel(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    cancellation: ?Cancellation,
+) !GitResult {
+    try checkCancellation(cancellation);
     var environment = try std.process.getEnvMap(allocator);
     defer environment.deinit();
     clearGitRepositoryEnvironment(&environment);
@@ -795,6 +1339,7 @@ fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
     if (stderr.items.len > output_limit) return error.StderrStreamTooLong;
     const term = try child.wait();
     waited = true;
+    try checkCancellation(cancellation);
     switch (term) {
         .Exited => |code| if (code != 0) return error.GitFailed,
         else => return error.GitFailed,
@@ -846,6 +1391,11 @@ pub fn parse(allocator: std.mem.Allocator, porcelain: []const u8) !std.array_lis
                 .path = try allocator.dupe(u8, line["worktree ".len..]),
                 .branch = try allocator.dupe(u8, ""),
             };
+        } else if (current != null and std.mem.startsWith(u8, line, "HEAD ")) {
+            const head = line["HEAD ".len..];
+            if (head.len != 40 and head.len != 64) return error.MalformedStatus;
+            if (current.?.head.len != 0) allocator.free(current.?.head);
+            current.?.head = try allocator.dupe(u8, head);
         } else if (current != null and std.mem.startsWith(u8, line, "branch ")) {
             const branch = line["branch ".len..];
             const short = if (std.mem.startsWith(u8, branch, "refs/heads/"))
@@ -881,6 +1431,7 @@ pub fn deinit(allocator: std.mem.Allocator, entries: *std.array_list.Managed(Ent
     for (entries.items) |entry| {
         allocator.free(entry.path);
         allocator.free(entry.branch);
+        if (entry.head.len != 0) allocator.free(entry.head);
     }
     entries.deinit();
 }
@@ -918,6 +1469,15 @@ test "worktree notice sizing successful zero and nonzero are complete" {
 
 test "worktree notice production inspection compiles without invoking IO" {
     std.mem.doNotOptimizeAway(&inspect);
+}
+
+test "cancelled worktree provider request refuses before invoking Git" {
+    var generation = std.atomic.Value(u64).init(2);
+    const cancellation = Cancellation{ .generation = &generation, .expected = 1 };
+    try std.testing.expectError(
+        error.Cancelled,
+        inspectWithCancel(std.testing.allocator, "C:\\owned-fixture", &.{}, cancellation),
+    );
 }
 
 test "worktree notice entry mapping retains incomplete coverage and known byte lower bounds" {
@@ -1457,16 +2017,35 @@ test "selected batch validation rejects duplicate missing bound and unsafe rows 
     ));
 }
 
-test "sweep selection allows human-confirmed dirty rows but rejects locked and bound rows" {
+test "sweep selection allows dirty and locked rows but rejects owned and bound rows" {
     try std.testing.expect(sweepSelectable(.{
         .path = @constCast("dirty"),
         .branch = @constCast("dirty"),
         .dirty = true,
     }));
-    try std.testing.expect(!sweepSelectable(.{
+    try std.testing.expect(sweepSelectable(.{
         .path = @constCast("locked"),
         .branch = @constCast("locked"),
         .locked = true,
+    }));
+    try std.testing.expect(requiresUnlock(.{
+        .path = @constCast("locked"),
+        .branch = @constCast("locked"),
+        .locked = true,
+    }));
+    try std.testing.expect(actionSelectable(.{
+        .path = @constCast("locked"),
+        .branch = @constCast("locked"),
+        .locked = true,
+        .pushed = true,
+        .landed = true,
+    }));
+    try std.testing.expect(!actionSelectable(.{
+        .path = @constCast("dirty"),
+        .branch = @constCast("dirty"),
+        .dirty = true,
+        .pushed = true,
+        .landed = true,
     }));
     try std.testing.expect(!sweepSelectable(.{
         .path = @constCast("running"),
@@ -1478,6 +2057,40 @@ test "sweep selection allows human-confirmed dirty rows but rejects locked and b
         .branch = @constCast("dirty"),
         .dirty = true,
     }));
+}
+
+test "reclaim report presents exact success partial and failure receipts" {
+    var report = ReclaimReport.init(std.testing.allocator);
+    defer report.deinit();
+    try appendReceipt(&report, .{
+        .path = @constCast("C:\\owned\\one"),
+        .branch = @constCast("one"),
+        .head = @constCast("1111111111111111111111111111111111111111"),
+    }, .complete, .removed, null);
+    try appendReceipt(&report, .{
+        .path = @constCast("C:\\owned\\two"),
+        .branch = @constCast("two"),
+        .head = @constCast("2222222222222222222222222222222222222222"),
+    }, .delete_branch, .worktree_removed_branch_preserved, error.BranchTipChanged);
+    try appendReceipt(&report, .{
+        .path = @constCast("C:\\owned\\three"),
+        .branch = @constCast("three"),
+        .head = @constCast("3333333333333333333333333333333333333333"),
+    }, .validate, .failed, error.RepositoryIdentityChanged);
+    const text = try reclaimReportPresentation(std.testing.allocator, report);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "C:\\owned\\one: removed worktree and branch\n" ++
+            "C:\\owned\\two: removed worktree; branch preserved at delete_branch (BranchTipChanged)\n" ++
+            "C:\\owned\\three: not removed at validate (RepositoryIdentityChanged)",
+        text,
+    );
+}
+
+test "recovery log timestamp is exact ISO 8601 UTC" {
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("1970-01-01T00:00:00Z", try formatIso8601Utc(&buffer, 0));
+    try std.testing.expectEqualStrings("2000-02-29T12:34:56Z", try formatIso8601Utc(&buffer, 951827696));
 }
 
 test "scoped Git environment removes routing keys without clearing ordinary configuration" {
@@ -1686,10 +2299,24 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
             try fixtureGit(&.{ "git", "-C", target, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "owned fixture" });
             try fixtureGit(&.{ "git", "-C", target, "update-ref", "refs/remotes/origin/main", "HEAD" });
             try fixtureGit(&.{ "git", "-C", target, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main" });
-            for ([_][]const u8{ "selected", "forced" }) |mode| {
+            try fixtureGit(&.{ "git", "-C", target, "branch", "preserved", "HEAD" });
+            const unrelated = try std.fs.path.join(allocator, &.{ root, "unrelated" });
+            defer allocator.free(unrelated);
+            try fixtureGit(&.{ "git", "-C", target, "worktree", "add", "-q", "-b", "unrelated", unrelated });
+            try fixtureGit(&.{ "git", "-C", target, "branch", "race", "HEAD" });
+            const stale_tip = try trimmedGitOutput(allocator, &.{ "git", "-C", target, "rev-parse", "race" }, null);
+            defer allocator.free(stale_tip);
+            try fixtureGit(&.{ "git", "-C", target, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "move race tip" });
+            try fixtureGit(&.{ "git", "-C", target, "branch", "-f", "race", "HEAD" });
+            try fixtureGit(&.{ "git", "-C", target, "update-ref", "refs/remotes/origin/main", "HEAD" });
+            try std.testing.expectError(error.BranchTipChanged, deleteBranchExpected(allocator, target, "race", stale_tip, null));
+            try std.testing.expect(succeedsGit(allocator, &.{ "git", "-C", target, "show-ref", "--verify", "refs/heads/race" }));
+            for ([_][]const u8{ "selected", "locked", "forced", "log-failure" }) |mode| {
                 const path = try std.fs.path.join(allocator, &.{ root, mode });
                 defer allocator.free(path);
                 try fixtureGit(&.{ "git", "-C", target, "worktree", "add", "-q", "-b", mode, path });
+                if (std.mem.eql(u8, mode, "locked"))
+                    try fixtureGit(&.{ "git", "-C", target, "worktree", "lock", "--reason", "owned synthetic fixture", path });
                 const remote_key = try std.fmt.allocPrint(allocator, "branch.{s}.remote", .{mode});
                 defer allocator.free(remote_key);
                 const merge_key = try std.fmt.allocPrint(allocator, "branch.{s}.merge", .{mode});
@@ -1705,7 +2332,16 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
                     }
                     // Git porcelain uses forward slashes even on Windows.
                     std.mem.replaceScalar(u8, path, '\\', '/');
-                    try std.testing.expectEqual(@as(usize, 1), try reclaimSelectedWithPolicyMode(
+                    const tip = try trimmedGitOutput(allocator, &.{ "git", "-C", target, "rev-parse", "HEAD" }, null);
+                    defer allocator.free(tip);
+                    if (std.mem.eql(u8, mode, "log-failure")) {
+                        const log_path = try recoveryLogPath(allocator);
+                        defer allocator.free(log_path);
+                        const graphcode_dir = std.fs.path.dirname(log_path) orelse return error.InvalidRecoveryLogPath;
+                        try std.fs.cwd().deleteTree(graphcode_dir);
+                        try std.fs.cwd().writeFile(.{ .sub_path = graphcode_dir, .data = "owned obstruction" });
+                    }
+                    var report = try reclaimSelectedDetailedWithCancel(
                         allocator,
                         target,
                         &.{path},
@@ -1713,10 +2349,61 @@ pub const SubprocessTests = if (@import("builtin").is_test) struct {
                         .{ .allow_reclaim = true },
                         true,
                         forced,
-                    ));
+                        null,
+                    );
+                    defer report.deinit();
+                    try std.testing.expectEqual(@as(usize, 1), report.receipts.items.len);
+                    const log_failure = std.mem.eql(u8, mode, "log-failure");
+                    try std.testing.expectEqual(
+                        if (log_failure) ReclaimDisposition.worktree_removed_branch_preserved else ReclaimDisposition.removed,
+                        report.receipts.items[0].disposition,
+                    );
+                    if (log_failure) {
+                        try std.testing.expectEqual(ReclaimStage.recovery_log, report.receipts.items[0].stage);
+                        try std.testing.expect(report.receipts.items[0].failure != null);
+                    }
+                    try std.testing.expectEqual(@as(usize, 1), report.removed_worktrees);
+                    try std.testing.expectEqual(@as(usize, if (log_failure) 0 else 1), report.deleted_branches);
+                    const deleted_ref = try std.fmt.allocPrint(allocator, "refs/heads/{s}", .{mode});
+                    defer allocator.free(deleted_ref);
+                    try std.testing.expectEqual(log_failure, succeedsGit(allocator, &.{ "git", "-C", target, "show-ref", "--verify", deleted_ref }));
+                    if (!log_failure) {
+                        const log_path = try recoveryLogPath(allocator);
+                        defer allocator.free(log_path);
+                        const log = try std.fs.cwd().readFileAlloc(allocator, log_path, 64 * 1024);
+                        defer allocator.free(log);
+                        try std.testing.expect(std.mem.indexOf(u8, log, tip) != null);
+                        try std.testing.expect(std.mem.indexOf(u8, log, path) != null);
+                    }
                 }
                 try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(path, .{}));
             }
+            try std.testing.expect(succeedsGit(allocator, &.{ "git", "-C", target, "show-ref", "--verify", "refs/heads/preserved" }));
+            try std.testing.expect(succeedsGit(allocator, &.{ "git", "-C", target, "show-ref", "--verify", "refs/heads/main" }));
+            try std.testing.expect(succeedsGit(allocator, &.{ "git", "-C", target, "show-ref", "--verify", "refs/heads/unrelated" }));
+            try std.fs.cwd().access(unrelated, .{});
+            try std.testing.expectError(error.UnsafeSelection, reclaimSelectedDetailedWithCancel(
+                allocator,
+                target,
+                &.{outside},
+                &.{},
+                .{ .allow_reclaim = true },
+                true,
+                false,
+                null,
+            ));
+            var cancelled_generation = std.atomic.Value(u64).init(2);
+            try std.testing.expectError(error.Cancelled, reclaimSelectedDetailedWithCancel(
+                allocator,
+                target,
+                &.{outside},
+                &.{},
+                .{ .allow_reclaim = true },
+                true,
+                false,
+                .{ .generation = &cancelled_generation, .expected = 1 },
+            ));
+            try std.fs.cwd().access(outside, .{});
         } else return error.UnknownFixtureScenario;
         var after_environment = try std.process.getEnvMap(allocator);
         defer after_environment.deinit();
