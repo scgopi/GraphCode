@@ -66,3 +66,5 @@ zig-out/
 
 # Per-worktree DerivedData (docs: .claude/skills/pr-gate-report)
 .derived/
+# Workspace layouts written to the shell's working directory during local runs
+/graphcode-workspace.*.json
