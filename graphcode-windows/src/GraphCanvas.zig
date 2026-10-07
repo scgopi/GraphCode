@@ -384,12 +384,55 @@ pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
 pub const overview_worktree_notice_kind = "overview-worktree-notice";
 
 pub fn overviewWorktreeNotice(graph: *const GraphModel.GraphSummary) ?WorktreeStatus.NoticePresentation {
-    if (!graph.project.isLocalFilesystem()) return null;
+    if (graph.project.isGlobal()) return null;
     return WorktreeStatus.NoticePresentation.fromRecord(graph.worktree_notice);
 }
 
 pub fn overviewWorktreeNoticeIdentity(allocator: std.mem.Allocator, project_path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}:{s}", .{ overview_worktree_notice_kind, project_path });
+}
+
+pub fn projectWorktreeChip(model: *const GraphModel.Model) ?WorktreeStatus.Summary {
+    if (model.isCompositeOpen()) return null;
+    const graph = model.currentGraph() orelse return null;
+    if (graph.project.isGlobal()) return null;
+    const record = graph.worktree_notice orelse return null;
+    const observation = record.observation orelse return null;
+    if (observation.summary.total == 0) return null;
+    return observation.summary;
+}
+
+pub fn projectWorktreeChipBounds(bounds: c.RECT) c.RECT {
+    return rect(bounds.left + 24, bounds.top + 14, @min(bounds.right - 24, bounds.left + 250), bounds.top + 42);
+}
+
+pub fn hitTestProjectWorktreeChip(model: *const GraphModel.Model, x: i32, y: i32, bounds: c.RECT) bool {
+    return projectWorktreeChip(model) != null and insideGraph(x, y, projectWorktreeChipBounds(bounds));
+}
+
+fn drawProjectWorktreeChip(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    model: *const GraphModel.Model,
+    bounds: c.RECT,
+) void {
+    const summary = projectWorktreeChip(model) orelse return;
+    const label = if (summary.reclaimable != 0)
+        std.fmt.allocPrint(allocator, "{d} worktree{s} · {d} reclaimable", .{
+            summary.total,
+            if (summary.total == 1) "" else "s",
+            summary.reclaimable,
+        })
+    else
+        std.fmt.allocPrint(allocator, "{d} worktree{s}", .{
+            summary.total,
+            if (summary.total == 1) "" else "s",
+        });
+    const text = label catch return;
+    defer allocator.free(text);
+    const chip = projectWorktreeChipBounds(bounds);
+    fill(hdc, chip, 0x00352B1C);
+    drawTextRect(hdc, allocator, text, chip, 10, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
 }
 
 pub const ZoomControl = enum { out, actual, in, fit };
@@ -411,6 +454,7 @@ pub const Header = struct {
     attention_count: usize = 0,
     notice_name: []const u8 = "",
     notice: ?WorktreeStatus.Summary = null,
+    notice_extra_folders: usize = 0,
     panel_visible: ?bool = null,
 
     pub fn contains(self: Header, action: HeaderAction) bool {
@@ -425,7 +469,14 @@ pub const Header = struct {
     pub fn label(self: Header, allocator: std.mem.Allocator, action: HeaderAction) ![]u8 {
         return switch (action) {
             .review_attention => std.fmt.allocPrint(allocator, "{d} need you", .{self.attention_count}),
-            .inspect_worktrees => if (self.notice.?.reclaimable != 0)
+            .inspect_worktrees => if (self.notice_extra_folders != 0)
+                std.fmt.allocPrint(allocator, "{s}: {d} {s} +{d}", .{
+                    self.notice_name,
+                    if (self.notice.?.reclaimable != 0) self.notice.?.reclaimable else self.notice.?.total,
+                    if (self.notice.?.reclaimable != 0) "reclaimable" else "worktrees",
+                    self.notice_extra_folders,
+                })
+            else if (self.notice.?.reclaimable != 0)
                 std.fmt.allocPrint(allocator, "{s}: {d} reclaimable", .{ self.notice_name, self.notice.?.reclaimable })
             else
                 std.fmt.allocPrint(allocator, "{s}: {d} worktrees", .{ self.notice_name, self.notice.?.total }),
@@ -618,6 +669,7 @@ pub fn paint(
         .overview => drawOverview(hdc, allocator, model, graph_bounds, state),
         .quick_chats => drawQuickChats(hdc, allocator, model, graph_bounds, state),
         .project => if (model.graph) |graph| {
+            drawProjectWorktreeChip(hdc, allocator, model, graph_bounds);
             drawCompositeBreadcrumb(hdc, allocator, model, graph_bounds);
             if (graph.nodes.items.len == 0) {
                 emptyGraph(hdc, allocator, graph, graph_bounds);

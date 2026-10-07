@@ -33,6 +33,7 @@ const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
 const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
+const RemoteWorktrees = @import("RemoteWorktrees.zig");
 const TrayModule = @import("Tray.zig");
 const Tray = TrayModule.Tray;
 const DaemonSupervisor = @import("DaemonSupervisor.zig").Supervisor;
@@ -65,6 +66,12 @@ const WorktreeInspectRunner = *const fn (
     []const WorktreeStatus.Binding,
     ?WorktreeStatus.Cancellation,
 ) anyerror!WorktreeStatus.Inspection;
+const WorktreeSizeRunner = *const fn (
+    std.mem.Allocator,
+    []const u8,
+    []const u8,
+    ?WorktreeStatus.Cancellation,
+) WorktreeStatus.SizeCoverage;
 const WorktreeReclaimRunner = *const fn (
     std.mem.Allocator,
     []const u8,
@@ -103,7 +110,24 @@ fn runWorktreeInspection(
     bindings: []const WorktreeStatus.Binding,
     cancellation: ?WorktreeStatus.Cancellation,
 ) anyerror!WorktreeStatus.Inspection {
-    return WorktreeStatus.inspectWithCancel(allocator, project_path, bindings, cancellation);
+    return if (std.mem.startsWith(u8, project_path, "ssh://") or
+        std.mem.startsWith(u8, project_path, "codespace://"))
+        RemoteWorktrees.inspectFactsWithCancel(allocator, project_path, bindings, cancellation)
+    else
+        WorktreeStatus.inspectFactsWithCancel(allocator, project_path, bindings, cancellation);
+}
+
+fn runWorktreeSize(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    path: []const u8,
+    cancellation: ?WorktreeStatus.Cancellation,
+) WorktreeStatus.SizeCoverage {
+    return if (std.mem.startsWith(u8, project_path, "ssh://") or
+        std.mem.startsWith(u8, project_path, "codespace://"))
+        RemoteWorktrees.measureSizeWithCancel(allocator, project_path, path, cancellation)
+    else
+        WorktreeStatus.measureSizeWithCancel(path, cancellation);
 }
 
 fn runWorktreeReclaim(
@@ -155,21 +179,27 @@ const WorktreeInspectionResult = struct {
     project_path: []u8,
     show_sweep: bool,
     outcome: union(enum) {
-        inspected: struct {
+        discovered: struct {
             inspection: WorktreeStatus.Inspection,
             policy: WorktreeStatus.PolicyOutcome,
         },
+        sized: struct {
+            path: []u8,
+            size: WorktreeStatus.SizeCoverage,
+        },
         failed: anyerror,
+        finished,
     },
 
     fn deinit(self: *WorktreeInspectionResult, allocator: std.mem.Allocator) void {
         allocator.free(self.project_path);
         switch (self.outcome) {
-            .inspected => |*value| {
+            .discovered => |*value| {
                 if (value.inspection.project_path.len != 0)
                     WorktreeStatus.deinitInspection(allocator, &value.inspection);
             },
-            .failed => {},
+            .sized => |value| allocator.free(value.path),
+            .failed, .finished => {},
         }
     }
 };
@@ -1137,6 +1167,7 @@ const UiaDynamicTarget = union(enum) {
     recent_project: []const u8,
     open_project: []const u8,
     overview_worktree_notice: []const u8,
+    project_worktree_chip: []const u8,
     project_new_loop: []const u8,
     project_disclosure: []const u8,
     loop: struct {
@@ -1186,14 +1217,16 @@ pub const App = struct {
     worktree_inspection: ?WorktreeStatus.Inspection = null,
     worktree_inspection_attempt_count: usize = 0,
     worktree_inspect_runner: WorktreeInspectRunner = runWorktreeInspection,
+    worktree_size_runner: WorktreeSizeRunner = runWorktreeSize,
     worktree_inspection_lock: std.Thread.Mutex = .{},
     worktree_inspection_thread: ?std.Thread = null,
     worktree_inspection_done: bool = false,
     worktree_inspection_generation: u64 = 0,
     worktree_inspection_cancellation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     worktree_inspection_pending: ?*WorktreeInspectionRequest = null,
-    worktree_inspection_result: ?WorktreeInspectionResult = null,
+    worktree_inspection_results: std.ArrayList(WorktreeInspectionResult) = .empty,
     worktree_loading_path: []u8 = &.{},
+    worktree_state: []u8 = &.{},
     worktree_reclaim_runner: WorktreeReclaimRunner = runWorktreeReclaim,
     worktree_reclaim_generation: u64 = 0,
     worktree_reclaim_cancellation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -1404,6 +1437,7 @@ pub const App = struct {
         }
         if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
+        if (self.worktree_state.len != 0) self.allocator.free(self.worktree_state);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
@@ -1758,6 +1792,15 @@ pub const App = struct {
                     }
                     self.clampSidebarScroll();
                     refresh(self);
+                    if (self.model.currentGraph()) |selected| {
+                        if (!selected.project.isGlobal() and
+                            selected.worktree_notice == null and
+                            !self.worktreeProviderBusy() and
+                            (selected.project.isRemote() or self.isLocalGitRepository(selected.project.path)))
+                        {
+                            self.inspectWorktreesImpl(false);
+                        }
+                    }
                 }
             },
             .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
@@ -2052,6 +2095,10 @@ pub const App = struct {
                 if (self.worktree_loading_path.len != 0) {
                     self.allocator.free(self.worktree_loading_path);
                     self.worktree_loading_path = &.{};
+                }
+                if (self.worktree_state.len != 0) {
+                    self.allocator.free(self.worktree_state);
+                    self.worktree_state = &.{};
                 }
                 if (self.selected_worktree_path.len != 0) {
                     self.allocator.free(self.selected_worktree_path);
@@ -4336,6 +4383,13 @@ pub const App = struct {
         self.inspectWorktreesImpl(true);
     }
 
+    fn isLocalGitRepository(self: *const App, project_path: []const u8) bool {
+        const marker = std.fs.path.join(self.allocator, &.{ project_path, ".git" }) catch return false;
+        defer self.allocator.free(marker);
+        std.fs.cwd().access(marker, .{}) catch return false;
+        return true;
+    }
+
     fn acceptWorktreeInspection(self: *App, inspection: WorktreeStatus.Inspection, policy: WorktreeStatus.PolicyOutcome) !void {
         var dialog = try WorktreeDialog.Dialog.init(
             self.allocator,
@@ -4368,6 +4422,15 @@ pub const App = struct {
             self.reportWorktreeError("Worktree inspection owner unavailable", err);
             return;
         };
+        const state = std.fmt.allocPrint(
+            self.allocator,
+            "Worktree inspection failed: {s}. Check repository access and retry.",
+            .{@errorName(failure)},
+        ) catch null;
+        if (state) |message| {
+            defer self.allocator.free(message);
+            self.setWorktreeState(message);
+        }
         self.reportWorktreeError("Worktree inspection failed", failure);
     }
 
@@ -4376,8 +4439,8 @@ pub const App = struct {
             self.setStatus("Worktrees require a local filesystem project");
             return;
         };
-        if (!current_graph.project.isLocalFilesystem()) {
-            self.setStatus("Worktrees require a local filesystem project");
+        if (current_graph.project.isGlobal()) {
+            self.setStatus("The global graph has no repository worktrees");
             return;
         }
         if (current_graph.project.path.len == 0) {
@@ -4446,6 +4509,7 @@ pub const App = struct {
         if (self.worktree_loading_path.len != 0) self.allocator.free(self.worktree_loading_path);
         self.worktree_loading_path = try self.allocator.dupe(u8, project_path);
         self.worktree_inspection_attempt_count += 1;
+        self.setWorktreeState("Reading worktrees...");
         self.setStatus("Reading worktrees...");
         self.launchPendingWorktreeInspection();
     }
@@ -4468,59 +4532,130 @@ pub const App = struct {
     }
 
     fn worktreeInspectionWorker(self: *App, request: *WorktreeInspectionRequest) void {
-        var result = WorktreeInspectionResult{
-            .generation = request.generation,
-            .project_path = request.project_path,
-            .show_sweep = request.show_sweep,
-            .outcome = undefined,
+        const cancellation = WorktreeStatus.Cancellation{
+            .generation = &self.worktree_inspection_cancellation,
+            .expected = request.generation,
         };
-        request.project_path = &.{};
-        result.outcome = if (request.runner(
+        var inspection = request.runner(
             self.allocator,
-            result.project_path,
+            request.project_path,
             request.bindings,
-            .{
-                .generation = &self.worktree_inspection_cancellation,
-                .expected = request.generation,
-            },
-        )) |inspection|
-            .{ .inspected = .{
+            cancellation,
+        ) catch |err| {
+            self.publishWorktreeInspectionResult(.{
+                .generation = request.generation,
+                .project_path = self.allocator.dupe(u8, request.project_path) catch {
+                    request.deinit(self.allocator);
+                    return;
+                },
+                .show_sweep = request.show_sweep,
+                .outcome = .{ .failed = err },
+            });
+            request.deinit(self.allocator);
+            self.worktree_inspection_lock.lock();
+            self.worktree_inspection_done = true;
+            self.worktree_inspection_lock.unlock();
+            return;
+        };
+        var size_paths: std.ArrayList([]u8) = .empty;
+        defer {
+            for (size_paths.items) |path| self.allocator.free(path);
+            size_paths.deinit(self.allocator);
+        }
+        for (inspection.entries.items) |entry| {
+            if (entry.opened_checkout or entry.prunable) continue;
+            size_paths.append(self.allocator, self.allocator.dupe(u8, entry.path) catch continue) catch {};
+        }
+        const project_path = self.allocator.dupe(u8, request.project_path) catch {
+            WorktreeStatus.deinitInspection(self.allocator, &inspection);
+            request.deinit(self.allocator);
+            return;
+        };
+        self.publishWorktreeInspectionResult(.{
+            .generation = request.generation,
+            .project_path = project_path,
+            .show_sweep = request.show_sweep,
+            .outcome = .{ .discovered = .{
                 .inspection = inspection,
-                .policy = WorktreeStatus.loadPolicyOutcome(self.allocator, result.project_path),
-            } }
-        else |err|
-            .{ .failed = err };
+                .policy = if (std.mem.startsWith(u8, request.project_path, "ssh://") or
+                    std.mem.startsWith(u8, request.project_path, "codespace://"))
+                    .{ .known = .{ .policy = .{}, .source = .missing } }
+                else
+                    WorktreeStatus.loadPolicyOutcome(self.allocator, request.project_path),
+            } },
+        });
+        for (size_paths.items) |path| {
+            if (cancellation.cancelled()) break;
+            const update_path = self.allocator.dupe(u8, path) catch continue;
+            self.publishWorktreeInspectionResult(.{
+                .generation = request.generation,
+                .project_path = self.allocator.dupe(u8, request.project_path) catch {
+                    self.allocator.free(update_path);
+                    continue;
+                },
+                .show_sweep = request.show_sweep,
+                .outcome = .{ .sized = .{
+                    .path = update_path,
+                    .size = self.worktree_size_runner(self.allocator, request.project_path, path, cancellation),
+                } },
+            });
+        }
+        if (self.allocator.dupe(u8, request.project_path)) |finished_path| {
+            self.publishWorktreeInspectionResult(.{
+                .generation = request.generation,
+                .project_path = finished_path,
+                .show_sweep = request.show_sweep,
+                .outcome = .finished,
+            });
+        } else |_| {}
         request.deinit(self.allocator);
         self.worktree_inspection_lock.lock();
-        if (self.worktree_inspection_result) |*old| old.deinit(self.allocator);
-        self.worktree_inspection_result = result;
         self.worktree_inspection_done = true;
         self.worktree_inspection_lock.unlock();
+    }
+
+    fn publishWorktreeInspectionResult(self: *App, result: WorktreeInspectionResult) void {
+        self.worktree_inspection_lock.lock();
+        defer self.worktree_inspection_lock.unlock();
+        self.worktree_inspection_results.append(self.allocator, result) catch {
+            var discarded = result;
+            discarded.deinit(self.allocator);
+        };
     }
 
     fn finishWorktreeInspection(self: *App) void {
         self.worktree_inspection_lock.lock();
         const done = self.worktree_inspection_done;
+        var results = self.worktree_inspection_results;
+        self.worktree_inspection_results = .empty;
         self.worktree_inspection_lock.unlock();
-        if (!done) return;
-        if (self.worktree_inspection_thread) |thread| thread.join();
-        self.worktree_inspection_thread = null;
-        self.worktree_inspection_lock.lock();
-        var result = self.worktree_inspection_result;
-        self.worktree_inspection_result = null;
-        self.worktree_inspection_done = false;
-        self.worktree_inspection_lock.unlock();
-        if (result) |*completed| {
+        if (done) {
+            if (self.worktree_inspection_thread) |thread| thread.join();
+            self.worktree_inspection_thread = null;
+        }
+        defer results.deinit(self.allocator);
+        var show_sweep = false;
+        for (results.items) |*completed| {
             defer completed.deinit(self.allocator);
             if (completed.generation == self.worktree_inspection_generation) {
+                show_sweep = show_sweep or completed.show_sweep;
                 self.applyWorktreeInspectionResult(completed);
             }
         }
+        if (!done) return;
+        self.worktree_inspection_lock.lock();
+        self.worktree_inspection_done = false;
+        self.worktree_inspection_lock.unlock();
         if (self.worktree_inspection_pending == null and self.worktree_loading_path.len != 0) {
             self.allocator.free(self.worktree_loading_path);
             self.worktree_loading_path = &.{};
         }
         self.launchPendingWorktreeInspection();
+        if (show_sweep and !envFlag("GRAPHCODE_UIA_GATE")) {
+            if (self.worktree_inspection) |inspection| {
+                if (inspection.entries.items.len != 0) self.presentWorktreeSweep();
+            }
+        }
     }
 
     fn applyWorktreeInspectionResult(self: *App, result: *WorktreeInspectionResult) void {
@@ -4531,7 +4666,7 @@ pub const App = struct {
                 self.recordWorktreeInspectionFailure(result.project_path, err);
                 return;
             },
-            .inspected => |*value| {
+            .discovered => |*value| {
                 self.acceptWorktreeInspection(value.inspection, value.policy) catch |err| {
                     self.recordWorktreeInspectionFailure(result.project_path, err);
                     return;
@@ -4539,6 +4674,20 @@ pub const App = struct {
                 value.inspection.entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator);
                 value.inspection.default_branch = &.{};
                 value.inspection.project_path = &.{};
+                if (self.worktree_inspection) |inspection| {
+                    if (inspection.entries.items.len == 0)
+                        self.setWorktreeState("No linked worktrees in this repository.")
+                    else
+                        self.setWorktreeState("Worktrees found. Calculating sizes...");
+                }
+            },
+            .sized => |value| {
+                self.applyWorktreeSize(result.project_path, value.path, value.size);
+                return;
+            },
+            .finished => {
+                self.finishWorktreeSizing(result.project_path);
+                return;
             },
         }
         const record = self.model.graphFor(result.project_path) orelse {
@@ -4551,7 +4700,9 @@ pub const App = struct {
         };
         self.clampSidebarScroll();
         const summary = notice.observation.?.summary;
-        const message = if (notice.policy.value() == null or !notice.observation.?.size.complete)
+        const message = if (summary.total == 0)
+            self.allocator.dupe(u8, "No linked worktrees in this repository.") catch return
+        else if (notice.policy.value() == null or !notice.observation.?.size.complete)
             WorktreeStatus.NoticePresentation.fromRecord(notice).?.label(self.allocator) catch {
                 self.setStatus("Worktree inspection has unavailable size or policy");
                 return;
@@ -4566,17 +4717,76 @@ pub const App = struct {
                 return;
             };
         self.replaceStatus(message);
-        if (result.show_sweep and !envFlag("GRAPHCODE_UIA_GATE")) {
-            const selected = self.model.currentGraph() orelse {
-                self.setStatus("Worktree inspection project closed before review");
-                return;
-            };
-            if (!std.mem.eql(u8, selected.project.path, result.project_path)) {
-                self.setStatus("Worktree inspection project changed before review");
-                return;
+    }
+
+    fn applyWorktreeSize(
+        self: *App,
+        project_path: []const u8,
+        worktree_path: []const u8,
+        size: WorktreeStatus.SizeCoverage,
+    ) void {
+        const inspection = if (self.worktree_inspection) |*value| value else return;
+        if (!std.mem.eql(u8, inspection.project_path, project_path)) return;
+        for (inspection.entries.items) |*entry| {
+            if (!std.mem.eql(u8, entry.path, worktree_path)) continue;
+            entry.size_bytes = size.bytes;
+            entry.size_complete = size.complete;
+            entry.size_error = size.first_error;
+            break;
+        } else return;
+        if (self.worktree_dialog) |*dialog| {
+            if (std.mem.eql(u8, dialog.project_path, project_path)) {
+                for (dialog.rows.items) |*row| {
+                    if (!std.mem.eql(u8, row.entry.path, worktree_path)) continue;
+                    row.entry.size_bytes = size.bytes;
+                    row.entry.size_complete = size.complete;
+                    row.entry.size_error = size.first_error;
+                    break;
+                }
             }
-            self.presentWorktreeSweep();
         }
+        const policy: WorktreeStatus.PolicyOutcome = if (self.worktree_dialog) |dialog|
+            .{ .known = .{ .policy = dialog.policy, .source = .configured } }
+        else
+            WorktreeStatus.loadPolicyOutcome(self.allocator, project_path);
+        self.model.recordWorktreeInspection(inspection, policy) catch return;
+        const measured = WorktreeStatus.sizeCoverageText(self.allocator, size) catch return;
+        defer self.allocator.free(measured);
+        const message = std.fmt.allocPrint(self.allocator, "Worktree size updated: {s} - {s}", .{ worktree_path, measured }) catch return;
+        self.replaceStatus(message);
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn finishWorktreeSizing(self: *App, project_path: []const u8) void {
+        const inspection = if (self.worktree_inspection) |*value| value else return;
+        if (!std.mem.eql(u8, inspection.project_path, project_path)) return;
+        if (inspection.entries.items.len == 0) {
+            self.setWorktreeState("No linked worktrees in this repository.");
+            self.setStatus("No linked worktrees in this repository.");
+            return;
+        }
+        var failures: usize = 0;
+        for (inspection.entries.items) |entry| {
+            if (entry.opened_checkout or entry.prunable) continue;
+            if (!entry.size_complete or entry.size_error != null) failures += 1;
+        }
+        const message = if (failures == 0)
+            std.fmt.allocPrint(self.allocator, "{d} worktree{s}; sizes complete.", .{
+                inspection.entries.items.len,
+                if (inspection.entries.items.len == 1) "" else "s",
+            })
+        else
+            std.fmt.allocPrint(self.allocator, "{d} worktree{s}; {d} size{s} unavailable. Rows remain available; use Reveal to inspect them.", .{
+                inspection.entries.items.len,
+                if (inspection.entries.items.len == 1) "" else "s",
+                failures,
+                if (failures == 1) "" else "s",
+            });
+        const owned = message catch return;
+        self.setWorktreeState(owned);
+        self.allocator.free(owned);
+        self.setStatus(self.worktree_state);
     }
 
     fn drainWorktreeInspection(self: *App) void {
@@ -4591,13 +4801,18 @@ pub const App = struct {
             self.worktree_inspection_thread = null;
         }
         self.worktree_inspection_lock.lock();
-        if (self.worktree_inspection_result) |*result| result.deinit(self.allocator);
-        self.worktree_inspection_result = null;
+        for (self.worktree_inspection_results.items) |*result| result.deinit(self.allocator);
+        self.worktree_inspection_results.deinit(self.allocator);
+        self.worktree_inspection_results = .empty;
         self.worktree_inspection_done = false;
         self.worktree_inspection_lock.unlock();
         if (self.worktree_loading_path.len != 0) {
             self.allocator.free(self.worktree_loading_path);
             self.worktree_loading_path = &.{};
+        }
+        if (self.worktree_state.len != 0) {
+            self.allocator.free(self.worktree_state);
+            self.worktree_state = &.{};
         }
     }
 
@@ -4962,8 +5177,8 @@ pub const App = struct {
             self.setStatus("Worktrees require a local filesystem project");
             return;
         };
-        if (!current_graph.project.isLocalFilesystem()) {
-            self.setStatus("Worktrees require a local filesystem project");
+        if (current_graph.project.isGlobal()) {
+            self.setStatus("The global graph has no repository worktrees");
             return;
         }
         const path = current_graph.project.path;
@@ -6057,6 +6272,14 @@ pub const App = struct {
         }
     }
 
+    fn setWorktreeState(self: *App, value: []const u8) void {
+        const copy = self.allocator.dupe(u8, value) catch return;
+        if (self.worktree_state.len != 0) self.allocator.free(self.worktree_state);
+        self.worktree_state = copy;
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
     fn replaceStatus(self: *App, value: []u8) void {
         self.workspace_recovery.active = false;
         if (self.status_override.len != 0) self.allocator.free(self.status_override);
@@ -6101,23 +6324,38 @@ pub const App = struct {
         if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.workspace_is_quick_chat)) {
             header.panel_visible = self.workspace_controls.panel_visible;
         }
-        if (self.worktree_inspection) |*inspection| {
-            if (self.model.graphFor(inspection.project_path)) |owner| {
-                if (owner.worktree_notice) |record| {
-                    if (record.state() == .notice and GraphCanvas.headerWorktreeNotice(&self.model, inspection, record.policy.value().?)) {
-                        header.notice = record.observation.?.summary;
-                        header.notice_name = owner.project.name;
-                    }
+        if (self.worktreeHeaderOwner()) |owner| {
+            header.notice = owner.worktree_notice.?.observation.?.summary;
+            header.notice_name = owner.project.name;
+            for (self.model.graphs.items) |graph| {
+                if (graph.worktree_notice) |record| {
+                    if (record.state() == .notice and !std.mem.eql(u8, graph.project.path, owner.project.path))
+                        header.notice_extra_folders += 1;
                 }
             }
         }
         return header;
     }
 
+    fn worktreeHeaderOwner(self: *const App) ?*const GraphModel.GraphSummary {
+        var owner: ?*const GraphModel.GraphSummary = null;
+        var owner_bytes: u64 = 0;
+        for (self.model.graphs.items) |*graph| {
+            const record = graph.worktree_notice orelse continue;
+            if (record.state() != .notice) continue;
+            const observation = record.observation orelse continue;
+            if (owner == null or observation.size.bytes > owner_bytes) {
+                owner = graph;
+                owner_bytes = observation.size.bytes;
+            }
+        }
+        return owner;
+    }
+
     fn currentWorktreeInspection(self: *const App) ?*const WorktreeStatus.Inspection {
         const graph = self.model.graph orelse return null;
         const inspection = if (self.worktree_inspection) |*value| value else return null;
-        if (!graph.project.isLocalFilesystem() or !std.mem.eql(u8, graph.project.path, inspection.project_path)) return null;
+        if (graph.project.isGlobal() or !std.mem.eql(u8, graph.project.path, inspection.project_path)) return null;
         return inspection;
     }
 
@@ -6230,7 +6468,12 @@ pub const App = struct {
                 defer self.allocator.free(path);
                 self.openLoopFromAccessibility(path, index);
             },
-            .inspect_worktrees => self.inspectWorktrees(),
+            .inspect_worktrees => {
+                if (self.worktreeHeaderOwner()) |owner| {
+                    if (!self.model.selectProject(owner.project.path)) return false;
+                }
+                self.inspectWorktrees();
+            },
             .jump => self.jumpToNode(),
             .toggle_panel => self.toggleWorkspaceDetailPanel(),
         }
@@ -6291,6 +6534,32 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
+        if (self.surface == .project) if (GraphCanvas.projectWorktreeChip(&self.model)) |summary| {
+            const graph = self.model.currentGraph() orelse return;
+            const name = if (summary.reclaimable != 0)
+                std.fmt.allocPrint(self.allocator, "{d} worktrees, {d} reclaimable", .{ summary.total, summary.reclaimable })
+            else
+                std.fmt.allocPrint(self.allocator, "{d} worktree{s}", .{ summary.total, if (summary.total == 1) "" else "s" });
+            const owned_name = name catch return;
+            self.appendAccessibilityElement(
+                &elements,
+                &owned_identities,
+                "project-worktree-chip",
+                graph.project.path,
+                owned_name,
+                4,
+                .{ .logical = GraphCanvas.projectWorktreeChipBounds(canvas_rect) },
+                false,
+                true,
+            ) catch {
+                self.allocator.free(owned_name);
+                return;
+            };
+            owned_identities.append(owned_name) catch {
+                self.allocator.free(owned_name);
+                return;
+            };
+        };
 
         for (sidebar_rows.items) |row| {
             const bounds = c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 };
@@ -6346,7 +6615,15 @@ pub const App = struct {
                     if (current_inspection == null or !std.mem.eql(u8, dialog.project_path, current_inspection.?.project_path)) continue;
                     if (row.index < dialog.rows.items.len) {
                         const worktree = dialog.rows.items[row.index];
-                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, worktree.entry.path, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch return;
+                        const name = WorktreeStatus.rowPresentation(self.allocator, worktree.entry) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "worktree", worktree.entry.path, name, 3, .{ .logical = bounds }, worktree.selected, WorktreeStatus.decision(worktree.entry) == .reclaimable) catch {
+                            self.allocator.free(name);
+                            return;
+                        };
+                        owned_identities.append(name) catch {
+                            self.allocator.free(name);
+                            return;
+                        };
                     }
                 },
                 .quick_chat_overview => {
@@ -6481,13 +6758,13 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
-        if (self.worktree_loading_path.len != 0) {
+        if (self.worktree_state.len != 0) {
             self.appendAccessibilityElement(
                 &elements,
                 &owned_identities,
-                "worktree-loading",
+                "worktree-state",
                 "inspection",
-                "Reading worktrees...",
+                self.worktree_state,
                 4,
                 .{ .logical = GraphCanvas.worktreeActivityBounds(canvas_rect) },
                 false,
@@ -6742,6 +7019,16 @@ pub const App = struct {
             if (target != null) return false;
             target = .{ .overview_worktree_notice = path };
         }
+        if (self.surface == .project) if (self.model.currentGraph()) |graph| {
+            if (GraphCanvas.projectWorktreeChip(&self.model) != null) {
+                const identity = std.fmt.allocPrint(self.allocator, "project-worktree-chip:{s}", .{graph.project.path}) catch return false;
+                defer self.allocator.free(identity);
+                if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .project_worktree_chip = graph.project.path };
+                }
+            }
+        };
         for (self.model.recent_projects.items) |project| {
             const identity = std.fmt.allocPrint(self.allocator, "project:{s}", .{project.path}) catch return false;
             defer self.allocator.free(identity);
@@ -6933,6 +7220,12 @@ pub const App = struct {
                     self.setStatus("Worktree notice project changed before inspection");
                     return false;
                 }
+                self.inspectWorktrees();
+            },
+            .project_worktree_chip => |path| {
+                const graph = self.model.currentGraph() orelse return false;
+                if (!std.mem.eql(u8, graph.project.path, path) or GraphCanvas.projectWorktreeChip(&self.model) == null)
+                    return false;
                 self.inspectWorktrees();
             },
             .local_section => self.sidebar_state.local_collapsed = !self.sidebar_state.local_collapsed,
@@ -7791,7 +8084,7 @@ fn onWindowMessage(
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), if (app.worktree_loading_path.len != 0) "Reading worktrees..." else "", app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
+            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
@@ -8267,7 +8560,9 @@ fn onWindowMessage(
                         _ = c.InvalidateRect(hwnd, null, 0);
                     },
                     .project, .workspace => if (app.model.graph) |graph| {
-                        if (GraphCanvas.hitTestCompositeBack(&app.model, x, y, bounds)) {
+                        if (app.surface == .project and GraphCanvas.hitTestProjectWorktreeChip(&app.model, x, y, bounds)) {
+                            app.inspectWorktrees();
+                        } else if (GraphCanvas.hitTestCompositeBack(&app.model, x, y, bounds)) {
                             app.closeCompositeGroup();
                         } else if (GraphCanvas.hitTestReclaimOffer(
                             graph.nodes.items,
@@ -11215,6 +11510,21 @@ test "worktree notice raw inspection presentation is independent of the header n
     try std.testing.expectEqualStrings("C:\\notice-a", app.worktree_dialog.?.project_path);
 }
 
+test "worktree titlebar notice aggregates all projects and targets the worst owner" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    try installNoticeTestInspection(&app, "C:\\notice-a", 8, 1024);
+    try installNoticeTestInspection(&app, "C:\\notice-b", 9, 4 * 1024 * 1024 * 1024);
+    try std.testing.expect(app.model.selectProject("C:\\notice-a"));
+    const owner = app.worktreeHeaderOwner() orelse return error.MissingWorktreeHeaderOwner;
+    try std.testing.expectEqualStrings("C:\\notice-b", owner.project.path);
+    const header = app.headerPresentation();
+    try std.testing.expectEqual(@as(usize, 1), header.notice_extra_folders);
+    const label = try header.label(std.testing.allocator, .inspect_worktrees);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("Same: 8 reclaimable +1", label);
+}
+
 test "worktree notice root row projection excludes foreign inspection without changing retained dialog" {
     var app = try noticeTestApp();
     defer deinitNoticeTestApp(&app);
@@ -11223,7 +11533,7 @@ test "worktree notice root row projection excludes foreign inspection without ch
     const owner_row = DpiExpectedElement{
         .identity = "worktree:C:\\notice-a\\tree-0",
         .present = true,
-        .name = "C:\\notice-a\\tree-0",
+        .name = "C:\\notice-a\\tree-0 - primary checkout - 1.0 KB",
         .eligible = false,
         .invokable = false,
     };
@@ -11313,6 +11623,10 @@ test "worktree notice actual UIA fixture data shares the supplied project identi
     const project = "D:\\owned-ui-fixture\\project";
     try app.installUiaFixtureData(project);
     try std.testing.expectEqualStrings(project, app.model.graph.?.project.path);
+    if (app.worktree_inspection == null) {
+        std.debug.print("remote fixture inspection missing: {s}\n", .{app.status_override});
+        return error.MissingRemoteWorktreeInspection;
+    }
     try std.testing.expectEqualStrings(project, app.worktree_inspection.?.project_path);
     try std.testing.expectEqualStrings(project, app.worktree_dialog.?.project_path);
     try std.testing.expect(app.currentWorktreeInspection() != null);
@@ -11450,7 +11764,12 @@ test "worktree notice App resolver owns exact paths across reorder close and all
     const reordered = (try app.resolveOverviewWorktreeNotice(std.testing.allocator, payload)).?;
     defer std.testing.allocator.free(reordered);
     try std.testing.expectEqualStrings(path, reordered);
-    try std.testing.expect((try app.resolveOverviewWorktreeNotice(std.testing.allocator, Accessibility.worktreeIdentityPayload("overview-worktree-notice:ssh://host/repo"))) == null);
+    const remote = (try app.resolveOverviewWorktreeNotice(
+        std.testing.allocator,
+        Accessibility.worktreeIdentityPayload("overview-worktree-notice:ssh://host/repo"),
+    )).?;
+    defer std.testing.allocator.free(remote);
+    try std.testing.expectEqualStrings("ssh://host/repo", remote);
     for (0..4) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, app.resolveOverviewWorktreeNotice(failing.allocator(), payload));
@@ -11490,7 +11809,13 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
             .eligible = true,
             .invokable = true,
         },
-        .{ .identity = "overview-worktree-notice:ssh://host/repo" },
+        .{
+            .identity = "overview-worktree-notice:ssh://host/repo",
+            .name = "Worktrees not inspected",
+            .bounds = .{ .{ 750, 430, 1036, 450 }, .{ 1125, 645, 1554, 675 }, .{ 1500, 860, 2072, 900 } },
+            .eligible = true,
+            .invokable = true,
+        },
         .{ .identity = "overview-worktree-notice:graphcode://global" },
     };
     const previous = app.model.graphFor("C:\\notice-a").?.worktree_notice.?;
@@ -12145,12 +12470,14 @@ fn exerciseOverviewWorktreesFixture() !void {
         try std.testing.expect(!WorktreeStatus.sweepSelectable(entry));
         const row_identity = try std.fmt.allocPrint(allocator, "worktree:{s}", .{expected_git_path});
         defer allocator.free(row_identity);
+        const row_name = try WorktreeStatus.rowPresentation(allocator, entry);
+        defer allocator.free(row_name);
         const project_identity = try std.fmt.allocPrint(allocator, "open-project:{s}", .{target.path});
         defer allocator.free(project_identity);
         const other_identity = try std.fmt.allocPrint(allocator, "open-project:{s}", .{target.other});
         defer allocator.free(other_identity);
         var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
-            .{ .identity = row_identity, .name = expected_git_path },
+            .{ .identity = row_identity, .name = row_name },
             .{ .identity = project_identity, .selected = true },
             .{ .identity = other_identity },
         } };
@@ -13998,6 +14325,7 @@ test "Worktrees inspection action does not block the UI thread on provider work"
     };
     const LoadingAccessibility = struct {
         found: bool = false,
+        error_found: bool = false,
         non_invokable: bool = false,
         visible_bounds: bool = false,
 
@@ -14011,8 +14339,9 @@ test "Worktrees inspection action does not block the UI thread on provider work"
             _: Accessibility.WorktreeCapabilities,
         ) void {
             for (elements) |element| {
-                if (!std.mem.eql(u8, element.identity, "worktree-loading:inspection")) continue;
+                if (!std.mem.eql(u8, element.identity, "worktree-state:inspection")) continue;
                 self.found = std.mem.eql(u8, element.name, "Reading worktrees...");
+                self.error_found = std.mem.indexOf(u8, element.name, "Check repository access and retry") != null;
                 self.non_invokable = !element.invokable;
                 self.visible_bounds = element.right > element.left and element.bottom > element.top;
             }
@@ -14065,6 +14394,173 @@ test "Worktrees inspection action does not block the UI thread on provider work"
     try std.testing.expectEqual(@as(usize, 1), SlowInspection.calls.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, app.status_override, "OwnedFixtureInspectionFailed") != null);
     try std.testing.expectEqual(@as(usize, 0), app.worktree_loading_path.len);
+    var failure_accessibility = LoadingAccessibility{};
+    app.syncAccessibilityTo(&failure_accessibility, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(failure_accessibility.error_found);
+}
+
+test "Worktrees rows publish before blocked sizing and UIA moves from pending to final size" {
+    const StreamedInspection = struct {
+        var inspect_calls = std.atomic.Value(usize).init(0);
+        var size_calls = std.atomic.Value(usize).init(0);
+
+        fn inspect(
+            allocator: std.mem.Allocator,
+            project_path: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            _ = inspect_calls.fetchAdd(1, .monotonic);
+            var entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
+            try entries.append(.{
+                .path = try allocator.dupe(u8, "C:\\owned-stream\\linked"),
+                .branch = try allocator.dupe(u8, "feature/stream"),
+                .pushed = true,
+                .landed = true,
+            });
+            return .{
+                .entries = entries,
+                .default_branch = try allocator.dupe(u8, "main"),
+                .project_path = try allocator.dupe(u8, project_path),
+            };
+        }
+
+        fn size(_: std.mem.Allocator, _: []const u8, _: []const u8, _: ?WorktreeStatus.Cancellation) WorktreeStatus.SizeCoverage {
+            _ = size_calls.fetchAdd(1, .monotonic);
+            std.Thread.sleep(300 * std.time.ns_per_ms);
+            return .{ .bytes = 4096 };
+        }
+    };
+    const WorktreeAccessibility = struct {
+        pending: bool = false,
+        final: bool = false,
+        partial: bool = false,
+        empty: bool = false,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(
+            self: *@This(),
+            _: []const u8,
+            elements: []const Accessibility.DynamicElement,
+            _: WorktreeStatus.Policy,
+            _: Accessibility.WorktreeCapabilities,
+        ) void {
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "worktree-state:inspection")) {
+                    self.empty = self.empty or std.mem.eql(u8, element.name, "No linked worktrees in this repository.");
+                }
+                if (std.mem.indexOf(u8, element.name, "C:\\owned-stream\\linked") == null) continue;
+                self.pending = self.pending or std.mem.indexOf(u8, element.name, "size pending") != null;
+                self.final = self.final or std.mem.indexOf(u8, element.name, "4.0 KB") != null;
+                self.partial = self.partial or std.mem.indexOf(u8, element.name, "AccessDenied") != null;
+            }
+        }
+    };
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    var app: App = .{
+        .allocator = allocator,
+        .client = client,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .worktree_inspect_runner = StreamedInspection.inspect,
+        .worktree_size_runner = StreamedInspection.size,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer {
+        app.drainWorktreeInspection();
+        if (app.worktree_dialog) |*dialog| dialog.deinit();
+        if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(allocator, inspection);
+        if (app.status_override.len != 0) allocator.free(app.status_override);
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\owned-stream","name":"Owned stream"},"nodes":[],"edges":[]}}}
+    );
+
+    var timer = try std.time.Timer.start();
+    app.inspectWorktreesImpl(false);
+    try std.testing.expect(timer.read() < 100 * std.time.ns_per_ms);
+    const rows_deadline = std.time.milliTimestamp() + 200;
+    while (app.worktree_inspection == null and std.time.milliTimestamp() < rows_deadline) {
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expect(app.worktree_inspection != null);
+    try std.testing.expect(app.worktree_inspection_thread != null);
+    try std.testing.expectEqual(@as(usize, 1), app.worktree_inspection.?.entries.items.len);
+    try std.testing.expect(!app.worktree_inspection.?.entries.items[0].size_complete);
+    try std.testing.expect(app.currentWorktreeInspection() != null);
+    try std.testing.expect(app.worktree_dialog != null);
+    var pending = WorktreeAccessibility{};
+    app.syncAccessibilityTo(&pending, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(pending.pending);
+
+    const final_deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < final_deadline) {
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expect(app.worktree_inspection_thread == null);
+    try std.testing.expectEqual(@as(u64, 4096), app.worktree_inspection.?.entries.items[0].size_bytes);
+    try std.testing.expect(app.worktree_inspection.?.entries.items[0].size_complete);
+    var final = WorktreeAccessibility{};
+    app.syncAccessibilityTo(&final, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(final.final);
+    try std.testing.expectEqual(@as(usize, 1), StreamedInspection.inspect_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), StreamedInspection.size_calls.load(.monotonic));
+
+    const PartialSize = struct {
+        fn run(_: std.mem.Allocator, _: []const u8, _: []const u8, _: ?WorktreeStatus.Cancellation) WorktreeStatus.SizeCoverage {
+            return .{ .complete = false, .first_error = error.AccessDenied };
+        }
+    };
+    app.worktree_size_runner = PartialSize.run;
+    app.inspectWorktreesImpl(false);
+    const partial_deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < partial_deadline) {
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expectEqual(@as(usize, 1), app.worktree_inspection.?.entries.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, app.worktree_state, "1 size unavailable") != null);
+    var partial = WorktreeAccessibility{};
+    app.syncAccessibilityTo(&partial, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(partial.partial);
+
+    const EmptyInspection = struct {
+        fn run(
+            allocator_arg: std.mem.Allocator,
+            project_path: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            return .{
+                .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator_arg),
+                .default_branch = try allocator_arg.dupe(u8, "main"),
+                .project_path = try allocator_arg.dupe(u8, project_path),
+            };
+        }
+    };
+    app.worktree_inspect_runner = EmptyInspection.run;
+    app.inspectWorktreesImpl(false);
+    const empty_deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < empty_deadline) {
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection.?.entries.items.len);
+    try std.testing.expectEqualStrings("No linked worktrees in this repository.", app.worktree_state);
+    var empty = WorktreeAccessibility{};
+    app.syncAccessibilityTo(&empty, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(empty.empty);
 }
 
 test "project switch cancels stale Worktrees UI application before the latest owner runs" {
@@ -14138,6 +14634,105 @@ test "project switch cancels stale Worktrees UI application before the latest ow
     try std.testing.expectEqual(@as(usize, 2), ReplacedInspection.calls.load(.monotonic));
     try std.testing.expect(std.mem.indexOf(u8, app.status_override, "CurrentBetaInspection") != null);
     try std.testing.expect(std.mem.indexOf(u8, app.status_override, "StaleAlphaInspection") == null);
+}
+
+test "remote and Codespace Worktrees discovery stays at the provider boundary" {
+    const RemoteFixture = struct {
+        var ssh_calls = std.atomic.Value(usize).init(0);
+        var codespace_calls = std.atomic.Value(usize).init(0);
+
+        fn inspect(
+            allocator_arg: std.mem.Allocator,
+            project_path: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            if (std.mem.startsWith(u8, project_path, "ssh://")) {
+                _ = ssh_calls.fetchAdd(1, .monotonic);
+            } else if (std.mem.startsWith(u8, project_path, "codespace://")) {
+                _ = codespace_calls.fetchAdd(1, .monotonic);
+            } else return error.UnexpectedLocalProviderCall;
+            var entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator_arg);
+            try entries.append(.{
+                .path = try allocator_arg.dupe(u8, "/workspaces/repo-linked"),
+                .branch = try allocator_arg.dupe(u8, "feature/remote"),
+                .pushed = true,
+                .landed = true,
+            });
+            return .{
+                .entries = entries,
+                .default_branch = try allocator_arg.dupe(u8, "main"),
+                .project_path = try allocator_arg.dupe(u8, project_path),
+            };
+        }
+
+        fn size(
+            _: std.mem.Allocator,
+            project_path: []const u8,
+            _: []const u8,
+            _: ?WorktreeStatus.Cancellation,
+        ) WorktreeStatus.SizeCoverage {
+            if (!std.mem.startsWith(u8, project_path, "ssh://") and
+                !std.mem.startsWith(u8, project_path, "codespace://"))
+                return .{ .complete = false, .first_error = error.UnexpectedLocalProviderCall };
+            return .{ .bytes = 2048 };
+        }
+    };
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    var app: App = .{
+        .allocator = allocator,
+        .client = client,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .worktree_inspect_runner = RemoteFixture.inspect,
+        .worktree_size_runner = RemoteFixture.size,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer {
+        app.drainWorktreeInspection();
+        if (app.worktree_dialog) |*dialog| dialog.deinit();
+        if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(allocator, inspection);
+        if (app.status_override.len != 0) allocator.free(app.status_override);
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+    const projects = [_][]const u8{
+        "ssh://dev@fixture.invalid/workspaces/repo",
+        "codespace://fixture-space/workspaces/repo",
+    };
+    for (projects, 0..) |project, index| {
+        const quoted = try std.json.Stringify.valueAlloc(allocator, project, .{});
+        defer allocator.free(quoted);
+        const frame = try std.fmt.allocPrint(
+            allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{s},\"name\":\"Remote {d}\"}},\"nodes\":[],\"edges\":[]}}}}}}",
+            .{ index + 1, quoted, index },
+        );
+        defer allocator.free(frame);
+        _ = try app.model.updateFromFrame(frame);
+        try std.testing.expect(app.model.selectProject(project));
+        app.inspectWorktreesImpl(false);
+        const deadline = std.time.milliTimestamp() + 2000;
+        while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < deadline) {
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+            app.finishWorktreeInspection();
+        }
+        if (app.worktree_inspection == null) {
+            std.debug.print("remote fixture inspection missing: {s}\n", .{app.status_override});
+            return error.MissingRemoteWorktreeInspection;
+        }
+        try std.testing.expectEqualStrings(project, app.worktree_inspection.?.project_path);
+        try std.testing.expectEqual(@as(usize, 1), app.worktree_inspection.?.entries.items.len);
+        try std.testing.expectEqual(@as(u64, 2048), app.worktree_inspection.?.entries.items[0].size_bytes);
+    }
+    try std.testing.expectEqual(@as(usize, 1), RemoteFixture.ssh_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), RemoteFixture.codespace_calls.load(.monotonic));
 }
 
 test "Worktrees reclaim action returns before owned provider removal completes" {

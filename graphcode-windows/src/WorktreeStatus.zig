@@ -487,6 +487,19 @@ pub fn sizeCoverageText(allocator: std.mem.Allocator, size: SizeCoverage) ![]u8 
     return std.fmt.allocPrint(allocator, "about {s} measured (size incomplete)", .{measured});
 }
 
+pub fn rowPresentation(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
+    const size = if (!entry.size_complete and entry.size_error == null and entry.size_bytes == 0)
+        try allocator.dupe(u8, "size pending")
+    else
+        try sizeCoverageText(allocator, entry.sizeCoverage());
+    defer allocator.free(size);
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} - {s} - {s}",
+        .{ entry.path, failureReasonText(entry), size },
+    );
+}
+
 pub fn canReclaim(entry: Entry, policy: Policy, confirmed: bool) bool {
     return policy.allow_reclaim and (!policy.confirm_each_reclaim or confirmed) and
         decision(entry) == .reclaimable;
@@ -529,6 +542,24 @@ pub fn inspectWithCancel(
     bindings: []const Binding,
     cancellation: ?Cancellation,
 ) !Inspection {
+    var inspection = try inspectFactsWithCancel(allocator, project_path, bindings, cancellation);
+    errdefer deinitInspection(allocator, &inspection);
+    for (inspection.entries.items) |*entry| {
+        try checkCancellation(cancellation);
+        if (!entry.opened_checkout and !entry.prunable) {
+            entry.setSize(measureSizeWithCancel(entry.path, cancellation));
+        }
+    }
+    try checkCancellation(cancellation);
+    return inspection;
+}
+
+pub fn inspectFactsWithCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const Binding,
+    cancellation: ?Cancellation,
+) !Inspection {
     if (project_path.len == 0) return error.EmptyProjectPath;
     try checkCancellation(cancellation);
     const list = try runGitWithCancel(allocator, &.{
@@ -543,9 +574,6 @@ pub fn inspectWithCancel(
         try checkCancellation(cancellation);
         entry.primary = index == 0;
         entry.opened_checkout = try sameWindowsPath(allocator, project_path, entry.path);
-        if (!entry.opened_checkout and !entry.prunable) {
-            entry.setSize(directorySizeResult(directorySizeWithCancel(entry.path, cancellation)));
-        }
         for (bindings) |binding| {
             if (std.mem.eql(u8, entry.path, binding.path)) {
                 entry.bound_running = true;
@@ -582,6 +610,10 @@ pub fn inspectWithCancel(
         .default_branch = default_branch,
         .project_path = try allocator.dupe(u8, project_path),
     };
+}
+
+pub fn measureSizeWithCancel(path: []const u8, cancellation: ?Cancellation) SizeCoverage {
+    return directorySizeResult(directorySizeWithCancel(path, cancellation));
 }
 
 fn allocatedFileSize(file: std.fs.File) anyerror!u64 {

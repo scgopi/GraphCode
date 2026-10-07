@@ -235,7 +235,14 @@ pub fn draw(
                 if (selected and WorktreeStatus.decision(entry) == .reclaimable)
                     fill(hdc, rect(12, row.top - 3, Tokens.sidebar_width - 12, row.top + 25), 0x003A3A44);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
-                drawText(hdc, allocator, reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
+                const size = WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage()) catch null;
+                defer if (size) |value_text| allocator.free(value_text);
+                const detail = if (size) |value_text|
+                    std.fmt.allocPrint(allocator, "{s} · {s}", .{ reason(entry), if (!entry.size_complete and entry.size_error == null and entry.size_bytes == 0) "size pending" else value_text }) catch null
+                else
+                    null;
+                defer if (detail) |value_text| allocator.free(value_text);
+                drawText(hdc, allocator, detail orelse reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
                 drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 18, row.top, 9, 0x007A7A7A);
