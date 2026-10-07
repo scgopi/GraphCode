@@ -6764,7 +6764,7 @@ pub const App = struct {
             self.appendAccessibilityElement(
                 &elements,
                 &owned_identities,
-                "worktree-state",
+                "worktree-loading",
                 "inspection",
                 self.worktree_state,
                 4,
@@ -14341,7 +14341,7 @@ test "Worktrees inspection action does not block the UI thread on provider work"
             _: Accessibility.WorktreeCapabilities,
         ) void {
             for (elements) |element| {
-                if (!std.mem.eql(u8, element.identity, "worktree-state:inspection")) continue;
+                if (!std.mem.eql(u8, element.identity, "worktree-loading:inspection")) continue;
                 self.found = std.mem.eql(u8, element.name, "Reading worktrees...");
                 self.error_found = std.mem.indexOf(u8, element.name, "Check repository access and retry") != null;
                 self.non_invokable = !element.invokable;
@@ -14449,7 +14449,7 @@ test "Worktrees rows publish before blocked sizing and UIA moves from pending to
             _: Accessibility.WorktreeCapabilities,
         ) void {
             for (elements) |element| {
-                if (std.mem.eql(u8, element.identity, "worktree-state:inspection")) {
+                if (std.mem.eql(u8, element.identity, "worktree-loading:inspection")) {
                     self.empty = self.empty or std.mem.eql(u8, element.name, "No linked worktrees in this repository.");
                 }
                 if (std.mem.indexOf(u8, element.name, "C:\\owned-stream\\linked") == null) continue;
