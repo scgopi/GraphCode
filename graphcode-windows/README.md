@@ -403,6 +403,13 @@ recoverable deletion still need their own evidence or implementation.
 
 `WorktreeStatus` runs local Git with explicit `-C` paths and a child-only copy of
 the environment. Windows environment names are matched case-insensitively.
+The App never runs inspection or reclaim on the Win32 message thread: it captures
+the project, bindings, selection, and policy into owned requests, shows
+`Reading worktrees...` / `Removing worktrees...` in pixels and UIA, and applies
+completed results on the UI thread. A newer inspection supersedes an older result,
+and shutdown joins both owned workers before model teardown. This keeps menus,
+keyboard routing, hit testing, and UIA responsive while Git and directory sizing
+run; it does not turn a slow provider operation into a successful one.
 The following inherited overrides are removed:
 
 | Variables | Reason |

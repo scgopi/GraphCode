@@ -72,7 +72,7 @@ try {
     & $zig0152 build `
       "-Dwinghostty-dir=$wingRoot" `
       "-Dwinghostty-lib=$(Join-Path $wingRoot 'zig-out\lib\winghostty-win32-host.lib')" `
-      "-Dversion=1.2.3" -Dworktrees-deferred=true -Doptimize=ReleaseSafe
+      "-Dversion=1.2.3" -Doptimize=ReleaseSafe
   } finally { Pop-Location }
   if ($LASTEXITCODE -ne 0) { throw "could not build versioned GraphCode Windows artifact" }
   $fixtureBin = Join-Path $fixture "nested space\unicode-日本\bin"
@@ -161,7 +161,7 @@ try {
       $metadata.sourceProvenance.tagMatchesSource -ne $true -or
       $metadata.sourceProvenance.tagMismatchAllowed -ne $false -or
       $metadata.packageKind -ne "release-candidate" -or
-      $metadata.previewFeatures.worktreesDeferred -ne $true -or
+      $metadata.previewFeatures.worktreesDeferred -ne $false -or
       $metadata.sourceProvenance.kind -ne "release-tag") {
     throw "package metadata did not preserve explicit source provenance: $($metadata | ConvertTo-Json -Compress)"
   }

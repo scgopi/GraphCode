@@ -42,6 +42,10 @@ extern fn gc_uia_update(
     count: c_int,
     allow_reclaim: c_int,
     confirm_each_reclaim: c_int,
+    worktrees_available: c_int,
+    worktree_dialog_open: c_int,
+    worktree_row_selected: c_int,
+    worktree_busy: c_int,
 ) c.HRESULT;
 
 pub const Role = enum { window, navigation, list, list_item, button, checkbox, card, menu, menu_item, text, terminal, status, dialog };
@@ -58,6 +62,12 @@ pub const NotificationKind = enum { status, @"error", focus, action };
 pub const Notification = struct { text: []const u8, kind: NotificationKind };
 pub const Announcement = struct { role: []const u8, name: []const u8, state: []const u8 };
 pub const WorktreeRow = struct { path: []const u8, selected: bool, eligible: bool };
+pub const WorktreeCapabilities = struct {
+    available: bool = false,
+    dialog_open: bool = false,
+    row_selected: bool = false,
+    busy: bool = false,
+};
 pub const DynamicElement = struct {
     identity: []const u8,
     name: []const u8,
@@ -179,13 +189,14 @@ pub const Provider = struct {
                 .bottom = top + 32,
             };
         }
-        self.syncElements(status, elements, policy);
+        self.syncElements(status, elements, policy, .{ .available = true });
     }
     pub fn syncElements(
         self: *Provider,
         status: []const u8,
         elements: []const DynamicElement,
         policy: WorktreeStatus.Policy,
+        capabilities: WorktreeCapabilities,
     ) void {
         if (!builtin.link_libc) return;
         const native = self.native_provider orelse return;
@@ -240,6 +251,10 @@ pub const Provider = struct {
             @intCast(elements.len),
             if (policy.allow_reclaim) 1 else 0,
             if (policy.confirm_each_reclaim) 1 else 0,
+            if (capabilities.available) 1 else 0,
+            if (capabilities.dialog_open) 1 else 0,
+            if (capabilities.row_selected) 1 else 0,
+            if (capabilities.busy) 1 else 0,
         );
         // The provider rejects a malformed update as a whole and keeps the previous
         // tree, so a rejection must be visible rather than silently leaving it stale.

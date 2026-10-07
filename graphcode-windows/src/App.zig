@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 const build_options = if (builtin.is_test)
     struct {
         pub const version = "dev";
-        pub const worktrees_deferred = false;
     }
 else
     @import("build_options");
@@ -60,7 +59,117 @@ const c = Win32.c;
 
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
-const worktrees_deferred_message = "Worktrees are deferred for this preview";
+const WorktreeInspectRunner = *const fn (
+    std.mem.Allocator,
+    []const u8,
+    []const WorktreeStatus.Binding,
+    ?WorktreeStatus.Cancellation,
+) anyerror!WorktreeStatus.Inspection;
+const WorktreeReclaimRunner = *const fn (
+    std.mem.Allocator,
+    []const u8,
+    []const []const u8,
+    []const WorktreeStatus.Binding,
+    WorktreeStatus.Policy,
+    bool,
+    bool,
+    ?WorktreeStatus.Cancellation,
+) anyerror!usize;
+const WorktreeReclaimKind = enum { sweep, selected, offer };
+const WorktreeReclaimRequest = struct {
+    generation: u64,
+    project_path: []u8,
+    selected: [][]const u8,
+    bindings: []WorktreeStatus.Binding,
+    policy: WorktreeStatus.Policy,
+    confirmed: bool,
+    allow_forced: bool,
+    kind: WorktreeReclaimKind,
+    runner: WorktreeReclaimRunner,
+
+    fn deinit(self: *WorktreeReclaimRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_path);
+        for (self.selected) |path| allocator.free(path);
+        allocator.free(self.selected);
+        for (self.bindings) |binding| allocator.free(binding.path);
+        allocator.free(self.bindings);
+        allocator.destroy(self);
+    }
+};
+
+fn runWorktreeInspection(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const WorktreeStatus.Binding,
+    cancellation: ?WorktreeStatus.Cancellation,
+) anyerror!WorktreeStatus.Inspection {
+    return WorktreeStatus.inspectWithCancel(allocator, project_path, bindings, cancellation);
+}
+
+fn runWorktreeReclaim(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const WorktreeStatus.Binding,
+    policy: WorktreeStatus.Policy,
+    confirmed: bool,
+    allow_forced: bool,
+    cancellation: ?WorktreeStatus.Cancellation,
+) anyerror!usize {
+    return WorktreeStatus.reclaimSelectedWithPolicyModeCancel(
+        allocator,
+        project_path,
+        selected,
+        bindings,
+        policy,
+        confirmed,
+        allow_forced,
+        cancellation,
+    );
+}
+const WorktreeReclaimResult = struct {
+    project_path: []u8,
+    kind: WorktreeReclaimKind,
+    outcome: anyerror!usize,
+
+    fn deinit(self: *WorktreeReclaimResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_path);
+    }
+};
+const WorktreeInspectionRequest = struct {
+    generation: u64,
+    project_path: []u8,
+    bindings: []WorktreeStatus.Binding,
+    show_sweep: bool,
+    runner: WorktreeInspectRunner,
+
+    fn deinit(self: *WorktreeInspectionRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_path);
+        for (self.bindings) |binding| allocator.free(binding.path);
+        allocator.free(self.bindings);
+        allocator.destroy(self);
+    }
+};
+const WorktreeInspectionResult = struct {
+    generation: u64,
+    project_path: []u8,
+    show_sweep: bool,
+    outcome: union(enum) {
+        inspected: struct {
+            inspection: WorktreeStatus.Inspection,
+            policy: WorktreeStatus.PolicyOutcome,
+        },
+        failed: anyerror,
+    },
+
+    fn deinit(self: *WorktreeInspectionResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_path);
+        switch (self.outcome) {
+            .inspected => |*value| WorktreeStatus.deinitInspection(allocator, &value.inspection),
+            .failed => {},
+        }
+    }
+};
 const tray_test_hook_environment = "GRAPHCODE_TRAY_TEST_HOOK";
 const daemon_supervisor_test_hook_environment = "GRAPHCODE_DAEMON_SUPERVISOR_TEST_HOOK";
 const daemon_handoff_test_user_environment = "GRAPHCODE_DAEMON_HANDOFF_TEST_USER";
@@ -176,11 +285,6 @@ fn workspaceInstanceKey(allocator: std.mem.Allocator, path: []const u8) ![:0]u16
     const name = try WorkspaceLifecycle.instanceName(allocator, user, path);
     defer allocator.free(name);
     return std.unicode.utf8ToUtf16LeAllocZ(allocator, name);
-}
-
-fn compiledWorktreesDeferred() bool {
-    if (builtin.is_test) return false;
-    return build_options.worktrees_deferred;
 }
 
 pub fn restoreCurrentWorkspace(allocator: std.mem.Allocator) !void {
@@ -1077,8 +1181,23 @@ pub const App = struct {
     edge_drag_source_id: []u8 = &.{},
     selection_initialized: bool = false,
     worktree_inspection: ?WorktreeStatus.Inspection = null,
-    worktrees_deferred: bool = false,
     worktree_inspection_attempt_count: usize = 0,
+    worktree_inspect_runner: WorktreeInspectRunner = runWorktreeInspection,
+    worktree_inspection_lock: std.Thread.Mutex = .{},
+    worktree_inspection_thread: ?std.Thread = null,
+    worktree_inspection_done: bool = false,
+    worktree_inspection_generation: u64 = 0,
+    worktree_inspection_cancellation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    worktree_inspection_pending: ?*WorktreeInspectionRequest = null,
+    worktree_inspection_result: ?WorktreeInspectionResult = null,
+    worktree_loading_path: []u8 = &.{},
+    worktree_reclaim_runner: WorktreeReclaimRunner = runWorktreeReclaim,
+    worktree_reclaim_generation: u64 = 0,
+    worktree_reclaim_cancellation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    worktree_reclaim_lock: std.Thread.Mutex = .{},
+    worktree_reclaim_thread: ?std.Thread = null,
+    worktree_reclaim_done: bool = false,
+    worktree_reclaim_result: ?WorktreeReclaimResult = null,
     selected_worktree_path: []u8 = &.{},
     reclaim_confirmation_armed: bool = false,
     worktree_dialog: ?WorktreeDialog.Dialog = null,
@@ -1192,8 +1311,7 @@ pub const App = struct {
             .allocator = allocator,
             .client = client,
             .daemon = .{ .allocator = allocator },
-            .model = GraphModel.Model.init(allocator),
-            .worktrees_deferred = compiledWorktreesDeferred(),
+            .model = undefined,
             .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
             .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
             .tray_test_hook_enabled = envFlag(tray_test_hook_environment),
@@ -1265,6 +1383,8 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.workspace_summary_work.drain();
+        self.drainWorktreeInspection();
+        self.drainWorktreeReclaim();
         if (self.workspace) |workspace| {
             workspace.deinit();
             self.allocator.destroy(workspace);
@@ -1911,8 +2031,33 @@ pub const App = struct {
     }
 
     fn selectProject(self: *App, path: []const u8) bool {
+        const changed = if (self.model.currentGraph()) |graph|
+            !std.mem.eql(u8, graph.project.path, path)
+        else
+            true;
         const selected = self.model.selectProject(path);
-        if (selected) self.client.setSubgraphAddress(null);
+        if (selected) {
+            self.client.setSubgraphAddress(null);
+            if (changed) {
+                const cancelled_inspection = self.worktree_inspection_thread != null or self.worktree_inspection_pending != null;
+                self.worktree_inspection_generation += 1;
+                self.worktree_inspection_cancellation.store(self.worktree_inspection_generation, .release);
+                if (self.worktree_inspection_pending) |pending| {
+                    pending.deinit(self.allocator);
+                    self.worktree_inspection_pending = null;
+                }
+                if (self.worktree_loading_path.len != 0) {
+                    self.allocator.free(self.worktree_loading_path);
+                    self.worktree_loading_path = &.{};
+                }
+                if (self.selected_worktree_path.len != 0) {
+                    self.allocator.free(self.selected_worktree_path);
+                    self.selected_worktree_path = &.{};
+                }
+                self.reclaim_confirmation_armed = false;
+                if (cancelled_inspection) self.setStatus("Worktree inspection cancelled after project changed");
+            }
+        }
         return selected;
     }
 
@@ -3615,6 +3760,7 @@ pub const App = struct {
                 .project_path = project_path,
                 .local_filesystem = graph.project.isLocalFilesystem(),
                 .can_create_edge = graph.nodes.items.len >= 2,
+                .worktrees_available = !self.worktreeProviderBusy(),
             } },
             x,
             y,
@@ -3674,8 +3820,8 @@ pub const App = struct {
             1 => .{ .project = .{ .path = self.requiredUiaFixtureProject() catch |err| {
                 self.reportWorktreeError("UIA fixture owner unavailable", err);
                 return;
-            }, .remote = false } },
-            2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true } },
+            }, .remote = false, .worktrees_available = !self.worktreeProviderBusy() } },
+            2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true, .worktrees_available = !self.worktreeProviderBusy() } },
             3 => return self.showNodeContextMenu(0, uia_context_menu_x, uia_context_menu_y),
             4 => return self.showBackgroundContextMenu(uia_context_menu_x, uia_context_menu_y),
             5 => .quick_chats,
@@ -4179,29 +4325,7 @@ pub const App = struct {
         );
     }
 
-    fn clearDeferredWorktreeState(self: *App) void {
-        if (self.worktree_dialog) |*dialog| dialog.deinit();
-        self.worktree_dialog = null;
-        if (self.worktree_inspection) |*inspection| {
-            WorktreeStatus.deinitInspection(self.allocator, inspection);
-        }
-        self.worktree_inspection = null;
-        if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
-        self.selected_worktree_path = &.{};
-        self.reclaim_confirmation_armed = false;
-        self.model.invalidateWorktreeNotices(.worktrees_changed);
-    }
-
-    fn guardWorktreesPreview(self: *App) bool {
-        if (!self.worktrees_deferred) return false;
-        self.clearDeferredWorktreeState();
-        self.setStatus(worktrees_deferred_message);
-        _ = c.InvalidateRect(self.window.hwnd, null, 0);
-        return true;
-    }
-
     fn inspectWorktrees(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         if (envFlag("GRAPHCODE_UIA_GATE") and envFlag("GRAPHCODE_UIA_SHOW_DIALOGS") and self.worktree_inspection != null) {
             self.presentWorktreeSweep();
             return;
@@ -4245,7 +4369,6 @@ pub const App = struct {
     }
 
     fn inspectWorktreesImpl(self: *App, show_sweep: bool) void {
-        if (self.guardWorktreesPreview()) return;
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
             return;
@@ -4258,36 +4381,175 @@ pub const App = struct {
             self.setStatus("No project selected for worktree inspection");
             return;
         }
-        const path = self.allocator.dupe(u8, current_graph.project.path) catch {
-            self.setStatus("Unable to retain worktree inspection project");
-            return;
-        };
-        defer self.allocator.free(path);
         var bindings = std.array_list.Managed(WorktreeStatus.Binding).init(self.allocator);
         defer bindings.deinit();
         if (self.model.graph) |graph| {
             for (graph.nodes.items) |node| {
                 if (node.worktree_path.len != 0) bindings.append(.{ .path = node.worktree_path }) catch |err| {
-                    self.recordWorktreeInspectionFailure(path, err);
+                    self.recordWorktreeInspectionFailure(current_graph.project.path, err);
                     return;
                 };
             }
         }
+        self.queueWorktreeInspection(current_graph.project.path, bindings.items, show_sweep) catch |err| {
+            self.recordWorktreeInspectionFailure(current_graph.project.path, err);
+        };
+    }
+
+    fn createWorktreeInspectionRequest(
+        self: *App,
+        generation: u64,
+        project_path: []const u8,
+        bindings: []const WorktreeStatus.Binding,
+        show_sweep: bool,
+    ) !*WorktreeInspectionRequest {
+        const request = try self.allocator.create(WorktreeInspectionRequest);
+        errdefer self.allocator.destroy(request);
+        request.* = .{
+            .generation = generation,
+            .project_path = try self.allocator.dupe(u8, project_path),
+            .bindings = &.{},
+            .show_sweep = show_sweep,
+            .runner = self.worktree_inspect_runner,
+        };
+        errdefer self.allocator.free(request.project_path);
+        request.bindings = try self.allocator.alloc(WorktreeStatus.Binding, bindings.len);
+        errdefer self.allocator.free(request.bindings);
+        var initialized: usize = 0;
+        errdefer for (request.bindings[0..initialized]) |binding| self.allocator.free(binding.path);
+        for (bindings, 0..) |binding, index| {
+            request.bindings[index] = .{ .path = try self.allocator.dupe(u8, binding.path) };
+            initialized += 1;
+        }
+        return request;
+    }
+
+    fn queueWorktreeInspection(
+        self: *App,
+        project_path: []const u8,
+        bindings: []const WorktreeStatus.Binding,
+        show_sweep: bool,
+    ) !void {
+        self.worktree_inspection_generation += 1;
+        self.worktree_inspection_cancellation.store(self.worktree_inspection_generation, .release);
+        const request = try self.createWorktreeInspectionRequest(
+            self.worktree_inspection_generation,
+            project_path,
+            bindings,
+            show_sweep,
+        );
+        if (self.worktree_inspection_pending) |pending| pending.deinit(self.allocator);
+        self.worktree_inspection_pending = request;
+        if (self.worktree_loading_path.len != 0) self.allocator.free(self.worktree_loading_path);
+        self.worktree_loading_path = try self.allocator.dupe(u8, project_path);
         self.worktree_inspection_attempt_count += 1;
-        var inspection = WorktreeStatus.inspect(self.allocator, path, bindings.items) catch |err| {
-            self.recordWorktreeInspectionFailure(path, err);
+        self.setStatus("Reading worktrees...");
+        self.launchPendingWorktreeInspection();
+    }
+
+    fn launchPendingWorktreeInspection(self: *App) void {
+        if (self.worktree_inspection_thread != null) return;
+        const request = self.worktree_inspection_pending orelse return;
+        self.worktree_inspection_pending = null;
+        self.worktree_inspection_done = false;
+        self.worktree_inspection_thread = std.Thread.spawn(
+            .{},
+            worktreeInspectionWorker,
+            .{ self, request },
+        ) catch {
+            request.deinit(self.allocator);
+            self.worktree_inspection_done = true;
+            self.setStatus("Worktree inspection could not start");
             return;
         };
-        self.acceptWorktreeInspection(inspection, WorktreeStatus.loadPolicyOutcome(self.allocator, path)) catch |err| {
-            WorktreeStatus.deinitInspection(self.allocator, &inspection);
-            self.recordWorktreeInspectionFailure(path, err);
+    }
+
+    fn worktreeInspectionWorker(self: *App, request: *WorktreeInspectionRequest) void {
+        var result = WorktreeInspectionResult{
+            .generation = request.generation,
+            .project_path = request.project_path,
+            .show_sweep = request.show_sweep,
+            .outcome = undefined,
+        };
+        request.project_path = &.{};
+        result.outcome = if (request.runner(
+            self.allocator,
+            result.project_path,
+            request.bindings,
+            .{
+                .generation = &self.worktree_inspection_cancellation,
+                .expected = request.generation,
+            },
+        )) |inspection|
+            .{ .inspected = .{
+                .inspection = inspection,
+                .policy = WorktreeStatus.loadPolicyOutcome(self.allocator, result.project_path),
+            } }
+        else |err|
+            .{ .failed = err };
+        request.deinit(self.allocator);
+        self.worktree_inspection_lock.lock();
+        if (self.worktree_inspection_result) |*old| old.deinit(self.allocator);
+        self.worktree_inspection_result = result;
+        self.worktree_inspection_done = true;
+        self.worktree_inspection_lock.unlock();
+    }
+
+    fn finishWorktreeInspection(self: *App) void {
+        self.worktree_inspection_lock.lock();
+        const done = self.worktree_inspection_done;
+        self.worktree_inspection_lock.unlock();
+        if (!done) return;
+        if (self.worktree_inspection_thread) |thread| thread.join();
+        self.worktree_inspection_thread = null;
+        self.worktree_inspection_lock.lock();
+        var result = self.worktree_inspection_result;
+        self.worktree_inspection_result = null;
+        self.worktree_inspection_done = false;
+        self.worktree_inspection_lock.unlock();
+        if (result) |*completed| {
+            defer completed.deinit(self.allocator);
+            if (completed.generation == self.worktree_inspection_generation) {
+                self.applyWorktreeInspectionResult(completed);
+            }
+        }
+        if (self.worktree_inspection_pending == null and self.worktree_loading_path.len != 0) {
+            self.allocator.free(self.worktree_loading_path);
+            self.worktree_loading_path = &.{};
+        }
+        self.launchPendingWorktreeInspection();
+    }
+
+    fn applyWorktreeInspectionResult(self: *App, result: *WorktreeInspectionResult) void {
+        const current = self.model.currentGraph() orelse return;
+        if (!std.mem.eql(u8, current.project.path, result.project_path)) return;
+        switch (result.outcome) {
+            .failed => |err| {
+                self.recordWorktreeInspectionFailure(result.project_path, err);
+                return;
+            },
+            .inspected => |*value| {
+                self.acceptWorktreeInspection(value.inspection, value.policy) catch |err| {
+                    self.recordWorktreeInspectionFailure(result.project_path, err);
+                    return;
+                };
+                value.inspection.entries = std.array_list.Managed(WorktreeStatus.Entry).init(self.allocator);
+                value.inspection.default_branch = &.{};
+                value.inspection.project_path = &.{};
+            },
+        }
+        const record = self.model.graphFor(result.project_path) orelse {
+            self.setStatus("Worktree inspection project closed before results arrived");
             return;
         };
-        const record = self.model.graphFor(path).?.worktree_notice.?;
+        const notice = record.worktree_notice orelse {
+            self.setStatus("Worktree inspection result could not be published");
+            return;
+        };
         self.clampSidebarScroll();
-        const summary = record.observation.?.summary;
-        const message = if (record.policy.value() == null or !record.observation.?.size.complete)
-            WorktreeStatus.NoticePresentation.fromRecord(record).?.label(self.allocator) catch {
+        const summary = notice.observation.?.summary;
+        const message = if (notice.policy.value() == null or !notice.observation.?.size.complete)
+            WorktreeStatus.NoticePresentation.fromRecord(notice).?.label(self.allocator) catch {
                 self.setStatus("Worktree inspection has unavailable size or policy");
                 return;
             }
@@ -4301,12 +4563,12 @@ pub const App = struct {
                 return;
             };
         self.replaceStatus(message);
-        if (show_sweep and !envFlag("GRAPHCODE_UIA_GATE")) {
+        if (result.show_sweep and !envFlag("GRAPHCODE_UIA_GATE")) {
             const selected = self.model.currentGraph() orelse {
                 self.setStatus("Worktree inspection project closed before review");
                 return;
             };
-            if (!std.mem.eql(u8, selected.project.path, path)) {
+            if (!std.mem.eql(u8, selected.project.path, result.project_path)) {
                 self.setStatus("Worktree inspection project changed before review");
                 return;
             }
@@ -4314,8 +4576,166 @@ pub const App = struct {
         }
     }
 
+    fn drainWorktreeInspection(self: *App) void {
+        self.worktree_inspection_generation += 1;
+        self.worktree_inspection_cancellation.store(self.worktree_inspection_generation, .release);
+        if (self.worktree_inspection_pending) |pending| {
+            pending.deinit(self.allocator);
+            self.worktree_inspection_pending = null;
+        }
+        if (self.worktree_inspection_thread) |thread| {
+            thread.join();
+            self.worktree_inspection_thread = null;
+        }
+        self.worktree_inspection_lock.lock();
+        if (self.worktree_inspection_result) |*result| result.deinit(self.allocator);
+        self.worktree_inspection_result = null;
+        self.worktree_inspection_done = false;
+        self.worktree_inspection_lock.unlock();
+        if (self.worktree_loading_path.len != 0) {
+            self.allocator.free(self.worktree_loading_path);
+            self.worktree_loading_path = &.{};
+        }
+    }
+
+    fn queueWorktreeReclaim(
+        self: *App,
+        project_path: []const u8,
+        selected: []const []const u8,
+        bindings: []const WorktreeStatus.Binding,
+        policy: WorktreeStatus.Policy,
+        confirmed: bool,
+        allow_forced: bool,
+        kind: WorktreeReclaimKind,
+    ) !void {
+        if (self.worktree_reclaim_thread != null) return error.WorktreeReclaimInProgress;
+        self.worktree_reclaim_generation += 1;
+        self.worktree_reclaim_cancellation.store(self.worktree_reclaim_generation, .release);
+        const request = try self.allocator.create(WorktreeReclaimRequest);
+        errdefer self.allocator.destroy(request);
+        request.* = .{
+            .generation = self.worktree_reclaim_generation,
+            .project_path = try self.allocator.dupe(u8, project_path),
+            .selected = &.{},
+            .bindings = &.{},
+            .policy = policy,
+            .confirmed = confirmed,
+            .allow_forced = allow_forced,
+            .kind = kind,
+            .runner = self.worktree_reclaim_runner,
+        };
+        errdefer self.allocator.free(request.project_path);
+        request.selected = try self.allocator.alloc([]const u8, selected.len);
+        errdefer self.allocator.free(request.selected);
+        var selected_initialized: usize = 0;
+        errdefer for (request.selected[0..selected_initialized]) |path| self.allocator.free(path);
+        for (selected, 0..) |path, index| {
+            request.selected[index] = try self.allocator.dupe(u8, path);
+            selected_initialized += 1;
+        }
+        request.bindings = try self.allocator.alloc(WorktreeStatus.Binding, bindings.len);
+        errdefer self.allocator.free(request.bindings);
+        var bindings_initialized: usize = 0;
+        errdefer for (request.bindings[0..bindings_initialized]) |binding| self.allocator.free(binding.path);
+        for (bindings, 0..) |binding, index| {
+            request.bindings[index] = .{ .path = try self.allocator.dupe(u8, binding.path) };
+            bindings_initialized += 1;
+        }
+        self.worktree_reclaim_done = false;
+        self.worktree_reclaim_thread = std.Thread.spawn(
+            .{},
+            worktreeReclaimWorker,
+            .{ self, request },
+        ) catch |err| {
+            request.deinit(self.allocator);
+            return err;
+        };
+        self.reclaim_confirmation_armed = false;
+        self.setStatus("Removing worktrees...");
+    }
+
+    fn worktreeReclaimWorker(self: *App, request: *WorktreeReclaimRequest) void {
+        const project_path = request.project_path;
+        request.project_path = &.{};
+        const outcome = request.runner(
+            self.allocator,
+            project_path,
+            request.selected,
+            request.bindings,
+            request.policy,
+            request.confirmed,
+            request.allow_forced,
+            .{
+                .generation = &self.worktree_reclaim_cancellation,
+                .expected = request.generation,
+            },
+        );
+        const kind = request.kind;
+        request.deinit(self.allocator);
+        self.worktree_reclaim_lock.lock();
+        if (self.worktree_reclaim_result) |*old| old.deinit(self.allocator);
+        self.worktree_reclaim_result = .{
+            .project_path = project_path,
+            .kind = kind,
+            .outcome = outcome,
+        };
+        self.worktree_reclaim_done = true;
+        self.worktree_reclaim_lock.unlock();
+    }
+
+    fn finishWorktreeReclaim(self: *App) void {
+        self.worktree_reclaim_lock.lock();
+        const done = self.worktree_reclaim_done;
+        self.worktree_reclaim_lock.unlock();
+        if (!done) return;
+        if (self.worktree_reclaim_thread) |thread| thread.join();
+        self.worktree_reclaim_thread = null;
+        self.worktree_reclaim_lock.lock();
+        var result = self.worktree_reclaim_result;
+        self.worktree_reclaim_result = null;
+        self.worktree_reclaim_done = false;
+        self.worktree_reclaim_lock.unlock();
+        if (result) |*completed| {
+            defer completed.deinit(self.allocator);
+            const removed = completed.outcome catch |err| {
+                self.setStatus(switch (err) {
+                    error.GitFailed => "Git refused to remove a selected worktree",
+                    error.PolicyDisabled => "Reclaim disabled by project worktree policy",
+                    error.ConfirmationRequired => "Reclaim confirmation required",
+                    error.UnsafeSelection => "Reclaim blocked: selected worktree is unsafe",
+                    else => "Worktree removal failed",
+                });
+                return;
+            };
+            const message = switch (completed.kind) {
+                .sweep => std.fmt.allocPrint(self.allocator, "Worktree Sweep removed {d} worktrees", .{removed}),
+                .selected => std.fmt.allocPrint(self.allocator, "Reclaimed {d} selected worktrees", .{removed}),
+                .offer => self.allocator.dupe(u8, "Resolved worktree reclaimed"),
+            } catch {
+                self.setStatus("Worktree removal complete");
+                return;
+            };
+            self.replaceStatus(message);
+            const current = self.currentProject() orelse return;
+            if (std.mem.eql(u8, current, completed.project_path)) self.inspectWorktreesImpl(false);
+        }
+    }
+
+    fn drainWorktreeReclaim(self: *App) void {
+        self.worktree_reclaim_generation += 1;
+        self.worktree_reclaim_cancellation.store(self.worktree_reclaim_generation, .release);
+        if (self.worktree_reclaim_thread) |thread| {
+            thread.join();
+            self.worktree_reclaim_thread = null;
+        }
+        self.worktree_reclaim_lock.lock();
+        if (self.worktree_reclaim_result) |*result| result.deinit(self.allocator);
+        self.worktree_reclaim_result = null;
+        self.worktree_reclaim_done = false;
+        self.worktree_reclaim_lock.unlock();
+    }
+
     fn presentWorktreeSweep(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         const graph = self.model.graph orelse return;
         const inspection = self.worktree_inspection orelse return;
         const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
@@ -4371,28 +4791,18 @@ pub const App = struct {
         var explicit_policy = WorktreeStatus.Policy{};
         explicit_policy.applyResolveAction(.remove);
         self.model.invalidateWorktreeNotices(.worktrees_changed);
-        const removed = WorktreeStatus.reclaimSelectedWithPolicyMode(
-            self.allocator,
+        self.queueWorktreeReclaim(
             project_path,
             selected.items,
             bindings.items,
             explicit_policy,
             result.destructive_confirmed,
             result.destructive_confirmed,
+            .sweep,
         ) catch |err| {
-            self.setStatus(switch (err) {
-                error.UnsafeSelection => "Worktree Sweep blocked an unsafe selection",
-                error.GitFailed => "Worktree Sweep failed: git refused removal",
-                else => "Worktree Sweep failed",
-            });
+            self.reportWorktreeError("Worktree Sweep could not start", err);
             return;
         };
-        const message = std.fmt.allocPrint(self.allocator, "Worktree Sweep removed {d} worktrees", .{removed}) catch {
-            self.setStatus("Worktree Sweep complete");
-            return;
-        };
-        self.replaceStatus(message);
-        self.inspectWorktreesImpl(false);
     }
 
     fn installUiaFixture(self: *App, reset_sidebar: bool) bool {
@@ -4435,10 +4845,7 @@ pub const App = struct {
             defer self.allocator.free(message);
             self.setIngressError(message);
         } else |_| {}
-        self.setStatus(if (self.worktrees_deferred)
-            worktrees_deferred_message
-        else
-            "UIA fixture inspection ready");
+        self.setStatus("UIA fixture inspection ready");
         return true;
     }
 
@@ -4457,7 +4864,6 @@ pub const App = struct {
         self.uia_fixture_model_arena = data.model_arena;
         self.worktree_inspection = data.inspection;
         self.worktree_dialog = data.dialog;
-        if (self.worktrees_deferred) self.clearDeferredWorktreeState();
         if (self.uia_fixture_project_path.len != 0) self.allocator.free(self.uia_fixture_project_path);
         self.uia_fixture_project_path = captured;
         if (self.selected_worktree_path.len != 0) self.allocator.free(self.selected_worktree_path);
@@ -4533,13 +4939,22 @@ pub const App = struct {
     /// that is enabled can always make progress instead of only reporting
     /// "select a row first".
     fn worktreeRowSelected(self: *const App) bool {
+        const project = self.currentProject() orelse return false;
+        const inspection = self.worktree_inspection orelse return false;
+        if (!std.mem.eql(u8, inspection.project_path, project)) return false;
         if (self.selected_worktree_path.len != 0) return true;
-        if (self.worktree_dialog) |dialog| return dialog.selectedCount() != 0;
+        if (self.worktree_dialog) |dialog| {
+            if (!std.mem.eql(u8, dialog.project_path, project)) return false;
+            return dialog.selectedCount() != 0;
+        }
         return false;
     }
 
+    fn worktreeProviderBusy(self: *const App) bool {
+        return self.worktree_inspection_thread != null or self.worktree_reclaim_thread != null;
+    }
+
     fn reclaimWorktrees(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         const current_graph = self.model.graph orelse {
             self.setStatus("Worktrees require a local filesystem project");
             return;
@@ -4588,39 +5003,22 @@ pub const App = struct {
             if (bound.worktree_path.len != 0) bindings.append(.{ .path = bound.worktree_path }) catch {};
         };
         self.model.invalidateWorktreeNotices(.worktrees_changed);
-        const removed = WorktreeStatus.reclaimSelectedWithPolicy(
-            self.allocator,
+        self.queueWorktreeReclaim(
             path,
             selected_list.items,
             bindings.items,
             policy,
             true,
+            false,
+            .selected,
         ) catch |err| {
             self.reclaim_confirmation_armed = false;
-            self.setStatus(switch (err) {
-                error.GitFailed => "Reclaim failed: git refused a selected worktree",
-                error.PolicyDisabled => "Reclaim disabled by project worktree policy",
-                error.ConfirmationRequired => "Reclaim confirmation required",
-                error.UnsafeSelection => "Reclaim blocked: selected worktree is unsafe",
-                else => "Reclaim failed",
-            });
+            self.reportWorktreeError("Reclaim could not start", err);
             return;
         };
-        self.reclaim_confirmation_armed = false;
-        const message = std.fmt.allocPrint(
-            self.allocator,
-            "Reclaimed {d} selected worktrees",
-            .{removed},
-        ) catch {
-            self.setStatus("Reclaim complete");
-            return;
-        };
-        self.replaceStatus(message);
-        self.inspectWorktreesImpl(false);
     }
 
     pub fn selectWorktreeRow(self: *App, path: []const u8) bool {
-        if (self.guardWorktreesPreview()) return false;
         const inspection = self.worktree_inspection orelse return false;
         if (!envFlag("GRAPHCODE_UIA_GATE")) {
             if (self.currentProject()) |project| {
@@ -4649,7 +5047,6 @@ pub const App = struct {
     }
 
     pub fn toggleWorktreeRow(self: *App, index: usize) bool {
-        if (self.guardWorktreesPreview()) return false;
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         if (index >= dialog.rows.items.len or
             WorktreeStatus.decision(dialog.rows.items[index].entry) != .reclaimable) return false;
@@ -4669,7 +5066,6 @@ pub const App = struct {
     }
 
     fn applyUiaWorktreeSelection(self: *App, payload: usize, operation: usize) bool {
-        if (self.guardWorktreesPreview()) return false;
         const dialog = if (self.worktree_dialog) |*value| value else return false;
         var target: ?usize = null;
         for (dialog.rows.items, 0..) |row, index| {
@@ -4947,7 +5343,6 @@ pub const App = struct {
     }
 
     fn editWorktreePolicy(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         const selected_path = self.currentProject() orelse {
             self.setStatus("Open a project before changing project settings");
             return;
@@ -4994,7 +5389,6 @@ pub const App = struct {
     }
 
     fn saveCurrentWorktreePolicy(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         const dialog = self.worktree_dialog orelse {
             self.setStatus("Inspect worktrees before saving policy");
             return;
@@ -5006,7 +5400,6 @@ pub const App = struct {
     }
 
     fn toggleAllowReclaim(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         if (self.worktree_dialog) |*dialog| {
             var policy = dialog.policy;
             policy.allow_reclaim = !policy.allow_reclaim;
@@ -5016,7 +5409,6 @@ pub const App = struct {
     }
 
     fn toggleConfirmReclaim(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         if (self.worktree_dialog) |*dialog| {
             var policy = dialog.policy;
             policy.confirm_each_reclaim = !policy.confirm_each_reclaim;
@@ -5026,7 +5418,6 @@ pub const App = struct {
     }
 
     fn revealSelectedWorktree(self: *App) void {
-        if (self.guardWorktreesPreview()) return;
         const dialog = self.worktree_dialog orelse {
             self.setStatus("Inspect worktrees before revealing a row");
             return;
@@ -5064,7 +5455,6 @@ pub const App = struct {
     }
 
     fn keepWorktreeOffer(self: *App, path: []const u8) void {
-        if (self.guardWorktreesPreview()) return;
         for (self.kept_worktree_paths.items) |kept| if (std.mem.eql(u8, kept, path)) return;
         const copy = self.allocator.dupe(u8, path) catch {
             self.setStatus("Unable to keep the worktree offer");
@@ -5079,7 +5469,6 @@ pub const App = struct {
     }
 
     fn reclaimWorktreeOffer(self: *App, path: []const u8) void {
-        if (self.guardWorktreesPreview()) return;
         const graph = self.model.graph orelse return;
         if (!graph.project.isLocalFilesystem()) return;
         const inspection = self.worktree_inspection orelse return;
@@ -5103,27 +5492,21 @@ pub const App = struct {
         }
         const selected = [_][]const u8{path};
         self.model.invalidateWorktreeNotices(.worktrees_changed);
-        _ = WorktreeStatus.reclaimSelectedWithPolicy(
-            self.allocator,
+        self.queueWorktreeReclaim(
             graph.project.path,
             &selected,
             bindings.items,
             .{ .allow_reclaim = true, .confirm_each_reclaim = false },
             true,
+            false,
+            .offer,
         ) catch |err| {
-            self.setStatus(switch (err) {
-                error.UnsafeSelection => "This worktree is no longer safe to reclaim",
-                error.GitFailed => "Git refused to remove the worktree",
-                else => "Unable to reclaim the worktree",
-            });
+            self.reportWorktreeError("Unable to start worktree reclaim", err);
             return;
         };
-        self.setStatus("Resolved worktree reclaimed");
-        self.inspectWorktrees();
     }
 
     fn moveWorktreeSelection(self: *App, delta: i32) void {
-        if (self.guardWorktreesPreview()) return;
         const inspection = self.worktree_inspection orelse return;
         if (inspection.entries.items.len == 0) return;
         var index: usize = 0;
@@ -5637,7 +6020,7 @@ pub const App = struct {
         } else false;
         MainWindow.updateMenu(self.window.hwnd, .{
             .has_project = self.model.graph != null,
-            .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
+            .can_worktrees = if (self.model.graph) |graph| graph.project.isLocalFilesystem() and !self.worktreeProviderBusy() else false,
             .worktree_dialog_open = self.worktree_dialog != null,
             .worktree_row_selected = self.worktreeRowSelected(),
             .has_jump_target = has_jump_target,
@@ -6095,6 +6478,20 @@ pub const App = struct {
                 .bottom = bounds.bottom,
             }) catch return;
         }
+        if (self.worktree_loading_path.len != 0) {
+            self.appendAccessibilityElement(
+                &elements,
+                &owned_identities,
+                "worktree-loading",
+                "inspection",
+                "Reading worktrees...",
+                4,
+                .{ .logical = GraphCanvas.worktreeActivityBounds(canvas_rect) },
+                false,
+                false,
+            ) catch return;
+            elements.items[elements.items.len - 1].invokable = false;
+        }
         switch (self.surface) {
             .project, .workspace => if (self.model.graph) |graph| {
                 if (self.model.open_composite_id) |parent_id| {
@@ -6260,7 +6657,12 @@ pub const App = struct {
             }
         }
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
-        provider.syncElements(self.status(), elements.items, policy);
+        provider.syncElements(self.status(), elements.items, policy, .{
+            .available = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
+            .dialog_open = self.worktree_dialog != null,
+            .row_selected = self.worktreeRowSelected(),
+            .busy = self.worktree_inspection_thread != null or self.worktree_reclaim_thread != null,
+        });
     }
 
     fn appendAccessibilityElement(
@@ -7386,7 +7788,7 @@ fn onWindowMessage(
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
+            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), if (app.worktree_loading_path.len != 0) "Reading worktrees..." else "", app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
@@ -7512,6 +7914,8 @@ fn onWindowMessage(
                 app.tray.add(hwnd) catch app.setStatus("System tray unavailable; retrying");
             }
             app.finishUpdateCheck();
+            app.finishWorktreeInspection();
+            app.finishWorktreeReclaim();
             if (app.clone_operation) |operation| {
                 var progress: [256]u8 = undefined;
                 var recent_stderr: [256]u8 = undefined;
@@ -8127,7 +8531,7 @@ fn onWindowMessage(
                         _ = c.ClientToScreen(hwnd, &screen);
                         GraphContextMenu.show(
                             hwnd,
-                            .{ .project = .{ .path = path, .remote = remote } },
+                            .{ .project = .{ .path = path, .remote = remote, .worktrees_available = !app.worktreeProviderBusy() } },
                             screen.x,
                             screen.y,
                             app,
@@ -9669,7 +10073,7 @@ const DpiAccessibilitySink = struct {
         self.canvas = bounds;
     }
 
-    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
         self.checked = true;
         self.checkElements(elements) catch |err| {
             self.failure = err;
@@ -9721,7 +10125,7 @@ test "Show in Graph shared action publishes project UIA after native effects com
             app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
         }
         fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
-        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
             updates += 1;
             workspace_chrome = 0;
             selected_card = false;
@@ -9799,7 +10203,7 @@ test "graphChanged republishes renamed project card and sidebar accessibility na
 
         fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
 
-        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
             updates += 1;
             for (elements) |element| {
                 if (std.mem.eql(u8, element.identity, "project-card:A:loop")) card_name = element.name;
@@ -10146,7 +10550,7 @@ const GraphPublicationTest = struct {
         sink.syncCanvasBounds(bounds);
     }
 
-    fn syncElements(_: []const u8, elements: []const Accessibility.DynamicElement, policy: WorktreeStatus.Policy) void {
+    fn syncElements(_: []const u8, elements: []const Accessibility.DynamicElement, policy: WorktreeStatus.Policy, capabilities: Accessibility.WorktreeCapabilities) void {
         loop_bars = 0;
         toolbars = 0;
         selected_beta_projects = 0;
@@ -10158,7 +10562,7 @@ const GraphPublicationTest = struct {
             if ((std.mem.eql(u8, element.identity, "project-card:B:loop") or
                 std.mem.eql(u8, element.identity, "overview-card:B:loop")) and element.selected) selected_beta_cards += 1;
         }
-        sink.syncElements("", elements, policy);
+        sink.syncElements("", elements, policy, capabilities);
     }
 
     fn receive(app: *App, path: []const u8, title_text: []const u8) !void {
@@ -11264,7 +11668,7 @@ const OverviewAccessibilitySink = struct {
 
     fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
 
-    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy) void {
+    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
         self.checked = true;
         self.check(elements) catch |err| {
             self.failure = err;
@@ -11334,6 +11738,8 @@ fn overviewTestApp(dpi: u32) !App {
 }
 
 fn deinitOverviewTestApp(app: *App) void {
+    app.drainWorktreeInspection();
+    app.drainWorktreeReclaim();
     if (app.worktree_dialog) |*dialog| dialog.deinit();
     if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
     app.allocator.free(app.selected_node_id);
@@ -11446,6 +11852,14 @@ fn applyOverviewTestLaneAction(app: *App, x: i32, y: i32, expected: OverviewTest
     try std.testing.expectEqual(foreground, c.GetForegroundWindow());
     try std.testing.expectEqual(focus, c.GetFocus());
     try std.testing.expectEqual(capture, c.GetCapture());
+    if (expected.action == .inspect_worktrees) {
+        const deadline = std.time.milliTimestamp() + 30000;
+        while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < deadline) {
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            app.finishWorktreeInspection();
+        }
+        if (app.worktree_inspection_thread != null) return error.WorktreeInspectionTimeout;
+    }
 }
 
 test "cross-project overview Open actions select exact projects and emit DPI scoped cards" {
@@ -12995,7 +13409,6 @@ test "worktree choices for node form degrade honestly when there is no inspectio
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
     defer app.kept_worktree_paths.deinit();
-
     // No worktree inspection has run (e.g. creating a node for graphcode://global):
     // the picker must see an explicit empty list, never a fabricated entry.
     var snapshot = try app.worktreeChoicesForNodeForm(allocator, "graphcode://global");
@@ -13237,7 +13650,7 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
         .allocator = allocator,
         .client = undefined,
         .daemon = undefined,
-        .model = undefined,
+        .model = GraphModel.Model.init(allocator),
         .sidebar_state = Sidebar.State.init(allocator),
         .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
@@ -13245,6 +13658,16 @@ test "worktree row selected reflects sidebar and dialog selection honestly" {
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
     defer app.kept_worktree_paths.deinit();
+    defer app.model.deinit();
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\repo","name":"Repo"},"nodes":[],"edges":[]}}}
+    );
+    app.worktree_inspection = .{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "C:\\repo"),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
 
     // Neither the sidebar shortcut nor a dialog has a selection.
     try std.testing.expect(!app.worktreeRowSelected());
@@ -13555,19 +13978,58 @@ test "header UIA identities hash to distinct payloads" {
     }
 }
 
-test "preview Worktrees guard blocks production actions without inspection" {
+test "Worktrees inspection action does not block the UI thread on provider work" {
+    const SlowInspection = struct {
+        var calls = std.atomic.Value(usize).init(0);
+
+        fn run(
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            _ = calls.fetchAdd(1, .monotonic);
+            std.Thread.sleep(300 * std.time.ns_per_ms);
+            return error.OwnedFixtureInspectionFailed;
+        }
+    };
+    const LoadingAccessibility = struct {
+        found: bool = false,
+        non_invokable: bool = false,
+        visible_bounds: bool = false,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(
+            self: *@This(),
+            _: []const u8,
+            elements: []const Accessibility.DynamicElement,
+            _: WorktreeStatus.Policy,
+            _: Accessibility.WorktreeCapabilities,
+        ) void {
+            for (elements) |element| {
+                if (!std.mem.eql(u8, element.identity, "worktree-loading:inspection")) continue;
+                self.found = std.mem.eql(u8, element.name, "Reading worktrees...");
+                self.non_invokable = !element.invokable;
+                self.visible_bounds = element.right > element.left and element.bottom > element.top;
+            }
+        }
+    };
     const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
     var app: App = .{
         .allocator = allocator,
-        .client = undefined,
+        .client = client,
         .daemon = undefined,
         .model = GraphModel.Model.init(allocator),
-        .worktrees_deferred = true,
+        .worktree_inspect_runner = SlowInspection.run,
         .sidebar_state = Sidebar.State.init(allocator),
         .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
     defer {
+        app.drainWorktreeInspection();
         if (app.status_override.len != 0) allocator.free(app.status_override);
         app.model.deinit();
         app.sidebar_state.deinit();
@@ -13575,52 +14037,200 @@ test "preview Worktrees guard blocks production actions without inspection" {
         app.kept_worktree_paths.deinit();
     }
     _ = try app.model.updateFromFrame(
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\preview","name":"Preview"},"nodes":[],"edges":[]}}}
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\owned-worktree-fixture","name":"Owned fixture"},"nodes":[],"edges":[]}}}
     );
-    const entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator);
-    app.worktree_inspection = .{
-        .entries = entries,
-        .default_branch = try allocator.dupe(u8, "main"),
-        .project_path = try allocator.dupe(u8, "C:\\preview"),
+
+    var timer = try std.time.Timer.start();
+    app.inspectWorktrees();
+    const elapsed = timer.read();
+
+    try std.testing.expect(elapsed < 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), app.worktree_inspection_attempt_count);
+    try std.testing.expectEqualStrings("Reading worktrees...", app.status_override);
+    var accessibility = LoadingAccessibility{};
+    app.syncAccessibilityTo(&accessibility, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(accessibility.found);
+    try std.testing.expect(accessibility.non_invokable);
+    try std.testing.expect(accessibility.visible_bounds);
+
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < deadline) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expect(app.worktree_inspection_thread == null);
+    try std.testing.expectEqual(@as(usize, 1), SlowInspection.calls.load(.monotonic));
+    try std.testing.expect(std.mem.indexOf(u8, app.status_override, "OwnedFixtureInspectionFailed") != null);
+    try std.testing.expectEqual(@as(usize, 0), app.worktree_loading_path.len);
+}
+
+test "project switch cancels stale Worktrees UI application before the latest owner runs" {
+    const ReplacedInspection = struct {
+        var calls = std.atomic.Value(usize).init(0);
+
+        fn run(
+            _: std.mem.Allocator,
+            project_path: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            _ = calls.fetchAdd(1, .monotonic);
+            if (std.mem.endsWith(u8, project_path, "alpha")) {
+                std.Thread.sleep(200 * std.time.ns_per_ms);
+                return error.StaleAlphaInspection;
+            }
+            return error.CurrentBetaInspection;
+        }
     };
-    app.worktree_dialog = try WorktreeDialog.Dialog.init(
-        allocator,
-        "C:\\preview",
-        app.worktree_inspection.?.entries.items,
-        .{ .allow_reclaim = true },
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    var app: App = .{
+        .allocator = allocator,
+        .client = client,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .worktree_inspect_runner = ReplacedInspection.run,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer {
+        app.drainWorktreeInspection();
+        if (app.status_override.len != 0) allocator.free(app.status_override);
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"alpha","project":{"path":"C:\\owned\\alpha","name":"Alpha"},"nodes":[],"edges":[]}}}
     );
-    app.selected_worktree_path = try allocator.dupe(u8, "C:\\preview-worktree");
-    app.reclaim_confirmation_armed = true;
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"beta","project":{"path":"C:\\owned\\beta","name":"Beta"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(app.selectProject("C:\\owned\\alpha"));
+    app.inspectWorktrees();
+    try std.testing.expect(app.selectProject("C:\\owned\\beta"));
+
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < deadline) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expect(app.worktree_inspection_thread == null);
+    try std.testing.expect(app.worktree_inspection == null);
+    try std.testing.expectEqualStrings("Worktree inspection cancelled after project changed", app.status_override);
+    try std.testing.expect(std.mem.indexOf(u8, app.status_override, "StaleAlphaInspection") == null);
 
     app.inspectWorktrees();
-    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
-    try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
-    try std.testing.expect(app.worktree_inspection == null);
-    try std.testing.expect(app.worktree_dialog == null);
-    try std.testing.expectEqual(@as(usize, 0), app.selected_worktree_path.len);
-    try std.testing.expect(!app.reclaim_confirmation_armed);
+    while ((app.worktree_inspection_thread != null or app.worktree_inspection_pending != null) and
+        std.time.milliTimestamp() < deadline)
+    {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        app.finishWorktreeInspection();
+    }
+    try std.testing.expect(app.worktree_inspection_thread == null);
+    try std.testing.expect(app.worktree_inspection_pending == null);
+    try std.testing.expectEqual(@as(usize, 2), ReplacedInspection.calls.load(.monotonic));
+    try std.testing.expect(std.mem.indexOf(u8, app.status_override, "CurrentBetaInspection") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app.status_override, "StaleAlphaInspection") == null);
+}
 
-    app.inspectWorktreesImpl(false);
-    app.presentWorktreeSweep();
+test "Worktrees reclaim action returns before owned provider removal completes" {
+    const SlowReclaim = struct {
+        var calls = std.atomic.Value(usize).init(0);
+        var selected_count = std.atomic.Value(usize).init(0);
+
+        fn run(
+            _: std.mem.Allocator,
+            _: []const u8,
+            selected: []const []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: WorktreeStatus.Policy,
+            _: bool,
+            _: bool,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!usize {
+            selected_count.store(selected.len, .monotonic);
+            _ = calls.fetchAdd(1, .monotonic);
+            std.Thread.sleep(300 * std.time.ns_per_ms);
+            return selected.len;
+        }
+    };
+    const ImmediateInspectionFailure = struct {
+        fn run(
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const WorktreeStatus.Binding,
+            _: ?WorktreeStatus.Cancellation,
+        ) anyerror!WorktreeStatus.Inspection {
+            return error.OwnedFixtureRefreshStopped;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const project_path = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(project_path);
+    try WorktreeStatus.savePolicy(
+        allocator,
+        project_path,
+        .{ .allow_reclaim = true, .confirm_each_reclaim = false },
+    );
+    const quoted_path = try std.json.Stringify.valueAlloc(allocator, project_path, .{});
+    defer allocator.free(quoted_path);
+    const frame = try std.fmt.allocPrint(
+        allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{s},\"name\":\"Owned fixture\"}},\"nodes\":[],\"edges\":[]}}}}}}",
+        .{quoted_path},
+    );
+    defer allocator.free(frame);
+    var app: App = .{
+        .allocator = allocator,
+        .client = undefined,
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .worktree_inspect_runner = ImmediateInspectionFailure.run,
+        .worktree_reclaim_runner = SlowReclaim.run,
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer {
+        app.drainWorktreeInspection();
+        app.drainWorktreeReclaim();
+        if (app.status_override.len != 0) allocator.free(app.status_override);
+        if (app.selected_worktree_path.len != 0) allocator.free(app.selected_worktree_path);
+        app.model.deinit();
+        app.sidebar_state.deinit();
+        app.declared_entry_ids.deinit();
+        app.kept_worktree_paths.deinit();
+    }
+    _ = try app.model.updateFromFrame(frame);
+    app.worktree_inspection = .{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, project_path),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &app.worktree_inspection.?);
+    app.selected_worktree_path = try allocator.dupe(u8, "C:\\owned-worktree-fixture\\linked");
+
+    var timer = try std.time.Timer.start();
     app.reclaimWorktrees();
-    app.reclaimWorktreeOffer("C:\\preview-worktree");
-    app.keepWorktreeOffer("C:\\preview-worktree");
-    app.editWorktreePolicy();
-    app.saveCurrentWorktreePolicy();
-    app.toggleAllowReclaim();
-    app.toggleConfirmReclaim();
-    app.revealSelectedWorktree();
-    app.moveWorktreeSelection(1);
-    try std.testing.expect(!app.selectWorktreeRow("C:\\preview-worktree"));
-    try std.testing.expect(!app.toggleWorktreeRow(0));
-    try std.testing.expect(!app.applyUiaWorktreeSelection(0, 0));
-    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
-    try std.testing.expectEqual(@as(usize, 0), app.worktree_inspection_attempt_count);
+    const elapsed = timer.read();
 
-    app.surface = .project;
-    app.openGlobalOverview();
-    try std.testing.expectEqual(GraphCanvas.Surface.overview, app.surface);
-    try std.testing.expectEqualStrings(worktrees_deferred_message, app.status_override);
+    try std.testing.expect(elapsed < 100 * std.time.ns_per_ms);
+    try std.testing.expectEqualStrings("Removing worktrees...", app.status_override);
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (app.worktree_reclaim_thread != null and std.time.milliTimestamp() < deadline) {
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+        app.finishWorktreeReclaim();
+    }
+    try std.testing.expect(app.worktree_reclaim_thread == null);
+    try std.testing.expectEqual(@as(usize, 1), SlowReclaim.calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), SlowReclaim.selected_count.load(.monotonic));
+    try std.testing.expectEqualStrings("Reading worktrees...", app.status_override);
 }
 
 fn runSmokeWorkspaceActions(self: *App) void {

@@ -18,9 +18,7 @@ pub fn main() !void {
         }
         if (std.mem.eql(u8, arg, "--worktrees-preview-state")) {
             var stdout = std.fs.File.stdout().writer(&.{});
-            try stdout.interface.print("{s}\n", .{
-                if (build_options.worktrees_deferred) "deferred" else "available",
-            });
+            try stdout.interface.print("available\n", .{});
             return;
         }
     }

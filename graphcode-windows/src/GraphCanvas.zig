@@ -566,6 +566,7 @@ pub fn paint(
     update_version: []const u8,
     ingress_error: []const u8,
     connection_failed: bool,
+    worktree_activity: []const u8,
     declared_entries: []const []const u8,
     kept_worktrees: []const []const u8,
     allocator: std.mem.Allocator,
@@ -633,6 +634,19 @@ pub fn paint(
         },
         .workspace => {},
     }
+    if (surface != .workspace and worktree_activity.len != 0) {
+        const activity = worktreeActivityBounds(graph_bounds);
+        fill(hdc, activity, 0x00352B1C);
+        drawTextRect(
+            hdc,
+            allocator,
+            worktree_activity,
+            rect(activity.left + 14, activity.top + 8, activity.right - 14, activity.bottom - 8),
+            11,
+            0x00FFCD7A,
+            c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS,
+        );
+    }
     const alert_text = if (ingress_error.len != 0)
         ingress_error
     else if (connection_failed)
@@ -652,6 +666,7 @@ pub fn paint(
             c.DT_LEFT | c.DT_VCENTER | c.DT_WORDBREAK,
         );
     }
+
     if (surface != .workspace) drawZoomControls(hdc, allocator, graph_bounds, state);
 
     _ = c.RestoreDC(hdc, saved);
@@ -665,6 +680,10 @@ pub fn paint(
             rect(0, client.bottom - workspace_height - Tokens.activity_strip_height, client.right, client.bottom - workspace_height),
         );
     }
+}
+
+pub fn worktreeActivityBounds(bounds: c.RECT) c.RECT {
+    return rect(bounds.left + 24, bounds.top + 24, @min(bounds.right - 24, bounds.left + 420), bounds.top + 64);
 }
 
 pub fn inlineAlertBounds(bounds: c.RECT) c.RECT {

@@ -431,6 +431,23 @@ pub const Binding = struct {
     path: []const u8,
 };
 
+pub const Cancellation = struct {
+    generation: *const std.atomic.Value(u64),
+    expected: u64,
+
+    pub fn cancelled(self: Cancellation) bool {
+        return self.generation.load(.acquire) != self.expected;
+    }
+
+    pub fn check(self: ?Cancellation) !void {
+        if (self) |value| if (value.cancelled()) return error.Cancelled;
+    }
+};
+
+fn checkCancellation(cancellation: ?Cancellation) !void {
+    if (cancellation) |value| try value.check();
+}
+
 pub const ReclaimDecision = enum { reclaimable, keep };
 
 pub fn decision(entry: Entry) ReclaimDecision {
@@ -503,20 +520,31 @@ pub fn inspect(
     project_path: []const u8,
     bindings: []const Binding,
 ) !Inspection {
+    return inspectWithCancel(allocator, project_path, bindings, null);
+}
+
+pub fn inspectWithCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    bindings: []const Binding,
+    cancellation: ?Cancellation,
+) !Inspection {
     if (project_path.len == 0) return error.EmptyProjectPath;
-    const list = try runGit(allocator, &.{
+    try checkCancellation(cancellation);
+    const list = try runGitWithCancel(allocator, &.{
         "git", "-C", project_path, "worktree", "list", "--porcelain",
-    });
+    }, cancellation);
     defer allocator.free(list.output);
     var entries = try parse(allocator, list.output);
     errdefer deinit(allocator, &entries);
-    const default_branch = try discoverDefault(allocator, project_path, entries.items);
+    const default_branch = try discoverDefaultWithCancel(allocator, project_path, entries.items, cancellation);
     errdefer allocator.free(default_branch);
     for (entries.items, 0..) |*entry, index| {
+        try checkCancellation(cancellation);
         entry.primary = index == 0;
         entry.opened_checkout = try sameWindowsPath(allocator, project_path, entry.path);
         if (!entry.opened_checkout and !entry.prunable) {
-            entry.setSize(directorySizeResult(directorySize(entry.path)));
+            entry.setSize(directorySizeResult(directorySizeWithCancel(entry.path, cancellation)));
         }
         for (bindings) |binding| {
             if (std.mem.eql(u8, entry.path, binding.path)) {
@@ -525,9 +553,9 @@ pub fn inspect(
             }
         }
         if (entry.primary or entry.prunable) continue;
-        const status = try runGit(allocator, &.{
+        const status = try runGitWithCancel(allocator, &.{
             "git", "-C", entry.path, "status", "--porcelain=v1", "--untracked-files=all",
-        });
+        }, cancellation);
         defer allocator.free(status.output);
         var lines = std.mem.splitScalar(u8, status.output, '\n');
         while (lines.next()) |raw| {
@@ -539,14 +567,16 @@ pub fn inspect(
                 (line[0] == 'A' and line[1] == 'A') or
                 (line[0] == 'D' and line[1] == 'D')) entry.conflicted = true;
         }
-        entry.pushed = succeedsGit(allocator, &.{
+        entry.pushed = succeedsGitWithCancel(allocator, &.{
             "git", "-C", entry.path, "rev-parse", "--verify", "@{u}",
-        }) and zeroCommitsAhead(allocator, entry.path);
-        entry.landed = succeedsGit(allocator, &.{
+        }, cancellation) and zeroCommitsAheadWithCancel(allocator, entry.path, cancellation);
+        entry.landed = succeedsGitWithCancel(allocator, &.{
             "git",        "-C",           project_path, "merge-base", "--is-ancestor",
             entry.branch, default_branch,
-        });
+        }, cancellation);
+        try checkCancellation(cancellation);
     }
+    try checkCancellation(cancellation);
     return .{
         .entries = entries,
         .default_branch = default_branch,
@@ -584,6 +614,10 @@ fn sameWindowsPath(allocator: std.mem.Allocator, left: []const u8, right: []cons
 }
 
 fn directorySize(path: []const u8) !SizeCoverage {
+    return directorySizeWithCancel(path, null);
+}
+
+fn directorySizeWithCancel(path: []const u8, cancellation: ?Cancellation) !SizeCoverage {
     var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
     defer dir.close();
     var walker = try dir.walk(std.heap.page_allocator);
@@ -593,6 +627,7 @@ fn directorySize(path: []const u8) !SizeCoverage {
         total.recordFailure(err);
         return total;
     }) |item| {
+        try checkCancellation(cancellation);
         if (item.kind != .file) continue;
         const file = item.dir.openFile(item.basename, .{}) catch |err| {
             total.recordFile(err);
@@ -653,19 +688,43 @@ pub fn reclaimSelectedWithPolicyMode(
     confirmed: bool,
     allow_forced: bool,
 ) !usize {
+    return reclaimSelectedWithPolicyModeCancel(
+        allocator,
+        project_path,
+        selected,
+        bindings,
+        policy,
+        confirmed,
+        allow_forced,
+        null,
+    );
+}
+
+pub fn reclaimSelectedWithPolicyModeCancel(
+    allocator: std.mem.Allocator,
+    project_path: []const u8,
+    selected: []const []const u8,
+    bindings: []const Binding,
+    policy: Policy,
+    confirmed: bool,
+    allow_forced: bool,
+    cancellation: ?Cancellation,
+) !usize {
+    try checkCancellation(cancellation);
     if (!policy.allow_reclaim) return error.PolicyDisabled;
     if (policy.confirm_each_reclaim and !confirmed) return error.ConfirmationRequired;
     if (selected.len == 0) return error.UnsafeSelection;
-    var inspection = try inspect(allocator, project_path, bindings);
+    var inspection = try inspectWithCancel(allocator, project_path, bindings, cancellation);
     defer deinitInspection(allocator, &inspection);
     try validateSelectedMode(allocator, inspection.entries.items, selected, bindings, allow_forced);
     var removed: usize = 0;
     for (selected) |path| {
+        try checkCancellation(cancellation);
         const entry = selectedEntry(inspection.entries.items, path) orelse return error.UnsafeSelection;
         const result = if (allow_forced and discardsFiles(entry))
-            try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path })
+            try runGitWithCancel(allocator, &.{ "git", "-C", project_path, "worktree", "remove", "--force", path }, cancellation)
         else
-            try runGit(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path });
+            try runGitWithCancel(allocator, &.{ "git", "-C", project_path, "worktree", "remove", path }, cancellation);
         allocator.free(result.output);
         removed += 1;
     }
@@ -706,13 +765,33 @@ pub fn validateSelectedMode(
 const GitResult = struct { output: []u8 };
 
 fn succeedsGit(allocator: std.mem.Allocator, args: []const []const u8) bool {
-    const result = runGit(allocator, args) catch return false;
+    return succeedsGitWithCancel(allocator, args, null);
+}
+
+fn succeedsGitWithCancel(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    cancellation: ?Cancellation,
+) bool {
+    const result = runGitWithCancel(allocator, args, cancellation) catch return false;
     allocator.free(result.output);
     return true;
 }
 
 fn zeroCommitsAhead(allocator: std.mem.Allocator, path: []const u8) bool {
-    const result = runGit(allocator, &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" }) catch return false;
+    return zeroCommitsAheadWithCancel(allocator, path, null);
+}
+
+fn zeroCommitsAheadWithCancel(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    cancellation: ?Cancellation,
+) bool {
+    const result = runGitWithCancel(
+        allocator,
+        &.{ "git", "-C", path, "rev-list", "--count", "@{upstream}..HEAD" },
+        cancellation,
+    ) catch return false;
     defer allocator.free(result.output);
     return std.mem.eql(u8, std.mem.trim(u8, result.output, " \r\n"), "0");
 }
@@ -730,14 +809,34 @@ fn landedOnDefault(allocator: std.mem.Allocator, project: []const u8, branch: []
 }
 
 fn discoverDefault(allocator: std.mem.Allocator, project: []const u8, entries: []const Entry) ![]u8 {
-    const origin = runGit(allocator, &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" }) catch null;
+    return discoverDefaultWithCancel(allocator, project, entries, null);
+}
+
+fn discoverDefaultWithCancel(
+    allocator: std.mem.Allocator,
+    project: []const u8,
+    entries: []const Entry,
+    cancellation: ?Cancellation,
+) ![]u8 {
+    try checkCancellation(cancellation);
+    const origin = runGitWithCancel(
+        allocator,
+        &.{ "git", "-C", project, "symbolic-ref", "--short", "refs/remotes/origin/HEAD" },
+        cancellation,
+    ) catch null;
+    try checkCancellation(cancellation);
     if (origin) |result| {
         defer allocator.free(result.output);
         const value = std.mem.trim(u8, result.output, " \r\n");
         if (value.len != 0) return allocator.dupe(u8, value);
     }
     for ([_][]const u8{ "main", "master" }) |candidate| {
-        if (succeedsGit(allocator, &.{ "git", "-C", project, "rev-parse", "--verify", candidate })) {
+        try checkCancellation(cancellation);
+        if (succeedsGitWithCancel(
+            allocator,
+            &.{ "git", "-C", project, "rev-parse", "--verify", candidate },
+            cancellation,
+        )) {
             return allocator.dupe(u8, candidate);
         }
     }
@@ -762,6 +861,15 @@ fn clearGitRepositoryEnvironment(environment: *std.process.EnvMap) void {
 }
 
 fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
+    return runGitWithCancel(allocator, args, null);
+}
+
+fn runGitWithCancel(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+    cancellation: ?Cancellation,
+) !GitResult {
+    try checkCancellation(cancellation);
     var environment = try std.process.getEnvMap(allocator);
     defer environment.deinit();
     clearGitRepositoryEnvironment(&environment);
@@ -795,6 +903,7 @@ fn runGit(allocator: std.mem.Allocator, args: []const []const u8) !GitResult {
     if (stderr.items.len > output_limit) return error.StderrStreamTooLong;
     const term = try child.wait();
     waited = true;
+    try checkCancellation(cancellation);
     switch (term) {
         .Exited => |code| if (code != 0) return error.GitFailed,
         else => return error.GitFailed,
@@ -918,6 +1027,15 @@ test "worktree notice sizing successful zero and nonzero are complete" {
 
 test "worktree notice production inspection compiles without invoking IO" {
     std.mem.doNotOptimizeAway(&inspect);
+}
+
+test "cancelled worktree provider request refuses before invoking Git" {
+    var generation = std.atomic.Value(u64).init(2);
+    const cancellation = Cancellation{ .generation = &generation, .expected = 1 };
+    try std.testing.expectError(
+        error.Cancelled,
+        inspectWithCancel(std.testing.allocator, "C:\\owned-fixture", &.{}, cancellation),
+    );
 }
 
 test "worktree notice entry mapping retains incomplete coverage and known byte lower bounds" {

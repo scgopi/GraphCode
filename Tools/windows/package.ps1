@@ -42,7 +42,7 @@ $required = @("graphcoded.exe", "graphcode.exe", "zmx.exe")
 $packageManifest = Get-Content (Join-Path $shellRoot "build.zig.zon") -Raw
 $localSourceCommit = $null
 $localSourceTreeDirty = $false
-$worktreesDeferred = if ($Local) { "false" } else { "true" }
+$worktreesDeferred = "false"
 if ($Local) {
   if ($Command -ne "Build") {
     throw "GraphCode packaging: -Local is only valid with -Command Build"
@@ -287,7 +287,6 @@ function Build-Package {
         "-Dwinghostty-dir=$WinghosttyRoot" `
         "-Dwinghostty-lib=$(Join-Path $WinghosttyRoot 'zig-out\lib\winghostty-win32-host.lib')" `
         "-Dversion=$Version" `
-        "-Dworktrees-deferred=$worktreesDeferred" `
         -Doptimize=ReleaseSafe
       Require ($LASTEXITCODE -eq 0) "GraphCode Windows release build failed"
     } finally { Pop-Location }
@@ -376,8 +375,7 @@ switch ($Command) {
       $root = Open-Package $Package
       Verify-PackageContents $root | Out-Null
       $metadata = Get-Content -LiteralPath (Join-Path $root "metadata.json") -Raw | ConvertFrom-Json
-      $expectedWorktreesDeferred = [string] $metadata.packageKind -eq "release-candidate"
-      Require ([bool] $metadata.previewFeatures.worktreesDeferred -eq $expectedWorktreesDeferred) `
+      Require ([bool] $metadata.previewFeatures.worktreesDeferred -eq $false) `
         "package metadata contradicts its Worktrees preview policy"
       if ([string] $metadata.packageKind -eq "local-development") {
         $provenance = $metadata.sourceProvenance
