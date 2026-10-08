@@ -11074,6 +11074,65 @@ test "loop panel toggle never covers Show in Graph or Stop, collapsed or expande
     }
 }
 
+/// One native press at a physical point, checked between DOWN and UP so a hidden-graph
+/// pan that UP would end is still observable.
+fn expectWorkspaceOwnsPress(app: *App, x: i32, y: i32, node_id: []const u8) !void {
+    var result: c.LRESULT = 0;
+    const lparam: c.LPARAM = @intCast(@as(u32, @intCast(x)) | (@as(u32, @intCast(y)) << 16));
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+    try std.testing.expect(!app.canvas.dragging);
+    try std.testing.expect(!app.canvas.node_dragging);
+    try std.testing.expect(app.edge_drag_source_id.len == 0);
+    _ = onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONUP, 0, lparam, &result);
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expectEqualStrings(node_id, app.model.selected().?.id);
+}
+
+test "collapsed loop panel routes native tab and loop-bar clicks to the workspace, not the hidden graph" {
+    for ([_]u32{ Dpi.base_dpi, Dpi.base_dpi * 3 / 2 }) |dpi| {
+        for ([_]i32{ 1200, 960 }) |width| {
+            var fixture: ShowGraphFixture = undefined;
+            try fixture.initSized(dpi, width);
+            defer fixture.deinit();
+            const app = &fixture.app;
+            const workspace = &fixture.workspace;
+            try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+            try std.testing.expect(app.workspace_controls.panel_visible);
+            app.toggleWorkspaceDetailPanel();
+            try std.testing.expect(!app.workspace_controls.panel_visible);
+            try expectLoopBarAndPane(app, workspace, "loop-b");
+
+            // A second tab, selected, so a click on the loop's tab has a visible effect.
+            try workspace.layout.addTab("shell-extra", false);
+            try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
+            const tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 0);
+            const tab_x = tab.left + 24;
+            const tab_y = @divTrunc(tab.top + tab.bottom, 2);
+            // The tab strip lies below the header and the loop bar, inside the client area.
+            try std.testing.expect(logicalCoordinate(tab_y, dpi) >= Tokens.header_height + Tokens.loop_bar_height);
+            try std.testing.expectEqual(@import("TerminalSurface.zig").TabAction.select, workspace.tabActionAt(tab_x, tab_y).?.action);
+
+            const before_tab = app.client.outbound_count;
+            try expectWorkspaceOwnsPress(app, tab_x, tab_y, "loop-b");
+            try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+            try std.testing.expectEqual(before_tab, app.client.outbound_count);
+            try expectLoopBarAndPane(app, workspace, "loop-b");
+
+            // A loop-bar control below the header reaches the bar, not the graph.
+            LoopBarProbe.publish(app);
+            const stop = LoopBarProbe.stop orelse return error.TestExpectedStopButton;
+            try std.testing.expect(logicalCoordinate(stop.top, dpi) > Tokens.header_height);
+            const before_stop = app.client.outbound_count;
+            try expectWorkspaceOwnsPress(app, @divTrunc(stop.left + stop.right, 2), @divTrunc(stop.top + stop.bottom, 2), "loop-b");
+            try std.testing.expectEqual(before_stop + 1, app.client.outbound_count);
+            const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "loop-b") != null);
+        }
+    }
+}
+
 test "selection routes with a loop workspace open: Ctrl+Tab review moves the loop bar and pane together" {
     var fixture: ShowGraphFixture = undefined;
     try fixture.init();
