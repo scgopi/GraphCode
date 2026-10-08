@@ -1107,6 +1107,19 @@ fn loopBarRect(rect: LoopBarLayout.Rect) c.RECT {
     return .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
 }
 
+/// A loop workspace's bar in logical pixels. Painting, pointer hit-testing, and UIA all
+/// read it, so the drawn buttons and their actionable bounds agree with the panel
+/// expanded (the bar stops at the panel) or collapsed (the bar spans the client and its
+/// trailing slot holds the panel's expand control).
+fn workspaceLoopBar(controls: WorkspaceControls.State, client_right: i32, resolved: bool) LoopBarLayout.Layout {
+    return TerminalWorkspace.loopBarLayout(
+        if (controls.rail_visible) Tokens.sidebar_width else 0,
+        client_right - (if (controls.panel_visible) Tokens.loop_detail_width else 0),
+        resolved,
+        !controls.panel_visible,
+    );
+}
+
 fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
     if (model.currentGraph()) |graph| if (graph.nodes.items.len != 0) return graph;
     if (model.selected_project_path) |path| {
@@ -6995,12 +7008,10 @@ pub const App = struct {
                 }
                 if (self.surface == .workspace) {
                     if (self.workspace) |workspace| {
-                        const workspace_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
-                        const workspace_right = client.right - (if (self.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const selected_index = self.model.selectedIndex() orelse 0;
-                        const loop_bar = TerminalWorkspace.loopBarLayout(
-                            workspace_left,
-                            workspace_right,
+                        const loop_bar = workspaceLoopBar(
+                            self.workspace_controls,
+                            client.right,
                             selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
                         );
                         if (!self.workspace_is_quick_chat) {
@@ -7012,10 +7023,10 @@ pub const App = struct {
                         if (loop_bar.stop) |stop| {
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
                         }
-                        const panel_toggle = if (self.workspace_controls.panel_visible)
-                            GraphCanvas.loopDetailCollapseBounds(client.right)
+                        const panel_toggle = if (loop_bar.panel_toggle) |expand|
+                            loopBarRect(expand)
                         else
-                            GraphCanvas.loopDetailExpandBounds(client.right);
+                            GraphCanvas.loopDetailCollapseBounds(client.right);
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
                         if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
                             const detail_left = client.right - Tokens.loop_detail_width;
@@ -8267,6 +8278,7 @@ fn onWindowMessage(
                                 node.metric_passes,
                                 node.token_usage,
                                 isResolvedLoopState(node.state),
+                                !app.workspace_controls.panel_visible,
                             );
                         }
                         if (!app.workspace_controls.panel_visible) GraphCanvas.paintLoopDetailExpandControl(hdc, app.allocator, logical_right);
@@ -8586,7 +8598,9 @@ fn onWindowMessage(
                 return true;
             }
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
-            const workspace_top = if (app.surface == .workspace and app.workspace_controls.panel_visible)
+            // A loop workspace fills everything under the header whether or not its loop
+            // detail panel is collapsed, so its bar, panel toggle, and tabs route from there.
+            const workspace_top = if (app.surface == .workspace)
                 Tokens.header_height
             else
                 routing.workspace_top;
@@ -8620,14 +8634,7 @@ fn onWindowMessage(
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
-                            if (TerminalWorkspace.loopBarActionAt(
-                                rail_left,
-                                Tokens.header_height,
-                                client.right - Tokens.loop_detail_width,
-                                x,
-                                y,
-                                isResolvedLoopState(node.state),
-                            )) |action| {
+                            if (workspaceLoopBar(app.workspace_controls, client.right, isResolvedLoopState(node.state)).actionAt(x, y)) |action| {
                                 switch (action) {
                                     .stop => app.stopSelectedNode(),
                                     .show_graph => app.handleAction(.show_graph),
@@ -10754,12 +10761,16 @@ const LoopBarProbe = struct {
     var bar_loop_len: usize = 0;
     var has_bar = false;
     var show_graph: ?c.RECT = null;
+    var stop: ?c.RECT = null;
+    var panel_toggle: ?c.RECT = null;
     var sink: @This() = .{};
 
     fn publish(app: *App) void {
         has_bar = false;
         bar_loop_len = 0;
         show_graph = null;
+        stop = null;
+        panel_toggle = null;
         app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, app.dpi));
     }
     fn barLoop() []const u8 {
@@ -10776,6 +10787,10 @@ const LoopBarProbe = struct {
                 has_bar = true;
             } else if (std.mem.eql(u8, element.identity, "workspace-show-graph:show-graph")) {
                 show_graph = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+            } else if (std.mem.startsWith(u8, element.identity, "workspace-stop:")) {
+                stop = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+            } else if (std.mem.eql(u8, element.identity, "workspace-toggle-panel:control")) {
+                panel_toggle = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
             }
         }
     }
@@ -10916,6 +10931,28 @@ const ShowGraphFixture = struct {
         self.tmp.cleanup();
     }
 
+    /// Loops A, B, C all idle (so the loop bar shows Stop) in a window `logical_width`
+    /// logical pixels wide at `dpi`, on the project graph with nothing open yet.
+    fn initSized(self: *ShowGraphFixture, dpi: u32, logical_width: i32) !void {
+        const allocator = std.testing.allocator;
+        self.sequence = 2;
+        self.tmp = std.testing.tmpDir(.{});
+        self.directory = try self.tmp.dir.realpathAlloc(allocator, ".");
+        self.layout_path = try std.fs.path.join(allocator, &.{ self.directory, "layout.json" });
+        self.workspace = try reopenTestWorkspace(allocator, self.layout_path);
+        self.app = try overviewTestApp(dpi);
+        const app = &self.app;
+        const initial = try showGraphFixtureFrame(app, 1, "idle", "idle");
+        defer allocator.free(initial);
+        _ = try app.model.updateFromFrame(initial);
+        try std.testing.expect(app.selectProject(reopen_fixture_path));
+        app.surface = .project;
+        app.workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+        app.workspace = &self.workspace;
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(logical_width, dpi), physicalCoordinate(700, dpi), 0) != 0);
+        try std.testing.expectEqual(logical_width, logicalClientRect(app.window.hwnd, dpi).right);
+    }
+
     fn openFromSidebar(self: *ShowGraphFixture, node_id: []const u8) !void {
         const before = self.app.client.outbound_count;
         try clickSidebarLoopRow(&self.app, reopen_fixture_path, node_id);
@@ -10953,6 +10990,87 @@ test "Show in Graph from an open loop shows the graph and never moves the loop b
         try expectPaneBoundTo(&fixture.workspace, node_id);
         LoopBarProbe.publish(app);
         try std.testing.expect(!LoopBarProbe.has_bar);
+    }
+}
+
+const LoopBarButtons = struct { show_graph: c.RECT, stop: c.RECT, panel_toggle: c.RECT };
+
+fn physicalRectsOverlap(a: c.RECT, b: c.RECT) bool {
+    return a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom;
+}
+
+/// Show in Graph, Stop, and the loop panel toggle as UIA publishes them (physical
+/// pixels): each present, non-empty, inside the client area, and pairwise disjoint.
+fn expectLoopBarButtonsDisjoint(app: *App) !LoopBarButtons {
+    LoopBarProbe.publish(app);
+    const buttons = LoopBarButtons{
+        .show_graph = LoopBarProbe.show_graph orelse return error.TestExpectedShowGraphButton,
+        .stop = LoopBarProbe.stop orelse return error.TestExpectedStopButton,
+        .panel_toggle = LoopBarProbe.panel_toggle orelse return error.TestExpectedPanelToggle,
+    };
+    var client: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(app.window.hwnd, &client) != 0);
+    for ([_]c.RECT{ buttons.show_graph, buttons.stop, buttons.panel_toggle }) |bounds| {
+        try std.testing.expect(bounds.left < bounds.right and bounds.top < bounds.bottom);
+        try std.testing.expect(bounds.left >= client.left and bounds.right <= client.right);
+        try std.testing.expect(bounds.top >= client.top and bounds.bottom <= client.bottom);
+    }
+    try std.testing.expect(!physicalRectsOverlap(buttons.show_graph, buttons.stop));
+    try std.testing.expect(!physicalRectsOverlap(buttons.show_graph, buttons.panel_toggle));
+    try std.testing.expect(!physicalRectsOverlap(buttons.stop, buttons.panel_toggle));
+    return buttons;
+}
+
+fn nativeClickCenter(app: *App, bounds: c.RECT) !void {
+    try nativeClick(app, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2));
+}
+
+test "loop panel toggle never covers Show in Graph or Stop, collapsed or expanded, at 1200 and 960px and 100% and 150% DPI" {
+    for ([_]u32{ Dpi.base_dpi, Dpi.base_dpi * 3 / 2 }) |dpi| {
+        for ([_]i32{ 1200, 960 }) |width| {
+            var fixture: ShowGraphFixture = undefined;
+            try fixture.initSized(dpi, width);
+            defer fixture.deinit();
+            const app = &fixture.app;
+            try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+            try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+            try std.testing.expect(app.workspace_controls.panel_visible);
+
+            // Expanded: the panel's Collapse button is clear of the bar's buttons and collapses it.
+            const expanded = try expectLoopBarButtonsDisjoint(app);
+            try nativeClickCenter(app, expanded.panel_toggle);
+            try std.testing.expect(!app.workspace_controls.panel_visible);
+            try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+
+            // Collapsed: a native click at the published centre of each button runs only it.
+            const collapsed = try expectLoopBarButtonsDisjoint(app);
+            const before_stop = app.client.outbound_count;
+            try nativeClickCenter(app, collapsed.stop);
+            try std.testing.expectEqual(before_stop + 1, app.client.outbound_count);
+            const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "loop-b") != null);
+            try std.testing.expect(!app.workspace_controls.panel_visible);
+            try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+
+            const before_show = app.client.outbound_count;
+            try nativeClickCenter(app, collapsed.show_graph);
+            try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+            try std.testing.expect(!app.workspace_controls.panel_visible);
+            try std.testing.expectEqualStrings("loop-b", app.model.selected().?.id);
+            try std.testing.expectEqual(before_show, app.client.outbound_count);
+            LoopBarProbe.publish(app);
+            try std.testing.expect(!LoopBarProbe.has_bar);
+
+            // Reopened collapsed, the expand control still expands the panel.
+            try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+            try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+            if (app.workspace_controls.panel_visible) app.toggleWorkspaceDetailPanel();
+            const reopened = try expectLoopBarButtonsDisjoint(app);
+            try nativeClickCenter(app, reopened.panel_toggle);
+            try std.testing.expect(app.workspace_controls.panel_visible);
+            try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+        }
     }
 }
 
@@ -11982,6 +12100,7 @@ test "open workspace applies production stopped state and removes Stop control" 
         Tokens.sidebar_width,
         1200 - Tokens.loop_detail_width,
         isResolvedLoopState(graph.nodes.items[selected_index].state),
+        false,
     );
     try std.testing.expect(loop_bar.stop == null);
     try std.testing.expectEqual(@as(usize, 1), F.publications);

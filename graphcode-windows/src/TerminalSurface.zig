@@ -163,12 +163,12 @@ pub const ChromeAction = enum { new_tab, split_right, split_down };
 pub const TabAction = enum { select, close };
 pub const LoopBarAction = LoopBarLayout.Action;
 
-pub fn loopBarLayout(left: i32, right: i32, resolved: bool) LoopBarLayout.Layout {
-    return LoopBarLayout.compute(left, Tokens.header_height, right, resolved);
+pub fn loopBarLayout(left: i32, right: i32, resolved: bool, panel_toggle: bool) LoopBarLayout.Layout {
+    return LoopBarLayout.compute(left, Tokens.header_height, right, resolved, panel_toggle);
 }
 
-pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool) ?LoopBarAction {
-    return LoopBarLayout.compute(left, top, right, resolved).actionAt(x, y);
+pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool, panel_toggle: bool) ?LoopBarAction {
+    return LoopBarLayout.compute(left, top, right, resolved, panel_toggle).actionAt(x, y);
 }
 
 fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
@@ -1296,9 +1296,10 @@ pub const Workspace = struct {
         metric_passes: u32,
         token_usage: ?u32,
         resolved: bool,
+        panel_toggle: bool,
     ) void {
         const top = Tokens.header_height;
-        const layout = loopBarLayout(left, right, resolved);
+        const layout = loopBarLayout(left, right, resolved, panel_toggle);
         // Theme.loopBar: lit like the tab strip, one step lighter.
         GdiGradient.fillVertical(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.loop_bar_top, Tokens.loop_bar_bottom);
         if (layout.stripe) |stripe| {
@@ -4856,10 +4857,13 @@ test "workspace tab chrome separates selection and close affordances" {
 }
 
 test "loop bar actions expose stop only for active loops" {
-    try std.testing.expectEqual(LoopBarAction.stop, loopBarActionAt(220, 34, 1200, 1010, 50, false).?);
-    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1010, 50, true) == null);
-    try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1120, 50, false).?);
-    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 90, false) == null);
+    try std.testing.expectEqual(LoopBarAction.stop, loopBarActionAt(220, 34, 1200, 1010, 50, false, false).?);
+    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1010, 50, true, false) == null);
+    try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1120, 50, false, false).?);
+    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 90, false, false) == null);
+    // With the panel collapsed its expand control owns the trailing slot.
+    try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 50, false, true) == null);
+    try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1050, 50, false, true).?);
 }
 
 const AttachOutputProbe = struct {

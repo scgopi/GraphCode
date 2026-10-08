@@ -4,6 +4,7 @@ const Tokens = @import("DesignTokens.zig");
 const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
+const LoopBarLayout = @import("LoopBarLayout.zig");
 const c = @import("Win32.zig").c;
 const AppFont = @import("AppFont.zig");
 const GdiplusAA = @import("GdiplusAA.zig");
@@ -600,8 +601,11 @@ pub fn loopDetailCollapseBounds(client_right: i32) c.RECT {
     return rect(client_right - Tokens.loop_detail_width + 172, Tokens.header_height + 12, client_right - 18, Tokens.header_height + 34);
 }
 
+/// The collapsed panel's "Loop panel" control is the loop bar's trailing button, so its
+/// bounds come from the bar's layout, which keeps Show in graph and Stop clear of it.
 pub fn loopDetailExpandBounds(client_right: i32) c.RECT {
-    return rect(client_right - 104, Tokens.header_height + 8, client_right - 14, Tokens.header_height + 30);
+    const bounds = LoopBarLayout.panelToggleRect(Tokens.header_height, client_right);
+    return rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
 }
 
 pub fn hitTestLoopDetailCollapse(x: i32, y: i32, client_right: i32, visible: bool) bool {
