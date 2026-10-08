@@ -72,9 +72,33 @@ exact detached HEAD/tag, zero remotes and clean status.
 `78ea03fada20125138911a2221e34b5d719ebee3d1d6cac8139a62470f0777a6`; all
 **8/8** entries verified.
 
-- Approval A is unchanged: `AvailableInspectionOnly`, reclaim not authorized,
-  no dump.
+- Approval A in that handoff is `AvailableInspectionOnly`: reclaim not
+  authorized, no dump.
 - The prompt adds the A → B → A reopen check to step 7A.
+
+On 2026-10-07 the operator authorized packaged Worktrees reclaim qualification.
+Handoff revision `GraphCode-DevBox-Handoff-0.1.78-windows.beta16-r2` replaces the
+original handoff for Dev Box use. Its `hashes.sha256` SHA-256 is
+`cbee6d29eef869cd979e6245e7a82c6c7f10ba4aa5a00011d3670e24edaed064`, and all
+**8/8** entries verified.
+
+- The candidate ZIP, source custody and plan are byte-identical to the original
+  handoff, and the original handoff is retained unchanged.
+- Only Approval A changed. Its Worktrees decision is now
+  `AvailableReclaimOnDisposableFixtures`:
+  - inspection is allowed;
+  - reclaim is allowed only on a disposable synthetic fixture created for the
+    run, through native confirmation;
+  - no dump is authorized.
+- The prompt's section 6C now requires all of the following:
+  - inspection responsiveness;
+  - a cancelled reclaim that leaves the fixture unchanged;
+  - reclaim of one landed row and one locked row (unlock-before-remove), with
+    exact `removed-branches.log` tip entries;
+  - dirty-row protection;
+  - branch recovery from the logged tip;
+  - byte-identical controls and sentinels.
+- #560 and the Worktrees parity rows stay `Partial` until that gate passes.
 
 ### Historical beta15 candidate
 
