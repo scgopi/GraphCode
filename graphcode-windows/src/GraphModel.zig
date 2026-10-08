@@ -107,6 +107,8 @@ pub const Graph = struct {
     project: Project,
     nodes: std.array_list.Managed(Node),
     edges: std.array_list.Managed(Edge),
+    /// The daemon's per-graph frame revision (`LoopGraph.revision`); null when absent.
+    revision: ?u64 = null,
 };
 
 pub const AttentionEntry = struct {
@@ -345,6 +347,7 @@ pub const GraphSummary = struct {
     project: Project,
     nodes: std.array_list.Managed(Node),
     edges: std.array_list.Managed(Edge),
+    revision: ?u64 = null,
     worktree_notice: ?WorktreeStatus.NoticeRecord = null,
 
     fn deinit(self: *GraphSummary, allocator: std.mem.Allocator) void {
@@ -761,6 +764,10 @@ pub const Model = struct {
                 try self.decodeGraph(frame);
                 return .graph_changed;
             },
+            .nodes_changed => {
+                try self.applyNodesChanged(frame);
+                return .nodes_changed;
+            },
             .recent_projects => {
                 try self.decodeRecentProjects(frame);
                 return .recent_projects;
@@ -978,6 +985,46 @@ pub const Model = struct {
             else => return err,
         } orelse return;
         defer freeGraph(self.allocator, &graph);
+        try self.applyGraph(&graph);
+    }
+
+    /// The presence tick as the loops it moved (`DaemonEvent.nodesChanged`), folded into
+    /// the snapshot held for that project and then applied as that snapshot — the same
+    /// shape macOS's `AppFeature.foldDelta` gives it. A delta never adds a loop, names a
+    /// project this shell does not hold, or overrides a snapshot with a newer revision.
+    fn applyNodesChanged(self: *Model, frame: []const u8) !void {
+        var root = try JsonFields.init(self.allocator, frame);
+        defer root.deinit();
+        var event = try JsonFields.init(self.allocator, root.get("event").container('{') orelse "{}");
+        defer event.deinit();
+        const value = if (root.has("event")) event.get("nodesChanged") else root.get("nodesChanged");
+        const payload = value.container('{') orelse return error.MalformedGraph;
+        var fields = try JsonFields.init(self.allocator, payload);
+        defer fields.deinit();
+        const project_path = try fields.get("projectPath").duplicateString(self.allocator, "");
+        defer self.allocator.free(project_path);
+        const revision = fields.get("revision").unsigned(u64) orelse return error.MalformedGraph;
+        const held = self.graphFor(project_path) orelse return;
+        if (held.revision) |current| {
+            if (revision <= current) return;
+        }
+        var moved = std.array_list.Managed(Node).init(self.allocator);
+        defer {
+            for (moved.items) |node| freeNode(self.allocator, node);
+            moved.deinit();
+        }
+        if (fields.get("nodes").container('[')) |nodes| try decodeNodes(self.allocator, nodes, &moved);
+        var merged = try cloneGraph(self.allocator, held.*);
+        defer freeGraph(self.allocator, &merged);
+        merged.revision = revision;
+        for (moved.items) |*node| {
+            const index = findNodeIndexByID(merged.nodes.items, node.id) orelse continue;
+            std.mem.swap(Node, &merged.nodes.items[index], node);
+        }
+        try self.applyGraph(&merged);
+    }
+
+    fn applyGraph(self: *Model, graph: *const Graph) !void {
         const was_selected = if (self.selected_project_path) |path|
             std.mem.eql(u8, path, graph.project.path)
         else
@@ -996,13 +1043,13 @@ pub const Model = struct {
         if (open_project != null) try self.open_projects.ensureUnusedCapacity(1);
         const seen = try self.prepareGraphSeen(graph.project.path);
         errdefer if (seen) |entry| self.allocator.free(entry.project_path);
-        var activity = try self.prepareActivity(graph);
+        var activity = try self.prepareActivity(graph.*);
         defer {
             for (activity.items) |event| freeActivityEvent(self.allocator, event);
             activity.deinit();
         }
         try self.activity.ensureUnusedCapacity(activity.items.len);
-        var attention = try self.prepareAttention(&graph);
+        var attention = try self.prepareAttention(graph);
         defer attention.deinit(self.allocator);
         var selected_index = self.selected_index;
         var selected_node_id: ?[]const u8 = self.selected_node_id;
@@ -1038,7 +1085,7 @@ pub const Model = struct {
 
         // The summary replacement is the last fallible step; all other owned
         // values and append capacity are ready before any model data is replaced.
-        try self.upsertSummary(&graph);
+        try self.upsertSummary(graph);
         if (open_project) |project| self.open_projects.appendAssumeCapacity(project);
         if (selected_path) |path| self.selected_project_path = path;
         self.markGraphSeen(graph.project.path, seen);
@@ -1146,11 +1193,12 @@ pub const Model = struct {
             self.applyWorktreeBindingChange(binding_change);
             std.mem.swap(std.array_list.Managed(Node), &summary.nodes, &copy.nodes);
             std.mem.swap(std.array_list.Managed(Edge), &summary.edges, &copy.edges);
+            summary.revision = graph.revision;
             return;
         }
         try self.graphs.ensureUnusedCapacity(1);
         self.applyWorktreeBindingChange(binding_change);
-        self.graphs.appendAssumeCapacity(.{ .project = copy.project, .nodes = copy.nodes, .edges = copy.edges });
+        self.graphs.appendAssumeCapacity(.{ .project = copy.project, .nodes = copy.nodes, .edges = copy.edges, .revision = graph.revision });
         copy.project = .{ .path = &.{}, .name = &.{} };
         copy.nodes = std.array_list.Managed(Node).init(self.allocator);
         copy.edges = std.array_list.Managed(Edge).init(self.allocator);
@@ -2230,6 +2278,7 @@ fn decodeGraphObject(allocator: std.mem.Allocator, parent_project: ?Project, jso
         defer project.deinit();
         graph.project.path = try project.get("path").duplicateString(allocator, "");
         graph.project.name = try project.get("name").duplicateString(allocator, "");
+        graph.revision = fields.get("revision").unsigned(u64);
     }
     if (fields.get("nodes").container('[')) |nodes| try decodeNodes(allocator, nodes, &graph.nodes);
     if (fields.get("edges").container('[')) |edges| graph.edges = try decodeEdges(allocator, edges);
@@ -3191,6 +3240,49 @@ test "activity log records state transitions but not initial snapshot" {
     _ = try model.updateFromFrame(second);
     try std.testing.expectEqual(@as(usize, 1), model.activity.items.len);
     try std.testing.expectEqualStrings("Worker", model.activity.items[0].title);
+}
+
+test "nodesChanged presence delta updates Needs you without a full snapshot" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","revision":3,"project":{"path":"C:\\work\\core","name":"Core"},"nodes":[{"id":"a1","title":"Core loop","loopType":"turnBased","state":"running","presence":{"presence":"busy","confidence":"reported"}}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","revision":4,"project":{"path":"C:\\work\\dest","name":"Destructive"},"nodes":[{"id":"b1","title":"Asker","loopType":"turnBased","state":"running","presence":{"presence":"busy","confidence":"reported"}},{"id":"b2","title":"Other","loopType":"turnBased","state":"running"}],"edges":[{"id":"e","from":"b1","to":"b2","kind":"handoff"}]}}}
+    );
+    try std.testing.expect(model.selectProject("C:\\work\\core"));
+    try std.testing.expectEqual(@as(usize, 0), model.attention_entries.items.len);
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"nodesChanged":{"projectPath":"C:\\work\\dest","revision":5,"nodes":[{"id":"b1","title":"Asker","loopType":"turnBased","state":"running","activity":"Asked a question","presence":{"presence":"awaitingInput","confidence":"reported"}},{"id":"stranger","title":"Not in graph","loopType":"turnBased","state":"running","presence":{"presence":"awaitingInput"}}]}}}
+    );
+    try std.testing.expectEqual(@as(usize, 1), model.attention_entries.items.len);
+    try std.testing.expectEqualStrings("C:\\work\\dest", model.attention_entries.items[0].project_path);
+    try std.testing.expectEqualStrings("b1", model.attention_entries.items[0].node.id);
+    const dest = model.graphFor("C:\\work\\dest").?;
+    try std.testing.expectEqual(@as(usize, 2), dest.nodes.items.len);
+    try std.testing.expectEqualStrings("awaitingInput", dest.nodes.items[0].presence);
+    try std.testing.expectEqualStrings("Asked a question", dest.nodes.items[0].activity);
+    try std.testing.expectEqual(@as(usize, 1), dest.edges.items.len);
+    try std.testing.expectEqualStrings("C:\\work\\core", model.selected_project_path.?);
+    try std.testing.expectEqualStrings("Core loop", model.graph.?.nodes.items[0].title);
+
+    // A delta older than the snapshot already held is dropped, as on macOS.
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"nodesChanged":{"projectPath":"C:\\work\\dest","revision":5,"nodes":[{"id":"b1","title":"Asker","loopType":"turnBased","state":"running","presence":{"presence":"idle"}}]}}}
+    );
+    try std.testing.expectEqual(@as(usize, 1), model.attention_entries.items.len);
+
+    // A delta for the selected project refreshes the visible graph and keeps selection.
+    try std.testing.expect(model.selectProject("C:\\work\\dest"));
+    _ = model.setSelectedIndex(1);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":5,"event":{"nodesChanged":{"projectPath":"C:\\work\\dest","revision":6,"nodes":[{"id":"b1","title":"Asker","loopType":"turnBased","state":"running","presence":{"presence":"idle"}}]}}}
+    );
+    try std.testing.expectEqual(@as(usize, 0), model.attention_entries.items.len);
+    try std.testing.expectEqualStrings("idle", model.graph.?.nodes.items[0].presence);
+    try std.testing.expectEqualStrings("b2", model.selectedNodeID().?);
 }
 
 test "presence polling does not evict or create activity history" {

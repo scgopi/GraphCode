@@ -366,13 +366,17 @@ try {
     foreach ($property in @(
         "protocolConnected",
         "correlatedRequests",
-        "subscriptionSeen",
         "reconnectObserved",
         "graphSent"
       )) {
       if (-not [bool] $evidence.$property) {
         throw "Stub daemon evidence failed: $property"
       }
+    }
+    # The shell is a sidebar client: a hello that names projectPaths would stop the
+    # daemon delivering every other open project's live updates (beta17 ProjectLiveUpdates).
+    if ([bool] $evidence.subscriptionSeen) {
+      throw "Stub daemon evidence failed: a shell hello narrowed delivery to specific projects"
     }
     if ($evidence.error) {
       throw "Stub daemon reported an error: $($evidence.error)"

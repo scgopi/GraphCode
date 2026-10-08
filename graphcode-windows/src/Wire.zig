@@ -24,6 +24,7 @@ pub const ConnectionState = enum {
 pub const EventKind = enum {
     recent_projects,
     graph_changed,
+    nodes_changed,
     quick_chats,
     quick_chat_changed,
     quick_chat_deleted,
@@ -113,6 +114,8 @@ pub fn eventKind(data: []const u8) EventKind {
     if (std.mem.indexOf(u8, data, "\"recentProjectsListed\"") != null) {
         return .recent_projects;
     }
+    // Keyed with the colon so a loop titled "nodesChanged" in a snapshot is not a delta.
+    if (std.mem.indexOf(u8, data, "\"nodesChanged\":") != null) return .nodes_changed;
     if (std.mem.indexOf(u8, data, "\"graphChanged\"") != null) {
         return .graph_changed;
     }
