@@ -1873,11 +1873,27 @@ pub const App = struct {
         if (event == .graph_changed) publish(self);
     }
 
+    /// Runs after every graph change. It re-observes only the open loop's own pane, in the
+    /// loop slot, and only once that loop is running: attaching here must never create a
+    /// session, or a loop's agent loses the race to a bare shell (LoopLaunchWait). It must
+    /// not bind other graph loops to slots by graph order either: after a reopen, that put
+    /// another loop's session into a stray, selected tab over the reopened loop's pane.
     fn refreshWorkspace(self: *App) void {
         const workspace = if (self.workspace) |value| value else return;
+        if (self.smoke) return self.refreshSmokeTerminals(workspace);
+        if (self.workspace_is_quick_chat) return;
+        const project = self.currentProject() orelse return;
+        if (!std.mem.eql(u8, workspace.projectPath(), project)) return;
+        if (workspace.hasSurface(0) or workspace.hasAttach(0) or workspace.isAwaitingLaunch(0)) return;
+        if (!workspace.loopPaneDetached(self.selected_node_id)) return;
+        workspace.openLaunchedNode(0, self.selected_node_id, 0) catch
+            self.setStatus("Unable to attach selected loop");
+    }
+
+    /// The smoke gate's two-terminal contract: terminals A and B show the graph's first two
+    /// loops once they run. Product windows never use it (see `refreshWorkspace`).
+    fn refreshSmokeTerminals(self: *App, workspace: *TerminalWorkspace.Workspace) void {
         const graph = if (self.model.graph) |value| value else return;
-        // Only shows loops that are already running: attaching here must never create a
-        // session, or a loop's agent loses the race to a bare shell (LoopLaunchWait).
         for (0..@min(graph.nodes.items.len, 2)) |pane| {
             if (workspace.hasSurface(pane) or workspace.isAwaitingLaunch(pane)) continue;
             workspace.openLaunchedNode(pane, graph.nodes.items[pane].id, 0) catch {
@@ -10474,6 +10490,228 @@ test "attended activation routes UIA loop invoke by owned node identity exactly 
     const identity = "loop:C:\\activation-fixture:target-loop";
     try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(identity)));
     try expectSingleActivation(&app, path, "target-loop");
+}
+
+const ReopenProbe = struct {
+    var drawn_tabs: usize = 0;
+    var uia_tabs: usize = 0;
+    var sink: @This() = .{};
+
+    fn publish(app: *App) void {
+        drawn_tabs = if (app.workspace) |workspace| workspace.tabCount() else 0;
+        uia_tabs = 0;
+        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    }
+    fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+    fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+        uia_tabs = 0;
+        for (elements) |element| {
+            if (std.mem.startsWith(u8, element.identity, "workspace-tab:")) uia_tabs += 1;
+        }
+    }
+};
+
+const reopen_fixture_path = "C:\\reopen-fixture";
+
+fn reopenFixtureFrame(app: *App, sequence: usize, a_state: []const u8, b_state: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:\\\\reopen-fixture\",\"name\":\"Reopen fixture\"}},\"nodes\":[{{\"id\":\"loop-a\",\"title\":\"Loop A\",\"loopType\":\"turnBased\",\"state\":{{\"{s}\":{{}}}}}},{{\"id\":\"loop-b\",\"title\":\"Loop B\",\"loopType\":\"turnBased\",\"state\":{{\"{s}\":{{}}}}}}],\"edges\":[]}}}}}}",
+        .{ sequence, a_state, b_state },
+    );
+}
+
+/// Delivers a daemon graph change through the production frame path, including the
+/// workspace refresh that runs after every graph change.
+fn deliverReopenFrame(app: *App, sequence: usize, a_state: []const u8, b_state: []const u8) !void {
+    const frame = try reopenFixtureFrame(app, sequence, a_state, b_state);
+    defer app.allocator.free(frame);
+    app.onFrameWithAccessibilityPublish(frame, ReopenProbe.publish);
+}
+
+/// A native left click (down and up) on a loop's visible sidebar row, through the same
+/// hit test the window procedure uses.
+fn clickSidebarLoopRow(app: *App, path: []const u8, node_id: []const u8) !void {
+    var rows = try Sidebar.appendRows(
+        app.allocator,
+        &app.model,
+        app.currentWorktreeInspection(),
+        app.sidebar_scroll,
+        &app.sidebar_state,
+    );
+    defer rows.deinit(app.allocator);
+    const graph = app.model.graphFor(path) orelse return error.TestExpectedGraph;
+    const row = for (rows.items) |row| {
+        if (row.kind != .loop or row.project_path == null or !std.mem.eql(u8, row.project_path.?, path)) continue;
+        if (row.index < graph.nodes.items.len and std.mem.eql(u8, graph.nodes.items[row.index].id, node_id))
+            break row;
+    } else return error.TestExpectedLoopRow;
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+    try std.testing.expect(row.top + 8 >= Tokens.header_height);
+    try std.testing.expect(row.top + 8 < sidebar_bottom);
+    const hit = Sidebar.rowAt(
+        80,
+        row.top + 8,
+        &app.model,
+        app.currentWorktreeInspection(),
+        app.sidebar_scroll,
+        sidebar_bottom,
+        &app.sidebar_state,
+    ) orelse return error.TestExpectedLoopRow;
+    try std.testing.expectEqual(Sidebar.RowKind.loop, hit.kind);
+    try std.testing.expectEqual(row.index, hit.index);
+    var result: c.LRESULT = 0;
+    const x: u32 = 80;
+    const y: u32 = @intCast(row.top + 8);
+    const lparam: c.LPARAM = @intCast(x | (y << 16));
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+    _ = onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONUP, 0, lparam, &result);
+}
+
+fn expectOneResumePerClick(app: *App, before: usize, node_id: []const u8) !void {
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    const expected = try std.fmt.allocPrint(app.allocator, "\"resumeSession\":{{\"_0\":\"{s}\"}}", .{node_id});
+    defer app.allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, newest, expected) != null);
+}
+
+/// The open loop owns the workspace: one tab whose pane is `node_id`, the loop slot bound
+/// (or binding) to it, no other slot binding any loop, and UIA exposing the drawn tabs.
+fn expectWorkspaceBoundTo(workspace: *TerminalWorkspace.Workspace, node_id: []const u8) !void {
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    const tab = workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+    try std.testing.expectEqual(@as(usize, 1), tab.panes.items.len);
+    try std.testing.expectEqualStrings(node_id, tab.panes.items[tab.focused_pane].id);
+    try std.testing.expect(tab.panes.items[tab.focused_pane].launches_agent);
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqualStrings(node_id, workspace.launch_waits[0].session);
+    for (1..workspace.surfaces.len) |index| {
+        try std.testing.expect(!workspace.isAwaitingLaunch(index));
+        try std.testing.expect(!workspace.hasSurface(index));
+        try std.testing.expect(!workspace.hasAttach(index));
+    }
+    try std.testing.expectEqual(ReopenProbe.drawn_tabs, ReopenProbe.uia_tabs);
+    try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
+}
+
+fn reopenTestWorkspace(allocator: std.mem.Allocator, layout_path: []const u8) !TerminalWorkspace.Workspace {
+    const project_path = try allocator.dupe(u8, reopen_fixture_path);
+    errdefer allocator.free(project_path);
+    const project_key = try allocator.dupe(u8, reopen_fixture_path);
+    errdefer allocator.free(project_key);
+    const owned_layout_path = try allocator.dupe(u8, layout_path);
+    errdefer allocator.free(owned_layout_path);
+    // No winghostty host or zmx: attaches are never reached, so every launch wait stays
+    // observable. The layout, launch-wait, activation, and refresh logic are production code.
+    return .{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, reopen_fixture_path),
+        .layout_path = owned_layout_path,
+        .project_key = project_key,
+        .project_path = project_path,
+    };
+}
+
+test "attended activation reopening a stopped loop binds its own pane without another loop's stray tab" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.workspace = null;
+    _ = try app.model.updateFromFrame(reopen_fixture_initial_frame);
+    try std.testing.expect(app.selectProject(reopen_fixture_path));
+    try std.testing.expect(app.selectNodeIndex(0));
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
+    app.workspace = &workspace;
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+    var sequence: usize = 2;
+
+    // 1. Open A from its sidebar row; the daemon starts it, then A is stopped.
+    var before = app.client.outbound_count;
+    try clickSidebarLoopRow(&app, reopen_fixture_path, "loop-a");
+    try expectOneResumePerClick(&app, before, "loop-a");
+    try deliverReopenFrame(&app, sequence, "running", "idle");
+    sequence += 1;
+    try expectWorkspaceBoundTo(&workspace, "loop-a");
+    try deliverReopenFrame(&app, sequence, "stopped", "idle");
+    sequence += 1;
+    try expectWorkspaceBoundTo(&workspace, "loop-a");
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+
+    // 2. Sidebar row B with stopped A's workspace open.
+    before = app.client.outbound_count;
+    try clickSidebarLoopRow(&app, reopen_fixture_path, "loop-b");
+    try expectOneResumePerClick(&app, before, "loop-b");
+    try deliverReopenFrame(&app, sequence, "stopped", "running");
+    sequence += 1;
+    try expectWorkspaceBoundTo(&workspace, "loop-b");
+    try std.testing.expectEqualStrings("loop-b", app.selected_node_id);
+
+    // 3. Sidebar row A again. Graph changes keep arriving while B runs; none may bind B
+    // back into the workspace beside the reopened loop.
+    before = app.client.outbound_count;
+    try clickSidebarLoopRow(&app, reopen_fixture_path, "loop-a");
+    try expectOneResumePerClick(&app, before, "loop-a");
+    try std.testing.expectEqualStrings("loop-a", app.selected_node_id);
+    try std.testing.expectEqualStrings("loop-a", app.model.selected().?.id);
+    for (0..3) |_| {
+        try deliverReopenFrame(&app, sequence, "stopped", "running");
+        sequence += 1;
+        try expectWorkspaceBoundTo(&workspace, "loop-a");
+    }
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+}
+
+const reopen_fixture_initial_frame =
+    \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\reopen-fixture","name":"Reopen fixture"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}},{"id":"loop-b","title":"Loop B","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+;
+
+test "graph refresh re-observes only the open loop's detached pane in the loop slot" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.layout.addTab("loop-a", true);
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.workspace = null;
+    _ = try app.model.updateFromFrame(reopen_fixture_initial_frame);
+    try std.testing.expect(app.selectProject(reopen_fixture_path));
+    app.workspace = &workspace;
+
+    // Selecting a loop the workspace does not own never binds it.
+    try std.testing.expect(app.selectNodeIndex(1));
+    try deliverReopenFrame(&app, 2, "running", "running");
+    for (0..workspace.surfaces.len) |index| try std.testing.expect(!workspace.isAwaitingLaunch(index));
+
+    // The open loop's own detached pane is re-observed passively, in the loop slot only.
+    try std.testing.expect(app.selectNodeIndex(0));
+    try deliverReopenFrame(&app, 3, "running", "running");
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqualStrings("loop-a", workspace.launch_waits[0].session);
+    try std.testing.expect(!workspace.launch_waits[0].reports_timeout);
+    for (1..workspace.surfaces.len) |index| try std.testing.expect(!workspace.isAwaitingLaunch(index));
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
 }
 
 test "gesture routing requires a graph-capable surface, not only the canvas rectangle" {
