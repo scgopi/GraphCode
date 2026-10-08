@@ -647,6 +647,26 @@ pub const Workspace = struct {
         return index < self.launch_waits.len and self.launch_waits[index].active();
     }
 
+    /// Whether `node_id` is a loop pane of this workspace's layout that no slot shows or
+    /// awaits — the only loop a graph refresh may re-observe.
+    pub fn loopPaneDetached(self: *const Workspace, node_id: []const u8) bool {
+        if (node_id.len == 0) return false;
+        const owned = owned: {
+            for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
+                if (pane.launches_agent and std.mem.eql(u8, pane.id, node_id)) break :owned true;
+            };
+            break :owned false;
+        };
+        if (!owned) return false;
+        for (self.surfaces, 0..) |slot, index| {
+            if ((slot.surface != null or slot.attach != null) and std.mem.eql(u8, slot.session_name, node_id))
+                return false;
+            if (self.launch_waits[index].active() and std.mem.eql(u8, self.launch_waits[index].session, node_id))
+                return false;
+        }
+        return true;
+    }
+
     pub fn takeLaunchOutcome(self: *Workspace) ?LaunchOutcome {
         defer self.launch_outcome = null;
         return self.launch_outcome;
@@ -4166,6 +4186,33 @@ test "passive loop observation does not create a pending tab" {
     try workspace.openLaunchedNode(0, "idle-loop", 0);
     try std.testing.expectEqual(@as(usize, 0), workspace.tabCount());
     try std.testing.expect(workspace.surfaces[0].attach == null);
+}
+
+test "a loop pane is detached only when the layout owns it and no slot shows or awaits it" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.cancelAllLaunchWaits();
+    const path = "terminal-detached-loop-test.json";
+    workspace.layout_path = @constCast(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+    try std.testing.expect(!workspace.loopPaneDetached(""));
+    try std.testing.expect(!workspace.loopPaneDetached("open-loop"));
+    try workspace.layout.addTab("open-loop", true);
+    try workspace.layout.addTab("shell-tab", false);
+    try std.testing.expect(workspace.loopPaneDetached("open-loop"));
+    // A shell tab and a loop the layout does not own are never graph-refresh targets.
+    try std.testing.expect(!workspace.loopPaneDetached("shell-tab"));
+    try std.testing.expect(!workspace.loopPaneDetached("other-loop"));
+    try workspace.openLaunchedNode(3, "open-loop", LoopLaunchWait.open_timeout_ms);
+    try std.testing.expect(!workspace.loopPaneDetached("open-loop"));
+    workspace.cancelLaunchWait(3);
+    try std.testing.expect(workspace.loopPaneDetached("open-loop"));
+    workspace.surfaces[5] = .{
+        .surface = @ptrFromInt(0x5000),
+        .session_name = @constCast("open-loop"),
+    };
+    defer workspace.surfaces[5] = .{};
+    try std.testing.expect(!workspace.loopPaneDetached("open-loop"));
 }
 
 fn paneResizeWorkspaceForTest(allocator: std.mem.Allocator) !Workspace {
