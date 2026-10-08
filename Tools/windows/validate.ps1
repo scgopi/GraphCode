@@ -1299,6 +1299,7 @@ function Invoke-Task([string] $name) {
         & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.ScriptSigning.Tests.ps1")
         & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Scheduler.Tests.ps1")
         & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Rollback.Tests.ps1")
+        & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Uninstall.Tests.ps1")
         & (Join-Path $repoRoot "Tools\windows\Tests\Packaging.Standalone.Tests.ps1")
       }
       if ($PackagingPart -ne "contracts") {

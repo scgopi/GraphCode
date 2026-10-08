@@ -451,12 +451,127 @@ function Install-Package([bool] $upgrade) {
     Close-Package
   }
 }
+function Get-FullInstallRoot {
+  $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallRoot).TrimEnd("\")
+}
+function Get-InstallRootProcesses {
+  $root = (Get-FullInstallRoot) + "\"
+  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ExecutablePath -and
+      [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+    })
+}
+function Assert-InstallRootIdle([bool] $daemonManaged) {
+  # Session hosts (zmx), the shell, and the CLI are the user's work: refuse rather than kill them.
+  $daemon = Join-Path (Get-FullInstallRoot) "bin\graphcoded.exe"
+  $blocking = @(Get-InstallRootProcesses | Where-Object {
+      -not ($daemonManaged -and [IO.Path]::GetFullPath($_.ExecutablePath) -ieq $daemon)
+    })
+  if ($blocking.Count -eq 0) { return }
+  $summary = @($blocking | Group-Object Name | Sort-Object Name | ForEach-Object {
+      "$($_.Name) (PID $((@($_.Group | ForEach-Object { $_.ProcessId }) | Sort-Object) -join ', '))"
+    }) -join "; "
+  $zmx = Join-Path $InstallRoot "bin\zmx.exe"
+  Fail ("Uninstall changed nothing: $($blocking.Count) GraphCode process(es) are still running from " +
+    "$InstallRoot`: $summary. Close GraphCode, end its terminal sessions (list them with " +
+    "`"$zmx`" ls and stop each with `"$zmx`" kill NAME), then run Uninstall again from a " +
+    "terminal outside GraphCode.")
+}
+function Find-LockedInstallFile([string] $root) {
+  foreach ($file in @(Get-ChildItem -LiteralPath $root -File -Recurse -Force)) {
+    $access = if ($file.IsReadOnly) { [IO.FileAccess]::Read } else { [IO.FileAccess]::ReadWrite }
+    try {
+      # Exclusive opens fail for any open handle and, with write access, for mapped images.
+      $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, $access, [IO.FileShare]::None)
+      $stream.Dispose()
+    } catch {
+      $failure = $_.Exception
+      while ($failure.InnerException) { $failure = $failure.InnerException }
+      return "$($file.FullName) ($($failure.Message))"
+    }
+  }
+  return $null
+}
 function Uninstall-Package {
-  if (-not $NoScheduledTask) { Stop-InstalledDaemon; Remove-DaemonTask }
+  $daemonManaged = -not $NoScheduledTask
+  $installed = Test-Path -LiteralPath $InstallRoot
+  if ($installed) { Assert-InstallRootIdle $daemonManaged }
+  $daemonWasRunning = $false
+  if ($daemonManaged) {
+    $daemonWasRunning = @(Get-InstalledDaemons).Count -gt 0
+    Stop-InstalledDaemon
+  }
   $bin = Join-Path $InstallRoot "bin"
-  Set-UserPath $bin $false
-  Set-Shortcut $false
-  if (Test-Path $InstallRoot) { Remove-Item $InstallRoot -Recurse -Force }
+  $parent = Split-Path (Get-FullInstallRoot) -Parent
+  $removed = $null
+  $shortcutBackup = $null
+  $pathAttempted = $false
+  $shortcutAttempted = $false
+  $oldPath = $null
+  try {
+    if ($installed) {
+      # Re-check after stopping the daemon, then take the whole tree out of service with
+      # one rename so a held file can never leave a half-deleted installation behind.
+      Assert-InstallRootIdle $daemonManaged
+      $locked = Find-LockedInstallFile $InstallRoot
+      if ($locked) {
+        Fail "Uninstall changed nothing: an installed file is in use: $locked. Close the program using it, then run Uninstall again."
+      }
+      $removed = Join-Path $parent ".GraphCode-uninstall-$([guid]::NewGuid())"
+      Move-InstallDirectory $InstallRoot $removed
+    }
+    $shortcutBackup = Join-Path ([IO.Path]::GetTempPath()) "GraphCode-uninstall-shortcut-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Force -Path $shortcutBackup | Out-Null
+    Save-Shortcut $shortcutBackup
+    $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($daemonManaged) { Remove-DaemonTask }
+    $pathAttempted = $true
+    Set-UserPath $bin $false
+    $shortcutAttempted = $true
+    Set-Shortcut $false
+  } catch {
+    $failure = $_
+    $rollbackErrors = [Collections.Generic.List[string]]::new()
+    $restored = $true
+    if ($removed -and (Test-Path -LiteralPath $removed)) {
+      try { Move-InstallDirectory $removed $InstallRoot } catch {
+        $restored = $false
+        $rollbackErrors.Add("restoring the installation from '$removed': $($_.Exception.Message)")
+      }
+    }
+    if ($pathAttempted) {
+      try { [Environment]::SetEnvironmentVariable("Path", $oldPath, "User") } catch {
+        $rollbackErrors.Add("restoring user PATH: $($_.Exception.Message)")
+      }
+    }
+    $keepShortcutBackup = $false
+    if ($shortcutAttempted) {
+      try { Restore-Shortcut $shortcutBackup } catch {
+        $keepShortcutBackup = $true
+        $rollbackErrors.Add("restoring shortcuts from '$shortcutBackup': $($_.Exception.Message)")
+      }
+    }
+    if ($daemonWasRunning -and $restored) {
+      try { Start-DaemonTask } catch {
+        $rollbackErrors.Add("restarting the daemon: $($_.Exception.Message)")
+      }
+    }
+    if (-not $keepShortcutBackup -and $shortcutBackup -and (Test-Path -LiteralPath $shortcutBackup)) {
+      Remove-Item -LiteralPath $shortcutBackup -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($rollbackErrors.Count) {
+      Fail "Uninstall failed: $($failure.Exception.Message) Rollback incomplete: $($rollbackErrors -join '; ')."
+    }
+    throw $failure
+  }
+  if ($shortcutBackup -and (Test-Path -LiteralPath $shortcutBackup)) {
+    Remove-Item -LiteralPath $shortcutBackup -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if ($removed) {
+    try { Remove-Item -LiteralPath $removed -Recurse -Force } catch {
+      Write-Warning "GraphCode packaging: GraphCode was uninstalled, but leftover files remain at '$removed': $($_.Exception.Message) Delete that directory after closing the program using it."
+    }
+  }
   $data = Join-Path $env:USERPROFILE ".graphcode"
   if ($RemoveUserData -and -not $KeepUserData) {
     Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue

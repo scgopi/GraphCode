@@ -141,6 +141,9 @@ powershell.exe -NoProfile -File "$env:LOCALAPPDATA\GraphCode\current\GraphCode-S
 ```
 
 Uninstall preserves user data by default; `-RemoveUserData` opts into removal.
+Close GraphCode and end its terminal sessions first: Uninstall refuses, without
+changing anything, while processes run from the installation (see
+[Uninstall with GraphCode still running](#uninstall-with-graphcode-still-running)).
 Authenticate signed setup before uninstall too. Setup never changes PowerShell
 execution policy or certificate stores; organization policy may restrict
 execution. Do not disable that policy to bypass a signature failure.
@@ -179,6 +182,33 @@ post-swap rollback, secondary recovery failures, fresh/portable installs, and a
 native Windows file-sharing lock. It isolates daemon and shortcut operations;
 the real-product packaging gate separately exercises scheduled-daemon
 install/upgrade/rollback/uninstall.
+
+## Uninstall with GraphCode still running
+
+Uninstall removes the installation completely or changes nothing. Before
+touching the daemon, scheduled task, PATH, or shortcut it lists every process
+running from the installation root. Terminal session hosts (`zmx.exe`), the
+shell, and the CLI are the user's live work, so Uninstall never kills them: it
+refuses with exit code 1, names each process and PID, and explains how to end
+the sessions (`<installed>\bin\zmx.exe ls`, then `zmx.exe kill <name>`) and to
+rerun Uninstall from a terminal outside GraphCode. Only the installed daemon is
+stopped automatically, as before.
+
+After stopping the daemon, Uninstall re-checks for processes, confirms that
+every installed file can be opened exclusively, and then renames the whole
+installation root to a sibling `.GraphCode-uninstall-<id>` directory in one
+step. Any failure up to and including the PATH and shortcut removal moves the
+installation back, restores PATH and the shortcut, and restarts the daemon if
+it was running. Only after the integration is gone is the renamed directory
+deleted; if a file is opened in that brief window, Uninstall still succeeds and
+warns with the leftover directory to delete. User data is preserved by default
+in every outcome.
+
+`Packaging.Uninstall.Tests.ps1` reproduces a live session host launched from
+the installed `bin\zmx.exe`, a runtime DLL held open by another process, a
+failed task removal after the rename, and a clean uninstall. It models the
+scheduler and user PATH; the real-product packaging gate exercises the real
+scheduled-daemon uninstall.
 
 ## Signed package integrity
 
