@@ -393,6 +393,8 @@ pub const Workspace = struct {
     layout_height: i32 = 250,
     collapsed: bool = false,
     project_path: []u8 = &.{},
+    /// The open loop's directory, where new terminal sessions start (see `sessionDirectory`).
+    shell_directory: []u8 = &.{},
     syncing_topology: bool = false,
     syncing_focus: bool = false,
     persisting_layout: bool = false,
@@ -477,6 +479,7 @@ pub const Workspace = struct {
             }
         }
         if (self.project_path.len != 0) self.allocator.free(self.project_path);
+        if (self.shell_directory.len != 0) self.allocator.free(self.shell_directory);
         if (self.host) |host| {
             _ = c.winghostty_host_deinitialize(host);
             self.host = null;
@@ -523,6 +526,7 @@ pub const Workspace = struct {
         self.allocator.free(old_layout_path);
         for (&self.recreate_due_ms) |*due| due.* = 0;
         for (&self.recreate_delay_ms) |*delay| delay.* = 100;
+        self.clearShellDirectory();
         self.restorePersistedSurfaces();
     }
 
@@ -566,12 +570,40 @@ pub const Workspace = struct {
         self.allocator.free(old_key);
         self.allocator.free(old_path);
         self.allocator.free(old_layout_path);
+        self.clearShellDirectory();
         self.restorePersistedSurfaces();
         return true;
     }
 
+    fn clearShellDirectory(self: *Workspace) void {
+        if (self.shell_directory.len != 0) self.allocator.free(self.shell_directory);
+        self.shell_directory = &.{};
+    }
+
     pub fn projectPath(self: *const Workspace) []const u8 {
         return self.project_path;
+    }
+
+    /// Records where the open loop's plain-shell tabs and splits start, as on macOS: the
+    /// loop's worktree, else its project folder. Empty leaves them in the shell's own
+    /// working directory.
+    pub fn setShellDirectory(self: *Workspace, directory: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, directory);
+        if (self.shell_directory.len != 0) self.allocator.free(self.shell_directory);
+        self.shell_directory = copy;
+    }
+
+    /// The directory a new terminal session starts in: the open loop's directory, else the
+    /// workspace's project folder. One that does not exist locally (a reclaimed worktree,
+    /// a remote or global project) falls back to the shell's own working directory.
+    fn sessionDirectory(self: *const Workspace) []const u8 {
+        for ([_][]const u8{ self.shell_directory, self.project_path }) |candidate| {
+            if (candidate.len == 0 or !std.fs.path.isAbsolute(candidate)) continue;
+            var directory = std.fs.cwd().openDir(candidate, .{}) catch continue;
+            directory.close();
+            return candidate;
+        }
+        return self.cwd;
     }
 
     fn layoutPathForProject(self: *Workspace, project: []const u8) ![]u8 {
@@ -612,6 +644,9 @@ pub const Workspace = struct {
         const explicit = timeout_ms > 0;
         const wait = &self.launch_waits[index];
         if (!explicit and now < self.passive_retry_due_ms[index]) return;
+        // A passive re-observation (a graph refresh, or an ended session's recreate) never
+        // displaces the loop the user just asked to open.
+        if (!explicit and wait.active() and wait.reports_timeout and !std.mem.eql(u8, wait.session, node_id)) return;
         const session = try self.allocator.dupe(u8, node_id);
         errdefer self.allocator.free(session);
         // Mount the tab immediately, but not the terminal: pending/failed launches still
@@ -631,6 +666,8 @@ pub const Workspace = struct {
                     self.layout.replacePaneID(node_id, wait.session) catch {};
                     return err;
                 };
+            } else {
+                try self.bindLoopPane(node_id);
             }
         }
         if (wait.active() and std.mem.eql(u8, wait.session, node_id)) {
@@ -876,6 +913,8 @@ pub const Workspace = struct {
             try self.layout.addTab(node_id, true);
         } else if (index > 0 and self.layout.tabs.items.len == 1) {
             try self.layout.addTab(node_id, loop_pane);
+        } else if (loop_pane) {
+            try self.bindLoopPane(node_id);
         }
         try self.persistLayout();
         var options = self.surfaceOptions(index);
@@ -893,13 +932,65 @@ pub const Workspace = struct {
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
         clearCells(&self.surfaces[index]);
-        self.resize(
-            self.layout_origin_x,
-            self.layout_origin_y,
-            self.layout_width,
-            self.layout_height,
-        );
+        self.relayout();
         self.clearRecreateSession(index);
+    }
+
+    /// Whether any pane of the layout is `id`.
+    fn layoutHasPane(self: *const Workspace, id: []const u8) bool {
+        for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
+            if (std.mem.eql(u8, pane.id, id)) return true;
+        };
+        return false;
+    }
+
+    /// Whether a slot shows or is attaching `id`.
+    fn paneShown(self: *const Workspace, id: []const u8) bool {
+        for (self.surfaces) |slot| {
+            if ((slot.surface != null or slot.attach != null) and std.mem.eql(u8, slot.session_name, id)) return true;
+        }
+        return false;
+    }
+
+    /// Makes `node_id` the layout's loop pane when the layout does not name it yet. The loop
+    /// pane that no slot shows any more (its session ended, or its loop was deleted) is
+    /// renamed in place and selected; without one, the loop gets its own tab. Otherwise the
+    /// loop's terminal would attach beside a stale pane that the tab strip and focus still
+    /// draw, leaving it hidden and every later open failing to find its pane.
+    fn bindLoopPane(self: *Workspace, node_id: []const u8) !void {
+        if (self.layoutHasPane(node_id)) return;
+        const previous_selected = self.layout.selected_tab;
+        for (self.layout.tabs.items, 0..) |tab, tab_index| for (tab.panes.items, 0..) |pane, pane_index| {
+            if (!pane.launches_agent or self.paneShown(pane.id)) continue;
+            const old_id = try self.allocator.dupe(u8, pane.id);
+            defer self.allocator.free(old_id);
+            const previous_focus = tab.focused_pane;
+            try self.layout.replacePaneID(old_id, node_id);
+            self.layout.selected_tab = tab_index;
+            self.layout.tabs.items[tab_index].focused_pane = pane_index;
+            self.persistLayout() catch |err| {
+                self.layout.replacePaneID(node_id, old_id) catch {};
+                self.layout.selected_tab = previous_selected;
+                self.layout.tabs.items[tab_index].focused_pane = previous_focus;
+                return err;
+            };
+            return;
+        };
+        const previous_next_id = self.layout.next_tab_id;
+        try self.layout.addTab(node_id, true);
+        self.persistLayout() catch |err| {
+            _ = self.layout.removePane(node_id);
+            self.layout.selected_tab = previous_selected;
+            self.layout.next_tab_id = previous_next_id;
+            return err;
+        };
+    }
+
+    /// Re-applies the current layout to the native surfaces without changing whether the
+    /// workspace is collapsed: a surface created while the graph shows stays hidden.
+    fn relayout(self: *Workspace) void {
+        if (self.collapsed) return self.blurAll();
+        self.syncTopology();
     }
 
     pub fn newTab(self: *Workspace) !void {
@@ -945,12 +1036,7 @@ pub const Workspace = struct {
             self.surfaces[index].destroyed = false;
             self.surfaces[index].destroying = false;
             clearCells(&self.surfaces[index]);
-            self.resize(
-                self.layout_origin_x,
-                self.layout_origin_y,
-                self.layout_width,
-                self.layout_height,
-            );
+            self.relayout();
             return index;
         }
         return error.SurfaceCapacityExceeded;
@@ -1448,6 +1534,7 @@ pub const Workspace = struct {
 
     fn syncTopology(self: *Workspace) void {
         if (self.syncing_topology) return;
+        if (self.collapsed) return self.blurAll();
         self.syncing_topology = true;
         defer self.syncing_topology = false;
         const selected = self.layout.selected() orelse return;
@@ -1456,7 +1543,6 @@ pub const Workspace = struct {
             const pane_index = self.paneIndex(slot.session_name);
             if (slot.surface == null) continue;
             if (pane_index) |position| {
-                _ = c.winghostty_surface_set_visible(slot.surface, 1);
                 const bounds = paneBounds(
                     self.layout_origin_x,
                     self.layout_origin_y,
@@ -1466,6 +1552,9 @@ pub const Workspace = struct {
                     position,
                     pane_count,
                 );
+                // A pane with no area has nowhere to draw; showing it would leave the
+                // surface at its previous or placeholder bounds.
+                _ = c.winghostty_surface_set_visible(slot.surface, if (bounds.width != 0 and bounds.height != 0) 1 else 0);
                 if (bounds.width != 0 and bounds.height != 0) {
                     _ = c.winghostty_surface_set_bounds(slot.surface, &bounds);
                     var metrics = slot.cell_metrics;
@@ -1791,8 +1880,10 @@ pub const Workspace = struct {
         options.bounds.y = 0;
         options.bounds.width = 480;
         options.bounds.height = 240;
-        options.visible = 1;
-        options.focus = if (index == self.active_surface) 1 else 0;
+        // A surface created while the workspace is collapsed (the graph shows) starts hidden
+        // and unfocused; otherwise it would draw at these placeholder bounds, over the sidebar.
+        options.visible = if (self.collapsed) 0 else 1;
+        options.focus = if (!self.collapsed and index == self.active_surface) 1 else 0;
         options.theme = c.WINGHOSTTY_THEME_DARK;
         // Use the workspace's last-known runtime monitor DPI so a surface created
         // after a DPI change (e.g. a new split/tab opened post-move) starts scaled
@@ -1835,6 +1926,7 @@ pub const Workspace = struct {
         try self.resizeSurfaceGrid(index, size);
         const vt = if (self.experimental_vt) try TerminalVt.State.create(self.allocator, size.cols, size.rows) else null;
         errdefer if (vt) |state| state.destroy();
+        const directory = self.sessionDirectory();
         const nonreading = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_SHELL_NONREADING_ATTACH") catch null;
         defer if (nonreading) |value| self.allocator.free(value);
         var attach_args: [5][]const u8 = undefined;
@@ -1857,7 +1949,7 @@ pub const Workspace = struct {
                 &session_buffer,
             )).len;
         }
-        var child = ZmxSession.child(self.allocator, attach_args[0..attach_len], self.cwd, .attach);
+        var child = ZmxSession.child(self.allocator, attach_args[0..attach_len], directory, .attach);
         try child.spawn();
         if (child.stdin) |stdin| {
             var mode: c.DWORD = c.PIPE_NOWAIT;
@@ -4187,6 +4279,29 @@ test "passive loop observation does not create a pending tab" {
     try workspace.openLaunchedNode(0, "idle-loop", 0);
     try std.testing.expectEqual(@as(usize, 0), workspace.tabCount());
     try std.testing.expect(workspace.surfaces[0].attach == null);
+}
+
+test "an explicit open rebinds a stale loop pane and survives a passive recreate of the ended loop" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.cancelAllLaunchWaits();
+    const path = "terminal-stale-loop-pane-test.json";
+    workspace.layout_path = @constCast(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+    // The deleted loop's pane outlived its session, beside a shell tab that is selected.
+    try workspace.layout.addTab("deleted-loop", true);
+    try workspace.layout.addTab("shell-tab", false);
+    try workspace.openLaunchedNode(0, "next-loop", LoopLaunchWait.open_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
+    try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+    try std.testing.expectEqualStrings("next-loop", workspace.layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
+    try std.testing.expectEqualStrings("shell-tab", workspace.layout.tabs.items[1].panes.items[0].id);
+    // The ended loop's recreate is a passive check; it must not cancel the open.
+    try workspace.openLaunchedNode(0, "deleted-loop", 0);
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqualStrings("next-loop", workspace.launch_waits[0].session);
+    try std.testing.expect(workspace.launch_waits[0].reports_timeout);
 }
 
 test "a loop pane is detached only when the layout owns it and no slot shows or awaits it" {

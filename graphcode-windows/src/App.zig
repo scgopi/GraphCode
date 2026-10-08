@@ -58,6 +58,9 @@ const WorkspaceTeardown = @import("WorkspaceTeardown.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 
+/// Lets tests observe each production UIA publication (`syncAccessibility`); absent from product builds.
+var accessibility_publication_observer: if (builtin.is_test) ?*const fn (*App) void else void = if (builtin.is_test) null else {};
+
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
 const WorktreeInspectRunner = *const fn (
@@ -1920,11 +1923,31 @@ pub const App = struct {
     fn openGraphLoop(self: *App, project_path: []const u8, node_id: []const u8) void {
         self.client.sendNodeAction(project_path, node_id, "resumeSession", null);
         const workspace = self.workspace orelse return;
+        self.bindLoopShellDirectory(workspace, project_path, node_id);
         workspace.openLaunchedNode(0, node_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch {
             self.setStatus("Unable to open selected loop");
             return;
         };
         if (workspace.isAwaitingLaunch(0)) self.setStatus("Starting loop");
+    }
+
+    /// A loop's plain-shell tabs start where macOS starts them: the loop's worktree, else
+    /// its project folder; a global loop's at home. A remote project names no local folder.
+    fn bindLoopShellDirectory(self: *App, workspace: *TerminalWorkspace.Workspace, project_path: []const u8, node_id: []const u8) void {
+        const graph = self.model.graphFor(project_path) orelse return;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, node_id) orelse return;
+        const node = graph.nodes.items[index];
+        var home: ?[]u8 = null;
+        defer if (home) |value| self.allocator.free(value);
+        const directory: []const u8 = if (graph.project.isRemote())
+            ""
+        else if (node.worktree_path.len != 0)
+            node.worktree_path
+        else if (graph.project.isGlobal()) global: {
+            home = std.process.getEnvVarOwned(self.allocator, "USERPROFILE") catch null;
+            break :global home orelse "";
+        } else graph.project.path;
+        workspace.setShellDirectory(directory) catch self.setStatus("Unable to record the loop's shell directory");
     }
 
     fn reportLaunchOutcome(self: *App, workspace: *TerminalWorkspace.Workspace) void {
@@ -6000,26 +6023,44 @@ pub const App = struct {
                 _ = self.selectNodeIndex(previous);
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
-            .new_tab => if (self.workspace) |workspace| workspace.newTab() catch {
-                self.smoke_workspace_action_failed = true;
-                self.setStatus("Unable to create tab");
+            .new_tab => {
+                if (self.workspace) |workspace| workspace.newTab() catch {
+                    self.smoke_workspace_action_failed = true;
+                    self.setStatus("Unable to create tab");
+                };
+                self.publishWorkspaceTabs();
             },
-            .close_tab => if (self.workspace) |workspace| workspace.closeFocusedPane() catch {
-                self.smoke_workspace_action_failed = true;
-                self.setStatus("Unable to close tab");
+            .close_tab => {
+                if (self.workspace) |workspace| workspace.closeFocusedPane() catch {
+                    self.smoke_workspace_action_failed = true;
+                    self.setStatus("Unable to close tab");
+                };
+                self.publishWorkspaceTabs();
             },
-            .split_horizontal => if (self.workspace) |workspace| workspace.splitFocused(.horizontal) catch {
-                self.smoke_workspace_action_failed = true;
-                self.setStatus("Unable to split workspace");
+            .split_horizontal => {
+                if (self.workspace) |workspace| workspace.splitFocused(.horizontal) catch {
+                    self.smoke_workspace_action_failed = true;
+                    self.setStatus("Unable to split workspace");
+                };
+                self.publishWorkspaceTabs();
             },
-            .split_vertical => if (self.workspace) |workspace| workspace.splitFocused(.vertical) catch {
-                self.smoke_workspace_action_failed = true;
-                self.setStatus("Unable to split workspace");
+            .split_vertical => {
+                if (self.workspace) |workspace| workspace.splitFocused(.vertical) catch {
+                    self.smoke_workspace_action_failed = true;
+                    self.setStatus("Unable to split workspace");
+                };
+                self.publishWorkspaceTabs();
             },
             .focus_next_pane => if (self.workspace) |workspace| workspace.focusNextPane(),
             .focus_previous_pane => if (self.workspace) |workspace| workspace.focusPreviousPane(),
-            .select_previous_tab => if (self.workspace) |workspace| workspace.selectPreviousTab(),
-            .select_next_tab => if (self.workspace) |workspace| workspace.selectNextTab(),
+            .select_previous_tab => {
+                if (self.workspace) |workspace| workspace.selectPreviousTab();
+                self.publishWorkspaceTabs();
+            },
+            .select_next_tab => {
+                if (self.workspace) |workspace| workspace.selectNextTab();
+                self.publishWorkspaceTabs();
+            },
             .show_graph => self.showInGraph(finishShowGraphNative, syncAccessibility),
             .toggle_rail => {
                 self.workspace_controls.apply(.toggle_rail);
@@ -6065,6 +6106,12 @@ pub const App = struct {
             },
             .none => {},
         }
+    }
+
+    /// The workspace's tabs changed: UIA republishes them so its tab list is the drawn one.
+    fn publishWorkspaceTabs(self: *App) void {
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     fn showInGraph(self: *App, comptime finish_native: fn (*App) void, comptime publish: fn (*App) void) void {
@@ -6283,22 +6330,20 @@ pub const App = struct {
         const center_offset: i32 = if (!is_quick_chats and !is_overview and graph == null) -70 else -60;
         const y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) + center_offset + 106;
         if (self.empty_open_folder_button != null) {
-            _ = c.ShowWindow(
+            placeChildControl(
                 self.empty_open_folder_button,
-                if (is_empty and !is_quick_chats and (is_overview or graph == null or is_global)) c.SW_SHOW else c.SW_HIDE,
-            );
-            _ = c.SetWindowPos(
-                self.empty_open_folder_button,
-                null,
-                physicalCoordinate(x, self.dpi),
-                physicalCoordinate(y, self.dpi),
-                physicalCoordinate(220, self.dpi),
-                physicalCoordinate(32, self.dpi),
-                c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+                is_empty and !is_quick_chats and (is_overview or graph == null or is_global),
+                .{
+                    .left = physicalCoordinate(x, self.dpi),
+                    .top = physicalCoordinate(y, self.dpi),
+                    .right = physicalCoordinate(x, self.dpi) + physicalCoordinate(220, self.dpi),
+                    .bottom = physicalCoordinate(y, self.dpi) + physicalCoordinate(32, self.dpi),
+                },
             );
         }
         if (self.empty_global_overview_button != null) {
-            setButtonText(self.empty_global_overview_button, if (is_quick_chats) "New Chat" else "New Loop");
+            const label = if (is_quick_chats) "New Chat" else "New Loop";
+            if (!childTextEquals(self.empty_global_overview_button, label)) setButtonText(self.empty_global_overview_button, label);
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
             const primary_x = if (is_empty) x else content_right - 140;
@@ -6306,20 +6351,46 @@ pub const App = struct {
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
             else
                 Tokens.header_height + 14;
-            _ = c.ShowWindow(
-                self.empty_global_overview_button,
-                if (show_primary) c.SW_SHOW else c.SW_HIDE,
-            );
+            placeChildControl(self.empty_global_overview_button, show_primary, .{
+                .left = physicalCoordinate(primary_x, self.dpi),
+                .top = physicalCoordinate(primary_y, self.dpi),
+                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
+                .bottom = physicalCoordinate(primary_y, self.dpi) + physicalCoordinate(32, self.dpi),
+            });
+        }
+    }
+
+    /// Shows or hides a child control and moves it to `bounds` (parent client pixels),
+    /// touching the native window only for what changed.
+    fn placeChildControl(control: c.HWND, show: bool, bounds: c.RECT) void {
+        const parent = c.GetParent(control);
+        var current: c.RECT = undefined;
+        if (c.GetWindowRect(control, &current) == 0) return;
+        _ = c.MapWindowPoints(null, parent, @ptrCast(&current), 2);
+        if (current.left != bounds.left or current.top != bounds.top or
+            current.right != bounds.right or current.bottom != bounds.bottom)
+        {
             _ = c.SetWindowPos(
-                self.empty_global_overview_button,
+                control,
                 null,
-                physicalCoordinate(primary_x, self.dpi),
-                physicalCoordinate(primary_y, self.dpi),
-                physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
-                physicalCoordinate(32, self.dpi),
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
                 c.SWP_NOZORDER | c.SWP_NOACTIVATE,
             );
         }
+        const style: u32 = @bitCast(c.GetWindowLongW(control, c.GWL_STYLE));
+        if (((style & c.WS_VISIBLE) != 0) != show) _ = c.ShowWindow(control, if (show) c.SW_SHOW else c.SW_HIDE);
+    }
+
+    fn childTextEquals(control: c.HWND, text: []const u8) bool {
+        var buffer: [64]u16 = undefined;
+        const length = c.GetWindowTextW(control, &buffer, buffer.len);
+        if (length <= 0) return text.len == 0;
+        var utf8: [192]u8 = undefined;
+        const count = std.unicode.utf16LeToUtf8(&utf8, buffer[0..@intCast(length)]) catch return false;
+        return std.mem.eql(u8, utf8[0..count], text);
     }
 
     fn createButton(parent: c.HWND, text: []const u8, id: usize) c.HWND {
@@ -6664,6 +6735,10 @@ pub const App = struct {
     }
 
     fn syncAccessibility(self: *App) void {
+        // The canvas's native New Loop / Open Folder buttons follow the same state UIA
+        // publishes, so a project switch or graph arrival never leaves one stale.
+        self.layoutEmptyStateControls();
+        if (builtin.is_test) if (accessibility_publication_observer) |observe| observe(self);
         const provider = if (self.accessibility) |*value| value else return;
         self.syncAccessibilityTo(provider, logicalClientRect(self.window.hwnd, self.dpi));
         self.syncHeaderFocus();
@@ -8662,7 +8737,7 @@ fn onWindowMessage(
                             .select => workspace.selectTab(tab_action.index) catch {},
                             .close => workspace.closeTab(tab_action.index) catch {},
                         }
-                        _ = c.InvalidateRect(hwnd, null, 0);
+                        app.publishWorkspaceTabs();
                         result.* = 0;
                         return true;
                     }
@@ -11131,6 +11206,454 @@ test "collapsed loop panel routes native tab and loop-bar clicks to the workspac
             try std.testing.expect(std.mem.indexOf(u8, newest, "loop-b") != null);
         }
     }
+}
+
+/// A `zmx` stand-in for live-terminal tests: `ls` prints `live.txt` (the daemon's running
+/// sessions); `attach` records the directory it was started in, then blocks on the
+/// terminal's input pipe like a real attach until its session is killed.
+const fake_zmx_script =
+    "@echo off\r\n" ++
+    "if \"%~1\"==\"ls\" goto ls\r\n" ++
+    "if \"%~1\"==\"attach\" goto attach\r\n" ++
+    "exit /b 0\r\n" ++
+    ":ls\r\n" ++
+    "if exist \"%~dp0live.txt\" type \"%~dp0live.txt\"\r\n" ++
+    "exit /b 0\r\n" ++
+    ":attach\r\n" ++
+    ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
+    "pause >nul\r\n" ++
+    "exit /b 0\r\n";
+
+const LiveLoop = struct { id: []const u8, state: []const u8 = "idle", worktree: ?[]const u8 = null };
+
+const TerminalChild = struct { visible: bool, rect: c.RECT };
+
+/// A loop workspace whose terminals are real winghostty surfaces (child windows of the
+/// shell window) attached through real child processes. Only the daemon is supplied: its
+/// graph arrives as frames and its sessions are the fake zmx's `live.txt`.
+const LiveTerminalFixture = struct {
+    tmp: std.testing.TmpDir,
+    root: []u8,
+    project: []u8,
+    worktree: []u8,
+    bin: []u8,
+    workspace: TerminalWorkspace.Workspace,
+    app: App,
+    sequence: usize,
+
+    fn init(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
+        const allocator = std.testing.allocator;
+        self.sequence = 2;
+        self.tmp = std.testing.tmpDir(.{});
+        try self.tmp.dir.makePath("project");
+        try self.tmp.dir.makePath("wt-a");
+        try self.tmp.dir.makePath("bin");
+        try self.tmp.dir.writeFile(.{ .sub_path = "zmx.cmd", .data = fake_zmx_script });
+        self.root = try self.tmp.dir.realpathAlloc(allocator, ".");
+        self.project = try std.fs.path.join(allocator, &.{ self.root, "project" });
+        self.worktree = try std.fs.path.join(allocator, &.{ self.root, "wt-a" });
+        // The installed shell's working directory: `...\GraphCode\current\bin`.
+        self.bin = try std.fs.path.join(allocator, &.{ self.root, "bin" });
+        self.app = try overviewTestApp(Dpi.base_dpi);
+        const app = &self.app;
+        self.workspace = .{
+            .parent = app.window.hwnd,
+            .allocator = allocator,
+            .zmx_path = try std.fs.path.join(allocator, &.{ self.root, "zmx.cmd" }),
+            .cwd = try allocator.dupe(u8, self.bin),
+            .input_queue = .{ .allocator = allocator },
+            .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, self.project),
+            .layout_path = try std.fs.path.join(allocator, &.{ self.root, "layout.json" }),
+            .project_key = try allocator.dupe(u8, self.project),
+            .project_path = try allocator.dupe(u8, self.project),
+        };
+        if (c.winghostty_host_initialize(&self.workspace.host) != c.WINGHOSTTY_OK) return error.TestWinghosttyHostUnavailable;
+        // Workspace.init's per-slot cell buffers for the default grid.
+        for (&self.workspace.surfaces) |*slot| {
+            slot.cells = try allocator.alloc(c.winghostty_terminal_cell, @as(usize, slot.grid.cols) * slot.grid.rows);
+            for (slot.cells) |*cell| cell.* = .{ .codepoint = 0, .foreground = 0xE6E6E6, .background = 0, .flags = 0 };
+        }
+        const initial = try self.frame(1, loops);
+        defer allocator.free(initial);
+        _ = try app.model.updateFromFrame(initial);
+        try std.testing.expect(app.selectProject(self.project));
+        app.surface = .project;
+        app.workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+        app.workspace = &self.workspace;
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+        app.layoutWorkspace();
+        ReopenProbe.uia_tabs = 0;
+        ReopenProbe.drawn_tabs = 0;
+        accessibility_publication_observer = ReopenProbe.publish;
+    }
+
+    fn deinit(self: *LiveTerminalFixture) void {
+        const allocator = std.testing.allocator;
+        accessibility_publication_observer = null;
+        self.app.workspace = null;
+        self.workspace.deinit();
+        deinitOverviewTestApp(&self.app);
+        allocator.free(self.bin);
+        allocator.free(self.worktree);
+        allocator.free(self.project);
+        allocator.free(self.root);
+        self.tmp.cleanup();
+    }
+
+    fn frame(self: *LiveTerminalFixture, sequence: usize, loops: []const LiveLoop) ![]u8 {
+        const allocator = std.testing.allocator;
+        var nodes: std.ArrayListUnmanaged(u8) = .empty;
+        defer nodes.deinit(allocator);
+        for (loops, 0..) |loop, index| {
+            const binding = if (loop.worktree) |path|
+                try std.fmt.allocPrint(allocator, ",\"worktreeBinding\":{{\"path\":{f}}}", .{std.json.fmt(path, .{})})
+            else
+                try allocator.dupe(u8, "");
+            defer allocator.free(binding);
+            const node = try std.fmt.allocPrint(
+                allocator,
+                "{s}{{\"id\":\"{s}\",\"title\":\"{s}\",\"loopType\":\"turnBased\",\"state\":{{\"{s}\":{{}}}}{s}}}",
+                .{ if (index == 0) "" else ",", loop.id, loop.id, loop.state, binding },
+            );
+            defer allocator.free(node);
+            try nodes.appendSlice(allocator, node);
+        }
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[]}}}}}}",
+            .{ sequence, std.json.fmt(self.project, .{}), nodes.items },
+        );
+    }
+
+    /// A daemon graph change through the production frame path (and its workspace refresh).
+    fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
+        const value = try self.frame(self.sequence, loops);
+        defer std.testing.allocator.free(value);
+        self.sequence += 1;
+        self.app.onFrameWithAccessibilityPublish(value, App.publishAccessibility);
+    }
+
+    fn setLive(self: *LiveTerminalFixture, ids: []const []const u8) !void {
+        const allocator = std.testing.allocator;
+        var listing: std.ArrayListUnmanaged(u8) = .empty;
+        defer listing.deinit(allocator);
+        for (ids) |id| {
+            try listing.appendSlice(allocator, "name=graphcode-");
+            try listing.appendSlice(allocator, id);
+            try listing.appendSlice(allocator, "\tpid=1\tclients=0\r\n");
+        }
+        try self.tmp.dir.writeFile(.{ .sub_path = "live.txt", .data = listing.items });
+    }
+
+    fn slotFor(self: *const LiveTerminalFixture, session: []const u8) ?usize {
+        for (self.workspace.surfaces, 0..) |slot, index| {
+            if (slot.surface != null and std.mem.eql(u8, slot.session_name, session)) return index;
+        }
+        return null;
+    }
+
+    /// The daemon kills a loop's session; its attach process exits.
+    fn endSession(self: *LiveTerminalFixture, session: []const u8) !void {
+        const index = self.slotFor(session) orelse return error.TestExpectedAttachedSession;
+        const child = self.workspace.surfaces[index].attach orelse return error.TestExpectedAttachedSession;
+        try std.testing.expect(c.TerminateProcess(child.id, 0) != 0);
+        try std.testing.expectEqual(@as(c.DWORD, c.WAIT_OBJECT_0), c.WaitForSingleObject(child.id, 5_000));
+    }
+
+    /// One WM_TIMER workspace step (`workspace.poll` and its launch report) plus the
+    /// thread's pending window messages.
+    fn tick(self: *LiveTerminalFixture) void {
+        self.workspace.poll();
+        self.app.reportLaunchOutcome(&self.workspace);
+        var message: c.MSG = undefined;
+        while (c.PeekMessageW(&message, null, 0, 0, c.PM_REMOVE) != 0) {
+            _ = c.TranslateMessage(&message);
+            _ = c.DispatchMessageW(&message);
+        }
+        std.Thread.sleep(15 * std.time.ns_per_ms);
+    }
+
+    fn waitFor(self: *LiveTerminalFixture, comptime done: fn (*LiveTerminalFixture, []const u8) bool, argument: []const u8) !void {
+        const deadline = std.time.milliTimestamp() + 12_000;
+        while (!done(self, argument)) {
+            if (std.time.milliTimestamp() >= deadline) {
+                std.debug.print("timed out waiting for {s}: status \"{s}\", awaiting {}, tabs {d}\n", .{ argument, self.app.status(), self.workspace.isAwaitingLaunch(0), self.workspace.tabCount() });
+                for (self.workspace.surfaces, 0..) |slot, index| {
+                    if (slot.surface != null or slot.attach != null or self.workspace.isAwaitingLaunch(index))
+                        std.debug.print("  slot {d}: session {s} surface {} attach {} awaiting {}\n", .{ index, slot.session_name, slot.surface != null, slot.attach != null, self.workspace.isAwaitingLaunch(index) });
+                }
+                return error.TestTimedOut;
+            }
+            self.tick();
+        }
+    }
+
+    fn shows(self: *LiveTerminalFixture, session: []const u8) bool {
+        return self.slotFor(session) != null and !self.workspace.isAwaitingLaunch(0);
+    }
+
+    fn loopSlotIdle(self: *LiveTerminalFixture, _: []const u8) bool {
+        return !self.workspace.hasSurface(0) and !self.workspace.hasAttach(0) and
+            !self.workspace.isAwaitingLaunch(0) and self.workspace.recreate_sessions[0].len == 0;
+    }
+
+    fn terminals(self: *LiveTerminalFixture, out: *[8]TerminalChild) usize {
+        const class = std.unicode.utf8ToUtf16LeStringLiteral("WinghosttyEmbeddableSurface");
+        var count: usize = 0;
+        var child: c.HWND = null;
+        while (count < out.len) {
+            child = c.FindWindowExW(self.app.window.hwnd, child, class, null);
+            if (child == null) break;
+            var rect: c.RECT = undefined;
+            _ = c.GetWindowRect(child, &rect);
+            _ = c.MapWindowPoints(null, self.app.window.hwnd, @ptrCast(&rect), 2);
+            const style: u32 = @bitCast(c.GetWindowLongW(child, c.GWL_STYLE));
+            out[count] = .{ .visible = (style & c.WS_VISIBLE) != 0, .rect = rect };
+            count += 1;
+        }
+        return count;
+    }
+
+    fn expectNoVisibleTerminal(self: *LiveTerminalFixture) !void {
+        var children: [8]TerminalChild = undefined;
+        for (children[0..self.terminals(&children)]) |child| {
+            if (child.visible) {
+                std.debug.print("visible terminal over the graph at {d},{d} {d}x{d}\n", .{
+                    child.rect.left, child.rect.top, child.rect.right - child.rect.left, child.rect.bottom - child.rect.top,
+                });
+                return error.TestUnexpectedVisibleTerminal;
+            }
+        }
+    }
+
+    /// Exactly `expected` terminals are visible, all inside the loop workspace (right of
+    /// the sidebar, below the header, loop bar, and tab strip).
+    fn expectTerminalsInWorkspace(self: *LiveTerminalFixture, expected: usize) !void {
+        var children: [8]TerminalChild = undefined;
+        var visible: usize = 0;
+        for (children[0..self.terminals(&children)]) |child| {
+            if (!child.visible) continue;
+            visible += 1;
+            try std.testing.expect(child.rect.left >= physicalCoordinate(Tokens.sidebar_width, self.app.dpi));
+            try std.testing.expect(child.rect.top >= physicalCoordinate(Tokens.header_height + Tokens.loop_bar_height + Tokens.tab_bar_height, self.app.dpi));
+            try std.testing.expect(child.rect.right > child.rect.left and child.rect.bottom > child.rect.top);
+        }
+        try std.testing.expectEqual(expected, visible);
+    }
+
+    fn showGraph(self: *LiveTerminalFixture) !void {
+        LoopBarProbe.publish(&self.app);
+        try nativeClickCenter(&self.app, LoopBarProbe.show_graph orelse return error.TestExpectedShowGraphButton);
+        try std.testing.expectEqual(GraphCanvas.Surface.project, self.app.surface);
+    }
+
+    /// The directory the session's attach process was started in (the shell's directory).
+    fn attachDirectory(self: *LiveTerminalFixture, session: []const u8) ![]u8 {
+        const allocator = std.testing.allocator;
+        const name = try std.fmt.allocPrint(allocator, "cwd-graphcode-{s}.txt", .{session});
+        defer allocator.free(name);
+        const deadline = std.time.milliTimestamp() + 12_000;
+        while (true) {
+            if (self.tmp.dir.readFileAlloc(allocator, name, 4096)) |data| {
+                defer allocator.free(data);
+                const trimmed = std.mem.trim(u8, data, " \r\n");
+                if (trimmed.len != 0) return allocator.dupe(u8, trimmed);
+            } else |_| {}
+            if (std.time.milliTimestamp() >= deadline) return error.TestTimedOut;
+            self.tick();
+        }
+    }
+
+    fn expectSelectedPane(self: *LiveTerminalFixture, session: []const u8) !void {
+        const tab = self.workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+        try std.testing.expectEqualStrings(session, tab.panes.items[tab.focused_pane].id);
+    }
+};
+
+fn expectSameDirectory(expected: []const u8, actual: []const u8) !void {
+    if (!std.ascii.eqlIgnoreCase(expected, actual)) {
+        std.debug.print("expected directory {s}, shell started in {s}\n", .{ expected, actual });
+        return error.TestUnexpectedDirectory;
+    }
+}
+
+test "workspace surface: a loop terminal attached while the graph shows stays hidden instead of drawing over the sidebar" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.expectTerminalsInWorkspace(1);
+
+    // The loop's session ends while its pane shows; the pane detaches.
+    try fixture.setLive(&.{});
+    try fixture.endSession("loop-a");
+    try fixture.waitFor(LiveTerminalFixture.loopSlotIdle, "");
+    try fixture.showGraph();
+    try fixture.expectNoVisibleTerminal();
+
+    // The daemon restarts the loop while the graph shows; graph refreshes re-observe its
+    // pane, which attaches behind the graph.
+    try fixture.setLive(&.{"loop-a"});
+    const deadline = std.time.milliTimestamp() + 12_000;
+    while (fixture.slotFor("loop-a") == null) {
+        if (std.time.milliTimestamp() >= deadline) return error.TestTimedOut;
+        try fixture.deliver(&.{ .{ .id = "loop-a", .state = "running" }, .{ .id = "loop-b" } });
+        for (0..5) |_| fixture.tick();
+    }
+    for (0..10) |_| fixture.tick();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try fixture.expectNoVisibleTerminal();
+
+    // Reopening the loop shows that terminal inside the workspace.
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.expectTerminalsInWorkspace(1);
+    try fixture.showGraph();
+    try fixture.expectNoVisibleTerminal();
+}
+
+test "workspace surface: native New Tab publishes every drawn tab to UIA and starts its shell in the loop's directory" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const workspace = &fixture.workspace;
+    // Loop A works in its own worktree; loop B in the project folder.
+    try fixture.deliver(&.{ .{ .id = "loop-a", .worktree = fixture.worktree }, .{ .id = "loop-b" } });
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    for ([_][]const u8{ "loop-a", "loop-b" }, [_][]const u8{ fixture.worktree, fixture.project }) |loop, directory| {
+        try clickSidebarLoopRow(app, fixture.project, loop);
+        try fixture.waitFor(LiveTerminalFixture.shows, loop);
+        try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+
+        const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+        try nativeClickCenter(app, new_tab);
+        try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
+        try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
+
+        const shell = try std.testing.allocator.dupe(u8, workspace.layout.tabs.items[1].panes.items[0].id);
+        defer std.testing.allocator.free(shell);
+        const started_in = try fixture.attachDirectory(shell);
+        defer std.testing.allocator.free(started_in);
+        try expectSameDirectory(directory, started_in);
+        try fixture.expectTerminalsInWorkspace(1);
+
+        // Native clicks on the drawn tabs keep UIA's tab list equal to the drawn one.
+        const agent_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 0);
+        try nativeClick(app, agent_tab.left + 24, @divTrunc(agent_tab.top + agent_tab.bottom, 2));
+        try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+        try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
+        const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+        try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
+        try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+        try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
+        try fixture.expectSelectedPane(loop);
+        try fixture.showGraph();
+    }
+}
+
+test "workspace surface: deleting the attached loop while the graph shows leaves every later loop open working" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-c" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b", "loop-c" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.expectTerminalsInWorkspace(1);
+    try fixture.showGraph();
+
+    // `graphcode node delete loop-a`: the daemon kills its session and drops it from the graph.
+    try fixture.setLive(&.{ "loop-b", "loop-c" });
+    try fixture.endSession("loop-a");
+    try fixture.deliver(&.{ .{ .id = "loop-b" }, .{ .id = "loop-c" } });
+
+    for ([_][]const u8{ "loop-b", "loop-c", "loop-b" }) |loop| {
+        try clickSidebarLoopRow(app, fixture.project, loop);
+        // The open itself reports no focus or open failure.
+        try std.testing.expectEqualStrings("Starting loop", app.status());
+        try fixture.waitFor(LiveTerminalFixture.shows, loop);
+        for (0..5) |_| fixture.tick();
+        try std.testing.expectEqualStrings("Loop opened", app.status());
+        try fixture.expectSelectedPane(loop);
+        try fixture.expectTerminalsInWorkspace(1);
+        try std.testing.expectEqual(@as(usize, 1), fixture.workspace.tabCount());
+        try fixture.showGraph();
+        try fixture.expectNoVisibleTerminal();
+    }
+}
+
+fn emptyStateButton(app: *App, button: c.HWND) TerminalChild {
+    var rect: c.RECT = undefined;
+    _ = c.GetWindowRect(button, &rect);
+    _ = c.MapWindowPoints(null, app.window.hwnd, @ptrCast(&rect), 2);
+    const style: u32 = @bitCast(c.GetWindowLongW(button, c.GWL_STYLE));
+    return .{ .visible = (style & c.WS_VISIBLE) != 0, .rect = rect };
+}
+
+/// The canvas's New Loop button sits at the top right of a project that has loops.
+fn expectNewLoopAtTopRight(app: *App) !void {
+    const button = emptyStateButton(app, app.empty_global_overview_button);
+    try std.testing.expect(button.visible);
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    try std.testing.expectEqual(physicalCoordinate(client.right - 140, app.dpi), button.rect.left);
+    try std.testing.expectEqual(physicalCoordinate(Tokens.header_height + 14, app.dpi), button.rect.top);
+    try std.testing.expectEqual(physicalCoordinate(120, app.dpi), button.rect.right - button.rect.left);
+    try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
+}
+
+fn clickSidebarProjectRow(app: *App, path: []const u8) !void {
+    var rows = try Sidebar.appendRows(app.allocator, &app.model, app.currentWorktreeInspection(), app.sidebar_scroll, &app.sidebar_state);
+    defer rows.deinit(app.allocator);
+    const row = for (rows.items) |row| {
+        if (row.kind == .open_project and row.project_path != null and std.mem.eql(u8, row.project_path.?, path)) break row;
+    } else return error.TestExpectedProjectRow;
+    try nativeClick(app, 80, row.top + 8);
+}
+
+test "workspace surface: canvas New Loop and Open Folder buttons follow the project shown after native opens and graph arrivals" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    // The first graph is queued as the project to subscribe to once connected.
+    defer app.allocator.free(app.pending_project_path);
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+    app.surface = .project;
+    app.createEmptyStateControls();
+    defer {
+        _ = c.DestroyWindow(app.empty_open_folder_button);
+        _ = c.DestroyWindow(app.empty_global_overview_button);
+    }
+    try std.testing.expect(app.empty_open_folder_button != null and app.empty_global_overview_button != null);
+    // No project yet: the empty canvas offers Open Folder.
+    try std.testing.expect(emptyStateButton(&app, app.empty_open_folder_button).visible);
+
+    // The daemon restores a project with loops: Open Folder goes, New Loop moves to the top right.
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\core-fixture","name":"Core"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+    , App.publishAccessibility);
+    try std.testing.expectEqualStrings("C:\\core-fixture", app.model.graph.?.project.path);
+    try expectNewLoopAtTopRight(&app);
+
+    // An extra, empty project opens beside it; selecting its row centres New Loop on its canvas.
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\empty-fixture","name":"Empty"},"nodes":[],"edges":[]}}}
+    , App.publishAccessibility);
+    try clickSidebarProjectRow(&app, "C:\\empty-fixture");
+    try std.testing.expectEqualStrings("C:\\empty-fixture", app.model.graph.?.project.path);
+    const centred = emptyStateButton(&app, app.empty_global_overview_button);
+    try std.testing.expect(centred.visible);
+    try std.testing.expectEqual(physicalCoordinate(220, app.dpi), centred.rect.right - centred.rect.left);
+
+    // Back on the project with loops, the button returns to the top right.
+    try clickSidebarProjectRow(&app, "C:\\core-fixture");
+    try std.testing.expectEqualStrings("C:\\core-fixture", app.model.graph.?.project.path);
+    try expectNewLoopAtTopRight(&app);
 }
 
 test "selection routes with a loop workspace open: Ctrl+Tab review moves the loop bar and pane together" {
