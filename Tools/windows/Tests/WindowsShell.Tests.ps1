@@ -1180,7 +1180,7 @@ Invoke-Native "App shell executable tests" {
     "Build the pinned Winghostty host library before App shell tests."
   Push-Location $shellRoot
   try {
-    & $zig test src\App.zig src\AccessibilityProvider.cpp src\FilePicker.c $winghosttyLib `
+    & $zig test src\App.zig src\AccessibilityProvider.cpp src\FilePicker.c src\FolderPicker.c $winghosttyLib `
       -DUNICODE -D_UNICODE -target x86_64-windows-msvc -lc `
       -luser32 -lgdi32 -lgdiplus -lmsimg32 -lopengl32 -lkernel32 -limm32 `
       -lole32 -loleaut32 -luiautomationcore -lshell32 -ladvapi32 -lwinhttp "-I$include" $terminalVtLib

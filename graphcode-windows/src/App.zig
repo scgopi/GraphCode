@@ -1011,6 +1011,13 @@ const AccessibilityBounds = union(enum) {
     }
 };
 
+fn clipSidebarAccessibilityBounds(bounds: c.RECT, viewport_bottom: i32) c.RECT {
+    const top = @max(bounds.top, Tokens.header_height);
+    const bottom = @min(bounds.bottom, viewport_bottom);
+    if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    return .{ .left = bounds.left, .top = top, .right = bounds.right, .bottom = bottom };
+}
+
 fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) InputBounds {
     return .{
         .rail_left = if (controls.rail_visible) Tokens.sidebar_width else 0,
@@ -1173,7 +1180,7 @@ const UiaDynamicTarget = union(enum) {
     project_disclosure: []const u8,
     loop: struct {
         project_path: []const u8,
-        index: usize,
+        node_id: []const u8,
     },
     loop_disclosure: struct {
         project_path: []const u8,
@@ -1251,6 +1258,8 @@ pub const App = struct {
     sidebar_drag_origin_y: i32 = 0,
     sidebar_drag_active: bool = false,
     sidebar_drag_started: bool = false,
+    canvas_press_project_path: []u8 = &.{},
+    canvas_press_node_id: []u8 = &.{},
     workspace: ?*TerminalWorkspace.Workspace = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
@@ -1445,6 +1454,8 @@ pub const App = struct {
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
+        if (self.canvas_press_project_path.len != 0) self.allocator.free(self.canvas_press_project_path);
+        if (self.canvas_press_node_id.len != 0) self.allocator.free(self.canvas_press_node_id);
         self.workspace_reservation.deinit();
         if (self.workspace_list) |*list| list.deinit(self.allocator);
         if (self.workspace_path.len != 0) self.allocator.free(self.workspace_path);
@@ -1877,8 +1888,9 @@ pub const App = struct {
 
     /// Asks the daemon to start an attended loop's agent — a no-op for a loop already
     /// running — and opens its pane once that session exists, never as a bare shell.
-    fn openGraphLoop(self: *App, workspace: *TerminalWorkspace.Workspace, project_path: []const u8, node_id: []const u8) void {
+    fn openGraphLoop(self: *App, project_path: []const u8, node_id: []const u8) void {
         self.client.sendNodeAction(project_path, node_id, "resumeSession", null);
+        const workspace = self.workspace orelse return;
         workspace.openLaunchedNode(0, node_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch {
             self.setStatus("Unable to open selected loop");
             return;
@@ -2155,11 +2167,30 @@ pub const App = struct {
 
     fn cancelCanvasInteraction(self: *App) void {
         self.canvas.cancelInteraction();
+        self.clearCanvasNodePress();
         if (self.edge_drag_source_id.len != 0) {
             self.allocator.free(self.edge_drag_source_id);
             self.edge_drag_source_id = &.{};
         }
         _ = c.ReleaseCapture();
+    }
+
+    fn clearCanvasNodePress(self: *App) void {
+        if (self.canvas_press_project_path.len != 0) self.allocator.free(self.canvas_press_project_path);
+        if (self.canvas_press_node_id.len != 0) self.allocator.free(self.canvas_press_node_id);
+        self.canvas_press_project_path = &.{};
+        self.canvas_press_node_id = &.{};
+    }
+
+    fn beginCanvasNodePress(self: *App, project_path: []const u8, node_id: []const u8) bool {
+        self.clearCanvasNodePress();
+        self.canvas_press_project_path = self.allocator.dupe(u8, project_path) catch return false;
+        self.canvas_press_node_id = self.allocator.dupe(u8, node_id) catch {
+            self.allocator.free(self.canvas_press_project_path);
+            self.canvas_press_project_path = &.{};
+            return false;
+        };
+        return true;
     }
 
     fn clearSidebarRootDrag(self: *App) void {
@@ -3521,25 +3552,59 @@ pub const App = struct {
         const graph = if (self.model.graph) |value| value else return;
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
+        const project_path = self.currentProject() orelse return;
+        _ = self.activateLoop(project_path, graph.nodes.items[index].id);
+    }
+
+    fn activateLoop(self: *App, project_path: []const u8, node_id: []const u8) bool {
+        const owned_project_path = self.allocator.dupe(u8, project_path) catch {
+            self.setStatus("Unable to select loop");
+            return false;
+        };
+        defer self.allocator.free(owned_project_path);
+        const owned_node_id = self.allocator.dupe(u8, node_id) catch {
+            self.setStatus("Unable to select loop");
+            return false;
+        };
+        defer self.allocator.free(owned_node_id);
+        if (!self.selectProject(owned_project_path)) return false;
+        const graph = self.model.graph orelse return false;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, owned_node_id) orelse {
+            self.setStatus("Selected loop is no longer available");
+            return false;
+        };
+        if (!self.selectNodeIndex(index)) {
+            self.setStatus("Unable to select loop");
+            return false;
+        }
         if (!self.model.isCompositeOpen() and
             (std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite") or
                 std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive")))
         {
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
             self.showCompositeGroup(graph.nodes.items[index]);
-            return;
+            return true;
         }
         if (self.model.isCompositeOpen()) {
             self.setStatus("Composite templates have no terminal until the group is piloted");
-            return;
+            return false;
         }
-        const workspace = if (self.workspace) |value| value else return;
-        const project_path = self.currentProject() orelse return;
         self.workspace_is_quick_chat = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
-        self.openGraphLoop(workspace, project_path, graph.nodes.items[index].id);
+        self.clearEdgeSelection();
+        self.rebindWorkspace(owned_project_path);
+        self.openGraphLoop(owned_project_path, owned_node_id);
+        if (self.workspace) |workspace|
+            workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
     }
 
     fn stopSelectedNode(self: *App) void {
@@ -5781,7 +5846,7 @@ pub const App = struct {
         const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
         const bottom = top + 34;
         const viewport_top = Tokens.header_height;
-        const viewport_bottom = client.bottom - Tokens.workspace_height;
+        const viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         if (top < viewport_top) self.sidebar_scroll -= viewport_top - top;
         if (bottom > viewport_bottom) self.sidebar_scroll += bottom - viewport_bottom;
         self.clampSidebarScroll();
@@ -5796,7 +5861,12 @@ pub const App = struct {
         const inspection = if (self.worktree_inspection) |*value| value else null;
         self.sidebar_scroll = Sidebar.clampScroll(
             self.sidebar_scroll,
-            Sidebar.maxScroll(&self.model, inspection, client.bottom - Tokens.workspace_height, &self.sidebar_state),
+            Sidebar.maxScroll(
+                &self.model,
+                inspection,
+                GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface),
+                &self.sidebar_state,
+            ),
         );
     }
 
@@ -6546,6 +6616,7 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
         const current_inspection = self.currentWorktreeInspection();
         var sidebar_rows = Sidebar.appendRows(
@@ -6605,7 +6676,10 @@ pub const App = struct {
         };
 
         for (sidebar_rows.items) |row| {
-            const bounds = c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 };
+            const bounds = clipSidebarAccessibilityBounds(
+                .{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 },
+                sidebar_bottom,
+            );
             switch (row.kind) {
                 .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", "Local Projects", 1, .{ .logical = bounds }, false, false) catch return,
                 .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", "Remote Repositories", 1, .{ .logical = bounds }, false, false) catch return,
@@ -6615,10 +6689,16 @@ pub const App = struct {
                 },
                 .open_project => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
                     self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, .{ .logical = bounds }, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
-                    const new_bounds = c.RECT{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 };
+                    const new_bounds = clipSidebarAccessibilityBounds(
+                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
+                        sidebar_bottom,
+                    );
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (row.has_children) {
-                        const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
+                        const disclosure_bounds = clipSidebarAccessibilityBounds(
+                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                            sidebar_bottom,
+                        );
                         self.appendAccessibilityElement(
                             &elements,
                             &owned_identities,
@@ -6639,7 +6719,10 @@ pub const App = struct {
                         defer self.allocator.free(key);
                         self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
                         if (row.has_children) {
-                            const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
+                            const disclosure_bounds = clipSidebarAccessibilityBounds(
+                                .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                                sidebar_bottom,
+                            );
                             self.appendAccessibilityElement(
                                 &elements,
                                 &owned_identities,
@@ -6671,10 +6754,16 @@ pub const App = struct {
                 },
                 .quick_chat_overview => {
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
-                    const new_bounds = c.RECT{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 };
+                    const new_bounds = clipSidebarAccessibilityBounds(
+                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
+                        sidebar_bottom,
+                    );
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (self.model.quick_chats.items.len != 0) {
-                        const disclosure_bounds = c.RECT{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 };
+                        const disclosure_bounds = clipSidebarAccessibilityBounds(
+                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                            sidebar_bottom,
+                        );
                         self.appendAccessibilityElement(
                             &elements,
                             &owned_identities,
@@ -7122,7 +7211,7 @@ pub const App = struct {
                     Accessibility.worktreeIdentityPayload(attention_identity) == payload)
                 {
                     if (target != null) return false;
-                    target = .{ .loop = .{ .project_path = graph.project.path, .index = index } };
+                    target = .{ .loop = .{ .project_path = graph.project.path, .node_id = node.id } };
                 }
                 if (Accessibility.worktreeIdentityPayload(reclaim_identity) == payload) {
                     if (target != null) return false;
@@ -7311,7 +7400,7 @@ pub const App = struct {
                 if (self.selectProject(path)) self.createNode();
             },
             .project_disclosure => |path| self.sidebar_state.toggleProject(path) catch return false,
-            .loop => |loop| self.openLoopFromAccessibility(loop.project_path, loop.index),
+            .loop => |loop| _ = self.activateLoop(loop.project_path, loop.node_id),
             .loop_disclosure => |loop| {
                 const graph = self.model.graphFor(loop.project_path) orelse return false;
                 if (loop.index >= graph.nodes.items.len) return false;
@@ -7370,36 +7459,9 @@ pub const App = struct {
     }
 
     fn openLoopFromAccessibility(self: *App, project_path: []const u8, index: usize) void {
-        if (!self.selectProject(project_path)) return;
-        self.workspace_is_quick_chat = false;
-        const graph = self.model.graph orelse return;
+        const graph = self.model.graphFor(project_path) orelse return;
         if (index >= graph.nodes.items.len) return;
-        if (!self.selectNodeIndex(index)) {
-            self.setStatus("Unable to select loop");
-            return;
-        }
-        if (std.mem.eql(u8, graph.nodes.items[index].loop_type, "composite") or
-            std.mem.eql(u8, graph.nodes.items[index].loop_type, "proactive"))
-        {
-            self.surface = .project;
-            self.workspace_controls.panel_visible = false;
-            self.layoutWorkspace();
-            self.layoutEmptyStateControls();
-            self.showCompositeGroup(graph.nodes.items[index]);
-            return;
-        }
-        self.surface = .workspace;
-        self.workspace_controls.panel_visible = true;
-        self.layoutWorkspace();
-        self.layoutEmptyStateControls();
-        self.clearEdgeSelection();
-        self.rebindWorkspace(project_path);
-        if (self.workspace) |workspace| {
-            self.openGraphLoop(workspace, project_path, graph.nodes.items[index].id);
-            workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
-        }
-        self.syncAccessibility();
-        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        _ = self.activateLoop(project_path, graph.nodes.items[index].id);
     }
 
     fn acquireSingleInstance(self: *App) !void {
@@ -8475,9 +8537,10 @@ fn onWindowMessage(
             else
                 routing.workspace_top;
             const rail_left = routing.rail_left;
+            const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
             if (app.workspace_controls.rail_visible and x < rail_left) {
                 const inspection = if (app.worktree_inspection) |*value| value else null;
-                if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, workspace_top, &app.sidebar_state)) |row| {
+                if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, sidebar_bottom, &app.sidebar_state)) |row| {
                     if (row.kind == .loop and row.depth == 0 and x < 198) {
                         if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                             if (row.index < graph.nodes.items.len) app.beginSidebarRootDrag(path, graph.nodes.items[row.index].id, y);
@@ -8571,20 +8634,7 @@ fn onWindowMessage(
                             _ = c.InvalidateRect(hwnd, null, 0);
                         } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
-                            if (app.selectProject(graph.project.path)) {
-                                app.workspace_is_quick_chat = false;
-                                app.surface = .workspace;
-                                app.workspace_controls.panel_visible = true;
-                                app.layoutWorkspace();
-                                app.layoutEmptyStateControls();
-                                app.clearEdgeSelection();
-                                app.rebindWorkspace(graph.project.path);
-                                _ = app.selectNodeIndex(hit.node_index);
-                                if (app.workspace) |workspace| {
-                                    app.openGraphLoop(workspace, graph.project.path, graph.nodes.items[hit.node_index].id);
-                                    workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
-                                }
-                            }
+                            _ = app.activateLoop(graph.project.path, graph.nodes.items[hit.node_index].id);
                         } else {
                             app.canvas.beginPan(x, y);
                             _ = c.SetCapture(hwnd);
@@ -8622,8 +8672,7 @@ fn onWindowMessage(
                             }
                             _ = c.InvalidateRect(hwnd, null, 0);
                         } else if (GraphCanvas.hitTestAttentionAction(graph.nodes.items, graph.edges.items, x, y, &app.canvas)) |index| {
-                            _ = app.selectNodeIndex(index);
-                            app.openSelectedNode();
+                            _ = app.activateLoop(graph.project.path, graph.nodes.items[index].id);
                         } else if (GraphCanvas.hitTestConnector(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                             if (app.edge_drag_source_id.len != 0) app.allocator.free(app.edge_drag_source_id);
                             app.edge_drag_source_id = app.allocator.dupe(u8, graph.nodes.items[index].id) catch &.{};
@@ -8633,8 +8682,12 @@ fn onWindowMessage(
                             }
                         } else if (GraphCanvas.hitTest(graph.nodes.items, x, y, &app.canvas, bounds)) |index| {
                             _ = app.selectNodeIndex(index);
-                            app.canvas.beginNodeDrag(graph.nodes.items[index].id, index, x, y);
-                            _ = c.SetCapture(hwnd);
+                            if (app.beginCanvasNodePress(graph.project.path, graph.nodes.items[index].id)) {
+                                app.canvas.beginNodeDrag(graph.nodes.items[index].id, index, x, y);
+                                _ = c.SetCapture(hwnd);
+                            } else {
+                                app.setStatus("Unable to prepare loop activation");
+                            }
                             _ = c.InvalidateRect(hwnd, null, 0);
                         } else if (GraphCanvas.hitTestEdge(graph.nodes.items, graph.edges.items, x, y, &app.canvas, bounds)) |index| {
                             _ = app.selectEdgeIndex(index);
@@ -8660,7 +8713,7 @@ fn onWindowMessage(
                 app.update_lock.lock();
                 const update_available = app.update_state.state == .available;
                 app.update_lock.unlock();
-                if (Sidebar.updateBannerAt(x, y, routing.canvas.bottom, update_available, app.ingress_error.len != 0)) {
+                if (Sidebar.updateBannerAt(x, y, sidebar_bottom, update_available, app.ingress_error.len != 0)) {
                     app.showCurrentUpdateOffer();
                     result.* = 0;
                     return true;
@@ -8738,7 +8791,7 @@ fn onWindowMessage(
                     &app.model,
                     if (app.worktree_inspection) |*value| value else null,
                     app.sidebar_scroll,
-                    workspace_top,
+                    sidebar_bottom,
                     &app.sidebar_state,
                 )) |row| {
                     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
@@ -8780,21 +8833,7 @@ fn onWindowMessage(
                                     result.* = 0;
                                     return true;
                                 }
-                                if (!app.selectProject(path)) return true;
-                                app.workspace_is_quick_chat = false;
-                                app.surface = .workspace;
-                                app.workspace_controls.panel_visible = true;
-                                app.layoutWorkspace();
-                                app.layoutEmptyStateControls();
-                                app.clearEdgeSelection();
-                                app.rebindWorkspace(path);
-                                const selected_graph = app.model.graph orelse return true;
-                                if (row.index >= selected_graph.nodes.items.len) return true;
-                                _ = app.selectNodeIndex(row.index);
-                                if (app.workspace) |workspace| {
-                                    app.openGraphLoop(workspace, path, selected_graph.nodes.items[row.index].id);
-                                    workspace.focusRestoredPane() catch app.setStatus("Unable to restore selected terminal focus");
-                                }
+                                _ = app.activateLoop(path, graph.nodes.items[row.index].id);
                             }
                         },
                         .worktree => if (app.worktree_inspection) |inspection| {
@@ -8851,7 +8890,15 @@ fn onWindowMessage(
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
             if (app.workspace_controls.rail_visible and point.x < routing.rail_left) {
                 const inspection = if (app.worktree_inspection) |*value| value else null;
-                if (Sidebar.rowAt(point.x, point.y, &app.model, inspection, app.sidebar_scroll, routing.canvas.bottom, &app.sidebar_state)) |row| {
+                if (Sidebar.rowAt(
+                    point.x,
+                    point.y,
+                    &app.model,
+                    inspection,
+                    app.sidebar_scroll,
+                    GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                    &app.sidebar_state,
+                )) |row| {
                     var project_path: ?[]const u8 = null;
                     var remote = false;
                     switch (row.kind) {
@@ -8950,13 +8997,24 @@ fn onWindowMessage(
         },
         c.WM_LBUTTONUP => {
             if (app.canvas.node_dragging) {
-                app.canvas.endNodeDrag();
-                if (app.canvas_layout_store) |*store| {
-                    store.save(&app.canvas) catch app.setStatus("Canvas position could not be saved");
+                const dragged = app.canvas.node_drag_started;
+                const activation_index = app.canvas.completeNodeDrag();
+                if (dragged) {
+                    if (app.canvas_layout_store) |*store| {
+                        store.save(&app.canvas) catch app.setStatus("Canvas position could not be saved");
+                    }
                 }
+                if (activation_index != null and
+                    app.canvas_press_project_path.len != 0 and
+                    app.canvas_press_node_id.len != 0)
+                {
+                    _ = app.activateLoop(app.canvas_press_project_path, app.canvas_press_node_id);
+                } else {
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                }
+                app.clearCanvasNodePress();
                 _ = c.ReleaseCapture();
-                app.syncAccessibility();
-                _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             }
@@ -9052,9 +9110,25 @@ fn onWindowMessage(
             const delta = wheel.delta;
             const client = logicalClientRect(hwnd, app.dpi);
             const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
-            switch (wheelRegion(x, y, routing, app.workspace_controls)) {
+            const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+            const region: WheelRegion = if (app.workspace_controls.rail_visible and
+                x < routing.rail_left and
+                y >= Tokens.header_height and
+                y < sidebar_bottom)
+                .sidebar
+            else
+                wheelRegion(x, y, routing, app.workspace_controls);
+            switch (region) {
                 .sidebar => {
-                    app.sidebar_scroll = Sidebar.clampScroll(app.sidebar_scroll - @divTrunc(@as(i32, delta), 4), Sidebar.maxScroll(&app.model, if (app.worktree_inspection) |*value| value else null, routing.canvas.bottom, &app.sidebar_state));
+                    app.sidebar_scroll = Sidebar.clampScroll(
+                        app.sidebar_scroll - @divTrunc(@as(i32, delta), 4),
+                        Sidebar.maxScroll(
+                            &app.model,
+                            if (app.worktree_inspection) |*value| value else null,
+                            GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                            &app.sidebar_state,
+                        ),
+                    );
                 },
                 .canvas => app.canvas.zoomAt(x, y, delta),
                 .none => {},
@@ -10253,6 +10327,153 @@ test "input routing bounds follow hidden workspace panel and rail" {
     try std.testing.expect(hidden.canvas.bottom > shown.canvas.bottom);
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(20, 300, hidden, hidden_controls));
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
+}
+
+test "sidebar UIA bounds clip hidden rows instead of sharing visible hit rectangles" {
+    try std.testing.expectEqualDeep(
+        c.RECT{ .left = 12, .top = Tokens.header_height, .right = 232, .bottom = Tokens.header_height + 8 },
+        clipSidebarAccessibilityBounds(
+            .{ .left = 12, .top = Tokens.header_height - 8, .right = 232, .bottom = Tokens.header_height + 8 },
+            400,
+        ),
+    );
+    try std.testing.expectEqualDeep(
+        c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+        clipSidebarAccessibilityBounds(.{ .left = 12, .top = 420, .right = 232, .bottom = 444 }, 400),
+    );
+}
+
+test "attended activation routes visible sidebar loop from an open stopped workspace with Worktrees and activity" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    const path = "C:\\activation-fixture";
+    try loadActivationTestFixture(&app);
+    try std.testing.expect(app.selectProject(path));
+    try std.testing.expect(app.selectNodeIndex(0));
+    app.surface = .workspace;
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = true };
+    try installNoticeTestInspection(&app, path, 2, 4096);
+    app.sidebar_scroll = 11;
+    try std.testing.expect(c.MoveWindow(
+        app.window.hwnd,
+        0,
+        0,
+        physicalCoordinate(1200, app.dpi),
+        physicalCoordinate(500, app.dpi),
+        0,
+    ) != 0);
+
+    var rows = try Sidebar.appendRows(
+        app.allocator,
+        &app.model,
+        app.currentWorktreeInspection(),
+        app.sidebar_scroll,
+        &app.sidebar_state,
+    );
+    defer rows.deinit(app.allocator);
+    const target_row = for (rows.items) |row| {
+        if (row.kind != .loop or row.project_path == null or !std.mem.eql(u8, row.project_path.?, path)) continue;
+        const graph = app.model.graphFor(path) orelse return error.TestExpectedGraph;
+        if (row.index < graph.nodes.items.len and std.mem.eql(u8, graph.nodes.items[row.index].id, "target-loop"))
+            break row;
+    } else return error.TestExpectedLoopRow;
+    try std.testing.expect(target_row.top >= Tokens.header_height);
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    const routing = inputBounds(client.right, client.bottom, app.workspace_controls);
+    const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+    try std.testing.expect(target_row.top + 8 >= routing.canvas.bottom);
+    try std.testing.expect(target_row.top + 8 < sidebar_bottom);
+    const row_hit = Sidebar.rowAt(
+        80,
+        target_row.top + 8,
+        &app.model,
+        app.currentWorktreeInspection(),
+        app.sidebar_scroll,
+        sidebar_bottom,
+        &app.sidebar_state,
+    ) orelse return error.TestExpectedLoopRow;
+    try std.testing.expectEqual(Sidebar.RowKind.loop, row_hit.kind);
+    try std.testing.expect(Sidebar.attentionRowAt(
+        target_row.top + 8,
+        &app.model,
+        app.currentWorktreeInspection(),
+        &app.sidebar_state,
+        app.sidebar_scroll,
+    ) == null);
+    try std.testing.expect(Sidebar.activityControlAt(
+        80,
+        target_row.top + 8,
+        &app.model,
+        app.currentWorktreeInspection(),
+        &app.sidebar_state,
+        app.sidebar_scroll,
+    ) == null);
+    try std.testing.expect(Sidebar.activityCardAt(
+        80,
+        target_row.top + 8,
+        &app.model,
+        app.currentWorktreeInspection(),
+        &app.sidebar_state,
+        app.sidebar_scroll,
+    ) == null);
+
+    var result: c.LRESULT = 0;
+    const click_x: u32 = 80;
+    const click_y: u32 = @intCast(target_row.top + 8);
+    const lparam: c.LPARAM = @intCast(click_x | (click_y << 16));
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+
+    try std.testing.expectEqualStrings(path, app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings("target-loop", app.model.selected().?.id);
+    try std.testing.expectEqualStrings("target-loop", app.selected_node_id);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try std.testing.expect(std.mem.indexOf(u8, app.client.outbound[app.client.outbound_head], "\"resumeSession\":{\"_0\":\"target-loop\"}") != null);
+    try std.testing.expectEqualStrings("stopped", app.model.graphFor(path).?.nodes.items[0].state);
+    try std.testing.expectEqualStrings("stopped", app.model.graphFor(path).?.nodes.items[2].state);
+}
+
+test "attended activation routes canvas card click and command through one exact-node resume" {
+    const path = "C:\\activation-fixture";
+    var pointer_app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&pointer_app);
+    try loadActivationTestFixture(&pointer_app);
+    try std.testing.expect(pointer_app.selectProject(path));
+    try std.testing.expect(pointer_app.selectNodeIndex(0));
+    pointer_app.surface = .project;
+    pointer_app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = true };
+    const card = GraphCanvas.nodeBounds(1, &pointer_app.canvas);
+    const x: u32 = @intCast(card.left + 20);
+    const y: u32 = @intCast(card.top + 20);
+    const lparam: c.LPARAM = @intCast(x | (y << 16));
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&pointer_app, pointer_app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+    try std.testing.expectEqualStrings("target-loop", pointer_app.model.selected().?.id);
+    try std.testing.expectEqual(@as(usize, 0), pointer_app.client.outbound_count);
+    _ = try pointer_app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\activation-fixture","name":"Activation fixture"},"nodes":[{"id":"target-loop","title":"Visible idle loop","loopType":"sketch","state":{"idle":{}}},{"id":"stopped-loop","title":"Stopped loop","loopType":"turnBased","state":{"stopped":{}}},{"id":"other-loop","title":"Unrelated loop","loopType":"turnBased","state":{"stopped":{}}}],"edges":[]}}}
+    );
+    try std.testing.expect(onWindowMessage(&pointer_app, pointer_app.window.hwnd, c.WM_LBUTTONUP, 0, lparam, &result));
+    try expectSingleActivation(&pointer_app, path, "target-loop");
+
+    var command_app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&command_app);
+    try loadActivationTestFixture(&command_app);
+    try std.testing.expect(command_app.selectProject(path));
+    try std.testing.expect(command_app.selectNodeIndex(1));
+    command_app.handleAction(.open_node);
+    try expectSingleActivation(&command_app, path, "target-loop");
+}
+
+test "attended activation routes UIA loop invoke by owned node identity exactly once" {
+    const path = "C:\\activation-fixture";
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try loadActivationTestFixture(&app);
+    try std.testing.expect(app.selectProject(path));
+    try std.testing.expect(app.selectNodeIndex(0));
+    const identity = "loop:C:\\activation-fixture:target-loop";
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(identity)));
+    try expectSingleActivation(&app, path, "target-loop");
 }
 
 test "gesture routing requires a graph-capable surface, not only the canvas rectangle" {
@@ -12108,6 +12329,30 @@ fn overviewTestApp(dpi: u32) !App {
     return app;
 }
 
+fn loadActivationTestFixture(app: *App) !void {
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\activation-fixture","name":"Activation fixture"},"nodes":[{"id":"stopped-loop","title":"Stopped loop","loopType":"turnBased","state":{"running":{}}},{"id":"target-loop","title":"Visible idle loop","loopType":"sketch","state":{"idle":{}}},{"id":"other-loop","title":"Unrelated loop","loopType":"turnBased","state":{"stopped":{}}}],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\activation-fixture","name":"Activation fixture"},"nodes":[{"id":"stopped-loop","title":"Stopped loop","loopType":"turnBased","state":{"stopped":{}}},{"id":"target-loop","title":"Visible idle loop","loopType":"sketch","state":{"idle":{}}},{"id":"other-loop","title":"Unrelated loop","loopType":"turnBased","state":{"stopped":{}}}],"edges":[]}}}
+    );
+}
+
+fn expectSingleActivation(app: *App, project_path: []const u8, node_id: []const u8) !void {
+    try std.testing.expectEqualStrings(project_path, app.model.selected_project_path.?);
+    try std.testing.expectEqualStrings(node_id, app.model.selected().?.id);
+    try std.testing.expectEqualStrings(node_id, app.selected_node_id);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    const expected = try std.fmt.allocPrint(app.allocator, "\"resumeSession\":{{\"_0\":\"{s}\"}}", .{node_id});
+    defer app.allocator.free(expected);
+    try std.testing.expect(std.mem.indexOf(u8, app.client.outbound[app.client.outbound_head], expected) != null);
+    const graph = app.model.graphFor(project_path) orelse return error.TestExpectedGraph;
+    const stopped = GraphModel.findNodeIndexByID(graph.nodes.items, "stopped-loop") orelse return error.TestExpectedLoop;
+    const other = GraphModel.findNodeIndexByID(graph.nodes.items, "other-loop") orelse return error.TestExpectedLoop;
+    try std.testing.expectEqualStrings("stopped", graph.nodes.items[stopped].state);
+    try std.testing.expectEqualStrings("stopped", graph.nodes.items[other].state);
+}
+
 fn deinitOverviewTestApp(app: *App) void {
     app.drainWorktreeInspection();
     app.drainWorktreeReclaim();
@@ -12118,6 +12363,8 @@ fn deinitOverviewTestApp(app: *App) void {
     app.allocator.free(app.selected_edge_id);
     app.allocator.free(app.selected_worktree_path);
     app.allocator.free(app.status_override);
+    app.allocator.free(app.canvas_press_project_path);
+    app.allocator.free(app.canvas_press_node_id);
     app.client.deinit();
     app.model.deinit();
     app.sidebar_state.deinit();

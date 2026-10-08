@@ -36,6 +36,7 @@ pub const CanvasState = struct {
     node_offset_keys: [512]u64 = [_]u64{0} ** 512,
     node_offset_used: [512]bool = [_]bool{false} ** 512,
     node_dragging: bool = false,
+    node_drag_started: bool = false,
     node_drag_index: usize = 0,
     node_drag_key: u64 = 0,
     node_drag_x: i32 = 0,
@@ -117,6 +118,7 @@ pub const CanvasState = struct {
         if (self.node_dragging and self.node_drag_index < self.node_offsets.len)
             self.node_offsets[self.node_drag_index] = self.node_drag_origin;
         self.node_dragging = false;
+        self.node_drag_started = false;
         self.node_drag_key = 0;
     }
 
@@ -136,6 +138,7 @@ pub const CanvasState = struct {
     pub fn beginNodeDrag(self: *CanvasState, node_id: []const u8, index: usize, x: i32, y: i32) void {
         if (index >= self.node_offsets.len) return;
         self.node_dragging = true;
+        self.node_drag_started = false;
         self.node_drag_index = index;
         self.node_drag_key = nodeKey(node_id);
         self.node_drag_x = x;
@@ -145,6 +148,10 @@ pub const CanvasState = struct {
 
     pub fn updateNodeDrag(self: *CanvasState, x: i32, y: i32) void {
         if (!self.node_dragging or self.node_drag_index >= self.node_offsets.len) return;
+        if (!self.node_drag_started) {
+            if (@abs(x - self.node_drag_x) < 6 and @abs(y - self.node_drag_y) < 6) return;
+            self.node_drag_started = true;
+        }
         self.node_offsets[self.node_drag_index] = .{
             .x = self.node_drag_origin.x + @as(f32, @floatFromInt(x - self.node_drag_x)) / self.zoom,
             .y = self.node_drag_origin.y + @as(f32, @floatFromInt(y - self.node_drag_y)) / self.zoom,
@@ -153,7 +160,16 @@ pub const CanvasState = struct {
 
     pub fn endNodeDrag(self: *CanvasState) void {
         self.node_dragging = false;
+        self.node_drag_started = false;
         self.node_drag_key = 0;
+    }
+
+    pub fn completeNodeDrag(self: *CanvasState) ?usize {
+        if (!self.node_dragging) return null;
+        const activate = !self.node_drag_started;
+        const index = self.node_drag_index;
+        self.endNodeDrag();
+        return if (activate) index else null;
     }
 
     pub fn syncNodeOffsets(self: *CanvasState, nodes: []const GraphModel.Node) void {
@@ -637,10 +653,6 @@ pub fn paint(
     else
         null;
     if (controls.rail_visible) {
-        const sidebar_bottom = if (controls.panel_visible and surface != .workspace)
-            client.bottom - Tokens.workspace_height
-        else
-            client.bottom;
         Sidebar.draw(
             hdc,
             model,
@@ -648,7 +660,7 @@ pub fn paint(
             selected_worktree_path,
             sidebar_scroll,
             status,
-            sidebar_bottom,
+            sidebarBottom(client.bottom, controls, surface),
             update_version,
             ingress_error,
             sidebar_state,
@@ -732,6 +744,13 @@ pub fn paint(
             rect(0, client.bottom - workspace_height - Tokens.activity_strip_height, client.right, client.bottom - workspace_height),
         );
     }
+}
+
+pub fn sidebarBottom(client_bottom: i32, controls: WorkspaceControls.State, surface: Surface) i32 {
+    var bottom = client_bottom;
+    if (controls.panel_visible and surface != .workspace) bottom -= Tokens.workspace_height;
+    if (controls.activity_enabled) bottom -= Tokens.activity_strip_height;
+    return bottom;
 }
 
 pub fn worktreeActivityBounds(bounds: c.RECT) c.RECT {
@@ -1079,6 +1098,14 @@ test "workspace controls change graph render bounds" {
     try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), shown.left);
     try std.testing.expectEqual(@as(i32, 0), hidden.left);
     try std.testing.expect(hidden.bottom > shown.bottom);
+    try std.testing.expectEqual(
+        @as(i32, 900 - Tokens.workspace_height - Tokens.activity_strip_height),
+        sidebarBottom(900, .{}, .project),
+    );
+    try std.testing.expectEqual(
+        @as(i32, 900 - Tokens.activity_strip_height),
+        sidebarBottom(900, .{}, .workspace),
+    );
 }
 
 test "inline canvas alerts remain inside the active detail surface" {
@@ -2512,6 +2539,25 @@ test "direct node movement follows zoom and cancels safely" {
     state.updateNodeDrag(before.left + 30, before.top + 10);
     state.endNodeDrag();
     try std.testing.expectEqual(before.left + 30, nodeBounds(0, &state).left);
+}
+
+test "node card release activates below drag threshold and movement only drags" {
+    var state = CanvasState{};
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
+    };
+    state.syncNodeOffsets(&nodes);
+    const before = nodeBounds(0, &state);
+    state.beginNodeDrag("a", 0, before.left + 10, before.top + 10);
+    state.updateNodeDrag(before.left + 14, before.top + 14);
+    try std.testing.expectEqual(@as(?usize, 0), state.completeNodeDrag());
+    try std.testing.expectEqual(before.left, nodeBounds(0, &state).left);
+    try std.testing.expectEqual(before.top, nodeBounds(0, &state).top);
+
+    state.beginNodeDrag("a", 0, before.left + 10, before.top + 10);
+    state.updateNodeDrag(before.left + 20, before.top + 10);
+    try std.testing.expect(state.completeNodeDrag() == null);
+    try std.testing.expectEqual(before.left + 10, nodeBounds(0, &state).left);
 }
 
 test "direct node movement follows stable node identity across daemon reorder" {
