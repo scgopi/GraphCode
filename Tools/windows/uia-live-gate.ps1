@@ -5753,6 +5753,56 @@ try {
   Start-Sleep -Milliseconds 150
   Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
     "could not establish a deterministic starting selection before the attention rail check"
+
+  # Selecting a card opens its loop workspace, whose loop bar is painted over the rail's
+  # strip; the bar's Show in Graph button lies inside the rail rect. A real click on that
+  # button must show the graph with the open loop still selected - never act as the
+  # hidden rail and cycle onto the NEEDS YOU card while the pane stays put (Dev Box
+  # beta16, Section 6B, LoopActivation).
+  $railWorkspace = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' } `
+    { param($items) @($items | Where-Object { $_.Current.AutomationId -match '^workspace-show-graph-' }).Count -eq 1 }
+  $railShowGraph = @($railWorkspace.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
+  }) | Select-Object -First 1
+  Require ($null -ne $railShowGraph) "selecting a loop card did not open its workspace before the attention rail check"
+  $railShowGraphBounds = $railShowGraph.Current.BoundingRectangle
+  Require (($railShowGraphBounds.Width -gt 0) -and ($railShowGraphBounds.Height -gt 0)) `
+    "workspace Show in Graph had empty bounds before the attention rail check"
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $showGraphClientX = 0
+  $showGraphClientY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+    $shellWindow,
+    [int](($railShowGraphBounds.Left + $railShowGraphBounds.Right) / 2),
+    [int](($railShowGraphBounds.Top + $railShowGraphBounds.Bottom) / 2),
+    [ref]$showGraphClientX, [ref]$showGraphClientY
+  )) "could not map workspace Show in Graph to client coordinates"
+  $null = Ensure-ShellForeground $shellWindow "before-show-in-graph-over-attention-rail"
+  Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0201, $showGraphClientX, $showGraphClientY)) `
+    "workspace Show in Graph click was rejected"
+  [GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $showGraphClientX, $showGraphClientY) | Out-Null
+  $railGraphProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^(workspace-loop-bar-|canvas-card-)' } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-loop-bar-' }).Count -eq 0) -and
+      (@($items | Where-Object { $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -in @("UIA loop A", "UIA loop B") }).Count -eq 2) }
+  Require (@($railGraphProbe.Items | Where-Object { $_.Current.AutomationId -match '^workspace-loop-bar-' }).Count -eq 0) `
+    "Show in Graph over the hidden attention rail did not leave the loop workspace"
+  $graph = $railGraphProbe.Graph
+  $projectCards = @($railGraphProbe.Items | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -in @("UIA loop A", "UIA loop B")
+  })
+  Require (($projectCards.Count -eq 2) -and
+           ((@($projectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
+    "Graph did not re-expose the project cards after Show in Graph"
+  $attentionSelection0 = $projectCards[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  $attentionSelection1 = $projectCards[1].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
+    "Show in Graph over the hidden attention rail moved the selection onto the NEEDS YOU card"
+
+  # On the graph surface the rail is visible and owns its strip.
   $railScreenX = [int](($graph.Current.BoundingRectangle.Left + $graph.Current.BoundingRectangle.Right) / 2)
   $railScreenY = [int]$graph.Current.BoundingRectangle.Top + 27
   $railClientX = 0
