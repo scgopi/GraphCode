@@ -125,6 +125,25 @@ test "sketch promotion test client has a fixed synthetic endpoint and inactive t
     try std.testing.expectEqual(@as(usize, 0), client.inbound_count);
 }
 
+test "client-generated node ids on the create-node wire are random version-4 UUIDs" {
+    const allocator = std.testing.allocator;
+    var client = try DaemonClient.initUnstartedForTest(allocator);
+    defer client.deinit();
+    client.sendCreateNodeConfigured("C:\\work\\graph", "Loop", "claudeCode", null);
+    client.sendCreateNodeDraft("C:\\work\\graph", .{ .title = "" });
+    try std.testing.expectEqual(@as(usize, 2), client.outbound_count);
+    var ids: [2][]const u8 = undefined;
+    for (client.outbound[0..2], &ids) |command, *id| {
+        const marker = "\"createNode\":{\"_0\":{\"id\":\"";
+        const start = (std.mem.indexOf(u8, command, marker) orelse return error.MissingNodeId) + marker.len;
+        id.* = command[start .. start + 36];
+        try std.testing.expect(Forms.isUuid(id.*));
+        try std.testing.expectEqual(@as(u8, '4'), id.*[14]);
+        try std.testing.expect(!std.mem.startsWith(u8, id.*, "00000000-0000-4000-8000-"));
+    }
+    try std.testing.expect(!std.mem.eql(u8, ids[0], ids[1]));
+}
+
 pub const EventCallback = *const fn (
     context: ?*anyopaque,
     frame: [*]const u8,
@@ -167,7 +186,6 @@ pub const DaemonClient = struct {
     last_error: []const u8 = "",
     resume_from: u64 = 0,
     next_request: u64 = 1,
-    next_draft: u64 = 1,
     pending_request_ids: [64][36]u8 = undefined,
     pending_request_count: usize = 0,
     v1_pending_count: usize = 0,
@@ -485,11 +503,7 @@ pub const DaemonClient = struct {
         model_tier: ?[]const u8,
     ) void {
         var node_id: [36]u8 = undefined;
-        self.mutex.lock();
-        const sequence = self.next_draft;
-        self.next_draft +%= 1;
-        self.mutex.unlock();
-        makeRequestID(&node_id, sequence);
+        Forms.generateDraftId(&node_id);
         const command = Wire.commandGraphCreateNodeConfigured(
             self.allocator,
             project_path,
@@ -513,11 +527,7 @@ pub const DaemonClient = struct {
         // creates has to carry the same one. Everything else keeps the historical
         // generate-at-send-time id.
         const node_id: []const u8 = if (draft.node_id.len != 0) draft.node_id else blk: {
-            self.mutex.lock();
-            const sequence = self.next_draft;
-            self.next_draft +%= 1;
-            self.mutex.unlock();
-            makeRequestID(&generated_id, sequence);
+            Forms.generateDraftId(&generated_id);
             break :blk &generated_id;
         };
         const command = Wire.commandGraphCreateNodeFull(self.allocator, project_path, node_id, draft) catch {

@@ -29,6 +29,9 @@ const State = struct {
     closed: bool = false,
     failure: ?anyerror = null,
     button_y: i32 = 565,
+    /// The control that owns keyboard focus whenever the dialog is active: the first
+    /// field on open, then whichever child the user left focused when it deactivated.
+    focus: c.HWND = null,
 };
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWindowsDialog");
@@ -89,27 +92,13 @@ pub fn textWithDescription(
     active_state.closed = false;
     active_state.accepted = false;
     active = true;
-    const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
-        class_name.ptr,
-        wide_title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
-        c.CW_USEDEFAULT,
-        c.CW_USEDEFAULT,
-        600,
-        window_height,
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse {
+    const hwnd = createDialogWindow(parent, wide_title, window_height) orelse {
         freeStateValues(&active_state);
         active = false;
         return error.DialogCreationFailed;
     };
     _ = c.EnableWindow(parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
+    presentDialog(hwnd);
     var message: c.MSG = undefined;
     while (!active_state.closed) {
         const code = c.GetMessageW(&message, null, 0, 0);
@@ -124,6 +113,29 @@ pub fn textWithDescription(
     ModalTeardown.dismiss(hwnd, parent);
     active = false;
     return finishText(&active_state);
+}
+
+fn createDialogWindow(parent: c.HWND, wide_title: []const u16, window_height: i32) c.HWND {
+    return c.CreateWindowExW(
+        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
+        class_name.ptr,
+        wide_title.ptr,
+        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
+        c.CW_USEDEFAULT,
+        c.CW_USEDEFAULT,
+        600,
+        window_height,
+        parent,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    );
+}
+
+fn presentDialog(hwnd: c.HWND) void {
+    _ = c.ShowWindow(hwnd, c.SW_SHOW);
+    _ = c.SetForegroundWindow(hwnd);
+    if (active_state.focus) |target| _ = c.SetFocus(target);
 }
 
 fn finishText(state: *State) !?Result {
@@ -184,6 +196,26 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             }
             createButton(hwnd, "OK", ok_id, 490, active_state.button_y);
             createButton(hwnd, "Cancel", cancel_id, 400, active_state.button_y);
+            if (active_state.edits[0]) |first| {
+                _ = c.SendMessageW(first, c.EM_SETSEL, 0, -1);
+                active_state.focus = first;
+            }
+            return 0;
+        },
+        // This is a plain window, not a dialog-manager dialog, so nothing hands focus to
+        // a control on its own: DefWindowProc's activation leaves it on the frame, where
+        // typing goes nowhere. Route it to the remembered control instead.
+        c.WM_ACTIVATE => {
+            if ((wparam & 0xffff) == c.WA_INACTIVE) {
+                const current = c.GetFocus();
+                if (current != null and c.IsChild(hwnd, current) != 0) active_state.focus = current;
+            } else if (active_state.focus) |target| {
+                _ = c.SetFocus(target);
+            }
+            return 0;
+        },
+        c.WM_SETFOCUS => {
+            if (active_state.focus) |target| _ = c.SetFocus(target);
             return 0;
         },
         c.WM_VSCROLL => {
@@ -448,4 +480,42 @@ test "workspace text capture and transfer release every partial allocation" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{edit});
+}
+
+test "text dialog opens with keyboard focus in its first field, text selected, and keeps it across activation" {
+    // Dev Box beta17: Rename Loop opened with focus on the dialog frame, so typing did
+    // nothing until the Title edit was clicked.
+    const allocator = std.testing.allocator;
+    const previous_active = active;
+    active_state = State{ .allocator = allocator, .parent = null, .count = 1, .description = "Shown on the loop card." };
+    active_state.labels[0] = "Title";
+    active_state.values[0] = try allocator.dupe(u8, "GCQCrud17");
+    active = true;
+    defer {
+        freeStateValues(&active_state);
+        active = previous_active;
+    }
+    try registerClass();
+    const wide_title = try wideZ(allocator, "Rename Loop");
+    defer allocator.free(wide_title);
+    const hwnd = createDialogWindow(null, wide_title, 220) orelse return error.TestWindowCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    const title_edit = active_state.edits[0] orelse return error.TestWindowCreationFailed;
+    try std.testing.expectEqual(@as(isize, 9904), c.GetDlgCtrlID(title_edit));
+
+    presentDialog(hwnd);
+    try std.testing.expectEqual(title_edit, c.GetFocus());
+    var start: c.DWORD = 0;
+    var end: c.DWORD = 0;
+    _ = c.SendMessageW(title_edit, c.EM_GETSEL, @intFromPtr(&start), @bitCast(@intFromPtr(&end)));
+    try std.testing.expectEqual(@as(c.DWORD, 0), start);
+    try std.testing.expectEqual(@as(c.DWORD, "GCQCrud17".len), end);
+
+    // Activation hands focus to the frame (DefWindowProc's WM_ACTIVATE does exactly
+    // that); the frame must pass it straight back to the field the user was in.
+    _ = c.SendMessageW(hwnd, c.WM_ACTIVATE, c.WA_INACTIVE, 0);
+    _ = c.SetFocus(hwnd);
+    try std.testing.expectEqual(title_edit, c.GetFocus());
+    _ = c.SendMessageW(hwnd, c.WM_ACTIVATE, c.WA_ACTIVE, 0);
+    try std.testing.expectEqual(title_edit, c.GetFocus());
 }

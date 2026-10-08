@@ -65,27 +65,28 @@ pub const NodeDraft = struct {
     }
 };
 
-/// A `[[0-9a-f]{8}-...]` version-4-shaped id, generated the same way
-/// `DaemonClient.zig`'s own `makeRequestID` does — a nanosecond timestamp rather than a
-/// cryptographic random source, because these ids only ever need to be unique within one
-/// running client, never unguessable. Exposed here (rather than kept private to
-/// `DaemonClient.zig`) so a draft's id can be chosen before its dialog opens, which is
-/// what lets an attachment picked mid-dialog be filed under the id the node will
-/// actually carry.
-///
-/// Mixed with a process-lifetime counter, not the timestamp alone: two calls close
-/// enough together can land on the same nanosecond reading on lower-resolution clocks,
-/// which would hand two different attachment directories the same name.
-var draft_id_sequence = std.atomic.Value(u64).init(0);
-
+/// A random RFC 4122 version-4 id, formatted like Swift `UUID().uuidString` (uppercase),
+/// which is also how the daemon echoes node ids back. Every node id the client chooses
+/// comes from here — `DaemonClient` uses it for create-node commands too — so Windows
+/// ids carry the same 122 random bits as macOS ones instead of a timestamp behind a
+/// zero-filled prefix. Exposed here (rather than kept private to `DaemonClient.zig`) so a
+/// draft's id can be chosen before its dialog opens, which is what lets an attachment
+/// picked mid-dialog be filed under the id the node will actually carry.
 pub fn generateDraftId(buffer: *[36]u8) void {
-    const timestamp: u64 = @intCast(std.time.nanoTimestamp());
-    const sequence = draft_id_sequence.fetchAdd(1, .monotonic);
-    _ = std.fmt.bufPrint(
-        buffer,
-        "00000000-0000-4000-8000-{x:0>12}",
-        .{(timestamp ^ sequence) & 0xffffffffffff},
-    ) catch unreachable;
+    var bytes: [16]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = std.fmt.bytesToHex(bytes, .upper);
+    @memcpy(buffer[0..8], hex[0..8]);
+    buffer[8] = '-';
+    @memcpy(buffer[9..13], hex[8..12]);
+    buffer[13] = '-';
+    @memcpy(buffer[14..18], hex[12..16]);
+    buffer[18] = '-';
+    @memcpy(buffer[19..23], hex[16..20]);
+    buffer[23] = '-';
+    @memcpy(buffer[24..36], hex[20..32]);
 }
 
 pub const EdgeDraft = struct {
@@ -865,6 +866,27 @@ test "generateDraftId produces a version-4-shaped, distinct id each call" {
     try std.testing.expect(isUuid(&first));
     try std.testing.expect(isUuid(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
+}
+
+test "generateDraftId produces random RFC 4122 version-4 ids, not a zero-filled prefix" {
+    // Dev Box beta17 created a loop whose id was `00000000-0000-4000-8000-AA395289111D`:
+    // 74 of 122 random bits were constant, leaving only a timestamp to tell ids apart.
+    const samples = 32;
+    var ids: [samples][36]u8 = undefined;
+    for (&ids) |*id| generateDraftId(id);
+    for (ids, 0..) |id, index| {
+        try std.testing.expect(isUuid(&id));
+        try std.testing.expectEqual(@as(u8, '4'), id[14]);
+        try std.testing.expect(std.mem.indexOfScalar(u8, "89ABab", id[19]) != null);
+        // Same case as Swift `UUID().uuidString`, which is what the daemon echoes back.
+        for (id) |byte| try std.testing.expect(!std.ascii.isLower(byte));
+        try std.testing.expect(!std.mem.startsWith(u8, &id, "00000000-0000-4000-8000-"));
+        for (ids[0..index]) |earlier| {
+            // The leading 32 bits alone must already differ between ids; a collision
+            // among 32 random samples has probability below 2^-22.
+            try std.testing.expect(!std.mem.eql(u8, earlier[0..8], id[0..8]));
+        }
+    }
 }
 
 test "node updates preserve unchanged fields and allow stall clear sentinel" {
