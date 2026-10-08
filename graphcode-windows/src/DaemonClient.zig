@@ -1040,17 +1040,7 @@ pub const DaemonClient = struct {
         }
         self.publishState(.negotiating, "");
         self.negotiation_deadline_ms = now + negotiation_timeout_ms;
-        const subscription = self.subscriptionSnapshot() catch {
-            self.scheduleRetry(now, "daemon subscription allocation failed");
-            return;
-        };
-        defer self.allocator.free(subscription);
-        const hello = Wire.v2Hello(
-            self.allocator,
-            &self.client_id,
-            if (self.resume_from == 0) null else self.resume_from,
-            subscription,
-        ) catch {
+        const hello = self.helloFrame(self.allocator) catch {
             self.scheduleRetry(now, "daemon hello encoding failed");
             return;
         };
@@ -1059,6 +1049,19 @@ pub const DaemonClient = struct {
             self.scheduleRetry(now, "daemon hello write failed");
             return;
         };
+    }
+
+    /// The shell is a sidebar client (`restoreOpenProjects`): every open project's rows
+    /// and Needs-you entries must stay live, so the hello never narrows delivery to the
+    /// focused project. `subscription_path` only records that focus and still triggers
+    /// the drained re-dial whose restore resynchronizes every open project.
+    fn helloFrame(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        return Wire.v2Hello(
+            allocator,
+            &self.client_id,
+            if (self.resume_from == 0) null else self.resume_from,
+            "",
+        );
     }
 
     fn prepareV2Negotiation(self: *DaemonClient) void {
@@ -1496,6 +1499,34 @@ test "subscription reconnect also waits for legacy response accounting" {
         "{\"version\":1,\"kind\":\"event\",\"event\":{\"graphChanged\":{}}}",
     ));
     try std.testing.expectEqual(ReconnectDecision.ready, client.takeReconnect(nowMilliseconds()));
+}
+
+/// Mirrors GraphcodeKit's `DaemonConnectionChannel.isSubscribed`: a hello without a
+/// subscription admits every project the connection joined; one with `projectPaths`
+/// admits only the listed projects.
+fn daemonAdmitsProjectEvents(hello: []const u8, project_path: []const u8) !bool {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, hello, .{});
+    defer parsed.deinit();
+    const subscription = parsed.value.object.get("subscription") orelse return true;
+    const paths = subscription.object.get("projectPaths") orelse return true;
+    for (paths.array.items) |path| {
+        if (std.mem.eql(u8, path.string, project_path)) return true;
+    }
+    return false;
+}
+
+test "opening a second project keeps the first project's live graph events admitted" {
+    var client = try DaemonClient.init(std.testing.allocator);
+    defer client.deinit();
+    client.setSubscription("C:\\GraphCode-Fixtures\\Core");
+    client.setSubscription("C:\\GraphCode-Fixtures\\Destructive");
+    client.resume_from = 42;
+    const hello = try client.helloFrame(std.testing.allocator);
+    defer std.testing.allocator.free(hello);
+    try std.testing.expect(try daemonAdmitsProjectEvents(hello, "C:\\GraphCode-Fixtures\\Destructive"));
+    try std.testing.expect(try daemonAdmitsProjectEvents(hello, "C:\\GraphCode-Fixtures\\Core"));
+    try std.testing.expect(try daemonAdmitsProjectEvents(hello, "graphcode://global"));
+    try std.testing.expect(std.mem.indexOf(u8, hello, "\"resumeFrom\":42") != null);
 }
 
 test "new negotiations reset legacy fallback state to v2 framing" {

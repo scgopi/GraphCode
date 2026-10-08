@@ -1732,7 +1732,9 @@ pub const App = struct {
                     self.queueProject(self.model.recent_projects.items[0].path);
                 }
             },
-            .graph_changed => {
+            // A presence delta is folded into the held snapshot by the model, so the UI
+            // treats it as the snapshot it amounts to.
+            .graph_changed, .nodes_changed => {
                 if (incoming_project_path) |path| {
                     if (self.pending_rebind_path.len != 0 and
                         (std.mem.eql(u8, path, self.pending_rebind_path) or
@@ -1886,7 +1888,7 @@ pub const App = struct {
             },
             else => {},
         }
-        if (event == .graph_changed) publish(self);
+        if (event == .graph_changed or event == .nodes_changed) publish(self);
     }
 
     /// Runs after every graph change. It re-observes only the open loop's own pane, in the
@@ -12056,6 +12058,61 @@ test "graphChanged republishes renamed project card and sidebar accessibility na
     try std.testing.expectEqualStrings("Renamed loop", Probe.sidebar_name.?);
     try std.testing.expectEqualStrings("Renamed loop", app.model.graph.?.nodes.items[0].title);
     try std.testing.expectEqualStrings("Renamed loop", app.model.graphFor("A").?.nodes.items[0].title);
+}
+
+test "nodesChanged presence delta republishes Needs you for a non-selected project" {
+    const Probe = struct {
+        var sink: @This() = .{};
+        var updates: usize = 0;
+        var needs_you_row = false;
+
+        fn publish(app: *App) void {
+            app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        }
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            updates += 1;
+            needs_you_row = false;
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "needs-you-row:B:b1")) needs_you_row = true;
+            }
+        }
+    };
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+    };
+    defer app.client.deinit();
+    defer app.model.deinit();
+    defer app.sidebar_state.deinit();
+    defer app.declared_entry_ids.deinit();
+    defer app.kept_worktree_paths.deinit();
+    defer if (app.selected_node_id.len != 0) allocator.free(app.selected_node_id);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"a","revision":1,"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a1","title":"Alpha loop","state":"running"}],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"b","revision":1,"project":{"path":"B","name":"Beta"},"nodes":[{"id":"b1","title":"Asker","state":"running","presence":{"presence":"busy"}}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("A"));
+    app.last_project_opened = "A";
+    Probe.updates = 0;
+
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"nodesChanged":{"projectPath":"B","revision":2,"nodes":[{"id":"b1","title":"Asker","state":"running","presence":{"presence":"awaitingInput"}}]}}}
+    , Probe.publish);
+
+    try std.testing.expectEqual(@as(usize, 1), Probe.updates);
+    try std.testing.expect(Probe.needs_you_row);
+    try std.testing.expectEqualStrings("A", app.model.graph.?.project.path);
 }
 
 test "folder picker completion waits for native callback unwind" {

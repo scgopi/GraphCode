@@ -180,6 +180,16 @@ deleted-node, or changed-type results do not send or retarget a command.
 Pure production-adapter tests and Swift fixture decoding cover this path;
 native keyboard/UIA and real-daemon promotion remain unverified.
 
+Live graph updates reach every open project, not only the focused one. The
+daemon connection is a sidebar client (`restoreOpenProjects`), and its v2 hello
+carries no `subscription.projectPaths` filter; the "observation subscription"
+above records the focused project and drives a drained re-dial, never a delivery
+filter. Presence/activity ticks arrive as `nodesChanged` deltas, which the model
+folds into the held snapshot by node ID (ignoring unknown loops and deltas no
+newer than the held `revision`) and then applies like a `graphChanged`, matching
+macOS `AppFeature.foldDelta`. Unit tests cover the hello and the delta fold; the
+Dev Box multi-project and Needs-you walkthroughs are the runtime evidence.
+
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
