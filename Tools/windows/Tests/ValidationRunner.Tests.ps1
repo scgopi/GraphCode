@@ -3051,7 +3051,7 @@ try {
   if ($runnerSource -notmatch '(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?Packaging\.Standalone\.Tests\.ps1.*?Packaging\.Tests\.ps1') {
     throw "RED: packaging validation does not run standalone setup contracts"
   }
-  foreach ($contract in @("Packaging.ScriptSigning.Tests.ps1", "Packaging.Scheduler.Tests.ps1")) {
+  foreach ($contract in @("Packaging.ScriptSigning.Tests.ps1", "Packaging.Scheduler.Tests.ps1", "Packaging.Uninstall.Tests.ps1")) {
     if ($runnerSource -notmatch ('(?s)"packaging" \{\s*if \(\$PackagingPart -ne "real"\) \{\s*& .*?' + [regex]::Escape($contract) + '.*?Packaging\.Tests\.ps1')) {
       throw "RED: packaging validation does not run $contract"
     }
