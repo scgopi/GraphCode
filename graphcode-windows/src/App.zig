@@ -2452,6 +2452,43 @@ pub const App = struct {
         if (self.model.selected_index) |index| _ = self.selectNodeIndex(index);
     }
 
+    // A loop workspace's bar names the selected loop. So with one open, a route that
+    // moves the selection to another loop must open that loop through `activateLoop`, or
+    // the bar and the visible pane name different loops. Graph surfaces only select.
+
+    fn openNextAttention(self: *App) void {
+        if (self.model.attention_entries.items.len == 0) return;
+        const open_node_id = self.allocator.dupe(u8, self.selected_node_id) catch return;
+        defer self.allocator.free(open_node_id);
+        self.selectNextAttention();
+        if (std.mem.eql(u8, open_node_id, self.selected_node_id)) return;
+        self.openSelectedNode();
+    }
+
+    fn stepOpenLoop(self: *App, forward: bool) void {
+        const graph = self.model.graph orelse return;
+        const count = graph.nodes.items.len;
+        if (count == 0) return;
+        const target = if (self.model.selected_index) |current|
+            (if (forward) (current + 1) % count else (current + count - 1) % count)
+        else if (forward) 0 else count - 1;
+        if (self.model.selected_index == target) return;
+        _ = self.activateLoop(graph.project.path, graph.nodes.items[target].id);
+    }
+
+    /// The sidebar's Needs-you row, by pointer or UIA. Returns whether it only selected.
+    fn chooseAttentionEntry(self: *App, index: usize) bool {
+        if (index >= self.model.attention_entries.items.len) return false;
+        const entry = self.model.attention_entries.items[index];
+        if (self.surface == .workspace) {
+            _ = self.activateLoop(entry.project_path, entry.node.id);
+            return false;
+        }
+        if (!self.selectProject(entry.project_path)) return false;
+        _ = self.model.setSelectedID(entry.node.id);
+        return true;
+    }
+
     fn stopAttentionEntry(self: *App, entry: GraphModel.AttentionEntry) void {
         self.client.sendNodeAction(entry.project_path, entry.node.id, "stopNode", null);
         const project_name = if (self.model.graphFor(entry.project_path)) |graph| graph.project.name else entry.project_path;
@@ -5922,7 +5959,7 @@ pub const App = struct {
                 self.applyOnboardingBackend(backend);
             },
             .cycle_attention => {
-                self.selectNextAttention();
+                if (self.surface == .workspace) self.openNextAttention() else self.selectNextAttention();
                 self.syncAccessibility();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
@@ -5936,10 +5973,12 @@ pub const App = struct {
             .focus_terminal_a => if (self.workspace) |workspace| workspace.focus(0),
             .focus_terminal_b => if (self.workspace) |workspace| workspace.focus(1),
             .select_next => {
+                if (self.surface == .workspace) return self.stepOpenLoop(true);
                 self.selectNextNode();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .select_previous => {
+                if (self.surface == .workspace) return self.stepOpenLoop(false);
                 const graph = self.model.graph orelse return;
                 if (graph.nodes.items.len == 0) return;
                 const current = self.model.selected_index orelse 0;
@@ -7389,8 +7428,7 @@ pub const App = struct {
             .needs_you_header => {},
             .needs_you => |index| {
                 if (index >= self.model.attention_entries.items.len) return false;
-                const entry = self.model.attention_entries.items[index];
-                if (self.selectProject(entry.project_path)) _ = self.model.setSelectedID(entry.node.id);
+                _ = self.chooseAttentionEntry(index);
             },
             .needs_you_stop => |index| {
                 if (index >= self.model.attention_entries.items.len) return false;
@@ -8541,7 +8579,7 @@ fn onWindowMessage(
                 return true;
             }
             if (app.header_focus != null) app.leaveHeader(false);
-            if (app.model.attentionCount() != 0 and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
+            if (GraphCanvas.attentionRailShown(&app.model, app.surface) and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
                 app.handleAction(.cycle_attention);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
@@ -8757,15 +8795,9 @@ fn onWindowMessage(
                     &app.sidebar_state,
                     app.sidebar_scroll,
                 )) |attention_index| {
-                    if (attention_index < app.model.attention_entries.items.len) {
-                        const entry = app.model.attention_entries.items[attention_index];
-                        if (app.selectProject(entry.project_path)) {
-                            _ = app.model.setSelectedID(entry.node.id);
-                            app.setStatus("Needs-you loop selected");
-                            app.syncAccessibility();
-                            _ = c.InvalidateRect(hwnd, null, 0);
-                        }
-                    }
+                    if (app.chooseAttentionEntry(attention_index)) app.setStatus("Needs-you loop selected");
+                    app.syncAccessibility();
+                    _ = c.InvalidateRect(hwnd, null, 0);
                     result.* = 0;
                     return true;
                 }
@@ -10712,6 +10744,285 @@ test "graph refresh re-observes only the open loop's detached pane in the loop s
     try std.testing.expect(!workspace.launch_waits[0].reports_timeout);
     for (1..workspace.surfaces.len) |index| try std.testing.expect(!workspace.isAwaitingLaunch(index));
     try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+}
+
+/// Reads the loop workspace's UIA surface the way the Dev Box harness does: the
+/// `workspace-loop-bar` identity names the loop the bar shows, and the published
+/// `workspace-show-graph` bounds are where a native click on the button lands.
+const LoopBarProbe = struct {
+    var bar_loop: [64]u8 = undefined;
+    var bar_loop_len: usize = 0;
+    var has_bar = false;
+    var show_graph: ?c.RECT = null;
+    var sink: @This() = .{};
+
+    fn publish(app: *App) void {
+        has_bar = false;
+        bar_loop_len = 0;
+        show_graph = null;
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, app.dpi));
+    }
+    fn barLoop() []const u8 {
+        return bar_loop[0..bar_loop_len];
+    }
+    fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+    fn syncElements(_: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+        const bar_prefix = "workspace-loop-bar:";
+        for (elements) |element| {
+            if (std.mem.startsWith(u8, element.identity, bar_prefix)) {
+                const id = element.identity[bar_prefix.len..];
+                bar_loop_len = @min(id.len, bar_loop.len);
+                @memcpy(bar_loop[0..bar_loop_len], id[0..bar_loop_len]);
+                has_bar = true;
+            } else if (std.mem.eql(u8, element.identity, "workspace-show-graph:show-graph")) {
+                show_graph = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+            }
+        }
+    }
+};
+
+fn showGraphFixtureFrame(app: *App, sequence: usize, a_state: []const u8, a_presence: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:\\\\reopen-fixture\",\"name\":\"Reopen fixture\"}},\"nodes\":[" ++
+            "{{\"id\":\"loop-a\",\"title\":\"Loop A\",\"loopType\":\"turnBased\",\"state\":{{\"{s}\":{{}}}},\"presence\":{{\"presence\":\"{s}\",\"confidence\":\"reported\"}}}}," ++
+            "{{\"id\":\"loop-b\",\"title\":\"Loop B\",\"loopType\":\"turnBased\",\"state\":{{\"idle\":{{}}}}}}," ++
+            "{{\"id\":\"loop-c\",\"title\":\"Loop C\",\"loopType\":\"turnBased\",\"state\":{{\"idle\":{{}}}}}}" ++
+            "],\"edges\":[]}}}}}}",
+        .{ sequence, a_state, a_presence },
+    );
+}
+
+fn deliverShowGraphFrame(app: *App, sequence: usize, a_state: []const u8, a_presence: []const u8) !void {
+    const frame = try showGraphFixtureFrame(app, sequence, a_state, a_presence);
+    defer app.allocator.free(frame);
+    app.onFrameWithAccessibilityPublish(frame, LoopBarProbe.publish);
+}
+
+fn nativeClick(app: *App, x: i32, y: i32) !void {
+    var result: c.LRESULT = 0;
+    const lparam: c.LPARAM = @intCast(@as(u32, @intCast(x)) | (@as(u32, @intCast(y)) << 16));
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+    _ = onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONUP, 0, lparam, &result);
+}
+
+/// A short native drag on a canvas card: it moves the card and leaves it graph-selected
+/// without opening it.
+fn dragCanvasCard(app: *App, index: usize) !void {
+    const card = GraphCanvas.nodeBounds(index, &app.canvas);
+    var result: c.LRESULT = 0;
+    const start_x: u32 = @intCast(card.left + 20);
+    const start_y: u32 = @intCast(card.top + 20);
+    const end_x: u32 = start_x + 40;
+    const end_y: u32 = start_y + 30;
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, @intCast(start_x | (start_y << 16)), &result));
+    try std.testing.expect(app.canvas.node_dragging);
+    _ = onWindowMessage(app, app.window.hwnd, c.WM_MOUSEMOVE, c.MK_LBUTTON, @intCast(end_x | (end_y << 16)), &result);
+    try std.testing.expect(app.canvas.node_drag_started);
+    _ = onWindowMessage(app, app.window.hwnd, c.WM_LBUTTONUP, 0, @intCast(end_x | (end_y << 16)), &result);
+}
+
+/// The loop bar (UIA identity and the selection its title is drawn from) and the visible
+/// pane both name `node_id`.
+fn expectLoopBarAndPane(app: *App, workspace: *TerminalWorkspace.Workspace, node_id: []const u8) !void {
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    LoopBarProbe.publish(app);
+    try std.testing.expect(LoopBarProbe.has_bar);
+    try std.testing.expectEqualStrings(node_id, LoopBarProbe.barLoop());
+    const graph = workspaceGraph(&app.model) orelse return error.TestExpectedGraph;
+    const index = app.model.selectedIndex() orelse return error.TestExpectedSelection;
+    try std.testing.expectEqualStrings(node_id, graph.nodes.items[index].id);
+    try std.testing.expectEqualStrings(node_id, app.selected_node_id);
+    try expectPaneBoundTo(workspace, node_id);
+}
+
+fn expectPaneBoundTo(workspace: *TerminalWorkspace.Workspace, node_id: []const u8) !void {
+    const tab = workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+    try std.testing.expectEqualStrings(node_id, tab.panes.items[tab.focused_pane].id);
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqualStrings(node_id, workspace.launch_waits[0].session);
+}
+
+fn needsYouRowY(app: *App) !i32 {
+    var y: i32 = Tokens.header_height;
+    while (y < 700) : (y += 1) {
+        const index = Sidebar.attentionRowAt(y, &app.model, app.currentWorktreeInspection(), &app.sidebar_state, app.sidebar_scroll) orelse continue;
+        if (index != 0) continue;
+        if (Sidebar.needsYouStopAt(80, y, &app.model, app.currentWorktreeInspection(), &app.sidebar_state, app.sidebar_scroll) != null) continue;
+        return y + 4;
+    }
+    return error.TestExpectedNeedsYouRow;
+}
+
+fn needsYouStopPoint(app: *App) !c.POINT {
+    var y: i32 = Tokens.header_height;
+    while (y < 700) : (y += 1) {
+        var x: i32 = 0;
+        while (x < Tokens.sidebar_width) : (x += 2) {
+            const index = Sidebar.needsYouStopAt(x, y, &app.model, app.currentWorktreeInspection(), &app.sidebar_state, app.sidebar_scroll) orelse continue;
+            if (index == 0) return .{ .x = x + 2, .y = y + 2 };
+        }
+    }
+    return error.TestExpectedNeedsYouStop;
+}
+
+const ShowGraphFixture = struct {
+    workspace: TerminalWorkspace.Workspace,
+    app: App,
+    directory: []u8,
+    layout_path: []u8,
+    tmp: std.testing.TmpDir,
+    sequence: usize = 2,
+
+    /// Core project with loops A, B, C; A stopped after spending a turn, so it is the
+    /// one "Needs you" entry, and a short canvas drag left A graph-selected.
+    fn init(self: *ShowGraphFixture) !void {
+        const allocator = std.testing.allocator;
+        self.sequence = 2;
+        self.tmp = std.testing.tmpDir(.{});
+        self.directory = try self.tmp.dir.realpathAlloc(allocator, ".");
+        self.layout_path = try std.fs.path.join(allocator, &.{ self.directory, "layout.json" });
+        self.workspace = try reopenTestWorkspace(allocator, self.layout_path);
+        self.app = try overviewTestApp(Dpi.base_dpi);
+        const app = &self.app;
+        const initial = try showGraphFixtureFrame(app, 1, "idle", "idle");
+        defer allocator.free(initial);
+        _ = try app.model.updateFromFrame(initial);
+        try std.testing.expect(app.selectProject(reopen_fixture_path));
+        try std.testing.expect(app.selectNodeIndex(1));
+        app.surface = .project;
+        app.workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+        app.workspace = &self.workspace;
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+
+        try deliverShowGraphFrame(app, self.sequence, "stopped", "awaitingInput");
+        self.sequence += 1;
+        try std.testing.expectEqual(@as(usize, 1), app.model.attentionCount());
+        try std.testing.expectEqualStrings("loop-a", app.model.attention_entries.items[0].node.id);
+
+        const before = app.client.outbound_count;
+        try dragCanvasCard(app, 0);
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expectEqualStrings("loop-a", app.model.selected().?.id);
+        try std.testing.expectEqual(before, app.client.outbound_count);
+    }
+
+    fn deinit(self: *ShowGraphFixture) void {
+        self.app.workspace = null;
+        deinitOverviewTestApp(&self.app);
+        self.workspace.deinit();
+        std.testing.allocator.free(self.layout_path);
+        std.testing.allocator.free(self.directory);
+        self.tmp.cleanup();
+    }
+
+    fn openFromSidebar(self: *ShowGraphFixture, node_id: []const u8) !void {
+        const before = self.app.client.outbound_count;
+        try clickSidebarLoopRow(&self.app, reopen_fixture_path, node_id);
+        try expectOneResumePerClick(&self.app, before, node_id);
+        try expectLoopBarAndPane(&self.app, &self.workspace, node_id);
+    }
+};
+
+test "Show in Graph from an open loop shows the graph and never moves the loop bar to the Needs-you loop" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    for ([_][]const u8{ "loop-b", "loop-c" }) |node_id| {
+        try fixture.openFromSidebar(node_id);
+        try std.testing.expect(app.workspace_controls.panel_visible);
+        const button = LoopBarProbe.show_graph orelse return error.TestExpectedShowGraphButton;
+        // The Dev Box geometry: the button sits inside the graph's hidden Needs-you rail.
+        try std.testing.expect(GraphCanvas.hitTestAttentionRail(
+            @divTrunc(button.left + button.right, 2),
+            @divTrunc(button.top + button.bottom, 2),
+            logicalClientRect(app.window.hwnd, app.dpi).right,
+        ));
+        const before = app.client.outbound_count;
+        try nativeClick(app, @divTrunc(button.left + button.right, 2), @divTrunc(button.top + button.bottom, 2));
+
+        // Whatever surface the click leaves, the bar must never name another loop.
+        if (app.surface == .workspace) try expectLoopBarAndPane(app, &fixture.workspace, node_id);
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expect(!app.workspace_controls.panel_visible);
+        try std.testing.expectEqualStrings(node_id, app.model.selected().?.id);
+        try std.testing.expectEqualStrings(node_id, app.selected_node_id);
+        try std.testing.expectEqual(before, app.client.outbound_count);
+        try expectPaneBoundTo(&fixture.workspace, node_id);
+        LoopBarProbe.publish(app);
+        try std.testing.expect(!LoopBarProbe.has_bar);
+    }
+}
+
+test "selection routes with a loop workspace open: Ctrl+Tab review moves the loop bar and pane together" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.openFromSidebar("loop-b");
+    fixture.app.handleWorkspaceKeyRoute(App.dispatchWorkspaceKey(c.VK_TAB, true, false, true));
+    try expectLoopBarAndPane(&fixture.app, &fixture.workspace, "loop-a");
+}
+
+test "selection routes with a loop workspace open: Review What Needs You menu moves the loop bar and pane together" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try fixture.openFromSidebar("loop-b");
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_COMMAND, @intFromEnum(MainWindow.Command.review_attention), 0, &result));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-a");
+}
+
+test "selection routes with a loop workspace open: Needs-you row click moves the loop bar and pane together" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try fixture.openFromSidebar("loop-b");
+    try nativeClick(app, 80, try needsYouRowY(app));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-a");
+}
+
+test "selection routes with a loop workspace open: Needs-you row UIA invoke moves the loop bar and pane together" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try fixture.openFromSidebar("loop-b");
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("needs-you-row:C:\\reopen-fixture:loop-a")));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-a");
+}
+
+test "selection routes with a loop workspace open: Next and Previous Loop move the loop bar and pane together" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try fixture.openFromSidebar("loop-b");
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_COMMAND, @intFromEnum(MainWindow.Command.next_loop), 0, &result));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-c");
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, c.WM_COMMAND, @intFromEnum(MainWindow.Command.previous_loop), 0, &result));
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
+}
+
+test "selection routes with a loop workspace open: Needs-you Stop leaves the open loop's bar and pane alone" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try fixture.openFromSidebar("loop-b");
+    const stop = try needsYouStopPoint(app);
+    const before = app.client.outbound_count;
+    try nativeClick(app, stop.x, stop.y);
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, newest, "loop-a") != null);
+    try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
 }
 
 test "gesture routing requires a graph-capable surface, not only the canvas rectangle" {

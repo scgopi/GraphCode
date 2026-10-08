@@ -589,6 +589,13 @@ pub fn hitTestAttentionRail(x: i32, y: i32, width: i32) bool {
     return insideGraph(x, y, attentionRailBounds(width));
 }
 
+/// The rail belongs to the graph surfaces. A loop workspace paints its loop bar over the
+/// same strip, so there it is neither drawn nor clickable: a click on the bar's Show in
+/// Graph button must never land on the rail's Review action.
+pub fn attentionRailShown(model: *const GraphModel.Model, surface: Surface) bool {
+    return surface != .workspace and model.attentionCount() != 0;
+}
+
 pub fn loopDetailCollapseBounds(client_right: i32) c.RECT {
     return rect(client_right - Tokens.loop_detail_width + 172, Tokens.header_height + 12, client_right - 18, Tokens.header_height + 34);
 }
@@ -734,7 +741,7 @@ pub fn paint(
     if (surface != .workspace) drawZoomControls(hdc, allocator, graph_bounds, state);
 
     _ = c.RestoreDC(hdc, saved);
-    attentionRail(hdc, allocator, model, client.right);
+    if (attentionRailShown(model, surface)) attentionRail(hdc, allocator, model, client.right);
     if (controls.activity_enabled) {
         const workspace_height: i32 = if (surface == .workspace) 0 else if (controls.panel_visible) Tokens.workspace_height else 0;
         activityStrip(
