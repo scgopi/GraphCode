@@ -3477,7 +3477,7 @@ function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
       $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
         "overview-destination", "quick-chats-destination")
       $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
-        "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-",
+        "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
         "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-",
         "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
         "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",

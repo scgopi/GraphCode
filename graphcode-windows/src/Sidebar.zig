@@ -188,7 +188,7 @@ pub fn draw(
     _ = c.IntersectClipRect(
         hdc,
         0,
-        Tokens.header_height,
+        content_top,
         Tokens.sidebar_width,
         contentViewportBottom(viewport_bottom, has_update, has_error),
     );
@@ -233,11 +233,12 @@ pub fn draw(
                     const indent = @as(i32, @intCast(row.depth * 12));
                     if (row.depth != 0) drawText(hdc, allocator, ">", 28 + indent, row.top, 9, 0x006A6A6A);
                     fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
-                    drawText(hdc, allocator, node.title, 39 + indent, row.top, 11, 0x00E6E6E6);
-                    drawText(hdc, allocator, compactState(node.state), 150, row.top, 9, stateColor(node.state));
+                    const text = loopRowTextRects(row.top, row.depth);
+                    drawTextRect(hdc, allocator, node.title, text.title, 11, 0x00E6E6E6, loop_text_format);
+                    drawTextRect(hdc, allocator, compactState(node.state), text.state, 9, stateColor(node.state), loop_text_format);
                     const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch null;
                     defer if (elapsed) |value| allocator.free(value);
-                    if (elapsed) |value| drawText(hdc, allocator, value, 168, row.top, 9, 0x008E8E93);
+                    if (elapsed) |value| drawTextRect(hdc, allocator, value, text.age, 9, 0x008E8E93, loop_text_format | c.DT_RIGHT);
                     if (row.has_children and hover_y >= row.top and hover_y < row.top + 24)
                         drawText(hdc, allocator, if (state.isNodeExpanded(node.id)) "v" else ">", 204, row.top, 9, 0x00B8B8B8);
                 }
@@ -352,6 +353,32 @@ pub fn draw(
         c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
     );
 }
+
+const loop_text_format: c.UINT = c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
+const loop_age_right: i32 = 198;
+const loop_age_width: i32 = 28;
+const loop_state_width: i32 = 44;
+const loop_text_gap: i32 = 4;
+
+pub const LoopRowText = struct { title: c.RECT, state: c.RECT, age: c.RECT };
+
+/// Disjoint columns for a loop row's title, status label, and age. The age is right-aligned
+/// against the hover disclosure's hit zone (x >= 198), the status sits left of it, and the
+/// title takes the rest, so each label elides inside its own column instead of overlapping
+/// its neighbour at the default sidebar width.
+pub fn loopRowTextRects(row_top: i32, depth: usize) LoopRowText {
+    const indent = @as(i32, @intCast(depth * 12));
+    const age = rect(loop_age_right - loop_age_width, row_top, loop_age_right, row_top + 17);
+    const state = rect(age.left - loop_text_gap - loop_state_width, row_top, age.left - loop_text_gap, row_top + 17);
+    const title_left = 39 + indent;
+    const title_right = @max(state.left - loop_text_gap, title_left);
+    return .{ .title = rect(title_left, row_top, title_right, row_top + 19), .state = state, .age = age };
+}
+
+/// Top edge of the scrollable sidebar content, 3 px above the first row's top so a row's
+/// selection fill is never cut at rest. The GRAPH / Projects header above it is fixed, so rows,
+/// labels, hit targets, and UIA bounds all start here and never overlap it.
+pub const content_top: i32 = Tokens.header_height + 78 - 3;
 
 const footer_status_extent: i32 = 58;
 const footer_error_extent: i32 = 50;
@@ -709,7 +736,7 @@ pub fn rowAt(
     viewport_bottom: i32,
     state: ?*const State,
 ) ?Row {
-    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    if (x < 0 or x >= Tokens.sidebar_width or y < content_top or y >= viewport_bottom) return null;
     var rows = appendRows(std.heap.page_allocator, model, inspection, scroll_offset, state) catch return null;
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
@@ -1187,7 +1214,7 @@ pub fn clampScroll(value: i32, maximum: i32) i32 {
 
 pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scroll_offset: i32, viewport_bottom: i32) ?usize {
     if (x < 12 or x >= Tokens.sidebar_width) return null;
-    if (y < Tokens.header_height or y >= viewport_bottom) return null;
+    if (y < content_top or y >= viewport_bottom) return null;
     const layout = Layout{ .base = Tokens.header_height + 78, .project_count = project_count, .loop_count = 0, .worktree_count = 0 };
     const top = layout.worktreeTop(0) - scroll_offset;
     if (y < top) return null;
@@ -1197,7 +1224,7 @@ pub fn hitTestWorktree(x: i32, y: i32, project_count: usize, count: usize, scrol
 }
 
 pub fn hitTestProject(x: i32, y: i32, model: *const GraphModel.Model, scroll_offset: i32, viewport_bottom: i32) ?usize {
-    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    if (x < 0 or x >= Tokens.sidebar_width or y < content_top or y >= viewport_bottom) return null;
     const top = Tokens.header_height + 78 - scroll_offset;
     if (y < top) return null;
     const index: usize = @intCast(@divTrunc(y - top, 24));
@@ -1206,7 +1233,7 @@ pub fn hitTestProject(x: i32, y: i32, model: *const GraphModel.Model, scroll_off
 }
 
 pub fn hitTestOverviewLoop(x: i32, y: i32, model: *const GraphModel.Model, scroll_offset: i32, viewport_bottom: i32) ?usize {
-    if (x < 0 or x >= Tokens.sidebar_width or y < Tokens.header_height or y >= viewport_bottom) return null;
+    if (x < 0 or x >= Tokens.sidebar_width or y < content_top or y >= viewport_bottom) return null;
     const top = Tokens.header_height + 78 +
         @as(i32, @intCast((visibleProjectCount(model) + projectHeadingCount(model)) * 24)) -
         scroll_offset;
@@ -1406,13 +1433,22 @@ test "scroll-adjusted generated rows hit titles loops and worktrees" {
     const scroll: i32 = 37;
     var rows = try appendRows(allocator, &model, &inspection, scroll, null);
     defer rows.deinit(allocator);
+    var hits: usize = 0;
+    var hidden: usize = 0;
     for (rows.items) |row| {
-        const hit = rowAt(24, row.top + 4, &model, &inspection, scroll, 700, null) orelse
-            return error.TestUnexpectedResult;
+        const hit = rowAt(24, row.top + 4, &model, &inspection, scroll, 700, null) orelse {
+            // Rows scrolled under the fixed header are not targets.
+            try std.testing.expect(row.top + 4 < content_top);
+            hidden += 1;
+            continue;
+        };
+        hits += 1;
+        try std.testing.expect(row.top + 4 >= content_top);
         try std.testing.expectEqual(row.kind, hit.kind);
         if (row.kind == .project or row.kind == .open_project or row.kind == .loop)
             try std.testing.expectEqualStrings(row.project_path orelse "recent", hit.project_path orelse "recent");
     }
+    try std.testing.expect(hits >= 3 and hidden >= 1);
 }
 
 test "sidebar scroll clamps overflow, shrink, and resize" {
@@ -1932,6 +1968,121 @@ test "sidebar paints an open project whose daemon name is empty" {
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
     draw(hdc, &model, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
+}
+
+fn manyLoopModel(allocator: std.mem.Allocator, loops: usize) !GraphModel.Model {
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+    var frame: std.ArrayList(u8) = .empty;
+    defer frame.deinit(allocator);
+    try frame.appendSlice(allocator, "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"graphChanged\":{\"project\":{\"path\":\"C:\\\\many-loops\",\"name\":\"Many loops\"},\"nodes\":[");
+    for (0..loops) |index| {
+        if (index != 0) try frame.append(allocator, ',');
+        try frame.print(allocator, "{{\"id\":\"loop-{d}\",\"title\":\"Loop {d}\",\"loopType\":\"goalBased\",\"state\":\"stopped\"}}", .{ index, index });
+    }
+    try frame.appendSlice(allocator, "],\"edges\":[]}}}");
+    _ = try model.updateFromFrame(frame.items);
+    return model;
+}
+
+test "scrolled rows beneath the fixed GRAPH/Projects header are not hit" {
+    const allocator = std.testing.allocator;
+    var model = try manyLoopModel(allocator, 40);
+    defer model.deinit();
+    var state = State.init(allocator);
+    defer state.deinit();
+    const content_bottom = contentViewportBottom(500, false, false);
+    const scroll: i32 = 150;
+
+    var rows = try appendRows(allocator, &model, null, scroll, &state);
+    defer rows.deinit(allocator);
+    var under_header: usize = 0;
+    for (rows.items) |row| {
+        const y = row.top + 8;
+        if (y >= Tokens.header_height and y < content_top) {
+            under_header += 1;
+            try std.testing.expect(rowAt(24, y, &model, null, scroll, content_bottom, &state) == null);
+        }
+    }
+    try std.testing.expect(under_header >= 2);
+}
+
+test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
+    const allocator = std.testing.allocator;
+    var model = try manyLoopModel(allocator, 40);
+    defer model.deinit();
+    var state = State.init(allocator);
+    defer state.deinit();
+    const viewport_bottom: i32 = 500;
+    const content_bottom = contentViewportBottom(viewport_bottom, false, false);
+    const scroll: i32 = 150;
+
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const bitmap = c.CreateCompatibleBitmap(screen, 400, viewport_bottom) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, previous);
+    var draw_allocator = std.heap.DebugAllocator(.{}){};
+    defer std.debug.assert(draw_allocator.deinit() == .ok);
+    draw(hdc, &model, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+
+    // The goalBased accent bar is only ever painted by loop rows.
+    const accent: u32 = 0x0048C78E;
+    var accent_in_header: usize = 0;
+    var accent_in_content: usize = 0;
+    var y: i32 = Tokens.header_height;
+    while (y < content_bottom) : (y += 1) {
+        var x: i32 = 0;
+        while (x < Tokens.sidebar_width) : (x += 1) {
+            if (c.GetPixel(hdc, x, y) != accent) continue;
+            if (y < content_top) accent_in_header += 1 else accent_in_content += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), accent_in_header);
+    try std.testing.expect(accent_in_content > 30);
+}
+
+test "loop row title, status, and age occupy disjoint columns that each label fits" {
+    for (0..5) |depth| {
+        const text = loopRowTextRects(100, depth);
+        try std.testing.expect(text.title.left < text.title.right);
+        try std.testing.expect(text.title.right <= text.state.left);
+        try std.testing.expect(text.state.right <= text.age.left);
+        // Clear of the hover disclosure's hit zone and the sidebar rail edge.
+        try std.testing.expect(text.age.right <= 198 and text.age.right <= Tokens.sidebar_width);
+    }
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const previous = AppFont.select(hdc, 9, false);
+    defer _ = c.SelectObject(hdc, previous);
+    const text = loopRowTextRects(100, 0);
+    var widest_state: i32 = 0;
+    for ([_][]const u8{ "idle", "running", "stopped", "blocked", "failed", "stalled", "waiting", "done", "needs" }) |label| {
+        const width = try measuredWidth(hdc, label);
+        widest_state = @max(widest_state, width);
+        try std.testing.expect(width <= text.state.right - text.state.left);
+    }
+    var widest_age: i32 = 0;
+    for ([_][]const u8{ "-", "59s", "59m", "23h", "99d", "365d", "999d" }) |label| {
+        const width = try measuredWidth(hdc, label);
+        widest_age = @max(widest_age, width);
+        try std.testing.expect(width <= text.age.right - text.age.left);
+    }
+    // Guard against vacuous measurements.
+    try std.testing.expect(widest_state > 20 and widest_age > 10);
+}
+
+fn measuredWidth(hdc: c.HDC, label: []const u8) !i32 {
+    var wide: [16]u16 = undefined;
+    const length = try std.unicode.utf8ToUtf16Le(&wide, label);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, &wide, @intCast(length), &size) == 0) return error.TestUnexpectedResult;
+    return size.cx;
 }
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
