@@ -682,6 +682,16 @@ public static class GraphCodeUiaGateState {
     if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return 0;
     return rect.Bottom - rect.Top;
   }
+  // Posts the WM_MOUSEWHEEL the OS delivers to the window under the cursor. Its
+  // lParam is in screen coordinates; delta is in wheel units (negative scrolls
+  // content up, so the sidebar advances).
+  [DllImport("user32.dll")]
+  private static extern bool ClientToScreen(IntPtr window, ref ScreenPoint point);
+  public static bool WheelAt(IntPtr window, int clientX, int clientY, int delta) {
+    var point = new ScreenPoint { X = clientX, Y = clientY };
+    if (window == IntPtr.Zero || !ClientToScreen(window, ref point)) return false;
+    return PostMessage(window, 0x020A, new UIntPtr((uint)((delta & 0xFFFF) << 16)), MouseLParam(point.X, point.Y));
+  }
   [StructLayout(LayoutKind.Sequential)]
   private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")]
@@ -8284,6 +8294,12 @@ try {
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 18)) `
     "activity fixture mutation was rejected"
   Start-Sleep -Milliseconds 200
+  # The Activity strip is the last sidebar section. At the gate's window size it sits
+  # below the sidebar's content viewport, where UIA publishes empty bounds instead of
+  # a rectangle under the footer, so scroll it into view the way a user would.
+  Require ([GraphCodeUiaGateState]::WheelAt($shellWindow, 100, 100, -32000)) `
+    "sidebar wheel scroll to the Activity strip was rejected"
+  Start-Sleep -Milliseconds 250
   # Mutation 18 is the first point at which the model holds state transitions, so
   # it is where the Activity strip's structural checks must run. Reaching them is
   # mandatory: an empty set is a failure, not a pass.
@@ -8367,6 +8383,8 @@ try {
   $activityNavigationRow = @($filteredActivityRows | Where-Object { $_.Current.Name -eq 'Activity C' }) | Select-Object -First 1
   Require ($null -ne $activityNavigationRow) "activity strip omitted the Activity C card after filtering"
   $activityNavigationRow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Require ([GraphCodeUiaGateState]::WheelAt($shellWindow, 100, 100, 32000)) `
+    "sidebar wheel scroll back to the top was rejected"
   $loopBarProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^workspace-loop-bar-' } `
     { param($items) $items.Count -ge 1 }

@@ -10767,6 +10767,45 @@ test "sidebar footer is not a click target for rows beneath it" {
     }
 }
 
+test "wheel scrolling brings the Activity strip into the content viewport with non-empty UIA bounds" {
+    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
+        var app = try footerLayoutApp(case, controls, true, ingress);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const banner = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, ingress) }).physicalRect(app.dpi);
+
+        // The posted message the live gate sends: delta in the high word, screen point in lParam.
+        const wheel_x: u32 = @intCast(physicalCoordinate(100, app.dpi));
+        const wheel_y: u32 = @intCast(physicalCoordinate(Tokens.header_height + 20, app.dpi));
+        const wparam: c.WPARAM = @as(usize, @as(u16, @bitCast(@as(i16, -32000)))) << 16;
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEWHEEL, wparam, @intCast(wheel_x | (wheel_y << 16)), &result));
+        try std.testing.expect(app.sidebar_scroll > 0);
+
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        var header = false;
+        var filter = false;
+        var rows: usize = 0;
+        var controls_found: usize = 0;
+        for (0..sink.count) |index| {
+            const name = sink.name(index);
+            const kind: *bool = if (std.mem.startsWith(u8, name, "activity-header:")) &header else if (std.mem.startsWith(u8, name, "activity-filter:")) &filter else continue;
+            kind.* = !rectIsEmpty(sink.rects[index]);
+        }
+        for (0..sink.count) |index| {
+            const name = sink.name(index);
+            if (!std.mem.startsWith(u8, name, "activity-row:") and !std.mem.startsWith(u8, name, "activity-control:")) continue;
+            try std.testing.expect(!rectIsEmpty(sink.rects[index]));
+            try std.testing.expect(!rectsIntersect(sink.rects[index], banner));
+            if (std.mem.startsWith(u8, name, "activity-row:")) rows += 1 else controls_found += 1;
+        }
+        try std.testing.expect(header and filter);
+        try std.testing.expect(rows >= 1 and controls_found == 2);
+    };
+}
+
 test "attended activation routes visible sidebar loop from an open stopped workspace with Worktrees and activity" {
     var app = try overviewTestApp(Dpi.base_dpi);
     defer deinitOverviewTestApp(&app);
