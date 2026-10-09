@@ -194,8 +194,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             for (active_state.labels[0..active_state.count], 0..) |label, index| {
                 createField(hwnd, &active_state, label, index);
             }
-            createButton(hwnd, "OK", ok_id, 490, active_state.button_y);
-            createButton(hwnd, "Cancel", cancel_id, 400, active_state.button_y);
+            createButton(hwnd, "OK", ok_id, 490, active_state.button_y, true);
+            createButton(hwnd, "Cancel", cancel_id, 400, active_state.button_y, false);
             if (active_state.edits[0]) |first| {
                 _ = c.SendMessageW(first, c.EM_SETSEL, 0, -1);
                 active_state.focus = first;
@@ -231,13 +231,25 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             repositionFields();
             return 0;
         },
+        // IsDialogMessage routes Enter to the default button reported here and Escape to
+        // IDCANCEL; without a reply Enter in a field is silently dropped. A focused
+        // button keeps Enter for itself, as in a dialog-manager dialog.
+        c.DM_GETDEFID => {
+            var default_id: usize = ok_id;
+            const focused = c.GetFocus();
+            if (focused != null and c.IsChild(hwnd, focused) != 0) {
+                const focused_id: usize = @intCast(c.GetDlgCtrlID(focused));
+                if (focused_id == cancel_id) default_id = cancel_id;
+            }
+            return @as(c.LRESULT, @intCast(default_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16);
+        },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
-            if (command == ok_id) {
+            if (command == ok_id or command == c.IDOK) {
                 applyTextCommand(&active_state, .submit);
                 return 0;
             }
-            if (command == cancel_id) {
+            if (command == cancel_id or command == c.IDCANCEL) {
                 applyTextCommand(&active_state, .cancel);
                 return 0;
             }
@@ -313,11 +325,12 @@ fn repositionFields() void {
     }
 }
 
-fn createButton(hwnd: c.HWND, label: []const u8, id: usize, x: i32, y: i32) void {
+fn createButton(hwnd: c.HWND, label: []const u8, id: usize, x: i32, y: i32, default: bool) void {
     const wide = wideZ(std.heap.c_allocator, label) catch return;
     defer std.heap.c_allocator.free(wide);
     const button_id = Win32.opaquePointerFromInt(c.HMENU, id);
-    const button = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, x, y, 80, 28, hwnd, button_id, c.GetModuleHandleW(null), null);
+    const push_style = if (default) c.BS_DEFPUSHBUTTON else c.BS_PUSHBUTTON;
+    const button = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, @intCast(c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | push_style), x, y, 80, 28, hwnd, button_id, c.GetModuleHandleW(null), null);
     AppFont.apply(button, AppFont.control_size, false);
 }
 
@@ -518,4 +531,117 @@ test "text dialog opens with keyboard focus in its first field, text selected, a
     try std.testing.expectEqual(title_edit, c.GetFocus());
     _ = c.SendMessageW(hwnd, c.WM_ACTIVATE, c.WA_ACTIVE, 0);
     try std.testing.expectEqual(title_edit, c.GetFocus());
+}
+
+fn openProbeDialog(allocator: std.mem.Allocator, initial: []const u8) !c.HWND {
+    active_state = State{ .allocator = allocator, .parent = null, .count = 1 };
+    active_state.labels[0] = "Title";
+    active_state.values[0] = try allocator.dupe(u8, initial);
+    active = true;
+    try registerClass();
+    const wide_title = try wideZ(allocator, "Rename Loop");
+    defer allocator.free(wide_title);
+    const hwnd = createDialogWindow(null, wide_title, 220) orelse return error.TestWindowCreationFailed;
+    presentDialog(hwnd);
+    return hwnd;
+}
+
+/// Delivers one key the way the modal loop does: through IsDialogMessageW to the
+/// focused control, falling back to the ordinary translate/dispatch path.
+fn pumpKey(hwnd: c.HWND, target: c.HWND, key: usize) void {
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = target;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = key;
+    if (c.IsDialogMessageW(hwnd, &message) != 0) return;
+    _ = c.TranslateMessage(&message);
+    _ = c.DispatchMessageW(&message);
+}
+
+fn typeInto(edit: c.HWND, text_utf8: []const u8) !void {
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(std.testing.allocator, text_utf8);
+    defer std.testing.allocator.free(wide);
+    _ = c.SendMessageW(edit, c.EM_SETSEL, 0, -1);
+    for (wide) |unit| _ = c.SendMessageW(edit, c.WM_CHAR, unit, 0);
+}
+
+test "Enter in a focused single-line field submits the dialog with the typed text" {
+    // Dev Box beta18: Enter in Rename Loop's Title field did nothing, so the dialog
+    // could only be accepted by clicking OK.
+    const allocator = std.testing.allocator;
+    const previous_active = active;
+    defer active = previous_active;
+    const hwnd = try openProbeDialog(allocator, "GCQCrud17");
+    defer {
+        freeStateValues(&active_state);
+        _ = c.DestroyWindow(hwnd);
+    }
+    const edit = active_state.edits[0] orelse return error.TestWindowCreationFailed;
+    try std.testing.expectEqual(edit, c.GetFocus());
+    try typeInto(edit, "Renamed loop");
+
+    pumpKey(hwnd, edit, c.VK_RETURN);
+
+    try std.testing.expect(active_state.closed);
+    try std.testing.expect(active_state.accepted);
+    var result = (try finishText(&active_state)) orelse return error.ExpectedAcceptedText;
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expectEqualStrings("Renamed loop", result.values[0]);
+}
+
+test "Escape in a focused field cancels the dialog without a result" {
+    const allocator = std.testing.allocator;
+    const previous_active = active;
+    defer active = previous_active;
+    const hwnd = try openProbeDialog(allocator, "keep me");
+    defer {
+        freeStateValues(&active_state);
+        _ = c.DestroyWindow(hwnd);
+    }
+    const edit = active_state.edits[0] orelse return error.TestWindowCreationFailed;
+    try typeInto(edit, "discarded");
+
+    pumpKey(hwnd, edit, c.VK_ESCAPE);
+
+    try std.testing.expect(active_state.closed);
+    try std.testing.expect(!active_state.accepted);
+    try std.testing.expect((try finishText(&active_state)) == null);
+}
+
+test "Enter on the Cancel button cancels rather than submitting" {
+    const allocator = std.testing.allocator;
+    const previous_active = active;
+    defer active = previous_active;
+    const hwnd = try openProbeDialog(allocator, "keep me");
+    defer {
+        freeStateValues(&active_state);
+        _ = c.DestroyWindow(hwnd);
+    }
+    const cancel = c.GetDlgItem(hwnd, cancel_id) orelse return error.TestWindowCreationFailed;
+    _ = c.SetFocus(cancel);
+
+    pumpKey(hwnd, cancel, c.VK_RETURN);
+
+    try std.testing.expect(active_state.closed);
+    try std.testing.expect(!active_state.accepted);
+}
+
+test "dialog exposes OK as its single default button" {
+    const allocator = std.testing.allocator;
+    const previous_active = active;
+    defer active = previous_active;
+    const hwnd = try openProbeDialog(allocator, "x");
+    defer {
+        freeStateValues(&active_state);
+        _ = c.DestroyWindow(hwnd);
+    }
+    const reply: usize = @bitCast(c.SendMessageW(hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(usize, c.DC_HASDEFID), reply >> 16);
+    try std.testing.expectEqual(@as(usize, ok_id), reply & 0xffff);
+    const ok = c.GetDlgItem(hwnd, ok_id) orelse return error.TestWindowCreationFailed;
+    const cancel = c.GetDlgItem(hwnd, cancel_id) orelse return error.TestWindowCreationFailed;
+    const style_mask: usize = 0xf;
+    try std.testing.expectEqual(@as(usize, c.BS_DEFPUSHBUTTON), @as(usize, @bitCast(c.GetWindowLongPtrW(ok, c.GWL_STYLE))) & style_mask);
+    try std.testing.expectEqual(@as(usize, c.BS_PUSHBUTTON), @as(usize, @bitCast(c.GetWindowLongPtrW(cancel, c.GWL_STYLE))) & style_mask);
 }
