@@ -11226,6 +11226,14 @@ const fake_zmx_script =
     "pause >nul\r\n" ++
     "exit /b 0\r\n";
 
+/// The installed shell names zmx bare (`zmx.exe`, no GRAPHCODE_ZMX) and finds it beside
+/// itself through its working directory, `...\GraphCode\current\bin`, which PATH need not
+/// name. This forwarder stands in for that copy; the stand-in it calls keeps its state.
+const bare_zmx_forwarder =
+    "@echo off\r\n" ++
+    "call \"%~dp0..\\zmx.cmd\" %*\r\n" ++
+    "exit /b %errorlevel%\r\n";
+
 const LiveLoop = struct { id: []const u8, state: []const u8 = "idle", worktree: ?[]const u8 = null };
 
 const TerminalChild = struct { visible: bool, rect: c.RECT };
@@ -11251,6 +11259,7 @@ const LiveTerminalFixture = struct {
         try self.tmp.dir.makePath("wt-a");
         try self.tmp.dir.makePath("bin");
         try self.tmp.dir.writeFile(.{ .sub_path = "zmx.cmd", .data = fake_zmx_script });
+        try self.tmp.dir.writeFile(.{ .sub_path = "bin\\zmx.cmd", .data = bare_zmx_forwarder });
         self.root = try self.tmp.dir.realpathAlloc(allocator, ".");
         self.project = try std.fs.path.join(allocator, &.{ self.root, "project" });
         self.worktree = try std.fs.path.join(allocator, &.{ self.root, "wt-a" });
@@ -11261,7 +11270,8 @@ const LiveTerminalFixture = struct {
         self.workspace = .{
             .parent = app.window.hwnd,
             .allocator = allocator,
-            .zmx_path = try std.fs.path.join(allocator, &.{ self.root, "zmx.cmd" }),
+            // As installed: a bare name that only the shell's working directory resolves.
+            .zmx_path = try allocator.dupe(u8, "zmx.cmd"),
             .cwd = try allocator.dupe(u8, self.bin),
             .input_queue = .{ .allocator = allocator },
             .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, self.project),
@@ -11589,6 +11599,71 @@ test "workspace surface: deleting the attached loop while the graph shows leaves
         try fixture.showGraph();
         try fixture.expectNoVisibleTerminal();
     }
+}
+
+/// Every terminal action must report something other than its failure status.
+fn expectNoTerminalFailure(app: *App) !void {
+    for ([_][]const u8{ "Unable to open selected loop", "Unable to create tab", "Unable to split workspace" }) |failure| {
+        if (std.mem.eql(u8, app.status(), failure)) {
+            std.debug.print("terminal action failed: status \"{s}\"\n", .{app.status()});
+            return error.TestTerminalActionFailed;
+        }
+    }
+}
+
+test "workspace surface: sidebar loop opens, New Tab, and Split Right attach visible terminals when only the shell's directory holds zmx" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-fresh" }, .{ .id = "loop-live" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const workspace = &fixture.workspace;
+    // Both loops have a directory of their own, so every attach starts outside the shell's.
+    try fixture.deliver(&.{ .{ .id = "loop-fresh" }, .{ .id = "loop-live", .worktree = fixture.worktree } });
+
+    // A fresh loop: the daemon starts its session only after the sidebar click.
+    try clickSidebarLoopRow(app, fixture.project, "loop-fresh");
+    try std.testing.expectEqualStrings("Starting loop", app.status());
+    for (0..5) |_| fixture.tick();
+    try fixture.setLive(&.{"loop-fresh"});
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-fresh");
+    for (0..5) |_| fixture.tick();
+    try std.testing.expectEqualStrings("Loop opened", app.status());
+    try fixture.expectSelectedPane("loop-fresh");
+    try fixture.expectTerminalsInWorkspace(1);
+    try fixture.showGraph();
+    try fixture.expectNoVisibleTerminal();
+
+    // A loop whose session is already running when its row is clicked.
+    try fixture.setLive(&.{ "loop-fresh", "loop-live" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-live");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-live");
+    for (0..5) |_| fixture.tick();
+    try std.testing.expectEqualStrings("Loop opened", app.status());
+    try fixture.expectSelectedPane("loop-live");
+    try fixture.expectTerminalsInWorkspace(1);
+    const loop_started_in = try fixture.attachDirectory("loop-live");
+    defer std.testing.allocator.free(loop_started_in);
+    try expectSameDirectory(fixture.worktree, loop_started_in);
+
+    // Native New Tab: a plain shell with no session behind it, started in the loop's worktree.
+    const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+    try nativeClickCenter(app, new_tab);
+    try expectNoTerminalFailure(app);
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
+    try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
+    const shell = try std.testing.allocator.dupe(u8, workspace.layout.tabs.items[1].panes.items[0].id);
+    defer std.testing.allocator.free(shell);
+    const shell_started_in = try fixture.attachDirectory(shell);
+    defer std.testing.allocator.free(shell_started_in);
+    try expectSameDirectory(fixture.worktree, shell_started_in);
+    try fixture.expectTerminalsInWorkspace(1);
+
+    // Native Split Right of that shell: a second visible terminal beside it.
+    const split_right = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 1);
+    try nativeClickCenter(app, split_right);
+    try expectNoTerminalFailure(app);
+    try std.testing.expectEqual(@as(usize, 2), (workspace.layout.selectedConst() orelse return error.TestExpectedTab).panes.items.len);
+    try fixture.expectTerminalsInWorkspace(2);
 }
 
 fn emptyStateButton(app: *App, button: c.HWND) TerminalChild {
