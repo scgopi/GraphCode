@@ -1562,9 +1562,11 @@ pub const App = struct {
         // secret; connection retries replace it with the real endpoint.
         const endpoint = self.client.currentDaemonStartupEndpoint(self.allocator) catch &.{};
         const lock_name = self.client.currentDaemonLockName(self.allocator) catch &.{};
+        const task_name = self.client.currentDaemonTaskName(self.allocator) catch &.{};
         defer if (endpoint.len != 0) self.allocator.free(endpoint);
         defer if (lock_name.len != 0) self.allocator.free(lock_name);
-        if (endpoint.len != 0 and lock_name.len != 0) self.daemon.start(endpoint, lock_name);
+        defer if (task_name.len != 0) self.allocator.free(task_name);
+        if (endpoint.len != 0 and lock_name.len != 0) _ = self.daemon.recover(endpoint, lock_name, task_name);
         if (daemon_supervisor_test_hook) {
             const state: usize = if (self.daemon.owned) 1 else if (self.daemon.status().len == 0) 2 else 3;
             _ = c.SetPropW(
@@ -5961,9 +5963,27 @@ pub const App = struct {
         );
     }
 
+    /// Reconnect also brings a stopped daemon back: a user who presses it after the daemon
+    /// ended expects the connection to return, as it does under launchd on macOS.
+    fn recoverDaemon(self: *App) void {
+        const endpoint = self.client.currentDaemonStartupEndpoint(self.allocator) catch return;
+        defer self.allocator.free(endpoint);
+        const lock_name = self.client.currentDaemonLockName(self.allocator) catch return;
+        defer self.allocator.free(lock_name);
+        const task_name = self.client.currentDaemonTaskName(self.allocator) catch &.{};
+        defer if (task_name.len != 0) self.allocator.free(task_name);
+        switch (self.daemon.recover(endpoint, lock_name, task_name)) {
+            .not_needed => {},
+            .task_started => self.setStatus("Started the GraphCode daemon task; reconnecting"),
+            .spawned => self.setStatus("Restarted the GraphCode daemon; reconnecting"),
+            .failed => self.setStatus(self.daemon.status()),
+        }
+    }
+
     fn handleAction(self: *App, action: InputRouter.Action) void {
         switch (action) {
             .reconnect => {
+                self.recoverDaemon();
                 self.client.reconnect();
             },
             .open_folder => self.openFolder(),

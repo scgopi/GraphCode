@@ -128,6 +128,18 @@ it, setup verifies/installs its own directory. `-InstallRoot` supports custom
 locations and must also be supplied when managing that custom installation.
 `-NoScheduledTask` retains the explicit development/portable mode.
 
+The daemon task has a logon trigger and a one-minute repeating trigger with
+`MultipleInstancesPolicy` `IgnoreNew`, the Windows counterpart of launchd
+`KeepAlive`: a tick is a no-op while the daemon runs and relaunches it within a
+minute once it has stopped, and battery limits never refuse or kill it. (Task
+Scheduler's restart-on-failure setting is deliberately not used; it fires only
+when a task cannot launch, never when the launched process exits.) Upgrade and
+Uninstall disable the task before ending it, so neither is fought by the
+trigger; a refused Uninstall re-registers it. In the shell, `Ctrl+R` Reconnect
+also starts the registered task (`schtasks /Run`, no elevation) when the daemon
+endpoint is missing and no daemon is starting, and falls back to launching a
+shell-owned daemon when no task is registered. The status line reports the outcome.
+
 Standalone provenance checks use the selected package's declared provider pins,
 so an older setup can verify another release whose pins changed. Signed-package
 catalog verification authenticates those declarations. Repository commands
@@ -299,7 +311,11 @@ hash mismatch; no certificate is added to trust stores. This contract requires
 the SDK on the build/CI host, not the installation target, and is not proof of
 production publisher trust. `Packaging.Scheduler.Tests.ps1` exercises an owned
 idle task through native stop/delete and verifies the actual missing-task
-HRESULT without suppressing account or permission errors.
+HRESULT without suppressing account or permission errors. It also registers the
+generated daemon task under an owned name with its action swapped for a harmless
+command, and proves on the real scheduler that the repeating trigger relaunches
+an action that has exited and that `Stop-InstalledDaemon` disables the task so an
+explicit stop is not undone (this part waits about two minutes).
 
 ## Publishing a Windows release
 
