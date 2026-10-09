@@ -1077,10 +1077,11 @@ test "settings accelerator table preserves existing bindings and product destina
     defer std.testing.expect(c.DestroyAcceleratorTable(accelerators) != 0) catch
         @panic("DestroyAcceleratorTable failed");
     try std.testing.expectEqual(@as(c_int, expected.len), c.CopyAcceleratorTableW(accelerators, null, 0));
-    var entries: [expected.len]c.ACCEL = undefined;
+    // The buffer is larger than the table: some Windows builds refuse an exactly sized copy.
+    var entries: [expected.len + 9]c.ACCEL = undefined;
     const count = c.CopyAcceleratorTableW(accelerators, &entries, entries.len);
     try std.testing.expectEqual(@as(c_int, expected.len), count);
-    for (expected, entries) |binding, entry| {
+    for (expected, entries[0..expected.len]) |binding, entry| {
         try std.testing.expectEqual(binding.fVirt, entry.fVirt);
         try std.testing.expectEqual(binding.key, entry.key);
         try std.testing.expectEqual(binding.cmd, entry.cmd);
