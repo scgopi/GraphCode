@@ -7,6 +7,7 @@ const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
 const TerminalVt = @import("TerminalVt.zig");
+const TerminalKeys = @import("TerminalKeys.zig");
 const ZmxSession = @import("ZmxSession.zig");
 const LoopLaunchWait = @import("LoopLaunchWait.zig");
 
@@ -2031,18 +2032,58 @@ pub const Workspace = struct {
         return try allocator.realloc(text, @intCast(length));
     }
 
-    pub fn pasteText(self: *Workspace, text: []const u8) !void {
+    pub fn pasteText(self: *Workspace, text: []const u8, allow_unbracketed_multiline: bool) !void {
         if (text.len == 0) return;
         if (self.active_surface >= self.surfaces.len) return error.TerminalSurfaceUnavailable;
-        const surface = self.surfaces[self.active_surface].surface orelse return error.TerminalSurfaceUnavailable;
-        const length = std.math.cast(u32, text.len) orelse return error.TerminalPasteTooLarge;
-        if (c.winghostty_paste_validate(text.ptr, length) != c.WINGHOSTTY_PASTE_SAFE) {
-            return error.TerminalPasteRequiresConfirmation;
-        }
-        const result = c.winghostty_surface_paste_text(surface, text.ptr, length, 0);
-        if (result == c.WINGHOSTTY_PASTE_REQUIRES_CONFIRMATION) return error.TerminalPasteRequiresConfirmation;
-        if (result == c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE) return error.TerminalClipboardUnavailable;
-        if (result != c.WINGHOSTTY_OK) return error.TerminalPasteFailed;
+        const slot = &self.surfaces[self.active_surface];
+        if (slot.surface == null) return error.TerminalSurfaceUnavailable;
+        // The running program, not the shell, decides bracketing (DECSET 2004), so a program
+        // that did not ask for it never receives the ESC[200~ markers as typed input.
+        const bracketed = if (slot.vt) |state| state.bracketedPasteEnabled() else false;
+        const payload = try TerminalVt.encodePaste(self.allocator, text, bracketed, allow_unbracketed_multiline);
+        defer self.allocator.free(payload);
+        if (!self.tryEnqueueInput(self.active_surface, payload)) return error.TerminalPasteFailed;
+        slot.accessibility_selection = null;
+    }
+
+    /// Runs a terminal clipboard binding through the same route as the canonical
+    /// Ctrl+Shift+C / Ctrl+Shift+V chords, whichever key or menu raised it.
+    fn runClipboardCommand(self: *Workspace, command: TerminalKeys.ClipboardCommand) void {
+        const callback = self.key_callback orelse return;
+        callback(self.key_callback_context, switch (command) {
+            .copy => 'C',
+            .paste => 'V',
+        }, true, true);
+    }
+
+    /// The right button and the Menu key share one route: the workspace sees the Menu key.
+    fn runContextMenu(self: *Workspace) void {
+        const callback = self.key_callback orelse return;
+        callback(self.key_callback_context, TerminalKeys.vk_apps, false, false);
+    }
+
+    pub fn hasSelection(self: *const Workspace) bool {
+        if (self.active_surface >= self.surfaces.len) return false;
+        return slotHasSelection(&self.surfaces[self.active_surface]);
+    }
+
+    /// Forgets the selection once it has been copied, so the next Ctrl+C interrupts again.
+    pub fn dismissSelection(self: *Workspace) void {
+        if (self.active_surface >= self.surfaces.len) return;
+        self.surfaces[self.active_surface].accessibility_selection = null;
+    }
+
+    /// Where the terminal context menu opens: under the pointer when it is over the
+    /// active terminal, else near the terminal's top-left corner.
+    pub fn contextMenuAnchor(self: *const Workspace) ?c.POINT {
+        if (self.active_surface >= self.surfaces.len) return null;
+        const surface = self.surfaces[self.active_surface].surface orelse return null;
+        const window = c.winghostty_surface_get_hwnd(surface) orelse return null;
+        var rect: c.RECT = undefined;
+        if (c.GetWindowRect(window, &rect) == 0) return null;
+        var point: c.POINT = undefined;
+        if (c.GetCursorPos(&point) != 0 and c.PtInRect(&rect, point) != 0) return point;
+        return .{ .x = rect.left + 24, .y = rect.top + 24 };
     }
 
     pub fn inputStatus(self: *const Workspace, current_status: []const u8) ?[]const u8 {
@@ -4090,13 +4131,24 @@ fn onAccessibilitySelection(user_data: ?*anyopaque, surface: *c.winghostty_surfa
 
 fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_key_event) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
-    const modifiers = callbackModifiers(event.modifiers);
+    const modifiers = TerminalKeys.decodeProviderModifiers(event.modifiers);
     const ctrl = modifiers.ctrl;
     const shift = modifiers.shift;
-    if (isApplicationShortcut(event.virtual_key, ctrl, shift) or
-        (event.virtual_key == c.VK_TAB and (event.modifiers & ~@as(u32, 0x03)) != 0))
+    if (TerminalKeys.clipboardCommand(event.virtual_key, modifiers, slotHasSelection(slot))) |command| {
+        // TranslateMessage already queued ^C/^V for these chords; they must not also reach the shell.
+        discardTranslatedCharacters(c.GetFocus());
+        if (event.action == c.WINGHOSTTY_KEY_PRESS) workspace.runClipboardCommand(command);
+        return;
+    }
+    if (TerminalKeys.opensContextMenu(event.virtual_key, modifiers)) {
+        if (event.action == c.WINGHOSTTY_KEY_PRESS) workspace.runContextMenu();
+        return;
+    }
+    if (isApplicationShortcut(event.virtual_key, ctrl) or
+        (event.virtual_key == c.VK_TAB and
+            (modifiers.alt or (event.modifiers & ~(TerminalKeys.provider_shift | TerminalKeys.provider_ctrl | TerminalKeys.provider_alt)) != 0)))
     {
         if (workspace.key_callback) |callback|
             callback(workspace.key_callback_context, event.virtual_key, ctrl, shift);
@@ -4118,18 +4170,27 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     workspace.enqueueInput(index, bytes);
 }
 
-fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
-    if (ctrl and shift and (key == 'C' or key == 'V')) return true;
+fn slotHasSelection(slot: *const Surface) bool {
+    const selection = slot.accessibility_selection orelse return false;
+    return selection.end > selection.start;
+}
+
+/// Removes the WM_CHAR/WM_SYSCHAR messages TranslateMessage queued for the key being
+/// dispatched. Only the character messages are filtered: key-up messages stay queued.
+fn discardTranslatedCharacters(target: c.HWND) void {
+    if (target == null) return;
+    var message: c.MSG = undefined;
+    while (c.PeekMessageW(&message, target, c.WM_CHAR, c.WM_DEADCHAR, c.PM_REMOVE) != 0) {}
+    while (c.PeekMessageW(&message, target, c.WM_SYSCHAR, c.WM_SYSDEADCHAR, c.PM_REMOVE) != 0) {}
+}
+
+fn isApplicationShortcut(key: usize, ctrl: bool) bool {
     if (key == c.VK_TAB) return ctrl;
     if (!ctrl) return false;
     return switch (key) {
         'O', 'J', 'N', 'S', 'T', 'W', 'D', c.VK_PRIOR, c.VK_NEXT, 0xDB, 0xDD, 0xBC => true,
         else => false,
     };
-}
-
-fn callbackModifiers(mask: u32) struct { ctrl: bool, shift: bool } {
-    return .{ .ctrl = (mask & 0x02) != 0, .shift = (mask & 0x01) != 0 };
 }
 
 const OrdinaryTabKeyboardTest = struct {
@@ -4179,7 +4240,7 @@ test "ordinary Tab and backtab enter the exact registered surface queue once" {
     defer workspace.input_queue.clear();
     var probe = Probe{};
     probe.bind(&workspace);
-    for ([_]u32{ 0, 0x01 }) |modifiers| {
+    for ([_]u32{ 0, provider_shift }) |modifiers| {
         const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
         onKey(@ptrCast(&workspace), Probe.registered, &event);
         try Probe.expectInput(&workspace, if (modifiers == 0) "\t" else "\x1b[Z");
@@ -4195,7 +4256,7 @@ test "ordinary Tab release and repeat preserve one item per accepted event" {
     defer workspace.input_queue.clear();
     var probe = Probe{};
     probe.bind(&workspace);
-    for ([_]u32{ 0, 0x01 }) |modifiers| {
+    for ([_]u32{ 0, provider_shift }) |modifiers| {
         var event = Probe.event(modifiers, c.WINGHOSTTY_KEY_RELEASE);
         onKey(@ptrCast(&workspace), Probe.registered, &event);
         try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
@@ -4215,13 +4276,13 @@ test "ordinary Tab changes preserve control and additional modifier shortcut rou
     defer workspace.input_queue.clear();
     var probe = Probe{};
     probe.bind(&workspace);
-    for ([_]u32{ 0x02, 0x03, 0x04, 0x05, 0x80000000 }) |modifiers| {
+    for ([_]u32{ provider_ctrl, provider_ctrl | provider_shift, provider_alt, provider_shift | provider_alt, 0x80000000 }) |modifiers| {
         probe.calls = 0;
         const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
         onKey(@ptrCast(&workspace), Probe.registered, &event);
         try std.testing.expectEqual(@as(usize, 1), probe.calls);
         try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
-        const decoded = callbackModifiers(modifiers);
+        const decoded = TerminalKeys.decodeProviderModifiers(modifiers);
         try std.testing.expectEqual(
             @import("InputRouter.zig").keyAction(c.VK_TAB, decoded.ctrl, decoded.shift),
             probe.action,
@@ -4237,7 +4298,7 @@ test "ordinary Tab rejects unregistered and retired surface callbacks" {
     var probe = Probe{};
     probe.bind(&workspace);
     const unknown: *c.winghostty_surface = @ptrFromInt(0x3000);
-    for ([_]u32{ 0, 0x01, 0x02 }) |modifiers| {
+    for ([_]u32{ 0, provider_shift, provider_ctrl }) |modifiers| {
         const event = Probe.event(modifiers, c.WINGHOSTTY_KEY_PRESS);
         onKey(@ptrCast(&workspace), unknown, &event);
         workspace.surfaces[Probe.source_index].destroying = true;
@@ -4294,7 +4355,7 @@ test "ordinary Tab production dispatch reaches the real terminal key callback" {
         Api.accelerator_calls = 0;
         Api.translation_calls = 0;
         Api.dispatch_calls = 0;
-        Api.event = Probe.event(if (shift) 0x01 else 0, c.WINGHOSTTY_KEY_PRESS);
+        Api.event = Probe.event(if (shift) provider_shift else 0, c.WINGHOSTTY_KEY_PRESS);
         const keys = MainWindow.KeyContext{
             .active = true,
             .owner_enabled = true,
@@ -4313,34 +4374,249 @@ test "ordinary Tab production dispatch reaches the real terminal key callback" {
 }
 
 test "TerminalSurface.isApplicationShortcut forwards registered terminal shortcuts" {
-    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, true));
-    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, false));
-    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, true));
-    try std.testing.expect(isApplicationShortcut('C', true, true));
-    try std.testing.expect(isApplicationShortcut('V', true, true));
-    try std.testing.expect(isApplicationShortcut(0xBC, true, false));
-    try std.testing.expect(isApplicationShortcut('W', true, true));
-    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false));
-    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false, false));
-    try std.testing.expect(!isApplicationShortcut('M', true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true));
+    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true));
+    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false));
+    try std.testing.expect(isApplicationShortcut(0xBC, true));
+    try std.testing.expect(isApplicationShortcut('W', true));
+    try std.testing.expect(!isApplicationShortcut('C', true));
+    try std.testing.expect(!isApplicationShortcut('V', true));
+    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false));
+    try std.testing.expect(!isApplicationShortcut('M', true));
 }
 
-test "child callback preserves actual modifier bits" {
-    const plain = callbackModifiers(0);
-    try std.testing.expect(!plain.ctrl);
-    try std.testing.expect(!plain.shift);
-    const shifted = callbackModifiers(0x01);
-    try std.testing.expect(!shifted.ctrl);
-    try std.testing.expect(shifted.shift);
-    const controlled = callbackModifiers(0x02);
-    try std.testing.expect(controlled.ctrl);
-    try std.testing.expect(!controlled.shift);
-    const both = callbackModifiers(0x03);
-    try std.testing.expect(both.ctrl);
-    try std.testing.expect(both.shift);
+// The pinned provider fills winghostty_key_event.modifiers from GetKeyState using the Win32
+// MK_* masks (Shift 0x04, Control 0x08) plus 0x80 for Alt (win32_host.zig keyModifiers).
+const provider_shift: u32 = 0x04;
+const provider_ctrl: u32 = 0x08;
+const provider_alt: u32 = 0x80;
+
+fn providerKey(vk: usize, modifiers: u32, action: u32) c.winghostty_key_event {
+    var key = std.mem.zeroes(c.winghostty_key_event);
+    key.virtual_key = @intCast(vk);
+    key.modifiers = modifiers;
+    key.action = action;
+    return key;
+}
+
+test "provider Shift modifier bit makes Tab a backtab instead of loop navigation" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    const event = providerKey(c.VK_TAB, provider_shift, c.WINGHOSTTY_KEY_PRESS);
+    onKey(@ptrCast(&workspace), Probe.registered, &event);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try Probe.expectInput(&workspace, "\x1b[Z");
+}
+
+const ClipboardProbe = struct {
+    calls: usize = 0,
+    key: usize = 0,
+    ctrl: bool = false,
+    shift: bool = false,
+
+    fn callback(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool) callconv(.c) void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        self.key = key;
+        self.ctrl = ctrl;
+        self.shift = shift;
+    }
+
+    fn bind(self: *@This(), workspace: *Workspace) void {
+        workspace.surfaces[0].surface = OrdinaryTabKeyboardTest.registered;
+        workspace.key_callback = &callback;
+        workspace.key_callback_context = self;
+    }
+};
+
+test "every terminal clipboard binding reaches the workspace as the canonical Ctrl+Shift chord" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = ClipboardProbe{};
+    probe.bind(&workspace);
+    workspace.surfaces[0].accessibility_selection = .{ .start = 2, .end = 9 };
+    const cases = [_]struct { vk: usize, modifiers: u32, expected: usize }{
+        .{ .vk = 'V', .modifiers = provider_ctrl | provider_shift, .expected = 'V' },
+        .{ .vk = c.VK_INSERT, .modifiers = provider_shift, .expected = 'V' },
+        .{ .vk = 'C', .modifiers = provider_ctrl | provider_shift, .expected = 'C' },
+        .{ .vk = c.VK_INSERT, .modifiers = provider_ctrl, .expected = 'C' },
+        .{ .vk = 'C', .modifiers = provider_ctrl, .expected = 'C' },
+    };
+    for (cases) |case| {
+        probe = .{};
+        probe.bind(&workspace);
+        const event = providerKey(case.vk, case.modifiers, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(case.expected, probe.key);
+        try std.testing.expect(probe.ctrl and probe.shift);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    }
+}
+
+test "terminal clipboard chords act once per press and never on repeat or release" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = ClipboardProbe{};
+    probe.bind(&workspace);
+    for ([_]u32{ c.WINGHOSTTY_KEY_RELEASE, c.WINGHOSTTY_KEY_REPEAT }) |action| {
+        const event = providerKey('V', provider_ctrl | provider_shift, action);
+        onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "plain Ctrl+C and Ctrl+V stay terminal input without a selection" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = ClipboardProbe{};
+    probe.bind(&workspace);
+    for ([_]usize{ 'C', 'V' }) |vk| {
+        const event = providerKey(vk, provider_ctrl, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    workspace.surfaces[0].accessibility_selection = .{ .start = 4, .end = 4 };
+    const event = providerKey('C', provider_ctrl, c.WINGHOSTTY_KEY_PRESS);
+    onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "discarding translated characters keeps key-up messages queued" {
+    const parent = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("translated character discard"),
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        100,
+        100,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(parent);
+    _ = c.PostMessageW(parent, c.WM_CHAR, 0x16, 0);
+    _ = c.PostMessageW(parent, c.WM_SYSCHAR, 'x', 0);
+    _ = c.PostMessageW(parent, c.WM_DEADCHAR, '`', 0);
+    _ = c.PostMessageW(parent, c.WM_SYSKEYUP, 'X', 0);
+    _ = c.PostMessageW(parent, c.WM_KEYUP, 'V', 0);
+    discardTranslatedCharacters(parent);
+    var message: c.MSG = undefined;
+    var remaining: [4]c.UINT = undefined;
+    var count: usize = 0;
+    while (c.PeekMessageW(&message, parent, c.WM_KEYFIRST, c.WM_KEYLAST, c.PM_REMOVE) != 0) : (count += 1) {
+        if (count < remaining.len) remaining[count] = message.message;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqualSlices(c.UINT, &.{ c.WM_SYSKEYUP, c.WM_KEYUP }, remaining[0..2]);
+}
+
+test "terminal paste follows the program's bracketed-paste mode and clears a stale selection" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const slot = &workspace.surfaces[0];
+    slot.surface = OrdinaryTabKeyboardTest.registered;
+    slot.vt = try TerminalVt.State.create(std.testing.allocator, 20, 3);
+    defer slot.vt.?.destroy();
+    slot.accessibility_selection = .{ .start = 1, .end = 5 };
+
+    try workspace.pasteText("echo hi", false);
+    var item = workspace.input_queue.dequeue().?;
+    try std.testing.expectEqualStrings("echo hi", item.bytes);
+    workspace.allocator.free(item.bytes);
+    try std.testing.expect(slot.accessibility_selection == null);
+
+    try std.testing.expectError(error.TerminalPasteRequiresConfirmation, workspace.pasteText("a\r\nb", false));
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try workspace.pasteText("a\r\nb", true);
+    item = workspace.input_queue.dequeue().?;
+    try std.testing.expectEqualStrings("a\rb", item.bytes);
+    workspace.allocator.free(item.bytes);
+
+    try slot.vt.?.feed("\x1b[?2004h");
+    try workspace.pasteText("a\r\nb", false);
+    item = workspace.input_queue.dequeue().?;
+    try std.testing.expectEqualStrings("\x1b[200~a\nb\x1b[201~", item.bytes);
+    workspace.allocator.free(item.bytes);
+}
+
+test "terminal paste has no target without a live surface" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    try std.testing.expectError(error.TerminalSurfaceUnavailable, workspace.pasteText("text", false));
+    try workspace.pasteText("", false);
+}
+
+test "right button release, Menu key and Shift+F10 raise the terminal context menu route once" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = ClipboardProbe{};
+    probe.bind(&workspace);
+    var mouse = std.mem.zeroes(c.winghostty_mouse_event);
+    mouse.button = 2;
+    for ([_]u32{ c.WINGHOSTTY_MOUSE_BUTTON_DOWN, c.WINGHOSTTY_MOUSE_MOVE }) |kind| {
+        mouse.kind = kind;
+        onMouse(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &mouse);
+    }
+    mouse.kind = c.WINGHOSTTY_MOUSE_BUTTON_UP;
+    mouse.button = 1;
+    onMouse(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &mouse);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+
+    mouse.button = 2;
+    onMouse(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &mouse);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, c.VK_APPS), probe.key);
+
+    probe = .{};
+    probe.bind(&workspace);
+    var event = providerKey(c.VK_APPS, 0, c.WINGHOSTTY_KEY_PRESS);
+    onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    event = providerKey(c.VK_F10, provider_shift, c.WINGHOSTTY_KEY_PRESS);
+    onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    event.action = c.WINGHOSTTY_KEY_REPEAT;
+    onKey(@ptrCast(&workspace), OrdinaryTabKeyboardTest.registered, &event);
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+}
+
+test "terminal selection state follows the surface's reported range" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    try std.testing.expect(!workspace.hasSelection());
+    workspace.surfaces[0].accessibility_selection = .{ .start = 3, .end = 3 };
+    try std.testing.expect(!workspace.hasSelection());
+    workspace.surfaces[0].accessibility_selection = .{ .start = 3, .end = 8 };
+    try std.testing.expect(workspace.hasSelection());
+    workspace.dismissSelection();
+    try std.testing.expect(!workspace.hasSelection());
+}
+
+test "provider Control+Shift bits route terminal clipboard chords to the workspace" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    const event = providerKey('V', provider_ctrl | provider_shift, c.WINGHOSTTY_KEY_PRESS);
+    onKey(@ptrCast(&workspace), Probe.registered, &event);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
 }
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {
@@ -4391,9 +4667,10 @@ test "committed IME composition enters the terminal input queue" {
 }
 
 fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = event;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    _ = callbackSlot(workspace, surface) orelse return;
+    // Winghostty numbers the buttons left 1, right 2, middle 3.
+    if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP and event.button == 2) workspace.runContextMenu();
 }
 
 fn onSelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_selection_event) callconv(.c) void {

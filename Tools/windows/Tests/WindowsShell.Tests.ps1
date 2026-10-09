@@ -926,6 +926,8 @@ Invoke-Native "Workspace layout executable tests" {
     & $zig test src\WorkspaceLayout.zig
     if ($LASTEXITCODE -ne 0) { throw "workspace layout tests failed" }
     & $zig test src\InputRouter.zig
+    if ($LASTEXITCODE -ne 0) { throw "input router tests failed" }
+    & $zig test src\TerminalKeys.zig
   } finally { Pop-Location }
 }
 Invoke-Native "Zmx session identity executable tests" {

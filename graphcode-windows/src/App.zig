@@ -253,15 +253,51 @@ const WorkspaceKeyRoute = union(enum) {
     action: InputRouter.Action,
     copy_terminal_selection,
     paste_clipboard_text,
+    terminal_context_menu,
 };
 
 fn terminalPasteFailureStatus(err: anyerror) []const u8 {
     if (err == error.TerminalPasteRequiresConfirmation) {
-        return "Terminal blocked unsafe clipboard text; paste a single line to continue";
+        return "Paste cancelled: multi-line text was not sent to the terminal";
     }
     if (err == error.TerminalClipboardUnavailable) return "Terminal clipboard is unavailable";
+    if (err == error.TerminalSurfaceUnavailable) return "No terminal is ready to paste into";
     return "Unable to paste clipboard text";
 }
+
+fn pasteLineCount(text: []const u8) usize {
+    var lines: usize = 1;
+    var index: usize = 0;
+    while (index < text.len) : (index += 1) {
+        switch (text[index]) {
+            '\r' => {
+                if (index + 1 < text.len and text[index + 1] == '\n') index += 1;
+                lines += 1;
+            },
+            '\n' => lines += 1,
+            else => {},
+        }
+    }
+    // A trailing line break ends the last line rather than starting another.
+    if (text.len != 0 and (text[text.len - 1] == '\n' or text[text.len - 1] == '\r')) lines -= 1;
+    return lines;
+}
+
+const TerminalPasteApi = struct {
+    fn readClipboard(owner: c.HWND, allocator: std.mem.Allocator) ![]u8 {
+        return Clipboard.readText(owner, allocator);
+    }
+
+    fn confirmMultiline(owner: c.HWND, lines: usize) bool {
+        var buffer: [256]u8 = undefined;
+        const message = std.fmt.bufPrint(
+            &buffer,
+            "The clipboard holds {d} lines, and this program has not asked for bracketed paste, so each line runs as soon as it is pasted. Paste anyway?",
+            .{lines},
+        ) catch "The clipboard holds several lines that will each run as soon as they are pasted. Paste anyway?";
+        return GraphContextMenu.confirm(owner, "Paste multiple lines", message);
+    }
+};
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
@@ -6297,6 +6333,7 @@ pub const App = struct {
             if (key == 'C') return .copy_terminal_selection;
             if (key == 'V') return .paste_clipboard_text;
         }
+        if (terminal_context_active and !ctrl and !shift and key == c.VK_APPS) return .terminal_context_menu;
         return .{ .action = InputRouter.keyAction(key, ctrl, shift) };
     }
 
@@ -6305,6 +6342,24 @@ pub const App = struct {
             .action => |action| self.handleAction(action),
             .copy_terminal_selection => self.copyTerminalSelection(),
             .paste_clipboard_text => self.pasteClipboardText(),
+            .terminal_context_menu => self.showTerminalContextMenu(),
+        }
+    }
+
+    fn showTerminalContextMenu(self: *App) void {
+        const workspace = self.workspace orelse return;
+        const anchor = workspace.contextMenuAnchor() orelse return;
+        const command = MainWindow.showTerminalContextMenu(
+            self.window.hwnd,
+            workspace.hasSelection(),
+            workspace.hasSurface(workspace.active_surface),
+            anchor.x,
+            anchor.y,
+        ) orelse return;
+        switch (command) {
+            .terminal_copy => self.copyTerminalSelection(),
+            .terminal_paste => self.pasteClipboardText(),
+            else => {},
         }
     }
 
@@ -6325,19 +6380,35 @@ pub const App = struct {
             return;
         };
         self.setStatus("Terminal selection copied");
+        workspace.dismissSelection();
     }
 
     fn pasteClipboardText(self: *App) void {
+        self.pasteClipboardTextWith(TerminalPasteApi);
+    }
+
+    fn pasteClipboardTextWith(self: *App, comptime Api: type) void {
         const workspace = self.workspace orelse return;
-        const text = Clipboard.readText(self.window.hwnd, self.allocator) catch |err| {
+        const text = Api.readClipboard(self.window.hwnd, self.allocator) catch |err| {
             std.log.warn("Unable to read Windows clipboard for terminal paste: {s}", .{@errorName(err)});
             self.setStatus("Unable to paste clipboard text");
             return;
         };
         defer self.allocator.free(text);
-        workspace.pasteText(text) catch |err| {
-            std.log.warn("Unable to paste clipboard text into terminal: {s}", .{@errorName(err)});
-            self.setStatus(terminalPasteFailureStatus(err));
+        workspace.pasteText(text, false) catch |err| {
+            if (err != error.TerminalPasteRequiresConfirmation) {
+                std.log.warn("Unable to paste clipboard text into terminal: {s}", .{@errorName(err)});
+                self.setStatus(terminalPasteFailureStatus(err));
+                return;
+            }
+            if (!Api.confirmMultiline(self.window.hwnd, pasteLineCount(text))) {
+                self.setStatus(terminalPasteFailureStatus(err));
+                return;
+            }
+            workspace.pasteText(text, true) catch |confirmed_err| {
+                std.log.warn("Unable to paste confirmed clipboard text into terminal: {s}", .{@errorName(confirmed_err)});
+                self.setStatus(terminalPasteFailureStatus(confirmed_err));
+            };
         };
     }
 
@@ -6608,6 +6679,8 @@ pub const App = struct {
             .can_cycle_panes = can_cycle_panes,
             .has_attention = self.model.attentionCount() != 0,
             .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
+            .can_copy_terminal = if (self.workspace) |workspace| workspace.hasSelection() else false,
+            .can_paste_terminal = if (self.workspace) |workspace| workspace.hasSurface(workspace.active_surface) else false,
             .sidebar_visible = self.workspace_controls.rail_visible,
             .workspace_visible = self.workspace_controls.panel_visible,
             .activity_visible = self.workspace_controls.activity_enabled,
@@ -8140,7 +8213,7 @@ fn fallbackKeyAction(key: usize, ctrl: bool, shift: bool, alt: bool) InputRouter
     if (alt and (key == c.VK_PRIOR or key == c.VK_NEXT)) return .none;
     return switch (App.dispatchWorkspaceKey(key, ctrl, shift, false)) {
         .action => |action| action,
-        .copy_terminal_selection, .paste_clipboard_text => InputRouter.keyAction(key, ctrl, shift),
+        .copy_terminal_selection, .paste_clipboard_text, .terminal_context_menu => InputRouter.keyAction(key, ctrl, shift),
     };
 }
 
@@ -8384,6 +8457,8 @@ fn onWindowMessage(
                     .previous_tab => app.handleAction(.select_previous_tab),
                     .focus_next_pane => app.handleAction(.focus_next_pane),
                     .focus_previous_pane => app.handleAction(.focus_previous_pane),
+                    .terminal_copy => app.copyTerminalSelection(),
+                    .terminal_paste => app.pasteClipboardText(),
                     .reconnect => app.handleAction(.reconnect),
                     .settings => app.handleAction(.settings),
                     .product_settings => app.handleAction(.product_settings),
@@ -10262,15 +10337,124 @@ test "App.dispatchWorkspaceKey routes clipboard shortcuts only with terminal con
     );
 }
 
-test "terminalPasteFailureStatus exposes provider paste safety rejections" {
+test "App.dispatchWorkspaceKey routes the Menu key to the terminal context menu only with terminal context" {
+    try std.testing.expectEqual(
+        std.meta.Tag(WorkspaceKeyRoute).terminal_context_menu,
+        std.meta.activeTag(App.dispatchWorkspaceKey(c.VK_APPS, false, false, true)),
+    );
+    try std.testing.expectEqual(
+        InputRouter.Action.none,
+        App.dispatchWorkspaceKey(c.VK_APPS, false, false, false).action,
+    );
+    try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_APPS, false, false, false));
+}
+
+test "terminalPasteFailureStatus reports a declined multi-line paste and unavailable terminals" {
     try std.testing.expectEqualStrings(
-        "Terminal blocked unsafe clipboard text; paste a single line to continue",
+        "Paste cancelled: multi-line text was not sent to the terminal",
         terminalPasteFailureStatus(error.TerminalPasteRequiresConfirmation),
     );
     try std.testing.expectEqualStrings(
         "Terminal clipboard is unavailable",
         terminalPasteFailureStatus(error.TerminalClipboardUnavailable),
     );
+    try std.testing.expectEqualStrings(
+        "No terminal is ready to paste into",
+        terminalPasteFailureStatus(error.TerminalSurfaceUnavailable),
+    );
+}
+
+test "pasteLineCount counts lines the paste would run" {
+    try std.testing.expectEqual(@as(usize, 1), pasteLineCount("one"));
+    try std.testing.expectEqual(@as(usize, 1), pasteLineCount("one\n"));
+    try std.testing.expectEqual(@as(usize, 2), pasteLineCount("one\r\ntwo\r\n"));
+    try std.testing.expectEqual(@as(usize, 3), pasteLineCount("a\rb\nc"));
+}
+
+test "terminal paste prompts only for multi-line text that would run unbracketed" {
+    const Api = struct {
+        var clipboard: []const u8 = "";
+        var confirmations: usize = 0;
+        var lines: usize = 0;
+        var answer = false;
+
+        fn readClipboard(_: c.HWND, allocator: std.mem.Allocator) ![]u8 {
+            return allocator.dupe(u8, clipboard);
+        }
+
+        fn confirmMultiline(_: c.HWND, line_count: usize) bool {
+            confirmations += 1;
+            lines = line_count;
+            return answer;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var workspace = try reopenTestWorkspace(allocator, "terminal-paste-prompt-layout.json");
+    defer workspace.deinit();
+    defer workspace.surfaces[0].surface = null;
+    workspace.surfaces[0].surface = @ptrFromInt(0x1000);
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.workspace = null;
+    app.workspace = &workspace;
+
+    Api.clipboard = "git status";
+    app.pasteClipboardTextWith(Api);
+    try std.testing.expectEqual(@as(usize, 0), Api.confirmations);
+    var item = workspace.input_queue.dequeue().?;
+    try std.testing.expectEqualStrings("git status", item.bytes);
+    allocator.free(item.bytes);
+
+    Api.clipboard = "one\r\ntwo\r\nthree";
+    Api.answer = false;
+    app.pasteClipboardTextWith(Api);
+    try std.testing.expectEqual(@as(usize, 1), Api.confirmations);
+    try std.testing.expectEqual(@as(usize, 3), Api.lines);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try std.testing.expectEqualStrings(
+        "Paste cancelled: multi-line text was not sent to the terminal",
+        app.status(),
+    );
+
+    Api.answer = true;
+    app.pasteClipboardTextWith(Api);
+    try std.testing.expectEqual(@as(usize, 2), Api.confirmations);
+    item = workspace.input_queue.dequeue().?;
+    try std.testing.expectEqualStrings("one\rtwo\rthree", item.bytes);
+    allocator.free(item.bytes);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+}
+
+test "terminal paste never prompts when the program asked for bracketed paste" {
+    const Api = struct {
+        var confirmations: usize = 0;
+
+        fn readClipboard(_: c.HWND, allocator: std.mem.Allocator) ![]u8 {
+            return allocator.dupe(u8, "line one\r\nline two\r\n");
+        }
+
+        fn confirmMultiline(_: c.HWND, _: usize) bool {
+            confirmations += 1;
+            return false;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var workspace = try reopenTestWorkspace(allocator, "terminal-paste-bracketed-layout.json");
+    defer workspace.deinit();
+    defer workspace.surfaces[0].surface = null;
+    workspace.surfaces[0].surface = @ptrFromInt(0x1000);
+    workspace.surfaces[0].vt = try @import("TerminalVt.zig").State.create(allocator, 20, 3);
+    try workspace.surfaces[0].vt.?.feed("\x1b[?2004h");
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.workspace = null;
+    app.workspace = &workspace;
+
+    app.pasteClipboardTextWith(Api);
+    try std.testing.expectEqual(@as(usize, 0), Api.confirmations);
+    const item = workspace.input_queue.dequeue().?;
+    defer allocator.free(item.bytes);
+    try std.testing.expectEqualStrings("\x1b[200~line one\nline two\n\x1b[201~", item.bytes);
 }
 
 test "workspace cycle keyboard fallback never turns Alt paging into terminal tabs" {
@@ -12124,6 +12308,153 @@ test "workspace surface: a loop terminal attached while the graph shows stays hi
     try fixture.expectTerminalsInWorkspace(1);
     try fixture.showGraph();
     try fixture.expectNoVisibleTerminal();
+}
+
+const LiveKeyboard = struct {
+    fixture: *LiveTerminalFixture,
+    surface: c.HWND,
+    index: usize,
+    original_state: [256]u8,
+
+    const Chord = struct { vk: u32, ctrl: bool = false, shift: bool = false, alt: bool = false, extended: bool = false };
+
+    fn begin(fixture: *LiveTerminalFixture, session: []const u8) !LiveKeyboard {
+        const class = std.unicode.utf8ToUtf16LeStringLiteral("WinghosttyEmbeddableSurface");
+        const surface = c.FindWindowExW(fixture.app.window.hwnd, null, class, null);
+        if (surface == null) return error.TestExpectedTerminalWindow;
+        const index = fixture.slotFor(session) orelse return error.TestExpectedAttachedSession;
+        var original: [256]u8 = undefined;
+        if (c.GetKeyboardState(&original) == 0) return error.KeyboardStateUnavailable;
+        _ = c.ShowWindow(fixture.app.window.hwnd, c.SW_SHOWNOACTIVATE);
+        _ = c.SetFocus(surface);
+        if (c.GetFocus() != surface) return error.TestTerminalCannotTakeFocus;
+        return .{ .fixture = fixture, .surface = surface, .index = index, .original_state = original };
+    }
+
+    fn end(self: *LiveKeyboard) void {
+        _ = c.SetKeyboardState(&self.original_state);
+        _ = c.ShowWindow(self.fixture.app.window.hwnd, c.SW_HIDE);
+    }
+
+    fn setModifiers(chord: Chord) !void {
+        var state = [_]u8{0} ** 256;
+        if (chord.shift) {
+            state[c.VK_SHIFT] = 0x80;
+            state[c.VK_LSHIFT] = 0x80;
+        }
+        if (chord.ctrl) {
+            state[c.VK_CONTROL] = 0x80;
+            state[c.VK_LCONTROL] = 0x80;
+        }
+        if (chord.alt) {
+            state[c.VK_MENU] = 0x80;
+            state[c.VK_LMENU] = 0x80;
+        }
+        if (c.SetKeyboardState(&state) == 0) return error.KeyboardStateUnavailable;
+    }
+
+    /// One key press through the production dispatch (shell hooks, TranslateMessage,
+    /// then the real Winghostty surface window), including the characters it translates.
+    fn press(self: *LiveKeyboard, chord: Chord) !void {
+        try setModifiers(chord);
+        var message = std.mem.zeroes(c.MSG);
+        message.hwnd = self.surface;
+        message.message = if (chord.alt) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
+        message.wParam = chord.vk;
+        const scan = c.MapVirtualKeyW(chord.vk, c.MAPVK_VK_TO_VSC);
+        message.lParam = @intCast(1 | (scan << 16) | (@as(u32, @intFromBool(chord.extended)) << 24));
+        const keys = MainWindow.KeyContext{
+            .active = true,
+            .owner_enabled = true,
+            .target_owned = true,
+            .target_visible = true,
+            .target_enabled = true,
+            .ctrl = chord.ctrl,
+            .shift = chord.shift,
+            .alt = chord.alt,
+        };
+        self.fixture.app.window.dispatchMessage(&message, keys, self.surface);
+        while (c.PeekMessageW(&message, self.surface, c.WM_KEYFIRST, c.WM_KEYLAST, c.PM_REMOVE) != 0) {
+            self.fixture.app.window.dispatchMessage(&message, keys, self.surface);
+        }
+    }
+
+    /// Everything queued for the shell since the last call.
+    fn drainInput(self: *LiveKeyboard, out: *std.ArrayListUnmanaged(u8)) !void {
+        out.clearRetainingCapacity();
+        const workspace = &self.fixture.workspace;
+        while (workspace.input_queue.dequeue()) |item| {
+            defer workspace.allocator.free(item.bytes);
+            try std.testing.expectEqual(self.index, item.surface);
+            try out.appendSlice(std.testing.allocator, item.bytes);
+        }
+    }
+};
+
+const ClipboardRouteProbe = struct {
+    var calls: usize = 0;
+    var key: usize = 0;
+    var ctrl = false;
+    var shift = false;
+
+    fn callback(_: ?*anyopaque, pressed: usize, with_ctrl: bool, with_shift: bool) callconv(.c) void {
+        calls += 1;
+        key = pressed;
+        ctrl = with_ctrl;
+        shift = with_shift;
+    }
+};
+
+test "live terminal keyboard: clipboard chords reach the workspace and never leak control characters to the shell" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    fixture.workspace.key_callback = &ClipboardRouteProbe.callback;
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+    const slot = &fixture.workspace.surfaces[keyboard.index];
+
+    const routed = [_]struct { chord: LiveKeyboard.Chord, expected: u8 }{
+        .{ .chord = .{ .vk = 'V', .ctrl = true, .shift = true }, .expected = 'V' },
+        .{ .chord = .{ .vk = c.VK_INSERT, .shift = true, .extended = true }, .expected = 'V' },
+        .{ .chord = .{ .vk = 'C', .ctrl = true, .shift = true }, .expected = 'C' },
+        .{ .chord = .{ .vk = c.VK_INSERT, .ctrl = true, .extended = true }, .expected = 'C' },
+    };
+    for (routed) |case| {
+        ClipboardRouteProbe.calls = 0;
+        try keyboard.press(case.chord);
+        try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+        try std.testing.expectEqual(@as(usize, case.expected), ClipboardRouteProbe.key);
+        try std.testing.expect(ClipboardRouteProbe.ctrl and ClipboardRouteProbe.shift);
+        try keyboard.drainInput(&sent);
+        try std.testing.expectEqualStrings("", sent.items);
+    }
+
+    // Plain Ctrl+V and Ctrl+C remain terminal input: the shell sees ^V and the interrupt.
+    for ([_]struct { vk: u32, expected: []const u8 }{
+        .{ .vk = 'V', .expected = "\x16" },
+        .{ .vk = 'C', .expected = "\x03" },
+    }) |case| {
+        ClipboardRouteProbe.calls = 0;
+        try keyboard.press(.{ .vk = case.vk, .ctrl = true });
+        try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+        try keyboard.drainInput(&sent);
+        try std.testing.expectEqualStrings(case.expected, sent.items);
+    }
+
+    // With a selection, Ctrl+C copies instead of interrupting.
+    slot.accessibility_selection = .{ .start = 0, .end = 5 };
+    ClipboardRouteProbe.calls = 0;
+    try keyboard.press(.{ .vk = 'C', .ctrl = true });
+    try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+    try std.testing.expectEqual(@as(usize, 'C'), ClipboardRouteProbe.key);
+    try keyboard.drainInput(&sent);
+    try std.testing.expectEqualStrings("", sent.items);
 }
 
 test "workspace surface: native New Tab publishes every drawn tab to UIA and starts its shell in the loop's directory" {

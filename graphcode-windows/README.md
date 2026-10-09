@@ -254,6 +254,20 @@ Worktrees route. `Ctrl+Shift+C` is shown only for Clone Repository: the
 terminal context also uses it to copy a selection, so Help does not present
 the context-dependent collision as a second shortcut.
 
+Terminal clipboard follows Winghostty's Windows defaults. `Ctrl+Shift+V` or
+`Shift+Insert` pastes and `Ctrl+Shift+C` or `Ctrl+Insert` copies the
+terminal's selected text; the Terminal menu and the terminal's context menu
+(right-click, Menu key, `Shift+F10`) offer the same Copy and Paste. Plain
+`Ctrl+V` stays terminal input and plain `Ctrl+C` stays the interrupt, except
+that `Ctrl+C` copies while the terminal reports a selection. Paste reads only
+`CF_UNICODETEXT`, normalises line endings, blanks unsafe control bytes, and
+wraps the text in bracketed-paste markers only when the running program asked
+for them (DECSET 2004); multi-line text for a program that did not ask asks for
+confirmation first instead of running each line as it is pasted. macOS
+auto-confirms that case without a dialog. The terminal reports no selection to
+copy until text is selected through UI Automation: drag selection in the
+terminal is not implemented, so Copy is limited to that range.
+
 Canvas and pointer actions still have no visible gesture hints: clicking
 selects/opens canvas items; dragging blank canvas pans, dragging a node moves
 it, and dragging a connector to another node creates an edge; wheel and

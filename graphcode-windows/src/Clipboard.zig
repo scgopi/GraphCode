@@ -86,16 +86,3 @@ test "clipboard Win32 operations require an owner window" {
         readText(null, std.testing.allocator),
     );
 }
-
-test "winghostty_paste_validate classifies multiline clipboard text for safe refusal" {
-    const multiline = "first line\r\nsecond line\nthird line";
-    try std.testing.expectEqual(
-        @as(u32, @intCast(c.WINGHOSTTY_PASTE_CONTAINS_NEWLINE)),
-        c.winghostty_paste_validate(multiline, @intCast(multiline.len)),
-    );
-    const single_line = "safe clipboard text";
-    try std.testing.expectEqual(
-        @as(u32, @intCast(c.WINGHOSTTY_PASTE_SAFE)),
-        c.winghostty_paste_validate(single_line, @intCast(single_line.len)),
-    );
-}

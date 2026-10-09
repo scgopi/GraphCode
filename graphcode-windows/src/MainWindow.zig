@@ -45,6 +45,8 @@ pub const Command = enum(u16) {
     previous_tab = 4306,
     focus_next_pane = 4307,
     focus_previous_pane = 4308,
+    terminal_copy = 4309,
+    terminal_paste = 4310,
     reconnect = 4401,
     settings = 4402,
     product_settings = 4403,
@@ -114,6 +116,10 @@ pub const MenuState = struct {
     can_cycle_panes: bool,
     has_attention: bool,
     can_close_tab: bool,
+    /// The focused terminal reports selected text to copy.
+    can_copy_terminal: bool = false,
+    /// A live terminal exists to receive pasted text.
+    can_paste_terminal: bool = false,
     sidebar_visible: bool,
     workspace_visible: bool,
     activity_visible: bool,
@@ -577,6 +583,9 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(terminal, "Previous Tab\tCtrl+PageUp", @intFromEnum(Command.previous_tab));
     append(terminal, "Focus Next Pane\tCtrl+]", @intFromEnum(Command.focus_next_pane));
     append(terminal, "Focus Previous Pane\tCtrl+[", @intFromEnum(Command.focus_previous_pane));
+    separator(terminal);
+    append(terminal, "Copy\tCtrl+Shift+C", @intFromEnum(Command.terminal_copy));
+    append(terminal, "Paste\tCtrl+Shift+V", @intFromEnum(Command.terminal_paste));
 
     append(view, "Global Overview", @intFromEnum(Command.open_global_overview));
     append(view, "Focus Window Toolbar\tF6", @intFromEnum(Command.focus_header));
@@ -603,8 +612,9 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Focus Terminal A\t1");
     appendInfo(discovery, "Focus Terminal B\t2");
     appendInfo(discovery, "Cancel clone\tCtrl+Shift+X");
-    appendInfo(discovery, "Copy terminal text\tCtrl+Shift+C");
-    appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V");
+    appendInfo(discovery, "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert");
+    appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V / Shift+Insert");
+    appendInfo(discovery, "Terminal context menu\tRight-click / Menu key / Shift+F10");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
     appendInfo(discovery, "Canvas: drag empty space to pan; wheel or pinch to zoom");
@@ -658,6 +668,8 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .previous_tab, state.can_cycle_tabs);
     setEnabled(hwnd, .focus_next_pane, state.can_cycle_panes);
     setEnabled(hwnd, .focus_previous_pane, state.can_cycle_panes);
+    setEnabled(hwnd, .terminal_copy, state.can_copy_terminal);
+    setEnabled(hwnd, .terminal_paste, state.can_paste_terminal);
     setEnabled(hwnd, .settings, true);
     setEnabled(hwnd, .product_settings, true);
     setEnabled(hwnd, .reconnect, true);
@@ -812,6 +824,23 @@ fn separator(menu: c.HMENU) void {
     _ = c.AppendMenuW(menu, c.MF_SEPARATOR, 0, null);
 }
 
+/// The terminal's right-click / Menu-key menu: the Terminal menu's Copy and Paste.
+pub fn terminalContextMenu(can_copy: bool, can_paste: bool) c.HMENU {
+    const menu = c.CreatePopupMenu() orelse return null;
+    appendEnabled(menu, "Copy\tCtrl+Shift+C", @intFromEnum(Command.terminal_copy), can_copy);
+    appendEnabled(menu, "Paste\tCtrl+Shift+V", @intFromEnum(Command.terminal_paste), can_paste);
+    return menu;
+}
+
+/// Shows the terminal context menu at a screen point and returns the command the user chose.
+pub fn showTerminalContextMenu(owner: c.HWND, can_copy: bool, can_paste: bool, x: i32, y: i32) ?Command {
+    const menu = terminalContextMenu(can_copy, can_paste) orelse return null;
+    defer _ = c.DestroyMenu(menu);
+    const id = c.TrackPopupMenu(menu, c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON, x, y, 0, owner, null);
+    if (id <= 0) return null;
+    return commandFromId(@intCast(id));
+}
+
 const accelerator_entries = [_]c.ACCEL{
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'O', .cmd = @intFromEnum(Command.open_folder) },
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.worktrees) },
@@ -954,8 +983,9 @@ test "main and help menus expose shortcuts and interaction guidance" {
         "Focus Terminal A\t1",
         "Focus Terminal B\t2",
         "Cancel clone\tCtrl+Shift+X",
-        "Copy terminal text\tCtrl+Shift+C",
-        "Paste terminal text\tCtrl+Shift+V",
+        "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert",
+        "Paste terminal text\tCtrl+Shift+V / Shift+Insert",
+        "Terminal context menu\tRight-click / Menu key / Shift+F10",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
         "Canvas: drag empty space to pan; wheel or pinch to zoom",
@@ -1022,17 +1052,85 @@ test "Ctrl+Shift+C discovery hints match terminal copy and outside-terminal clon
         if (length <= 0) continue;
         const actual = try std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
         defer std.testing.allocator.free(actual);
-        if (std.mem.eql(u8, actual, "Copy terminal text\tCtrl+Shift+C")) {
+        if (std.mem.eql(u8, actual, "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert")) {
             try std.testing.expectEqual(@as(?c.UINT, null), copy_index);
             copy_index = index;
         }
-        if (std.mem.eql(u8, actual, "Paste terminal text\tCtrl+Shift+V")) paste_index = index;
+        if (std.mem.eql(u8, actual, "Paste terminal text\tCtrl+Shift+V / Shift+Insert")) paste_index = index;
     }
     const copy = copy_index orelse return error.TerminalCopyShortcutUndocumented;
     const paste = paste_index orelse return error.TerminalPasteShortcutUndocumented;
     try std.testing.expectEqual(copy + 1, paste);
     try std.testing.expect(c.GetMenuState(guide, copy, c.MF_BYPOSITION) & c.MF_GRAYED != 0);
     try std.testing.expectEqual(@as(c.UINT, 0), c.GetMenuItemID(guide, @intCast(copy)));
+}
+
+fn menuLabel(menu: c.HMENU, command: Command) ![]u8 {
+    var label: [128]u16 = undefined;
+    const length = c.GetMenuStringW(menu, @intFromEnum(command), &label, label.len, c.MF_BYCOMMAND);
+    try std.testing.expect(length > 0 and length < label.len - 1);
+    return std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+}
+
+fn quietMenuState() MenuState {
+    return .{
+        .has_project = false,
+        .can_worktrees = false,
+        .worktree_dialog_open = false,
+        .worktree_row_selected = false,
+        .has_jump_target = false,
+        .can_navigate_loops = false,
+        .can_create_edge = false,
+        .has_selected_loop = false,
+        .has_workspace = false,
+        .can_cycle_tabs = false,
+        .can_cycle_panes = false,
+        .has_attention = false,
+        .can_close_tab = false,
+        .sidebar_visible = false,
+        .workspace_visible = false,
+        .activity_visible = false,
+        .update_checking = false,
+    };
+}
+
+test "Terminal menu offers discoverable Copy and Paste that follow terminal state" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const terminal = c.GetSubMenu(c.GetMenu(hwnd), 2);
+    try std.testing.expect(terminal != null);
+    const copy = try menuLabel(terminal, .terminal_copy);
+    defer std.testing.allocator.free(copy);
+    const paste = try menuLabel(terminal, .terminal_paste);
+    defer std.testing.allocator.free(paste);
+    try std.testing.expectEqualStrings("Copy\tCtrl+Shift+C", copy);
+    try std.testing.expectEqualStrings("Paste\tCtrl+Shift+V", paste);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+
+    var state = quietMenuState();
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_paste), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    state.can_paste_terminal = true;
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_paste), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    state.can_copy_terminal = true;
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+}
+
+test "terminal context menu carries the same Copy and Paste commands" {
+    const menu = terminalContextMenu(false, true) orelse return error.MenuCreationFailed;
+    defer _ = c.DestroyMenu(menu);
+    try std.testing.expectEqual(@as(c_int, 2), c.GetMenuItemCount(menu));
+    const copy = try menuLabel(menu, .terminal_copy);
+    defer std.testing.allocator.free(copy);
+    try std.testing.expectEqualStrings("Copy\tCtrl+Shift+C", copy);
+    try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    try std.testing.expect(c.GetMenuState(menu, @intFromEnum(Command.terminal_paste), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    try std.testing.expectEqual(Command.terminal_paste, commandFromId(4310).?);
 }
 
 const NativeMenuDispatchTest = struct {
