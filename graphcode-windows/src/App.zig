@@ -1722,6 +1722,8 @@ pub const App = struct {
                 )) return;
             }
         }
+        var loop_identity = self.captureLoopIdentity(frame);
+        defer if (loop_identity) |*value| value.deinit(self.allocator);
         const had_current_graph = self.model.currentGraph() != null;
         const event = self.model.updateFromFrame(frame) catch {
             self.setStatus("Malformed GraphcodeKit event");
@@ -1842,6 +1844,12 @@ pub const App = struct {
                 if (event == .quick_chat_changed) {
                     if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
                 }
+                if (event == .quick_chat_deleted and !self.smoke) {
+                    if (Wire.jsonString(frame, "quickChatDeleted")) |id| {
+                        if (self.workspace) |workspace|
+                            _ = workspace.retireLoop(id, TerminalWorkspace.quick_chat_scope_project);
+                    }
+                }
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
@@ -1890,7 +1898,80 @@ pub const App = struct {
             },
             else => {},
         }
+        if (event == .graph_changed) {
+            if (loop_identity) |value| self.endDeletedLoops(value);
+        }
         if (event == .graph_changed or event == .nodes_changed) publish(self);
+    }
+
+    /// The loops a project's graph held before a `graphChanged` replaced it.
+    const LoopIdentity = struct {
+        project: []u8,
+        /// Null when the shell had no graph of the project yet: this snapshot is the first it
+        /// sees this run, so it reconciles every saved loop layout instead of a difference.
+        ids: ?[][]u8,
+
+        fn deinit(self: *LoopIdentity, allocator: std.mem.Allocator) void {
+            allocator.free(self.project);
+            if (self.ids) |ids| {
+                for (ids) |id| allocator.free(id);
+                allocator.free(ids);
+            }
+        }
+    };
+
+    fn captureLoopIdentity(self: *App, frame: []const u8) ?LoopIdentity {
+        if (self.smoke or Wire.eventKind(frame) != .graph_changed) return null;
+        const project = (Wire.copyGraphChangedProjectPath(self.allocator, frame) catch return null) orelse return null;
+        const graph = self.model.graphFor(project) orelse return .{ .project = project, .ids = null };
+        const ids = self.allocator.alloc([]u8, graph.nodes.items.len) catch {
+            self.allocator.free(project);
+            return null;
+        };
+        var copied: usize = 0;
+        for (graph.nodes.items) |node| {
+            ids[copied] = self.allocator.dupe(u8, node.id) catch {
+                for (ids[0..copied]) |id| self.allocator.free(id);
+                self.allocator.free(ids);
+                self.allocator.free(project);
+                return null;
+            };
+            copied += 1;
+        }
+        return .{ .project = project, .ids = ids };
+    }
+
+    /// Ends the shell sessions of loops the daemon no longer has. The workspace owns those
+    /// sessions (the daemon only knows a loop's agent), so the shell reconciles its saved
+    /// loop layouts with each project's graph: a loop that vanished since the previous
+    /// snapshot, or, on the first snapshot of a project, one deleted while the shell was
+    /// closed. Only layouts saved for this project are considered.
+    fn endDeletedLoops(self: *App, identity: LoopIdentity) void {
+        const workspace = self.workspace orelse return;
+        const graph = self.model.graphFor(identity.project) orelse return;
+        if (identity.ids) |ids| {
+            for (ids) |id| {
+                if (!graphHasLoop(graph, id)) _ = workspace.retireLoop(id, identity.project);
+            }
+            return;
+        }
+        const saved = workspace.savedLoopLayouts() catch return;
+        defer @import("WorkspaceLayout.zig").freeLoopRecords(workspace.allocator, saved);
+        for (saved) |record| {
+            if (!std.mem.eql(u8, record.project, identity.project)) continue;
+            if (!graphHasLoop(graph, record.loop)) _ = workspace.retireLoop(record.loop, identity.project);
+        }
+    }
+
+    /// Whether `id` still names a loop of `graph`, at its top level or inside a composite.
+    /// Nested loops are matched by text in their parent's stored subgraph, so any doubt keeps
+    /// a loop's sessions rather than ending them.
+    fn graphHasLoop(graph: *const GraphModel.GraphSummary, id: []const u8) bool {
+        if (GraphModel.findNodeIndexByID(graph.nodes.items, id) != null) return true;
+        for (graph.nodes.items) |node| {
+            if (node.subgraph_json.len != 0 and std.mem.indexOf(u8, node.subgraph_json, id) != null) return true;
+        }
+        return false;
     }
 
     /// Runs after every graph change. It re-observes only the open loop's own pane, in the
@@ -1928,6 +2009,10 @@ pub const App = struct {
         self.client.sendNodeAction(project_path, node_id, "resumeSession", null);
         const workspace = self.workspace orelse return;
         self.bindLoopShellDirectory(workspace, project_path, node_id);
+        workspace.scopeToLoop(node_id, project_path, true) catch {
+            self.setStatus("Unable to open selected loop");
+            return;
+        };
         workspace.openLaunchedNode(0, node_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch {
             self.setStatus("Unable to open selected loop");
             return;
@@ -2464,6 +2549,9 @@ pub const App = struct {
                     defer self.allocator.free(home);
                     _ = workspace.rebindProject(home) catch {};
                 } else |_| {}
+                workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, false) catch {
+                    self.setStatus("Unable to open quick chat workspace");
+                };
                 workspace.openNode(0, chat.id) catch {
                     self.setStatus("Unable to open quick chat workspace");
                 };
@@ -11675,9 +11763,13 @@ const fake_zmx_script =
     "@echo off\r\n" ++
     "if \"%~1\"==\"ls\" goto ls\r\n" ++
     "if \"%~1\"==\"attach\" goto attach\r\n" ++
+    "if \"%~1\"==\"kill\" goto kill\r\n" ++
     "exit /b 0\r\n" ++
     ":ls\r\n" ++
     "if exist \"%~dp0live.txt\" type \"%~dp0live.txt\"\r\n" ++
+    "exit /b 0\r\n" ++
+    ":kill\r\n" ++
+    ">>\"%~dp0kills.txt\" echo %*\r\n" ++
     "exit /b 0\r\n" ++
     ":attach\r\n" ++
     ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
@@ -11938,6 +12030,54 @@ const LiveTerminalFixture = struct {
         const tab = self.workspace.layout.selectedConst() orelse return error.TestExpectedTab;
         try std.testing.expectEqualStrings(session, tab.panes.items[tab.focused_pane].id);
     }
+
+    /// Every `zmx kill` the shell has run, as the fake zmx recorded it.
+    fn kills(self: *LiveTerminalFixture) ![]u8 {
+        return self.tmp.dir.readFileAlloc(std.testing.allocator, "kills.txt", 1 << 16) catch |err| switch (err) {
+            error.FileNotFound => std.testing.allocator.dupe(u8, ""),
+            else => err,
+        };
+    }
+
+    fn killed(self: *LiveTerminalFixture, session: []const u8) bool {
+        const text = self.kills() catch return false;
+        defer std.testing.allocator.free(text);
+        var name: [160]u8 = undefined;
+        const needle = std.fmt.bufPrint(&name, "graphcode-{s}", .{session}) catch return false;
+        return std.mem.indexOf(u8, text, needle) != null;
+    }
+
+    /// Ticks the shell for a while, so a kill that must not happen has had its chance.
+    fn settle(self: *LiveTerminalFixture) void {
+        for (0..40) |_| self.tick();
+    }
+
+    fn newTab(self: *LiveTerminalFixture) !void {
+        const workspace = &self.workspace;
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+        try nativeClickCenter(&self.app, bounds);
+        try expectNoTerminalFailure(&self.app);
+    }
+
+    fn splitRight(self: *LiveTerminalFixture) !void {
+        const workspace = &self.workspace;
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 1);
+        try nativeClickCenter(&self.app, bounds);
+        try expectNoTerminalFailure(&self.app);
+    }
+
+    /// The selected tab's pane `index`, copied.
+    fn selectedPane(self: *LiveTerminalFixture, index: usize) ![]u8 {
+        const tab = self.workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+        return std.testing.allocator.dupe(u8, tab.panes.items[index].id);
+    }
+
+    fn expectOnlyLoopPane(self: *LiveTerminalFixture, loop: []const u8) !void {
+        try std.testing.expectEqual(@as(usize, 1), self.workspace.tabCount());
+        const tab = self.workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+        try std.testing.expectEqual(@as(usize, 1), tab.panes.items.len);
+        try std.testing.expectEqualStrings(loop, tab.panes.items[0].id);
+    }
 };
 
 fn expectSameDirectory(expected: []const u8, actual: []const u8) !void {
@@ -12057,6 +12197,323 @@ test "workspace surface: deleting the attached loop while the graph shows leaves
         try fixture.showGraph();
         try fixture.expectNoVisibleTerminal();
     }
+}
+
+test "workspace layout: a deleted loop's New Tab and Split panes are never shown under another loop" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const tab_shell = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(tab_shell);
+    try fixture.splitRight();
+    const split_shell = try fixture.selectedPane(1);
+    defer std.testing.allocator.free(split_shell);
+    try std.testing.expectEqual(@as(usize, 2), fixture.workspace.tabCount());
+
+    // `graphcode node delete loop-a`: the daemon kills its session and drops it from the graph.
+    try fixture.setLive(&.{ "loop-b", tab_shell, split_shell });
+    try fixture.endSession("loop-a");
+    try fixture.deliver(&.{.{ .id = "loop-b" }});
+
+    try clickSidebarLoopRow(app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+    try fixture.expectOnlyLoopPane("loop-b");
+    try std.testing.expect(fixture.slotFor(tab_shell) == null);
+    try std.testing.expect(fixture.slotFor(split_shell) == null);
+    try fixture.expectTerminalsInWorkspace(1);
+}
+
+test "workspace layout: closing a New Tab ends its shell session and never the loop's" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const workspace = &fixture.workspace;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const shell = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(shell);
+    try fixture.setLive(&.{ "loop-a", "loop-b", shell });
+
+    const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+    try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    try fixture.waitFor(LiveTerminalFixture.killed, shell);
+    fixture.settle();
+    try std.testing.expect(!fixture.killed("loop-a"));
+    try std.testing.expect(!fixture.killed("loop-b"));
+}
+
+test "workspace layout: deleting a loop ends the shell sessions of its own tabs and no other loop's" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const a_tab = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(a_tab);
+    try fixture.splitRight();
+    const a_split = try fixture.selectedPane(1);
+    defer std.testing.allocator.free(a_split);
+
+    try clickSidebarLoopRow(app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+    try fixture.newTab();
+    const b_tab = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(b_tab);
+
+    // Loop A is deleted while loop B is the one open.
+    try fixture.setLive(&.{ "loop-b", a_tab, a_split, b_tab });
+    try fixture.deliver(&.{.{ .id = "loop-b" }});
+    try fixture.waitFor(LiveTerminalFixture.killed, a_tab);
+    try fixture.waitFor(LiveTerminalFixture.killed, a_split);
+    fixture.settle();
+    try std.testing.expect(!fixture.killed(b_tab));
+    try std.testing.expect(!fixture.killed("loop-a"));
+    try std.testing.expect(!fixture.killed("loop-b"));
+    try std.testing.expectEqual(@as(usize, 2), fixture.workspace.tabCount());
+}
+
+test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    const layout_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_WORKSPACE_LAYOUT");
+    var original = try std.process.getEnvMap(allocator);
+    defer original.deinit();
+    defer setWorkspaceTestEnvironment(layout_key, original.get("GRAPHCODE_WORKSPACE_LAYOUT")) catch @panic("layout environment restore failed");
+    const stem = try std.fs.path.join(allocator, &.{ fixture.root, "restore-layout.json" });
+    defer allocator.free(stem);
+    try setWorkspaceTestEnvironment(layout_key, stem);
+
+    const other = try std.fs.path.join(allocator, &.{ fixture.root, "other-project" });
+    defer allocator.free(other);
+    const saved = try std.fmt.allocPrint(allocator, "{s}\\restore-layout.{s}.json", .{ fixture.root, WorkspaceLayoutFile.projectSuffix(other) });
+    defer allocator.free(saved);
+    var layout = try WorkspaceLayoutFile.Layout.init(allocator, other);
+    defer layout.deinit();
+    try layout.addTab("ghost-shell", false);
+    try layout.addTab("alive-shell", false);
+    try layout.save(saved);
+    try fixture.setLive(&.{"alive-shell"});
+
+    _ = try fixture.workspace.rebindProject(other);
+    try fixture.waitFor(restoredAliveShell, "alive-shell");
+    fixture.settle();
+    try std.testing.expect(fixture.slotFor("ghost-shell") == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.access("cwd-graphcode-ghost-shell.txt", .{}));
+    try std.testing.expect(!fixture.workspace.layout.hasPane("ghost-shell"));
+    var persisted = try WorkspaceLayoutFile.Layout.load(allocator, saved, other);
+    defer persisted.deinit();
+    try std.testing.expect(!persisted.hasPane("ghost-shell"));
+    try std.testing.expect(persisted.hasPane("alive-shell"));
+}
+
+fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
+    return fixture.slotFor(session) != null;
+}
+
+test "workspace layout: the installed shell saves its layout under the support directory, never beside itself" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(root);
+    const support = try std.fs.path.join(allocator, &.{ root, "support" });
+    defer allocator.free(support);
+    const bin = try std.fs.path.join(allocator, &.{ root, "bin" });
+    defer allocator.free(bin);
+    try tmp.dir.makePath("bin");
+    const layout_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_WORKSPACE_LAYOUT");
+    const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+    var original = try std.process.getEnvMap(allocator);
+    defer original.deinit();
+    defer setWorkspaceTestEnvironment(layout_key, original.get("GRAPHCODE_WORKSPACE_LAYOUT")) catch @panic("layout environment restore failed");
+    defer setWorkspaceTestEnvironment(support_key, original.get("GRAPHCODE_SUPPORT_DIR")) catch @panic("support environment restore failed");
+    try setWorkspaceTestEnvironment(layout_key, null);
+    try setWorkspaceTestEnvironment(support_key, support);
+
+    // The installed shell's working directory is its install `bin` folder.
+    var previous = try std.fs.cwd().openDir(".", .{});
+    defer previous.close();
+    var bin_dir = try tmp.dir.openDir("bin", .{});
+    defer bin_dir.close();
+    try bin_dir.setAsCwd();
+    defer previous.setAsCwd() catch @panic("working directory restore failed");
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    const workspace = try TerminalWorkspace.Workspace.init(app.window.hwnd, allocator);
+    defer {
+        workspace.deinit();
+        allocator.destroy(workspace);
+    }
+    _ = try workspace.rebindProject("C:\\GraphCode-Fixtures\\Core");
+    try workspace.layout.addTab("shell-tab", false);
+    try workspace.persistLayout();
+
+    try std.testing.expect(std.mem.startsWith(u8, workspace.layout_path, support));
+    try tmp.dir.access("support", .{});
+    var beside = try tmp.dir.openDir("bin", .{ .iterate = true });
+    defer beside.close();
+    var iterator = beside.iterate();
+    try std.testing.expect((try iterator.next()) == null);
+}
+
+test "workspace layout: a loop's own tabs come back when it is reopened and no other loop's do" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const a_tab = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(a_tab);
+    try clickSidebarLoopRow(app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+    try fixture.newTab();
+    const b_tab = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(b_tab);
+    try fixture.setLive(&.{ "loop-a", "loop-b", a_tab, b_tab });
+
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.waitFor(restoredAliveShell, a_tab);
+    fixture.settle();
+    try std.testing.expectEqual(@as(usize, 2), fixture.workspace.tabCount());
+    try std.testing.expect(fixture.workspace.layout.hasPane(a_tab));
+    try std.testing.expect(!fixture.workspace.layout.hasPane(b_tab));
+    try std.testing.expect(fixture.slotFor(b_tab) == null);
+    // Switching between loops never ends a session: zmx sessions outlive their panes.
+    try std.testing.expect(!fixture.killed(a_tab));
+    try std.testing.expect(!fixture.killed(b_tab));
+}
+
+test "workspace layout: a layout saved beside the executable is adopted once, by the loop it names, and never rewritten" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    const app = &fixture.app;
+
+    try fixture.tmp.dir.makePath("legacy");
+    const legacy_directory = try std.fs.path.join(allocator, &.{ fixture.root, "legacy" });
+    defer allocator.free(legacy_directory);
+    fixture.workspace.legacy_directory = try allocator.dupe(u8, legacy_directory);
+    const legacy_path = try WorkspaceLayoutFile.legacyLayoutPath(allocator, legacy_directory, fixture.project);
+    defer allocator.free(legacy_path);
+    var legacy = try WorkspaceLayoutFile.Layout.init(allocator, fixture.project);
+    defer legacy.deinit();
+    try legacy.addTab("loop-a", true);
+    try legacy.addTab("saved-shell", false);
+    try legacy.addTab("loop-b", true);
+    try legacy.save(legacy_path);
+    const legacy_before = try std.fs.cwd().readFileAlloc(allocator, legacy_path, 1 << 16);
+    defer allocator.free(legacy_before);
+
+    try fixture.setLive(&.{ "loop-a", "loop-b", "saved-shell" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.waitFor(restoredAliveShell, "saved-shell");
+    try std.testing.expectEqual(@as(usize, 2), fixture.workspace.tabCount());
+    try std.testing.expect(!fixture.workspace.layout.hasPane("loop-b"));
+    try fixture.tmp.dir.access("loop-a.json", .{});
+
+    // The legacy file named loop B too, but its shells were handed to loop A already.
+    try clickSidebarLoopRow(app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+    try fixture.expectOnlyLoopPane("loop-b");
+
+    const legacy_after = try std.fs.cwd().readFileAlloc(allocator, legacy_path, 1 << 16);
+    defer allocator.free(legacy_after);
+    try std.testing.expectEqualStrings(legacy_before, legacy_after);
+}
+
+test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, and only those" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    const Case = struct { loop: []const u8, project: []const u8, shell: []const u8 };
+    const other_project = "C:\\another-project";
+    const cases = [_]Case{
+        .{ .loop = "gone-loop", .project = fixture.project, .shell = "gone-shell" },
+        .{ .loop = "loop-a", .project = fixture.project, .shell = "a-shell" },
+        .{ .loop = "nested-loop", .project = fixture.project, .shell = "nested-shell" },
+        .{ .loop = "elsewhere-loop", .project = other_project, .shell = "elsewhere-shell" },
+    };
+    for (cases) |case| {
+        var layout = try WorkspaceLayoutFile.Layout.initForLoop(allocator, case.project, case.loop);
+        defer layout.deinit();
+        try layout.addTab(case.loop, true);
+        try layout.addTab(case.shell, false);
+        const path = try std.fmt.allocPrint(allocator, "{s}\\{s}.json", .{ fixture.root, case.loop });
+        defer allocator.free(path);
+        try layout.save(path);
+    }
+    const nested = try std.fmt.allocPrint(
+        allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[" ++
+            "{{\"id\":\"loop-a\",\"title\":\"a\",\"loopType\":\"turnBased\",\"state\":{{\"idle\":{{}}}}}}," ++
+            "{{\"id\":\"group\",\"title\":\"g\",\"loopType\":\"composite\",\"state\":{{\"idle\":{{}}}},\"subGraph\":{{\"nodes\":[{{\"id\":\"nested-loop\",\"title\":\"n\",\"state\":{{\"idle\":{{}}}}}}],\"edges\":[]}}}}" ++
+            "],\"edges\":[]}}}}}}",
+        .{ fixture.sequence, std.json.fmt(fixture.project, .{}) },
+    );
+    defer allocator.free(nested);
+    fixture.sequence += 1;
+    _ = try fixture.app.model.updateFromFrame(nested);
+
+    fixture.app.endDeletedLoops(.{ .project = @constCast(fixture.project), .ids = null });
+    try fixture.waitFor(LiveTerminalFixture.killed, "gone-shell");
+    fixture.settle();
+    for ([_][]const u8{ "a-shell", "nested-shell", "elsewhere-shell", "gone-loop", "loop-a" }) |kept| {
+        try std.testing.expect(!fixture.killed(kept));
+    }
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.access("gone-loop.json", .{}));
+    for ([_][]const u8{ "loop-a.json", "nested-loop.json", "elsewhere-loop.json" }) |file| try fixture.tmp.dir.access(file, .{});
+}
+
+test "workspace layout: a layout that cannot be attributed to the deleted loop ends nothing" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    var foreign = try WorkspaceLayoutFile.Layout.initForLoop(allocator, "C:\\another-project", "loop-x");
+    defer foreign.deinit();
+    try foreign.addTab("loop-x", true);
+    try foreign.addTab("foreign-shell", false);
+    const foreign_path = try std.fmt.allocPrint(allocator, "{s}\\loop-x.json", .{fixture.root});
+    defer allocator.free(foreign_path);
+    try foreign.save(foreign_path);
+    try fixture.tmp.dir.writeFile(.{ .sub_path = "loop-y.json", .data = "{ not a layout" });
+
+    // The saved project differs, and the other file is unreadable: neither is this loop's.
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("loop-x", fixture.project));
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("loop-y", fixture.project));
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("never-saved", fixture.project));
+    fixture.settle();
+    try std.testing.expect(!fixture.killed("foreign-shell"));
 }
 
 /// Every terminal action must report something other than its failure status.

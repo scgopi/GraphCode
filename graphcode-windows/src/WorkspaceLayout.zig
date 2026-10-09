@@ -38,6 +38,8 @@ pub const Tab = struct {
 pub const Layout = struct {
     allocator: std.mem.Allocator,
     project_key: []u8,
+    /// The graph loop this layout belongs to; empty for a project-level layout.
+    loop_key: []u8 = &.{},
     tabs: std.ArrayListUnmanaged(Tab) = .empty,
     selected_tab: usize = 0,
     next_tab_id: u64 = 1,
@@ -49,10 +51,40 @@ pub const Layout = struct {
         };
     }
 
+    pub fn initForLoop(allocator: std.mem.Allocator, project_key: []const u8, loop_key: []const u8) !Layout {
+        var layout = try init(allocator, project_key);
+        errdefer layout.deinit();
+        layout.loop_key = try allocator.dupe(u8, loop_key);
+        return layout;
+    }
+
     pub fn deinit(self: *Layout) void {
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.deinit(self.allocator);
         self.allocator.free(self.project_key);
+        if (self.loop_key.len != 0) self.allocator.free(self.loop_key);
+    }
+
+    /// Whether any pane of the layout is `id`.
+    pub fn hasPane(self: *const Layout, id: []const u8) bool {
+        return self.idExists(id);
+    }
+
+    /// Makes sure the layout names `id` as its agent pane, adding it as the first tab when
+    /// missing, as macOS does when a saved layout lost it. The human's selected tab stays.
+    pub fn ensureAgentFirst(self: *Layout, id: []const u8) !void {
+        if (self.idExists(id)) return;
+        var panes: std.ArrayListUnmanaged(Pane) = .empty;
+        errdefer panes.deinit(self.allocator);
+        try panes.append(self.allocator, .{ .id = try self.allocator.dupe(u8, id), .launches_agent = true });
+        errdefer self.allocator.free(panes.items[0].id);
+        try self.tabs.insert(self.allocator, 0, .{ .id = self.next_tab_id, .panes = panes });
+        self.next_tab_id += 1;
+        if (self.tabs.items.len == 1) {
+            self.selected_tab = 0;
+        } else {
+            self.selected_tab += 1;
+        }
     }
 
     pub fn default(allocator: std.mem.Allocator, project_key: []const u8, node_id: []const u8) !Layout {
@@ -259,12 +291,14 @@ pub const Layout = struct {
         if (self.tabs.items.len != 0) try self.validateTopology();
         const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{file_path});
         defer self.allocator.free(tmp_path);
+        if (std.fs.path.dirname(file_path)) |directory| try std.fs.cwd().makePath(directory);
         var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
         defer file.close();
         var buffer: [4096]u8 = undefined;
         var writer = file.writer(&buffer);
         try writer.interface.writeAll("{\"schemaVersion\":2,\"project\":");
         try writer.interface.print("{f}", .{std.json.fmt(self.project_key, .{})});
+        if (self.loop_key.len != 0) try writer.interface.print(",\"loop\":{f}", .{std.json.fmt(self.loop_key, .{})});
         try writer.interface.print(",\"selectedTab\":{d},\"tabs\":[", .{self.selected_tab});
         for (self.tabs.items, 0..) |tab, tab_index| {
             if (tab_index != 0) try writer.interface.writeByte(',');
@@ -291,6 +325,16 @@ pub const Layout = struct {
         file_path: []const u8,
         expected_project: []const u8,
     ) !Layout {
+        return loadFor(allocator, file_path, expected_project, "");
+    }
+
+    /// `expected_loop` is empty for a project-level layout, which must not name a loop.
+    pub fn loadFor(
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        expected_project: []const u8,
+        expected_loop: []const u8,
+    ) !Layout {
         const data = try std.fs.cwd().readFileAlloc(allocator, file_path, 4 * 1024 * 1024);
         defer allocator.free(data);
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
@@ -300,9 +344,11 @@ pub const Layout = struct {
         if (version != schema_version) return error.UnsupportedSchema;
         const project = try string(try field(root, "project"));
         if (!std.mem.eql(u8, project, expected_project)) return error.ProjectMismatch;
+        const loop = if (root.get("loop")) |value| try string(value) else "";
+        if (!std.mem.eql(u8, loop, expected_loop)) return error.LoopMismatch;
         const selected_index = try nonNegativeIndex(try field(root, "selectedTab"));
         const values = try array(try field(root, "tabs"));
-        var layout = try Layout.init(allocator, expected_project);
+        var layout = try Layout.initForLoop(allocator, expected_project, expected_loop);
         errdefer layout.deinit();
         layout.selected_tab = selected_index;
         for (values) |encoded| {
@@ -378,6 +424,155 @@ pub const Layout = struct {
         }
     }
 };
+
+pub const layouts_directory_name = "terminal-layouts";
+
+/// `%GRAPHCODE_SUPPORT_DIR%` when set, otherwise `%USERPROFILE%\.graphcode`: where every
+/// other per-user shell state lives, never the install directory.
+pub fn supportDirectory(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR")) |value| {
+        if (value.len != 0) return value;
+        allocator.free(value);
+    } else |_| {}
+    const profile = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
+    defer allocator.free(profile);
+    return std.fs.path.join(allocator, &.{ profile, ".graphcode" });
+}
+
+/// The per-loop layout directory, as macOS's `<support>/terminal-layouts/`.
+pub fn layoutsDirectory(allocator: std.mem.Allocator) ![]u8 {
+    const support = try supportDirectory(allocator);
+    defer allocator.free(support);
+    return std.fs.path.join(allocator, &.{ support, layouts_directory_name });
+}
+
+pub fn projectSuffix(project: []const u8) [16]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(project, &digest, .{});
+    var suffix: [16]u8 = undefined;
+    const value = std.mem.readInt(u64, digest[0..8], .little);
+    const hex = "0123456789abcdef";
+    for (0..16) |index| {
+        suffix[15 - index] = hex[(value >> @as(u6, @intCast(index * 4))) & 0x0f];
+    }
+    return suffix;
+}
+
+fn isFileSafeID(id: []const u8) bool {
+    if (id.len == 0 or id.len > 128) return false;
+    for (id) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
+    }
+    return true;
+}
+
+/// A loop's layout file, `<root>\<loop>.json`; an id that is not a plain file name is hashed.
+pub fn loopLayoutPath(allocator: std.mem.Allocator, root: []const u8, loop: []const u8) ![]u8 {
+    if (isFileSafeID(loop)) return std.fmt.allocPrint(allocator, "{s}\\{s}.json", .{ root, loop });
+    return std.fmt.allocPrint(allocator, "{s}\\loop-{s}.json", .{ root, projectSuffix(loop) });
+}
+
+pub fn projectLayoutPath(allocator: std.mem.Allocator, root: []const u8, project: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}\\project.{s}.json", .{ root, projectSuffix(project) });
+}
+
+/// Where earlier shells saved the project-wide layout: `graphcode-workspace.<hash>.json` in
+/// the shell's working directory, which for the installed shell is its install `bin`
+/// folder. Read-only here; nothing is ever written to it again.
+pub fn legacyLayoutPath(allocator: std.mem.Allocator, directory: []const u8, project: []const u8) ![]u8 {
+    if (directory.len == 0) return std.fmt.allocPrint(allocator, "graphcode-workspace.{s}.json", .{projectSuffix(project)});
+    return std.fmt.allocPrint(allocator, "{s}\\graphcode-workspace.{s}.json", .{ directory, projectSuffix(project) });
+}
+
+/// A loop's layout from the project-wide legacy file, for a loop that has none of its own
+/// yet. The legacy file mixed every loop of the project: it is adopted only when it names
+/// `loop` as one of its panes, and then without the agent panes of any other loop. Null
+/// when it is absent, unreadable, or not this loop's. `target_project` is the project the
+/// adopted layout is saved under.
+pub fn adoptLegacyLayout(
+    allocator: std.mem.Allocator,
+    legacy_path: []const u8,
+    legacy_project: []const u8,
+    loop: []const u8,
+    target_project: []const u8,
+) !?Layout {
+    var legacy = Layout.load(allocator, legacy_path, legacy_project) catch return null;
+    errdefer legacy.deinit();
+    if (!legacy.idExists(loop)) {
+        legacy.deinit();
+        return null;
+    }
+    var foreign: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (foreign.items) |id| allocator.free(id);
+        foreign.deinit(allocator);
+    }
+    for (legacy.tabs.items) |tab| for (tab.panes.items) |pane| {
+        if (pane.launches_agent and !std.mem.eql(u8, pane.id, loop))
+            try foreign.append(allocator, try allocator.dupe(u8, pane.id));
+    };
+    for (foreign.items) |id| _ = legacy.removePane(id);
+    const project = try allocator.dupe(u8, target_project);
+    allocator.free(legacy.project_key);
+    legacy.project_key = project;
+    legacy.loop_key = try allocator.dupe(u8, loop);
+    return legacy;
+}
+
+pub const LoopRecord = struct {
+    loop: []u8,
+    project: []u8,
+};
+
+pub fn freeLoopRecords(allocator: std.mem.Allocator, records: []LoopRecord) void {
+    for (records) |record| {
+        allocator.free(record.loop);
+        allocator.free(record.project);
+    }
+    allocator.free(records);
+}
+
+const max_scanned_layouts: usize = 1024;
+
+/// The loop-scoped layouts saved in `root`, best effort: unreadable or foreign files are skipped.
+pub fn scanLoopLayouts(allocator: std.mem.Allocator, root: []const u8) ![]LoopRecord {
+    var records: std.ArrayListUnmanaged(LoopRecord) = .empty;
+    errdefer {
+        for (records.items) |record| {
+            allocator.free(record.loop);
+            allocator.free(record.project);
+        }
+        records.deinit(allocator);
+    }
+    var directory = std.fs.cwd().openDir(root, .{ .iterate = true }) catch return records.toOwnedSlice(allocator);
+    defer directory.close();
+    var iterator = directory.iterate();
+    var seen: usize = 0;
+    while (iterator.next() catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        seen += 1;
+        if (seen > max_scanned_layouts) break;
+        const data = directory.readFileAlloc(allocator, entry.name, 4 * 1024 * 1024) catch continue;
+        defer allocator.free(data);
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch continue;
+        defer parsed.deinit();
+        const root_object = switch (parsed.value) {
+            .object => |value| value,
+            else => continue,
+        };
+        const version = root_object.get("schemaVersion") orelse continue;
+        if (version != .integer or version.integer != schema_version) continue;
+        const project = root_object.get("project") orelse continue;
+        const loop = root_object.get("loop") orelse continue;
+        if (project != .string or loop != .string or loop.string.len == 0) continue;
+        const owned_loop = try allocator.dupe(u8, loop.string);
+        errdefer allocator.free(owned_loop);
+        const owned_project = try allocator.dupe(u8, project.string);
+        errdefer allocator.free(owned_project);
+        try records.append(allocator, .{ .loop = owned_loop, .project = owned_project });
+    }
+    return records.toOwnedSlice(allocator);
+}
 
 fn field(object_value: std.json.ObjectMap, name: []const u8) !std.json.Value {
     return object_value.get(name) orelse error.MissingField;
@@ -529,4 +724,125 @@ test "topology mutation rollback leaves no phantom tab or split" {
     try std.testing.expectEqual(@as(usize, 1), layout.selected().?.panes.items.len);
     try std.testing.expectEqual(focus, layout.selected().?.focused_pane);
     try std.testing.expectEqual(direction, layout.selected().?.split_direction);
+}
+
+test "a loop's layout is saved under its own file in a directory it creates, and refuses another loop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const directory = try std.fs.path.join(std.testing.allocator, &.{ root, "support", layouts_directory_name });
+    defer std.testing.allocator.free(directory);
+    const path = try loopLayoutPath(std.testing.allocator, directory, "3f2a-loop");
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(std.mem.endsWith(u8, path, "terminal-layouts\\3f2a-loop.json"));
+
+    var layout = try Layout.initForLoop(std.testing.allocator, "project-a", "3f2a-loop");
+    defer layout.deinit();
+    try layout.addTab("3f2a-loop", true);
+    try layout.addTab("shell", false);
+    try layout.save(path);
+
+    var restored = try Layout.loadFor(std.testing.allocator, path, "project-a", "3f2a-loop");
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("3f2a-loop", restored.loop_key);
+    try std.testing.expectEqual(@as(usize, 2), restored.tabs.items.len);
+    try std.testing.expectError(error.LoopMismatch, Layout.loadFor(std.testing.allocator, path, "project-a", "other-loop"));
+    try std.testing.expectError(error.LoopMismatch, Layout.load(std.testing.allocator, path, "project-a"));
+    try std.testing.expectError(error.ProjectMismatch, Layout.loadFor(std.testing.allocator, path, "project-b", "3f2a-loop"));
+}
+
+test "layout file names are the loop id when it is a plain name and a hash otherwise" {
+    const plain = try loopLayoutPath(std.testing.allocator, "C:\\s", "00000000-0000-4000-8000-0A6CC9277ED5");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expectEqualStrings("C:\\s\\00000000-0000-4000-8000-0A6CC9277ED5.json", plain);
+    for ([_][]const u8{ "..\\escape", "a/b", "project.x", "" }) |hostile| {
+        const path = try loopLayoutPath(std.testing.allocator, "C:\\s", hostile);
+        defer std.testing.allocator.free(path);
+        try std.testing.expect(std.mem.startsWith(u8, path, "C:\\s\\loop-"));
+        try std.testing.expect(std.mem.indexOfAny(u8, path["C:\\s\\".len..], "\\/") == null);
+    }
+    const project = try projectLayoutPath(std.testing.allocator, "C:\\s", "C:/GraphCode-Fixtures/Core");
+    defer std.testing.allocator.free(project);
+    try std.testing.expect(std.mem.startsWith(u8, project, "C:\\s\\project."));
+    const legacy = try legacyLayoutPath(std.testing.allocator, "", "C:/GraphCode-Fixtures/Core");
+    defer std.testing.allocator.free(legacy);
+    try std.testing.expect(std.mem.startsWith(u8, legacy, "graphcode-workspace."));
+}
+
+test "ensureAgentFirst mounts the loop's agent tab first and keeps the selected tab" {
+    var layout = try Layout.init(std.testing.allocator, "p");
+    defer layout.deinit();
+    try layout.ensureAgentFirst("loop");
+    try std.testing.expectEqual(@as(usize, 1), layout.tabs.items.len);
+    try std.testing.expect(layout.tabs.items[0].panes.items[0].launches_agent);
+    try layout.addTab("shell", false);
+    layout.selected_tab = 1;
+    try layout.ensureAgentFirst("loop");
+    try std.testing.expectEqual(@as(usize, 2), layout.tabs.items.len);
+    var other = try Layout.init(std.testing.allocator, "p");
+    defer other.deinit();
+    try other.addTab("shell", false);
+    try other.ensureAgentFirst("loop");
+    try std.testing.expectEqualStrings("loop", other.tabs.items[0].panes.items[0].id);
+    try std.testing.expectEqualStrings("shell", other.tabs.items[1].panes.items[0].id);
+    try std.testing.expectEqual(@as(usize, 1), other.selected_tab);
+    try std.testing.expectEqualStrings("shell", other.selected().?.panes.items[0].id);
+}
+
+test "legacy project layout is adopted by the loop it names, without other loops' agent panes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const legacy_path = try legacyLayoutPath(std.testing.allocator, root, "project-a");
+    defer std.testing.allocator.free(legacy_path);
+    var legacy = try Layout.init(std.testing.allocator, "project-a");
+    defer legacy.deinit();
+    try legacy.addTab("loop-a", true);
+    try legacy.addTab("shell-1", false);
+    try legacy.addTab("loop-b", true);
+    try legacy.save(legacy_path);
+
+    var adopted = (try adoptLegacyLayout(std.testing.allocator, legacy_path, "project-a", "loop-a", "project-a")).?;
+    defer adopted.deinit();
+    try std.testing.expectEqualStrings("loop-a", adopted.loop_key);
+    try std.testing.expect(adopted.hasPane("loop-a"));
+    try std.testing.expect(adopted.hasPane("shell-1"));
+    try std.testing.expect(!adopted.hasPane("loop-b"));
+
+    try std.testing.expect((try adoptLegacyLayout(std.testing.allocator, legacy_path, "project-a", "loop-c", "project-a")) == null);
+    try std.testing.expect((try adoptLegacyLayout(std.testing.allocator, legacy_path, "project-b", "loop-a", "project-b")) == null);
+    try std.testing.expect((try adoptLegacyLayout(std.testing.allocator, "missing.json", "project-a", "loop-a", "project-a")) == null);
+}
+
+test "scanning loop layouts reports only loop-scoped files and skips everything else" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    var scoped = try Layout.initForLoop(std.testing.allocator, "project-a", "loop-a");
+    defer scoped.deinit();
+    try scoped.addTab("loop-a", true);
+    const scoped_path = try loopLayoutPath(std.testing.allocator, root, "loop-a");
+    defer std.testing.allocator.free(scoped_path);
+    try scoped.save(scoped_path);
+    var project_level = try Layout.init(std.testing.allocator, "project-a");
+    defer project_level.deinit();
+    try project_level.addTab("shell", false);
+    const project_path = try projectLayoutPath(std.testing.allocator, root, "project-a");
+    defer std.testing.allocator.free(project_path);
+    try project_level.save(project_path);
+    try tmp.dir.writeFile(.{ .sub_path = "garbage.json", .data = "not json" });
+    try tmp.dir.writeFile(.{ .sub_path = "note.txt", .data = "{}" });
+
+    const records = try scanLoopLayouts(std.testing.allocator, root);
+    defer freeLoopRecords(std.testing.allocator, records);
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqualStrings("loop-a", records[0].loop);
+    try std.testing.expectEqualStrings("project-a", records[0].project);
+
+    const missing = try scanLoopLayouts(std.testing.allocator, "C:\\no\\such\\layouts");
+    defer freeLoopRecords(std.testing.allocator, missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
 }
