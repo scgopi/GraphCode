@@ -69,7 +69,19 @@ struct State {
   // reports one, get_BoundingRectangle falls back to a placeholder rect.
   RECT canvas_bounds{};
   bool has_canvas_bounds = false;
+  // Drawn, scroll-clipped rects of the sidebar's Graph (index 0) and Quick Chats
+  // (index 1) destinations, delivered through gc_uia_update under the identities
+  // below. Until the app reports them the fixed elements use placeholder rects.
+  RECT destination_bounds[2]{};
+  bool has_destination_bounds[2]{};
 };
+
+static const char kOverviewDestinationIdentity[] = "overview-destination:graph";
+static const char kQuickChatsDestinationIdentity[] = "quick-chats-destination:quick-chats";
+
+static bool isEmptyRect(const RECT &bounds) {
+  return bounds.left >= bounds.right || bounds.top >= bounds.bottom;
+}
 
 static std::wstring wide(const char *value) {
   if (!value) return {};
@@ -197,6 +209,13 @@ class Node final : public IRawElementProviderSimple,
         kind = kInteger;
       } else if (property == UIA_IsOffscreenPropertyId) {
         bool_value = id_ >= 7 && id_ <= 13;
+        if (isRowKey(id_)) {
+          bool_value = isEmptyRect(state_->rows.at(id_).bounds);
+        } else if (id_ == 14 || id_ == 15) {
+          const int slot = static_cast<int>(id_ - 14);
+          bool_value = state_->has_destination_bounds[slot] &&
+              isEmptyRect(state_->destination_bounds[slot]);
+        }
         kind = kBool;
       } else if (property == UIA_IsKeyboardFocusablePropertyId ||
                  property == UIA_IsEnabledPropertyId ||
@@ -327,6 +346,10 @@ class Node final : public IRawElementProviderSimple,
       hwnd = state_->hwnd;
       if (isRowKey(id_)) {
         dynamic_bounds = state_->rows.at(id_).bounds;
+        has_dynamic_bounds = true;
+      } else if ((id_ == 14 || id_ == 15) &&
+                 state_->has_destination_bounds[id_ - 14]) {
+        dynamic_bounds = state_->destination_bounds[id_ - 14];
         has_dynamic_bounds = true;
       } else if (id_ == 4 && state_->has_canvas_bounds) {
         canvas_bounds = state_->canvas_bounds;
@@ -627,8 +650,20 @@ class Node final : public IRawElementProviderSimple,
 
       std::unordered_map<int64_t, Row> next_rows;
       std::vector<int64_t> next_order;
+      state_->has_destination_bounds[0] = false;
+      state_->has_destination_bounds[1] = false;
       for (int index = 0; index < count; ++index) {
         const std::string identity = identities && identities[index] ? identities[index] : "";
+        const int destination = identity == kOverviewDestinationIdentity ? 0
+            : identity == kQuickChatsDestinationIdentity ? 1 : -1;
+        if (destination >= 0) {
+          state_->destination_bounds[destination] = bounds
+              ? RECT{bounds[index * 4], bounds[index * 4 + 1],
+                     bounds[index * 4 + 2], bounds[index * 4 + 3]}
+              : RECT{};
+          state_->has_destination_bounds[destination] = true;
+          continue;
+        }
         int64_t key = rowKeyForIdentityLocked(identity, next_rows);
         const auto existing = std::find_if(
             state_->rows.begin(), state_->rows.end(),
@@ -989,6 +1024,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           row.identity.rfind("workspace-switch:", 0) == 0 ? L"workspace-switch-" :
           row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
+          row.identity.rfind("sidebar-update-banner:", 0) == 0 ? L"sidebar-update-banner-" :
           row.identity.rfind("worktree-loading:", 0) == 0 ? L"worktree-loading-" :
           row.identity.rfind("header-attention:", 0) == 0 ? L"header-attention-" :
           row.identity.rfind("header-worktree:", 0) == 0 ? L"header-worktree-" :
@@ -1030,6 +1066,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("project-new-loop:", 0) == 0 ||
           row.identity.rfind("project-disclosure:", 0) == 0 ||
           row.identity.rfind("quick-chats-header:", 0) == 0 ||
+          row.identity.rfind("sidebar-update-banner:", 0) == 0 ||
           row.identity.rfind("quick-chat-new:", 0) == 0 ||
           row.identity.rfind("quick-chats-disclosure:", 0) == 0 ||
           row.identity.rfind("loop-disclosure:", 0) == 0;
