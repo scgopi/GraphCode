@@ -606,6 +606,24 @@ pub const Workspace = struct {
         return self.cwd;
     }
 
+    /// The zmx program for a child started outside the shell's working directory. The
+    /// installed shell names zmx bare (`zmx.exe`) and finds it beside itself through that
+    /// directory, `...\GraphCode\current\bin`, which PATH need not name. A child resolves a
+    /// relative program against its own working directory, then PATH, so an attach started
+    /// in the loop's directory would not find it. Resolved once against the shell's
+    /// directory, as every other zmx child (started there) already resolves it; a name not
+    /// found there is left to PATH.
+    fn zmxExecutable(self: *Workspace) []const u8 {
+        if (self.zmx_path.len == 0 or std.fs.path.isAbsolute(self.zmx_path)) return self.zmx_path;
+        const candidate = std.fs.path.join(self.allocator, &.{ if (self.cwd.len == 0) "." else self.cwd, self.zmx_path }) catch
+            return self.zmx_path;
+        defer self.allocator.free(candidate);
+        const resolved = std.fs.cwd().realpathAlloc(self.allocator, candidate) catch return self.zmx_path;
+        self.allocator.free(self.zmx_path);
+        self.zmx_path = resolved;
+        return self.zmx_path;
+    }
+
     fn layoutPathForProject(self: *Workspace, project: []const u8) ![]u8 {
         const configured = std.process.getEnvVarOwned(self.allocator, "GRAPHCODE_WORKSPACE_LAYOUT") catch
             try self.allocator.dupe(u8, "graphcode-workspace.json");
@@ -1941,7 +1959,7 @@ pub const Workspace = struct {
             attach_len = 4;
         } else {
             attach_len = (try attachArguments(
-                self.zmx_path,
+                self.zmxExecutable(),
                 session,
                 size,
                 &attach_args,
@@ -4302,6 +4320,36 @@ test "an explicit open rebinds a stale loop pane and survives a passive recreate
     try std.testing.expect(workspace.isAwaitingLaunch(0));
     try std.testing.expectEqualStrings("next-loop", workspace.launch_waits[0].session);
     try std.testing.expect(workspace.launch_waits[0].reports_timeout);
+}
+
+test "a bare zmx name resolves against the shell's directory, not the attaching child's" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("bin");
+    try tmp.dir.writeFile(.{ .sub_path = "bin\\zmx.exe", .data = "" });
+    const bin = try tmp.dir.realpathAlloc(std.testing.allocator, "bin");
+    defer std.testing.allocator.free(bin);
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ bin, "zmx.exe" });
+    defer std.testing.allocator.free(expected);
+    workspace.cwd = bin;
+
+    // As installed: zmx beside the shell, found through its working directory.
+    workspace.zmx_path = try std.testing.allocator.dupe(u8, "zmx.exe");
+    try std.testing.expectEqualStrings(expected, workspace.zmxExecutable());
+    try std.testing.expectEqualStrings(expected, workspace.zmx_path);
+    std.testing.allocator.free(workspace.zmx_path);
+
+    // A name the shell's directory does not hold is left to PATH.
+    workspace.zmx_path = try std.testing.allocator.dupe(u8, "zmx-elsewhere.exe");
+    try std.testing.expectEqualStrings("zmx-elsewhere.exe", workspace.zmxExecutable());
+    std.testing.allocator.free(workspace.zmx_path);
+
+    // GRAPHCODE_ZMX's absolute path is used as given.
+    workspace.zmx_path = try std.testing.allocator.dupe(u8, "C:\\provider\\zmx.exe");
+    try std.testing.expectEqualStrings("C:\\provider\\zmx.exe", workspace.zmxExecutable());
+    std.testing.allocator.free(workspace.zmx_path);
 }
 
 test "a loop pane is detached only when the layout owns it and no slot shows or awaits it" {
