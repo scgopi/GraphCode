@@ -269,10 +269,16 @@ function Get-InstalledDaemons {
       ([IO.Path]::GetFullPath($_.ExecutablePath) -ieq $expected)
     })
 }
+function Disable-DaemonTask([string] $name) {
+  # The repeating trigger would otherwise restart a daemon that an explicit stop just ended.
+  $result = Invoke-PackageCommand "schtasks.exe" @("/Change", "/TN", $name, "/DISABLE")
+  Require ($result.ExitCode -eq 0) "scheduled-task disable failed: $($result.Output)"
+}
 function Stop-InstalledDaemon {
   $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
   $identity = Get-TaskIdentity $support
   if (Test-DaemonTask $identity.name) {
+    Disable-DaemonTask $identity.name
     $result = Invoke-PackageCommand "schtasks.exe" @("/End", "/TN", $identity.name)
     Require ($result.ExitCode -eq 0) "scheduled-task stop failed: $($result.Output)"
   }
@@ -293,31 +299,44 @@ function Remove-DaemonTask {
   $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
   $identity = Get-TaskIdentity $support
   if (-not (Test-DaemonTask $identity.name)) { return }
+  Disable-DaemonTask $identity.name
   $result = Invoke-PackageCommand "schtasks.exe" @("/End", "/TN", $identity.name)
   Require ($result.ExitCode -eq 0) "scheduled-task stop failed: $($result.Output)"
   $result = Invoke-PackageCommand "schtasks.exe" @("/Delete", "/TN", $identity.name, "/F")
   Require ($result.ExitCode -eq 0) "scheduled-task removal failed: $($result.Output)"
+}
+function New-DaemonTaskXml([hashtable] $identity, [string] $support) {
+  $sid = Xml-Escape $identity.sid
+  $command = Xml-Escape (Join-Path $env:SystemRoot "System32\cmd.exe")
+  $arguments = Xml-Escape "/d /s /c `"set `"GRAPHCODE_SUPPORT_DIR=$support`"`&`&`"$InstallRoot\bin\graphcoded.exe`"`""
+  $workingDirectory = Xml-Escape (Join-Path $InstallRoot "bin")
+  # launchd runs the macOS daemon with KeepAlive; the Windows equivalent is a one-minute
+  # repeating trigger. MultipleInstancesPolicy IgnoreNew makes every tick a no-op while the
+  # daemon runs and restarts it, whatever its exit code, once it has stopped. Task Scheduler's
+  # own RestartOnFailure is not used: it fires only when a task cannot launch, never when a
+  # launched process exits. Uninstall and upgrade disable the task before ending it, so an
+  # explicit stop is not undone by the next tick. Battery limits would otherwise refuse or kill
+  # the daemon on laptops.
+  return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>GraphCode daemon for $sid</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>$sid</UserId></LogonTrigger>
+    <TimeTrigger><Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2000-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>$sid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>$command</Command><Arguments>$arguments</Arguments><WorkingDirectory>$workingDirectory</WorkingDirectory></Exec></Actions>
+</Task>
+"@
 }
 function Start-DaemonTask {
   $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
   $identity = Get-TaskIdentity $support
   New-Item -ItemType Directory -Force $support | Out-Null
   $xmlPath = Join-Path (Split-Path $InstallRoot -Parent) "GraphCode-daemon-task.xml"
-  $taskName = Xml-Escape $identity.name
-  $sid = Xml-Escape $identity.sid
-  $command = Xml-Escape (Join-Path $env:SystemRoot "System32\cmd.exe")
-  $arguments = Xml-Escape "/d /s /c `"set `"GRAPHCODE_SUPPORT_DIR=$support`"`&`&`"$InstallRoot\bin\graphcoded.exe`"`""
-  $workingDirectory = Xml-Escape (Join-Path $InstallRoot "bin")
-  $xml = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>GraphCode daemon for $sid</Description></RegistrationInfo>
-  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>$sid</UserId></LogonTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>$sid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
-  <Actions Context="Author"><Exec><Command>$command</Command><Arguments>$arguments</Arguments><WorkingDirectory>$workingDirectory</WorkingDirectory></Exec></Actions>
-</Task>
-"@
+  $xml = New-DaemonTaskXml $identity $support
   [IO.File]::WriteAllText($xmlPath, $xml, [Text.Encoding]::Unicode)
   $result = Invoke-PackageCommand "schtasks.exe" @("/Create", "/TN", $identity.name, "/XML", $xmlPath, "/F")
   Require ($result.ExitCode -eq 0) "scheduled-task registration failed: $($result.Output)"
@@ -497,8 +516,11 @@ function Uninstall-Package {
   $installed = Test-Path -LiteralPath $InstallRoot
   if ($installed) { Assert-InstallRootIdle $daemonManaged }
   $daemonWasRunning = $false
+  $daemonTaskExisted = $false
   if ($daemonManaged) {
     $daemonWasRunning = @(Get-InstalledDaemons).Count -gt 0
+    $support = if ($env:GRAPHCODE_SUPPORT_DIR) { $env:GRAPHCODE_SUPPORT_DIR } else { Join-Path $env:USERPROFILE ".graphcode" }
+    $daemonTaskExisted = Test-DaemonTask (Get-TaskIdentity $support).name
     Stop-InstalledDaemon
   }
   $bin = Join-Path $InstallRoot "bin"
@@ -551,7 +573,8 @@ function Uninstall-Package {
         $rollbackErrors.Add("restoring shortcuts from '$shortcutBackup': $($_.Exception.Message)")
       }
     }
-    if ($daemonWasRunning -and $restored) {
+    # Stopping disabled the task, so a refused uninstall must re-register it, not just restart.
+    if (($daemonWasRunning -or $daemonTaskExisted) -and $restored) {
       try { Start-DaemonTask } catch {
         $rollbackErrors.Add("restarting the daemon: $($_.Exception.Message)")
       }

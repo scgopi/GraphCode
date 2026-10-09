@@ -369,6 +369,11 @@ pub const DaemonClient = struct {
         return daemonLockName(allocator);
     }
 
+    pub fn currentDaemonTaskName(self: *DaemonClient, allocator: std.mem.Allocator) ![]u8 {
+        _ = self;
+        return daemonTaskName(allocator);
+    }
+
     fn validateSupportDirectory(allocator: std.mem.Allocator, support_directory: []const u8) !void {
         const normalized = try normalizedSupportPath(allocator, support_directory);
         defer std.heap.page_allocator.free(normalized);
@@ -1842,6 +1847,56 @@ pub fn daemonLockName(allocator: std.mem.Allocator) ![]u8 {
     const support = try supportDirectory(allocator);
     defer allocator.free(support);
     return daemonLockNameFor(allocator, support);
+}
+
+/// Name of the per-user scheduled task that Tools\windows\PackageRuntime.ps1
+/// (`Get-TaskIdentity`) registers for the daemon that owns `support_directory`:
+/// `GraphCode\graphcoded-` plus the first 32 hex digits of SHA-256 over
+/// `<SID>|<lowercased full path without a trailing backslash>`.
+pub fn daemonTaskNameFor(allocator: std.mem.Allocator, support_directory: []const u8) ![]u8 {
+    const normalized = try normalizedSupportPath(allocator, support_directory);
+    defer allocator.free(normalized);
+    for (normalized) |*byte| {
+        if (byte.* == '/') byte.* = '\\';
+    }
+    const trimmed = std.mem.trimRight(u8, normalized, "\\");
+    const sid = try currentSID(allocator);
+    defer allocator.free(sid);
+    const identity = try std.fmt.allocPrint(allocator, "{s}|{s}", .{ sid, trimmed });
+    defer allocator.free(identity);
+    const hash = try sha256Hex(allocator, identity);
+    defer allocator.free(hash);
+    return std.fmt.allocPrint(allocator, "GraphCode\\graphcoded-{s}", .{hash[0..32]});
+}
+
+pub fn daemonTaskName(allocator: std.mem.Allocator) ![]u8 {
+    const support = try supportDirectory(allocator);
+    defer allocator.free(support);
+    return daemonTaskNameFor(allocator, support);
+}
+
+test "daemon task name follows the installer's identity for any spelling of the support path" {
+    const allocator = std.testing.allocator;
+    const sid = try currentSID(allocator);
+    defer allocator.free(sid);
+    const identity = try std.fmt.allocPrint(allocator, "{s}|c:\\fixture\\.graphcode", .{sid});
+    defer allocator.free(identity);
+    const hash = try sha256Hex(allocator, identity);
+    defer allocator.free(hash);
+    const expected = try std.fmt.allocPrint(allocator, "GraphCode\\graphcoded-{s}", .{hash[0..32]});
+    defer allocator.free(expected);
+    for ([_][]const u8{
+        "C:\\Fixture\\.graphcode",
+        "C:\\Fixture\\.graphcode\\",
+        "c:/fixture/./.graphcode",
+    }) |spelling| {
+        const name = try daemonTaskNameFor(allocator, spelling);
+        defer allocator.free(name);
+        try std.testing.expectEqualStrings(expected, name);
+    }
+    const other = try daemonTaskNameFor(allocator, "C:\\Fixture\\.graphcode-other");
+    defer allocator.free(other);
+    try std.testing.expect(!std.mem.eql(u8, expected, other));
 }
 
 fn sha256Hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {

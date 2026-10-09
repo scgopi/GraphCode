@@ -2,8 +2,23 @@ const std = @import("std");
 const c = @import("Win32.zig").c;
 
 pub const Probe = enum { available, busy, missing, unknown };
+pub const Recovery = enum { not_needed, task_started, spawned, failed };
+const TaskState = enum { registered, absent };
+const RecoveryAction = enum { none, run_task, spawn_owned, unreachable_state };
 const startup_reservation_timeout_ms: i64 = 5_000;
+const task_command_timeout_ms: u32 = 10_000;
 const ReservationWait = enum { acquired, missing, timed_out };
+
+/// A stopped daemon is only restarted when nothing is listening and no daemon holds, or is
+/// acquiring, the lifetime lock; the installed scheduled task is preferred because it lets the
+/// daemon outlive the shell, as launchd does on macOS.
+fn recoveryAction(probe: Probe, lock_exists: bool, task: TaskState) RecoveryAction {
+    return switch (probe) {
+        .available, .busy => .none,
+        .unknown => .unreachable_state,
+        .missing => if (lock_exists) .none else if (task == .registered) .run_task else .spawn_owned,
+    };
+}
 
 pub const Supervisor = struct {
     allocator: std.mem.Allocator,
@@ -14,6 +29,50 @@ pub const Supervisor = struct {
     startup_reservation: c.HANDLE = null,
     owned: bool = false,
     failure: []u8 = &.{},
+
+    /// Starts the daemon when it is not running: through the installed scheduled task when one
+    /// is registered (no elevation needed), otherwise as a child of this shell. Bounded by the
+    /// task commands' own timeout, so it never retries on its own; a later Reconnect retries.
+    pub fn recover(
+        self: *Supervisor,
+        endpoint: []const u8,
+        lock_name: []const u8,
+        task_name: []const u8,
+    ) Recovery {
+        self.setFailure("");
+        const probe = probeEndpoint(endpoint);
+        const lock_exists = daemonLockExists(lock_name);
+        const task: TaskState = if (probe == .missing and !lock_exists and task_name.len != 0)
+            queryScheduledTask(self.allocator, task_name)
+        else
+            .absent;
+        switch (recoveryAction(probe, lock_exists, task)) {
+            .none => return .not_needed,
+            .unreachable_state => {
+                self.setFailure("Unable to determine daemon endpoint state");
+                return .failed;
+            },
+            .run_task => {
+                if (runScheduledTask(self.allocator, task_name)) return .task_started;
+                self.setFailure("GraphCode daemon task could not be started");
+                return .failed;
+            },
+            .spawn_owned => {
+                self.releaseExitedChild();
+                self.start(endpoint, lock_name);
+                return if (self.status().len == 0) .spawned else .failed;
+            },
+        }
+    }
+
+    // A previous child that already exited still owns handles that start() would overwrite.
+    fn releaseExitedChild(self: *Supervisor) void {
+        if (self.process == null or c.WaitForSingleObject(self.process, 0) == c.WAIT_TIMEOUT) return;
+        self.closeProcess();
+        self.closeShutdownEvent();
+        self.closeStartupEvent();
+        self.closeStartupHandoffEvent();
+    }
 
     pub fn start(self: *Supervisor, endpoint: []const u8, lock_name: []const u8) void {
         const acquired = self.acquireStartupReservationBounded(lock_name) catch {
@@ -323,6 +382,44 @@ pub const Supervisor = struct {
     }
 };
 
+/// Runs `schtasks.exe <verb> /TN <task>` hidden and returns whether it exited with code 0.
+/// The task name is derived from a hash, but is still refused if it could break the command line.
+fn schtasksSucceeds(allocator: std.mem.Allocator, verb: []const u8, task_name: []const u8) bool {
+    if (task_name.len == 0 or std.mem.indexOfAny(u8, task_name, "\"\r\n") != null) return false;
+    const system_root = std.process.getEnvVarOwned(allocator, "SystemRoot") catch
+        allocator.dupe(u8, "C:\\Windows") catch return false;
+    defer allocator.free(system_root);
+    const exe = std.fs.path.join(allocator, &.{ system_root, "System32", "schtasks.exe" }) catch return false;
+    defer allocator.free(exe);
+    const command = std.fmt.allocPrint(allocator, "\"{s}\" {s} /TN \"{s}\"", .{ exe, verb, task_name }) catch return false;
+    defer allocator.free(command);
+    const wide_exe = utf16(allocator, exe) catch return false;
+    defer allocator.free(wide_exe);
+    const wide_command = utf16(allocator, command) catch return false;
+    defer allocator.free(wide_command);
+    var startup: c.STARTUPINFOW = std.mem.zeroes(c.STARTUPINFOW);
+    startup.cb = @sizeOf(c.STARTUPINFOW);
+    var info: c.PROCESS_INFORMATION = undefined;
+    if (c.CreateProcessW(wide_exe.ptr, wide_command.ptr, null, null, 0, c.CREATE_NO_WINDOW, null, null, &startup, &info) == 0) return false;
+    defer _ = c.CloseHandle(info.hProcess);
+    _ = c.CloseHandle(info.hThread);
+    if (c.WaitForSingleObject(info.hProcess, task_command_timeout_ms) != c.WAIT_OBJECT_0) {
+        _ = c.TerminateProcess(info.hProcess, 1);
+        return false;
+    }
+    var code: c.DWORD = 1;
+    if (c.GetExitCodeProcess(info.hProcess, &code) == 0) return false;
+    return code == 0;
+}
+
+fn queryScheduledTask(allocator: std.mem.Allocator, task_name: []const u8) TaskState {
+    return if (schtasksSucceeds(allocator, "/Query", task_name)) .registered else .absent;
+}
+
+fn runScheduledTask(allocator: std.mem.Allocator, task_name: []const u8) bool {
+    return schtasksSucceeds(allocator, "/Run", task_name);
+}
+
 fn probeEndpoint(endpoint: []const u8) Probe {
     const wide = utf16(std.heap.page_allocator, endpoint) catch return .unknown;
     defer std.heap.page_allocator.free(wide);
@@ -360,6 +457,60 @@ fn utf16(allocator: std.mem.Allocator, value: []const u8) ![:0]u16 {
 
 test "busy endpoint is never treated as missing" {
     try std.testing.expect(@intFromEnum(Probe.busy) != @intFromEnum(Probe.missing));
+}
+
+test "recovery only acts on a missing endpoint with no daemon starting" {
+    const probes = [_]Probe{ .available, .busy, .missing, .unknown };
+    for (probes) |probe| {
+        for ([_]bool{ false, true }) |lock| {
+            for ([_]TaskState{ .registered, .absent }) |task| {
+                const action = recoveryAction(probe, lock, task);
+                if (probe == .missing and !lock) {
+                    try std.testing.expectEqual(
+                        if (task == .registered) RecoveryAction.run_task else RecoveryAction.spawn_owned,
+                        action,
+                    );
+                } else if (probe == .unknown) {
+                    try std.testing.expectEqual(RecoveryAction.unreachable_state, action);
+                } else {
+                    try std.testing.expectEqual(RecoveryAction.none, action);
+                }
+            }
+        }
+    }
+}
+
+test "scheduled task helpers report an unregistered task as absent and unrunnable" {
+    const name = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "GraphCode\\graphcoded-unit-test-missing-{d}",
+        .{std.time.nanoTimestamp()},
+    );
+    defer std.testing.allocator.free(name);
+    try std.testing.expectEqual(TaskState.absent, queryScheduledTask(std.testing.allocator, name));
+    try std.testing.expect(!runScheduledTask(std.testing.allocator, name));
+}
+
+test "recovery leaves a reachable daemon alone" {
+    const suffix = std.time.nanoTimestamp();
+    const endpoint = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "\\\\.\\pipe\\graphcode-supervisor-recover-{d}",
+        .{suffix},
+    );
+    defer std.testing.allocator.free(endpoint);
+    const wide = try utf16(std.testing.allocator, endpoint);
+    defer std.testing.allocator.free(wide);
+    const server = c.CreateNamedPipeW(wide.ptr, c.PIPE_ACCESS_DUPLEX, c.PIPE_TYPE_BYTE, 1, 512, 512, 0, null);
+    try std.testing.expect(server != c.INVALID_HANDLE_VALUE);
+    defer _ = c.CloseHandle(server);
+    var supervisor = Supervisor{ .allocator = std.testing.allocator };
+    try std.testing.expectEqual(
+        Recovery.not_needed,
+        supervisor.recover(endpoint, "Local\\graphcode-supervisor-recover-lock", "GraphCode\\graphcoded-never-run"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), supervisor.status().len);
+    try std.testing.expect(!supervisor.owned);
 }
 
 test "daemon supervisor preserves Unicode sibling paths" {
