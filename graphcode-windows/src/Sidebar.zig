@@ -182,7 +182,20 @@ pub fn draw(
     fill(hdc, sidebar, Tokens.workspace_rail);
     drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
     drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
-    var rows = appendRows(allocator, model, inspection, scroll_offset, state) catch return;
+    const has_update = update_version.len != 0;
+    const has_error = ingress_error.len != 0;
+    const saved_clip = c.SaveDC(hdc);
+    _ = c.IntersectClipRect(
+        hdc,
+        0,
+        Tokens.header_height,
+        Tokens.sidebar_width,
+        contentViewportBottom(viewport_bottom, has_update, has_error),
+    );
+    var rows = appendRows(allocator, model, inspection, scroll_offset, state) catch {
+        if (saved_clip != 0) _ = c.RestoreDC(hdc, saved_clip);
+        return;
+    };
     defer rows.deinit(allocator);
     for (rows.items) |row| {
         switch (row.kind) {
@@ -258,13 +271,15 @@ pub fn draw(
         }
     }
     for (rows.items) |row| if (row.kind == .quick_chat_overview) {
-        drawText(hdc, allocator, "CHATS", 18, row.top - 32, 10, 0x007A7A7A);
+        const label = chatsLabelRect(row.top);
+        drawText(hdc, allocator, "CHATS", label.left, label.top, 10, 0x007A7A7A);
         break;
     };
 
     const section_y = sidebarSectionBottom(model, inspection, state) - scroll_offset;
     if (model.attentionCount() != 0) {
-        drawText(hdc, allocator, "Needs you", 18, section_y + 10, 11, 0x00FFCD7A);
+        const label = needsYouLabelRect(sidebarSectionBottom(model, inspection, state), scroll_offset);
+        drawText(hdc, allocator, "Needs you", label.left, label.top, 11, 0x00FFCD7A);
         var attention_y = section_y + 30;
         if (model.attention_entries.items.len != 0) {
             for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)], 0..) |entry, index| {
@@ -312,6 +327,7 @@ pub fn draw(
             drawTextRect(hdc, allocator, stamp orelse "", rect(card.left + 8, card.top + 18, card.right - 8, card.bottom - 4), 9, stateColor(event.state), c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
         }
     }
+    if (saved_clip != 0) _ = c.RestoreDC(hdc, saved_clip);
     if (ingress_error.len != 0) {
         const bounds = errorFooterRect(viewport_bottom);
         fill(hdc, bounds, 0x00242448);
@@ -326,10 +342,48 @@ pub fn draw(
         defer if (detail) |value| allocator.free(value);
         drawText(hdc, allocator, detail orelse update_version, bounds.left + 30, bounds.top + 24, 10, 0x00909090);
     }
-    const status_offset: i32 = 58 +
-        (if (ingress_error.len != 0) @as(i32, 50) else 0) +
-        (if (update_version.len != 0) @as(i32, 58) else 0);
-    drawText(hdc, allocator, status, 18, viewport_bottom - status_offset, 11, 0x00909090);
+    drawTextRect(
+        hdc,
+        allocator,
+        status,
+        statusTextRect(viewport_bottom, update_version.len != 0, ingress_error.len != 0),
+        11,
+        0x00909090,
+        c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
+    );
+}
+
+const footer_status_extent: i32 = 58;
+const footer_error_extent: i32 = 50;
+const footer_update_extent: i32 = 58;
+const status_line_height: i32 = 20;
+
+/// Height the sidebar footer (status line, optional update banner, optional error footer)
+/// takes from the bottom of the sidebar. Scrolling content never extends into it.
+pub fn footerReserve(has_update: bool, has_error: bool) i32 {
+    return footer_status_extent +
+        (if (has_error) footer_error_extent else 0) +
+        (if (has_update) footer_update_extent else 0);
+}
+
+/// Bottom edge of the scrollable sidebar content; rows, labels, hit targets, and UIA
+/// bounds all end here so they cannot sit under the status line, banner, or error footer.
+pub fn contentViewportBottom(viewport_bottom: i32, has_update: bool, has_error: bool) i32 {
+    return @max(viewport_bottom - footerReserve(has_update, has_error), Tokens.header_height);
+}
+
+pub fn statusTextRect(viewport_bottom: i32, has_update: bool, has_error: bool) c.RECT {
+    const top = viewport_bottom - footerReserve(has_update, has_error);
+    return rect(18, top, Tokens.sidebar_width - 10, top + status_line_height);
+}
+
+pub fn chatsLabelRect(row_top: i32) c.RECT {
+    return rect(18, row_top - 32, Tokens.sidebar_width - 10, row_top - 32 + 18);
+}
+
+pub fn needsYouLabelRect(section_bottom: i32, scroll_offset: i32) c.RECT {
+    const top = section_bottom - scroll_offset + 10;
+    return rect(18, top, Tokens.sidebar_width - 10, top + 19);
 }
 
 pub fn errorFooterRect(viewport_bottom: i32) c.RECT {
@@ -1707,6 +1761,57 @@ test "elapsedText renders a compact age and its unit boundaries honestly" {
     try std.testing.expectEqualStrings("10d", ten_days);
 }
 
+test "sidebar footer reserve keeps content, status text, banner, and error footer disjoint" {
+    for ([_]bool{ false, true }) |has_update| for ([_]bool{ false, true }) |has_error| for ([_]i32{ 420, 522, 772 }) |viewport_bottom| {
+        const content_bottom = contentViewportBottom(viewport_bottom, has_update, has_error);
+        const status = statusTextRect(viewport_bottom, has_update, has_error);
+        try std.testing.expect(content_bottom <= status.top);
+        try std.testing.expect(status.right <= Tokens.sidebar_width and status.bottom <= viewport_bottom);
+        if (has_update) {
+            const banner = updateBannerRect(viewport_bottom, has_error);
+            try std.testing.expect(content_bottom <= banner.top);
+            try std.testing.expect(status.bottom <= banner.top);
+        }
+        if (has_error) {
+            const footer = errorFooterRect(viewport_bottom);
+            try std.testing.expect(content_bottom <= footer.top);
+            try std.testing.expect(status.bottom <= footer.top);
+        }
+    };
+    // A viewport too short for the footer still leaves a well-formed, header-anchored content rect.
+    try std.testing.expectEqual(@as(i32, Tokens.header_height), contentViewportBottom(100, true, true));
+}
+
+test "sidebar rows beneath the update banner are neither hit nor counted as visible" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    for (0..12) |index| try model.recent_projects.append(.{
+        .path = try std.fmt.allocPrint(std.testing.allocator, "project-{d}", .{index}),
+        .name = try std.fmt.allocPrint(std.testing.allocator, "Project {d}", .{index}),
+    });
+    const viewport_bottom: i32 = 420;
+    const banner = updateBannerRect(viewport_bottom, false);
+    const content_bottom = contentViewportBottom(viewport_bottom, true, false);
+    var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
+    defer rows.deinit(std.testing.allocator);
+    var under_banner: usize = 0;
+    for (rows.items) |row| {
+        const y = row.top + 8;
+        if (y >= banner.top and y < banner.bottom) {
+            under_banner += 1;
+            try std.testing.expect(rowAt(24, y, &model, null, 0, content_bottom, null) == null);
+        } else if (y >= Tokens.header_height and y < content_bottom) {
+            try std.testing.expect(rowAt(24, y, &model, null, 0, content_bottom, null) != null);
+        }
+    }
+    try std.testing.expect(under_banner >= 1);
+    // Scrolling to the end brings the last row above the banner instead of leaving it beneath.
+    const max = maxScroll(&model, null, content_bottom, null);
+    try std.testing.expectEqual(contentBottom(&model, null, null) - content_bottom, max);
+    const last = rows.items[rows.items.len - 1];
+    try std.testing.expect(last.top + 24 - max <= content_bottom);
+}
+
 test "update banner is a bounded footer action" {
     const bounds = updateBannerRect(700, false);
     try std.testing.expect(updateBannerAt(bounds.left, bounds.top, 700, true, false));
@@ -1723,6 +1828,56 @@ test "error footer exposes an inset wrapping rect" {
     try std.testing.expect(text.right < footer.right);
     try std.testing.expect(text.top > footer.top);
     try std.testing.expect(text.bottom < footer.bottom);
+}
+
+test "sidebar draw clips rows to the content viewport and keeps status text inside the rail" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    for (0..14) |index| try model.recent_projects.append(.{
+        .path = try std.fmt.allocPrint(allocator, "project-{d}", .{index}),
+        .name = try std.fmt.allocPrint(allocator, "Project {d} with a name long enough to run far past the sidebar rail edge and into the canvas", .{index}),
+    });
+    var state = State.init(allocator);
+    defer state.deinit();
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const viewport_bottom: i32 = 500;
+    const bitmap = c.CreateCompatibleBitmap(screen, 400, viewport_bottom) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, previous);
+    const sentinel: u32 = 0x00FF00FF;
+    fill(hdc, rect(0, 0, 400, viewport_bottom), sentinel);
+    var draw_allocator = std.heap.DebugAllocator(.{}){};
+    defer std.debug.assert(draw_allocator.deinit() == .ok);
+    const long_status = "S" ** 120;
+    draw(hdc, &model, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+
+    const content_bottom = contentViewportBottom(viewport_bottom, false, false);
+    const status = statusTextRect(viewport_bottom, false, false);
+    var painted_in_content: usize = 0;
+    var y: i32 = Tokens.header_height;
+    while (y < viewport_bottom) : (y += 1) {
+        var x: i32 = 0;
+        while (x < 400) : (x += 1) {
+            const pixel = c.GetPixel(hdc, x, y);
+            if (x >= Tokens.sidebar_width) {
+                try std.testing.expectEqual(sentinel, pixel);
+                continue;
+            }
+            const background = pixel == Tokens.workspace_rail;
+            if (y < content_bottom) {
+                if (!background) painted_in_content += 1;
+            } else if (y >= status.bottom or x >= status.right) {
+                // Below the status line, and right of it, only the rail background may show.
+                try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), pixel);
+            }
+        }
+    }
+    try std.testing.expect(painted_in_content > 200);
 }
 
 test "sidebar paints an open project whose daemon name is empty" {

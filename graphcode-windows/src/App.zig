@@ -5939,10 +5939,23 @@ pub const App = struct {
         const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
         const bottom = top + 34;
         const viewport_top = Tokens.header_height;
-        const viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
+        const viewport_bottom = self.sidebarContentBottom(client.bottom);
         if (top < viewport_top) self.sidebar_scroll -= viewport_top - top;
         if (bottom > viewport_bottom) self.sidebar_scroll += bottom - viewport_bottom;
         self.clampSidebarScroll();
+    }
+
+    /// Bottom edge of the scrollable sidebar content: the sidebar viewport minus the footer
+    /// (status line, update banner, error footer) that is drawn over its lower edge.
+    fn sidebarContentBottom(self: *App, client_bottom: i32) i32 {
+        self.update_lock.lock();
+        const update_shown = self.update_state.state == .available and self.update_version.len != 0;
+        self.update_lock.unlock();
+        return Sidebar.contentViewportBottom(
+            GraphCanvas.sidebarBottom(client_bottom, self.workspace_controls, self.surface),
+            update_shown,
+            self.ingress_error.len != 0,
+        );
     }
 
     fn clampSidebarScroll(self: *App) void {
@@ -5957,7 +5970,7 @@ pub const App = struct {
             Sidebar.maxScroll(
                 &self.model,
                 inspection,
-                GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface),
+                self.sidebarContentBottom(client.bottom),
                 &self.sidebar_state,
             ),
         );
@@ -6781,7 +6794,7 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
-        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
+        const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
         const current_inspection = self.currentWorktreeInspection();
         var sidebar_rows = Sidebar.appendRows(
@@ -6978,8 +6991,8 @@ pub const App = struct {
             }
         };
         if (self.model.attention_entries.items.len != 0) {
-            const section = Sidebar.sidebarSectionBottom(&self.model, current_inspection, &self.sidebar_state);
-            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .logical = .{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 } }, false, true) catch return;
+            const section = Sidebar.sidebarSectionBottom(&self.model, current_inspection, &self.sidebar_state) - self.sidebar_scroll;
+            self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .logical = clipSidebarAccessibilityBounds(.{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, sidebar_bottom) }, false, true) catch return;
             for (self.model.attention_entries.items[0..@min(self.model.attention_entries.items.len, 4)], 0..) |entry, index| {
                 const row_offset = @as(i32, @intCast(index)) * 34;
                 const identity = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ entry.project_path, entry.node.id }) catch return;
@@ -6989,7 +7002,7 @@ pub const App = struct {
                     self.allocator.free(name);
                     return;
                 };
-                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .logical = .{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset } }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-row", identity, name, 1, .{ .logical = clipSidebarAccessibilityBounds(.{ .left = 18, .top = section + 30 + row_offset, .right = 232, .bottom = section + 60 + row_offset }, sidebar_bottom) }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, entry.node.id), true) catch return;
                 self.appendAccessibilityElement(
                     &elements,
                     &owned_identities,
@@ -6997,17 +7010,17 @@ pub const App = struct {
                     identity,
                     "Stop loop",
                     1,
-                    .{ .logical = Sidebar.needsYouStopBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, index) },
+                    .{ .logical = clipSidebarAccessibilityBounds(Sidebar.needsYouStopBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, index), sidebar_bottom) },
                     false,
                     true,
                 ) catch return;
             }
         }
         if (self.model.activity.items.len != 0) {
-            const section = Sidebar.sidebarSectionBottom(&self.model, current_inspection, &self.sidebar_state);
+            const section = Sidebar.sidebarSectionBottom(&self.model, current_inspection, &self.sidebar_state) - self.sidebar_scroll;
             const attention_rows = @min(self.model.attentionCount(), 4);
             const activity_top = section + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .logical = .{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 } }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-header", "activity", "Activity", 1, .{ .logical = clipSidebarAccessibilityBounds(.{ .left = 12, .top = activity_top, .right = 232, .bottom = activity_top + 24 }, sidebar_bottom) }, false, true) catch return;
             self.appendAccessibilityElement(
                 &elements,
                 &owned_identities,
@@ -7015,7 +7028,7 @@ pub const App = struct {
                 "attention",
                 if (self.sidebar_state.activity_attention_only) "Show all activity" else "Show attention-only activity",
                 1,
-                .{ .logical = Sidebar.activityFilterBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll) },
+                .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityFilterBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll), sidebar_bottom) },
                 false,
                 true,
             ) catch return;
@@ -7032,13 +7045,13 @@ pub const App = struct {
                     identity,
                     event.title,
                     1,
-                    .{ .logical = Sidebar.activityCardBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, visible_index) },
+                    .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityCardBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, visible_index), sidebar_bottom) },
                     false,
                     true,
                 ) catch return;
             }
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .logical = Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .left) }, false, true) catch return;
-            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .logical = Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .right) }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .left), sidebar_bottom) }, false, true) catch return;
+            self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .right), sidebar_bottom) }, false, true) catch return;
         }
         if (self.ingress_error.len != 0) {
             const bounds = (AccessibilityBounds{ .logical = Sidebar.errorFooterRect(client.bottom) }).physicalRect(self.dpi);
@@ -8705,7 +8718,7 @@ fn onWindowMessage(
             const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
             if (app.workspace_controls.rail_visible and x < rail_left) {
                 const inspection = if (app.worktree_inspection) |*value| value else null;
-                if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, sidebar_bottom, &app.sidebar_state)) |row| {
+                if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, app.sidebarContentBottom(client.bottom), &app.sidebar_state)) |row| {
                     if (row.kind == .loop and row.depth == 0 and x < 198) {
                         if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
                             if (row.index < graph.nodes.items.len) app.beginSidebarRootDrag(path, graph.nodes.items[row.index].id, y);
@@ -8876,6 +8889,14 @@ fn onWindowMessage(
                     result.* = 0;
                     return true;
                 }
+                // Rows, Needs you, and Activity scroll under the footer's top edge; the
+                // footer (status line, error footer) is not a click target for any of them.
+                const sidebar_content_bottom = app.sidebarContentBottom(client.bottom);
+                if (y >= sidebar_content_bottom) {
+                    app.clearSidebarRootDrag();
+                    result.* = 0;
+                    return true;
+                }
                 if (Sidebar.needsYouStopAt(
                     x,
                     y,
@@ -8943,7 +8964,7 @@ fn onWindowMessage(
                     &app.model,
                     if (app.worktree_inspection) |*value| value else null,
                     app.sidebar_scroll,
-                    sidebar_bottom,
+                    sidebar_content_bottom,
                     &app.sidebar_state,
                 )) |row| {
                     const ctrl = (@as(i32, c.GetKeyState(c.VK_CONTROL)) & 0x8000) != 0;
@@ -9048,7 +9069,7 @@ fn onWindowMessage(
                     &app.model,
                     inspection,
                     app.sidebar_scroll,
-                    GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                    app.sidebarContentBottom(client.bottom),
                     &app.sidebar_state,
                 )) |row| {
                     var project_path: ?[]const u8 = null;
@@ -9277,7 +9298,7 @@ fn onWindowMessage(
                         Sidebar.maxScroll(
                             &app.model,
                             if (app.worktree_inspection) |*value| value else null,
-                            GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface),
+                            app.sidebarContentBottom(client.bottom),
                             &app.sidebar_state,
                         ),
                     );
@@ -10493,6 +10514,296 @@ test "sidebar UIA bounds clip hidden rows instead of sharing visible hit rectang
         c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
         clipSidebarAccessibilityBounds(.{ .left = 12, .top = 420, .right = 232, .bottom = 444 }, 400),
     );
+}
+
+const sidebar_uia_prefixes = [_][]const u8{
+    "sidebar-section:",
+    "project:",
+    "open-project:",
+    "project-new-loop:",
+    "project-disclosure:",
+    "loop:",
+    "loop-disclosure:",
+    "worktree:",
+    "quick-chats-header:",
+    "quick-chats-disclosure:",
+    "quick-chat-new:",
+    "quick-chat-row:",
+    "needs-you-header:",
+    "needs-you-row:",
+    "needs-you-stop:",
+    "activity-header:",
+    "activity-filter:",
+    "activity-row:",
+    "activity-control:",
+};
+
+const SidebarUiaSink = struct {
+    count: usize = 0,
+    rects: [192]c.RECT = undefined,
+    names: [192][40]u8 = undefined,
+    name_lens: [192]usize = undefined,
+
+    fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+    fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+        self.count = 0;
+        for (elements) |element| {
+            const sidebar_element = for (sidebar_uia_prefixes) |prefix| {
+                if (std.mem.startsWith(u8, element.identity, prefix)) break true;
+            } else false;
+            if (!sidebar_element or self.count == self.rects.len) continue;
+            self.rects[self.count] = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+            const len = @min(element.identity.len, self.names[self.count].len);
+            @memcpy(self.names[self.count][0..len], element.identity[0..len]);
+            self.name_lens[self.count] = len;
+            self.count += 1;
+        }
+    }
+
+    fn name(self: *const @This(), index: usize) []const u8 {
+        return self.names[index][0..self.name_lens[index]];
+    }
+};
+
+fn rectIsEmpty(bounds: c.RECT) bool {
+    return bounds.left >= bounds.right or bounds.top >= bounds.bottom;
+}
+
+fn rectsIntersect(a: c.RECT, b: c.RECT) bool {
+    return a.left < b.right and a.right > b.left and a.top < b.bottom and a.bottom > b.top;
+}
+
+const FooterLayoutCase = struct { dpi: u32, width: i32, height: i32 };
+// Physical client sizes: the 1280x820 default and the 960px width from the beta18 Dev Box
+// findings, each at 96 DPI and at the logically identical 144 DPI size.
+const footer_layout_cases = [_]FooterLayoutCase{
+    .{ .dpi = 96, .width = 1280, .height = 820 },
+    .{ .dpi = 96, .width = 960, .height = 820 },
+    .{ .dpi = 144, .width = 1920, .height = 1230 },
+    .{ .dpi = 144, .width = 960, .height = 820 },
+};
+const footer_layout_controls = [_]WorkspaceControls.State{
+    .{ .rail_visible = true, .panel_visible = false, .activity_enabled = true },
+    .{ .rail_visible = true, .panel_visible = true, .activity_enabled = true },
+};
+
+fn deinitFooterLayoutApp(app: *App) void {
+    if (app.update_version.len != 0) app.allocator.free(app.update_version);
+    if (app.ingress_error.len != 0) app.allocator.free(app.ingress_error);
+    deinitOverviewTestApp(app);
+}
+
+/// A project with loops, eight Worktrees rows, two Needs-you entries, an Activity card, and
+/// Quick Chats: enough sidebar content to run past the bottom of every case's viewport.
+fn footerLayoutApp(case: FooterLayoutCase, controls: WorkspaceControls.State, update: bool, ingress: bool) !App {
+    const path = "C:\\activation-fixture";
+    var app = try overviewTestApp(case.dpi);
+    errdefer deinitFooterLayoutApp(&app);
+    try loadActivationTestFixture(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"b","project":{"path":"C:\\attention-b","name":"Attention B"},"nodes":[{"id":"b1","title":"Failed build","loopType":"turnBased","state":"failed"}],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"c","project":{"path":"C:\\attention-c","name":"Attention C"},"nodes":[{"id":"c1","title":"Question","loopType":"turnBased","state":"running","presence":{"presence":"awaitingInput"}}],"edges":[]}}}
+    );
+    for (0..2) |index| try app.model.quick_chats.append(.{
+        .id = try std.fmt.allocPrint(app.allocator, "chat-{d}", .{index}),
+        .title = try std.fmt.allocPrint(app.allocator, "Chat {d}", .{index}),
+        .backend = try app.allocator.dupe(u8, "claudeCode"),
+    });
+    try std.testing.expect(app.selectProject(path));
+    app.surface = .project;
+    app.workspace_controls = controls;
+    try installNoticeTestInspection(&app, path, 8, 4096);
+    if (c.MoveWindow(app.window.hwnd, 0, 0, case.width, case.height, 0) == 0) return error.TestWindowResizeFailed;
+    if (update) {
+        app.update_state.state = .available;
+        app.update_version = try app.allocator.dupe(u8, "9.9.9-test");
+    }
+    if (ingress) app.ingress_error = try app.allocator.dupe(u8, "Daemon ingress is unavailable");
+    return app;
+}
+
+test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280x820 and 960px, 96 and 144 DPI" {
+    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
+        var app = try footerLayoutApp(case, controls, true, ingress);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const banner = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, ingress) }).physicalRect(app.dpi);
+        var published_anywhere: usize = 0;
+        for ([_]i32{ 0, 37, 1_000_000 }) |requested_scroll| {
+            app.sidebar_scroll = requested_scroll;
+            app.clampSidebarScroll();
+            var sink: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&sink, client);
+            for (0..sink.count) |index| {
+                const bounds = sink.rects[index];
+                if (rectIsEmpty(bounds)) continue;
+                published_anywhere += 1;
+                if (rectsIntersect(bounds, banner)) {
+                    std.debug.print(
+                        "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
+                        .{
+                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
+                            case.width,       app.sidebar_scroll,
+                        },
+                    );
+                    return error.SidebarElementUnderBanner;
+                }
+                const center_x = logicalCoordinate(@divTrunc(bounds.left + bounds.right, 2), app.dpi);
+                const center_y = logicalCoordinate(@divTrunc(bounds.top + bounds.bottom, 2), app.dpi);
+                try std.testing.expect(!Sidebar.updateBannerAt(center_x, center_y, sidebar_bottom, true, ingress));
+            }
+        }
+        // A fixture that publishes nothing would pass vacuously.
+        try std.testing.expect(published_anywhere >= 3);
+    };
+}
+
+fn expectReachable(content_top: i32, content_bottom: i32, viewport_bottom: i32, max_scroll: i32) !void {
+    // Some scroll offset in [0, max_scroll] must place the whole rect inside the content viewport.
+    const lowest = @max(content_bottom - viewport_bottom, 0);
+    const highest = @min(content_top - Tokens.header_height, max_scroll);
+    if (lowest > highest) std.debug.print(
+        "unreachable sidebar rect {d}..{d}: needs scroll {d}..{d}, viewport bottom {d}, max scroll {d}\n",
+        .{ content_top, content_bottom, lowest, highest, viewport_bottom, max_scroll },
+    );
+    try std.testing.expect(lowest <= highest);
+}
+
+test "sidebar status text, CHATS label, and Needs you stay separate and reachable at 960px and 1280x820, 96 and 144 DPI" {
+    const footers = [_]struct { update: bool, ingress: bool }{
+        .{ .update = false, .ingress = false },
+        .{ .update = true, .ingress = false },
+        .{ .update = true, .ingress = true },
+    };
+    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for (footers) |footer| {
+        var app = try footerLayoutApp(case, controls, footer.update, footer.ingress);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const content_bottom = app.sidebarContentBottom(client.bottom);
+        const inspection = app.currentWorktreeInspection();
+
+        const status = Sidebar.statusTextRect(sidebar_bottom, footer.update, footer.ingress);
+        try std.testing.expect(status.top >= content_bottom);
+        try std.testing.expect(status.bottom <= sidebar_bottom);
+        try std.testing.expect(status.left >= 0 and status.right <= Tokens.sidebar_width);
+        if (footer.update) try std.testing.expect(!rectsIntersect(status, Sidebar.updateBannerRect(sidebar_bottom, footer.ingress)));
+        if (footer.ingress) try std.testing.expect(!rectsIntersect(status, Sidebar.errorFooterRect(sidebar_bottom)));
+
+        // The production clamp must agree with the content viewport, so the last row is reachable.
+        const max_scroll = Sidebar.maxScroll(&app.model, inspection, content_bottom, &app.sidebar_state);
+        app.sidebar_scroll = 1_000_000;
+        app.clampSidebarScroll();
+        try std.testing.expectEqual(max_scroll, app.sidebar_scroll);
+        try std.testing.expectEqual(content_bottom, Sidebar.contentBottom(&app.model, inspection, &app.sidebar_state) - app.sidebar_scroll);
+
+        const section = Sidebar.sidebarSectionBottom(&app.model, inspection, &app.sidebar_state);
+        var rows = try Sidebar.appendRows(app.allocator, &app.model, inspection, 0, &app.sidebar_state);
+        defer rows.deinit(app.allocator);
+        const chats = for (rows.items) |row| {
+            if (row.kind == .quick_chat_overview) break Sidebar.chatsLabelRect(row.top);
+        } else return error.TestExpectedChatsLabel;
+        try expectReachable(chats.top, chats.bottom, content_bottom, max_scroll);
+
+        const needs_you = Sidebar.needsYouLabelRect(section, 0);
+        try std.testing.expect(app.model.attentionCount() == 2);
+        try expectReachable(needs_you.top, needs_you.bottom, content_bottom, max_scroll);
+        for (0..app.model.attentionCount()) |index| {
+            const stop = Sidebar.needsYouStopBounds(&app.model, inspection, &app.sidebar_state, 0, index);
+            const row_top = section + 30 + @as(i32, @intCast(index)) * 34;
+            try expectReachable(row_top, row_top + 34, content_bottom, max_scroll);
+            try std.testing.expect(stop.top >= row_top and stop.bottom <= row_top + 34);
+            // With that row scrolled fully into view, UIA must publish its whole bounds.
+            app.sidebar_scroll = @max(row_top + 34 - content_bottom, 0);
+            var sink: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&sink, client);
+            var published = false;
+            for (0..sink.count) |element| {
+                if (!std.mem.startsWith(u8, sink.name(element), "needs-you-row:")) continue;
+                const bounds = sink.rects[element];
+                if (logicalCoordinate(bounds.top, app.dpi) == row_top - app.sidebar_scroll and
+                    logicalCoordinate(bounds.bottom, app.dpi) == row_top - app.sidebar_scroll + 30) published = true;
+            }
+            try std.testing.expect(published);
+        }
+    };
+}
+
+test "sidebar footer is not a click target for rows beneath it" {
+    const case = footer_layout_cases[0];
+    for (footer_layout_controls) |controls| {
+        var app = try footerLayoutApp(case, controls, false, false);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const content_bottom = app.sidebarContentBottom(client.bottom);
+        const inspection = app.currentWorktreeInspection();
+        var rows = try Sidebar.appendRows(app.allocator, &app.model, inspection, 0, &app.sidebar_state);
+        defer rows.deinit(app.allocator);
+        var clicked: usize = 0;
+        for (rows.items) |row| {
+            const y = row.top + 8;
+            if (y < content_bottom or y >= sidebar_bottom) continue;
+            clicked += 1;
+            try std.testing.expect(Sidebar.rowAt(80, y, &app.model, inspection, 0, content_bottom, &app.sidebar_state) == null);
+            const before_selected = try app.allocator.dupe(u8, app.selected_node_id);
+            defer app.allocator.free(before_selected);
+            const before_worktree = try app.allocator.dupe(u8, app.selected_worktree_path);
+            defer app.allocator.free(before_worktree);
+            var result: c.LRESULT = 0;
+            const lparam: c.LPARAM = @intCast(@as(u32, 80) | (@as(u32, @intCast(y)) << 16));
+            try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+            _ = onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONUP, 0, lparam, &result);
+            try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+            try std.testing.expectEqualStrings(before_selected, app.selected_node_id);
+            try std.testing.expectEqualStrings(before_worktree, app.selected_worktree_path);
+        }
+        try std.testing.expect(clicked >= 1);
+    }
+}
+
+test "wheel scrolling brings the Activity strip into the content viewport with non-empty UIA bounds" {
+    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
+        var app = try footerLayoutApp(case, controls, true, ingress);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const banner = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, ingress) }).physicalRect(app.dpi);
+
+        // The posted message the live gate sends: delta in the high word, screen point in lParam.
+        const wheel_x: u32 = @intCast(physicalCoordinate(100, app.dpi));
+        const wheel_y: u32 = @intCast(physicalCoordinate(Tokens.header_height + 20, app.dpi));
+        const wparam: c.WPARAM = @as(usize, @as(u16, @bitCast(@as(i16, -32000)))) << 16;
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_MOUSEWHEEL, wparam, @intCast(wheel_x | (wheel_y << 16)), &result));
+        try std.testing.expect(app.sidebar_scroll > 0);
+
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        var header = false;
+        var filter = false;
+        var rows: usize = 0;
+        var controls_found: usize = 0;
+        for (0..sink.count) |index| {
+            const name = sink.name(index);
+            const kind: *bool = if (std.mem.startsWith(u8, name, "activity-header:")) &header else if (std.mem.startsWith(u8, name, "activity-filter:")) &filter else continue;
+            kind.* = !rectIsEmpty(sink.rects[index]);
+        }
+        for (0..sink.count) |index| {
+            const name = sink.name(index);
+            if (!std.mem.startsWith(u8, name, "activity-row:") and !std.mem.startsWith(u8, name, "activity-control:")) continue;
+            try std.testing.expect(!rectIsEmpty(sink.rects[index]));
+            try std.testing.expect(!rectsIntersect(sink.rects[index], banner));
+            if (std.mem.startsWith(u8, name, "activity-row:")) rows += 1 else controls_found += 1;
+        }
+        try std.testing.expect(header and filter);
+        try std.testing.expect(rows >= 1 and controls_found == 2);
+    };
 }
 
 test "attended activation routes visible sidebar loop from an open stopped workspace with Worktrees and activity" {
