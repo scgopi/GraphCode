@@ -17,12 +17,14 @@ pub const passive_retry_ms: i64 = 5_000;
 pub const Probe = enum { running, live, missing };
 pub const Step = enum { idle, start_probe, attach, give_up };
 
-/// Whether a persisted pane is restored. A shell tab is (its session is recreated if it
-/// ended); a loop pane only while the daemon's session is still running. Restoring it
-/// otherwise would create a bare shell under the loop's name, and every later open would
-/// then find the loop "running" and never launch its agent.
+/// Whether a persisted pane is restored: only while its session is still running (or when
+/// the listing could not say). A shell tab's session ended with the machine, or was killed
+/// with its loop, and `zmx attach` would create a bare shell under that name: a ghost the
+/// user never asked for. A loop pane restored without its session would likewise make every
+/// later open find the loop "running" and never launch its agent.
 pub fn restoreKeepsPane(launches_agent: bool, session_live: ?bool) bool {
-    return !launches_agent or session_live != false;
+    _ = launches_agent;
+    return session_live != false;
 }
 
 pub const Wait = struct {
@@ -169,10 +171,10 @@ test "re-opening a loop being waited on extends the wait without shortening it" 
     try std.testing.expect(wait.reports_timeout);
 }
 
-test "a restored loop pane is kept only while its session runs; a shell tab always is" {
+test "a restored pane is kept only while its session runs, whether a loop's or a shell tab's" {
     try std.testing.expect(restoreKeepsPane(true, true));
     try std.testing.expect(!restoreKeepsPane(true, false));
-    try std.testing.expect(restoreKeepsPane(false, false));
+    try std.testing.expect(!restoreKeepsPane(false, false));
     try std.testing.expect(restoreKeepsPane(false, true));
 }
 
@@ -196,8 +198,9 @@ test "a listed session counts as live only while its task runs" {
     try std.testing.expect(!listingShowsLive("", "anything"));
 }
 
-test "a failed listing must not delete a saved loop pane" {
+test "a failed listing must not delete a saved pane" {
     try std.testing.expect(restoreKeepsPane(true, null));
+    try std.testing.expect(restoreKeepsPane(false, null));
 }
 
 test "a session name mentioned in another task command is not a live session" {
