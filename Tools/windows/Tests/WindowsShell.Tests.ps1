@@ -335,6 +335,31 @@ Assert-Contract ($shellSource -notmatch '\$env:GRAPHCODE_ZMX list') `
   "session tracking must not block on unrelated zmx namespaces"
 Assert-Contract ($shellSource -notmatch 'ASSUME_LOOP_SESSIONS') `
   "smoke must verify real loop sessions, not bypass launch readiness"
+# The installed shell names zmx bare; every other live case sets GRAPHCODE_ZMX to an
+# absolute path, so this case is what keeps the bare-name resolution under a gate (beta18).
+$bareNameBlock = [regex]::Match($shellSource,
+  '(?s)function Invoke-BareNameZmxShell \{.*?\r?\n\}\r?\n').Value
+Assert-Contract ($bareNameBlock.Length -gt 0) `
+  "windows-shell.ps1 must define the bare-name zmx installed-layout case"
+Assert-Contract ($bareNameBlock -match '\$start\.WorkingDirectory = \$stage' -and
+  $bareNameBlock -match 'Copy-Item -LiteralPath \$app -Destination \$stageShell' -and
+  $bareNameBlock -match 'Copy-Item -LiteralPath \$env:GRAPHCODE_ZMX -Destination \$stageZmx' -and
+  $bareNameBlock -match 'Environment\.Remove\("GRAPHCODE_ZMX"\)' -and
+  $bareNameBlock -match 'Environment\.Remove\("GRAPHCODE_GATE_CWD"\)' -and
+  $bareNameBlock -match 'holdsZmx' -and
+  $bareNameBlock -match 'has its own directory on PATH') `
+  "bare-name zmx case must start the staged shell in its own directory with GRAPHCODE_ZMX unset and no zmx on PATH"
+Assert-Contract ($bareNameBlock -match '-StubProjectPath", \$project' -and
+  $bareNameBlock -match '\$project = Join-Path \$shellRoot' -and
+  $stubSource -match '\[string\] \$StubProjectPath = "graphcode://stub/project"') `
+  "bare-name zmx case must open its loops in a real folder other than the shell's directory"
+Assert-Contract ($bareNameBlock -match 'attachSessions\.Contains\("graphcode-\$id"\)' -and
+  $bareNameBlock -match '\$shellSessions\.Count -lt 1' -and
+  $bareNameBlock -match 'BARE_NAME_ZMX_EVIDENCE_JSON') `
+  "bare-name zmx case must require the loops and a New Tab or Split Right terminal to attach through the staged zmx"
+Assert-Contract ($shellSource -match
+  '(?s)Invoke-Native "GraphCode Windows shell bare-name zmx installed-layout smoke" \{\s*Invoke-BareNameZmxShell') `
+  "bare-name zmx case must run as a windows-shell section"
 & {
   $tokens = $null
   $errors = $null

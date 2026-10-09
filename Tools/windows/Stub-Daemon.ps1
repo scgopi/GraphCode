@@ -19,7 +19,10 @@ param(
   [switch] $SeedMultiProjects,
   [string] $ProjectAPath = "",
   [string] $ProjectBPath = "",
-  [string] $PublicationControlPath = ""
+  [string] $PublicationControlPath = "",
+  # The project the stub graph belongs to. The default is not a folder; a gate that needs the
+  # shell to start terminals in a real directory names one.
+  [string] $StubProjectPath = "graphcode://stub/project"
 )
 
 $ErrorActionPreference = "Stop"
@@ -345,10 +348,11 @@ function New-StubGraphEvent {
   }
   $edgeJson = @($edges | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress })
   return '{"version":2,"kind":"event","sequence":' + $graphSequence +
-    ',"event":{"graphChanged":{"id":"stub-graph","project":{"path":"graphcode://stub/project",' +
+    ',"event":{"graphChanged":{"id":"stub-graph","project":{"path":"' + (ConvertTo-StubJsonText $StubProjectPath) + '",' +
     '"name":"Stub project","remote":false},"nodes":[' + ($nodes -join ",") + '],"edges":[' + ($edgeJson -join ",") + ']}}}'
 }
-$recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"graphcode://stub/project","name":"Stub project","remote":false}]}}'
+$recentProjects = '{"version":2,"kind":"response","requestID":"{0}","event":{"recentProjectsListed":[{"path":"' +
+  (ConvertTo-StubJsonText $StubProjectPath) + '","name":"Stub project","remote":false}]}}'
 $quickChats = '{"version":2,"kind":"response","requestID":"{0}","event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"Stub quick chat","backend":"claudeCode","createdAt":0,"activity":{"sequence":1,"text":"ready","presence":{"presence":"idle","confidence":"reported"}}},{"id":"44444444-4444-4444-8444-444444444444","title":"Review notes","backend":"copilot","createdAt":1,"activity":null}]}}'
 $success = '{"version":2,"kind":"response","requestID":"{0}","success":true}'
 $hello = '{"version":2,"kind":"hello","supportedVersions":[1,2],"selectedVersion":2}'
@@ -624,7 +628,7 @@ try {
           if ($null -ne $promotion) {
             $promotionId = [string]$promotion._0
             $variant = @($promotion.promotion.PSObject.Properties.Name)
-            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+            if ([string]$frame.command.graphCommand.            projectPath -cne $StubProjectPath -or
                 -not $nodeTitles.Contains($promotionId) -or
                 [string]$nodeLoopTypes[$promotionId] -cne "sketch" -or
                 $variant.Count -ne 1 -or
@@ -676,7 +680,7 @@ try {
           }
           $createEdge = $frame.command.graphCommand.command.createEdge
           if ($null -ne $createEdge) {
-            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+            if ([string]$frame.command.graphCommand.            projectPath -cne $StubProjectPath -or
                 -not $nodeTitles.Contains([string]$createEdge.from) -or
                 -not $nodeTitles.Contains([string]$createEdge.to) -or
                 [string]$createEdge.from -ceq [string]$createEdge.to -or
@@ -706,7 +710,7 @@ try {
           $updateEdge = $frame.command.graphCommand.command.updateEdge
           if ($null -ne $updateEdge) {
             $matches = @($edges | Where-Object { $_.id -ceq [string]$updateEdge.id })
-            if ([string]$frame.command.graphCommand.projectPath -cne "graphcode://stub/project" -or
+            if ([string]$frame.command.graphCommand.            projectPath -cne $StubProjectPath -or
                 $matches.Count -ne 1 -or
                 $matches[0].from -cne [string]$updateEdge.from -or
                 $matches[0].to -cne [string]$updateEdge.to -or
