@@ -28,6 +28,7 @@ const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
 const Clipboard = @import("Clipboard.zig");
+const TerminalKeys = @import("TerminalKeys.zig");
 const Tokens = @import("DesignTokens.zig");
 const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
@@ -1565,6 +1566,7 @@ pub const App = struct {
         defer if (use_gdiplus) GdiplusAA.deinit();
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.window.key_callback = &onShellKey;
+        self.window.terminal_route = &onTerminalKeyRoute;
         try self.revalidateWorkspaceIdentity();
         if (!self.window.gesture_config_registered) {
             // Non-fatal: the canvas simply falls back to wheel-only zoom (no
@@ -6860,6 +6862,13 @@ pub const App = struct {
             }
         }
         self.syncHeaderFocus();
+    }
+
+    fn onTerminalKeyRoute(context: ?*anyopaque, message: *const c.MSG, ctrl: bool, shift: bool, alt: bool) MainWindow.TerminalKeyRoute {
+        const self: *App = @ptrCast(@alignCast(context orelse return .default));
+        const workspace = self.workspace orelse return .default;
+        if (!workspace.ownsSurfaceWindow(message.hwnd)) return .default;
+        return TerminalKeys.routeChord(@intCast(message.wParam), .{ .ctrl = ctrl, .shift = shift, .alt = alt });
     }
 
     fn onShellKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
@@ -12507,7 +12516,7 @@ const LiveKeyboard = struct {
     index: usize,
     original_state: [256]u8,
 
-    const Chord = struct { vk: u32, ctrl: bool = false, shift: bool = false, alt: bool = false, extended: bool = false };
+    const Chord = struct { vk: u32, ctrl: bool = false, shift: bool = false, alt: bool = false, extended: bool = false, repeat: bool = false };
 
     fn begin(fixture: *LiveTerminalFixture, session: []const u8) !LiveKeyboard {
         const class = std.unicode.utf8ToUtf16LeStringLiteral("WinghosttyEmbeddableSurface");
@@ -12519,12 +12528,28 @@ const LiveKeyboard = struct {
         _ = c.ShowWindow(fixture.app.window.hwnd, c.SW_SHOWNOACTIVATE);
         _ = c.SetFocus(surface);
         if (c.GetFocus() != surface) return error.TestTerminalCannotTakeFocus;
+        // The production accelerator table and terminal key routing, as the shell installs them.
+        fixture.app.window.accelerators = MainWindow.createAccelerators();
+        fixture.app.window.terminal_route = &App.onTerminalKeyRoute;
+        fixture.app.window.context = &fixture.app;
         return .{ .fixture = fixture, .surface = surface, .index = index, .original_state = original };
     }
 
     fn end(self: *LiveKeyboard) void {
         _ = c.SetKeyboardState(&self.original_state);
-        _ = c.ShowWindow(self.fixture.app.window.hwnd, c.SW_HIDE);
+        const window = &self.fixture.app.window;
+        if (window.accelerators != null) _ = c.DestroyAcceleratorTable(window.accelerators);
+        window.accelerators = null;
+        window.terminal_route = null;
+        window.context = null;
+        _ = c.ShowWindow(window.hwnd, c.SW_HIDE);
+    }
+
+    /// The command or system message the shell posted to its own window, if any.
+    fn takePosted(self: *LiveKeyboard, message: c.UINT) ?c.WPARAM {
+        var posted: c.MSG = undefined;
+        if (c.PeekMessageW(&posted, self.fixture.app.window.hwnd, message, message, c.PM_REMOVE) == 0) return null;
+        return posted.wParam;
     }
 
     fn setModifiers(chord: Chord) !void {
@@ -12553,7 +12578,8 @@ const LiveKeyboard = struct {
         message.message = if (chord.alt) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
         message.wParam = chord.vk;
         const scan = c.MapVirtualKeyW(chord.vk, c.MAPVK_VK_TO_VSC);
-        message.lParam = @intCast(1 | (scan << 16) | (@as(u32, @intFromBool(chord.extended)) << 24));
+        message.lParam = @intCast(1 | (scan << 16) | (@as(u32, @intFromBool(chord.extended)) << 24) |
+            (@as(u32, @intFromBool(chord.repeat)) << 30));
         const keys = MainWindow.KeyContext{
             .active = true,
             .owner_enabled = true,
@@ -12644,6 +12670,183 @@ test "live terminal keyboard: clipboard chords reach the workspace and never lea
     try keyboard.press(.{ .vk = 'C', .ctrl = true });
     try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
     try std.testing.expectEqual(@as(usize, 'C'), ClipboardRouteProbe.key);
+    try keyboard.drainInput(&sent);
+    try std.testing.expectEqualStrings("", sent.items);
+}
+
+const KeyTableCase = struct {
+    name: []const u8,
+    chord: LiveKeyboard.Chord,
+    expected: []const u8,
+};
+
+fn expectKeyTable(keyboard: *LiveKeyboard, cases: []const KeyTableCase) !void {
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+    var mismatches: usize = 0;
+    for (cases) |case| {
+        try keyboard.press(case.chord);
+        try keyboard.drainInput(&sent);
+        if (!std.mem.eql(u8, case.expected, sent.items)) {
+            mismatches += 1;
+            std.debug.print("key {s}: expected {any}, observed {any}\n", .{ case.name, case.expected, sent.items });
+        }
+    }
+    if (mismatches != 0) {
+        std.debug.print("{d} of {d} keys did not reach the shell as expected\n", .{ mismatches, cases.len });
+        return error.TestKeyTableMismatch;
+    }
+}
+
+test "live terminal keyboard: key table of editing, cursor, function, and Ctrl/Alt keys" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+
+    const f1: u32 = c.VK_F1;
+    const cases = [_]KeyTableCase{
+        .{ .name = "Enter", .chord = .{ .vk = c.VK_RETURN }, .expected = "\r" },
+        .{ .name = "Tab", .chord = .{ .vk = c.VK_TAB }, .expected = "\t" },
+        .{ .name = "Shift+Tab", .chord = .{ .vk = c.VK_TAB, .shift = true }, .expected = "\x1b[Z" },
+        .{ .name = "Backspace", .chord = .{ .vk = c.VK_BACK }, .expected = "\x7f" },
+        .{ .name = "Ctrl+Backspace", .chord = .{ .vk = c.VK_BACK, .ctrl = true }, .expected = "\x08" },
+        .{ .name = "Escape", .chord = .{ .vk = c.VK_ESCAPE }, .expected = "\x1b" },
+        .{ .name = "Up", .chord = .{ .vk = c.VK_UP, .extended = true }, .expected = "\x1b[A" },
+        .{ .name = "Down", .chord = .{ .vk = c.VK_DOWN, .extended = true }, .expected = "\x1b[B" },
+        .{ .name = "Right", .chord = .{ .vk = c.VK_RIGHT, .extended = true }, .expected = "\x1b[C" },
+        .{ .name = "Left", .chord = .{ .vk = c.VK_LEFT, .extended = true }, .expected = "\x1b[D" },
+        .{ .name = "Ctrl+Left", .chord = .{ .vk = c.VK_LEFT, .ctrl = true, .extended = true }, .expected = "\x1b[1;5D" },
+        .{ .name = "Alt+Left", .chord = .{ .vk = c.VK_LEFT, .alt = true, .extended = true }, .expected = "\x1b[1;3D" },
+        .{ .name = "Shift+Right", .chord = .{ .vk = c.VK_RIGHT, .shift = true, .extended = true }, .expected = "\x1b[1;2C" },
+        .{ .name = "Home", .chord = .{ .vk = c.VK_HOME, .extended = true }, .expected = "\x1b[H" },
+        .{ .name = "End", .chord = .{ .vk = c.VK_END, .extended = true }, .expected = "\x1b[F" },
+        .{ .name = "Insert", .chord = .{ .vk = c.VK_INSERT, .extended = true }, .expected = "\x1b[2~" },
+        .{ .name = "Delete", .chord = .{ .vk = c.VK_DELETE, .extended = true }, .expected = "\x1b[3~" },
+        .{ .name = "Ctrl+Delete", .chord = .{ .vk = c.VK_DELETE, .ctrl = true, .extended = true }, .expected = "\x1b[3;5~" },
+        .{ .name = "PageUp", .chord = .{ .vk = c.VK_PRIOR, .extended = true }, .expected = "\x1b[5~" },
+        .{ .name = "PageDown", .chord = .{ .vk = c.VK_NEXT, .extended = true }, .expected = "\x1b[6~" },
+        .{ .name = "F1", .chord = .{ .vk = f1 }, .expected = "\x1bOP" },
+        .{ .name = "F4", .chord = .{ .vk = f1 + 3 }, .expected = "\x1bOS" },
+        .{ .name = "F5", .chord = .{ .vk = f1 + 4 }, .expected = "\x1b[15~" },
+        .{ .name = "F12", .chord = .{ .vk = f1 + 11 }, .expected = "\x1b[24~" },
+        .{ .name = "a", .chord = .{ .vk = 'A' }, .expected = "a" },
+        .{ .name = "Shift+A", .chord = .{ .vk = 'A', .shift = true }, .expected = "A" },
+        .{ .name = "Space", .chord = .{ .vk = c.VK_SPACE }, .expected = " " },
+        .{ .name = "Ctrl+Space", .chord = .{ .vk = c.VK_SPACE, .ctrl = true }, .expected = "\x00" },
+        .{ .name = "Ctrl+A", .chord = .{ .vk = 'A', .ctrl = true }, .expected = "\x01" },
+        .{ .name = "Ctrl+R", .chord = .{ .vk = 'R', .ctrl = true }, .expected = "\x12" },
+        .{ .name = "Ctrl+Z", .chord = .{ .vk = 'Z', .ctrl = true }, .expected = "\x1a" },
+        .{ .name = "Ctrl+[", .chord = .{ .vk = c.VK_OEM_4, .ctrl = true }, .expected = "\x1b" },
+        .{ .name = "Ctrl+]", .chord = .{ .vk = c.VK_OEM_6, .ctrl = true }, .expected = "\x1d" },
+        .{ .name = "Alt+B", .chord = .{ .vk = 'B', .alt = true }, .expected = "\x1bb" },
+        .{ .name = "Alt+Shift+B", .chord = .{ .vk = 'B', .alt = true, .shift = true }, .expected = "\x1bB" },
+        .{ .name = "Alt+.", .chord = .{ .vk = c.VK_OEM_PERIOD, .alt = true }, .expected = "\x1b." },
+        .{ .name = "Alt+Backspace", .chord = .{ .vk = c.VK_BACK, .alt = true }, .expected = "\x1b\x7f" },
+        // Chords the menu accelerators used to take from a focused terminal.
+        .{ .name = "Ctrl+D", .chord = .{ .vk = 'D', .ctrl = true }, .expected = "\x04" },
+        .{ .name = "Ctrl+W", .chord = .{ .vk = 'W', .ctrl = true }, .expected = "\x17" },
+        .{ .name = "Ctrl+S", .chord = .{ .vk = 'S', .ctrl = true }, .expected = "\x13" },
+        .{ .name = "Ctrl+T", .chord = .{ .vk = 'T', .ctrl = true }, .expected = "\x14" },
+        .{ .name = "Ctrl+N", .chord = .{ .vk = 'N', .ctrl = true }, .expected = "\x0e" },
+        // The documented terminal-safe chords and the application keys that stay documented are
+        // handled by the shell, so nothing reaches the program.
+        .{ .name = "Ctrl+Shift+T", .chord = .{ .vk = 'T', .ctrl = true, .shift = true }, .expected = "" },
+        .{ .name = "Ctrl+Shift+N", .chord = .{ .vk = 'N', .ctrl = true, .shift = true }, .expected = "" },
+        .{ .name = "Alt+Shift+D", .chord = .{ .vk = 'D', .alt = true, .shift = true }, .expected = "" },
+        .{ .name = "Ctrl+Shift+[", .chord = .{ .vk = c.VK_OEM_4, .ctrl = true, .shift = true }, .expected = "" },
+        .{ .name = "Ctrl+Shift+]", .chord = .{ .vk = c.VK_OEM_6, .ctrl = true, .shift = true }, .expected = "" },
+        .{ .name = "Ctrl+J", .chord = .{ .vk = 'J', .ctrl = true }, .expected = "" },
+        .{ .name = "Ctrl+O", .chord = .{ .vk = 'O', .ctrl = true }, .expected = "" },
+    };
+    try expectKeyTable(&keyboard, &cases);
+}
+
+test "live terminal keyboard: application cursor keys mode and key repeat reach the program" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const slot = &fixture.workspace.surfaces[keyboard.index];
+    slot.vt = try @import("TerminalVt.zig").State.create(std.testing.allocator, 20, 3);
+
+    try expectKeyTable(&keyboard, &[_]KeyTableCase{
+        .{ .name = "Up (normal mode)", .chord = .{ .vk = c.VK_UP, .extended = true }, .expected = "\x1b[A" },
+    });
+    try slot.vt.?.feed("\x1b[?1h");
+    try expectKeyTable(&keyboard, &[_]KeyTableCase{
+        .{ .name = "Up (application mode)", .chord = .{ .vk = c.VK_UP, .extended = true }, .expected = "\x1bOA" },
+        .{ .name = "Down (application mode)", .chord = .{ .vk = c.VK_DOWN, .extended = true }, .expected = "\x1bOB" },
+        .{ .name = "Home (application mode)", .chord = .{ .vk = c.VK_HOME, .extended = true }, .expected = "\x1bOH" },
+        .{ .name = "Ctrl+Left (application mode)", .chord = .{ .vk = c.VK_LEFT, .ctrl = true, .extended = true }, .expected = "\x1b[1;5D" },
+        .{ .name = "Up auto-repeat", .chord = .{ .vk = c.VK_UP, .extended = true, .repeat = true }, .expected = "\x1bOA" },
+        .{ .name = "Backspace auto-repeat", .chord = .{ .vk = c.VK_BACK, .repeat = true }, .expected = "\x7f" },
+        .{ .name = "a auto-repeat", .chord = .{ .vk = 'A', .repeat = true }, .expected = "a" },
+    });
+    try slot.vt.?.feed("\x1b[?1l");
+    try expectKeyTable(&keyboard, &[_]KeyTableCase{
+        .{ .name = "Up (normal mode again)", .chord = .{ .vk = c.VK_UP, .extended = true }, .expected = "\x1b[A" },
+    });
+}
+
+test "live terminal keyboard: dead keys and AltGr still commit text instead of being encoded as chords" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const original_layout = c.GetKeyboardLayout(0);
+    defer _ = c.ActivateKeyboardLayout(original_layout, 0);
+
+    const international = c.LoadKeyboardLayoutW(std.unicode.utf8ToUtf16LeStringLiteral("00020409"), c.KLF_NOTELLSHELL) orelse
+        return error.SkipZigTest;
+    defer _ = c.UnloadKeyboardLayout(international);
+    if (c.ActivateKeyboardLayout(international, 0) == null) return error.SkipZigTest;
+    try expectKeyTable(&keyboard, &[_]KeyTableCase{
+        .{ .name = "US-International dead quote", .chord = .{ .vk = c.VK_OEM_7 }, .expected = "" },
+        .{ .name = "US-International e after the dead quote", .chord = .{ .vk = 'E' }, .expected = "\xc3\xa9" },
+        .{ .name = "US-International dead acute then a", .chord = .{ .vk = c.VK_OEM_7 }, .expected = "" },
+        .{ .name = "US-International a after the dead acute", .chord = .{ .vk = 'A' }, .expected = "\xc3\xa1" },
+    });
+
+    const german = c.LoadKeyboardLayoutW(std.unicode.utf8ToUtf16LeStringLiteral("00000407"), c.KLF_NOTELLSHELL) orelse
+        return error.SkipZigTest;
+    defer _ = c.UnloadKeyboardLayout(german);
+    if (c.ActivateKeyboardLayout(german, 0) == null) return error.SkipZigTest;
+    try expectKeyTable(&keyboard, &[_]KeyTableCase{
+        .{ .name = "German AltGr+Q (@)", .chord = .{ .vk = 'Q', .ctrl = true, .alt = true }, .expected = "@" },
+    });
+}
+
+test "live terminal keyboard: Ctrl+Shift+W and the Windows system keys become shell commands" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+
+    try keyboard.press(.{ .vk = 'W', .ctrl = true, .shift = true });
+    try std.testing.expectEqual(@as(?c.WPARAM, @intFromEnum(MainWindow.Command.close_tab)), keyboard.takePosted(c.WM_COMMAND));
+    try keyboard.press(.{ .vk = c.VK_F4, .alt = true });
+    try std.testing.expectEqual(@as(?c.WPARAM, c.SC_CLOSE), keyboard.takePosted(c.WM_SYSCOMMAND));
+    try keyboard.press(.{ .vk = c.VK_SPACE, .alt = true });
+    try std.testing.expectEqual(@as(?c.WPARAM, c.SC_KEYMENU), keyboard.takePosted(c.WM_SYSCOMMAND));
     try keyboard.drainInput(&sent);
     try std.testing.expectEqualStrings("", sent.items);
 }

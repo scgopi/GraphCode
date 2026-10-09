@@ -57,6 +57,74 @@ pub fn clipboardCommand(vk: u32, mods: Modifiers, has_selection: bool) ?Clipboar
     return null;
 }
 
+/// What the shell does with a chord typed while a terminal has keyboard focus.
+pub const Route = enum {
+    /// Normal shell handling: menu accelerators and shortcuts apply.
+    default,
+    /// The key belongs to the program in the terminal; no accelerator may take it.
+    terminal,
+    /// Ctrl+Shift+W closes the terminal tab (Worktrees owns it outside a terminal).
+    close_tab,
+    /// Alt+F4: the terminal window swallows system keys, so the shell closes the window.
+    system_close,
+    /// Alt+Space: the shell opens the window menu instead of typing a space.
+    system_menu,
+};
+
+const vk_f4: u32 = 0x73;
+const vk_space: u32 = 0x20;
+const vk_oem_4: u32 = 0xDB;
+const vk_oem_6: u32 = 0xDD;
+
+/// Terminal-focused keys win: plain Ctrl+D (EOF), Ctrl+W (delete word), Ctrl+S (XOFF and
+/// forward search), Ctrl+T (transpose), Ctrl+N (next history), and Ctrl+[ / Ctrl+] (ESC, GS)
+/// belong to the program in the terminal. Their menu commands keep the same keys elsewhere
+/// and have terminal-safe alternatives: Ctrl+Shift+T, Ctrl+Shift+N, Alt+Shift+D, Ctrl+Shift+W,
+/// and Ctrl+Shift+[ / ].
+pub fn routeChord(vk: u32, mods: Modifiers) Route {
+    if (mods.alt and !mods.ctrl and !mods.shift) {
+        if (vk == vk_f4) return .system_close;
+        if (vk == vk_space) return .system_menu;
+    }
+    if (mods.ctrl and mods.shift and !mods.alt and vk == 'W') return .close_tab;
+    if (mods.ctrl and !mods.shift and !mods.alt) {
+        switch (vk) {
+            'D', 'W', 'S', 'T', 'N', vk_oem_4, vk_oem_6 => return .terminal,
+            else => {},
+        }
+    }
+    return .default;
+}
+
+test "terminal-focused Ctrl chords with shell meanings are terminal input" {
+    for ([_]u32{ 'D', 'W', 'S', 'T', 'N', 0xDB, 0xDD }) |vk| {
+        try std.testing.expectEqual(Route.terminal, routeChord(vk, .{ .ctrl = true }));
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{ .ctrl = true, .alt = true }));
+    }
+}
+
+test "chords that keep their application meaning in a terminal" {
+    // Ctrl+J, Ctrl+O, Ctrl+R are not claimed here: J and O stay documented application keys,
+    // and R already reached the shell.
+    for ([_]u32{ 'J', 'O', 'R', 0x22, 0x21, 0xBC }) |vk| {
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{ .ctrl = true }));
+    }
+    try std.testing.expectEqual(Route.default, routeChord('T', .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord('D', .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord(0xDB, .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord('A', .{}));
+}
+
+test "Ctrl+Shift+W closes the terminal tab and Alt+F4 or Alt+Space stay Windows system keys" {
+    try std.testing.expectEqual(Route.close_tab, routeChord('W', .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord('W', .{ .ctrl = true, .shift = true, .alt = true }));
+    try std.testing.expectEqual(Route.system_close, routeChord(0x73, .{ .alt = true }));
+    try std.testing.expectEqual(Route.system_menu, routeChord(0x20, .{ .alt = true }));
+    try std.testing.expectEqual(Route.default, routeChord(0x73, .{}));
+    try std.testing.expectEqual(Route.default, routeChord(0x20, .{}));
+    try std.testing.expectEqual(Route.default, routeChord(0x73, .{ .alt = true, .shift = true }));
+}
+
 test "Menu key and Shift+F10 open the terminal context menu" {
     try std.testing.expect(opensContextMenu(vk_apps, .{}));
     try std.testing.expect(opensContextMenu(vk_apps, .{ .shift = true }));

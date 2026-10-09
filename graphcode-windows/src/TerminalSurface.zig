@@ -8,6 +8,7 @@ const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
 const TerminalVt = @import("TerminalVt.zig");
 const TerminalKeys = @import("TerminalKeys.zig");
+const TerminalKeyEncoding = @import("TerminalKeyEncoding.zig");
 const ZmxSession = @import("ZmxSession.zig");
 const LoopLaunchWait = @import("LoopLaunchWait.zig");
 
@@ -2060,6 +2061,17 @@ pub const Workspace = struct {
     fn runContextMenu(self: *Workspace) void {
         const callback = self.key_callback orelse return;
         callback(self.key_callback_context, TerminalKeys.vk_apps, false, false);
+    }
+
+    /// Whether `window` is one of this workspace's live terminal surface windows.
+    pub fn ownsSurfaceWindow(self: *const Workspace, window: c.HWND) bool {
+        if (window == null) return false;
+        for (self.surfaces) |slot| {
+            if (slot.destroying or slot.destroyed) continue;
+            const surface = slot.surface orelse continue;
+            if (c.winghostty_surface_get_hwnd(surface) == window) return true;
+        }
+        return false;
     }
 
     pub fn hasSelection(self: *const Workspace) bool {
@@ -4146,7 +4158,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
         if (event.action == c.WINGHOSTTY_KEY_PRESS) workspace.runContextMenu();
         return;
     }
-    if (isApplicationShortcut(event.virtual_key, ctrl) or
+    if (isApplicationShortcut(event.virtual_key, ctrl, shift) or
         (event.virtual_key == c.VK_TAB and
             (modifiers.alt or (event.modifiers & ~(TerminalKeys.provider_shift | TerminalKeys.provider_ctrl | TerminalKeys.provider_alt)) != 0)))
     {
@@ -4155,19 +4167,43 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
         return;
     }
 
-    const bytes: []const u8 = switch (event.virtual_key) {
-        c.VK_RETURN => "\r",
-        c.VK_BACK => "\x08",
-        c.VK_TAB => if (shift) "\x1b[Z" else "\t",
-        c.VK_ESCAPE => "\x1b",
-        c.VK_UP => "\x1b[A",
-        c.VK_DOWN => "\x1b[B",
-        c.VK_LEFT => "\x1b[D",
-        c.VK_RIGHT => "\x1b[C",
-        else => return,
+    var text_buffer: [8]u8 = undefined;
+    const key = TerminalKeyEncoding.Event{
+        .vk = event.virtual_key,
+        .action = if (event.action == c.WINGHOSTTY_KEY_REPEAT) .repeat else .press,
+        .mods = modifiers,
+        .extended = (event.flags & 1) != 0,
+        .text = if (modifiers.alt and !modifiers.ctrl) altChordText(event, &text_buffer) else "",
     };
+    var sequence_buffer: [TerminalKeyEncoding.max_sequence_bytes]u8 = undefined;
+    const terminal: TerminalVt.c.GhosttyTerminal = if (slot.vt) |state| state.terminal else null;
+    const bytes = switch (TerminalKeyEncoding.encode(&sequence_buffer, key, terminal)) {
+        .not_encoded => return,
+        .encoded => |sequence| sequence,
+    };
+    // Windows also turns Enter, Tab, Backspace, Escape, Ctrl+Space and Alt chords into WM_CHAR;
+    // the encoded sequence replaces that text instead of arriving twice.
+    discardTranslatedCharacters(c.GetFocus());
     const index = surfaceIndex(workspace, surface) orelse return;
+    slot.accessibility_selection = null;
     workspace.enqueueInput(index, bytes);
+}
+
+/// What an Alt chord's key types on its own: Alt and Ctrl are cleared so ToUnicodeEx reports
+/// the character (Shift and layout included), without disturbing dead-key state.
+fn altChordText(event: *const c.winghostty_key_event, buffer: *[8]u8) []const u8 {
+    var state: [256]u8 = undefined;
+    if (c.GetKeyboardState(&state) == 0) return "";
+    for ([_]usize{ c.VK_MENU, c.VK_LMENU, c.VK_RMENU, c.VK_CONTROL, c.VK_LCONTROL, c.VK_RCONTROL }) |key| state[key] = 0;
+    var units: [8]u16 = undefined;
+    const layout: c.HKL = if (event.keyboard_layout != 0)
+        @import("Win32.zig").opaquePointerFromInt(c.HKL, event.keyboard_layout)
+    else
+        c.GetKeyboardLayout(0);
+    const count = c.ToUnicodeEx(event.virtual_key, event.scan_code, &state, &units, units.len, 0x4, layout);
+    if (count <= 0 or units[0] < 0x20) return "";
+    const length = std.unicode.utf16LeToUtf8(buffer, units[0..@intCast(count)]) catch return "";
+    return buffer[0..length];
 }
 
 fn slotHasSelection(slot: *const Surface) bool {
@@ -4184,11 +4220,13 @@ fn discardTranslatedCharacters(target: c.HWND) void {
     while (c.PeekMessageW(&message, target, c.WM_SYSCHAR, c.WM_SYSDEADCHAR, c.PM_REMOVE) != 0) {}
 }
 
-fn isApplicationShortcut(key: usize, ctrl: bool) bool {
+fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
     if (key == c.VK_TAB) return ctrl;
     if (!ctrl) return false;
     return switch (key) {
-        'O', 'J', 'N', 'S', 'T', 'W', 'D', c.VK_PRIOR, c.VK_NEXT, 0xDB, 0xDD, 0xBC => true,
+        'O', 'J', c.VK_PRIOR, c.VK_NEXT, 0xBC => true,
+        // Ctrl+Shift+[ and ] move between panes; plain Ctrl+[ (ESC) and Ctrl+] belong to the shell.
+        0xDB, 0xDD => shift,
         else => false,
     };
 }
@@ -4373,18 +4411,26 @@ test "ordinary Tab production dispatch reaches the real terminal key callback" {
     }
 }
 
-test "TerminalSurface.isApplicationShortcut forwards registered terminal shortcuts" {
-    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true));
-    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true));
-    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true));
-    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false));
-    try std.testing.expect(isApplicationShortcut(0xBC, true));
-    try std.testing.expect(isApplicationShortcut('W', true));
-    try std.testing.expect(!isApplicationShortcut('C', true));
-    try std.testing.expect(!isApplicationShortcut('V', true));
-    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false));
-    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false));
-    try std.testing.expect(!isApplicationShortcut('M', true));
+test "TerminalSurface.isApplicationShortcut forwards only the chords a terminal does not keep" {
+    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, false));
+    try std.testing.expect(isApplicationShortcut(0xBC, true, false));
+    try std.testing.expect(isApplicationShortcut('O', true, false));
+    try std.testing.expect(isApplicationShortcut('J', true, false));
+    // Ctrl+D/W/S/T/N and Ctrl+[ / ] are terminal input: EOF, delete word, XOFF, transpose, next
+    // history, ESC, and GS. Ctrl+Shift+[ / ] move between panes.
+    for ([_]usize{ 'D', 'W', 'S', 'T', 'N', 0xDB, 0xDD }) |key| {
+        try std.testing.expect(!isApplicationShortcut(key, true, false));
+    }
+    try std.testing.expect(isApplicationShortcut(0xDB, true, true));
+    try std.testing.expect(isApplicationShortcut(0xDD, true, true));
+    try std.testing.expect(!isApplicationShortcut('C', true, true));
+    try std.testing.expect(!isApplicationShortcut('V', true, true));
+    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false, false));
+    try std.testing.expect(!isApplicationShortcut('M', true, false));
 }
 
 // The pinned provider fills winghostty_key_event.modifiers from GetKeyState using the Win32
@@ -4621,8 +4667,9 @@ test "provider Control+Shift bits route terminal clipboard chords to the workspa
 
 fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
     const index = surfaceIndex(workspace, surface) orelse return;
+    slot.accessibility_selection = null;
     workspace.enqueueInput(index, text[0..length]);
 }
 
