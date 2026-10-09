@@ -13,10 +13,22 @@ pub const MessageCallback = *const fn (
 
 pub const KeyCallback = *const fn (context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool;
 
+pub const TerminalKeyRoute = @import("TerminalKeys.zig").Route;
+
+/// Reports how a key aimed at `message.hwnd` is handled when that window is a terminal.
+pub const TerminalRouteCallback = *const fn (
+    context: ?*anyopaque,
+    message: *const c.MSG,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) TerminalKeyRoute;
+
 const MessageDispatchApi = struct {
     const translateAccelerator = c.TranslateAcceleratorW;
     const translateMessage = c.TranslateMessage;
     const dispatchMessage = c.DispatchMessageW;
+    pub const postMessage = c.PostMessageW;
 };
 
 pub const Command = enum(u16) {
@@ -166,6 +178,7 @@ pub const Window = struct {
     context: ?*anyopaque = null,
     callback: ?MessageCallback = null,
     key_callback: ?KeyCallback = null,
+    terminal_route: ?TerminalRouteCallback = null,
     accelerators: c.HACCEL = null,
     pending_native_f10: ?struct { down: c.MSG, owner: c.HWND, menu: c.HMENU } = null,
     class_name: [*:0]const u16 = class_name.ptr,
@@ -247,9 +260,25 @@ pub const Window = struct {
             self.pending_native_f10 = null;
             return;
         }
+        const route = self.terminalRouteFor(message, keys);
+        switch (route) {
+            .default, .terminal => {},
+            .close_tab => {
+                self.postWindowMessage(Api, c.WM_COMMAND, @intFromEnum(Command.close_tab), 0);
+                return;
+            },
+            .system_close => {
+                self.postWindowMessage(Api, c.WM_SYSCOMMAND, c.SC_CLOSE, 0);
+                return;
+            },
+            .system_menu => {
+                self.postWindowMessage(Api, c.WM_SYSCOMMAND, c.SC_KEYMENU, ' ');
+                return;
+            },
+        }
         const ordinary_tab = message.message == c.WM_KEYDOWN and message.wParam == c.VK_TAB and !keys.ctrl and !keys.alt;
-        const accelerator_eligible = !ordinary_tab or
-            (self.hwnd != null and message.hwnd == self.hwnd and focused == self.hwnd and keys.eligible());
+        const accelerator_eligible = route != .terminal and (!ordinary_tab or
+            (self.hwnd != null and message.hwnd == self.hwnd and focused == self.hwnd and keys.eligible()));
         if (accelerator_eligible and self.accelerators != null and Api.translateAccelerator(self.hwnd, self.accelerators, message) != 0) {
             self.pending_native_f10 = null;
             return;
@@ -257,6 +286,18 @@ pub const Window = struct {
         if (self.dispatchNativeF10(message, keys, focused)) return;
         _ = Api.translateMessage(message);
         _ = Api.dispatchMessage(message);
+    }
+
+    fn terminalRouteFor(self: *Window, message: *const c.MSG, keys: KeyContext) TerminalKeyRoute {
+        if (message.message != c.WM_KEYDOWN and message.message != c.WM_SYSKEYDOWN) return .default;
+        if (!keys.eligible()) return .default;
+        const callback = self.terminal_route orelse return .default;
+        return callback(self.context, message, keys.ctrl, keys.shift, keys.alt);
+    }
+
+    fn postWindowMessage(self: *Window, comptime Api: type, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) void {
+        if (self.hwnd == null) return;
+        if (@hasDecl(Api, "postMessage")) _ = Api.postMessage(self.hwnd, message, wparam, lparam);
     }
 
     fn consumeRejectedCycleKey(self: *Window, message: *const c.MSG, keys: KeyContext) bool {
@@ -568,21 +609,21 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(loop, "Next Loop\tTab", @intFromEnum(Command.next_loop));
     append(loop, "Previous Loop\tShift+Tab", @intFromEnum(Command.previous_loop));
     separator(loop);
-    append(loop, "New Loop...\tCtrl+N", @intFromEnum(Command.create_node));
+    append(loop, "New Loop...\tCtrl+Shift+N", @intFromEnum(Command.create_node));
     append(loop, "Create Edge...", @intFromEnum(Command.create_edge));
     append(loop, "Show in Graph\tCtrl+Shift+G", @intFromEnum(Command.show_graph));
-    append(loop, "Stop Loop\tCtrl+S", @intFromEnum(Command.stop_loop));
+    append(loop, "Stop Loop\tCtrl+S outside terminal", @intFromEnum(Command.stop_loop));
 
-    append(terminal, "New Tab\tCtrl+T", @intFromEnum(Command.new_tab));
-    append(terminal, "Close Tab\tCtrl+W", @intFromEnum(Command.close_tab));
+    append(terminal, "New Tab\tCtrl+Shift+T", @intFromEnum(Command.new_tab));
+    append(terminal, "Close Tab\tCtrl+W (Ctrl+Shift+W in terminal)", @intFromEnum(Command.close_tab));
     separator(terminal);
-    append(terminal, "Split Right\tCtrl+D", @intFromEnum(Command.split_right));
+    append(terminal, "Split Right\tAlt+Shift+D", @intFromEnum(Command.split_right));
     append(terminal, "Split Down\tCtrl+Shift+D", @intFromEnum(Command.split_down));
     separator(terminal);
     append(terminal, "Next Tab\tCtrl+PageDown", @intFromEnum(Command.next_tab));
     append(terminal, "Previous Tab\tCtrl+PageUp", @intFromEnum(Command.previous_tab));
-    append(terminal, "Focus Next Pane\tCtrl+]", @intFromEnum(Command.focus_next_pane));
-    append(terminal, "Focus Previous Pane\tCtrl+[", @intFromEnum(Command.focus_previous_pane));
+    append(terminal, "Focus Next Pane\tCtrl+Shift+]", @intFromEnum(Command.focus_next_pane));
+    append(terminal, "Focus Previous Pane\tCtrl+Shift+[", @intFromEnum(Command.focus_previous_pane));
     separator(terminal);
     append(terminal, "Copy\tCtrl+Shift+C", @intFromEnum(Command.terminal_copy));
     append(terminal, "Paste\tCtrl+Shift+V", @intFromEnum(Command.terminal_paste));
@@ -615,6 +656,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert");
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V / Shift+Insert");
     appendInfo(discovery, "Terminal context menu\tRight-click / Menu key / Shift+F10");
+    appendInfo(discovery, "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
     appendInfo(discovery, "Canvas: drag empty space to pan; wheel or pinch to zoom");
@@ -860,6 +902,12 @@ const accelerator_entries = [_]c.ACCEL{
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = @intFromEnum(Command.product_settings) },
         .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.workspace_next) },
         .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = @intFromEnum(Command.workspace_previous) },
+        // Terminal-safe alternatives for chords a focused terminal keeps for its program.
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'T', .cmd = @intFromEnum(Command.new_tab) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'N', .cmd = @intFromEnum(Command.create_node) },
+        .{ .fVirt = c.FALT | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_right) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 0xDB, .cmd = @intFromEnum(Command.focus_previous_pane) },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 0xDD, .cmd = @intFromEnum(Command.focus_next_pane) },
 };
 
 pub fn workspaceCycleDirection(key: usize, ctrl: bool, shift: bool, alt: bool) ?isize {
@@ -887,7 +935,7 @@ fn cycleKeyEligible(message: *const c.MSG, keys: KeyContext) bool {
     return cycleKeyMessage(message, keys) == null or keys.eligible();
 }
 
-fn createAccelerators() c.HACCEL {
+pub fn createAccelerators() c.HACCEL {
     var entries = accelerator_entries;
     const accelerators = c.CreateAcceleratorTableW(&entries, entries.len);
     if (accelerators == null) {
@@ -900,6 +948,103 @@ fn createAccelerators() c.HACCEL {
         }
     }
     return accelerators;
+}
+
+test "terminal routes decide accelerators, translation, and shell commands for a focused terminal" {
+    const Api = struct {
+        var accelerator_calls: usize = 0;
+        var translation_calls: usize = 0;
+        var dispatch_calls: usize = 0;
+        var posts: usize = 0;
+        var posted_message: c.UINT = 0;
+        var posted_wparam: c.WPARAM = 0;
+
+        pub fn translateAccelerator(_: c.HWND, _: c.HACCEL, _: *c.MSG) c_int {
+            accelerator_calls += 1;
+            return 1;
+        }
+
+        pub fn translateMessage(_: *const c.MSG) c.BOOL {
+            translation_calls += 1;
+            return 1;
+        }
+
+        pub fn dispatchMessage(_: *const c.MSG) c.LRESULT {
+            dispatch_calls += 1;
+            return 0;
+        }
+
+        pub fn postMessage(_: c.HWND, message: c.UINT, wparam: c.WPARAM, _: c.LPARAM) c.BOOL {
+            posts += 1;
+            posted_message = message;
+            posted_wparam = wparam;
+            return 1;
+        }
+
+        fn reset() void {
+            accelerator_calls = 0;
+            translation_calls = 0;
+            dispatch_calls = 0;
+            posts = 0;
+        }
+    };
+    const Route = struct {
+        var next: TerminalKeyRoute = .default;
+        var calls: usize = 0;
+
+        fn callback(_: ?*anyopaque, _: *const c.MSG, _: bool, _: bool, _: bool) TerminalKeyRoute {
+            calls += 1;
+            return next;
+        }
+    };
+    const owner: c.HWND = @ptrFromInt(0x1000);
+    const child: c.HWND = @ptrFromInt(0x2000);
+    var window = Window{ .hwnd = owner, .accelerators = @ptrFromInt(0x3000), .terminal_route = &Route.callback };
+    const keys = KeyContext{ .active = true, .owner_enabled = true, .target_owned = true, .target_visible = true, .target_enabled = true, .ctrl = true };
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = child;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = 'D';
+
+    Api.reset();
+    Route.next = .default;
+    window.dispatchMessageWith(Api, &message, keys, child);
+    try std.testing.expectEqual(@as(usize, 1), Api.accelerator_calls);
+    try std.testing.expectEqual(@as(usize, 0), Api.dispatch_calls);
+
+    // A terminal-owned chord skips the accelerator table and reaches the terminal window.
+    Api.reset();
+    Route.next = .terminal;
+    window.dispatchMessageWith(Api, &message, keys, child);
+    try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls);
+    try std.testing.expectEqual(@as(usize, 1), Api.translation_calls);
+    try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+
+    const commands = [_]struct { route: TerminalKeyRoute, message: c.UINT, wparam: c.WPARAM }{
+        .{ .route = .close_tab, .message = c.WM_COMMAND, .wparam = @intFromEnum(Command.close_tab) },
+        .{ .route = .system_close, .message = c.WM_SYSCOMMAND, .wparam = c.SC_CLOSE },
+        .{ .route = .system_menu, .message = c.WM_SYSCOMMAND, .wparam = c.SC_KEYMENU },
+    };
+    for (commands) |case| {
+        Api.reset();
+        Route.next = case.route;
+        window.dispatchMessageWith(Api, &message, keys, child);
+        try std.testing.expectEqual(@as(usize, 1), Api.posts);
+        try std.testing.expectEqual(case.message, Api.posted_message);
+        try std.testing.expectEqual(case.wparam, Api.posted_wparam);
+        try std.testing.expectEqual(@as(usize, 0), Api.accelerator_calls + Api.translation_calls + Api.dispatch_calls);
+    }
+
+    // The route is consulted only for key-down messages of an eligible, owned window.
+    Api.reset();
+    Route.calls = 0;
+    Route.next = .close_tab;
+    message.message = c.WM_KEYUP;
+    window.dispatchMessageWith(Api, &message, keys, child);
+    message.message = c.WM_KEYDOWN;
+    window.dispatchMessageWith(Api, &message, .{}, child);
+    try std.testing.expectEqual(@as(usize, 0), Route.calls);
+    try std.testing.expectEqual(@as(usize, 0), Api.posts);
 }
 
 test "settings accelerator table preserves existing bindings and product destination" {
@@ -922,6 +1067,11 @@ test "settings accelerator table preserves existing bindings and product destina
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = c.VK_OEM_COMMA, .cmd = 4403 },
         .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = 4804 },
         .{ .fVirt = c.FCONTROL | c.FALT | c.FVIRTKEY, .key = c.VK_PRIOR, .cmd = 4805 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'T', .cmd = 4301 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'N', .cmd = 4205 },
+        .{ .fVirt = c.FALT | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = 4303 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 0xDB, .cmd = 4308 },
+        .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 0xDD, .cmd = 4307 },
     };
     const accelerators = createAccelerators() orelse return error.AcceleratorCreationFailed;
     defer std.testing.expect(c.DestroyAcceleratorTable(accelerators) != 0) catch
@@ -986,6 +1136,7 @@ test "main and help menus expose shortcuts and interaction guidance" {
         "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert",
         "Paste terminal text\tCtrl+Shift+V / Shift+Insert",
         "Terminal context menu\tRight-click / Menu key / Shift+F10",
+        "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
         "Canvas: drag empty space to pan; wheel or pinch to zoom",
@@ -1844,7 +1995,7 @@ test "workspace cycle keyboard actual accelerator descriptors provide both direc
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 18), accelerator_entries.len);
+    try std.testing.expectEqual(@as(usize, 23), accelerator_entries.len);
     const previous_commands = [_]Command{
         .open_folder, .worktrees, .jump_loop, .review_attention, .next_loop,
         .previous_loop, .create_node, .stop_loop, .new_tab, .close_tab,

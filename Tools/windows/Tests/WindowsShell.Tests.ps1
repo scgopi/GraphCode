@@ -957,6 +957,8 @@ Invoke-Native "Terminal VT preparation and memory tests" {
     & $zig build prepare-terminal-vt "-Dwinghostty-dir=$winghosttyRoot"
     if ($LASTEXITCODE -ne 0) { throw "terminal VT preparation failed" }
     & $zig test src\TerminalVt.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
+    if ($LASTEXITCODE -ne 0) { throw "terminal VT tests failed" }
+    & $zig test src\TerminalKeyEncoding.zig -target x86_64-windows-msvc -lc "-I$include" $terminalVtLib
   } finally { Pop-Location }
 }
 Invoke-Native "Terminal input queue tests" {

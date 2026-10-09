@@ -236,7 +236,18 @@ and `Ctrl+Shift+X` cancels a clone; they are not aliases for those toggles or
 chat deletion.
 
 These root-window bindings are not universal terminal or dialog shortcuts.
-`Ctrl+J` is forwarded from the terminal; `Ctrl+P` is not. In the jump palette,
+While a terminal has focus it keeps `Ctrl+D` (EOF), `Ctrl+W` (delete word),
+`Ctrl+S`, `Ctrl+T`, `Ctrl+N`, `Ctrl+[` and `Ctrl+]` for the program running in
+it, so those menu accelerators apply only elsewhere. The terminal-safe
+alternatives work everywhere: `Ctrl+Shift+T` (new tab), `Ctrl+Shift+N` (new
+loop), `Alt+Shift+D` (split right), `Ctrl+Shift+D` (split down), and
+`Ctrl+Shift+[` / `Ctrl+Shift+]` (pane focus); `Ctrl+Shift+W` closes the tab
+while a terminal has focus (it opens Worktrees elsewhere). `Ctrl+J` and
+`Ctrl+O` remain application keys in a terminal and `Ctrl+P` is not forwarded.
+The terminal sends editing, cursor, Home/End, Insert/Delete, Page, and function
+keys through the pinned Ghostty key encoder, so cursor-key application mode,
+modifier parameters, and Alt's ESC prefix match the macOS terminal; Backspace
+sends DEL and Ctrl+Backspace sends BS. In the jump palette,
 Up/Down moves through results and Enter accepts the selection, returning to
 the selected loop in the graph rather than opening its terminal. Native forms
 keep their own text editing, Tab navigation, and acceptance/cancellation;
