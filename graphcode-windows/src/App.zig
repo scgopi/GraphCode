@@ -6795,8 +6795,9 @@ pub const App = struct {
             .bottom = canvas_bounds.bottom,
         };
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
+        const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
-        const current_inspection = self.currentWorktreeInspection();
+        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
         var sidebar_rows = Sidebar.appendRows(
             self.allocator,
             &self.model,
@@ -7053,8 +7054,8 @@ pub const App = struct {
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .left), sidebar_bottom) }, false, true) catch return;
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .right), sidebar_bottom) }, false, true) catch return;
         }
-        if (self.ingress_error.len != 0) {
-            const bounds = (AccessibilityBounds{ .logical = Sidebar.errorFooterRect(client.bottom) }).physicalRect(self.dpi);
+        if (self.ingress_error.len != 0 and Sidebar.errorFooterVisible(footer_viewport_bottom)) {
+            const bounds = (AccessibilityBounds{ .logical = Sidebar.errorFooterRect(footer_viewport_bottom) }).physicalRect(self.dpi);
             elements.append(.{
                 .identity = "sidebar-error-footer:ingress",
                 .name = self.ingress_error,
@@ -10536,6 +10537,7 @@ const sidebar_uia_prefixes = [_][]const u8{
     "activity-filter:",
     "activity-row:",
     "activity-control:",
+    "sidebar-error-footer:",
 };
 
 const SidebarUiaSink = struct {
@@ -10661,6 +10663,131 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
         // A fixture that publishes nothing would pass vacuously.
         try std.testing.expect(published_anywhere >= 3);
     };
+}
+
+const IngressFooterCase = struct { dpi: u32, width: i32, height: i32 };
+// Physical client sizes: 960 and 1200 px wide, a tall window, and short windows that
+// cannot fit the whole footer stack above the activity strip and workspace panel.
+const ingress_footer_cases = [_]IngressFooterCase{
+    .{ .dpi = 96, .width = 960, .height = 820 },
+    .{ .dpi = 96, .width = 1200, .height = 820 },
+    .{ .dpi = 144, .width = 960, .height = 1230 },
+    .{ .dpi = 144, .width = 1200, .height = 1230 },
+    .{ .dpi = 96, .width = 960, .height = 420 },
+    .{ .dpi = 96, .width = 1200, .height = 230 },
+    .{ .dpi = 144, .width = 960, .height = 345 },
+    .{ .dpi = 144, .width = 1200, .height = 180 },
+    .{ .dpi = 96, .width = 960, .height = 400 },
+    .{ .dpi = 96, .width = 1200, .height = 150 },
+};
+
+/// Bounding box of the ingress footer's fill as Sidebar.draw paints it into a bitmap, in
+/// logical pixels, or null when nothing is painted.
+fn paintedIngressFooter(app: *App, sidebar_bottom: i32, update: bool) !?c.RECT {
+    const footer_fill: u32 = 0x00242448;
+    const bitmap_height = @max(sidebar_bottom, Tokens.header_height) + 100;
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const bitmap = c.CreateCompatibleBitmap(screen, Tokens.sidebar_width + 40, bitmap_height) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, previous);
+    Sidebar.draw(
+        hdc,
+        &app.model,
+        app.currentWorktreeInspection(),
+        "",
+        0,
+        "status",
+        sidebar_bottom,
+        if (update) app.update_version else "",
+        app.ingress_error,
+        &app.sidebar_state,
+        -1,
+        app.allocator,
+    );
+    var painted: ?c.RECT = null;
+    var y: i32 = 0;
+    while (y < bitmap_height) : (y += 1) {
+        var x: i32 = 0;
+        while (x < Tokens.sidebar_width + 40) : (x += 1) {
+            if (c.GetPixel(hdc, x, y) != footer_fill) continue;
+            if (painted) |*box| {
+                box.left = @min(box.left, x);
+                box.top = @min(box.top, y);
+                box.right = @max(box.right, x + 1);
+                box.bottom = @max(box.bottom, y + 1);
+            } else painted = .{ .left = x, .top = y, .right = x + 1, .bottom = y + 1 };
+        }
+    }
+    return painted;
+}
+
+test "ingress error footer UIA bounds equal the drawn rect and stay inside the sidebar's visible region" {
+    var covered_visible: usize = 0;
+    var covered_hidden: usize = 0;
+    for (ingress_footer_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |update| {
+        var app = try footerLayoutApp(.{ .dpi = case.dpi, .width = 960, .height = 820 }, controls, update, true);
+        defer deinitFooterLayoutApp(&app);
+        const client = c.RECT{
+            .left = 0,
+            .top = 0,
+            .right = logicalCoordinate(case.width, app.dpi),
+            .bottom = logicalCoordinate(case.height, app.dpi),
+        };
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        var published: ?c.RECT = null;
+        for (0..sink.count) |index| {
+            if (std.mem.eql(u8, sink.name(index), "sidebar-error-footer:ingress")) published = sink.rects[index];
+        }
+
+        const painted = try paintedIngressFooter(&app, sidebar_bottom, update);
+        const context = .{ case.dpi, case.width, case.height, controls.panel_visible, update };
+        if (painted) |drawn| {
+            covered_visible += 1;
+            const uia = published orelse {
+                std.debug.print("footer drawn but not published {any}\n", .{context});
+                return error.IngressFooterNotPublished;
+            };
+            const uia_logical = c.RECT{
+                .left = logicalCoordinate(uia.left, app.dpi),
+                .top = logicalCoordinate(uia.top, app.dpi),
+                .right = logicalCoordinate(uia.right, app.dpi),
+                .bottom = logicalCoordinate(uia.bottom, app.dpi),
+            };
+            if (uia_logical.left != drawn.left or uia_logical.top != drawn.top or
+                uia_logical.right != drawn.right or uia_logical.bottom != drawn.bottom)
+            {
+                std.debug.print(
+                    "footer UIA {d},{d},{d},{d} != drawn {d},{d},{d},{d} {any}\n",
+                    .{ uia_logical.left, uia_logical.top, uia_logical.right, uia_logical.bottom, drawn.left, drawn.top, drawn.right, drawn.bottom, context },
+                );
+                return error.IngressFooterUiaMismatch;
+            }
+            const expected = (AccessibilityBounds{ .logical = drawn }).physicalRect(app.dpi);
+            try std.testing.expect(uia.left == expected.left and uia.top == expected.top and uia.right == expected.right and uia.bottom == expected.bottom);
+            if (drawn.left < 0 or drawn.right > Tokens.sidebar_width or drawn.top < Tokens.header_height or drawn.bottom > sidebar_bottom) {
+                std.debug.print("footer {d},{d},{d},{d} outside sidebar [{d}..{d}] {any}\n", .{ drawn.left, drawn.top, drawn.right, drawn.bottom, Tokens.header_height, sidebar_bottom, context });
+                return error.IngressFooterOutsideSidebar;
+            }
+            if (update) try std.testing.expect(!rectsIntersect(drawn, Sidebar.updateBannerRect(sidebar_bottom, true)));
+            try std.testing.expect(!rectsIntersect(drawn, Sidebar.statusTextRect(sidebar_bottom, update, true)));
+            try std.testing.expect(app.sidebarContentBottom(client.bottom) <= drawn.top);
+        } else {
+            covered_hidden += 1;
+            if (published) |uia| if (!rectIsEmpty(uia)) {
+                std.debug.print("footer published {d},{d},{d},{d} but not drawn {any}\n", .{ uia.left, uia.top, uia.right, uia.bottom, context });
+                return error.IngressFooterPublishedWhileHidden;
+            };
+        }
+    };
+    // Both outcomes must be exercised, or the short-window branch would pass vacuously.
+    try std.testing.expect(covered_visible >= 16);
+    try std.testing.expect(covered_hidden >= 1);
 }
 
 fn expectReachable(content_top: i32, content_bottom: i32, viewport_bottom: i32, max_scroll: i32) !void {
@@ -13911,11 +14038,21 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
         .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
         .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 109, 232, 135 }, .{ 18, 164, 348, 203 }, .{ 24, 218, 464, 270 } } },
-        .{ .identity = "sidebar-error-footer:ingress", .bounds = .{ .{ 8, 816, 212, 858 }, .{ 12, 1224, 318, 1287 }, .{ 16, 1632, 424, 1716 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
+    // The footer is anchored to the sidebar's visible bottom, which the workspace panel
+    // shortens on every surface except the workspace itself.
+    const footer_above_panel = DpiExpectedElement{
+        .identity = "sidebar-error-footer:ingress",
+        .bounds = .{ .{ 8, 566, 212, 608 }, .{ 12, 849, 318, 912 }, .{ 16, 1132, 424, 1216 } },
+    };
+    const footer_full_height = DpiExpectedElement{
+        .identity = "sidebar-error-footer:ingress",
+        .bounds = .{ .{ 8, 816, 212, 858 }, .{ 12, 1224, 318, 1287 }, .{ 16, 1632, 424, 1716 } },
+    };
     for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
-        try expectDpiAccessibility(surface, null, &common, false);
+        const footer = if (surface == .workspace) footer_full_height else footer_above_panel;
+        try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{footer}), false);
         if (surface != .workspace) try expectDpiAccessibility(surface, null, &.{
             .{ .identity = "header-toggle-panel:control" },
             .{ .identity = "workspace-toolbar:A" },

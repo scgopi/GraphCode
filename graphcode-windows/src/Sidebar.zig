@@ -328,7 +328,7 @@ pub fn draw(
         }
     }
     if (saved_clip != 0) _ = c.RestoreDC(hdc, saved_clip);
-    if (ingress_error.len != 0) {
+    if (ingress_error.len != 0 and errorFooterVisible(viewport_bottom)) {
         const bounds = errorFooterRect(viewport_bottom);
         fill(hdc, bounds, 0x00242448);
         drawTextRect(hdc, allocator, ingress_error, errorFooterTextRect(viewport_bottom), 10, 0x006060FF, c.DT_LEFT | c.DT_WORDBREAK | c.DT_NOPREFIX);
@@ -386,13 +386,24 @@ pub fn needsYouLabelRect(section_bottom: i32, scroll_offset: i32) c.RECT {
     return rect(18, top, Tokens.sidebar_width - 10, top + 19);
 }
 
+/// Rect of the inline error footer, anchored to the sidebar's visible bottom. Drawing and UIA
+/// both use this rect. It never rises above the header; a viewport too short to hold any
+/// of it yields an empty rect, which callers neither draw nor publish.
 pub fn errorFooterRect(viewport_bottom: i32) c.RECT {
-    return rect(8, viewport_bottom - 84, Tokens.sidebar_width - 8, viewport_bottom - 42);
+    const bottom = viewport_bottom - 42;
+    const top = @max(viewport_bottom - 84, Tokens.header_height);
+    return rect(8, top, Tokens.sidebar_width - 8, @max(bottom, top));
 }
 
 pub fn errorFooterTextRect(viewport_bottom: i32) c.RECT {
     const bounds = errorFooterRect(viewport_bottom);
-    return rect(bounds.left + 10, bounds.top + 8, bounds.right - 10, bounds.bottom - 8);
+    const top = @min(bounds.top + 8, bounds.bottom);
+    return rect(bounds.left + 10, top, bounds.right - 10, @max(bounds.bottom - 8, top));
+}
+
+pub fn errorFooterVisible(viewport_bottom: i32) bool {
+    const bounds = errorFooterRect(viewport_bottom);
+    return bounds.top < bounds.bottom;
 }
 
 pub fn updateBannerRect(viewport_bottom: i32, has_error: bool) c.RECT {
@@ -1828,6 +1839,25 @@ test "error footer exposes an inset wrapping rect" {
     try std.testing.expect(text.right < footer.right);
     try std.testing.expect(text.top > footer.top);
     try std.testing.expect(text.bottom < footer.bottom);
+}
+
+test "error footer stays below the header and above the viewport bottom on short viewports" {
+    try std.testing.expectEqual(@as(i32, 204), errorFooterRect(700).right - errorFooterRect(700).left);
+    try std.testing.expectEqual(@as(i32, 42), errorFooterRect(700).bottom - errorFooterRect(700).top);
+    for ([_]i32{ -50, 0, 60, 76, 90, 118, 119, 300, 700 }) |viewport_bottom| {
+        const footer = errorFooterRect(viewport_bottom);
+        const text = errorFooterTextRect(viewport_bottom);
+        try std.testing.expect(footer.top >= Tokens.header_height);
+        try std.testing.expect(footer.top <= footer.bottom);
+        try std.testing.expect(footer.bottom <= @max(viewport_bottom - 42, Tokens.header_height));
+        try std.testing.expect(text.top <= text.bottom and text.top >= footer.top and text.bottom <= footer.bottom);
+        try std.testing.expectEqual(footer.top < footer.bottom, errorFooterVisible(viewport_bottom));
+        // Never reaches the update banner above it or the status line above that.
+        try std.testing.expect(updateBannerRect(viewport_bottom, true).bottom <= footer.top);
+        try std.testing.expect(statusTextRect(viewport_bottom, true, true).bottom <= footer.top);
+    }
+    try std.testing.expect(!errorFooterVisible(70));
+    try std.testing.expect(errorFooterVisible(100));
 }
 
 test "sidebar draw clips rows to the content viewport and keeps status text inside the rail" {
