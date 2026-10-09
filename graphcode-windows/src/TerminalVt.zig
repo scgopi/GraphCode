@@ -243,6 +243,14 @@ pub const State = struct {
         self.response_length = 0;
     }
 
+    /// Whether the running program asked for bracketed paste (DECSET 2004).
+    pub fn bracketedPasteEnabled(self: *const State) bool {
+        var enabled = false;
+        if (c.ghostty_terminal_mode_get(self.terminal, c.ghostty_mode_new(2004, false), &enabled) != c.GHOSTTY_SUCCESS)
+            return false;
+        return enabled;
+    }
+
     fn refresh(self: *State) Error!void {
         if (self.allocation_failed) {
             self.failure = error.RenderStateUnreliable;
@@ -456,6 +464,95 @@ fn dimensions(columns: usize, rows: usize) Error![2]u16 {
     if (columns == 0 or rows == 0 or columns > std.math.maxInt(u16) or rows > std.math.maxInt(u16))
         return error.InvalidSize;
     return .{ @intCast(columns), @intCast(rows) };
+}
+
+pub const PasteError = error{ OutOfMemory, TerminalPasteRequiresConfirmation, TerminalPasteFailed };
+
+/// Prepares clipboard text for the pty the way Ghostty does for a paste: line endings
+/// are normalised, unsafe control bytes (including ESC, so pasted text cannot close the
+/// bracket itself) are blanked, and the text is wrapped in bracketed-paste markers only when
+/// the running program enabled them. Multi-line text for a program that did not enable
+/// them would run each line as typed, so it needs `allow_unbracketed_multiline`.
+pub fn encodePaste(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    bracketed: bool,
+    allow_unbracketed_multiline: bool,
+) PasteError![]u8 {
+    var normalized = try allocator.alloc(u8, text.len);
+    defer allocator.free(normalized);
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) : (index += 1) {
+        const byte = text[index];
+        if (byte == '\r') {
+            if (index + 1 < text.len and text[index + 1] == '\n') index += 1;
+            normalized[length] = '\n';
+        } else {
+            normalized[length] = byte;
+        }
+        length += 1;
+    }
+    const data = normalized[0..length];
+    if (!bracketed and !allow_unbracketed_multiline and !c.ghostty_paste_is_safe(data.ptr, data.len))
+        return error.TerminalPasteRequiresConfirmation;
+
+    var required: usize = 0;
+    const probe = c.ghostty_paste_encode(data.ptr, data.len, bracketed, null, 0, &required);
+    if (probe != c.GHOSTTY_OUT_OF_SPACE and probe != c.GHOSTTY_SUCCESS) return error.TerminalPasteFailed;
+    const output = try allocator.alloc(u8, required);
+    errdefer allocator.free(output);
+    var written: usize = 0;
+    if (c.ghostty_paste_encode(data.ptr, data.len, bracketed, output.ptr, output.len, &written) != c.GHOSTTY_SUCCESS)
+        return error.TerminalPasteFailed;
+    return allocator.realloc(output, written) catch output[0..written];
+}
+
+test "paste encoding follows the program's bracketed-paste mode" {
+    const allocator = std.testing.allocator;
+    const single = try encodePaste(allocator, "echo hi", false, false);
+    defer allocator.free(single);
+    try std.testing.expectEqualStrings("echo hi", single);
+
+    const bracketed = try encodePaste(allocator, "echo hi", true, false);
+    defer allocator.free(bracketed);
+    try std.testing.expectEqualStrings("\x1b[200~echo hi\x1b[201~", bracketed);
+
+    const multiline = try encodePaste(allocator, "one\r\ntwo\rthree\nfour", true, false);
+    defer allocator.free(multiline);
+    try std.testing.expectEqualStrings("\x1b[200~one\ntwo\nthree\nfour\x1b[201~", multiline);
+}
+
+test "multi-line paste to a program without bracketed paste needs confirmation and then sends carriage returns" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.TerminalPasteRequiresConfirmation, encodePaste(allocator, "a\r\nb", false, false));
+    const confirmed = try encodePaste(allocator, "a\r\nb\r\n", false, true);
+    defer allocator.free(confirmed);
+    try std.testing.expectEqualStrings("a\rb\r", confirmed);
+}
+
+test "paste encoding keeps Unicode and blanks escapes that could close the bracket" {
+    const allocator = std.testing.allocator;
+    const unicode = try encodePaste(allocator, "paste-é-漢字-😀", false, false);
+    defer allocator.free(unicode);
+    try std.testing.expectEqualStrings("paste-é-漢字-😀", unicode);
+
+    const hostile = try encodePaste(allocator, "x\x1b[201~rm -rf /\n", true, false);
+    defer allocator.free(hostile);
+    try std.testing.expect(std.mem.startsWith(u8, hostile, "\x1b[200~"));
+    try std.testing.expect(std.mem.endsWith(u8, hostile, "\x1b[201~"));
+    const inner = hostile["\x1b[200~".len .. hostile.len - "\x1b[201~".len];
+    try std.testing.expect(std.mem.indexOfScalar(u8, inner, 0x1b) == null);
+}
+
+test "VT reports the program's bracketed-paste request" {
+    const state = try State.create(std.testing.allocator, 20, 3);
+    defer state.destroy();
+    try std.testing.expect(!state.bracketedPasteEnabled());
+    try state.feed("\x1b[?2004h");
+    try std.testing.expect(state.bracketedPasteEnabled());
+    try state.feed("\x1b[?2004l");
+    try std.testing.expect(!state.bracketedPasteEnabled());
 }
 
 test "VT parser is production default with an explicit legacy opt-out" {
