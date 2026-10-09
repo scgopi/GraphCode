@@ -56,6 +56,8 @@ $ownedSessionNames = [System.Collections.Generic.HashSet[string]]::new()
 $ownedProcessIds = [System.Collections.Generic.HashSet[int]]::new()
 $shellProcess = $null
 $handoffStage = $null
+$bareZmxStage = $null
+$bareZmxProject = $null
 $resourceRole = "graphcode-windows"
 $metricSequence = 0
 
@@ -228,6 +230,167 @@ function Invoke-ShellProcess([string[]] $arguments, [string] $phase) {
   $script:shellProcess = $null
 }
 
+function Get-StageZmxProcesses([string] $stageZmx) {
+  @(Get-CimInstance Win32_Process -Filter "Name = 'zmx.exe'" -ErrorAction Stop |
+      Where-Object {
+        $_.ExecutablePath -and
+        [IO.Path]::GetFullPath([string] $_.ExecutablePath) -ieq $stageZmx
+      })
+}
+
+# The installed shell names zmx bare ("zmx.exe", GRAPHCODE_ZMX unset) and finds it beside
+# itself through its working directory, which PATH need not name. Every other case here
+# exports GRAPHCODE_ZMX as an absolute path, so a regression in resolving the bare name
+# for a child started in another directory (beta18: "Unable to open selected loop",
+# "Unable to create tab") reached no gate. Stage that layout - shell and zmx side by side,
+# that directory off PATH, no GRAPHCODE_ZMX - and require the scripted workspace actions
+# (New Tab, Split Right, among others) to pass through the same smoke contract, with
+# attach children observed running the staged zmx.
+function Invoke-BareNameZmxShell {
+  $stage = Join-Path $shellRoot "bare-zmx-installed-$PID"
+  # A real folder that is not the shell's directory: the loop's project. Terminals start
+  # here, so the bare name cannot be found by the child's own working directory.
+  $project = Join-Path $shellRoot "bare-zmx-project-$PID"
+  $stageShell = Join-Path $stage "graphcode-windows.exe"
+  $stageZmx = Join-Path $stage "zmx.exe"
+  $script:bareZmxStage = $stage
+  $script:bareZmxProject = $project
+  foreach ($path in @($stage, $project)) {
+    if (Test-Path -LiteralPath $path) { throw "Bare-name zmx fixture already exists: $path" }
+  }
+  New-Item -ItemType Directory -Path $stage, $project | Out-Null
+  $process = $null
+  $stub = $null
+  $bareStubResult = Join-Path $shellRoot "bare-zmx-stub-result-$PID.json"
+  try {
+    Copy-Item -LiteralPath $app -Destination $stageShell
+    Copy-Item -LiteralPath $env:GRAPHCODE_ZMX -Destination $stageZmx
+    Start-StubLoopSessions
+    $barePipe = "graphcode-shell-barezmx-$PID"
+    $stub = Start-Process -FilePath "pwsh" -WindowStyle Hidden -PassThru -ArgumentList @(
+      "-NoProfile", "-File", (Join-Path $repoRoot "Tools\windows\Stub-Daemon.ps1"),
+      "-PipeName", $barePipe, "-ResultPath", $bareStubResult, "-StubProjectPath", $project)
+
+    $start = [Diagnostics.ProcessStartInfo]::new($stageShell)
+    $start.WorkingDirectory = $stage
+    $start.UseShellExecute = $false
+    $start.RedirectStandardError = $true
+    [void] $start.ArgumentList.Add("--smoke")
+    # The installed shell sets neither: it names zmx bare and its workspace directory
+    # is its own working directory.
+    [void] $start.Environment.Remove("GRAPHCODE_ZMX")
+    [void] $start.Environment.Remove("GRAPHCODE_GATE_CWD")
+    $start.Environment["GRAPHCODE_DAEMON_PIPE"] = "\\.\pipe\$barePipe"
+    # No PATH entry may supply a zmx.exe: neither the stage nor any directory that
+    # happens to hold one (a developer machine may have an installed copy on PATH).
+    $pathEntries = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($env:PATH -split ";")) {
+      if (-not $entry) { continue }
+      $holdsZmx = $false
+      try { $holdsZmx = [IO.File]::Exists((Join-Path $entry "zmx.exe")) } catch { $holdsZmx = $false }
+      if (-not $holdsZmx) { $pathEntries.Add($entry) }
+    }
+    $start.Environment["PATH"] = $pathEntries -join ";"
+    if ($start.Environment.ContainsKey("GRAPHCODE_ZMX") -or
+        $start.Environment.ContainsKey("GRAPHCODE_GATE_CWD")) {
+      throw "Bare-name zmx shell still carries a provider path override"
+    }
+    if ($pathEntries | Where-Object { $_.TrimEnd("\") -ieq $stage.TrimEnd("\") }) {
+      throw "Bare-name zmx shell has its own directory on PATH"
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    [void] $process.Start()
+    [void] $ownedProcessIds.Add($process.Id)
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $attachSessions = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $shellSessions = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $stageProcessIds = [Collections.Generic.HashSet[int]]::new()
+    $shellSessionPattern = "^graphcode-" + [regex]::Escape($sessionPrefix) + "-"
+    $sample = {
+      foreach ($zmxProcess in @(Get-StageZmxProcesses $stageZmx)) {
+        [void] $stageProcessIds.Add([int] $zmxProcess.ProcessId)
+        [void] $ownedProcessIds.Add([int] $zmxProcess.ProcessId)
+        if ($zmxProcess.CommandLine -match '(?<![\w-])(attach|--daemon)\s+"?(graphcode-[\w-]+)') {
+          $verb = $Matches[1]
+          $name = $Matches[2]
+          if ($verb -eq "attach") { [void] $attachSessions.Add($name) }
+          if ($name -match $shellSessionPattern) { [void] $shellSessions.Add($name) }
+        }
+      }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(90)
+    while (-not $process.HasExited) {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        Stop-Process -Id $process.Id -Force
+        throw "Bare-name zmx smoke did not finish within 90 seconds"
+      }
+      & $sample
+      Start-Sleep -Milliseconds 50
+    }
+    $process.WaitForExit()
+    # A plain shell tab or split starts its session's daemon from the staged zmx, and that
+    # daemon outlives the shell, so one last look settles what a sample could miss.
+    & $sample
+    Record-TestOwnedSessions
+    Write-Host ("BARE_NAME_ZMX_EVIDENCE_JSON=" + (@{
+          exitCode = $process.ExitCode
+          stageProcessCount = $stageProcessIds.Count
+          attachSessions = @($attachSessions | Sort-Object)
+          shellSessions = @($shellSessions | Sort-Object)
+        } | ConvertTo-Json -Compress))
+    if ($process.ExitCode -ne 0) {
+      throw "Bare-name zmx shell smoke exited with code $($process.ExitCode): $($stderr.Result)"
+    }
+    if ($stageProcessIds.Count -eq 0) {
+      throw "Bare-name zmx shell never ran the staged zmx.exe; the layout was not exercised"
+    }
+    # The loops open from the staged copy, so both must attach through it.
+    foreach ($id in $testSessionIds) {
+      if (-not $attachSessions.Contains("graphcode-$id")) {
+        throw "Bare-name zmx shell never attached loop graphcode-$id through the staged zmx.exe"
+      }
+    }
+    # New Tab and Split Right start plain shell sessions in the loop's folder; the smoke's
+    # scripted workspace actions only run once a loop is attached, and each must spawn one.
+    if ($shellSessions.Count -lt 1) {
+      throw "Bare-name zmx shell attached no New Tab or Split Right terminal through the staged zmx.exe"
+    }
+    $bareEvidence = Get-Content -LiteralPath $bareStubResult -Raw | ConvertFrom-Json
+    if (@($bareEvidence.commands) -notcontains "openProject" -or [bool] $bareEvidence.error) {
+      throw "Bare-name zmx stub did not serve the folder project: $($bareEvidence.error)"
+    }
+  } finally {
+    if ($process) {
+      if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+      $process.Dispose()
+    }
+    if ($stub -and -not $stub.HasExited) { Stop-Process -Id $stub.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $bareStubResult -Force -ErrorAction SilentlyContinue
+    Remove-BareNameZmxStage
+  }
+  $global:LASTEXITCODE = 0
+}
+
+function Remove-BareNameZmxStage {
+  $stage = $script:bareZmxStage
+  if ($script:bareZmxProject) {
+    Remove-Item -LiteralPath $script:bareZmxProject -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  if (-not $stage -or -not (Test-Path -LiteralPath $stage)) { return }
+  $stageZmx = Join-Path $stage "zmx.exe"
+  Record-TestOwnedSessions
+  foreach ($zmxProcess in @(Get-StageZmxProcesses $stageZmx)) {
+    Stop-Process -Id ([int] $zmxProcess.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $stage)) { return }
+    Start-Sleep -Milliseconds 250
+  }
+}
+
 function Get-ProcessTreeIds([int[]] $roots) {
   $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
   $ids = [Collections.Generic.HashSet[int]]::new()
@@ -385,6 +548,9 @@ try {
       if (@($evidence.commands) -notcontains $command) {
       throw "Stub daemon did not observe command: $command"
       }
+    }
+    Invoke-Native "GraphCode Windows shell bare-name zmx installed-layout smoke" {
+      Invoke-BareNameZmxShell
     }
     Remove-Item -LiteralPath $busyResult,$busyError -Force -ErrorAction SilentlyContinue
     $busyPipeName = "graphcode-shell-busy-$PID"
@@ -591,6 +757,7 @@ finally {
   if ($handoffStage) {
     Remove-Item -LiteralPath $handoffStage -Recurse -Force -ErrorAction SilentlyContinue
   }
+  Remove-BareNameZmxStage
   Assert-NoOrphanShellProcesses
 }
 
