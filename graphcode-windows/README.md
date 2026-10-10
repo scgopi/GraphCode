@@ -268,16 +268,21 @@ the context-dependent collision as a second shortcut.
 Terminal clipboard follows Winghostty's Windows defaults. `Ctrl+Shift+V` or
 `Shift+Insert` pastes and `Ctrl+Shift+C` or `Ctrl+Insert` copies the
 terminal's selected text; the Terminal menu and the terminal's context menu
-(right-click, Menu key, `Shift+F10`) offer the same Copy and Paste. Plain
+(right-click, Menu key, `Shift+F10`) offer the same Copy and Paste. Dragging
+selects text with a visible highlight, double click selects a word, triple click
+a whole line, `Shift`+click extends the selection, and a click or typing clears
+it. Copy puts exactly the selected text on the clipboard: soft-wrapped rows join
+into one line and trailing blanks are dropped. Plain
 `Ctrl+V` stays terminal input and plain `Ctrl+C` stays the interrupt, except
-that `Ctrl+C` copies while the terminal reports a selection. Paste reads only
+that `Ctrl+C` copies while the terminal has a selection. Paste reads only
 `CF_UNICODETEXT`, normalises line endings, blanks unsafe control bytes, and
 wraps the text in bracketed-paste markers only when the running program asked
 for them (DECSET 2004); multi-line text for a program that did not ask asks for
-confirmation first instead of running each line as it is pasted. macOS
-auto-confirms that case without a dialog. The terminal reports no selection to
-copy until text is selected through UI Automation: drag selection in the
-terminal is not implemented, so Copy is limited to that range.
+confirmation first instead of running each line as it is pasted. That includes
+`pwsh` and `cmd.exe`: neither asks for bracketed paste under ConPTY, and each
+runs the pasted lines as they arrive. macOS auto-confirms that case without a
+dialog. Dragging past the edge of the terminal does not scroll it, and there is
+no block selection.
 
 Canvas and pointer actions still have no visible gesture hints: clicking
 selects/opens canvas items; dragging blank canvas pans, dragging a node moves

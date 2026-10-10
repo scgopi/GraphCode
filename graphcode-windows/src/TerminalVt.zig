@@ -82,6 +82,31 @@ pub const Cursor = struct {
     pending_wrap: bool,
 };
 
+/// A cell position in screen coordinates: row 0 is the oldest scrollback row, so a point keeps
+/// naming the same text while output scrolls the viewport.
+pub const ScreenPoint = struct {
+    x: u16,
+    y: u32,
+
+    pub fn eql(self: ScreenPoint, other: ScreenPoint) bool {
+        return self.x == other.x and self.y == other.y;
+    }
+
+    pub fn before(self: ScreenPoint, other: ScreenPoint) bool {
+        return self.y < other.y or (self.y == other.y and self.x < other.x);
+    }
+};
+
+pub const GridCell = struct {
+    /// The cell's first scalar; zero for a blank cell.
+    codepoint: u32,
+    wide: c.GhosttyCellWide,
+    /// The row soft-wraps into the next one.
+    wraps: bool,
+    /// The row continues a soft-wrapped row above it.
+    continuation: bool,
+};
+
 pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     columns: u16,
@@ -249,6 +274,74 @@ pub const State = struct {
         if (c.ghostty_terminal_mode_get(self.terminal, c.ghostty_mode_new(2004, false), &enabled) != c.GHOSTTY_SUCCESS)
             return false;
         return enabled;
+    }
+
+    /// First screen row (scrollback included) shown at the top of the viewport.
+    pub fn viewportTop(self: *const State) u32 {
+        const snapshot = self.snapshot orelse return 0;
+        return std.math.cast(u32, snapshot.scrollbar.offset) orelse std.math.maxInt(u32);
+    }
+
+    fn gridRef(self: *State, point: ScreenPoint) ?c.GhosttyGridRef {
+        var ref = std.mem.zeroes(c.GhosttyGridRef);
+        ref.size = @sizeOf(c.GhosttyGridRef);
+        const status = c.ghostty_terminal_grid_ref(self.terminal, .{
+            .tag = c.GHOSTTY_POINT_TAG_SCREEN,
+            .value = .{ .coordinate = .{ .x = point.x, .y = point.y } },
+        }, &ref);
+        return if (status == c.GHOSTTY_SUCCESS) ref else null;
+    }
+
+    /// What the grid holds at `point` (screen coordinates, scrollback included), read straight
+    /// from the terminal rather than the viewport snapshot. Null when the point is off the grid.
+    pub fn cellAt(self: *State, point: ScreenPoint) ?GridCell {
+        const ref = self.gridRef(point) orelse return null;
+        var cell: c.GhosttyCell = undefined;
+        var row: c.GhosttyRow = undefined;
+        if (c.ghostty_grid_ref_cell(&ref, &cell) != c.GHOSTTY_SUCCESS) return null;
+        if (c.ghostty_grid_ref_row(&ref, &row) != c.GHOSTTY_SUCCESS) return null;
+        var result = GridCell{ .codepoint = 0, .wide = c.GHOSTTY_CELL_WIDE_NARROW, .wraps = false, .continuation = false };
+        if (c.ghostty_cell_get(cell, c.GHOSTTY_CELL_DATA_WIDE, &result.wide) != c.GHOSTTY_SUCCESS) return null;
+        var codepoints: [1]u32 = undefined;
+        var length: usize = 0;
+        const text = c.ghostty_grid_ref_graphemes(&ref, &codepoints, codepoints.len, &length);
+        if (text == c.GHOSTTY_SUCCESS or text == c.GHOSTTY_OUT_OF_SPACE) {
+            if (length != 0) result.codepoint = codepoints[0];
+        } else return null;
+        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_WRAP, &result.wraps) != c.GHOSTTY_SUCCESS) return null;
+        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &result.continuation) != c.GHOSTTY_SUCCESS) return null;
+        return result;
+    }
+
+    /// The text between two screen points, inclusive and in reading order, exactly as Ghostty
+    /// copies it: soft-wrapped rows join into one line, hard line breaks stay, and blank cells
+    /// after the last character of a line are dropped.
+    pub fn selectionText(self: *State, allocator: std.mem.Allocator, start: ScreenPoint, end: ScreenPoint) Error![]u8 {
+        if (self.failure) |err| return err;
+        var selection = std.mem.zeroes(c.GhosttySelection);
+        selection.size = @sizeOf(c.GhosttySelection);
+        selection.start = self.gridRef(start) orelse return error.InvalidValue;
+        selection.end = self.gridRef(end) orelse return error.InvalidValue;
+        var options = std.mem.zeroes(c.GhosttyFormatterTerminalOptions);
+        options.size = @sizeOf(c.GhosttyFormatterTerminalOptions);
+        options.emit = c.GHOSTTY_FORMATTER_FORMAT_PLAIN;
+        options.unwrap = true;
+        options.trim = true;
+        options.extra.size = @sizeOf(c.GhosttyFormatterTerminalExtra);
+        options.extra.screen.size = @sizeOf(c.GhosttyFormatterScreenExtra);
+        options.selection = &selection;
+        var formatter: c.GhosttyFormatter = null;
+        try check(c.ghostty_formatter_terminal_new(&self.bridge, &formatter, self.terminal, options));
+        defer c.ghostty_formatter_free(formatter);
+        var required: usize = 0;
+        const probe = c.ghostty_formatter_format_buf(formatter, null, 0, &required);
+        if (probe != c.GHOSTTY_OUT_OF_SPACE and probe != c.GHOSTTY_SUCCESS) try check(probe);
+        const text = try allocator.alloc(u8, required);
+        errdefer allocator.free(text);
+        var written: usize = 0;
+        try check(c.ghostty_formatter_format_buf(formatter, text.ptr, text.len, &written));
+        if (written > text.len) return error.UnexpectedResult;
+        return allocator.realloc(text, written) catch text[0..written];
     }
 
     fn refresh(self: *State) Error!void {
