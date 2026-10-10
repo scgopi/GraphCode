@@ -479,6 +479,9 @@ pub const Workspace = struct {
     /// session's attach pipe; set by tests, which have no pipe to read.
     teardown_input_sink: ?*const fn (context: ?*anyopaque, index: usize, bytes: []const u8) void = null,
     teardown_input_context: ?*anyopaque = null,
+    /// Set by tests only: the number of saves that still succeed before one fails (once) with
+    /// `LayoutSaveFaultInjected`, so a compensating save can be made to fail on its own.
+    layout_save_fault: ?usize = null,
     layout: WorkspaceLayout.Layout,
     layout_path: []u8,
     project_key: []u8,
@@ -1927,6 +1930,13 @@ pub const Workspace = struct {
 
     pub fn persistLayout(self: *Workspace) !void {
         if (self.persisting_layout or self.layout_path.len == 0) return;
+        if (self.layout_save_fault) |remaining| {
+            if (remaining == 0) {
+                self.layout_save_fault = null;
+                return error.LayoutSaveFaultInjected;
+            }
+            self.layout_save_fault = remaining - 1;
+        }
         self.persisting_layout = true;
         defer self.persisting_layout = false;
         try self.layout.save(self.layout_path);
