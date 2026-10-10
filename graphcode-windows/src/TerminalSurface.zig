@@ -273,6 +273,9 @@ pub const InputQueue = struct {
 pub const Surface = struct {
     surface: ?*c.winghostty_surface = null,
     attach: ?std.process.Child = null,
+    // Whether the attach pipe took non-blocking mode; a write the surface's teardown makes
+    // itself is skipped when it did not, since it could block the shell.
+    attach_nonblocking: bool = false,
     session_name: []u8 = &.{},
     project_path: []u8 = &.{},
     destroying: bool = false,
@@ -2259,12 +2262,21 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
         slot.destroying = true;
+        const undelivered = self.inputPending(index);
         self.cancelSurfaceInput(index);
         self.waitInputIdle(index);
         // A button the program was told is down must not stay down in a session that outlives
         // this surface (a recreate re-attaches the same one). The surface's queue is gone by
         // now, so the release goes straight to the attach pipe, before the attach is killed.
-        if (slot.mouse_gesture == .program or slot.program_buttons != 0) cancelProgramGesture(self, index, .direct);
+        // Only when the press was delivered: input still queued (or being written) is dropped
+        // with the surface, and a release for a press the program never saw would be an orphan,
+        // so then the buttons are just forgotten.
+        if (slot.mouse_gesture == .program or slot.program_buttons != 0) {
+            if (undelivered) {
+                slot.program_buttons = 0;
+                slot.mouse_gesture = .none;
+            } else cancelProgramGesture(self, index, .direct);
+        }
         self.waitAttach(index);
         if (slot.surface) |surface| {
             _ = c.winghostty_surface_destroy(surface);
@@ -2366,12 +2378,14 @@ pub const Workspace = struct {
         }
         var child = ZmxSession.child(self.allocator, attach_args[0..attach_len], directory, .attach);
         try child.spawn();
+        var nonblocking = false;
         if (child.stdin) |stdin| {
             var mode: c.DWORD = c.PIPE_NOWAIT;
-            _ = c.SetNamedPipeHandleState(stdin.handle, &mode, null, null);
+            nonblocking = c.SetNamedPipeHandleState(stdin.handle, &mode, null, null) != 0;
         }
         self.input_mutex.lock();
         self.surfaces[index].attach = child;
+        self.surfaces[index].attach_nonblocking = nonblocking;
         self.surfaces[index].vt = vt;
         self.surfaces[index].last_resize_size = size;
         self.surfaces[index].attempted_resize_size = null;
@@ -2389,9 +2403,22 @@ pub const Workspace = struct {
         }
     }
 
+    /// Whether input for a surface is still queued or being written, so not yet delivered.
+    fn inputPending(self: *Workspace, index: usize) bool {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        if (self.input_busy and self.input_worker_surface == index) return true;
+        var position: usize = 0;
+        while (position < self.input_queue.count) : (position += 1) {
+            if (self.input_queue.items[(self.input_queue.head + position) % input_queue_capacity].surface == index) return true;
+        }
+        return false;
+    }
+
     /// Writes bytes straight to a surface's session. Used only while the surface is being torn
     /// down, after its queued input is gone and before its attach is killed.
     fn writeTeardownInput(self: *Workspace, index: usize, bytes: []const u8) void {
+        if (!self.surfaces[index].attach_nonblocking) return;
         if (self.teardown_input_sink) |sink| return sink(self.teardown_input_context, index, bytes);
         const child = self.surfaces[index].attach orelse return;
         const stdin = child.stdin orelse return;

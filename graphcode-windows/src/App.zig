@@ -14176,6 +14176,79 @@ test "live terminal mouse: the release of a cancelled program gesture neither re
     try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
 }
 
+test "live terminal mouse: a press still queued when the surface is torn down leaves no orphan release" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    const slot = &workspace.surfaces[keyboard.index];
+    try slot.vt.?.feed("\x1b[?1002h\x1b[?1006h");
+
+    const Sink = struct {
+        var calls: usize = 0;
+
+        fn write(_: ?*anyopaque, _: usize, _: []const u8) void {
+            calls += 1;
+        }
+    };
+    Sink.calls = 0;
+    workspace.teardown_input_sink = &Sink.write;
+    try std.testing.expect(slot.attach_nonblocking);
+
+    // The press is queued and not yet delivered (nothing drains it); the surface is torn down
+    // at once, as a recreate does. The press is dropped with the queue, so the program must not
+    // be sent a release for it.
+    buttons.press(.left, 0, 3, 2);
+    try std.testing.expectEqual(@as(u8, 1), slot.program_buttons);
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqual(@as(usize, 0), Sink.calls);
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try std.testing.expectEqual(@as(u8, 0), slot.program_buttons);
+    try std.testing.expect(slot.mouse_gesture == .none);
+}
+
+test "live terminal mouse: the teardown release is not written when the attach pipe is not non-blocking" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    const slot = &workspace.surfaces[keyboard.index];
+    try slot.vt.?.feed("\x1b[?1002h\x1b[?1006h");
+
+    const Sink = struct {
+        var calls: usize = 0;
+
+        fn write(_: ?*anyopaque, _: usize, _: []const u8) void {
+            calls += 1;
+        }
+    };
+    Sink.calls = 0;
+    workspace.teardown_input_sink = &Sink.write;
+    buttons.press(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    // The pipe did not take non-blocking mode: a direct write could block the shell, so it is skipped.
+    slot.attach_nonblocking = false;
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqual(@as(usize, 0), Sink.calls);
+    try std.testing.expectEqual(@as(u8, 0), slot.program_buttons);
+}
+
 const KeyTableCase = struct {
     name: []const u8,
     chord: LiveKeyboard.Chord,
