@@ -15446,6 +15446,143 @@ test "workspace layout: a new tab's layout claim and ownership record exist befo
     try std.testing.expectEqualStrings("loop-a", try fixture.tmp.dir.readFile(record_name, &buffer));
 }
 
+/// How many shell-ownership records the shell has written beside its layouts.
+fn shellRecordCount(dir: std.fs.Dir) !usize {
+    var records = dir.openDir("shell-sessions", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer records.close();
+    var count: usize = 0;
+    var iterator = records.iterate();
+    while (try iterator.next()) |_| count += 1;
+    return count;
+}
+
+/// How many attach processes the fake zmx has been started for.
+fn attachStartCount(dir: std.fs.Dir) !usize {
+    var entries = try dir.openDir(".", .{ .iterate = true });
+    defer entries.close();
+    var count: usize = 0;
+    var iterator = entries.iterate();
+    while (try iterator.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "cwd-graphcode-")) count += 1;
+    }
+    return count;
+}
+
+test "workspace layout: New Tab and Split with no free surface slot fail before claiming a session" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const workspace = &fixture.workspace;
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    // The loop's attach has recorded itself, so a later count only moves for a new attach.
+    allocator.free(try fixture.attachDirectory("loop-a"));
+    const attaches = try attachStartCount(fixture.tmp.dir);
+    const before = try std.fs.cwd().readFileAlloc(allocator, workspace.layout_path, 1 << 16);
+    defer allocator.free(before);
+
+    // Every slot is shown or awaiting a launch, as when the user has 32 terminals open.
+    for (&workspace.launch_waits, 0..) |*wait, index| {
+        if (workspace.hasSurface(index) or workspace.hasAttach(index) or wait.active()) continue;
+        wait.begin(try allocator.dupe(u8, "busy"), std.time.milliTimestamp(), 60_000, false);
+    }
+
+    inline for (.{ "newTab", "splitRight" }) |action| {
+        // A save that failed now would leave a claim behind; none must even be attempted.
+        workspace.layout_save_fault = 1;
+        const failed = if (comptime std.mem.eql(u8, action, "newTab"))
+            workspace.newTab()
+        else
+            workspace.splitFocused(.horizontal);
+        try std.testing.expectError(error.SurfaceCapacityExceeded, failed);
+        const after = try std.fs.cwd().readFileAlloc(allocator, workspace.layout_path, 1 << 16);
+        defer allocator.free(after);
+        try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqual(@as(?usize, 1), workspace.layout_save_fault);
+        try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+        try std.testing.expectEqual(@as(usize, 0), try shellRecordCount(fixture.tmp.dir));
+        try std.testing.expectEqual(attaches, try attachStartCount(fixture.tmp.dir));
+    }
+    workspace.layout_save_fault = null;
+}
+
+test "workspace layout: a failed rollback save leaves the claim on disk, never a marker, and no kill ever follows from it" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    const workspace = &fixture.workspace;
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+
+    // zmx cannot be started, so the new tab's session start fails after its claim is saved,
+    // and the save that takes the claim back fails as well.
+    const working_zmx = workspace.zmx_path;
+    workspace.zmx_path = try allocator.dupe(u8, "no-such-zmx.exe");
+    workspace.layout_save_fault = 1;
+    const failed = workspace.newTab();
+    allocator.free(workspace.zmx_path);
+    workspace.zmx_path = working_zmx;
+    if (failed) |_| return error.TestExpectedNewTabFailure else |_| {}
+    try std.testing.expectEqual(@as(?usize, null), workspace.layout_save_fault);
+
+    // Memory is rolled back and no record exists, but the disk still names the pane.
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    try std.testing.expectEqual(@as(usize, 0), try shellRecordCount(fixture.tmp.dir));
+    var saved = try WorkspaceLayoutFile.Layout.loadFor(allocator, workspace.layout_path, fixture.project, "loop-a");
+    defer saved.deinit();
+    try std.testing.expectEqual(@as(usize, 2), saved.tabs.items.len);
+    const ghost = try allocator.dupe(u8, saved.tabs.items[1].panes.items[0].id);
+    defer allocator.free(ghost);
+    try std.testing.expect(!workspace.layout.hasPane(ghost));
+    try std.testing.expect(!fixture.ownedMarker(ghost));
+
+    // Another loop's retirement of this one finds the claim with no record: nothing is
+    // killed, and the layout is set aside rather than deleted.
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+    try std.testing.expect(fixture.layoutExists("loop-a.json"));
+    try std.testing.expectEqual(@as(usize, 0), workspace.retireLoop("loop-a", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-a.json.refused"));
+    try std.testing.expect(!fixture.layoutExists("loop-a.json"));
+}
+
+test "workspace layout: restore drops a loop layout's claimed pane whose session was never started" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    try fixture.saveLoopLayout(fixture.project, "loop-a", &.{
+        .{ .id = "loop-a", .agent = true },
+        .{ .id = shell_uuid_one },
+        .{ .id = shell_uuid_two },
+    });
+    try fixture.setLive(&.{ "loop-a", shell_uuid_two });
+
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.waitFor(restoredAliveShell, shell_uuid_two);
+    fixture.settle();
+    try std.testing.expect(fixture.slotFor(shell_uuid_one) == null);
+    try std.testing.expectError(error.FileNotFound, fixture.tmp.dir.access("cwd-graphcode-" ++ shell_uuid_one ++ ".txt", .{}));
+    try std.testing.expect(!fixture.workspace.layout.hasPane(shell_uuid_one));
+    var persisted = try WorkspaceLayoutFile.Layout.loadFor(allocator, fixture.workspace.layout_path, fixture.project, "loop-a");
+    defer persisted.deinit();
+    try std.testing.expect(!persisted.hasPane(shell_uuid_one));
+    try std.testing.expect(persisted.hasPane(shell_uuid_two));
+    try fixture.expectKills("");
+}
+
 test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" } });
