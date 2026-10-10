@@ -12606,6 +12606,32 @@ const LiveKeyboard = struct {
         }
     }
 
+    /// What Windows sends for a character typed with AltGr: a plain WM_KEYDOWN with Ctrl and Alt
+    /// both down, then the WM_CHAR its layout translates it to. The test machine's layout may
+    /// have no AltGr, so what TranslateMessage queued is dropped and the layout's character
+    /// is sent in its place.
+    fn pressAltGr(self: *LiveKeyboard, vk: u32, unit: u16) !void {
+        const chord = Chord{ .vk = vk, .ctrl = true, .alt = true };
+        try setModifiers(chord);
+        var message = std.mem.zeroes(c.MSG);
+        message.hwnd = self.surface;
+        message.message = c.WM_KEYDOWN;
+        message.wParam = vk;
+        message.lParam = @intCast(1 | (c.MapVirtualKeyW(vk, c.MAPVK_VK_TO_VSC) << 16));
+        const keys = MainWindow.KeyContext{
+            .active = true,
+            .owner_enabled = true,
+            .target_owned = true,
+            .target_visible = true,
+            .target_enabled = true,
+            .ctrl = true,
+            .alt = true,
+        };
+        self.fixture.app.window.dispatchMessage(&message, keys, self.surface);
+        while (c.PeekMessageW(&message, self.surface, c.WM_CHAR, c.WM_SYSDEADCHAR, c.PM_REMOVE) != 0) {}
+        _ = c.SendMessageW(self.surface, c.WM_CHAR, unit, 1);
+    }
+
     /// Everything queued for the shell since the last call.
     fn drainInput(self: *LiveKeyboard, out: *std.ArrayListUnmanaged(u8)) !void {
         out.clearRetainingCapacity();
@@ -12937,6 +12963,39 @@ const KeyTableCase = struct {
     chord: LiveKeyboard.Chord,
     expected: []const u8,
 };
+
+test "live terminal keyboard: AltGr characters reach the shell and never run a shell shortcut" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    fixture.workspace.key_callback = &ClipboardRouteProbe.callback;
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+
+    // O, J and comma are application shortcuts with plain Ctrl (open folder, jump, settings);
+    // Polish AltGr+O is o-acute, and the others are common AltGr characters.
+    const cases = [_]struct { vk: u32, unit: u16, text: []const u8 }{
+        .{ .vk = 'O', .unit = 0x00F3, .text = "ó" },
+        .{ .vk = 'J', .unit = 'j', .text = "j" },
+        .{ .vk = c.VK_OEM_COMMA, .unit = ',', .text = "," },
+        .{ .vk = 'Q', .unit = '@', .text = "@" },
+        .{ .vk = '7', .unit = '{', .text = "{" },
+        .{ .vk = 'E', .unit = 0x20AC, .text = "€" },
+    };
+    for (cases) |case| {
+        ClipboardRouteProbe.calls = 0;
+        try keyboard.pressAltGr(case.vk, case.unit);
+        if (ClipboardRouteProbe.calls != 0) std.debug.print("AltGr vk 0x{x} ran shortcut key {d}\n", .{ case.vk, ClipboardRouteProbe.key });
+        try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+        try keyboard.drainInput(&sent);
+        try std.testing.expectEqualStrings(case.text, sent.items);
+    }
+}
 
 fn expectKeyTable(keyboard: *LiveKeyboard, cases: []const KeyTableCase) !void {
     var sent: std.ArrayListUnmanaged(u8) = .empty;

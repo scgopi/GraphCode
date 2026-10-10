@@ -4211,6 +4211,7 @@ fn onAccessibilitySelection(user_data: ?*anyopaque, surface: *c.winghostty_surfa
 fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_key_event) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
     const slot = callbackSlot(workspace, surface) orelse return;
+    // Releases are never sent to the program: the shell does not negotiate Kitty release reporting.
     if (event.action == c.WINGHOSTTY_KEY_RELEASE) return;
     const modifiers = TerminalKeys.decodeProviderModifiers(event.modifiers);
     const ctrl = modifiers.ctrl;
@@ -4225,7 +4226,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
         if (event.action == c.WINGHOSTTY_KEY_PRESS) workspace.runContextMenu();
         return;
     }
-    if (isApplicationShortcut(event.virtual_key, ctrl, shift) or
+    if (isApplicationShortcut(event.virtual_key, ctrl, shift, modifiers.alt) or
         (event.virtual_key == c.VK_TAB and
             (modifiers.alt or (event.modifiers & ~(TerminalKeys.provider_shift | TerminalKeys.provider_ctrl | TerminalKeys.provider_alt)) != 0)))
     {
@@ -4288,9 +4289,13 @@ fn discardTranslatedCharacters(target: c.HWND) void {
     while (c.PeekMessageW(&message, target, c.WM_SYSCHAR, c.WM_SYSDEADCHAR, c.PM_REMOVE) != 0) {}
 }
 
-fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool) bool {
+fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool, alt: bool) bool {
     if (key == c.VK_TAB) return ctrl;
-    if (!ctrl) return false;
+    // Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt chord types text on layouts that have
+    // one and is never a shortcut here, except Tab (handled above and in onKey, unchanged);
+    // Ctrl+Alt+PageUp/PageDown stay with the window's own accelerators, which are handled
+    // before the key reaches the terminal.
+    if (!ctrl or alt) return false;
     return switch (key) {
         'O', 'J', c.VK_PRIOR, c.VK_NEXT, 0xBC => true,
         // Ctrl+Shift+[ and ] move between panes; plain Ctrl+[ (ESC) and Ctrl+] belong to the shell.
@@ -4480,25 +4485,41 @@ test "ordinary Tab production dispatch reaches the real terminal key callback" {
 }
 
 test "TerminalSurface.isApplicationShortcut forwards only the chords a terminal does not keep" {
-    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false));
-    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false));
-    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, false));
-    try std.testing.expect(isApplicationShortcut(0xBC, true, false));
-    try std.testing.expect(isApplicationShortcut('O', true, false));
-    try std.testing.expect(isApplicationShortcut('J', true, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false, false));
+    try std.testing.expect(isApplicationShortcut(c.VK_TAB, true, false, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_TAB, false, false, false));
+    try std.testing.expect(isApplicationShortcut(0xBC, true, false, false));
+    try std.testing.expect(isApplicationShortcut('O', true, false, false));
+    try std.testing.expect(isApplicationShortcut('J', true, false, false));
     // Ctrl+D/W/S/T/N and Ctrl+[ / ] are terminal input: EOF, delete word, XOFF, transpose, next
     // history, ESC, and GS. Ctrl+Shift+[ / ] move between panes.
     for ([_]usize{ 'D', 'W', 'S', 'T', 'N', 0xDB, 0xDD }) |key| {
-        try std.testing.expect(!isApplicationShortcut(key, true, false));
+        try std.testing.expect(!isApplicationShortcut(key, true, false, false));
     }
-    try std.testing.expect(isApplicationShortcut(0xDB, true, true));
-    try std.testing.expect(isApplicationShortcut(0xDD, true, true));
-    try std.testing.expect(!isApplicationShortcut('C', true, true));
-    try std.testing.expect(!isApplicationShortcut('V', true, true));
-    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false));
-    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false, false));
-    try std.testing.expect(!isApplicationShortcut('M', true, false));
+    try std.testing.expect(isApplicationShortcut(0xDB, true, true, false));
+    try std.testing.expect(isApplicationShortcut(0xDD, true, true, false));
+    try std.testing.expect(!isApplicationShortcut('C', true, true, false));
+    try std.testing.expect(!isApplicationShortcut('V', true, true, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_UP, false, false, false));
+    try std.testing.expect(!isApplicationShortcut(c.VK_DOWN, false, false, false));
+    try std.testing.expect(!isApplicationShortcut('M', true, false, false));
+}
+
+test "TerminalSurface.isApplicationShortcut rejects every shortcut key once Alt is held with Ctrl (AltGr)" {
+    const shortcuts = [_]struct { vk: usize, shift: bool }{
+        .{ .vk = 'O', .shift = false },
+        .{ .vk = 'J', .shift = false },
+        .{ .vk = 0xBC, .shift = false },
+        .{ .vk = c.VK_PRIOR, .shift = false },
+        .{ .vk = c.VK_NEXT, .shift = false },
+        .{ .vk = 0xDB, .shift = true },
+        .{ .vk = 0xDD, .shift = true },
+    };
+    for (shortcuts) |shortcut| {
+        try std.testing.expect(isApplicationShortcut(shortcut.vk, true, shortcut.shift, false));
+        try std.testing.expect(!isApplicationShortcut(shortcut.vk, true, shortcut.shift, true));
+    }
 }
 
 // The pinned provider fills winghostty_key_event.modifiers from GetKeyState using the Win32
@@ -4513,6 +4534,68 @@ fn providerKey(vk: usize, modifiers: u32, action: u32) c.winghostty_key_event {
     key.modifiers = modifiers;
     key.action = action;
     return key;
+}
+
+test "AltGr (Ctrl+Alt) never triggers an application shortcut, so its text reaches the terminal" {
+    const Probe = OrdinaryTabKeyboardTest;
+    // Windows reports AltGr as Ctrl+Alt. Each row is a character that layout types with AltGr,
+    // on a key the shell also uses with plain Ctrl as an application shortcut (O, J, comma)
+    // or not (the rest). The WM_CHAR text is what the provider hands to on_text.
+    const altgr = [_]struct { layout: []const u8, vk: usize, text: []const u8 }{
+        .{ .layout = "Polish", .vk = 'O', .text = "ó" },
+        .{ .layout = "Polish", .vk = 'A', .text = "ą" },
+        .{ .layout = "Polish", .vk = 'L', .text = "ł" },
+        .{ .layout = "German", .vk = 'Q', .text = "@" },
+        .{ .layout = "German", .vk = '7', .text = "{" },
+        .{ .layout = "German", .vk = 'E', .text = "€" },
+        .{ .layout = "French", .vk = '0', .text = "@" },
+        .{ .layout = "French", .vk = 'J', .text = "j" },
+        .{ .layout = "Spanish", .vk = '2', .text = "@" },
+        .{ .layout = "Layout with AltGr+comma", .vk = 0xBC, .text = "," },
+    };
+    for (altgr) |case| {
+        var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+        defer workspace.layout.deinit();
+        defer workspace.input_queue.clear();
+        var probe = Probe{};
+        probe.bind(&workspace);
+        const key = providerKey(case.vk, provider_ctrl | provider_alt, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &key);
+        if (probe.calls != 0 or workspace.input_queue.count != 0) {
+            std.debug.print("{s} AltGr vk 0x{x}: {d} shortcut calls, {d} queued inputs\n", .{ case.layout, case.vk, probe.calls, workspace.input_queue.count });
+        }
+        try std.testing.expectEqual(@as(usize, 0), probe.calls);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+        onText(@ptrCast(&workspace), Probe.registered, @ptrCast(case.text.ptr), @intCast(case.text.len));
+        try Probe.expectInput(&workspace, case.text);
+    }
+}
+
+test "Ctrl+Alt held on every application-shortcut key leaves the key to the terminal" {
+    const Probe = OrdinaryTabKeyboardTest;
+    const with_shift = [_]usize{ 0xDB, 0xDD };
+    const without_shift = [_]usize{ 'O', 'J', 0xBC, c.VK_PRIOR, c.VK_NEXT };
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    for (without_shift) |vk| for ([_]u32{ 0, provider_shift }) |shift| {
+        const key = providerKey(vk, provider_ctrl | provider_alt | shift, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &key);
+    };
+    for (with_shift) |vk| {
+        const key = providerKey(vk, provider_ctrl | provider_alt | provider_shift, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &key);
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    // Plain Ctrl still reaches the shell's shortcut route, so the guard is the Alt bit alone.
+    for (without_shift) |vk| {
+        const key = providerKey(vk, provider_ctrl, c.WINGHOSTTY_KEY_PRESS);
+        probe.calls = 0;
+        onKey(@ptrCast(&workspace), Probe.registered, &key);
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    }
 }
 
 test "provider Shift modifier bit makes Tab a backtab instead of loop navigation" {
