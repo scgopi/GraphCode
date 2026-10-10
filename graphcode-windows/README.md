@@ -300,12 +300,15 @@ that `Ctrl+C` copies while the terminal has a selection. Paste reads only
 (NUL, BS, ESC, DEL and the tty's special characters; BEL and tab pass through) plus
 the C1 controls U+0080 to U+009F (8-bit CSI and friends), and
 wraps the text in bracketed-paste markers only when the running program asked
-for them (DECSET 2004); text over 1,000,000 UTF-8 bytes is refused. A copy that the
-Windows clipboard refuses puts the previous Unicode text back and says whether
-that worked; if the existing Unicode text cannot be copied safely the copy is
-refused before the clipboard is touched. Only the Unicode text is protected:
-emptying the clipboard removes every other format (an image, HTML, RTF), which a
-copy replaces and a failed copy does not restore. Multi-line text for a program that did not ask asks for
+for them (DECSET 2004); text over 1,000,000 UTF-8 bytes is refused. A successful copy
+intentionally replaces every clipboard format with plain Unicode text, as macOS does
+with `clearContents` then `setString`: an image, HTML, RTF or file list that was on
+the clipboard is gone afterwards, and nothing earlier is read or restored. The text
+is copied into a clipboard block before the clipboard is opened, so running out of
+memory leaves the clipboard unchanged; if the clipboard refuses the block after it
+was emptied, the copy fails with a status saying the clipboard may now be empty.
+Copy and paste through Remote Desktop or a Dev Box (`rdpclip`) has not been
+verified. Multi-line text for a program that did not ask asks for
 confirmation first instead of running each line as it is pasted. That includes
 `pwsh` and `cmd.exe`: neither asks for bracketed paste under ConPTY, and each
 runs the pasted lines as they arrive. macOS auto-confirms that case without a

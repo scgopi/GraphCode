@@ -9,34 +9,6 @@ pub fn decodeUtf16(allocator: std.mem.Allocator, text: []const u16) ![]u8 {
     return std.unicode.utf16LeToUtf8Alloc(allocator, text);
 }
 
-/// What the clipboard held as Unicode text before a write.
-const Snapshot = union(enum) {
-    /// No Unicode text: nothing there to lose.
-    none,
-    /// The text through its terminator; the caller frees it.
-    units: []u16,
-    /// Unicode text is there but could not be copied safely, so a write must not empty it.
-    unreadable,
-};
-
-/// Copies a clipboard text block through its first terminator, never reading past `capacity`
-/// units. A block with no terminator is not valid CF_UNICODETEXT and is not republished.
-fn snapshotUnits(allocator: std.mem.Allocator, units: [*]const u16, capacity: usize) Snapshot {
-    var length: usize = 0;
-    while (length < capacity and units[length] != 0) : (length += 1) {}
-    if (length == capacity) return .unreadable;
-    const copy = allocator.alloc(u16, length + 1) catch return .unreadable;
-    @memcpy(copy[0..length], units[0..length]);
-    copy[length] = 0;
-    return .{ .units = copy };
-}
-
-/// A clipboard block as Windows reports it: a size in bytes that must hold whole UTF-16 units.
-fn snapshotBlock(allocator: std.mem.Allocator, units: [*]const u16, byte_count: usize) Snapshot {
-    if (byte_count < @sizeOf(u16) or byte_count % @sizeOf(u16) != 0) return .unreadable;
-    return snapshotUnits(allocator, units, byte_count / @sizeOf(u16));
-}
-
 const NativeApi = struct {
     fn open(owner: c.HWND) bool {
         return c.OpenClipboard(owner) != 0;
@@ -50,31 +22,27 @@ const NativeApi = struct {
         return c.EmptyClipboard() != 0;
     }
 
-    fn snapshot(allocator: std.mem.Allocator) Snapshot {
-        if (c.IsClipboardFormatAvailable(c.CF_UNICODETEXT) == 0) return .none;
-        const memory = c.GetClipboardData(c.CF_UNICODETEXT) orelse return .unreadable;
-        const byte_count = c.GlobalSize(memory);
-        const locked = c.GlobalLock(memory) orelse return .unreadable;
-        defer _ = c.GlobalUnlock(memory);
-        const source: [*]const u16 = @ptrCast(@alignCast(locked));
-        return snapshotBlock(allocator, source, byte_count);
-    }
-
-    /// Hands `units` (terminator included) to the clipboard, which owns the memory on success.
-    fn setUnits(units: []const u16) bool {
-        const memory = c.GlobalAlloc(c.GMEM_MOVEABLE, units.len * @sizeOf(u16)) orelse return false;
+    /// Copies `units` (terminator included) into a new movable block. Until `publish` succeeds
+    /// the caller owns the block and must `free` it exactly once.
+    fn stage(units: []const u16) ?*anyopaque {
+        const memory = c.GlobalAlloc(c.GMEM_MOVEABLE, units.len * @sizeOf(u16)) orelse return null;
         const locked = c.GlobalLock(memory) orelse {
             _ = c.GlobalFree(memory);
-            return false;
+            return null;
         };
         const destination: [*]u16 = @ptrCast(@alignCast(locked));
         @memcpy(destination[0..units.len], units);
         _ = c.GlobalUnlock(memory);
-        if (c.SetClipboardData(c.CF_UNICODETEXT, memory) == null) {
-            _ = c.GlobalFree(memory);
-            return false;
-        }
-        return true;
+        return memory;
+    }
+
+    fn free(memory: *anyopaque) void {
+        _ = c.GlobalFree(memory);
+    }
+
+    /// Windows owns the block only when this succeeds; after a failure the caller still owns it.
+    fn publish(memory: *anyopaque) bool {
+        return c.SetClipboardData(c.CF_UNICODETEXT, memory) != null;
     }
 };
 
@@ -82,30 +50,31 @@ pub fn writeText(owner: c.HWND, allocator: std.mem.Allocator, text: []const u8) 
     return writeTextWith(NativeApi, owner, allocator, text);
 }
 
-/// Replaces the clipboard's text. Windows only lets a program set the clipboard after emptying
-/// it, so a refusal of the new text would lose what the user had copied. The previous Unicode
-/// text is therefore copied first and put back if the write fails, and the error says which
-/// happened. If Unicode text is there but cannot be copied safely, the clipboard is left alone
-/// and the copy fails. Only the Unicode text is protected: emptying the clipboard removes every
-/// other format (images, HTML, RTF, files), which are not restored, and a successful copy
-/// replaces them as well.
+/// Replaces the whole clipboard with `text`, as Unicode text only. Windows only lets a program
+/// set the clipboard after emptying it, and emptying removes every other format (images, HTML,
+/// RTF, files, and the history and cloud opt-out formats), so a successful copy replaces all
+/// of them, as macOS does with `clearContents` then `setString`. Nothing earlier is read or
+/// restored: reading it could block on another program that renders it on demand, and putting
+/// back only its text would drop an opt-out marker and could republish text that was excluded
+/// from history and sync. The text is copied into a clipboard block before the clipboard is
+/// opened, so running out of memory cannot happen once it has been emptied. If the clipboard
+/// then refuses the block, the copy fails and the clipboard may be left empty. The block belongs
+/// to this function until the clipboard accepts it, and is freed exactly once on every
+/// failure; after success Windows owns it.
 fn writeTextWith(comptime Api: type, owner: c.HWND, allocator: std.mem.Allocator, text: []const u8) !void {
     if (owner == null) return error.ClipboardOwnerUnavailable;
     const encoded = try encodeUtf16(allocator, text);
     defer allocator.free(encoded);
 
+    const staged = Api.stage(encoded.ptr[0 .. encoded.len + 1]) orelse return error.OutOfMemory;
+    var owned = true;
+    defer if (owned) Api.free(staged);
+
     if (!Api.open(owner)) return error.ClipboardOpenFailed;
     defer Api.close();
-    const previous = Api.snapshot(allocator);
-    defer if (previous == .units) allocator.free(previous.units);
-    if (previous == .unreadable) return error.ClipboardPreviousTextUnreadable;
     if (!Api.empty()) return error.ClipboardClearFailed;
-    if (Api.setUnits(encoded.ptr[0 .. encoded.len + 1])) return;
-    if (previous == .units) {
-        if (Api.setUnits(previous.units)) return error.ClipboardWriteFailedKeptPreviousText;
-        return error.ClipboardWriteFailedLostPreviousText;
-    }
-    return error.ClipboardWriteFailed;
+    if (!Api.publish(staged)) return error.ClipboardWriteFailed;
+    owned = false;
 }
 
 /// Reads the clipboard's Unicode text as UTF-8. Text that would be longer than `max_bytes`
@@ -194,18 +163,29 @@ test "clipboard Win32 operations require an owner window" {
 }
 
 /// A stand-in clipboard that follows the Win32 rules this code depends on: a write needs the
-/// clipboard emptied first, and the stand-in can refuse writes or fail to open or empty.
+/// clipboard emptied first, and the stand-in can refuse to allocate, open, empty or accept a
+/// block. It counts opens, empties, publishes, closes and frees, and tracks which staged blocks
+/// the caller still owns, so a leaked or doubly freed block fails a test. It never touches the
+/// real clipboard.
 const FakeClipboard = struct {
     var storage: [64]u16 = undefined;
     var held: ?[]const u16 = null;
     var open_ok = true;
     var empty_ok = true;
-    var unreadable = false;
-    /// The block size Windows would report, when it is not a whole number of units.
-    var reported_bytes: ?usize = null;
-    var refused_sets: usize = 0;
     var sets: usize = 0;
     var closes: usize = 0;
+    var opens: usize = 0;
+    var empties: usize = 0;
+    var stages: usize = 0;
+    var frees: usize = 0;
+    /// Staged blocks the caller still owns: staged, not yet freed and not yet handed to the clipboard.
+    var live: isize = 0;
+    var alloc_ok = true;
+    var publish_ok = true;
+    var is_open = false;
+    var staged_while_open = false;
+    var staged_storage: [64]u16 = undefined;
+    var staged_len: usize = 0;
 
     fn units(comptime text: []const u8) []const u16 {
         const literal = std.unicode.utf8ToUtf16LeStringLiteral(text);
@@ -219,38 +199,60 @@ const FakeClipboard = struct {
         } else held = null;
         open_ok = true;
         empty_ok = true;
-        unreadable = false;
-        reported_bytes = null;
-        refused_sets = 0;
         sets = 0;
         closes = 0;
+        opens = 0;
+        empties = 0;
+        stages = 0;
+        frees = 0;
+        live = 0;
+        alloc_ok = true;
+        publish_ok = true;
+        is_open = false;
+        staged_while_open = false;
+        staged_len = 0;
     }
 
     fn open(_: c.HWND) bool {
+        opens += 1;
+        is_open = open_ok;
         return open_ok;
     }
 
     fn close() void {
         closes += 1;
+        is_open = false;
     }
 
     fn empty() bool {
+        empties += 1;
         if (!empty_ok) return false;
         held = null;
         return true;
     }
 
-    fn snapshot(allocator: std.mem.Allocator) Snapshot {
-        if (unreadable) return .unreadable;
-        const value = held orelse return .none;
-        return snapshotBlock(allocator, value.ptr, reported_bytes orelse value.len * @sizeOf(u16));
+    fn stage(value: []const u16) ?usize {
+        stages += 1;
+        if (is_open) staged_while_open = true;
+        if (!alloc_ok) return null;
+        @memcpy(staged_storage[0..value.len], value);
+        staged_len = value.len;
+        live += 1;
+        return 1;
     }
 
-    fn setUnits(value: []const u16) bool {
+    fn free(_: usize) void {
+        frees += 1;
+        live -= 1;
+    }
+
+    /// Windows takes ownership of the block only when this succeeds.
+    fn publish(_: usize) bool {
         sets += 1;
-        if (sets <= refused_sets) return false;
-        @memcpy(storage[0..value.len], value);
-        held = storage[0..value.len];
+        if (!publish_ok) return false;
+        @memcpy(storage[0..staged_len], staged_storage[0..staged_len]);
+        held = storage[0..staged_len];
+        live -= 1;
         return true;
     }
 
@@ -269,38 +271,6 @@ test "clipboard write replaces the previous text" {
     try writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new");
     try FakeClipboard.expectHeld(FakeClipboard.units("new"));
     try std.testing.expectEqual(@as(usize, 1), FakeClipboard.closes);
-}
-
-test "a refused clipboard write puts the user's previous text back and says so" {
-    FakeClipboard.reset(FakeClipboard.units("old"));
-    FakeClipboard.refused_sets = 1;
-    try std.testing.expectError(
-        error.ClipboardWriteFailedKeptPreviousText,
-        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
-    );
-    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
-    try std.testing.expectEqual(@as(usize, 2), FakeClipboard.sets);
-    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.closes);
-}
-
-test "a refused write that also cannot restore the previous text reports the loss" {
-    FakeClipboard.reset(FakeClipboard.units("old"));
-    FakeClipboard.refused_sets = 2;
-    try std.testing.expectError(
-        error.ClipboardWriteFailedLostPreviousText,
-        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
-    );
-    try FakeClipboard.expectHeld(null);
-}
-
-test "a refused write over a clipboard with no text is a plain write failure" {
-    FakeClipboard.reset(null);
-    FakeClipboard.refused_sets = 1;
-    try std.testing.expectError(
-        error.ClipboardWriteFailed,
-        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
-    );
-    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.sets);
 }
 
 test "a clipboard that cannot be opened or emptied is left as it was" {
@@ -362,67 +332,81 @@ test "the paste limit counts UTF-8 bytes, so wide characters are refused before 
     try std.testing.expectError(error.ClipboardTextTooLarge, textFromUnits(failing.allocator(), euro.ptr, euro.len, 5));
 }
 
-test "a snapshot copies text through its terminator and refuses an unterminated block" {
-    const allocator = std.testing.allocator;
-    var block = [_]u16{ 'h', 'i', 0, 'x', 'y' };
-    const kept = snapshotUnits(allocator, &block, block.len);
-    defer allocator.free(kept.units);
-    try std.testing.expectEqualSlices(u16, &[_]u16{ 'h', 'i', 0 }, kept.units);
-    const bare = [_]u16{ 'a', 'b', 'c' };
-    try std.testing.expect(snapshotUnits(allocator, &bare, bare.len) == .unreadable);
-}
-
-test "unreadable or unterminated existing text stops a copy before the clipboard is emptied" {
-    // Unicode text is there but cannot be copied: the write is refused and nothing changes.
+test "a copy that cannot stage its text touches nothing" {
     FakeClipboard.reset(FakeClipboard.units("old"));
-    FakeClipboard.unreadable = true;
+    FakeClipboard.alloc_ok = false;
     try std.testing.expectError(
-        error.ClipboardPreviousTextUnreadable,
+        error.OutOfMemory,
         writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
     );
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.stages);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.opens);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.empties);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.frees);
     try FakeClipboard.expectHeld(FakeClipboard.units("old"));
+}
+
+test "the new text is staged before the clipboard is opened" {
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    try writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new");
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.stages);
+    try std.testing.expect(!FakeClipboard.staged_while_open);
+}
+
+test "a copy that cannot open the clipboard frees its staged text exactly once" {
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    FakeClipboard.open_ok = false;
+    try std.testing.expectError(
+        error.ClipboardOpenFailed,
+        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.stages);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.frees);
+    try std.testing.expectEqual(@as(isize, 0), FakeClipboard.live);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.empties);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.closes);
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
+}
+
+test "a copy that cannot empty the clipboard frees its staged text exactly once" {
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    FakeClipboard.empty_ok = false;
+    try std.testing.expectError(
+        error.ClipboardClearFailed,
+        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.frees);
+    try std.testing.expectEqual(@as(isize, 0), FakeClipboard.live);
     try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
     try std.testing.expectEqual(@as(usize, 1), FakeClipboard.closes);
-
-    // An existing block with no terminator must not be republished by a restore: the copy is
-    // stopped before the clipboard is emptied, so a refused write has nothing to restore.
-    FakeClipboard.reset(&[_]u16{ 'a', 'b', 'c' });
-    FakeClipboard.refused_sets = 1;
-    try std.testing.expectError(
-        error.ClipboardPreviousTextUnreadable,
-        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
-    );
-    try FakeClipboard.expectHeld(&[_]u16{ 'a', 'b', 'c' });
-    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
 }
 
-test "a block whose size is not whole UTF-16 units is unreadable and stops the copy before the clipboard is emptied" {
-    const allocator = std.testing.allocator;
-    const block = [_]u16{ 'a', 0, 'b' };
-    for ([_]usize{ 0, 1, 3, 5 }) |bytes| try std.testing.expect(snapshotBlock(allocator, &block, bytes) == .unreadable);
-    const whole = snapshotBlock(allocator, &block, 4);
-    defer allocator.free(whole.units);
-    try std.testing.expectEqualSlices(u16, &[_]u16{ 'a', 0 }, whole.units);
-
-    // Windows reports 3 bytes for the existing item: it must not be truncated to one unit and
-    // treated as valid, nor emptied and lost.
+test "a refused publish frees its staged text exactly once, is an ordinary write failure, and restores nothing" {
     FakeClipboard.reset(FakeClipboard.units("old"));
-    FakeClipboard.reported_bytes = 3;
-    FakeClipboard.refused_sets = 1;
+    FakeClipboard.publish_ok = false;
     try std.testing.expectError(
-        error.ClipboardPreviousTextUnreadable,
+        error.ClipboardWriteFailed,
         writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
     );
-    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
-    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.empties);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.sets);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.frees);
+    try std.testing.expectEqual(@as(isize, 0), FakeClipboard.live);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.closes);
+    // The clipboard was emptied and stays empty: no earlier text is put back.
+    try FakeClipboard.expectHeld(null);
 }
 
-test "a restore republishes only the text through its terminator" {
-    FakeClipboard.reset(&[_]u16{ 'o', 'l', 'd', 0, 'j', 'u', 'n', 'k' });
-    FakeClipboard.refused_sets = 1;
-    try std.testing.expectError(
-        error.ClipboardWriteFailedKeptPreviousText,
-        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
-    );
-    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
+test "a successful publish hands the block to Windows and the caller never frees it" {
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    try writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new");
+    try FakeClipboard.expectHeld(FakeClipboard.units("new"));
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.opens);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.empties);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.sets);
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.closes);
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.frees);
+    try std.testing.expectEqual(@as(isize, 0), FakeClipboard.live);
 }
