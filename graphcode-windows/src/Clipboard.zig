@@ -183,6 +183,7 @@ const FakeClipboard = struct {
     var alloc_ok = true;
     var publish_ok = true;
     var is_open = false;
+    var emptied = false;
     var staged_while_open = false;
     var staged_storage: [64]u16 = undefined;
     var staged_len: usize = 0;
@@ -209,6 +210,7 @@ const FakeClipboard = struct {
         alloc_ok = true;
         publish_ok = true;
         is_open = false;
+        emptied = false;
         staged_while_open = false;
         staged_len = 0;
     }
@@ -216,18 +218,22 @@ const FakeClipboard = struct {
     fn open(_: c.HWND) bool {
         opens += 1;
         is_open = open_ok;
+        emptied = false;
         return open_ok;
     }
 
     fn close() void {
         closes += 1;
         is_open = false;
+        emptied = false;
     }
 
+    /// Windows refuses to empty a clipboard the caller has not opened.
     fn empty() bool {
         empties += 1;
-        if (!empty_ok) return false;
+        if (!is_open or !empty_ok) return false;
         held = null;
+        emptied = true;
         return true;
     }
 
@@ -246,10 +252,11 @@ const FakeClipboard = struct {
         live -= 1;
     }
 
-    /// Windows takes ownership of the block only when this succeeds.
+    /// Windows takes ownership of the block only when this succeeds, and only for a caller that
+    /// has the clipboard open and has emptied it to become its owner.
     fn publish(_: usize) bool {
         sets += 1;
-        if (!publish_ok) return false;
+        if (!is_open or !emptied or !publish_ok) return false;
         @memcpy(storage[0..staged_len], staged_storage[0..staged_len]);
         held = storage[0..staged_len];
         live -= 1;
@@ -330,6 +337,58 @@ test "the paste limit counts UTF-8 bytes, so wide characters are refused before 
     // Refused by size, nothing was allocated: a failing allocator still reports the size error.
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try std.testing.expectError(error.ClipboardTextTooLarge, textFromUnits(failing.allocator(), euro.ptr, euro.len, 5));
+}
+
+test "the stand-in refuses calls made in the wrong order, as Windows does" {
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    // Emptying a clipboard that is not open fails and changes nothing.
+    try std.testing.expect(!FakeClipboard.empty());
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
+    // Publishing without having emptied fails: the caller is not the owner.
+    try std.testing.expect(FakeClipboard.open(fake_owner));
+    const staged = FakeClipboard.stage(FakeClipboard.units("new")).?;
+    try std.testing.expect(!FakeClipboard.publish(staged));
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
+    // Emptying then publishing works, and closing ends the ownership.
+    try std.testing.expect(FakeClipboard.empty());
+    try std.testing.expect(FakeClipboard.publish(staged));
+    FakeClipboard.close();
+    try std.testing.expect(!FakeClipboard.publish(staged));
+    // Reopening starts again unemptied.
+    try std.testing.expect(FakeClipboard.open(fake_owner));
+    try std.testing.expect(!FakeClipboard.publish(staged));
+    FakeClipboard.close();
+}
+
+test "a copy that skips emptying the clipboard is a write failure and the block is freed" {
+    const SkipsEmpty = struct {
+        fn open(owner: c.HWND) bool {
+            return FakeClipboard.open(owner);
+        }
+        fn close() void {
+            FakeClipboard.close();
+        }
+        fn empty() bool {
+            return true;
+        }
+        fn stage(value: []const u16) ?usize {
+            return FakeClipboard.stage(value);
+        }
+        fn free(block: usize) void {
+            FakeClipboard.free(block);
+        }
+        fn publish(block: usize) bool {
+            return FakeClipboard.publish(block);
+        }
+    };
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    try std.testing.expectError(
+        error.ClipboardWriteFailed,
+        writeTextWith(SkipsEmpty, fake_owner, std.testing.allocator, "new"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), FakeClipboard.frees);
+    try std.testing.expectEqual(@as(isize, 0), FakeClipboard.live);
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
 }
 
 test "a copy that cannot stage its text touches nothing" {
