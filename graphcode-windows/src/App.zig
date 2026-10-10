@@ -20951,7 +20951,18 @@ const RealShellWindow = struct {
     fn requireActive(fixture: *LiveTerminalFixture) !void {
         const hwnd = fixture.app.window.hwnd;
         _ = c.AllowSetForegroundWindow(c.GetCurrentProcessId());
-        _ = c.SetForegroundWindow(hwnd);
+        if (c.SetForegroundWindow(hwnd) == 0) {
+            // Windows only lets the foreground's own input queue hand it over, so join that queue
+            // for the call (no input is synthesized) and leave it again at once.
+            const current = c.GetForegroundWindow();
+            const owner_thread = if (current != null) c.GetWindowThreadProcessId(current, null) else 0;
+            const this_thread = c.GetCurrentThreadId();
+            if (owner_thread != 0 and owner_thread != this_thread and c.AttachThreadInput(this_thread, owner_thread, 1) != 0) {
+                _ = c.BringWindowToTop(hwnd);
+                _ = c.SetForegroundWindow(hwnd);
+                _ = c.AttachThreadInput(this_thread, owner_thread, 0);
+            }
+        }
         const foreground = c.GetForegroundWindow() == hwnd;
         const active = c.GetActiveWindow() == hwnd;
         const visible = c.IsWindowVisible(hwnd) != 0;
