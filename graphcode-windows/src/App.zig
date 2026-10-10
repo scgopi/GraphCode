@@ -284,6 +284,12 @@ fn pasteLineCount(text: []const u8) usize {
     return lines;
 }
 
+const TerminalCopyApi = struct {
+    fn writeClipboard(owner: c.HWND, allocator: std.mem.Allocator, text: []const u8) !void {
+        return Clipboard.writeText(owner, allocator, text);
+    }
+};
+
 const TerminalPasteApi = struct {
     fn readClipboard(owner: c.HWND, allocator: std.mem.Allocator) ![]u8 {
         return Clipboard.readText(owner, allocator);
@@ -6371,6 +6377,10 @@ pub const App = struct {
     }
 
     fn copyTerminalSelection(self: *App) void {
+        self.copyTerminalSelectionWith(TerminalCopyApi);
+    }
+
+    fn copyTerminalSelectionWith(self: *App, comptime Api: type) void {
         const workspace = self.workspace orelse return;
         const selection = workspace.copySelection(self.allocator) catch |err| {
             std.log.warn("Unable to read terminal selection for clipboard: {s}", .{@errorName(err)});
@@ -6381,7 +6391,7 @@ pub const App = struct {
             return;
         };
         defer self.allocator.free(selection);
-        Clipboard.writeText(self.window.hwnd, self.allocator, selection) catch |err| {
+        Api.writeClipboard(self.window.hwnd, self.allocator, selection) catch |err| {
             std.log.warn("Unable to write terminal selection to Windows clipboard: {s}", .{@errorName(err)});
             self.setStatus("Unable to copy terminal selection");
             return;
@@ -12672,6 +12682,254 @@ test "live terminal keyboard: clipboard chords reach the workspace and never lea
     try std.testing.expectEqual(@as(usize, 'C'), ClipboardRouteProbe.key);
     try keyboard.drainInput(&sent);
     try std.testing.expectEqualStrings("", sent.items);
+}
+
+/// Mouse input for a real terminal surface: the messages the Win32 host window procedure
+/// receives, so the provider's own hit-testing, capture, and click counting run.
+const LiveMouse = struct {
+    keyboard: *LiveKeyboard,
+    cell_width: i32,
+    cell_height: i32,
+
+    fn begin(keyboard: *LiveKeyboard) !LiveMouse {
+        const slot = &keyboard.fixture.workspace.surfaces[keyboard.index];
+        var metrics: c.winghostty_cell_metrics = undefined;
+        if (c.winghostty_surface_get_cell_metrics(slot.surface.?, &metrics) != c.WINGHOSTTY_OK) return error.TestCellMetricsUnavailable;
+        try std.testing.expect(metrics.cell_width > 0 and metrics.cell_height > 0);
+        return .{ .keyboard = keyboard, .cell_width = @intCast(metrics.cell_width), .cell_height = @intCast(metrics.cell_height) };
+    }
+
+    fn send(self: LiveMouse, message: c.UINT, held: bool, col: i32, row: i32) void {
+        self.sendWith(message, if (held) c.MK_LBUTTON else 0, col, row);
+    }
+
+    fn sendWith(self: LiveMouse, message: c.UINT, flags: c.WPARAM, col: i32, row: i32) void {
+        const x = col * self.cell_width + @divTrunc(self.cell_width, 2);
+        const y = row * self.cell_height + @divTrunc(self.cell_height, 2);
+        const position: c.LPARAM = (@as(c.LPARAM, y) << 16) | @as(c.LPARAM, x);
+        _ = c.SendMessageW(self.keyboard.surface, message, flags, position);
+    }
+
+    fn shiftClick(self: LiveMouse, col: i32, row: i32) void {
+        self.sendWith(c.WM_LBUTTONDOWN, c.MK_LBUTTON | c.MK_SHIFT, col, row);
+        self.sendWith(c.WM_LBUTTONUP, c.MK_SHIFT, col, row);
+    }
+
+    fn drag(self: LiveMouse, from_col: i32, from_row: i32, to_col: i32, to_row: i32) void {
+        self.send(c.WM_LBUTTONDOWN, true, from_col, from_row);
+        self.send(c.WM_MOUSEMOVE, true, @divTrunc(from_col + to_col, 2), @divTrunc(from_row + to_row, 2));
+        self.send(c.WM_MOUSEMOVE, true, to_col, to_row);
+        self.send(c.WM_LBUTTONUP, false, to_col, to_row);
+    }
+
+    fn click(self: LiveMouse, col: i32, row: i32) void {
+        self.send(c.WM_LBUTTONDOWN, true, col, row);
+        self.send(c.WM_LBUTTONUP, false, col, row);
+    }
+
+    // Windows delivers the second press of a double click as WM_LBUTTONDBLCLK.
+    fn doubleClick(self: LiveMouse, col: i32, row: i32) void {
+        self.click(col, row);
+        self.send(c.WM_LBUTTONDBLCLK, true, col, row);
+        self.send(c.WM_LBUTTONUP, false, col, row);
+    }
+
+    // The third press arrives as a plain WM_LBUTTONDOWN, so the shell counts it.
+    fn tripleClick(self: LiveMouse, col: i32, row: i32) void {
+        self.doubleClick(col, row);
+        self.click(col, row);
+    }
+
+    fn selected(self: LiveMouse) !?[]u8 {
+        return self.keyboard.fixture.workspace.copySelection(std.testing.allocator);
+    }
+
+    fn expectSelected(self: LiveMouse, expected: []const u8) !void {
+        const text = (try self.selected()) orelse {
+            std.debug.print("expected selection \"{s}\" but the terminal reported none\n", .{expected});
+            return error.TestExpectedSelection;
+        };
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(expected, text);
+    }
+
+    fn expectNoSelection(self: LiveMouse) !void {
+        const workspace = &self.keyboard.fixture.workspace;
+        try std.testing.expect(!workspace.hasSelection());
+        try std.testing.expect((try self.selected()) == null);
+    }
+};
+
+const CopyCapture = struct {
+    var text: [1024]u8 = undefined;
+    var length: usize = 0;
+    var writes: usize = 0;
+
+    fn writeClipboard(_: c.HWND, _: std.mem.Allocator, value: []const u8) !void {
+        @memcpy(text[0..value.len], value);
+        length = value.len;
+        writes += 1;
+    }
+};
+
+const mouse_fixture_text = "alpha beta-gamma delta\r\nGC-COPY-2\r\n";
+
+fn feedMouseFixture(fixture: *LiveTerminalFixture, index: usize) !void {
+    const slot = &fixture.workspace.surfaces[index];
+    // The VT parser is the production default; the fixture's hand-built workspace predates it.
+    if (slot.vt == null) slot.vt = try @import("TerminalVt.zig").State.create(std.testing.allocator, slot.grid.cols, slot.grid.rows);
+    const cols: usize = slot.grid.cols;
+    const wrapped = try std.testing.allocator.alloc(u8, cols + 5);
+    defer std.testing.allocator.free(wrapped);
+    @memset(wrapped[0..cols], 'A');
+    @memcpy(wrapped[cols..], "BBBBB");
+    fixture.workspace.feedTerminalOutput(index, mouse_fixture_text);
+    fixture.workspace.feedTerminalOutput(index, wrapped);
+    fixture.workspace.feedTerminalOutput(index, "\r\nlast");
+}
+
+test "live terminal mouse: dragging selects and copies exactly the selected text" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const workspace = &fixture.workspace;
+    try feedMouseFixture(&fixture, keyboard.index);
+    const cols: i32 = @intCast(workspace.surfaces[keyboard.index].grid.cols);
+
+    // The beta20 Dev Box failure: dragging over GC-COPY-2 reported no selection at all.
+    try mouse.expectNoSelection();
+    mouse.drag(0, 1, 8, 1);
+    try std.testing.expect(workspace.hasSelection());
+    try mouse.expectSelected("GC-COPY-2");
+
+    // Direction does not matter, and a click clears.
+    mouse.drag(8, 1, 3, 1);
+    try mouse.expectSelected("COPY-2");
+    mouse.click(12, 1);
+    try mouse.expectNoSelection();
+
+    // Dragging past the end of a line copies no padding.
+    mouse.drag(0, 1, 60, 1);
+    try mouse.expectSelected("GC-COPY-2");
+
+    // Hard line breaks stay; the soft wrap of a long line does not become one.
+    mouse.drag(0, 0, 8, 1);
+    try mouse.expectSelected("alpha beta-gamma delta\nGC-COPY-2");
+    mouse.drag(cols - 3, 2, 2, 3);
+    try mouse.expectSelected("AAABBB");
+}
+
+test "live terminal mouse: double click selects a word, triple click a whole logical line, shift extends" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const workspace = &fixture.workspace;
+    try feedMouseFixture(&fixture, keyboard.index);
+    const cols: usize = workspace.surfaces[keyboard.index].grid.cols;
+
+    mouse.doubleClick(8, 0);
+    try mouse.expectSelected("beta-gamma");
+    mouse.doubleClick(2, 0);
+    try mouse.expectSelected("alpha");
+
+    mouse.tripleClick(2, 0);
+    try mouse.expectSelected("alpha beta-gamma delta");
+    // A line that soft-wrapped is one line, whichever row is clicked.
+    const wrapped = try std.testing.allocator.alloc(u8, cols + 5);
+    defer std.testing.allocator.free(wrapped);
+    @memset(wrapped[0..cols], 'A');
+    @memcpy(wrapped[cols..], "BBBBB");
+    mouse.tripleClick(2, 3);
+    try mouse.expectSelected(wrapped);
+
+    mouse.drag(0, 0, 4, 0);
+    try mouse.expectSelected("alpha");
+    mouse.shiftClick(9, 0);
+    try mouse.expectSelected("alpha beta");
+}
+
+test "live terminal mouse: selection is highlighted, copied once through the shared route, and never interrupts the shell" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const workspace = &fixture.workspace;
+    const slot = &workspace.surfaces[keyboard.index];
+    try feedMouseFixture(&fixture, keyboard.index);
+    const cols: usize = slot.grid.cols;
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+
+    // Selected cells swap their colors; unselected ones keep them.
+    const plain = slot.cells[2 * cols + 40];
+    const before = slot.cells[cols + 1];
+    mouse.drag(0, 1, 8, 1);
+    for (0..9) |column| {
+        const cell = slot.cells[cols + column];
+        try std.testing.expectEqual(before.background, cell.foreground);
+        try std.testing.expectEqual(before.foreground, cell.background);
+    }
+    try std.testing.expectEqual(plain, slot.cells[2 * cols + 40]);
+    try std.testing.expectEqual(before.foreground, slot.cells[cols + 9].foreground);
+
+    // Copy takes exactly the selection through the menu/shortcut route and drops the highlight.
+    workspace.key_callback = &ClipboardRouteProbe.callback;
+    for ([_]LiveKeyboard.Chord{
+        .{ .vk = 'C', .ctrl = true, .shift = true },
+        .{ .vk = c.VK_INSERT, .ctrl = true, .extended = true },
+        .{ .vk = 'C', .ctrl = true },
+    }) |chord| {
+        ClipboardRouteProbe.calls = 0;
+        try keyboard.press(chord);
+        try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+        try std.testing.expectEqual(@as(usize, 'C'), ClipboardRouteProbe.key);
+        try keyboard.drainInput(&sent);
+        try std.testing.expectEqualStrings("", sent.items);
+    }
+    CopyCapture.writes = 0;
+    fixture.app.copyTerminalSelectionWith(CopyCapture);
+    try std.testing.expectEqual(@as(usize, 1), CopyCapture.writes);
+    try std.testing.expectEqualStrings("GC-COPY-2", CopyCapture.text[0..CopyCapture.length]);
+    try std.testing.expectEqualStrings("Terminal selection copied", fixture.app.status());
+    try mouse.expectNoSelection();
+    fixture.tick();
+    try std.testing.expectEqual(before, slot.cells[cols + 1]);
+
+    // Without a selection, Copy reports that and Ctrl+C is the interrupt again.
+    CopyCapture.writes = 0;
+    fixture.app.copyTerminalSelectionWith(CopyCapture);
+    try std.testing.expectEqual(@as(usize, 0), CopyCapture.writes);
+    try std.testing.expectEqualStrings("No terminal selection to copy", fixture.app.status());
+    ClipboardRouteProbe.calls = 0;
+    try keyboard.press(.{ .vk = 'C', .ctrl = true });
+    try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+    try keyboard.drainInput(&sent);
+    try std.testing.expectEqualStrings("\x03", sent.items);
+
+    // Typing replaces the selection, as in Ghostty.
+    mouse.drag(0, 1, 8, 1);
+    try std.testing.expect(workspace.hasSelection());
+    try keyboard.press(.{ .vk = c.VK_RETURN });
+    try mouse.expectNoSelection();
+    try keyboard.drainInput(&sent);
+    try std.testing.expectEqualStrings("\r", sent.items);
 }
 
 const KeyTableCase = struct {

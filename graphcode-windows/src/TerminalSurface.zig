@@ -7,6 +7,7 @@ const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
 const TerminalVt = @import("TerminalVt.zig");
+const TerminalSelection = @import("TerminalSelection.zig");
 const TerminalKeys = @import("TerminalKeys.zig");
 const TerminalKeyEncoding = @import("TerminalKeyEncoding.zig");
 const ZmxSession = @import("ZmxSession.zig");
@@ -307,10 +308,15 @@ pub const Surface = struct {
     // by onAccessibilitySelection; kept here so a UIA text pattern for the embedded
     // terminal has real selection data to expose instead of none at all.
     accessibility_selection: ?struct { start: u64, end: u64 } = null,
+    // The mouse selection, tracked in screen coordinates so it stays on its text as output
+    // scrolls. `selection_dirty` marks a change not yet drawn into the published snapshot.
+    selection: TerminalSelection.State = .{},
+    selection_dirty: bool = false,
 
     fn resetOutput(self: *Surface) void {
         if (self.vt) |state| state.destroy();
         self.vt = null;
+        self.clearSelection();
         self.parser = .normal;
         self.csi_value = 0;
         self.csi_have_value = false;
@@ -318,6 +324,12 @@ pub const Surface = struct {
         self.input_bytes = 0;
         self.output_events = 0;
         self.output_result = .{};
+    }
+
+    /// Forgets every selection of this surface, the mouse's and the accessibility layer's.
+    fn clearSelection(self: *Surface) void {
+        self.accessibility_selection = null;
+        if (self.selection.clear()) self.selection_dirty = true;
     }
 };
 
@@ -361,6 +373,12 @@ const kill_wait_ms: i64 = 3_000;
 /// The project key under which a quick chat's layout is saved. It is no project's path, so
 /// a chat's layout is never mistaken for a graph loop's when loops are reconciled.
 pub const quick_chat_scope_project = "graphcode://quick-chats";
+
+const NativeAccessibilityCopy = struct {
+    fn copyRange(surface: *c.winghostty_surface, start: u64, end: u64, buffer: []u8, written: *u64) c.winghostty_result {
+        return c.winghostty_surface_copy_accessibility_range(surface, start, end, buffer.ptr, buffer.len, written);
+    }
+};
 
 pub const Workspace = struct {
     pub const LaunchOutcome = enum { started, not_started, attach_failed };
@@ -1731,6 +1749,7 @@ pub const Workspace = struct {
         // sessions server-side, so it's safe to stop draining the local attach pipe while hidden.
         if (self.collapsed) return;
         for (self.surfaces, 0..) |_, index| self.readAttachOutput(index);
+        self.refreshDirtySelections();
         self.pollRecreates();
         self.pollResizeControl();
     }
@@ -1940,6 +1959,8 @@ pub const Workspace = struct {
     fn resizeSurfaceGridState(self: *Workspace, index: usize, size: GridSize) !void {
         const slot = &self.surfaces[index];
         if (slot.grid.eql(size)) return;
+        // Reflow moves text between rows, so a selection made on the old grid no longer names it.
+        slot.clearSelection();
         const cells = try resizedCellBuffer(self.allocator, slot.cells, slot.grid, size, slot.vt);
         errdefer self.allocator.free(cells);
         if (slot.cells.len != 0) self.allocator.free(slot.cells);
@@ -2006,9 +2027,26 @@ pub const Workspace = struct {
     }
 
     pub fn copySelection(self: *Workspace, allocator: std.mem.Allocator) !?[]u8 {
+        return self.copySelectionWith(allocator, NativeAccessibilityCopy);
+    }
+
+    /// The text of the mouse selection, else of the range assistive technology selected.
+    fn copySelectionWith(self: *Workspace, allocator: std.mem.Allocator, comptime Api: type) !?[]u8 {
         if (self.active_surface >= self.surfaces.len) return null;
         const slot = &self.surfaces[self.active_surface];
         const surface = slot.surface orelse return null;
+        if (slot.selection.range) |range| {
+            const state = slot.vt orelse return null;
+            const text = state.selectionText(allocator, range.start, range.end) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.TerminalSelectionCopyFailed,
+            };
+            if (text.len == 0) {
+                allocator.free(text);
+                return null;
+            }
+            return text;
+        }
         const selection = slot.accessibility_selection orelse return null;
         if (selection.end <= selection.start) return null;
 
@@ -2019,14 +2057,7 @@ pub const Workspace = struct {
         const text = try allocator.alloc(u8, capacity);
         errdefer allocator.free(text);
         var length: u64 = 0;
-        const result = c.winghostty_surface_copy_accessibility_range(
-            surface,
-            selection.start,
-            selection.end,
-            text.ptr,
-            text.len,
-            &length,
-        );
+        const result = Api.copyRange(surface, selection.start, selection.end, text, &length);
         if (result == c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE) return error.TerminalClipboardUnavailable;
         if (result != c.WINGHOSTTY_OK) return error.TerminalSelectionCopyFailed;
         if (length > text.len) return error.TerminalSelectionCopyOverflow;
@@ -2044,7 +2075,7 @@ pub const Workspace = struct {
         const payload = try TerminalVt.encodePaste(self.allocator, text, bracketed, allow_unbracketed_multiline);
         defer self.allocator.free(payload);
         if (!self.tryEnqueueInput(self.active_surface, payload)) return error.TerminalPasteFailed;
-        slot.accessibility_selection = null;
+        slot.clearSelection();
     }
 
     /// Runs a terminal clipboard binding through the same route as the canonical
@@ -2082,7 +2113,28 @@ pub const Workspace = struct {
     /// Forgets the selection once it has been copied, so the next Ctrl+C interrupts again.
     pub fn dismissSelection(self: *Workspace) void {
         if (self.active_surface >= self.surfaces.len) return;
-        self.surfaces[self.active_surface].accessibility_selection = null;
+        self.surfaces[self.active_surface].clearSelection();
+    }
+
+    /// Applies mouse input to a surface's selection. Redrawing is left to `refreshSelection`.
+    fn selectionMouse(self: *Workspace, index: usize, input: SelectionInput) void {
+        applySelectionInput(&self.surfaces[index], input, c.GetTickCount64(), c.GetDoubleClickTime());
+    }
+
+    /// Draws selection changes that have not reached the published snapshot yet.
+    fn refreshSelection(self: *Workspace, index: usize) void {
+        const slot = &self.surfaces[index];
+        if (slot.surface == null or slot.vt == null or slot.destroying or slot.destroyed) {
+            slot.selection_dirty = false;
+            return;
+        }
+        self.feedTerminalOutput(index, "");
+    }
+
+    fn refreshDirtySelections(self: *Workspace) void {
+        for (&self.surfaces, 0..) |*slot, index| {
+            if (slot.selection_dirty) self.refreshSelection(index);
+        }
     }
 
     /// Where the terminal context menu opens: under the pointer when it is over the
@@ -2241,7 +2293,7 @@ pub const Workspace = struct {
         options.input_callbacks.on_ime_start = @ptrCast(&onImeStart);
         options.input_callbacks.on_ime_update = @ptrCast(&onImeUpdate);
         options.input_callbacks.on_ime_end = @ptrCast(&onImeEnd);
-        options.input_callbacks.on_mouse = @ptrCast(&onMouse);
+        options.input_callbacks.on_mouse = @ptrCast(&onMouseDrawn);
         options.input_callbacks.on_selection = @ptrCast(&onSelection);
         options.input_callbacks.on_link = @ptrCast(&onLink);
         options.input_callbacks.on_paste = @ptrCast(&onPaste);
@@ -2630,7 +2682,7 @@ pub const Workspace = struct {
         self.surfaces[index].resetOutput();
     }
 
-    fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
+    pub fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
         const slot = &self.surfaces[index];
         const surface = slot.surface orelse return;
         const previous = slot.output_result;
@@ -2895,6 +2947,7 @@ fn glyphSnapshotFromVt(
     allocator: std.mem.Allocator,
     snapshot: *const TerminalVt.Snapshot,
     expected_cell_count: usize,
+    highlight: ?TerminalSelection.Range,
 ) !NativeGlyphSnapshot {
     if (expected_cell_count != snapshot.cells.len) return error.InvalidGrid;
     const cells = try allocator.alloc(c.winghostty_terminal_cell, expected_cell_count);
@@ -2903,12 +2956,20 @@ fn glyphSnapshotFromVt(
     errdefer allocator.free(glyphs);
     var text: std.ArrayList(u8) = .empty;
     errdefer text.deinit(allocator);
-    for (snapshot.cells, cells, glyphs) |cell, *out, *glyph| {
+    const top: u64 = snapshot.scrollbar.offset;
+    for (snapshot.cells, cells, glyphs, 0..) |cell, *out, *glyph, index| {
         var fg = cell.foreground orelse snapshot.colors.foreground;
         var bg = cell.background orelse snapshot.colors.background;
         if (cell.style.inverse) std.mem.swap(TerminalVt.c.GhosttyColorRgb, &fg, &bg);
         if (cell.style.invisible) fg = bg;
         const continuation = cell.wide == TerminalVt.c.GHOSTTY_CELL_WIDE_SPACER_TAIL;
+        if (highlight) |range| {
+            // A wide character's second column is selected with its first.
+            const column = index % snapshot.columns;
+            const lead = if (continuation and column > 0) column - 1 else column;
+            const row = std.math.cast(u32, top + index / snapshot.columns) orelse std.math.maxInt(u32);
+            if (range.contains(@intCast(lead), row)) std.mem.swap(TerminalVt.c.GhosttyColorRgb, &fg, &bg);
+        }
         const codepoint: u32 = if (continuation or cell.codepoints.len == 0)
             0
         else
@@ -2985,15 +3046,19 @@ fn publishVtOutput(
     api: anytype,
 ) TerminalOutputResult {
     var result = TerminalOutputResult{ .authoritative_vt = true };
-    state.feed(bytes) catch |err| {
-        result.vt_error = err;
-    };
+    // A selection redraw has no new bytes; the snapshot already held is projected again.
+    if (bytes.len != 0 or !state.snapshot_current) {
+        state.feed(bytes) catch |err| {
+            result.vt_error = err;
+        };
+    }
     if (state.snapshot_current) {
         const snapshot = &state.snapshot.?;
+        _ = slot.selection.followScreen(snapshot.active_screen);
         if (snapshot.columns != slot.grid.cols or snapshot.rows != slot.grid.rows or slot.cells.len != @as(usize, slot.grid.cols) * slot.grid.rows) {
             result.projection_error = error.InvalidGrid;
         } else {
-            const projected: ?NativeGlyphSnapshot = glyphSnapshotFromVt(allocator, snapshot, slot.cells.len) catch |err| blk: {
+            const projected: ?NativeGlyphSnapshot = glyphSnapshotFromVt(allocator, snapshot, slot.cells.len, slot.selection.range) catch |err| blk: {
                 switch (err) {
                     error.OutOfMemory => result.glyph_error = error.OutOfMemory,
                     else => result.projection_error = error.UnsupportedHostCell,
@@ -3023,6 +3088,8 @@ fn publishVtOutput(
         }
     }
     slot.output_result = result;
+    if (result.render_result == c.WINGHOSTTY_OK and result.projection_error == null and result.glyph_error == null)
+        slot.selection_dirty = false;
     if (result.succeeded()) slot.output_events += 1;
     return result;
 }
@@ -3144,7 +3211,7 @@ test "terminal glyph snapshot staging releases every partial allocation" {
             input: *const TerminalVt.Snapshot,
             output: []c.winghostty_terminal_cell,
         ) !void {
-            const staged = try glyphSnapshotFromVt(failing, input, output.len);
+            const staged = try glyphSnapshotFromVt(failing, input, output.len, null);
             defer staged.deinit(failing);
             try std.testing.expectEqualStrings("A\xe7\x95\x8c", staged.text);
             try std.testing.expectEqual(@as(u32, 'A'), staged.cells.?[0].codepoint);
@@ -4185,7 +4252,7 @@ fn onKey(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c
     // the encoded sequence replaces that text instead of arriving twice.
     discardTranslatedCharacters(c.GetFocus());
     const index = surfaceIndex(workspace, surface) orelse return;
-    slot.accessibility_selection = null;
+    slot.clearSelection();
     workspace.enqueueInput(index, bytes);
 }
 
@@ -4207,6 +4274,7 @@ fn altChordText(event: *const c.winghostty_key_event, buffer: *[8]u8) []const u8
 }
 
 fn slotHasSelection(slot: *const Surface) bool {
+    if (slot.selection.hasSelection()) return true;
     const selection = slot.accessibility_selection orelse return false;
     return selection.end > selection.start;
 }
@@ -4652,6 +4720,233 @@ test "terminal selection state follows the surface's reported range" {
     try std.testing.expect(!workspace.hasSelection());
 }
 
+fn mouseEvent(kind: u32, button: u32, col: i32, row: i32, modifiers: u32, clicks: u32) c.winghostty_mouse_event {
+    var event = std.mem.zeroes(c.winghostty_mouse_event);
+    event.kind = kind;
+    event.button = button;
+    event.cell_x = col;
+    event.cell_y = row;
+    event.modifiers = modifiers;
+    event.click_count = clicks;
+    return event;
+}
+
+test "provider mouse events become selection input only for the left button and motion" {
+    const down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 1, 4, 2, provider_shift | 0x1, 2);
+    const press = selectionInputFor(&down).?;
+    try std.testing.expectEqual(@as(i32, 4), press.cell_x);
+    try std.testing.expectEqual(@as(i32, 2), press.cell_y);
+    try std.testing.expectEqual(@as(u32, 2), press.click_count);
+    try std.testing.expect(press.shift and press.kind == .press);
+
+    const up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 1, 0, 0, 0, 1);
+    try std.testing.expect(selectionInputFor(&up).?.kind == .release);
+    const motion = mouseEvent(c.WINGHOSTTY_MOUSE_MOVE, 0, -1, 99, 0, 1);
+    try std.testing.expect(selectionInputFor(&motion).?.kind == .move);
+    for ([_]u32{ 2, 3 }) |button| {
+        const other = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, button, 0, 0, 0, 1);
+        try std.testing.expect(selectionInputFor(&other) == null);
+        const other_up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, button, 0, 0, 0, 1);
+        try std.testing.expect(selectionInputFor(&other_up) == null);
+    }
+    const wheel = mouseEvent(c.WINGHOSTTY_MOUSE_WHEEL, 0, 0, 0, 0, 1);
+    try std.testing.expect(selectionInputFor(&wheel) == null);
+}
+
+const NoAccessibilityCopy = struct {
+    fn copyRange(_: *c.winghostty_surface, _: u64, _: u64, _: []u8, _: *u64) c.winghostty_result {
+        return c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE;
+    }
+};
+
+const SelectionFixture = struct {
+    workspace: Workspace,
+    probe: TerminalOutputProbe = .{},
+
+    fn copy(self: *SelectionFixture) !?[]u8 {
+        return self.workspace.copySelectionWith(std.testing.allocator, NoAccessibilityCopy);
+    }
+
+    fn init(self: *SelectionFixture, text: []const u8) !void {
+        self.* = .{ .workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator) };
+        const slot = &self.workspace.surfaces[0];
+        slot.surface = OrdinaryTabKeyboardTest.registered;
+        slot.cells = try std.testing.allocator.alloc(c.winghostty_terminal_cell, cell_count);
+        clearCells(slot);
+        slot.vt = try TerminalVt.State.create(std.testing.allocator, columns, rows);
+        try std.testing.expect(self.publish(text).succeeded());
+    }
+
+    fn deinit(self: *SelectionFixture) void {
+        const slot = &self.workspace.surfaces[0];
+        if (slot.vt) |state| state.destroy();
+        std.testing.allocator.free(slot.cells);
+        self.workspace.layout.deinit();
+        self.workspace.input_queue.clear();
+    }
+
+    fn publish(self: *SelectionFixture, bytes: []const u8) TerminalOutputResult {
+        self.probe.call_count = 0;
+        return publishTerminalOutput(std.testing.allocator, &self.workspace.surfaces[0], bytes, &self.probe);
+    }
+
+    fn mouse(self: *SelectionFixture, kind: @FieldType(SelectionInput, "kind"), col: i32, row: i32) void {
+        self.workspace.selectionMouse(0, .{ .kind = kind, .cell_x = col, .cell_y = row });
+    }
+
+    fn drag(self: *SelectionFixture, from_col: i32, from_row: i32, to_col: i32, to_row: i32) void {
+        self.mouse(.press, from_col, from_row);
+        self.mouse(.move, to_col, to_row);
+        self.mouse(.release, to_col, to_row);
+    }
+
+    fn expectCopied(self: *SelectionFixture, expected: []const u8) !void {
+        const text = (try self.copy()) orelse return error.TestExpectedSelection;
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualStrings(expected, text);
+    }
+};
+
+test "a mouse selection is drawn into the published snapshot and copied as exactly its text" {
+    var fixture: SelectionFixture = undefined;
+    try fixture.init("alpha beta\r\ngamma");
+    defer fixture.deinit();
+    const slot = &fixture.workspace.surfaces[0];
+    const plain = slot.cells[0];
+    try std.testing.expect(!fixture.workspace.hasSelection());
+
+    fixture.drag(0, 0, 4, 0);
+    try std.testing.expect(fixture.workspace.hasSelection());
+    try std.testing.expect(slot.selection_dirty);
+    try fixture.expectCopied("alpha");
+
+    // The selection reaches the host as swapped colors on exactly the selected cells.
+    try std.testing.expect(fixture.publish("").succeeded());
+    try std.testing.expect(!slot.selection_dirty);
+    try std.testing.expectEqual(@as(usize, 3), fixture.probe.call_count);
+    for (slot.cells[0..5]) |cell| {
+        try std.testing.expectEqual(plain.background, cell.foreground);
+        try std.testing.expectEqual(plain.foreground, cell.background);
+    }
+    try std.testing.expectEqual(plain.foreground, slot.cells[5].foreground);
+    try std.testing.expectEqual(plain.foreground, slot.cells[columns].foreground);
+
+    // New output scrolls the viewport; the selection stays on its text.
+    for (0..rows) |_| try std.testing.expect(fixture.publish("\r\nmore").succeeded());
+    try fixture.expectCopied("alpha");
+    try std.testing.expectEqual(plain.foreground, slot.cells[0].foreground);
+
+    // A click clears the selection and the drawing.
+    fixture.mouse(.press, 3, rows - 1);
+    fixture.mouse(.release, 3, rows - 1);
+    try std.testing.expect(!fixture.workspace.hasSelection());
+    try std.testing.expect(try fixture.copy() == null);
+    try std.testing.expect(slot.selection_dirty);
+    try std.testing.expect(fixture.publish("").succeeded());
+    try std.testing.expect(!slot.selection_dirty);
+}
+
+test "a drag that leaves the pane stays on its edge and a selection of blanks copies nothing" {
+    var fixture: SelectionFixture = undefined;
+    try fixture.init("alpha beta\r\ngamma");
+    defer fixture.deinit();
+    fixture.drag(6, 0, 9999, -40);
+    try fixture.expectCopied("beta");
+    fixture.drag(30, 5, 60, 5);
+    try std.testing.expect(fixture.workspace.hasSelection());
+    try std.testing.expect(try fixture.copy() == null);
+}
+
+test "typing, paste, a resize and the alternate screen all end a mouse selection and its drawing" {
+    var fixture: SelectionFixture = undefined;
+    try fixture.init("alpha beta\r\ngamma");
+    defer fixture.deinit();
+    const workspace = &fixture.workspace;
+    const slot = &workspace.surfaces[0];
+    const plain = slot.cells[0];
+
+    fixture.drag(0, 0, 4, 0);
+    try std.testing.expect(workspace.hasSelection());
+    const typed = "x";
+    onText(@ptrCast(workspace), OrdinaryTabKeyboardTest.registered, typed, typed.len);
+    try std.testing.expect(!workspace.hasSelection());
+    try std.testing.expect(slot.selection_dirty);
+    try std.testing.expect(fixture.publish("").succeeded());
+    try std.testing.expectEqual(plain.foreground, slot.cells[0].foreground);
+    workspace.input_queue.clear();
+
+    fixture.drag(0, 0, 4, 0);
+    try workspace.pasteText("echo", false);
+    try std.testing.expect(!workspace.hasSelection());
+    workspace.input_queue.clear();
+
+    fixture.drag(0, 0, 4, 0);
+    try workspace.resizeSurfaceGridState(0, .{ .cols = columns, .rows = rows });
+    try std.testing.expect(workspace.hasSelection());
+    try workspace.resizeSurfaceGridState(0, .{ .cols = columns - 20, .rows = rows });
+    try std.testing.expect(!workspace.hasSelection());
+    try workspace.resizeSurfaceGridState(0, .{ .cols = columns, .rows = rows });
+
+    fixture.drag(0, 0, 4, 0);
+    try std.testing.expect(workspace.hasSelection());
+    try std.testing.expect(fixture.publish("\x1b[?1049hfull screen").succeeded());
+    try std.testing.expect(!workspace.hasSelection());
+    try std.testing.expect(fixture.publish("\x1b[?1049l").succeeded());
+    try std.testing.expect(!workspace.hasSelection());
+}
+
+test "with a mouse selection Ctrl+C copies instead of interrupting, and without one it interrupts" {
+    var fixture: SelectionFixture = undefined;
+    try fixture.init("alpha beta");
+    defer fixture.deinit();
+    const workspace = &fixture.workspace;
+    var probe = ClipboardProbe{};
+    probe.bind(workspace);
+    const interrupt = providerKey('C', provider_ctrl, c.WINGHOSTTY_KEY_PRESS);
+
+    onKey(@ptrCast(workspace), OrdinaryTabKeyboardTest.registered, &interrupt);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+
+    fixture.drag(0, 0, 4, 0);
+    for ([_]struct { vk: usize, modifiers: u32 }{
+        .{ .vk = 'C', .modifiers = provider_ctrl },
+        .{ .vk = 'C', .modifiers = provider_ctrl | provider_shift },
+        .{ .vk = c.VK_INSERT, .modifiers = provider_ctrl },
+    }) |case| {
+        probe = .{};
+        probe.bind(workspace);
+        const event = providerKey(case.vk, case.modifiers, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(workspace), OrdinaryTabKeyboardTest.registered, &event);
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(@as(usize, 'C'), probe.key);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    }
+    try fixture.expectCopied("alpha");
+}
+
+test "a program that never asks for bracketed paste keeps multi-line paste behind confirmation" {
+    // What pwsh 7.6.6 with PSReadLine 2.4.5 sends under ConPTY: no ESC[?2004h, only these modes.
+    // Each pasted line runs as soon as it arrives, so the confirmation is the safe behavior.
+    const conpty_pwsh_startup = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[?25hPS C:\\work> ";
+    var fixture: SelectionFixture = undefined;
+    try fixture.init(conpty_pwsh_startup);
+    defer fixture.deinit();
+    const workspace = &fixture.workspace;
+    try std.testing.expect(!workspace.surfaces[0].vt.?.bracketedPasteEnabled());
+
+    try std.testing.expectError(error.TerminalPasteRequiresConfirmation, workspace.pasteText("echo one\r\necho two", false));
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try workspace.pasteText("echo one", false);
+    workspace.input_queue.clear();
+
+    // A program that does ask for it (a bracketed-paste aware editor or shell) is not asked.
+    try std.testing.expect(fixture.publish("\x1b[?2004h").succeeded());
+    try workspace.pasteText("echo one\r\necho two", false);
+    const item = workspace.input_queue.dequeue().?;
+    defer workspace.allocator.free(item.bytes);
+    try std.testing.expectEqualStrings("\x1b[200~echo one\necho two\x1b[201~", item.bytes);
+}
+
 test "provider Control+Shift bits route terminal clipboard chords to the workspace" {
     const Probe = OrdinaryTabKeyboardTest;
     var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
@@ -4669,7 +4964,7 @@ fn onText(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]con
     const workspace = workspaceFromUserData(user_data) orelse return;
     const slot = callbackSlot(workspace, surface) orelse return;
     const index = surfaceIndex(workspace, surface) orelse return;
-    slot.accessibility_selection = null;
+    slot.clearSelection();
     workspace.enqueueInput(index, text[0..length]);
 }
 
@@ -4718,12 +5013,93 @@ fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const
     _ = callbackSlot(workspace, surface) orelse return;
     // Winghostty numbers the buttons left 1, right 2, middle 3.
     if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP and event.button == 2) workspace.runContextMenu();
+    if (selectionInputFor(event)) |input| {
+        const index = surfaceIndex(workspace, surface) orelse return;
+        workspace.selectionMouse(index, input);
+    }
+}
+
+/// The callback the host window gets: the mouse handling above, then the selection it changed
+/// is drawn while the pointer is still moving. Kept apart so the handling needs no native surface.
+fn onMouseDrawn(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {
+    onMouse(user_data, surface, event);
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    if (workspace.surfaces[index].selection_dirty) workspace.refreshSelection(index);
+}
+
+/// What the left button does to a selection: a press starts or extends it, motion with the
+/// button held drags it, and the release ends the drag.
+const SelectionInput = struct {
+    kind: enum { press, move, release },
+    cell_x: i32,
+    cell_y: i32,
+    click_count: u32 = 1,
+    shift: bool = false,
+};
+
+fn selectionInputFor(event: *const c.winghostty_mouse_event) ?SelectionInput {
+    const left = event.button == 1;
+    const kind: @FieldType(SelectionInput, "kind") = switch (event.kind) {
+        c.WINGHOSTTY_MOUSE_BUTTON_DOWN => if (left) .press else return null,
+        c.WINGHOSTTY_MOUSE_BUTTON_UP => if (left) .release else return null,
+        c.WINGHOSTTY_MOUSE_MOVE => .move,
+        else => return null,
+    };
+    return .{
+        .kind = kind,
+        .cell_x = event.cell_x,
+        .cell_y = event.cell_y,
+        .click_count = event.click_count,
+        .shift = TerminalKeys.decodeProviderModifiers(event.modifiers).shift,
+    };
+}
+
+/// Screen coordinates of a viewport cell; a pointer dragged outside the pane stays on its edge.
+fn screenPointFor(snapshot: *const TerminalVt.Snapshot, cell_x: i32, cell_y: i32) TerminalSelection.Point {
+    const last_column: i32 = @as(i32, snapshot.columns) - 1;
+    const last_row: i32 = @as(i32, snapshot.rows) - 1;
+    const column: u16 = @intCast(std.math.clamp(cell_x, 0, last_column));
+    const row: u32 = @intCast(std.math.clamp(cell_y, 0, last_row));
+    const top = std.math.cast(u32, snapshot.scrollbar.offset) orelse std.math.maxInt(u32);
+    return .{ .x = column, .y = top +| row };
+}
+
+/// Updates the surface's selection from one mouse input and marks the drawing stale when the
+/// selection moved. A surface without the VT parser has no text to select.
+fn applySelectionInput(slot: *Surface, input: SelectionInput, now_ms: u64, double_click_ms: u64) void {
+    const state = slot.vt orelse return;
+    const snapshot = &(state.snapshot orelse return);
+    if (input.kind == .release) {
+        slot.selection.release();
+        return;
+    }
+    if (input.kind == .move and !slot.selection.pressed) return;
+    const grid = TerminalSelection.VtGrid.init(state);
+    const point = screenPointFor(snapshot, input.cell_x, input.cell_y);
+    const changed = switch (input.kind) {
+        .press => blk: {
+            // A click replaces whatever assistive technology reported as selected, too.
+            const reported = slot.accessibility_selection != null;
+            slot.accessibility_selection = null;
+            const moved = slot.selection.press(grid, snapshot.active_screen, point, .{
+                .click_count = input.click_count,
+                .shift = input.shift,
+                .now_ms = now_ms,
+                .double_click_ms = double_click_ms,
+            });
+            break :blk moved or reported;
+        },
+        else => slot.selection.drag(grid, point),
+    };
+    if (changed) slot.selection_dirty = true;
 }
 
 fn onSelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_selection_event) callconv(.c) void {
-    _ = user_data;
-    _ = surface;
-    _ = event;
+    const workspace = workspaceFromUserData(user_data) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    // The provider ends a drag without a button-up when it loses mouse capture.
+    if (event.dragging == 0) slot.selection.release();
 }
 
 fn onLink(
