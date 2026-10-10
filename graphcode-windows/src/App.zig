@@ -15816,6 +15816,43 @@ test "workspace layout: New Tab and Split with no free surface slot fail before 
     workspace.layout_save_fault = null;
 }
 
+test "workspace layout: New Tab and Split with every free slot reserved by a pending restore fail before claiming a session" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const workspace = &fixture.workspace;
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    allocator.free(try fixture.attachDirectory("loop-a"));
+    const attaches = try attachStartCount(fixture.tmp.dir);
+    const before = try std.fs.cwd().readFileAlloc(allocator, workspace.layout_path, 1 << 16);
+    defer allocator.free(before);
+
+    // Every other slot holds a restore retry waiting for its session to answer.
+    for (&workspace.recreate_sessions, 0..) |*pending, index| {
+        if (workspace.hasSurface(index) or workspace.hasAttach(index) or pending.len != 0) continue;
+        pending.* = try allocator.dupe(u8, "pending-restore");
+    }
+
+    inline for (.{ "newTab", "splitRight" }) |action| {
+        workspace.layout_save_fault = 1;
+        const failed = if (comptime std.mem.eql(u8, action, "newTab"))
+            workspace.newTab()
+        else
+            workspace.splitFocused(.horizontal);
+        try std.testing.expectError(error.SurfaceCapacityExceeded, failed);
+        const after = try std.fs.cwd().readFileAlloc(allocator, workspace.layout_path, 1 << 16);
+        defer allocator.free(after);
+        try std.testing.expectEqualStrings(before, after);
+        try std.testing.expectEqual(@as(?usize, 1), workspace.layout_save_fault);
+        try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+        try std.testing.expectEqual(@as(usize, 0), try shellRecordCount(fixture.tmp.dir));
+        try std.testing.expectEqual(attaches, try attachStartCount(fixture.tmp.dir));
+    }
+    workspace.layout_save_fault = null;
+}
 test "workspace layout: a failed rollback save leaves the claim on disk, never a marker, and no kill ever follows from it" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
