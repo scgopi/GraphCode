@@ -2296,7 +2296,8 @@ pub const Workspace = struct {
         options.input_callbacks.on_mouse = @ptrCast(&onMouseDrawn);
         options.input_callbacks.on_selection = @ptrCast(&onSelection);
         options.input_callbacks.on_link = @ptrCast(&onLink);
-        options.input_callbacks.on_paste = @ptrCast(&onPaste);
+        // No on_paste: the provider's paste entry point always brackets and does not sanitize.
+        // Every paste goes through Workspace.pasteText, which follows the program's own mode.
         options.input_callbacks.on_clipboard_read = @ptrCast(&onClipboardRead);
         options.input_callbacks.on_clipboard_write = @ptrCast(&onClipboardWrite);
         options.input.cell_width = 8;
@@ -4869,6 +4870,88 @@ test "terminal paste has no target without a live surface" {
     try workspace.pasteText("", false);
 }
 
+const PasteCase = struct { name: []const u8, text: []const u8, bracketed: bool, expected: []const u8 };
+
+test "every paste is normalized and stripped of control bytes, with or without bracketed paste" {
+    const cases = [_]PasteCase{
+        .{ .name = "CRLF", .text = "a\r\nb", .bracketed = false, .expected = "a\rb" },
+        .{ .name = "bare CR", .text = "a\rb", .bracketed = false, .expected = "a\rb" },
+        .{ .name = "bare LF", .text = "a\nb", .bracketed = false, .expected = "a\rb" },
+        .{ .name = "trailing LF", .text = "a\n", .bracketed = false, .expected = "a\r" },
+        .{ .name = "trailing CRLF", .text = "a\r\n", .bracketed = false, .expected = "a\r" },
+        .{ .name = "NUL", .text = "a\x00b", .bracketed = false, .expected = "a b" },
+        .{ .name = "ESC closing a bracket", .text = "x\x1b[201~y", .bracketed = false, .expected = "x [201~y" },
+        .{ .name = "DEL, BS, Ctrl+C and Ctrl+Z", .text = "a\x7fb\x08c\x03d\x1ae", .bracketed = false, .expected = "a b c d e" },
+        // xterm's strip list, which the pinned encoder follows, does not include BEL.
+        .{ .name = "BEL passes through", .text = "a\x07b", .bracketed = false, .expected = "a\x07b" },
+        .{ .name = "tab", .text = "a\tb", .bracketed = false, .expected = "a\tb" },
+        .{ .name = "bracketed ESC closing the bracket", .text = "x\x1b[201~y\n", .bracketed = true, .expected = "\x1b[200~x [201~y\n\x1b[201~" },
+        .{ .name = "bracketed CRLF", .text = "a\r\nb", .bracketed = true, .expected = "\x1b[200~a\nb\x1b[201~" },
+        .{ .name = "bracketed NUL", .text = "a\x00b", .bracketed = true, .expected = "\x1b[200~a b\x1b[201~" },
+        .{ .name = "bracketed trailing CRLF", .text = "a\r\n", .bracketed = true, .expected = "\x1b[200~a\n\x1b[201~" },
+    };
+    for (cases) |case| {
+        var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+        defer workspace.layout.deinit();
+        defer workspace.input_queue.clear();
+        const slot = &workspace.surfaces[0];
+        slot.surface = OrdinaryTabKeyboardTest.registered;
+        slot.vt = try TerminalVt.State.create(std.testing.allocator, 20, 3);
+        defer slot.vt.?.destroy();
+        if (case.bracketed) try slot.vt.?.feed("\x1b[?2004h");
+        try workspace.pasteText(case.text, true);
+        const item = workspace.input_queue.dequeue().?;
+        defer workspace.allocator.free(item.bytes);
+        if (!std.mem.eql(u8, case.expected, item.bytes))
+            std.debug.print("paste case {s}: expected {any}, queued {any}\n", .{ case.name, case.expected, item.bytes });
+        try std.testing.expectEqualSlices(u8, case.expected, item.bytes);
+        try std.testing.expect(workspace.input_queue.dequeue() == null);
+    }
+}
+
+test "text that could close a bracket or run lines needs confirmation unless the program asked for brackets" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const slot = &workspace.surfaces[0];
+    slot.surface = OrdinaryTabKeyboardTest.registered;
+    slot.vt = try TerminalVt.State.create(std.testing.allocator, 20, 3);
+    defer slot.vt.?.destroy();
+    for ([_][]const u8{ "a\nb", "a\r\nb", "x\x1b[201~y", "a\n" }) |text| {
+        try std.testing.expectError(error.TerminalPasteRequiresConfirmation, workspace.pasteText(text, false));
+    }
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    try workspace.pasteText("one line", false);
+    workspace.allocator.free(workspace.input_queue.dequeue().?.bytes);
+    // A program that asked for bracketed paste is not asked, and the markers cannot be closed early.
+    try slot.vt.?.feed("\x1b[?2004h");
+    try workspace.pasteText("x\x1b[201~y\na", false);
+    const item = workspace.input_queue.dequeue().?;
+    defer workspace.allocator.free(item.bytes);
+    try std.testing.expectEqualStrings("\x1b[200~x [201~y\na\x1b[201~", item.bytes);
+}
+
+test "a paste above the documented size limit is refused before anything is queued or allocated for it" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    const slot = &workspace.surfaces[0];
+    slot.surface = OrdinaryTabKeyboardTest.registered;
+    const big = try std.testing.allocator.alloc(u8, 1_000_001);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'a');
+    try std.testing.expectError(error.TerminalPasteTooLarge, workspace.pasteText(big, true));
+    try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    // The refusal does not allocate: a failing allocator cannot turn it into OutOfMemory.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.TerminalPasteTooLarge, TerminalVt.encodePaste(failing.allocator(), big, true, true));
+    // The limit itself is accepted, bracket markers included.
+    try workspace.pasteText(big[0..1_000_000], true);
+    const item = workspace.input_queue.dequeue().?;
+    defer workspace.allocator.free(item.bytes);
+    try std.testing.expectEqual(@as(usize, 1_000_000), item.bytes.len);
+}
+
 test "right button release, Menu key and Shift+F10 raise the terminal context menu route once" {
     var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
     defer workspace.layout.deinit();
@@ -5309,14 +5392,6 @@ fn onLink(
     _ = link;
     _ = hovered;
     _ = clicked;
-}
-
-fn onPaste(user_data: ?*anyopaque, surface: *c.winghostty_surface, text: [*:0]const u8, length: u32, bracketed: u8) callconv(.c) void {
-    const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
-    const index = surfaceIndex(workspace, surface) orelse return;
-    workspace.enqueueInput(index, text[0..length]);
-    _ = bracketed;
 }
 
 fn onClipboardRead(

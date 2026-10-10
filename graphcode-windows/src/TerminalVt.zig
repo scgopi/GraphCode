@@ -559,19 +559,28 @@ fn dimensions(columns: usize, rows: usize) Error![2]u16 {
     return .{ @intCast(columns), @intCast(rows) };
 }
 
-pub const PasteError = error{ OutOfMemory, TerminalPasteRequiresConfirmation, TerminalPasteFailed };
+pub const PasteError = error{ OutOfMemory, TerminalPasteRequiresConfirmation, TerminalPasteFailed, TerminalPasteTooLarge };
+
+/// The most clipboard text one paste carries, in UTF-8 bytes. It is a decimal million, a little
+/// under the shell's 1 MiB terminal input queue, so a pasted payload with its bracketed-paste
+/// markers still fits; larger text is refused before anything is allocated for it.
+pub const max_paste_bytes: usize = 1_000_000;
 
 /// Prepares clipboard text for the pty the way Ghostty does for a paste: line endings
-/// are normalised, unsafe control bytes (including ESC, so pasted text cannot close the
-/// bracket itself) are blanked, and the text is wrapped in bracketed-paste markers only when
-/// the running program enabled them. Multi-line text for a program that did not enable
-/// them would run each line as typed, so it needs `allow_unbracketed_multiline`.
+/// are normalised, the control bytes xterm blanks (NUL, BS, ENQ, EOT, ESC, DEL and the tty's
+/// interrupt, quit, kill, suspend, start, stop, word-erase, literal-next, reprint and discard
+/// characters, so pasted text cannot close the bracket itself) become spaces, and the text is
+/// wrapped in bracketed-paste markers only when the running program enabled them. Other
+/// control bytes, such as BEL, pass through. Multi-line text for a program that did not enable
+/// them would run each line as typed, so it needs `allow_unbracketed_multiline`. Text over
+/// `max_paste_bytes` is refused before it is copied.
 pub fn encodePaste(
     allocator: std.mem.Allocator,
     text: []const u8,
     bracketed: bool,
     allow_unbracketed_multiline: bool,
 ) PasteError![]u8 {
+    if (text.len > max_paste_bytes) return error.TerminalPasteTooLarge;
     var normalized = try allocator.alloc(u8, text.len);
     defer allocator.free(normalized);
     var length: usize = 0;

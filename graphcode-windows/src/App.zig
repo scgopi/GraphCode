@@ -265,9 +265,23 @@ fn terminalPasteFailureStatus(err: anyerror) []const u8 {
     if (err == error.TerminalPasteRequiresConfirmation) {
         return "Paste cancelled: multi-line text was not sent to the terminal";
     }
+    if (err == error.TerminalPasteTooLarge or err == error.ClipboardTextTooLarge) {
+        return "Paste cancelled: clipboard text is larger than 1,000,000 bytes";
+    }
     if (err == error.TerminalClipboardUnavailable) return "Terminal clipboard is unavailable";
     if (err == error.TerminalSurfaceUnavailable) return "No terminal is ready to paste into";
     return "Unable to paste clipboard text";
+}
+
+/// What the status line says when the Windows clipboard refused a copy. The user's previous
+/// clipboard text is restored when the write fails, and the message says whether it was.
+fn terminalCopyFailureStatus(err: anyerror) []const u8 {
+    if (err == error.ClipboardWriteFailedKeptPreviousText)
+        return "Unable to copy: the clipboard refused the text; its previous text was kept";
+    if (err == error.ClipboardWriteFailedLostPreviousText)
+        return "Unable to copy: the clipboard refused the text and its previous text could not be restored";
+    if (err == error.ClipboardOpenFailed) return "Unable to copy: the clipboard is in use by another program";
+    return "Unable to copy terminal selection";
 }
 
 fn pasteLineCount(text: []const u8) usize {
@@ -296,7 +310,7 @@ const TerminalCopyApi = struct {
 
 const TerminalPasteApi = struct {
     fn readClipboard(owner: c.HWND, allocator: std.mem.Allocator) ![]u8 {
-        return Clipboard.readText(owner, allocator);
+        return Clipboard.readText(owner, allocator, @import("TerminalVt.zig").max_paste_bytes);
     }
 
     fn confirmMultiline(owner: c.HWND, lines: usize) bool {
@@ -6536,7 +6550,7 @@ pub const App = struct {
         defer self.allocator.free(selection);
         Api.writeClipboard(self.window.hwnd, self.allocator, selection) catch |err| {
             std.log.warn("Unable to write terminal selection to Windows clipboard: {s}", .{@errorName(err)});
-            self.setStatus("Unable to copy terminal selection");
+            self.setStatus(terminalCopyFailureStatus(err));
             return;
         };
         self.setStatus("Terminal selection copied");
@@ -6551,7 +6565,7 @@ pub const App = struct {
         const workspace = self.workspace orelse return;
         const text = Api.readClipboard(self.window.hwnd, self.allocator) catch |err| {
             std.log.warn("Unable to read Windows clipboard for terminal paste: {s}", .{@errorName(err)});
-            self.setStatus("Unable to paste clipboard text");
+            self.setStatus(terminalPasteFailureStatus(err));
             return;
         };
         defer self.allocator.free(text);
@@ -10655,6 +10669,55 @@ test "terminal paste never prompts when the program asked for bracketed paste" {
     try std.testing.expectEqualStrings("\x1b[200~line one\nline two\n\x1b[201~", item.bytes);
 }
 
+test "terminal paste refuses clipboard text above the size limit with a clear status and sends nothing" {
+    const Api = struct {
+        var oversize = false;
+
+        fn readClipboard(_: c.HWND, allocator: std.mem.Allocator) ![]u8 {
+            if (!oversize) return error.ClipboardTextTooLarge;
+            const text = try allocator.alloc(u8, 1_000_001);
+            @memset(text, 'a');
+            return text;
+        }
+
+        fn confirmMultiline(_: c.HWND, _: usize) bool {
+            return true;
+        }
+    };
+    const allocator = std.testing.allocator;
+    var workspace = try reopenTestWorkspace(allocator, "terminal-paste-too-large-layout.json");
+    defer workspace.deinit();
+    defer workspace.surfaces[0].surface = null;
+    workspace.surfaces[0].surface = @ptrFromInt(0x1000);
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.workspace = null;
+    app.workspace = &workspace;
+
+    for ([_]bool{ false, true }) |oversize| {
+        Api.oversize = oversize;
+        app.pasteClipboardTextWith(Api);
+        try std.testing.expectEqualStrings("Paste cancelled: clipboard text is larger than 1,000,000 bytes", app.status());
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    }
+}
+
+test "a refused terminal copy says whether the user's previous clipboard text survived" {
+    try std.testing.expectEqualStrings(
+        "Unable to copy: the clipboard refused the text; its previous text was kept",
+        terminalCopyFailureStatus(error.ClipboardWriteFailedKeptPreviousText),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to copy: the clipboard refused the text and its previous text could not be restored",
+        terminalCopyFailureStatus(error.ClipboardWriteFailedLostPreviousText),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to copy: the clipboard is in use by another program",
+        terminalCopyFailureStatus(error.ClipboardOpenFailed),
+    );
+    try std.testing.expectEqualStrings("Unable to copy terminal selection", terminalCopyFailureStatus(error.ClipboardWriteFailed));
+}
+
 test "workspace cycle keyboard fallback never turns Alt paging into terminal tabs" {
     try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_NEXT, true, false, true));
     try std.testing.expectEqual(InputRouter.Action.none, fallbackKeyAction(c.VK_PRIOR, true, false, true));
@@ -13688,6 +13751,60 @@ const KeyTableCase = struct {
     chord: LiveKeyboard.Chord,
     expected: []const u8,
 };
+
+test "live terminal copy: a clipboard that refuses the text keeps the selection and reports it" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    try feedMouseFixture(&fixture, keyboard.index);
+    mouse.drag(0, 1, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+
+    const Refusing = struct {
+        var err: anyerror = error.ClipboardWriteFailed;
+
+        fn writeClipboard(_: c.HWND, _: std.mem.Allocator, _: []const u8) !void {
+            return err;
+        }
+    };
+    Refusing.err = error.ClipboardWriteFailedLostPreviousText;
+    fixture.app.copyTerminalSelectionWith(Refusing);
+    try std.testing.expectEqualStrings(
+        "Unable to copy: the clipboard refused the text and its previous text could not be restored",
+        fixture.app.status(),
+    );
+    // Nothing was copied, so the selection stays for another attempt.
+    try mouse.expectSelected("GC-COPY-2");
+}
+
+test "live terminal paste: the provider's own paste entry point puts nothing raw on the pty" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const surface = fixture.workspace.surfaces[keyboard.index].surface.?;
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+
+    // winghostty_surface_paste_text brackets unconditionally and hands the payload to on_paste
+    // as is, so the shell must not route that callback to the pty.
+    for ([_][]const u8{ "plain", "x\x1b[201~rm -rf /\r\n", "line one\r\nline two" }) |text| {
+        _ = c.winghostty_surface_paste_text(surface, text.ptr, @intCast(text.len), 1);
+        try keyboard.drainInput(&sent);
+        if (sent.items.len != 0) std.debug.print("provider paste reached the pty: {any}\n", .{sent.items});
+        try std.testing.expectEqualStrings("", sent.items);
+    }
+}
 
 test "live terminal keyboard: AltGr characters reach the shell and never run a shell shortcut" {
     var fixture: LiveTerminalFixture = undefined;
