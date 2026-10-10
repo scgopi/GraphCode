@@ -216,9 +216,22 @@ pub const WorkspaceKeyCallback = *const fn (
 pub const InputQueue = struct {
     pub const max_bytes = input_queue_max_bytes;
 
+    /// What a pointer report tells the program, so the worker can keep the ledger of what it
+    /// has really been sent (see `Surface.delivered_buttons`). `generation` is the surface's
+    /// `mouse_generation` when the report was queued.
+    pub const MouseTag = struct {
+        kind: enum { none, press, release, pointer } = .none,
+        buttons: u8 = 0,
+        x: i32 = 0,
+        y: i32 = 0,
+        ctrl: bool = false,
+        generation: u32 = 0,
+    };
+
     pub const Item = struct {
         surface: usize,
         bytes: []u8,
+        mouse: MouseTag = .{},
     };
     allocator: std.mem.Allocator,
     items: [input_queue_capacity]Item = undefined,
@@ -227,12 +240,16 @@ pub const InputQueue = struct {
     bytes: usize = 0,
 
     pub fn enqueue(self: *InputQueue, surface: usize, bytes: []u8) !void {
+        return self.enqueueTagged(surface, bytes, .{});
+    }
+
+    pub fn enqueueTagged(self: *InputQueue, surface: usize, bytes: []u8, mouse: MouseTag) !void {
         if (bytes.len > input_queue_max_bytes) return error.InputTooLarge;
         if (self.count == input_queue_capacity or self.bytes + bytes.len > input_queue_max_bytes) {
             return error.InputQueueFull;
         }
         const index = (self.head + self.count) % input_queue_capacity;
-        self.items[index] = .{ .surface = surface, .bytes = bytes };
+        self.items[index] = .{ .surface = surface, .bytes = bytes, .mouse = mouse };
         self.count += 1;
         self.bytes += bytes.len;
     }
@@ -321,6 +338,18 @@ pub const Surface = struct {
     // The buttons the program has been told are down (bit 0 left, 1 right, 2 middle) and where
     // it last heard from the pointer, so a gesture that ends without a release can be closed.
     program_buttons: u8 = 0,
+    // What the program has really been sent, as opposed to `program_buttons`, which counts a
+    // report from the moment it is queued. Written only under `Workspace.input_mutex`: the
+    // input worker commits a press, release or pointer report once its whole write succeeded
+    // and `mouse_generation` still matches. `delivered_buttons` are the buttons the program
+    // was told are down, `delivered_pointer` where it last heard from the pointer,
+    // `release_owed` buttons whose release could not be queued. `mouse_generation` is unique
+    // per attach and changes at teardown and whenever the program stops tracking the mouse, so
+    // a write that finishes late never touches the state of a later session.
+    mouse_generation: u32 = 0,
+    delivered_buttons: u8 = 0,
+    delivered_pointer: struct { x: i32 = 0, y: i32 = 0, ctrl: bool = false } = .{},
+    release_owed: u8 = 0,
     // Buttons whose gesture was cancelled while the user still holds them; their release is
     // swallowed. See swallowsRelease.
     swallow_buttons: u8 = 0,
@@ -482,6 +511,10 @@ pub const Workspace = struct {
     /// Set by tests only: the number of saves that still succeed before one fails (once) with
     /// `LayoutSaveFaultInjected`, so a compensating save can be made to fail on its own.
     layout_save_fault: ?usize = null,
+    /// Replaces the attach pipe for queued input writes; set by tests, which have no pipe to read.
+    input_write_hook: ?*const fn (context: ?*anyopaque, surface: usize, bytes: []const u8) anyerror!usize = null,
+    input_write_context: ?*anyopaque = null,
+    mouse_generation_counter: u32 = 0,
     layout: WorkspaceLayout.Layout,
     layout_path: []u8,
     project_key: []u8,
@@ -2163,6 +2196,7 @@ pub const Workspace = struct {
         // probes are console-less `zmx ls` runs that never touch accessibility.
         self.pollLaunchWaits();
         self.pollKillJobs();
+        self.retryOwedReleases();
         // While the workspace is collapsed (not visible as either the full surface or the
         // picture-in-picture panel), skip draining terminal output entirely. Feeding output
         // notifies winghostty's own accessibility layer via
@@ -2664,24 +2698,29 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
         slot.destroying = true;
-        const undelivered = self.inputPending(index);
         self.cancelSurfaceInput(index);
-        self.waitInputIdle(index);
+        const quiet = self.waitInputIdle(index);
         // A button the program was told is down must not stay down in a session that outlives
         // this surface (a recreate re-attaches the same one). The surface's queue is gone by
         // now, so the release goes straight to the attach pipe, before the attach is killed.
-        // Only when the press was delivered: input still queued (or being written) is dropped
-        // with the surface, and a release for a press the program never saw would be an orphan,
-        // so then the buttons are just forgotten. Known limitation: "pending" is any input for this
-        // surface, not only the press, so a press that was delivered followed by other queued
-        // bytes (a key, a motion report) also skips the release, and the program keeps the button
-        // down until its next click. Telling those apart needs a per-report delivered flag.
-        if (slot.mouse_gesture == .program or slot.program_buttons != 0) {
-            if (undelivered) {
-                slot.program_buttons = 0;
-                slot.mouse_gesture = .none;
-            } else cancelProgramGesture(self, index, .direct);
-        }
+        // "Told" is what the input worker really wrote (`delivered_buttons`), not what was
+        // queued: a press still queued is dropped with the queue and gets no release, while a
+        // delivered press gets one however much else (keys, motion, its own release) was still
+        // queued behind it. The release goes where the program last heard from the pointer.
+        // When the worker has not stopped (`waitInputIdle` timed out) a write to the pipe may
+        // still be in flight, and a second one could interleave with it, so no release is
+        // written and the buttons are forgotten; the late completion is discarded by the
+        // generation change. When the pipe is not non-blocking, or the attach is already gone
+        // (the attach exited), `writeTeardownInput` writes nothing either.
+        self.input_mutex.lock();
+        const delivered = slot.delivered_buttons;
+        slot.program_pointer = .{ .x = slot.delivered_pointer.x, .y = slot.delivered_pointer.y, .ctrl = slot.delivered_pointer.ctrl };
+        self.forgetDeliveredMouseLocked(slot);
+        self.input_mutex.unlock();
+        slot.program_buttons = if (quiet) delivered else 0;
+        if (slot.program_buttons != 0) {
+            cancelProgramGesture(self, index, .direct);
+        } else slot.mouse_gesture = .none;
         self.waitAttach(index);
         if (slot.surface) |surface| {
             _ = c.winghostty_surface_destroy(surface);
@@ -2790,6 +2829,7 @@ pub const Workspace = struct {
         }
         self.input_mutex.lock();
         self.surfaces[index].attach = child;
+        self.surfaces[index].mouse_generation = self.nextMouseGenerationLocked();
         self.surfaces[index].attach_nonblocking = nonblocking;
         self.surfaces[index].vt = vt;
         self.surfaces[index].last_resize_size = size;
@@ -2800,7 +2840,7 @@ pub const Workspace = struct {
 
     fn waitAttach(self: *Workspace, index: usize) void {
         self.cancelSurfaceInput(index);
-        self.waitInputIdle(index);
+        _ = self.waitInputIdle(index);
         if (self.surfaces[index].attach) |*child| {
             _ = child.kill() catch {};
             _ = child.wait() catch {};
@@ -2808,24 +2848,60 @@ pub const Workspace = struct {
         }
     }
 
-    /// Whether input for a surface is still queued or being written, so not yet delivered.
-    fn inputPending(self: *Workspace, index: usize) bool {
+    /// A generation no other attach in this workspace has had (see `Surface.mouse_generation`).
+    fn nextMouseGenerationLocked(self: *Workspace) u32 {
+        self.mouse_generation_counter +%= 1;
+        return self.mouse_generation_counter;
+    }
+
+    /// Forgets what the program was sent and invalidates every write still queued or in flight
+    /// for it, so none of them can change the ledger afterwards. Caller holds `input_mutex`.
+    fn forgetDeliveredMouseLocked(self: *Workspace, slot: *Surface) void {
+        slot.delivered_buttons = 0;
+        slot.release_owed = 0;
+        slot.mouse_generation = self.nextMouseGenerationLocked();
+    }
+
+    fn forgetDeliveredMouse(self: *Workspace, slot: *Surface) void {
         self.input_mutex.lock();
         defer self.input_mutex.unlock();
-        if (self.input_busy and self.input_worker_surface == index) return true;
-        var position: usize = 0;
-        while (position < self.input_queue.count) : (position += 1) {
-            if (self.input_queue.items[(self.input_queue.head + position) % input_queue_capacity].surface == index) return true;
+        self.forgetDeliveredMouseLocked(slot);
+    }
+
+    fn markReleaseOwed(self: *Workspace, index: usize, buttons: u8) void {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        self.surfaces[index].release_owed |= buttons;
+    }
+
+    /// Queues again the releases that could not be queued when the user let go, once there is
+    /// room, for buttons the program was really told are down. A program that has stopped
+    /// tracking the mouse is told nothing.
+    fn retryOwedReleases(self: *Workspace) void {
+        for (&self.surfaces, 0..) |*slot, index| {
+            self.input_mutex.lock();
+            const owed = slot.release_owed;
+            const pointer = slot.delivered_pointer;
+            slot.release_owed = 0;
+            self.input_mutex.unlock();
+            if (owed == 0) continue;
+            const state = slot.vt orelse continue;
+            if (!state.mouseTrackingEnabled()) {
+                self.input_mutex.lock();
+                self.forgetDeliveredMouseLocked(slot);
+                self.input_mutex.unlock();
+                continue;
+            }
+            releaseProgramButtons(self, index, owed, pointer.x, pointer.y, pointer.ctrl, .queued);
         }
-        return false;
     }
 
     /// Writes bytes straight to a surface's session. Used only while the surface is being torn
     /// down, after its queued input is gone and before its attach is killed.
     fn writeTeardownInput(self: *Workspace, index: usize, bytes: []const u8) void {
         if (!self.surfaces[index].attach_nonblocking) return;
-        if (self.teardown_input_sink) |sink| return sink(self.teardown_input_context, index, bytes);
         const child = self.surfaces[index].attach orelse return;
+        if (self.teardown_input_sink) |sink| return sink(self.teardown_input_context, index, bytes);
         const stdin = child.stdin orelse return;
         _ = writeInputBounded(stdin.handle, bytes) catch {};
     }
@@ -2835,6 +2911,10 @@ pub const Workspace = struct {
     }
 
     fn tryEnqueueInput(self: *Workspace, index: usize, bytes: []const u8) bool {
+        return self.tryEnqueueTagged(index, bytes, .{});
+    }
+
+    fn tryEnqueueTagged(self: *Workspace, index: usize, bytes: []const u8, tag: InputQueue.MouseTag) bool {
         if (bytes.len == 0) return true;
         if (bytes.len > input_queue_max_bytes) {
             self.setInputError("terminal input queue overflow: paste is too large");
@@ -2850,7 +2930,9 @@ pub const Workspace = struct {
             self.allocator.free(copy);
             return false;
         }
-        self.input_queue.enqueue(index, copy) catch |err| {
+        var stamped = tag;
+        if (index < self.surfaces.len) stamped.generation = self.surfaces[index].mouse_generation;
+        self.input_queue.enqueueTagged(index, copy, stamped) catch |err| {
             self.input_mutex.unlock();
             self.allocator.free(copy);
             self.setInputError(switch (err) {
@@ -2995,7 +3077,29 @@ pub const Workspace = struct {
                 self.input_mutex.unlock();
                 break;
             }
-            const item = self.input_queue.dequeue().?;
+            const taken = self.takeInputLocked();
+            self.input_mutex.unlock();
+            if (taken) |input| self.deliverInput(input);
+        }
+    }
+
+    const TakenInput = struct { item: InputQueue.Item, handle: c.HANDLE };
+
+    /// Takes the next report worth writing and marks the worker busy with it. A release, or a
+    /// motion report with a button held, is only worth writing while the program has been told
+    /// that button is down in this very generation: without that press (it was dropped, or
+    /// never queued) the program must not be handed the rest of the gesture. Caller holds
+    /// `input_mutex`.
+    fn takeInputLocked(self: *Workspace) ?TakenInput {
+        while (self.input_queue.dequeue()) |item| {
+            const tag = item.mouse;
+            if (tag.kind != .press and tag.buttons != 0) {
+                const slot = &self.surfaces[item.surface];
+                if (tag.generation != slot.mouse_generation or (tag.buttons & ~slot.delivered_buttons) != 0) {
+                    self.allocator.free(item.bytes);
+                    continue;
+                }
+            }
             self.input_busy = true;
             self.input_worker_surface = item.surface;
             self.input_worker_handle = if (self.surfaces[item.surface].attach) |child|
@@ -3003,36 +3107,76 @@ pub const Workspace = struct {
             else
                 null;
             self.input_cancel_requested = false;
-            const handle = self.input_worker_handle;
-            self.input_mutex.unlock();
+            return .{ .item = item, .handle = self.input_worker_handle };
+        }
+        return null;
+    }
 
-            const result = if (handle) |value|
-                writeInputBounded(value, item.bytes)
-            else
-                error.InputUnavailable;
-            const cancelled = self.inputCancelled();
-            if (result) |written| {
-                self.input_mutex.lock();
-                if (item.surface < self.surfaces.len) self.surfaces[item.surface].input_bytes += written;
-                self.input_mutex.unlock();
-            } else |err| {
-                if (!cancelled) {
-                    self.setInputError(switch (err) {
-                        error.WriteTimeout => "terminal input write timed out",
-                        error.InputUnavailable => "terminal attach input unavailable",
-                        else => "terminal input write failed",
-                    });
+    const InputWriter = struct {
+        workspace: *Workspace,
+        surface: usize,
+        handle: c.HANDLE,
+
+        fn write(self: InputWriter, bytes: []const u8) !usize {
+            if (self.workspace.input_write_hook) |hook| return hook(self.workspace.input_write_context, self.surface, bytes);
+            const handle = self.handle orelse return error.InputUnavailable;
+            return (NativeInputWriter{ .handle = handle }).write(bytes);
+        }
+    };
+
+    /// Writes one taken report and records what came of it. Only a write that finished in full
+    /// changes the ledger of what the program has been sent, and only while the report's
+    /// generation is still the surface's: a cancel that arrives after a complete write does not
+    /// undo it, a partial write or a failed one counts as not delivered (a release stays owed),
+    /// and a write that finishes after its surface was torn down touches nothing.
+    fn deliverInput(self: *Workspace, taken: TakenInput) void {
+        const item = taken.item;
+        const result = writeInputChunks(item.bytes, InputWriter{ .workspace = self, .surface = item.surface, .handle = taken.handle });
+        const cancelled = self.inputCancelled();
+        if (result) |written| {
+            self.input_mutex.lock();
+            if (item.surface < self.surfaces.len) {
+                const slot = &self.surfaces[item.surface];
+                slot.input_bytes += written;
+                const tag = item.mouse;
+                if (tag.kind != .none and tag.generation == slot.mouse_generation) {
+                    switch (tag.kind) {
+                        .press => slot.delivered_buttons |= tag.buttons,
+                        .release => slot.delivered_buttons &= ~tag.buttons,
+                        else => {},
+                    }
+                    slot.delivered_pointer = .{ .x = tag.x, .y = tag.y, .ctrl = tag.ctrl };
                 }
             }
-            self.allocator.free(item.bytes);
-            self.input_mutex.lock();
-            self.input_busy = false;
-            self.input_worker_surface = null;
-            self.input_worker_handle = null;
-            self.input_cancel_requested = false;
-            self.input_condition.broadcast();
             self.input_mutex.unlock();
+        } else |err| {
+            if (!cancelled) {
+                self.setInputError(switch (err) {
+                    error.WriteTimeout => "terminal input write timed out",
+                    error.InputUnavailable => "terminal attach input unavailable",
+                    else => "terminal input write failed",
+                });
+            }
         }
+        self.allocator.free(item.bytes);
+        self.input_mutex.lock();
+        self.input_busy = false;
+        self.input_worker_surface = null;
+        self.input_worker_handle = null;
+        self.input_cancel_requested = false;
+        self.input_condition.broadcast();
+        self.input_mutex.unlock();
+    }
+
+    /// One step of the input worker without its thread: takes and delivers the next queued
+    /// report, if any. Tests drive the queue with it, through `input_write_hook`.
+    pub fn pumpInput(self: *Workspace) bool {
+        self.input_mutex.lock();
+        const taken = self.takeInputLocked();
+        self.input_mutex.unlock();
+        const input = taken orelse return false;
+        self.deliverInput(input);
+        return true;
     }
 
     fn inputCancelled(self: *Workspace) bool {
@@ -3074,20 +3218,20 @@ pub const Workspace = struct {
         if (busy) self.cancelInputIo();
     }
 
-    fn waitInputIdle(self: *Workspace, index: usize) void {
+    fn waitInputIdle(self: *Workspace, index: usize) bool {
         const deadline = nowMilliseconds() + 500;
         while (true) {
             self.input_mutex.lock();
             const busy = self.input_busy and self.input_worker_surface == index;
             if (!busy) {
                 self.input_mutex.unlock();
-                return;
+                return true;
             }
             _ = self.input_condition.timedWait(&self.input_mutex, 25 * std.time.ns_per_ms) catch {};
             self.input_mutex.unlock();
             if (nowMilliseconds() >= deadline) {
                 self.cancelInputIo();
-                return;
+                return false;
             }
         }
     }
@@ -5952,7 +6096,8 @@ fn cancelProgramGesture(workspace: *Workspace, index: usize, delivery: MouseDeli
     slot.swallow_buttons |= buttons;
     if (slot.mouse_gesture == .program) slot.mouse_gesture = .none;
     const state = slot.vt orelse return;
-    if (buttons == 0 or !state.mouseTrackingEnabled()) return;
+    if (!state.mouseTrackingEnabled()) return workspace.forgetDeliveredMouse(slot);
+    if (buttons == 0) return;
     releaseProgramButtons(workspace, index, buttons, slot.program_pointer.x, slot.program_pointer.y, slot.program_pointer.ctrl, delivery);
 }
 
@@ -5972,6 +6117,7 @@ fn reconcileProgramGesture(workspace: *Workspace, index: usize, event: *const c.
         slot.swallow_buttons |= slot.program_buttons;
         slot.program_buttons = 0;
         slot.mouse_gesture = .none;
+        workspace.forgetDeliveredMouse(slot);
         return;
     }
     // A leave carries no button state, and a wheel turn is not about buttons.
@@ -6024,8 +6170,22 @@ fn sendMouseReport(workspace: *Workspace, index: usize, delivery: MouseDelivery,
     const geometry = mouseGeometry(slot) orelse return;
     var buffer: [TerminalVt.max_mouse_sequence_bytes]u8 = undefined;
     const bytes = state.encodeMouse(&buffer, report, geometry) catch return;
+    const bit = programButtonBit(report.button);
+    const tag: InputQueue.MouseTag = .{
+        .kind = switch (report.action) {
+            .press => if (bit != 0) .press else .pointer,
+            .release => .release,
+            .motion => .pointer,
+        },
+        .buttons = bit,
+        .x = report.x,
+        .y = report.y,
+        .ctrl = report.ctrl,
+    };
     switch (delivery) {
-        .queued => workspace.enqueueInput(index, bytes),
+        .queued => if (!workspace.tryEnqueueTagged(index, bytes, tag) and tag.kind == .release) {
+            workspace.markReleaseOwed(index, bit);
+        },
         .direct => workspace.writeTeardownInput(index, bytes),
     }
 }
@@ -6281,6 +6441,281 @@ fn minimalWorkspaceForOptionsTest(allocator: std.mem.Allocator) !Workspace {
         .layout_path = @constCast(""),
         .project_key = @constCast(""),
     };
+}
+
+const MouseLedgerHook = struct {
+    var bytes: [512]u8 = undefined;
+    var length: usize = 0;
+    var sunk: [128]u8 = undefined;
+    var sunk_length: usize = 0;
+    var mode: enum { full, partial_then_error, cancel_after_full } = .full;
+    var partial_done = false;
+    var workspace: *Workspace = undefined;
+
+    fn install(target: *Workspace) void {
+        length = 0;
+        sunk_length = 0;
+        mode = .full;
+        partial_done = false;
+        workspace = target;
+        target.input_write_hook = &write;
+        target.teardown_input_sink = &sink;
+    }
+
+    fn write(_: ?*anyopaque, surface: usize, data: []const u8) anyerror!usize {
+        if (surface != 0) return data.len;
+        if (mode == .partial_then_error) {
+            if (partial_done) return error.WriteFailed;
+            partial_done = true;
+            @memcpy(bytes[length..][0..2], data[0..2]);
+            length += 2;
+            return 2;
+        }
+        @memcpy(bytes[length..][0..data.len], data);
+        length += data.len;
+        if (mode == .cancel_after_full) {
+            workspace.input_mutex.lock();
+            workspace.input_cancel_requested = true;
+            workspace.input_mutex.unlock();
+        }
+        return data.len;
+    }
+
+    fn sink(_: ?*anyopaque, _: usize, data: []const u8) void {
+        @memcpy(sunk[sunk_length..][0..data.len], data);
+        sunk_length += data.len;
+    }
+
+    fn written() []const u8 {
+        return bytes[0..length];
+    }
+
+    fn released() []const u8 {
+        return sunk[0..sunk_length];
+    }
+};
+
+/// A workspace whose first slot has a VT parser that tracks the mouse (1002, SGR) and cells of
+/// 8 by 16 pixels, with no window: reports are queued with `reportMouse` and delivered with
+/// `pumpInput` through `MouseLedgerHook`.
+fn armMouseSlot(workspace: *Workspace) !void {
+    const slot = &workspace.surfaces[0];
+    slot.cell_metrics.cell_width = 8;
+    slot.cell_metrics.cell_height = 16;
+    if (slot.vt == null) slot.vt = try TerminalVt.State.create(workspace.allocator, slot.grid.cols, slot.grid.rows);
+    try slot.vt.?.feed("\x1b[?1002h\x1b[?1006h");
+}
+
+/// A stand-in attach process, so teardown has a live session to write the release to.
+fn spawnTestAttach(workspace: *Workspace) !void {
+    var child = std.process.Child.init(&.{ "cmd.exe", "/c", "pause" }, workspace.allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    workspace.surfaces[0].attach = child;
+    workspace.surfaces[0].attach_nonblocking = true;
+}
+
+fn reportMouse(workspace: *Workspace, action: TerminalVt.MouseAction, button: TerminalVt.MouseButton, col: i32, row: i32) void {
+    sendMouseReport(workspace, 0, .queued, .{
+        .action = action,
+        .button = button,
+        .x = col * 8 + 4,
+        .y = row * 16 + 8,
+        .any_button_pressed = action != .release,
+    });
+}
+
+fn pumpAll(workspace: *Workspace) void {
+    while (workspace.pumpInput()) {}
+}
+
+fn fillInputQueue(workspace: *Workspace) !void {
+    for (0..input_queue_capacity) |_| try workspace.input_queue.enqueue(1, try workspace.allocator.dupe(u8, "x"));
+}
+
+test "mouse ledger: only a complete write of the current generation counts as delivered" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+    const slot = &workspace.surfaces[0];
+
+    // A write that stops part-way and then fails leaves the program mid-sequence: not delivered.
+    MouseLedgerHook.mode = .partial_then_error;
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    try std.testing.expectEqual(@as(usize, 2), MouseLedgerHook.written().len);
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+
+    // A cancel that arrives after a complete write does not undo it.
+    MouseLedgerHook.mode = .cancel_after_full;
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    try std.testing.expectEqual(@as(u8, 1), slot.delivered_buttons);
+    try std.testing.expectEqual(@as(i32, 28), slot.delivered_pointer.x);
+
+    // A write that completes after the surface's generation changed leaves the ledger alone.
+    MouseLedgerHook.mode = .full;
+    workspace.forgetDeliveredMouse(slot);
+    const written_before = MouseLedgerHook.written().len;
+    reportMouse(&workspace, .press, .right, 3, 2);
+    workspace.input_mutex.lock();
+    const taken = workspace.takeInputLocked().?;
+    workspace.input_mutex.unlock();
+    workspace.forgetDeliveredMouse(slot);
+    workspace.deliverInput(taken);
+    try std.testing.expect(MouseLedgerHook.written().len > written_before);
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+}
+
+test "mouse ledger: a release or drag is not written for a press that never reached the program" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+
+    // The press cannot be queued (the queue is full of another pane's input), but its release
+    // and a drag that follow can, once the worker has made room.
+    try fillInputQueue(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    try std.testing.expectEqual(input_queue_capacity, workspace.input_queue.count);
+    workspace.input_queue.clear();
+    reportMouse(&workspace, .motion, .left, 5, 2);
+    reportMouse(&workspace, .release, .left, 5, 2);
+    pumpAll(&workspace);
+    try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.written().len);
+    try std.testing.expectEqual(@as(u8, 0), workspace.surfaces[0].delivered_buttons);
+}
+
+test "mouse ledger: a release that could not be queued is queued again and reaches the program" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+    const slot = &workspace.surfaces[0];
+
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    try std.testing.expectEqual(@as(u8, 1), slot.delivered_buttons);
+    try fillInputQueue(&workspace);
+    reportMouse(&workspace, .release, .left, 5, 2);
+    try std.testing.expectEqual(@as(u8, 1), slot.release_owed);
+    workspace.input_queue.clear();
+    workspace.retryOwedReleases();
+    pumpAll(&workspace);
+    // The program is released where it last heard from the pointer, not where the release was lost.
+    try std.testing.expectEqualStrings("\x1b[<0;4;3M\x1b[<0;4;3m", MouseLedgerHook.written());
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+    try std.testing.expectEqual(@as(u8, 0), slot.release_owed);
+}
+
+test "mouse ledger: a program that stops and resumes tracking forgets a press still in flight" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+    const slot = &workspace.surfaces[0];
+
+    reportMouse(&workspace, .press, .left, 3, 2);
+    workspace.input_mutex.lock();
+    const in_flight = workspace.takeInputLocked().?;
+    workspace.input_mutex.unlock();
+    reportMouse(&workspace, .release, .left, 3, 2);
+    slot.mouse_gesture = .program;
+    slot.program_buttons = 1;
+    try slot.vt.?.feed("\x1b[?1002l");
+    cancelProgramGesture(&workspace, 0, .queued);
+    try slot.vt.?.feed("\x1b[?1002h");
+    workspace.deliverInput(in_flight);
+    pumpAll(&workspace);
+    // The press finished writing after the program had forgotten the gesture, so it is not
+    // recorded and the release queued behind it is not written.
+    try std.testing.expectEqualStrings("\x1b[<0;4;3M", MouseLedgerHook.written());
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+}
+
+test "mouse teardown: only the buttons still down are released, where the program last heard from the pointer" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    MouseLedgerHook.install(&workspace);
+    defer workspace.waitAttach(0);
+
+    // Left and right are down; the right is released and a drag is still queued: the drag is
+    // dropped with the queue and the left is released at the right button's release position.
+    try armMouseSlot(&workspace);
+    try spawnTestAttach(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    reportMouse(&workspace, .press, .right, 3, 2);
+    reportMouse(&workspace, .release, .right, 4, 2);
+    pumpAll(&workspace);
+    reportMouse(&workspace, .motion, .left, 6, 2);
+    workspace.destroySurface(0);
+    try std.testing.expectEqualStrings("\x1b[<0;5;3m", MouseLedgerHook.released());
+
+    // A release still queued is lost with the queue, so both buttons are released.
+    MouseLedgerHook.sunk_length = 0;
+    try armMouseSlot(&workspace);
+    try spawnTestAttach(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    reportMouse(&workspace, .press, .right, 3, 2);
+    pumpAll(&workspace);
+    reportMouse(&workspace, .release, .right, 4, 2);
+    workspace.destroySurface(0);
+    try std.testing.expectEqualStrings("\x1b[<0;4;3m\x1b[<2;4;3m", MouseLedgerHook.released());
+}
+
+test "mouse teardown: no release goes to an exited attach, a blocking pipe or a write still in flight" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    MouseLedgerHook.install(&workspace);
+    defer workspace.waitAttach(0);
+    const slot = &workspace.surfaces[0];
+
+    // The attach exited first (`handleAttachExit` ends it before the surface): the session is gone.
+    try armMouseSlot(&workspace);
+    try spawnTestAttach(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    workspace.waitAttach(0);
+    workspace.destroySurface(0);
+    try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
+
+    // A pipe that did not take non-blocking mode could block the shell: no release.
+    try armMouseSlot(&workspace);
+    try spawnTestAttach(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    slot.attach_nonblocking = false;
+    workspace.destroySurface(0);
+    try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
+
+    // A write that does not stop within the wait may still be using the pipe: no second write
+    // beside it, and its late completion is discarded.
+    try armMouseSlot(&workspace);
+    try spawnTestAttach(&workspace);
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    reportMouse(&workspace, .press, .right, 3, 2);
+    workspace.input_mutex.lock();
+    const in_flight = workspace.takeInputLocked().?;
+    workspace.input_mutex.unlock();
+    workspace.destroySurface(0);
+    try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
+    workspace.deliverInput(in_flight);
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+    try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
 }
 
 test "opening a loop mounts its pending tab without spawning a terminal" {
