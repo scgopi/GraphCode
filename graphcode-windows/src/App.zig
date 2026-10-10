@@ -15037,6 +15037,45 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
     return fixture.slotFor(session) != null;
 }
 
+test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
+    const layout_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_WORKSPACE_LAYOUT");
+    var original = try std.process.getEnvMap(allocator);
+    defer original.deinit();
+    defer setWorkspaceTestEnvironment(layout_key, original.get("GRAPHCODE_WORKSPACE_LAYOUT")) catch @panic("layout environment restore failed");
+    const stem = try std.fs.path.join(allocator, &.{ fixture.root, "restore-layout.json" });
+    defer allocator.free(stem);
+    try setWorkspaceTestEnvironment(layout_key, stem);
+
+    const other = try std.fs.path.join(allocator, &.{ fixture.root, "other-project" });
+    defer allocator.free(other);
+    const saved = try std.fmt.allocPrint(allocator, "{s}\\restore-layout.{s}.json", .{ fixture.root, WorkspaceLayoutFile.projectSuffix(other) });
+    defer allocator.free(saved);
+    var layout = try WorkspaceLayoutFile.Layout.init(allocator, other);
+    defer layout.deinit();
+    try layout.addTab("busy-agent", true);
+    try layout.addTab("busy-shell", false);
+    try layout.addTab("alive-shell", false);
+    try layout.save(saved);
+    try fixture.setUnreachable(&.{"alive-shell"}, &.{ "busy-agent", "busy-shell" }, "Timeout");
+
+    // The restore lists once, while two of the three sessions time out; they answer right after.
+    _ = try fixture.workspace.rebindProject(other);
+    try fixture.setLive(&.{ "busy-agent", "busy-shell", "alive-shell" });
+    try fixture.waitFor(restoredAliveShell, "alive-shell");
+    // As when the workspace is shown at startup, the restore retries run.
+    fixture.workspace.collapsed = false;
+    try fixture.waitFor(restoredAliveShell, "busy-agent");
+    try fixture.waitFor(restoredAliveShell, "busy-shell");
+    try std.testing.expect(fixture.workspace.layout.hasPane("busy-agent"));
+    try std.testing.expect(fixture.workspace.layout.hasPane("busy-shell"));
+    try fixture.expectKills("");
+}
+
 test "workspace layout: restore keeps a pane whose session zmx could not reach, and still drops one whose daemon is gone" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });

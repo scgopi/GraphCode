@@ -134,6 +134,10 @@ pub fn probeArguments(program: []const u8, output: *[2][]const u8) []const []con
 pub fn listingLiveness(listing: []const u8, session: []const u8) Liveness {
     var name_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
     const name = ZmxSession.nameBuffer(session, &name_buffer) catch return .absent;
+    // Every row naming the session counts, whatever its order: unknown dominates, then live,
+    // and only rows that are all definitively absent make the session absent.
+    var found_live = false;
+    var found_unknown = false;
     var lines = std.mem.splitScalar(u8, listing, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimRight(u8, raw, "\r");
@@ -141,13 +145,15 @@ pub fn listingLiveness(listing: []const u8, session: []const u8) Liveness {
         const first = fields.next() orelse continue;
         if (!std.mem.startsWith(u8, first, "name=") or !std.mem.eql(u8, first["name=".len..], name)) continue;
         if (errorField(line)) |err_name| {
-            return if (std.mem.eql(u8, err_name, dead_daemon_error)) .absent else .unknown;
+            if (!std.mem.eql(u8, err_name, dead_daemon_error)) found_unknown = true;
+            continue;
         }
         if (std.mem.indexOf(u8, line, "\tended=") != null or
-            std.mem.indexOf(u8, line, "\texit_code=") != null) return .absent;
-        return .live;
+            std.mem.indexOf(u8, line, "\texit_code=") != null) continue;
+        found_live = true;
     }
-    return .absent;
+    if (found_unknown) return .unknown;
+    return if (found_live) .live else .absent;
 }
 
 /// The value of the tab-preceded `err=` field of one row, if it has one.
@@ -341,4 +347,21 @@ test "an unknown probe never attaches and gives up only at the deadline" {
     try std.testing.expectEqual(Step.idle, wait.step(400, null));
     try std.testing.expectEqual(Step.start_probe, wait.step(510, null));
     try std.testing.expectEqual(Step.give_up, wait.step(520, .unknown));
+}
+
+test "several rows naming one session aggregate conservatively whatever their order" {
+    const refused = "  name=graphcode-x\terr=ConnectionRefused\tstatus=unreachable\n";
+    const timeout = "  name=graphcode-x\terr=Timeout\tstatus=unreachable\n";
+    const live = "name=graphcode-x\tpid=1\tclients=0\n";
+    const ended = "name=graphcode-x\tpid=1\tended=5\texit_code=0\n";
+    try std.testing.expectEqual(Liveness.live, listingLiveness(refused ++ live, "x"));
+    try std.testing.expectEqual(Liveness.live, listingLiveness(live ++ refused, "x"));
+    try std.testing.expectEqual(Liveness.live, listingLiveness(ended ++ live, "x"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(timeout ++ live, "x"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(live ++ timeout, "x"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(timeout ++ refused, "x"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(refused ++ timeout, "x"));
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(refused ++ refused, "x"));
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(refused ++ ended, "x"));
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(ended ++ refused, "x"));
 }

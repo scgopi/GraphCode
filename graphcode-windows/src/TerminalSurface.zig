@@ -1648,7 +1648,7 @@ pub const Workspace = struct {
     /// and the session started, and any failure afterwards takes the claim back.
     pub fn newTab(self: *Workspace) !void {
         // Checked before the claim is saved: a claim taken back by a failing save is a ghost.
-        if (self.firstFreeSurfaceSlot(0) == null) return error.SurfaceCapacityExceeded;
+        if (self.firstFreeSurfaceSlot(0, null) == null) return error.SurfaceCapacityExceeded;
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
         const initial_grid = try self.workspaceGridSize();
@@ -1679,23 +1679,29 @@ pub const Workspace = struct {
         return self.createAttachedSurfaceFrom(0, session, initial_grid);
     }
 
-    /// Whether slot `index` can take a new terminal: nothing is shown or attaching in it and
-    /// no loop launch is waiting for it. The one test creation and its pre-check share.
-    fn surfaceSlotFree(self: *const Workspace, index: usize) bool {
+    /// Whether slot `index` can take a new terminal: nothing is shown or attaching in it, no
+    /// loop launch is waiting for it, and no queued restore retry (`recreate_sessions`) has
+    /// reserved it. Only that retry, naming its own slot as `claim`, may use a reserved slot.
+    /// The one test creation, its pre-checks and the retry queue share.
+    fn surfaceSlotFree(self: *const Workspace, index: usize, claim: ?usize) bool {
         const slot = &self.surfaces[index];
-        return slot.surface == null and slot.attach == null and !self.launch_waits[index].active();
+        if (slot.surface != null or slot.attach != null or self.launch_waits[index].active()) return false;
+        return self.recreate_sessions[index].len == 0 or claim == index;
     }
-
-    fn firstFreeSurfaceSlot(self: *const Workspace, first_slot: usize) ?usize {
+    fn firstFreeSurfaceSlot(self: *const Workspace, first_slot: usize, claim: ?usize) ?usize {
         for (0..self.surfaces.len) |index| {
             if (index < first_slot) continue;
-            if (self.surfaceSlotFree(index)) return index;
+            if (self.surfaceSlotFree(index, claim)) return index;
         }
         return null;
     }
 
     fn createAttachedSurfaceFrom(self: *Workspace, first_slot: usize, session: []const u8, initial_grid: GridSize) !usize {
-        const index = self.firstFreeSurfaceSlot(first_slot) orelse return error.SurfaceCapacityExceeded;
+        return self.createAttachedSurfaceClaiming(first_slot, session, initial_grid, null);
+    }
+
+    fn createAttachedSurfaceClaiming(self: *Workspace, first_slot: usize, session: []const u8, initial_grid: GridSize, claim: ?usize) !usize {
+        const index = self.firstFreeSurfaceSlot(first_slot, claim) orelse return error.SurfaceCapacityExceeded;
         const slot = &self.surfaces[index];
         slot.session_name = try self.allocator.dupe(u8, session);
         errdefer self.destroySurface(index);
@@ -1793,9 +1799,9 @@ pub const Workspace = struct {
         // A shell is retried by re-listing, never by a blind attach; with no retries allowed
         // it stays saved until its loop is reopened.
         if (!daemon_session and self.restore_retry_limit == 0) return;
-        for (self.surfaces, 0..) |slot, index| {
+        for (0..self.surfaces.len) |index| {
             if (index < first_slot) continue;
-            if (slot.surface == null and slot.attach == null and self.recreate_sessions[index].len == 0) {
+            if (self.surfaceSlotFree(index, null)) {
                 self.daemon_sessions[index] = daemon_session;
                 self.recreate_sessions[index] = self.allocator.dupe(u8, session) catch &.{};
                 if (self.recreate_sessions[index].len == 0) return;
@@ -1831,7 +1837,7 @@ pub const Workspace = struct {
             },
         }
         const initial_grid = self.gridForSession(id) catch return self.deferShellRestore(index, now);
-        const attached = self.createAttachedSurfaceFrom(self.restoreFirstSlot(), id, initial_grid) catch
+        const attached = self.createAttachedSurfaceClaiming(self.restoreFirstSlot(), id, initial_grid, index) catch
             return self.deferShellRestore(index, now);
         self.daemon_sessions[attached] = false;
         self.clearRecreateSession(index);
@@ -1907,7 +1913,7 @@ pub const Workspace = struct {
     }
 
     pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction) !void {
-        if (self.firstFreeSurfaceSlot(0) == null) return error.SurfaceCapacityExceeded;
+        if (self.firstFreeSurfaceSlot(0, null) == null) return error.SurfaceCapacityExceeded;
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
         const tab = self.layout.selected() orelse return error.NoTabs;
