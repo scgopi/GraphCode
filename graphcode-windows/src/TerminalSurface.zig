@@ -1593,6 +1593,8 @@ pub const Workspace = struct {
     /// (visible to any other shell sharing the layout directory) before the record is written
     /// and the session started, and any failure afterwards takes the claim back.
     pub fn newTab(self: *Workspace) !void {
+        // Checked before the claim is saved: a claim taken back by a failing save is a ghost.
+        if (self.firstFreeSurfaceSlot(0) == null) return error.SurfaceCapacityExceeded;
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
         const initial_grid = try self.workspaceGridSize();
@@ -1623,33 +1625,45 @@ pub const Workspace = struct {
         return self.createAttachedSurfaceFrom(0, session, initial_grid);
     }
 
-    fn createAttachedSurfaceFrom(self: *Workspace, first_slot: usize, session: []const u8, initial_grid: GridSize) !usize {
-        for (&self.surfaces, 0..) |*slot, index| {
-            if (index < first_slot) continue;
-            if (slot.surface != null or slot.attach != null or self.launch_waits[index].active()) continue;
-            slot.session_name = try self.allocator.dupe(u8, session);
-            errdefer self.destroySurface(index);
-            slot.project_path = try self.allocator.dupe(u8, self.project_path);
-            try self.startSession(index, slot.session_name, initial_grid);
-            var options = self.surfaceOptions(index);
-            const result = c.winghostty_host_create_surface_v2(
-                self.host,
-                self.parent,
-                &options,
-                &self.surfaces[index].surface,
-            );
-            if (result != c.WINGHOSTTY_OK or self.surfaces[index].surface == null) {
-                self.waitAttach(index);
-                return error.WinghosttySurfaceCreateFailed;
-            }
+    /// Whether slot `index` can take a new terminal: nothing is shown or attaching in it and
+    /// no loop launch is waiting for it. The one test creation and its pre-check share.
+    fn surfaceSlotFree(self: *const Workspace, index: usize) bool {
+        const slot = &self.surfaces[index];
+        return slot.surface == null and slot.attach == null and !self.launch_waits[index].active();
+    }
 
-            self.surfaces[index].destroyed = false;
-            self.surfaces[index].destroying = false;
-            clearCells(&self.surfaces[index]);
-            self.relayout();
-            return index;
+    fn firstFreeSurfaceSlot(self: *const Workspace, first_slot: usize) ?usize {
+        for (0..self.surfaces.len) |index| {
+            if (index < first_slot) continue;
+            if (self.surfaceSlotFree(index)) return index;
         }
-        return error.SurfaceCapacityExceeded;
+        return null;
+    }
+
+    fn createAttachedSurfaceFrom(self: *Workspace, first_slot: usize, session: []const u8, initial_grid: GridSize) !usize {
+        const index = self.firstFreeSurfaceSlot(first_slot) orelse return error.SurfaceCapacityExceeded;
+        const slot = &self.surfaces[index];
+        slot.session_name = try self.allocator.dupe(u8, session);
+        errdefer self.destroySurface(index);
+        slot.project_path = try self.allocator.dupe(u8, self.project_path);
+        try self.startSession(index, slot.session_name, initial_grid);
+        var options = self.surfaceOptions(index);
+        const result = c.winghostty_host_create_surface_v2(
+            self.host,
+            self.parent,
+            &options,
+            &self.surfaces[index].surface,
+        );
+        if (result != c.WINGHOSTTY_OK or self.surfaces[index].surface == null) {
+            self.waitAttach(index);
+            return error.WinghosttySurfaceCreateFailed;
+        }
+
+        self.surfaces[index].destroyed = false;
+        self.surfaces[index].destroying = false;
+        clearCells(&self.surfaces[index]);
+        self.relayout();
+        return index;
     }
 
     /// Re-attaches the layout's panes whose sessions are still running, from slot
@@ -1829,6 +1843,7 @@ pub const Workspace = struct {
     }
 
     pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction) !void {
+        if (self.firstFreeSurfaceSlot(0) == null) return error.SurfaceCapacityExceeded;
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
         const tab = self.layout.selected() orelse return error.NoTabs;

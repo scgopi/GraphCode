@@ -514,6 +514,46 @@ The parity row remains **Partial**: shown-dialog accessibility/keyboard/layout
 and multi-instance behavior, complete live totals, real running-cycle keyboard/window proof, and
 recoverable deletion still need their own evidence or implementation.
 
+## Per-loop terminal layouts: known limits
+
+New Tab and Split save the layout's claim on the new session first, then record
+that this shell minted it (`<layouts>\shell-sessions`), then start the session, so
+a concurrent cleanup can never end a session the shell is still creating. Only a
+session with such a record for the loop being retired is ever ended by the shell.
+A free surface slot is checked before the claim is saved, so a full workspace
+(32 terminals) fails without writing anything. The limits below are known and
+unchanged; none of them can cause a session to be ended.
+
+- **A failed rollback save is not handled.** When the session start or the native
+  surface then fails, the claim is taken back in memory and saved again; if that
+  second save fails it is only dropped, and the on-disk layout keeps a pane that
+  names a session that was never created. The record is already removed, so the
+  claim cannot authorize a kill; a later successful save of the layout, or the
+  next restore (which drops a pane whose session `zmx ls` does not show running),
+  clears it. Retiring such a loop moves its layout aside as `.refused` instead of
+  deleting it. A retry of the save was considered and not built: `Layout.save`
+  replaces the file with no compare-and-swap, so a deferred retry could overwrite
+  a newer layout written by another shell, and loop switches swap the layout and
+  its path.
+- **A pane opened through `openNode` is not recorded as shell-minted.** The only
+  production caller is opening a quick chat. `attachNode` starts the session
+  before saving the pane and never writes an ownership record. A session it
+  creates is therefore never ended by the shell at retire, and a stop between the
+  start and the save leaves a live session with no claim. A quick chat's session
+  is named by its graph node and belongs to the daemon, which removes it when the
+  chat is deleted, so the shell refusing it is intended; no shell-minted tab
+  reaches this path. `attachNode` is also the re-attach used by a recreate of a
+  pane that was minted earlier, which keeps its original record.
+- **A native surface failure after the attach was started may leave a session.**
+  New Tab and Split roll back the claim and the record when
+  `winghostty_host_create_surface_v2` fails, but the attach process is only
+  killed, and `zmx attach` creates the session on connect, so a session that came
+  up before the kill can survive with no claim and no record. Whether it does
+  depends on zmx timing and is not established without a real zmx.
+
+Coverage is Zig tests against a fake `zmx`, including a test-only forced save
+failure; no real zmx, filesystem sharing violation, or live walkthrough is claimed.
+
 ## Worktree discovery processes
 
 `WorktreeStatus` runs local Git with explicit `-C` paths and a child-only copy of
