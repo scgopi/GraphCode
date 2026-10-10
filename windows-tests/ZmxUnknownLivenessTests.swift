@@ -116,6 +116,10 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       ((try? String(contentsOf: directory.appendingPathComponent("calls"), encoding: .utf8)) ?? "")
         .split(separator: "\n").map(String.init)
     }
+    var stderr: String {
+      (try? String(
+        contentsOf: directory.appendingPathComponent("stderr.txt"), encoding: .utf8)) ?? ""
+    }
     var dialLog: String {
       (try? String(
         contentsOf: directory.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8))
@@ -188,8 +192,13 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     #if os(Windows)
       // A 13 KB script with embedded quotes and newlines does not survive Windows command-line
       // quoting into the MSYS shell, so it runs from a file with the same shell flags.
+      // The remote scripts name `zmx` and `python3` bare. Resolving them through PATH is what
+      // a runner's MSYS runtime does least reliably, so the stubs are bound as functions: the
+      // script text and what it asks of its tools are unchanged.
+      let base = fixture.directory.path.replacingOccurrences(of: "\\", with: "/")
+      let shims = ["zmx", "python3"].map { "\($0)() { \"\(base)/\($0)\" \"$@\"; }\n" }.joined()
       let file = fixture.directory.appendingPathComponent("script.sh")
-      try script.write(to: file, atomically: true, encoding: .utf8)
+      try (shims + script).write(to: file, atomically: true, encoding: .utf8)
       process.arguments =
         flags.filter { $0 != "-c" } + [file.path.replacingOccurrences(of: "\\", with: "/")]
     #else
@@ -209,7 +218,9 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     process.environment = environment
     let pipe = Pipe()
     process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
+    let errorFile = fixture.directory.appendingPathComponent("stderr.txt")
+    FileManager.default.createFile(atPath: errorFile.path, contents: nil)
+    process.standardError = try FileHandle(forWritingTo: errorFile)
     try process.run()
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
@@ -330,7 +341,9 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       ZmxSessionLauncher.remoteEnsureDialScript(
         forNode: node, at: location, settings: GraphcodeSettings()))
     try run(built.script, in: fixture, shell: variant.shell, flags: variant.flags)
+    // On a run that never reached the fake zmx, say what the shell printed.
     return fixture.calls
+      + (fixture.calls.contains("ls") ? [] : ["stderr=" + fixture.stderr.prefix(800)])
   }
 
   func testTheRemoteEnsureListsOnceAndNeverRunsForAnythingButADefinitelyAbsentSession() throws {
@@ -414,14 +427,16 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     // Under every shell variant, plain and `-e`: they must all agree.
     func probe(_ listing: String?) throws -> String {
       var answers: [String] = []
+      var errors: [String] = []
       for variant in Self.variants {
         let fixture = try fixture(listing: listing)
         let script = ZmxSessionLauncher.remoteStatusScript(forNode: node, label: "presence")
-        answers.append(
-          try run(script, in: fixture, shell: variant.shell, flags: variant.flags)
-            .trimmingCharacters(in: .whitespacesAndNewlines))
+        let answer = try run(script, in: fixture, shell: variant.shell, flags: variant.flags)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        answers.append(answer)
+        errors.append(String(fixture.stderr.prefix(400)))
       }
-      XCTAssertEqual(Set(answers).count, 1, "\(answers)")
+      XCTAssertEqual(Set(answers).count, 1, "\(answers) stderr: \(errors)")
       return answers.first ?? ""
     }
     let id = node.id.uuidString
