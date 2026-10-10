@@ -2270,7 +2270,10 @@ pub const Workspace = struct {
         // now, so the release goes straight to the attach pipe, before the attach is killed.
         // Only when the press was delivered: input still queued (or being written) is dropped
         // with the surface, and a release for a press the program never saw would be an orphan,
-        // so then the buttons are just forgotten.
+        // so then the buttons are just forgotten. Known limitation: "pending" is any input for this
+        // surface, not only the press, so a press that was delivered followed by other queued
+        // bytes (a key, a motion report) also skips the release, and the program keeps the button
+        // down until its next click. Telling those apart needs a per-report delivered flag.
         if (slot.mouse_gesture == .program or slot.program_buttons != 0) {
             if (undelivered) {
                 slot.program_buttons = 0;
