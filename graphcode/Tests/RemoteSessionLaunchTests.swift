@@ -67,14 +67,17 @@ struct RemoteSessionLaunchTests {
     // Never load-bearing: a failed seed must fall back to today's dialog, not block
     // the launch.
     #expect(remoteCommand.contains("|| true"))
-    // And the seed runs before the launch it clears the way for — but *behind* the
-    // alive check, which is what keeps the liveness sweep's healthy tick a bare
-    // `zmx ls` rather than a `python3` per minute against an already-trusted folder.
+    // And the seed runs before the launch it clears the way for, and before the listing
+    // that decides the launch (nothing may sit between the two). It stays behind the `zmx
+    // get` hint, which is what keeps the liveness sweep's healthy tick a bare `zmx ls`
+    // rather than a `python3` per minute against an already-trusted folder.
+    let get = try #require(remoteCommand.range(of: "'get'"))
     let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let seed = try #require(remoteCommand.range(of: "trustedFolders"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(check.lowerBound < seed.lowerBound)
-    #expect(seed.lowerBound < run.lowerBound)
+    #expect(get.lowerBound < seed.lowerBound)
+    #expect(seed.lowerBound < check.lowerBound)
+    #expect(check.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -194,9 +197,10 @@ struct RemoteSessionLaunchTests {
   @Test
   func aRemoteEnsureDeliversTheCLIAndBriefingBeforeLaunching() throws {
     // The delivery fragment must precede the launch: a `zmx run` that fires has to find
-    // every path its argv names already on the host's disk. It sits *behind* the
-    // existence check, so a session that is already running costs the sweep one `zmx
-    // get` rather than ~20 KB of base64'd shim through a `python3` every minute.
+    // every path its argv names already on the host's disk. It is gated by the host's
+    // receipt alone, so a healthy tick costs one `cat` rather than ~20 KB of base64'd shim
+    // through a `python3` every minute, and it sits *before* the listing that decides the
+    // launch: nothing slow runs between that listing and `zmx run`.
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
     let invocation = try #require(
@@ -212,8 +216,8 @@ struct RemoteSessionLaunchTests {
     let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let deliver = try #require(remoteCommand.range(of: "b64decode"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(check.lowerBound < deliver.lowerBound)
-    #expect(deliver.lowerBound < run.lowerBound)
+    #expect(deliver.lowerBound < check.lowerBound)
+    #expect(check.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -480,7 +484,11 @@ extension RemoteSessionLaunchTests {
     let delivery = try #require(script.range(of: "prompt-undelivered"))
     let run = try #require(script.range(of: "'run'", options: .backwards))
     #expect(delivery.upperBound < run.lowerBound)
-    #expect(script[delivery.upperBound..<run.lowerBound].contains("&&"))
+    // The delivery runs ahead of the listing, so its outcome travels in `gc_pok`, which
+    // gates the fresh launch.
+    let gate = try #require(script.range(of: "[ \"$gc_pok\" = 1 ] &&"))
+    #expect(delivery.upperBound < gate.lowerBound)
+    #expect(gate.upperBound <= run.lowerBound)
   }
 
   @Test

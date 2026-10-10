@@ -1946,9 +1946,12 @@ public enum ZmxSessionLauncher {
     // The launch, behind the delivery of the one file it cannot do without. Nothing is
     // prefixed when the prompt was typed in full, which is the ordinary case.
     let launchCommand = remoteQuotedCommand(["zmx"] + zmxArguments)
+    // The prompt file is written before the listing (`promptDeliveryCommand`, below); a
+    // failed write still takes the launch with it, through `gc_pok`.
+    let promptDeliveryCommand = remotePromptDelivery(shedPrompt, forNode: node, spool: spool)
     let run =
-      remotePromptDelivery(shedPrompt, forNode: node, spool: spool)
-      .map { "\($0) && \(launchCommand)" } ?? launchCommand
+      promptDeliveryCommand == nil
+      ? launchCommand : "[ \"$gc_pok\" = 1 ] && \(launchCommand)"
     // Copilot only, and remote only: an unattended Copilot queues its `--interactive`
     // goal behind a per-session folder-trust dialog that nobody is present to answer,
     // so a fresh remote Copilot loop booted to an idle screen with its goal parked
@@ -2010,35 +2013,49 @@ public enum ZmxSessionLauncher {
     // session that died with the machine from one that ended.
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let markerWrite = RemoteBootMarker.writeFragment(forSessionName: name)
-    var missing = trustSeed + hooksWrite + "{ \(launch); } && { \(markerWrite); }"
-    if onlyAfterReboot {
+    let missing = "{ \(launch); } && { \(markerWrite); }"
+    // A finished loop is only brought back after a reboot: `gc_reboot_ok` is 1 unless this
+    // is such a sweep and the host has not rebooted since the session's boot marker.
+    let rebootGate: String = {
+      guard onlyAfterReboot else { return "gc_reboot_ok=1; " }
       let marker = RemoteBootMarker.markerExpression(forSessionName: name)
-      missing =
-        "\(RemoteBootMarker.captureFragment); gc_last=$(cat \(marker) 2>/dev/null); "
-        + "if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] && [ \"$gc_boot\" != \"$gc_last\" ]; "
-        + "then \(missing); fi"
-    }
-    // ONE `zmx ls`, taken first and classified into `gc_lv`; the delivery and the launch both
-    // read it, so there is no second listing to disagree with it. Only a definite absent or
-    // ended task is launched into. A live one banks and stamps; an unlabelled live Codex one
-    // is adopted; `unknown`, a failed listing and a live session of another agent are
-    // skipped and logged, to be asked again by the next sweep tick. The cost of a single
-    // snapshot is the window between it and the launch (the delivery runs in it): a pane
-    // that attaches in that window is the race the old second check narrowed, and it now
-    // meets `zmx run`'s own duplicate handling alone.
+      return "\(RemoteBootMarker.captureFragment); gc_last=$(cat \(marker) 2>/dev/null); "
+        + "gc_reboot_ok=0; if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] "
+        + "&& [ \"$gc_boot\" != \"$gc_last\" ]; then gc_reboot_ok=1; fi; "
+    }()
+    // ONE `zmx ls`, taken last, immediately before the `case` that decides the launch, and
+    // classified into `gc_lv`: nothing runs between that listing and `zmx run`. Everything
+    // that has to happen before a launch is done before the listing and is decided without
+    // it: the delivery by its receipt alone (`remoteDeliveryReceipt`), the shed-prompt file
+    // unconditionally (one small idempotent write that nothing re-reads while a session
+    // lives), and the folder-trust seed and hooks file only while `zmx get` misses (an
+    // additive read-modify-write of the agent's own config, which a live agent may be
+    // writing too; `get` is a hint for that, never a liveness decision, so a busy live
+    // session at worst gets one redundant idempotent seed). Only a definite absent or
+    // ended task is launched into. A live one banks and stamps; an unlabelled live Codex
+    // one is adopted; `unknown`, a failed listing and a live session of another agent are
+    // skipped and logged, to be asked again by the next sweep tick.
     let probe = livenessProbeFragment(
       zmxPath: "zmx", sessionName: name, agent: readinessAgent(forNode: node))
     let adopt = agentLabelCommand(zmxPath: "zmx", forNode: node).map { "{ \($0) || true; }" } ?? ":"
     let skip = { (event: String) in DialLog.fragment(session: name, dial: "ensure", event: event) }
+    let receipt = remoteDeliveryReceipt(forNode: node, at: location, settings: settings)
+    let preparation = trustSeed + hooksWrite
+    let prepare =
+      preparation.isEmpty
+      ? ""
+      : "if [ \"$gc_reboot_ok\" = 1 ] && ! \(quotedCommand(["zmx", "get", name])) >/dev/null 2>&1; "
+        + "then \(preparation)true; fi; "
+    let promptDelivery =
+      promptDeliveryCommand.map { "gc_pok=1; \($0) || gc_pok=0; " } ?? "gc_pok=1; "
     let script =
-      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { \(probe); "
+      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { \(rebootGate)"
       + deliveryFragment(
-        delivery, ifSessionMissing: "[ \"$gc_lv\" != absent ]",
-        bridgeStateGeneration: bridgeState.map(\.generation))
-      + "case \"$gc_lv\" in "
+        delivery, receipt: receipt, bridgeStateGeneration: bridgeState.map(\.generation))
+      + promptDelivery + prepare + "\(probe); case \"$gc_lv\" in "
       + "live) true\(bank) && { \(markerWrite); } || true;; "
       + "unlabelled) \(adopt);; "
-      + "absent) \(missing);; "
+      + "absent) if [ \"$gc_reboot_ok\" = 1 ]; then \(missing); fi;; "
       + "unknown) \(skip("skipped-unknown"));; "
       + "lsfail) \(skip("skipped-ls-failed"));; "
       + "mismatch) \(skip("skipped-agent-mismatch"));; "
@@ -2049,43 +2066,37 @@ public enum ZmxSessionLauncher {
     return (spooled, spool.input)
   }
 
-  /// The delivery, run when the session is missing **or** the host's shim is out of date.
+  /// The delivery, run when the host's receipt differs from the one this ensure would write
+  /// (the shim changed, or a delivered file did) or the bridge generation moved. It does not
+  /// look at the session at all: the launch reads these files, so they have to be current
+  /// before it, and the receipt (`remoteDeliveryReceipt`) is what says whether they are.
   ///
-  /// Delivery cannot follow the trust seed and the hooks file behind the existence check.
-  /// Those are read once at session start; the CLI shim is re-executed for as long as the
-  /// session lives, and it speaks a wire protocol to this daemon
-  /// (`RemoteGraphAccess.cliShimStamp` has the full reasoning). Skipping it for a live
-  /// session means a graphcode upgrade never reaches a remote host whose loops are still
-  /// running — and since those loops are unattended by definition, nothing else would
-  /// heal it either: `GhosttyTerminalView.remoteCommand` delivers unconditionally, but
-  /// only when a human opens the loop.
+  /// It cannot follow the trust seed and the hooks file behind the existence check. Those
+  /// are read once at session start; the CLI shim is re-executed for as long as the session
+  /// lives, and it speaks a wire protocol to this daemon (`RemoteGraphAccess.cliShimStamp`
+  /// has the full reasoning). Skipping it for a live session means a graphcode upgrade never
+  /// reaches a remote host whose loops are still running.
   ///
-  /// Nor can it stay unconditional, which is what made it a `python3` and ~20 KB of
-  /// base64 per loop per minute once the sweep existed. The stamp splits the difference:
-  /// a healthy tick costs one extra `zmx get` and a `cat` on the same host, and the
-  /// delivery itself runs only when it has something new to say.
+  /// Nor can it stay unconditional, which is what made it a `python3` and ~20 KB of base64
+  /// per loop per minute once the sweep existed. The receipt splits the difference: a
+  /// healthy tick costs a `cat` on the same host, and the delivery itself runs only when it
+  /// has something new to say.
   static func deliveryFragment(
-    _ delivery: String, ifSessionMissing check: String,
-    bridgeStateGeneration: UInt64? = nil
+    _ delivery: String, receipt: String, bridgeStateGeneration: UInt64? = nil
   ) -> String {
     guard !delivery.isEmpty else { return "" }
-    let stamp = RemoteProjectLocation.shellQuoted(RemoteGraphAccess.cliShimStamp)
+    let stamp = RemoteProjectLocation.shellQuoted(receipt)
     // Tilde, unquoted, so the remote shell expands it — the same one constant the
-    // installer expands with `expanduser`. The stamp is the delivery's own receipt,
-    // written last and only on success, so a delivery that failed anywhere leaves no
-    // stamp and the next dial tries again.
+    // installer expands with `expanduser`. The receipt is written last and only on
+    // success, so a delivery that failed anywhere leaves no matching receipt and the next
+    // dial tries again.
     let stampFile = RemoteGraphAccess.shimStampPath
-    // `!` binds to the pipeline, so this reads (session missing) OR (stamp differs). A
-    // missing session has to re-deliver whatever the stamp says: the create branch below
-    // launches an argv naming the briefing, wake digest and prompt files, and every one
-    // of them rides in this same fragment.
     let bridgeChanged =
       bridgeStateGeneration.map {
         " || [ \"$(cat \(RemoteGraphAccess.bridgeStateGenerationPath) 2>/dev/null)\" != "
           + RemoteProjectLocation.shellQuoted(String($0)) + " ]"
       } ?? ""
-    return "if ! \(check) >/dev/null 2>&1 "
-      + "|| [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]"
+    return "if [ \"$(cat \(stampFile) 2>/dev/null)\" != \(stamp) ]"
       + bridgeChanged + "; then "
       + delivery + "fi; "
   }
@@ -2151,6 +2162,26 @@ public enum ZmxSessionLauncher {
       + (fresh.map { "else \($0); " } ?? "") + "fi"
   }
 
+  /// The delivery receipt: the shim's stamp plus a digest of every file the delivery carries
+  /// (briefing, wake digest, …). It is what lets an ensure decide to deliver from the host's
+  /// stamp alone, with no listing in the decision: a missing session needs its delivered
+  /// files current, and they are current exactly when the receipt matches.
+  static func remoteDeliveryReceipt(
+    forNode node: LoopNode?, backend: CLISessionBackendKind? = nil,
+    at location: RemoteProjectLocation, settings: GraphcodeSettings
+  ) -> String {
+    let files = remoteDeliveryFiles(
+      forNode: node, backend: backend, at: location, settings: settings)
+    var material = Data()
+    for path in files.keys.sorted() {
+      material.append(Data(path.utf8))
+      material.append(0)
+      material.append(Data((files[path] ?? "").utf8))
+      material.append(0)
+    }
+    return RemoteGraphAccess.cliShimStamp + "-" + String(GraphcodeSHA256.hex(material).prefix(16))
+  }
+
   /// The files a remote session needs on its own disk, as one installer fragment
   /// (`RemoteGraphAccess.installerScript`): always the CLI shim, plus the briefing when
   /// briefing is on and the node's wake digest when it has one. `node` is optional
@@ -2167,7 +2198,11 @@ public enum ZmxSessionLauncher {
     // without ever claiming a shim the host never received.
     return RemoteGraphAccess.installerScript(
       files: remoteDeliveryFiles(forNode: node, backend: backend, at: location, settings: settings),
-      receipt: (path: RemoteGraphAccess.shimStampPath, content: RemoteGraphAccess.cliShimStamp),
+      receipt: (
+        path: RemoteGraphAccess.shimStampPath,
+        content: remoteDeliveryReceipt(
+          forNode: node, backend: backend, at: location, settings: settings)
+      ),
       spool: spool)
   }
 

@@ -347,6 +347,37 @@ struct ZmxUnknownLivenessTests {
     }
   }
 
+  /// The delivery (a `python3` here) is the slow step in which a pane can create the session.
+  /// The stub flips the listing to a live row when the delivery's installer is invoked, which is exactly a
+  /// session appearing while the delivery runs: no `run` may follow, whatever the shell.
+  @Test
+  func aSessionThatBecomesLiveDuringDeliveryIsNeverRunInto() throws {
+    let name = "graphcode-5E11BA5E-0001-4000-8000-000000000001"
+    for variant in Self.variants {
+      let fixture = try Fixture(listing: "")
+      let flip = Self.row(name).replacingOccurrences(of: "\t", with: "\\t")
+      try
+        "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) printf '\(flip)\\n' > \"$d/ls.out\";; esac\nexit 0\n"
+        .write(
+          to: fixture.directory.appendingPathComponent("python3"), atomically: true,
+          encoding: .utf8)
+      let node = LoopNode(
+        id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
+        title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
+      let location = RemoteProjectLocation(
+        user: "dev", host: "build-box", port: 2222, remotePath: fixture.directory.path)
+      let built = try #require(
+        ZmxSessionLauncher.remoteEnsureDialScript(
+          forNode: node, at: location, settings: GraphcodeSettings()))
+      try fixture.run(built.script, shell: variant.shell, flags: variant.flags)
+      let listing = try String(
+        contentsOf: fixture.directory.appendingPathComponent("ls.out"), encoding: .utf8)
+      #expect(listing.contains(name), "the delivery never ran, so nothing was raced")
+      #expect(!fixture.calls.contains("run"), "\(variant) \(fixture.calls)")
+      #expect(fixture.calls.filter { $0 == "ls" }.count == 1, "\(variant) \(fixture.calls)")
+    }
+  }
+
   @Test
   func theRemoteEnsureStructureIsPinnedAsWell() throws {
     let node = LoopNode(
@@ -358,6 +389,12 @@ struct ZmxUnknownLivenessTests {
     let probe = try #require(command.range(of: "gc_lv=lsfail"))
     let launch = try #require(command.range(of: "'run'"))
     #expect(probe.lowerBound < launch.lowerBound)
+    // Nothing that can take time, or that another pane can race, sits between the listing
+    // and the launch it decides.
+    let between = command[probe.lowerBound..<launch.lowerBound]
+    #expect(!between.contains("b64decode"))
+    #expect(!between.contains("python3"))
+    #expect(!between.contains("trustedFolders"))
     #expect(command.contains("skipped-unknown"))
     #expect(command.contains("skipped-ls-failed"))
     #expect(command.contains("skipped-agent-mismatch"))

@@ -28,7 +28,8 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       ZmxSessionLauncher.parseSessionTaskState(lsOutput: output, sessionName: Self.name)
     }
     XCTAssertEqual(state(Self.error(Self.name, "ConnectionRefused")), .absent)
-    XCTAssertEqual(state(Self.error(Self.name, "ConnectionRefused", status: "cleaning up")), .absent)
+    XCTAssertEqual(
+      state(Self.error(Self.name, "ConnectionRefused", status: "cleaning up")), .absent)
     XCTAssertEqual(state(Self.error(Self.name, "Timeout")), .unknown)
     XCTAssertEqual(state(Self.error(Self.name, "Unexpected")), .unknown)
     XCTAssertEqual(state(Self.error(Self.name, "InfoSizeMismatch")), .unknown)
@@ -189,7 +190,8 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       // quoting into the MSYS shell, so it runs from a file with the same shell flags.
       let file = fixture.directory.appendingPathComponent("script.sh")
       try script.write(to: file, atomically: true, encoding: .utf8)
-      process.arguments = flags.filter { $0 != "-c" } + [file.path.replacingOccurrences(of: "\\", with: "/")]
+      process.arguments =
+        flags.filter { $0 != "-c" } + [file.path.replacingOccurrences(of: "\\", with: "/")]
     #else
       process.arguments = flags + [script]
     #endif
@@ -351,6 +353,37 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     }
   }
 
+  /// The delivery (a `python3` here) is the slow step in which a pane can create the session.
+  /// The stub flips the listing to a live row when the delivery's installer is invoked, which is exactly a
+  /// session appearing while the delivery runs: no `run` may follow, whatever the shell.
+  func testASessionThatBecomesLiveDuringDeliveryIsNeverRunInto() throws {
+    let name = "graphcode-5E11BA5E-0001-4000-8000-000000000001"
+    for variant in Self.variants {
+      let fixture = try fixture(listing: "")
+      let flip = Self.row(name).replacingOccurrences(of: "\t", with: "\\t")
+      try
+        "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) printf '\(flip)\\n' > \"$d/ls.out\";; esac\nexit 0\n"
+        .write(
+          to: fixture.directory.appendingPathComponent("python3"), atomically: true,
+          encoding: .utf8)
+      let node = LoopNode(
+        id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
+        title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
+      let location = RemoteProjectLocation(
+        user: "dev", host: "build-box", port: 2222,
+        remotePath: fixture.directory.path.replacingOccurrences(of: "\\", with: "/"))
+      let built = try XCTUnwrap(
+        ZmxSessionLauncher.remoteEnsureDialScript(
+          forNode: node, at: location, settings: GraphcodeSettings()))
+      try run(built.script, in: fixture, shell: variant.shell, flags: variant.flags)
+      let listing = try String(
+        contentsOf: fixture.directory.appendingPathComponent("ls.out"), encoding: .utf8)
+      XCTAssertTrue(listing.contains(name), "the delivery never ran, so nothing was raced")
+      XCTAssertFalse(fixture.calls.contains("run"), "\(fixture.calls)")
+      XCTAssertEqual(fixture.calls.filter { $0 == "ls" }.count, 1, "\(fixture.calls)")
+    }
+  }
+
   func testTheRemoteEnsureStructureIsPinnedAsWell() throws {
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
@@ -361,6 +394,10 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     let probe = try XCTUnwrap(command.range(of: "gc_lv=lsfail"))
     let launch = try XCTUnwrap(command.range(of: "'run'"))
     XCTAssertLessThan(probe.lowerBound, launch.lowerBound)
+    let between = command[probe.lowerBound..<launch.lowerBound]
+    XCTAssertFalse(between.contains("b64decode"))
+    XCTAssertFalse(between.contains("python3"))
+    XCTAssertFalse(between.contains("trustedFolders"))
     XCTAssertTrue(command.contains("skipped-unknown"))
     XCTAssertTrue(command.contains("skipped-ls-failed"))
     XCTAssertTrue(command.contains("skipped-agent-mismatch"))
