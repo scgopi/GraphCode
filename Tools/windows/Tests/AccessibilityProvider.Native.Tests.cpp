@@ -188,6 +188,23 @@ static void nativeHitTestChecks(IRawElementProviderSimple *provider, HWND hwnd) 
         "a point over the reported canvas resolves to the canvas element");
   if (canvas) canvas->Release();
   expectHit(root, origin, 100, 210, L"Visible row", "rows still win outside the canvas");
+
+  // A 144-DPI shell publishes physical pixels (1.5x its logical rects); the point is a physical
+  // screen coordinate, so the window's non-zero screen origin is the only conversion.
+  const char *scaled_identities[] = {"loop:scaled"};
+  const char *scaled_names[] = {"Scaled row"};
+  const int scaled_parents[] = {2};
+  const int scaled_none[] = {0};
+  const int scaled_actions[] = {1};
+  const int scaled_bounds[] = {18, 300, 348, 339};
+  check(update(provider, "Scaled", scaled_identities, scaled_names, scaled_parents, scaled_none,
+               scaled_none, scaled_actions, scaled_bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "scaled publication succeeds");
+  check(origin.x != 0 && origin.y != 0, "the hit-test window has a non-zero screen origin");
+  expectHit(root, origin, 18, 300, L"Scaled row", "a physical-pixel row is hit at its top-left corner from a shifted origin");
+  expectHit(root, origin, 347, 338, L"Scaled row", "a physical-pixel row is hit at its last pixel from a shifted origin");
+  expectHit(root, origin, 348, 338, nullptr, "a physical-pixel row's right edge is exclusive from a shifted origin");
+  expectHit(root, origin, 100, 339, nullptr, "a physical-pixel row's bottom edge is exclusive from a shifted origin");
   root->Release();
 }
 
@@ -504,7 +521,7 @@ static void nativeCommandAndScrollChecks() {
 
 int main() {
   HWND hwnd = CreateWindowW(L"STATIC", L"UIA native test", WS_OVERLAPPED,
-                            0, 0, 100, 100, nullptr, nullptr, nullptr, nullptr);
+                            137, 211, 300, 300, nullptr, nullptr, nullptr, nullptr);
   check(hwnd != nullptr, "native window exists");
   if (!hwnd) return 1;
   nativeCommandAndScrollChecks();

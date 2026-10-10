@@ -11763,7 +11763,7 @@ test "scrolled Needs you and Activity controls are painted where UIA publishes t
     try std.testing.expect(clicked_stops >= 10);
 }
 
-test "sidebar footer collapses the error footer then the banner to keep two rows, and a collapsed part is not painted, published or clickable" {
+test "sidebar footer collapses the error footer then the banner to keep a 52 px scroll region, and a collapsed part is not painted, published or clickable" {
     const banner_fill: u32 = 0x00352B1C;
     const error_fill: u32 = 0x00242448;
     var collapsed_error: usize = 0;
@@ -11821,7 +11821,7 @@ test "sidebar footer collapses the error footer then the banner to keep two rows
     try std.testing.expect(reachable >= 48);
 }
 
-test "the minimum window height keeps a two-row sidebar scroll region with the panel, strip, banner and error footer" {
+test "the minimum window height keeps a 52 px sidebar scroll region and at least one published row with the panel, strip, banner and error footer" {
     for ([_]u32{ 96, 144 }) |dpi| {
         var app = try overviewTestApp(dpi);
         defer deinitOverviewTestApp(&app);

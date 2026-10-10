@@ -343,8 +343,10 @@ with it (rows, controls, the Graph and Quick Chats destinations) exposes
 footer do not scroll and expose no scroll item. The root's coordinate hit-test
 returns the element under the point (banner above header above scrolled rows).
 
-Short windows: the sidebar keeps at least two rows (`Sidebar.min_content_region`)
-of scroll region. If the footer would leave less, the error footer collapses
+Short windows: the sidebar keeps a 52 px scroll region (`Sidebar.min_content_region`,
+room for two 24 px row slots; the tests assert the region height and at least one
+published element, not two elements at every offset, and a 34 px Needs-you or
+Activity card can fill it). If the footer would leave less, the error footer collapses
 first, then the update banner; the status line is the floor. A collapsed part is
 not painted, published, or clickable. The window's minimum height is the smallest
 client height at which the status line, Activity strip, and open Workspace panel

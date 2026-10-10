@@ -394,7 +394,7 @@ pub fn footerReserve(has_update: bool, has_error: bool) i32 {
         (if (has_update) footer_update_extent else 0);
 }
 
-/// Scroll region (two rows) the sidebar keeps before it gives footer space back to content.
+/// Scroll region (52 px, room for two 24 px row slots) the sidebar keeps before it gives footer space back to content. It is a region height, not a guarantee of two published elements at every offset.
 pub const min_content_region: i32 = 52;
 
 pub const Footer = struct {
@@ -1897,7 +1897,7 @@ test "update banner is a bounded footer action" {
     try std.testing.expect(updateBannerRect(700, true).bottom < errorFooterRect(700).top);
 }
 
-test "footer parts collapse error footer first, then the update banner, to keep two rows" {
+test "footer parts collapse error footer first, then the update banner, to keep a 52 px scroll region" {
     // Room for everything: nothing collapses.
     try std.testing.expectEqual(Footer{ .update = true, .ingress = true }, effectiveFooter(700, true, true));
     try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(700, false, false));
