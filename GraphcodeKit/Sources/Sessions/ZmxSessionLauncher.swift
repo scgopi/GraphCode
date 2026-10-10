@@ -1914,6 +1914,24 @@ public enum ZmxSessionLauncher {
     settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
     bridgeState: RemoteBridgeWireState? = nil, onlyAfterReboot: Bool = false
   ) -> (invocation: [String], input: Data)? {
+    guard
+      let built = remoteEnsureDialScript(
+        forNode: node, at: location, settings: settings, bridgeState: bridgeState,
+        onlyAfterReboot: onlyAfterReboot)
+    else { return nil }
+    return (
+      location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(built.script)),
+      built.input
+    )
+  }
+
+  /// The ensure script itself, apart from the ssh wrapper, so a test can run it against a
+  /// fake `zmx`.
+  static func remoteEnsureDialScript(
+    forNode node: LoopNode, at location: RemoteProjectLocation,
+    settings: GraphcodeSettings = GraphcodeSettingsStore.load(),
+    bridgeState: RemoteBridgeWireState? = nil, onlyAfterReboot: Bool = false
+  ) -> (script: String, input: Data)? {
     let spool = RemotePayloadSpool()
     let shedPrompt = ShedPromptReport()
     guard
@@ -1921,11 +1939,10 @@ public enum ZmxSessionLauncher {
         forNode: node, projectPath: location.projectPath, settings: settings,
         shedPrompt: shedPrompt)
     else { return nil }
-    // The remote twin of the local alive check: raw existence (`zmx get`) answers for a
-    // husk too — the wrapper shell stays at its prompt after the command inside exits —
-    // so an ensure keyed on it could never revive a dead remote loop (#215). Only a
-    // listed session whose task has not ended counts as alive here.
-    let check = aliveCheckCommand(zmxPath: "zmx", forNode: node)
+    // The remote twin of the local alive check, read from ONE `zmx ls` (`probe` below): raw
+    // existence (`zmx get`) answers for a husk too — the wrapper shell stays at its prompt
+    // after the command inside exits — so an ensure keyed on it could never revive a dead
+    // remote loop (#215). Only a listed session whose task has not ended counts as alive.
     // The launch, behind the delivery of the one file it cannot do without. Nothing is
     // prefixed when the prompt was typed in full, which is the ordinary case.
     let launchCommand = remoteQuotedCommand(["zmx"] + zmxArguments)
@@ -2001,33 +2018,35 @@ public enum ZmxSessionLauncher {
         + "if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] && [ \"$gc_boot\" != \"$gc_last\" ]; "
         + "then \(missing); fi"
     }
-    // One `zmx ls`, taken right before the decision (not before the delivery above, which
-    // can take long enough for a pane's attach to create the session first), classified
-    // into `gc_lv`: only a definite absent or ended task is launched into. A live one
-    // banks and stamps; an unlabelled live Codex one is adopted; `unknown` and a failed
-    // listing are skipped and logged, to be asked again by the next sweep tick.
+    // ONE `zmx ls`, taken first and classified into `gc_lv`; the delivery and the launch both
+    // read it, so there is no second listing to disagree with it. Only a definite absent or
+    // ended task is launched into. A live one banks and stamps; an unlabelled live Codex one
+    // is adopted; `unknown`, a failed listing and a live session of another agent are
+    // skipped and logged, to be asked again by the next sweep tick. The cost of a single
+    // snapshot is the window between it and the launch (the delivery runs in it): a pane
+    // that attaches in that window is the race the old second check narrowed, and it now
+    // meets `zmx run`'s own duplicate handling alone.
     let probe = livenessProbeFragment(
       zmxPath: "zmx", sessionName: name, agent: readinessAgent(forNode: node))
     let adopt = agentLabelCommand(zmxPath: "zmx", forNode: node).map { "{ \($0) || true; }" } ?? ":"
     let skip = { (event: String) in DialLog.fragment(session: name, dial: "ensure", event: event) }
     let script =
-      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
+      "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { \(probe); "
       + deliveryFragment(
-        delivery, ifSessionMissing: check,
+        delivery, ifSessionMissing: "[ \"$gc_lv\" != absent ]",
         bridgeStateGeneration: bridgeState.map(\.generation))
-      + "\(probe); case \"$gc_lv\" in "
+      + "case \"$gc_lv\" in "
       + "live) true\(bank) && { \(markerWrite); } || true;; "
       + "unlabelled) \(adopt);; "
+      + "absent) \(missing);; "
       + "unknown) \(skip("skipped-unknown"));; "
       + "lsfail) \(skip("skipped-ls-failed"));; "
-      + "*) \(missing);; esac; }"
+      + "mismatch) \(skip("skipped-agent-mismatch"));; "
+      + "esac; }"
     let spooled =
       spool.prelude.map { "\($0){ \(script); }; gc_rc=$?; \(spool.cleanup); exit $gc_rc" }
       ?? script
-    return (
-      location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(spooled)),
-      spool.input
-    )
+    return (spooled, spool.input)
   }
 
   /// The delivery, run when the session is missing **or** the host's shim is out of date.
@@ -2646,7 +2665,8 @@ public enum ZmxSessionLauncher {
       forNode: node, at: location, bridgeState: bridgeState, onlyAfterReboot: onlyAfterReboot
     ) {
       let result = await runRemoteRetryingCollecting(
-        ensure.invocation, standardInput: ensure.input.isEmpty ? nil : ensure.input)
+        ensure.invocation, standardInput: ensure.input.isEmpty ? nil : ensure.input,
+        timeout: remoteEnsureDeadline)
       if result.succeeded {
         await CodespaceDialBreaker.shared.record(location, reached: true)
         await CodespaceSSHUser.shared.learnIfNeeded(location)
@@ -3099,7 +3119,7 @@ public enum ZmxSessionLauncher {
       // into literal single-quoted text under cmd.exe, so launch the provider without a
       // shell. zmx rejects a duplicate session atomically, which stays the backstop; the
       // decision to try at all is made from one listing, as the POSIX script does.
-      let listing = await runZmx(["ls"])
+      let listing = await boundedListing()
       guard
         shouldLaunch(
           after: sessionTaskState(
@@ -3127,17 +3147,51 @@ public enum ZmxSessionLauncher {
         zmxPath: zmxPath, sessionName: sessionName, agent: agent,
         run: quotedCommand([zmxPath] + runArguments), logFragment: logFragment,
         stampCommand: stampCommand)
-      let executable = "/bin/sh"
-      let arguments = ["-c", script]
-      guard
-        let session = try? PTYProcessSession(
-          executable: executable, arguments: arguments,
-          workingDirectory: workingDirectory)
-      else { return }
-      _ = await session.waitUntilFinished()
+      let finished = await runBounded(
+        script: script, workingDirectory: workingDirectory, deadline: launchDeadline)
+      if !finished {
+        DialLog.record(session: sessionName, dial: "ensure", event: "skipped-timeout")
+      }
       await SessionListing.shared.noteChanged()
     #endif
   }
+
+  /// The total wall-clock bound on a launch decision. `zmx ls` has none of its own: zmx
+  /// limits each session probe (1 s connect, 5 s read), so a listing takes as long as every
+  /// session on the machine adds up to, and a launch waits on it. A decision that did not
+  /// finish in time is a skip, never a launch: the shell script is terminated, and the one
+  /// thing it could have run after a slow listing is not run.
+  static let launchDeadline: Duration = .seconds(60)
+
+  /// A remote ensure dial's ceiling, delivery included, so one wedged host cannot hold the
+  /// sweep. A dial that outlives it is killed and counts as a failed attempt, never as a
+  /// reason to launch.
+  static let remoteEnsureDeadline: Duration = .seconds(120)
+
+  /// `zmx ls` under `launchDeadline`; `nil` (which reads as `unknown`) when it was not done
+  /// in time or could not run.
+  static func boundedListing(deadline: Duration = launchDeadline) async -> ZmxResult? {
+    await withDeadline(deadline) { await runZmx(["ls"]) } ?? nil
+  }
+
+  #if !os(Windows)
+    /// Runs a launch script under `/bin/sh` and waits at most `deadline` for it. `false`
+    /// means the deadline passed and the script was terminated.
+    static func runBounded(
+      script: String, workingDirectory: String?, deadline: Duration
+    ) async -> Bool {
+      guard
+        let session = try? PTYProcessSession(
+          executable: "/bin/sh", arguments: ["-c", script], workingDirectory: workingDirectory)
+      else { return true }
+      let finished = await withDeadline(deadline) { await session.waitUntilFinished() }
+      guard finished != nil else {
+        session.terminate()
+        return false
+      }
+      return true
+    }
+  #endif
 
   /// A launch is made only for a session that is definitely not there: no row, a daemon
   /// that refused the connection, or a task that ended. A live one is left alone, and an
@@ -3151,10 +3205,15 @@ public enum ZmxSessionLauncher {
   /// that single snapshot into `gc_lv`:
   /// - `live`: a running task (and, when an agent is named, its readiness label);
   /// - `unlabelled`: a running task that carries no agent label at all (agent named only);
+  /// - `mismatch`: a running task labelled for a different agent (agent named only). It is
+  ///   still a running task: nothing may be typed into it, so it is never launched into;
   /// - `unknown`: an `err=` row other than `ConnectionRefused` (matched exactly);
   /// - `lsfail`: the listing itself failed;
-  /// - `absent`: anything else — no row, a refused daemon, an ended task, or a task labelled
-  ///   with a different agent.
+  /// - `absent`: no row, a refused daemon, or an ended task — the only states a launch is
+  ///   made from.
+  /// Each extraction ends `|| :` so the fragment is safe under `sh -e` (the remote login
+  /// shell): `grep` exits 1 on no match, which is the common case here, not an error. Nothing
+  /// relies on `pipefail`.
   /// Every row naming the session counts, and they aggregate like `parseSessionTaskState`:
   /// unknown over live over absent. Row anchoring and the tab-preceded fields mirror the
   /// Swift parser, so a command line that merely contains `err=` or another session's name
@@ -3169,18 +3228,18 @@ public enum ZmxSessionLauncher {
     var fragment =
       "gc_tab=$(printf '\\t'); gc_lv=lsfail; "
       + "if gc_ls=$(\(zmx) ls 2>/dev/null); then "
-      + "gc_rows=$(printf '%s\\n' \"$gc_ls\" | grep -E \"\(row)\"); "
+      + "gc_rows=$(printf '%s\\n' \"$gc_ls\" | grep -E \"\(row)\" || :); "
       + "if printf '%s\\n' \"$gc_rows\" | grep -F \"${gc_tab}err=\" "
       + "| grep -v -E \"\(refused)\" | grep -q .; then gc_lv=unknown; else "
       + "gc_live=$(printf '%s\\n' \"$gc_rows\" "
-      + "| grep -v -e \"${gc_tab}err=\" -e \"${gc_tab}ended=\" -e \"${gc_tab}exit_code=\"); "
+      + "| grep -v -e \"${gc_tab}err=\" -e \"${gc_tab}ended=\" -e \"${gc_tab}exit_code=\" || :); "
       + "if [ -z \"$gc_live\" ]; then gc_lv=absent; "
     if let agent {
       fragment +=
         "elif printf '%s\\n' \"$gc_live\" "
         + "| grep -q -E \"${gc_tab}\(agentLabelKey)=\(agent)(${gc_tab}|\\$)\"; then gc_lv=live; "
         + "elif printf '%s\\n' \"$gc_live\" | grep -q -F \"${gc_tab}\(agentLabelKey)=\"; "
-        + "then gc_lv=absent; else gc_lv=unlabelled; "
+        + "then gc_lv=mismatch; else gc_lv=unlabelled; "
     } else {
       fragment += "else gc_lv=live; "
     }
@@ -3188,8 +3247,9 @@ public enum ZmxSessionLauncher {
   }
 
   /// The local check-or-run: `livenessProbeFragment`'s one listing, then — live: nothing;
-  /// unlabelled live Codex session: stamp it, never relaunch; unknown or a failed listing:
-  /// log and skip; absent: log and launch. The stamp rides in the run branch too, after the
+  /// unlabelled live Codex session: stamp it, never relaunch; unknown, a failed listing or a
+  /// live session of another agent: log and skip; absent: log and launch. Switching a live
+  /// session to another backend needs a confirmed kill in a later step, never a `run`. The stamp rides in the run branch too, after the
   /// launch it describes and only if that launch was made.
   static func launchDecisionScript(
     zmxPath: String, sessionName: String, agent: String?, run: String,
@@ -3206,6 +3266,9 @@ public enum ZmxSessionLauncher {
       + "unlabelled) \(adopt); exit 0;; "
       + "unknown) \(log("skipped-unknown")); exit 0;; "
       + "lsfail) \(log("skipped-ls-failed")); exit 0;; "
+      + "mismatch) \(log("skipped-agent-mismatch")); exit 0;; "
+      + "absent) :;; "
+      + "*) exit 0;; "
       + "esac; "
       + (logFragment.map { "\($0); " } ?? "") + launch
   }

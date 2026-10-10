@@ -112,7 +112,9 @@ struct ZmxUnknownLivenessTests {
         ?? ""
     }
 
-    init(listing: String?) throws {
+    /// `listing` is what the fake `zmx ls` prints; `nil` makes it exit 1; `slow` makes it
+    /// hang first.
+    init(listing: String?, slow: Bool = false) throws {
       directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("zmx-unknown-\(UUID().uuidString)", isDirectory: true)
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -121,7 +123,8 @@ struct ZmxUnknownLivenessTests {
         d=$(dirname "$0")
         echo "$1" >> "$d/calls"
         case "$1" in
-          ls) [ -f "$d/ls.fail" ] && exit 1; cat "$d/ls.out"; exit 0;;
+          ls) [ -f "$d/ls.slow" ] && sleep 30; [ -f "$d/ls.fail" ] && exit 1
+              cat "$d/ls.out"; exit 0;;
           get) echo busy; exit 0;;
           *) exit 0;;
         esac
@@ -129,6 +132,11 @@ struct ZmxUnknownLivenessTests {
         """
       try script.write(to: zmx, atomically: true, encoding: .utf8)
       try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmx.path)
+      // The remote ensure shells out to python3 for its delivery; a stub keeps the test about
+      // zmx.
+      let python = directory.appendingPathComponent("python3")
+      try "#!/bin/sh\nexit 0\n".write(to: python, atomically: true, encoding: .utf8)
+      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: python.path)
       if let listing {
         try listing.write(
           to: directory.appendingPathComponent("ls.out"), atomically: true, encoding: .utf8)
@@ -136,17 +144,26 @@ struct ZmxUnknownLivenessTests {
         try "x".write(
           to: directory.appendingPathComponent("ls.fail"), atomically: true, encoding: .utf8)
       }
+      if slow {
+        try "x".write(
+          to: directory.appendingPathComponent("ls.slow"), atomically: true, encoding: .utf8)
+      }
     }
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
-    /// Runs `script` under `/bin/sh` with this directory as `$HOME`, returning its stdout.
+    /// Runs `script` under `shell` with this directory as `$HOME` and first on `PATH` (the
+    /// remote scripts name a bare `zmx`), returning its stdout.
     @discardableResult
-    func run(_ script: String) throws -> String {
+    func run(_ script: String, shell: String = "/bin/sh", flags: [String] = ["-c"]) throws
+      -> String
+    {
       let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/bin/sh")
-      process.arguments = ["-c", script]
-      process.environment = ["HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
+      process.executableURL = URL(fileURLWithPath: shell)
+      process.arguments = flags + [script]
+      process.environment = [
+        "HOME": directory.path, "PATH": "\(directory.path):/usr/bin:/bin:/usr/sbin:/sbin",
+      ]
       let pipe = Pipe()
       process.standardOutput = pipe
       process.standardError = FileHandle.nullDevice
@@ -157,35 +174,63 @@ struct ZmxUnknownLivenessTests {
     }
   }
 
-  private func decide(
-    listing: String?, agent: String? = nil, stamp: String? = nil
-  ) throws -> Fixture {
-    let fixture = try Fixture(listing: listing)
-    let zmx = fixture.zmx.path
-    let script = ZmxSessionLauncher.launchDecisionScript(
+  /// Every shell the scripts must survive: the login shell may be `sh -e`, dash or bash, and
+  /// nothing here may rely on `pipefail`.
+  private static let variants: [(shell: String, flags: [String])] = {
+    ["/bin/sh", "/bin/dash", "/bin/bash"]
+      .filter { FileManager.default.isExecutableFile(atPath: $0) }
+      .flatMap { shell in [(shell, ["-c"]), (shell, ["-e", "-c"])] }
+  }()
+
+  private func decideScript(agent: String?, stamp: String?, zmx: String) -> String {
+    ZmxSessionLauncher.launchDecisionScript(
       zmxPath: zmx, sessionName: Self.name, agent: agent,
       run: ZmxSessionLauncher.quotedCommand([zmx, "run", Self.name, "-d", "agent"]),
       logFragment: nil, stampCommand: stamp)
-    try fixture.run(script)
-    return fixture
+  }
+
+  /// The calls the fake zmx saw, for each shell variant: all of them must agree.
+  private func decide(
+    listing: String?, agent: String? = nil, stamp: String? = nil
+  ) throws -> [[String]] {
+    try Self.variants.map { variant in
+      let fixture = try Fixture(listing: listing)
+      try fixture.run(
+        decideScript(agent: agent, stamp: stamp, zmx: fixture.zmx.path),
+        shell: variant.shell, flags: variant.flags)
+      return fixture.calls
+    }
+  }
+
+  private func expectDecision(
+    _ expected: [String], listing: String?, agent: String? = nil, stamp: String? = nil
+  ) throws {
+    let all = try decide(listing: listing, agent: agent, stamp: stamp)
+    #expect(!all.isEmpty)
+    for calls in all { #expect(calls == expected, "\(listing ?? "ls fails")") }
   }
 
   @Test
   func aTimeoutRowForTheTargetNeverInvokesRunAndListsExactlyOnce() throws {
-    let fixture = try decide(listing: Self.error(Self.name, "Timeout"))
-    #expect(fixture.calls == ["ls"])
+    try expectDecision(["ls"], listing: Self.error(Self.name, "Timeout"))
+    let fixture = try Fixture(listing: Self.error(Self.name, "Timeout"))
+    try fixture.run(decideScript(agent: nil, stamp: nil, zmx: fixture.zmx.path))
     #expect(fixture.dialLog.contains("\(Self.name) ensure skipped-unknown"))
   }
 
   @Test
   func aFailedListingNeverInvokesRunAndIsLogged() throws {
-    let fixture = try decide(listing: nil)
-    #expect(fixture.calls == ["ls"])
+    try expectDecision(["ls"], listing: nil)
+    let fixture = try Fixture(listing: nil)
+    try fixture.run(decideScript(agent: nil, stamp: nil, zmx: fixture.zmx.path))
     #expect(fixture.dialLog.contains("\(Self.name) ensure skipped-ls-failed"))
   }
 
   @Test
-  func onlyADefinitelyMissingOrEndedSessionIsLaunchedInto() throws {
+  func onlyADefinitelyMissingOrEndedSessionIsLaunchedIntoEvenUnderErrexit() throws {
+    // `grep` exits 1 on no match, which is exactly these listings: under `sh -e` an
+    // unguarded extraction would abort before classifying, and a dead session would never
+    // be relaunched.
     for listing in [
       Self.row(Self.other),
       Self.error(Self.name, "ConnectionRefused"),
@@ -194,7 +239,7 @@ struct ZmxUnknownLivenessTests {
       // Another session's timeout is not this one's.
       Self.error(Self.other, "Timeout"),
     ] {
-      #expect(try decide(listing: listing).calls == ["ls", "run"], "\(listing)")
+      try expectDecision(["ls", "run"], listing: listing)
     }
   }
 
@@ -207,7 +252,7 @@ struct ZmxUnknownLivenessTests {
       Self.row(Self.name) + Self.error(Self.name, "ConnectionRefused"),
       Self.row(Self.name, "\tended=5\texit_code=0") + Self.row(Self.name),
     ] {
-      #expect(try decide(listing: listing).calls == ["ls"], "\(listing)")
+      try expectDecision(["ls"], listing: listing)
     }
   }
 
@@ -215,38 +260,95 @@ struct ZmxUnknownLivenessTests {
   func unknownDominatesALiveRowInEitherOrder() throws {
     let timeout = Self.error(Self.name, "Timeout")
     let live = Self.row(Self.name)
-    #expect(try decide(listing: timeout + live).calls == ["ls"])
-    #expect(try decide(listing: live + timeout).calls == ["ls"])
-    #expect(
-      try decide(listing: Self.error(Self.name, "ConnectionRefused") + timeout).calls == ["ls"])
+    try expectDecision(["ls"], listing: timeout + live)
+    try expectDecision(["ls"], listing: live + timeout)
+    try expectDecision(["ls"], listing: Self.error(Self.name, "ConnectionRefused") + timeout)
   }
 
   @Test
-  func anAgentLabelDecidesBetweenLeftAloneAdoptedAndRelaunched() throws {
+  func aLiveSessionOfAnotherAgentIsNeverRunIntoWhateverItsLabel() throws {
     // Labelled for this agent: ready, untouched.
-    #expect(
-      try decide(listing: Self.row(Self.name, "\tagent=codex"), agent: "codex", stamp: ":").calls
-        == ["ls"])
+    try expectDecision(["ls"], listing: Self.row(Self.name, "\tagent=codex"), agent: "codex")
     // Alive but unlabelled: adopted (stamped), never relaunched.
-    #expect(
-      try !decide(listing: Self.row(Self.name), agent: "codex", stamp: ":").calls.contains("run"))
-    // Labelled for another agent, or for one whose name merely starts with it: relaunched.
-    #expect(
-      try decide(listing: Self.row(Self.name, "\tagent=claudeCode"), agent: "codex").calls
-        == ["ls", "run"])
-    #expect(
-      try decide(listing: Self.row(Self.name, "\tagent=codexFoo"), agent: "codex").calls
-        == ["ls", "run"])
-    // An unknown row blocks a Codex launch too.
-    #expect(
-      try decide(listing: Self.error(Self.name, "Timeout"), agent: "codex").calls == ["ls"])
+    for calls in try decide(listing: Self.row(Self.name), agent: "codex", stamp: ":") {
+      #expect(!calls.contains("run"))
+    }
+    // Labelled for another agent, or for one whose name merely starts with this one: it is
+    // still a running task, so nothing is typed into it; the launch is skipped.
+    try expectDecision(
+      ["ls"], listing: Self.row(Self.name, "\tagent=claudeCode"), agent: "codex")
+    try expectDecision(["ls"], listing: Self.row(Self.name, "\tagent=codexFoo"), agent: "codex")
+    // An unknown row blocks a Codex launch too, and an absent one still launches.
+    try expectDecision(["ls"], listing: Self.error(Self.name, "Timeout"), agent: "codex")
+    try expectDecision(["ls", "run"], listing: Self.row(Self.other), agent: "codex")
   }
 
   @Test
-  func theRealLaunchFragmentsCarryTheSameProbeBeforeTheirRun() throws {
-    // The remote ensure cannot be run without ssh, so it is pinned structurally: one
-    // classification of `zmx ls` into `gc_lv`, and the launch only in the arm that a
-    // definite absent reaches.
+  func aMismatchedLabelIsLoggedAsASkip() throws {
+    let fixture = try Fixture(listing: Self.row(Self.name, "\tagent=claudeCode"))
+    try fixture.run(decideScript(agent: "codex", stamp: nil, zmx: fixture.zmx.path))
+    #expect(fixture.dialLog.contains("\(Self.name) ensure skipped-agent-mismatch"))
+  }
+
+  @Test
+  func aLaunchDecisionThatOutlivesItsDeadlineIsKilledAndNeverRuns() async throws {
+    let fixture = try Fixture(listing: Self.row(Self.other), slow: true)
+    let script = decideScript(agent: nil, stamp: nil, zmx: fixture.zmx.path)
+
+    let finished = await ZmxSessionLauncher.runBounded(
+      script: script, workingDirectory: nil, deadline: .milliseconds(500))
+    #expect(!finished)
+    try await Task.sleep(for: .milliseconds(500))
+    #expect(fixture.calls == ["ls"])
+  }
+
+  // MARK: - The remote ensure, executed against a fake zmx
+
+  private func remoteCalls(
+    listing: String?, backend: CLISessionBackendKind = .claudeCode,
+    variant: (shell: String, flags: [String])
+  ) throws -> [String] {
+    let fixture = try Fixture(listing: listing)
+    let node = LoopNode(
+      id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
+      title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
+      backend: backend)
+    let location = RemoteProjectLocation(
+      user: "dev", host: "build-box", port: 2222, remotePath: fixture.directory.path)
+    let built = try #require(
+      ZmxSessionLauncher.remoteEnsureDialScript(
+        forNode: node, at: location, settings: GraphcodeSettings()))
+    try fixture.run(built.script, shell: variant.shell, flags: variant.flags)
+    return fixture.calls
+  }
+
+  @Test
+  func theRemoteEnsureListsOnceAndNeverRunsForAnythingButADefinitelyAbsentSession() throws {
+    let name = "graphcode-5E11BA5E-0001-4000-8000-000000000001"
+    let runless: [(String?, CLISessionBackendKind)] = [
+      (Self.error(name, "Timeout"), .claudeCode),
+      (nil, .claudeCode),
+      (Self.row(name), .claudeCode),
+      (Self.row(name, "\tagent=claudeCode"), .codex),
+      (Self.row(name, "\tagent=codexFoo"), .codex),
+      (Self.error(name, "Timeout") + Self.row(name), .claudeCode),
+    ]
+    for variant in Self.variants {
+      for (listing, backend) in runless {
+        let calls = try remoteCalls(listing: listing, backend: backend, variant: variant)
+        #expect(calls.filter { $0 == "ls" }.count == 1, "\(listing ?? "ls fails") \(calls)")
+        #expect(!calls.contains("run"), "\(listing ?? "ls fails") \(variant) \(calls)")
+      }
+      for listing in ["", Self.error(name, "ConnectionRefused"), Self.row(name, "\tended=5")] {
+        let calls = try remoteCalls(listing: listing, variant: variant)
+        #expect(calls.filter { $0 == "ls" }.count == 1, "\(listing) \(calls)")
+        #expect(calls.filter { $0 == "run" }.count == 1, "\(listing) \(variant) \(calls)")
+      }
+    }
+  }
+
+  @Test
+  func theRemoteEnsureStructureIsPinnedAsWell() throws {
     let node = LoopNode(
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
     let location = RemoteProjectLocation(
@@ -254,11 +356,11 @@ struct ZmxUnknownLivenessTests {
     let command = try #require(
       ZmxSessionLauncher.remoteEnsureInvocation(forNode: node, at: location)?.last)
     let probe = try #require(command.range(of: "gc_lv=lsfail"))
-    let unknown = try #require(command.range(of: "skipped-unknown"))
     let launch = try #require(command.range(of: "'run'"))
-    #expect(probe.lowerBound < unknown.lowerBound)
-    #expect(unknown.lowerBound < launch.lowerBound)
+    #expect(probe.lowerBound < launch.lowerBound)
+    #expect(command.contains("skipped-unknown"))
     #expect(command.contains("skipped-ls-failed"))
+    #expect(command.contains("skipped-agent-mismatch"))
   }
 
   // MARK: - The remote status probe
@@ -268,11 +370,15 @@ struct ZmxUnknownLivenessTests {
     let id = try #require(UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001"))
     let node = LoopNode(id: id, title: "x")
     let name = "graphcode-\(node.id.uuidString)"
+    // Under every shell variant, plain and `-e`: they must all agree.
     func probe(_ listing: String?) throws -> String {
-      let fixture = try Fixture(listing: listing)
       let script = ZmxSessionLauncher.remoteStatusScript(forNode: node, label: "presence")
-        .replacingOccurrences(of: "'zmx'", with: "'\(fixture.zmx.path)'")
-      return try fixture.run(script).trimmingCharacters(in: .whitespacesAndNewlines)
+      let answers = try Self.variants.map { variant in
+        try Fixture(listing: listing).run(script, shell: variant.shell, flags: variant.flags)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+      }
+      #expect(Set(answers).count == 1, "\(answers)")
+      return answers.first ?? ""
     }
     let marker = ZmxSessionLauncher.remoteProbeMarker
     #expect(try probe(Self.row(name)) == "\(marker) live busy")
