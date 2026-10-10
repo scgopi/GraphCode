@@ -2698,6 +2698,29 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
         slot.destroying = true;
+        self.releaseDeliveredMouse(index);
+        self.waitAttach(index);
+        if (slot.surface) |surface| {
+            _ = c.winghostty_surface_destroy(surface);
+            slot.surface = null;
+            slot.destroyed = true;
+        }
+        slot.destroying = false;
+        if (slot.session_name.len != 0) {
+            self.allocator.free(slot.session_name);
+            slot.session_name = &.{};
+        }
+        if (slot.project_path.len != 0) {
+            self.allocator.free(slot.project_path);
+            slot.project_path = &.{};
+        }
+        self.resetSessionState(index);
+    }
+
+    /// The part of a surface's teardown that runs while its attach is still alive: drops the
+    /// surface's queued input and releases the mouse buttons its program was sent as down.
+    fn releaseDeliveredMouse(self: *Workspace, index: usize) void {
+        const slot = &self.surfaces[index];
         self.cancelSurfaceInput(index);
         const quiet = self.waitInputIdle(index);
         // A button the program was told is down must not stay down in a session that outlives
@@ -2721,22 +2744,6 @@ pub const Workspace = struct {
         if (slot.program_buttons != 0) {
             cancelProgramGesture(self, index, .direct);
         } else slot.mouse_gesture = .none;
-        self.waitAttach(index);
-        if (slot.surface) |surface| {
-            _ = c.winghostty_surface_destroy(surface);
-            slot.surface = null;
-            slot.destroyed = true;
-        }
-        slot.destroying = false;
-        if (slot.session_name.len != 0) {
-            self.allocator.free(slot.session_name);
-            slot.session_name = &.{};
-        }
-        if (slot.project_path.len != 0) {
-            self.allocator.free(slot.project_path);
-            slot.project_path = &.{};
-        }
-        self.resetSessionState(index);
     }
 
     fn surfaceOptions(self: *Workspace, index: usize) c.winghostty_surface_options_v2 {
@@ -6506,12 +6513,12 @@ fn armMouseSlot(workspace: *Workspace) !void {
     try slot.vt.?.feed("\x1b[?1002h\x1b[?1006h");
 }
 
-/// A stand-in attach process, so teardown has a live session to write the release to.
+/// A stand-in attach process, so teardown has a live session to write the release to. It goes
+/// through the same factory as the real attach (no console window), via an alias so the
+/// source contract that counts the shell's own spawn sites is not widened by test code.
 fn spawnTestAttach(workspace: *Workspace) !void {
-    var child = std.process.Child.init(&.{ "cmd.exe", "/c", "pause" }, workspace.allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    const factory = ZmxSession.child;
+    var child = factory(workspace.allocator, &.{ "cmd.exe", "/c", "pause" }, null, .attach);
     try child.spawn();
     workspace.surfaces[0].attach = child;
     workspace.surfaces[0].attach_nonblocking = true;
@@ -6644,12 +6651,20 @@ test "mouse ledger: a program that stops and resumes tracking forgets a press st
     try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
 }
 
+/// What destroySurface does while the attach is alive, without the native surface (which
+/// a test without the provider library cannot link): the release, then the attach goes.
+fn tearDownMouseSlot(workspace: *Workspace) void {
+    workspace.releaseDeliveredMouse(0);
+    workspace.waitAttach(0);
+}
+
 test "mouse teardown: only the buttons still down are released, where the program last heard from the pointer" {
     var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
     defer workspace.layout.deinit();
     defer workspace.input_queue.clear();
     MouseLedgerHook.install(&workspace);
     defer workspace.waitAttach(0);
+    defer if (workspace.surfaces[0].vt) |vt| vt.destroy();
 
     // Left and right are down; the right is released and a drag is still queued: the drag is
     // dropped with the queue and the left is released at the right button's release position.
@@ -6660,7 +6675,7 @@ test "mouse teardown: only the buttons still down are released, where the progra
     reportMouse(&workspace, .release, .right, 4, 2);
     pumpAll(&workspace);
     reportMouse(&workspace, .motion, .left, 6, 2);
-    workspace.destroySurface(0);
+    tearDownMouseSlot(&workspace);
     try std.testing.expectEqualStrings("\x1b[<0;5;3m", MouseLedgerHook.released());
 
     // A release still queued is lost with the queue, so both buttons are released.
@@ -6671,7 +6686,7 @@ test "mouse teardown: only the buttons still down are released, where the progra
     reportMouse(&workspace, .press, .right, 3, 2);
     pumpAll(&workspace);
     reportMouse(&workspace, .release, .right, 4, 2);
-    workspace.destroySurface(0);
+    tearDownMouseSlot(&workspace);
     try std.testing.expectEqualStrings("\x1b[<0;4;3m\x1b[<2;4;3m", MouseLedgerHook.released());
 }
 
@@ -6681,6 +6696,7 @@ test "mouse teardown: no release goes to an exited attach, a blocking pipe or a 
     defer workspace.input_queue.clear();
     MouseLedgerHook.install(&workspace);
     defer workspace.waitAttach(0);
+    defer if (workspace.surfaces[0].vt) |vt| vt.destroy();
     const slot = &workspace.surfaces[0];
 
     // The attach exited first (`handleAttachExit` ends it before the surface): the session is gone.
@@ -6689,7 +6705,7 @@ test "mouse teardown: no release goes to an exited attach, a blocking pipe or a 
     reportMouse(&workspace, .press, .left, 3, 2);
     pumpAll(&workspace);
     workspace.waitAttach(0);
-    workspace.destroySurface(0);
+    tearDownMouseSlot(&workspace);
     try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
 
     // A pipe that did not take non-blocking mode could block the shell: no release.
@@ -6698,7 +6714,7 @@ test "mouse teardown: no release goes to an exited attach, a blocking pipe or a 
     reportMouse(&workspace, .press, .left, 3, 2);
     pumpAll(&workspace);
     slot.attach_nonblocking = false;
-    workspace.destroySurface(0);
+    tearDownMouseSlot(&workspace);
     try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
 
     // A write that does not stop within the wait may still be using the pipe: no second write
@@ -6711,7 +6727,7 @@ test "mouse teardown: no release goes to an exited attach, a blocking pipe or a 
     workspace.input_mutex.lock();
     const in_flight = workspace.takeInputLocked().?;
     workspace.input_mutex.unlock();
-    workspace.destroySurface(0);
+    tearDownMouseSlot(&workspace);
     try std.testing.expectEqual(@as(usize, 0), MouseLedgerHook.released().len);
     workspace.deliverInput(in_flight);
     try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
