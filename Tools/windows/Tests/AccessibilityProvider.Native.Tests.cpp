@@ -203,7 +203,8 @@ static void nativeHitTestChecks(IRawElementProviderSimple *provider, HWND hwnd) 
   check(origin.x != 0 && origin.y != 0, "the hit-test window has a non-zero screen origin");
   expectHit(root, origin, 18, 300, L"Scaled row", "a physical-pixel row is hit at its top-left corner from a shifted origin");
   expectHit(root, origin, 347, 338, L"Scaled row", "a physical-pixel row is hit at its last pixel from a shifted origin");
-  expectHit(root, origin, 348, 338, nullptr, "a physical-pixel row's right edge is exclusive from a shifted origin");
+  // x 348 is inside the canvas reported above (left 240), so the exclusive row edge falls through to it.
+  expectHit(root, origin, 348, 338, L"Graph", "a physical-pixel row's right edge is exclusive from a shifted origin");
   expectHit(root, origin, 100, 339, nullptr, "a physical-pixel row's bottom edge is exclusive from a shifted origin");
   root->Release();
 }
