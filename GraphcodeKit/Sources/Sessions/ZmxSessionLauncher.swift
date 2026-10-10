@@ -798,7 +798,7 @@ public enum ZmxSessionLauncher {
     case unknown
   }
 
-  /// Parses the `zmx ls` line for one session into a `SessionTaskState`. Internal so
+  /// Parses the `zmx ls` rows for one session into a `SessionTaskState`. Internal so
   /// tests can hold the real output shapes.
   ///
   /// `ended=` is tab-preceded in the ls line (`…\tcmd=…\tended=<ts>\texit_code=<n>`) and
@@ -807,24 +807,50 @@ public enum ZmxSessionLauncher {
   /// text (a pasted goal, say) from counting as a completed task; the same is why the
   /// name is matched as a whole token, so `graphcode-A` is never found inside
   /// `graphcode-AB`'s line.
+  ///
+  /// Every row naming the session counts, in any order, and they aggregate
+  /// conservatively: `.unknown` dominates, then `.alive`, and `.absent` only when no row
+  /// says anything else. An `err=` row is `.absent` for exactly one error,
+  /// `ConnectionRefused` (the daemon behind it is gone — macOS prints `cleaning up` for
+  /// it and deletes the socket). Any other (`Timeout` while a busy daemon missed zmx's
+  /// 1 s probe, `Unexpected`, …) is a session zmx could not get an answer out of, which
+  /// is not evidence that it is gone: `.unknown`.
   static func parseSessionTaskState(lsOutput: String, sessionName: String) -> SessionTaskState {
-    let line = lsOutput.split(separator: "\n").first { line in
-      line.split(whereSeparator: \.isWhitespace).contains("name=\(sessionName)")
+    var unknown = false
+    var alive = false
+    var exited: SessionTaskState?
+    for line in lsOutput.split(separator: "\n") {
+      guard line.split(whereSeparator: \.isWhitespace).contains("name=\(sessionName)")
+      else { continue }
+      if let error = errorField(of: line) {
+        if error != deadDaemonError { unknown = true }
+        continue
+      }
+      guard line.range(of: "\tended=") != nil || line.range(of: "\texit_code=") != nil else {
+        alive = true
+        continue
+      }
+      var exitCode: Int?
+      if let range = line.range(of: "\texit_code=") {
+        let digits = line[range.upperBound...].prefix { $0.isNumber }
+        exitCode = Int(digits)
+      }
+      exited = exited ?? .exited(exitCode: exitCode)
     }
-    guard let line else { return .absent }
-    // An error row (`…\tname=…\terr=ConnectionRefused\tstatus=cleaning up`) is zmx
-    // reporting a session it cannot reach — the daemon behind it is gone, which is as
-    // absent as a missing row, and counts as neither alive nor exited.
-    guard line.range(of: "\terr=") == nil else { return .absent }
-    guard line.range(of: "\tended=") != nil || line.range(of: "\texit_code=") != nil else {
-      return .alive
-    }
-    var exitCode: Int?
-    if let range = line.range(of: "\texit_code=") {
-      let digits = line[range.upperBound...].prefix { $0.isNumber }
-      exitCode = Int(digits)
-    }
-    return .exited(exitCode: exitCode)
+    if unknown { return .unknown }
+    if alive { return .alive }
+    return exited ?? .absent
+  }
+
+  /// The one `err=` value `zmx ls` prints for a daemon that is definitively gone.
+  static let deadDaemonError = "ConnectionRefused"
+
+  /// The value of a row's tab-preceded `err=` field. The tab matters: a command line
+  /// that merely contains `err=` is not an error row.
+  static func errorField(of line: Substring) -> String? {
+    line.split(separator: "\t", omittingEmptySubsequences: false).dropFirst()
+      .first { $0.hasPrefix("err=") }
+      .map { String($0.dropFirst("err=".count)).trimmingCharacters(in: .whitespaces) }
   }
 
   /// The shell-level form of the same judgement `sessionTaskState` makes — the check
@@ -898,8 +924,15 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else {
       return .failure(.unavailable("zmx is not installed"))
     }
-    if await sessionExists(node, projectPath: projectPath, fresh: true) {
-      return .success(.attached)
+    // A session zmx could not get an answer out of is neither adopted nor launched into,
+    // and nothing below may kill it: it is reported, and the next ensure asks again.
+    let couldNotTell = CLISessionError.failed(
+      "zmx could not tell whether the session is running; not launching or ending it "
+        + "(\(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))")
+    switch startGate(for: await lifecycleState(node, projectPath: projectPath)) {
+    case .attach: return .success(.attached)
+    case .refuse: return .failure(couldNotTell)
+    case .launch: break
     }
     var spawnedProcess: Process?
     if node.backend != .nod, node.sessionPrompt == nil || node.sessionPrompt?.isEmpty == true {
@@ -922,7 +955,7 @@ public enum ZmxSessionLauncher {
         }
       #else
         await atomicCheckOrRun(
-          checkCommand: aliveCheckCommand(zmxPath: ZmxLocator.binaryURL.path, forNode: node),
+          sessionName: name, agent: readinessAgent(forNode: node),
           runArguments: ["run", name, "-d", executable],
           zmxPath: ZmxLocator.binaryURL.path,
           workingDirectory: workingDirectory(forNode: node, projectPath: projectPath))
@@ -932,10 +965,17 @@ public enum ZmxSessionLauncher {
     }
     for delay in [100, 200, 400, 800, 1200] {
       try? await Task.sleep(for: .milliseconds(delay))
-      if await sessionExists(node, projectPath: projectPath, fresh: true) {
+      switch await lifecycleState(node, projectPath: projectPath) {
+      case .alive:
         spawnedProcess = nil
         return .success(.started)
+      case .unknown: return .failure(couldNotTell)
+      case .absent, .exited: break
       }
+    }
+    // The cleanup below kills, so it needs a definite answer first.
+    if await lifecycleState(node, projectPath: projectPath) == .unknown {
+      return .failure(couldNotTell)
     }
     if let spawnedProcess {
       if spawnedProcess.isRunning { spawnedProcess.terminate() }
@@ -943,13 +983,15 @@ public enum ZmxSessionLauncher {
     }
     await kill(node, projectPath: projectPath)
     for delay in [100, 200, 400] {
-      if await sessionExists(node, projectPath: projectPath, fresh: true) {
+      if await lifecycleState(node, projectPath: projectPath) == .alive {
         await kill(node, projectPath: projectPath)
       }
       try? await Task.sleep(for: .milliseconds(delay))
     }
-    if await sessionExists(node, projectPath: projectPath, fresh: true) {
-      return .failure(.failed("zmx session appeared after startup timeout"))
+    switch await lifecycleState(node, projectPath: projectPath) {
+    case .alive: return .failure(.failed("zmx session appeared after startup timeout"))
+    case .unknown: return .failure(couldNotTell)
+    case .absent, .exited: break
     }
     return .failure(
       .failed(
@@ -960,17 +1002,75 @@ public enum ZmxSessionLauncher {
   public static func terminateResult(
     _ node: LoopNode, projectPath: String? = nil
   ) async -> Result<Void, CLISessionError> {
-    guard await sessionExists(node, projectPath: projectPath, fresh: true) else {
+    // `unknown` is not "gone": reporting success here would drop the stored conversation
+    // id and tell the caller the session no longer exists while it may be running.
+    switch terminateGate(for: await lifecycleState(node, projectPath: projectPath)) {
+    case .alreadyGone:
       SessionIDStore.remove(forNodeID: node.id)
       return .success(())
+    case .refuse:
+      return .failure(.failed("zmx could not tell whether the session is running; not ended"))
+    case .kill:
+      break
     }
     await kill(node, projectPath: projectPath)
-    guard !(await sessionExists(node, projectPath: projectPath, fresh: true)) else {
-      return .failure(.failed("zmx session remained after terminate"))
+    switch await lifecycleState(node, projectPath: projectPath) {
+    case .absent, .exited: return .success(())
+    case .alive: return .failure(.failed("zmx session remained after terminate"))
+    case .unknown:
+      return .failure(.failed("zmx could not confirm the session ended after terminate"))
     }
-    return .success(())
   }
 
+  enum StartGate: Equatable {
+    case attach
+    case launch
+    case refuse
+  }
+
+  /// What `startResult` does for a session in this state: adopt a live one, launch only
+  /// for one that is definitely not there, and refuse — launching or killing nothing — for
+  /// one `zmx` could not get an answer out of.
+  static func startGate(for state: SessionTaskState) -> StartGate {
+    switch state {
+    case .alive: return .attach
+    case .absent, .exited: return .launch
+    case .unknown: return .refuse
+    }
+  }
+
+  enum TerminateGate: Equatable {
+    case alreadyGone
+    case kill
+    case refuse
+  }
+
+  /// What `terminateResult` does: a session shown to be gone is success (and its banked
+  /// conversation id is dropped); a live one is killed; an unknown one is neither reported
+  /// gone nor killed blind.
+  static func terminateGate(for state: SessionTaskState) -> TerminateGate {
+    switch state {
+    case .absent, .exited: return .alreadyGone
+    case .alive: return .kill
+    case .unknown: return .refuse
+    }
+  }
+
+  /// A fresh answer for the lifecycle decisions (start, end, confirm): the local listing's
+  /// four-way state, or — for a remote project, whose session only ssh can ask — the
+  /// existing presence probe's yes/no.
+  private static func lifecycleState(
+    _ node: LoopNode, projectPath: String?
+  ) async -> SessionTaskState {
+    if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
+      return await sessionExists(node, projectPath: projectPath, fresh: true) ? .alive : .absent
+    }
+    return await sessionTaskState(node, fresh: true)
+  }
+
+  /// The quick-chat sessions that are live. A session `zmx` could not get an answer out of
+  /// is left out, which is the safe side for its one caller: it is not listed as an orphan,
+  /// so it is not killed, and the next reconnect asks again.
   public static func enumerateSessionIDs() async -> [UUID] {
     var live: [UUID] = []
     for id in QuickChatSessionRegistry.ids() {
@@ -1139,23 +1239,47 @@ public enum ZmxSessionLauncher {
   /// Whether the node's local session is alive and not a husk — the ensure's own
   /// create-or-run check (`aliveCheckCommand`), asked on its own. A remote session
   /// answers `false`: its liveness is read through presence over ssh (`GraphStore`).
+  ///
+  /// `false` is **not** "gone": a session zmx could not get an answer out of is also
+  /// `false` here. A caller that would launch, kill, resolve or forget on a `false` must
+  /// ask `sessionLiveness` instead and handle `.unknown` itself.
   static func isSessionAlive(_ node: LoopNode, projectPath: String? = nil) async -> Bool {
+    await sessionLiveness(node, projectPath: projectPath) == .live
+  }
+
+  /// The three-way answer behind `isSessionAlive`: `.live` (a running task), `.absent`
+  /// (no session, or its task ended — a husk), or `.unknown` (zmx could not be asked, or
+  /// could not get an answer out of the session). Only `.absent` is evidence the session
+  /// is gone; `.unknown` must never launch, kill, resolve, prune or forget anything.
+  ///
+  /// A remote session answers `.absent`, exactly as `isSessionAlive` answered `false`:
+  /// its liveness is read through presence over ssh.
+  static func sessionLiveness(
+    _ node: LoopNode, projectPath: String? = nil
+  ) async -> SessionLiveness {
     if let projectPath, RemoteProjectLocation.parse(projectPath: projectPath) != nil {
-      return false
+      return .absent
     }
-    guard ZmxLocator.isInstalled else { return false }
-    let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    func alive(in result: ZmxResult?) -> Bool {
-      guard let result, result.status == 0 else { return false }
-      return result.output.split(separator: "\n").contains { line in
-        !line.contains("\tended=") && !line.contains("\texit_code=") && !line.contains("\terr=")
-          && line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
-      }
-    }
+    guard ZmxLocator.isInstalled else { return .absent }
     // Fresh both ways: a "no" decides whether a pane closing resolves the loop, and a
     // "yes" tells a sender their message to a finished loop will be typed in. The shared
     // listing can predate the session starting, or its task ending.
-    return alive(in: await SessionListing.shared.listing(fresh: true))
+    let result = await SessionListing.shared.listing(fresh: true)
+    return sessionLiveness(
+      lsStatus: result?.status, lsOutput: result?.output ?? "",
+      sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName)
+  }
+
+  /// `sessionLiveness` over a listing that may never have run. Internal so tests can hold
+  /// the real output shapes without a zmx.
+  static func sessionLiveness(lsStatus: Int32?, lsOutput: String, sessionName: String)
+    -> SessionLiveness
+  {
+    switch sessionTaskState(lsStatus: lsStatus, lsOutput: lsOutput, sessionName: sessionName) {
+    case .alive: return .live
+    case .absent, .exited: return .absent
+    case .unknown: return .unknown
+    }
   }
 
   private enum SessionNamedState {
@@ -1165,15 +1289,17 @@ public enum ZmxSessionLauncher {
   }
 
   /// A listing of its own rather than the shared one: this is a kill's confirmation, and
-  /// only a listing taken after the kill can confirm it.
+  /// only a listing taken after the kill can confirm it. A row for a daemon that refused
+  /// the connection is as gone as no row (zmx on Windows leaves it behind forever); a row
+  /// zmx could not get an answer out of is not confirmation of anything.
   private static func sessionNamedState(_ name: String) async -> SessionNamedState {
     guard let result = await runZmx(["ls"]), result.status == 0 else { return .unknown }
-    let exists = result.output.split(separator: "\n").contains { line in
-      line.split(whereSeparator: \.isWhitespace).contains("name=\(name)")
+    switch parseSessionTaskState(lsOutput: result.output, sessionName: name) {
+    case .absent: return .absent
+    case .alive, .exited: return .present
+    case .unknown: return .unknown
     }
-    return exists ? .present : .absent
   }
-
   struct ZmxResult: Equatable, Sendable {
     let status: Int32
     let output: String
@@ -1859,7 +1985,6 @@ public enum ZmxSessionLauncher {
     // create script is an if/else whose exit status belongs to whichever branch ran —
     // and it is safe to run unconditionally here, since `zmx set` against a session that
     // was never created fails and leaves no label for the gate to find.
-    let repair = adoptUnlabelledCommand(zmxPath: "zmx", forNode: node).map { "\($0) || " } ?? ""
     let launch =
       agentLabelCommand(zmxPath: "zmx", forNode: node)
       .map { "\(create) && { \($0) || true; }" } ?? create
@@ -1876,12 +2001,26 @@ public enum ZmxSessionLauncher {
         + "if [ -n \"$gc_boot\" ] && [ -n \"$gc_last\" ] && [ \"$gc_boot\" != \"$gc_last\" ]; "
         + "then \(missing); fi"
     }
+    // One `zmx ls`, taken right before the decision (not before the delivery above, which
+    // can take long enough for a pane's attach to create the session first), classified
+    // into `gc_lv`: only a definite absent or ended task is launched into. A live one
+    // banks and stamps; an unlabelled live Codex one is adopted; `unknown` and a failed
+    // listing are skipped and logged, to be asked again by the next sweep tick.
+    let probe = livenessProbeFragment(
+      zmxPath: "zmx", sessionName: name, agent: readinessAgent(forNode: node))
+    let adopt = agentLabelCommand(zmxPath: "zmx", forNode: node).map { "{ \($0) || true; }" } ?? ":"
+    let skip = { (event: String) in DialLog.fragment(session: name, dial: "ensure", event: event) }
     let script =
       "cd \(RemoteProjectLocation.shellQuoted(location.remotePath)) && { "
       + deliveryFragment(
         delivery, ifSessionMissing: check,
         bridgeStateGeneration: bridgeState.map(\.generation))
-      + "\(check) >/dev/null 2>&1\(bank) && { \(markerWrite); } || \(repair){ \(missing); }; }"
+      + "\(probe); case \"$gc_lv\" in "
+      + "live) true\(bank) && { \(markerWrite); } || true;; "
+      + "unlabelled) \(adopt);; "
+      + "unknown) \(skip("skipped-unknown"));; "
+      + "lsfail) \(skip("skipped-ls-failed"));; "
+      + "*) \(missing);; esac; }"
     let spooled =
       spool.prelude.map { "\($0){ \(script); }; gc_rc=$?; \(spool.cleanup); exit $gc_rc" }
       ?? script
@@ -2221,21 +2360,30 @@ public enum ZmxSessionLauncher {
   static func remoteStatusInvocation(
     forNode node: LoopNode, label: String, at location: RemoteProjectLocation
   ) -> [String] {
+    let script = remoteStatusScript(forNode: node, label: label)
+    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+  }
+
+  /// The probe script itself, apart from the ssh wrapper, so a test can run it against a
+  /// fake `zmx`.
+  static func remoteStatusScript(forNode node: LoopNode, label: String) -> String {
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    let check = quotedCommand(["zmx", "ls"])
     let read = quotedCommand(["zmx", "get", name, label])
-    // The pattern is a fixed string, so the tab must be a real one: `grep -F` never
-    // interprets a `\t` escape, and the two characters would match nothing — every
-    // probe would read an existing session as absent.
+    // One `zmx ls`, classified like the local parser (`livenessProbeFragment`): `absent`
+    // only when ssh answered and the session is definitely not running. A listing that
+    // failed, or a row zmx could not get an answer out of, is `unknown` — which parses as
+    // `.unreachable`, never as a session that is gone.
+    let probe = livenessProbeFragment(zmxPath: "zmx", sessionName: name, agent: nil)
     let script =
-      "gc_row=$(\(check) 2>/dev/null | grep -F \(quotedCommand(["name=\(name)\t"])) | head -1); "
-      + "if [ -z \"$gc_row\" ] || printf '%s' \"$gc_row\" | grep -q $'\\terr='; then "
-      + "echo '\(remoteProbeMarker) absent'; "
-      + "elif printf '%s' \"$gc_row\" | grep -q $'\\tended='; then "
+      "\(probe); case \"$gc_lv\" in "
+      + "live) echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\";; "
+      + "absent) gc_row=$(printf '%s\\n' \"$gc_rows\" | grep -F \"${gc_tab}ended=\" | head -1); "
+      + "if [ -n \"$gc_row\" ]; then "
       + "gc_done=$(printf '%s' \"$gc_row\" | sed -n 's/.*\\texit_code=\\([0-9][0-9]*\\).*/\\1/p'); "
       + "echo \"\(remoteProbeMarker) exited ${gc_done:-1}\"; "
-      + "else echo \"\(remoteProbeMarker) live $(\(read) 2>/dev/null)\"; fi"
-    return location.sshInvocation(remoteCommand: location.remoteLoginShellCommand(script))
+      + "else echo '\(remoteProbeMarker) absent'; fi;; "
+      + "*) echo '\(remoteProbeMarker) unknown';; esac"
+    return script
   }
 
   static func remoteStatus(
@@ -2631,7 +2779,8 @@ public enum ZmxSessionLauncher {
       + "for gc_n in \(quotedNames); do "
       + "gc_last=$(cat \"$HOME/.graphcode/boots/$gc_n\" 2>/dev/null); "
       + "[ -n \"$gc_last\" ] && [ \"$gc_last\" != \"$gc_boot\" ] || continue; "
-      + "printf '%s\\n' \"$gc_ls\" | grep -v -e \"${gc_tab}ended=\" -e \"${gc_tab}err=\" "
+      + "printf '%s\\n' \"$gc_ls\" | grep -v -e \"${gc_tab}ended=\" "
+      + "-e \"${gc_tab}err=\(deadDaemonError)${gc_tab}\" -e \"${gc_tab}err=\(deadDaemonError)\\$\" "
       + "| grep -q \"name=$gc_n$gc_tab\" || printf 'rebooted %s\\n' \"$gc_n\"; done; exit 0"
   }
 
@@ -2652,18 +2801,18 @@ public enum ZmxSessionLauncher {
     guard ZmxLocator.isInstalled else { return }
 
     let zmxPath = ZmxLocator.binaryURL.path
-    let aliveCheck = aliveCheckCommand(zmxPath: zmxPath, forNode: node)
     let wd = workingDirectory(forNode: node, projectPath: projectPath)
 
-    // Same atomic check-or-create as the remote path (`remoteEnsureInvocation`): an
-    // alive-check and `zmx run` in one shell, joined by `||`, so the app's own
-    // `zmx attach` cannot slip in between and create the session first. Without
-    // this, a `zmx run` that loses the race types the entire launch command into
-    // the now-live agent's input — the `/bin/zsh -i` leak in the Copilot input bar.
-    // The check is husk-aware (`aliveCheckCommand`): a session whose task ended is
-    // no session a keystroke can reach, so the run branch relaunches it — this is
-    // what lets an ensure, a send, or the sweep wake a loop that died unattended
-    // (issue #215), which a `zmx get` check could never do.
+    // Same atomic check-or-create as the remote path (`remoteEnsureInvocation`): one
+    // `zmx ls` and `zmx run` in one shell, so the app's own `zmx attach` cannot slip in
+    // between and create the session first. Without this, a `zmx run` that loses the
+    // race types the entire launch command into the now-live agent's input — the
+    // `/bin/zsh -i` leak in the Copilot input bar. The check is husk-aware: a session
+    // whose task ended is no session a keystroke can reach, so the run branch relaunches
+    // it — this is what lets an ensure, a send, or the sweep wake a loop that died
+    // unattended (issue #215), which a `zmx get` check could never do. And it is
+    // unknown-aware (`launchDecisionScript`): a session `zmx` could not get an answer
+    // out of is skipped, not launched into.
     let bankedID: String? =
       SessionIDStore.load(forNodeID: node.id)
       ?? {
@@ -2687,11 +2836,10 @@ public enum ZmxSessionLauncher {
         forNode: node, sessionID: sessionID, projectPath: projectPath)
     {
       await atomicCheckOrRun(
-        checkCommand: aliveCheck, runArguments: resumeArgs,
+        sessionName: name, agent: readinessAgent(forNode: node), runArguments: resumeArgs,
         zmxPath: zmxPath, workingDirectory: wd,
         logFragment: DialLog.fragment(session: name, dial: "ensure", event: "resume"),
-        stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node),
-        repairCommand: adoptUnlabelledCommand(zmxPath: zmxPath, forNode: node))
+        stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node))
       // `zmx run -d` reports that the *session* exists, not that what it launched
       // survived: `claude --resume` against a transcript its retention expired dies
       // within a second — and the wrapper shell it was typed with stays behind, a
@@ -2726,11 +2874,10 @@ public enum ZmxSessionLauncher {
       firstPassMessage(for: node) != nil
       ? CopilotSessionLog.directory(forSessionNamed: name)?.lastPathComponent : nil
     await atomicCheckOrRun(
-      checkCommand: aliveCheck, runArguments: runArgs,
+      sessionName: name, agent: readinessAgent(forNode: node), runArguments: runArgs,
       zmxPath: zmxPath, workingDirectory: wd,
       logFragment: DialLog.fragment(session: name, dial: "ensure", event: "fresh"),
-      stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node),
-      repairCommand: adoptUnlabelledCommand(zmxPath: zmxPath, forNode: node))
+      stampCommand: agentLabelCommand(zmxPath: zmxPath, forNode: node))
     await kickOffFirstPass(
       of: node, sessionNamed: name, projectPath: projectPath, after: copilotSessionBefore)
   }
@@ -2799,7 +2946,13 @@ public enum ZmxSessionLauncher {
         DialLog.record(session: name, dial: "first-pass", event: "already-served")
         return
       }
-      guard await sessionExists(node, fresh: true) else {
+      // `unknown` types nothing either, and is logged as what it is.
+      switch await sessionTaskState(node, fresh: true) {
+      case .alive: break
+      case .unknown:
+        DialLog.record(session: name, dial: "first-pass", event: "unknown-session")
+        return
+      case .absent, .exited:
         DialLog.record(session: name, dial: "first-pass", event: "no-session")
         return
       }
@@ -2912,28 +3065,49 @@ public enum ZmxSessionLauncher {
   /// stays at its prompt — a husk that answers `zmx get` and once read as a resume that
   /// took. Judged by `sessionTaskState`, so both the vanished session and the husk
   /// count as the death they are.
+  ///
+  /// Only a session that is definitely not running counts as dead: one `zmx` could not get
+  /// an answer out of has not been shown to have died, and calling it dead drops the
+  /// banked conversation id and launches a second agent beside it.
   private static func sessionDiedImmediately(node: LoopNode) async -> Bool {
     try? await Task.sleep(for: .seconds(resumeSettleSeconds))
-    return await sessionTaskState(node, fresh: true) != .alive
+    return resumeDied(after: await sessionTaskState(node, fresh: true))
+  }
+
+  static func resumeDied(after state: SessionTaskState) -> Bool {
+    switch state {
+    case .absent, .exited: return true
+    case .alive, .unknown: return false
+    }
   }
 
   /// `logFragment` rides inside the run branch, so an ensure whose check found the
-  /// session alive records nothing — the dial log holds decisions, not ticks.
+  /// session alive records nothing — the dial log holds decisions, not ticks. A skipped
+  /// launch (`unknown`, or a listing that could not be taken) is a decision too, and is
+  /// logged as one.
   ///
-  /// The check is the alive command (`aliveCheckCommand`), not raw existence: a session
-  /// whose task has ended must fall through to the run, or a dead loop could never be
-  /// woken — the husk answered every `zmx get` (#215).
+  /// The decision is made from ONE `zmx ls` (`launchDecisionScript`), launching only on a
+  /// definite absent or ended task: a session `zmx` merely could not get an answer out of
+  /// is not a session to type a launch command into.
   private static func atomicCheckOrRun(
-    checkCommand: String, runArguments: [String],
+    sessionName: String, agent: String?, runArguments: [String],
     zmxPath: String, workingDirectory: String?, logFragment: String? = nil,
-    stampCommand: String? = nil, repairCommand: String? = nil
+    stampCommand: String? = nil
   ) async {
-    let run = quotedCommand([zmxPath] + runArguments)
     #if os(Windows)
       // Windows zmx receives argv directly. POSIX shell quoting turns paths and prompts
       // into literal single-quoted text under cmd.exe, so launch the provider without a
-      // shell. zmx rejects a duplicate session atomically, preserving the check-or-create
-      // race guarantee without translating the POSIX readiness probe.
+      // shell. zmx rejects a duplicate session atomically, which stays the backstop; the
+      // decision to try at all is made from one listing, as the POSIX script does.
+      let listing = await runZmx(["ls"])
+      guard
+        shouldLaunch(
+          after: sessionTaskState(
+            lsStatus: listing?.status, lsOutput: listing?.output ?? "", sessionName: sessionName))
+      else {
+        DialLog.record(session: sessionName, dial: "ensure", event: "skipped")
+        return
+      }
       let process = Process()
       process.executableURL = URL(fileURLWithPath: zmxPath)
       process.arguments = runArguments
@@ -2949,16 +3123,10 @@ public enum ZmxSessionLauncher {
       await SessionListing.shared.noteChanged()
       return
     #else
-      // The stamp rides in the run branch, after the launch it describes and only if
-      // that launch was made. Repair precedes relaunch so an alive unlabelled session
-      // is adopted rather than receiving the launch command as terminal input.
-      let launch = stampCommand.map { "\(run) && { \($0) || true; }" } ?? run
-      let repair = repairCommand.map { "\($0) || " } ?? ""
-      let script =
-        logFragment.map {
-          "\(checkCommand) >/dev/null 2>&1 || \(repair){ \($0); \(launch); }"
-        }
-        ?? "\(checkCommand) >/dev/null 2>&1 || \(repair)\(launch)"
+      let script = launchDecisionScript(
+        zmxPath: zmxPath, sessionName: sessionName, agent: agent,
+        run: quotedCommand([zmxPath] + runArguments), logFragment: logFragment,
+        stampCommand: stampCommand)
       let executable = "/bin/sh"
       let arguments = ["-c", script]
       guard
@@ -2969,6 +3137,77 @@ public enum ZmxSessionLauncher {
       _ = await session.waitUntilFinished()
       await SessionListing.shared.noteChanged()
     #endif
+  }
+
+  /// A launch is made only for a session that is definitely not there: no row, a daemon
+  /// that refused the connection, or a task that ended. A live one is left alone, and an
+  /// unknown one (a listing that failed, or a row `zmx` could not get an answer out of)
+  /// waits for the next tick.
+  static func shouldLaunch(after state: SessionTaskState) -> Bool {
+    startGate(for: state) == .launch
+  }
+
+  /// One `zmx ls` taken into a shell variable, and the row for this session classified from
+  /// that single snapshot into `gc_lv`:
+  /// - `live`: a running task (and, when an agent is named, its readiness label);
+  /// - `unlabelled`: a running task that carries no agent label at all (agent named only);
+  /// - `unknown`: an `err=` row other than `ConnectionRefused` (matched exactly);
+  /// - `lsfail`: the listing itself failed;
+  /// - `absent`: anything else — no row, a refused daemon, an ended task, or a task labelled
+  ///   with a different agent.
+  /// Every row naming the session counts, and they aggregate like `parseSessionTaskState`:
+  /// unknown over live over absent. Row anchoring and the tab-preceded fields mirror the
+  /// Swift parser, so a command line that merely contains `err=` or another session's name
+  /// is not read as one. `sessionName` and `agent` are node-id and backend-name shaped (no
+  /// quoting characters), as everywhere else this module embeds them in a pattern.
+  static func livenessProbeFragment(zmxPath: String, sessionName: String, agent: String?)
+    -> String
+  {
+    let zmx = RemoteProjectLocation.shellQuoted(zmxPath)
+    let row = "^([^=]*[[:space:]])?name=\(sessionName)(${gc_tab}|\\$)"
+    let refused = "${gc_tab}err=\(deadDaemonError)(${gc_tab}|\\$)"
+    var fragment =
+      "gc_tab=$(printf '\\t'); gc_lv=lsfail; "
+      + "if gc_ls=$(\(zmx) ls 2>/dev/null); then "
+      + "gc_rows=$(printf '%s\\n' \"$gc_ls\" | grep -E \"\(row)\"); "
+      + "if printf '%s\\n' \"$gc_rows\" | grep -F \"${gc_tab}err=\" "
+      + "| grep -v -E \"\(refused)\" | grep -q .; then gc_lv=unknown; else "
+      + "gc_live=$(printf '%s\\n' \"$gc_rows\" "
+      + "| grep -v -e \"${gc_tab}err=\" -e \"${gc_tab}ended=\" -e \"${gc_tab}exit_code=\"); "
+      + "if [ -z \"$gc_live\" ]; then gc_lv=absent; "
+    if let agent {
+      fragment +=
+        "elif printf '%s\\n' \"$gc_live\" "
+        + "| grep -q -E \"${gc_tab}\(agentLabelKey)=\(agent)(${gc_tab}|\\$)\"; then gc_lv=live; "
+        + "elif printf '%s\\n' \"$gc_live\" | grep -q -F \"${gc_tab}\(agentLabelKey)=\"; "
+        + "then gc_lv=absent; else gc_lv=unlabelled; "
+    } else {
+      fragment += "else gc_lv=live; "
+    }
+    return fragment + "fi; fi; fi"
+  }
+
+  /// The local check-or-run: `livenessProbeFragment`'s one listing, then — live: nothing;
+  /// unlabelled live Codex session: stamp it, never relaunch; unknown or a failed listing:
+  /// log and skip; absent: log and launch. The stamp rides in the run branch too, after the
+  /// launch it describes and only if that launch was made.
+  static func launchDecisionScript(
+    zmxPath: String, sessionName: String, agent: String?, run: String,
+    logFragment: String?, stampCommand: String?
+  ) -> String {
+    let launch = stampCommand.map { "\(run) && { \($0) || true; }" } ?? run
+    let log = { (event: String) in
+      DialLog.fragment(session: sessionName, dial: "ensure", event: event)
+    }
+    let adopt = stampCommand.map { "{ \($0) || true; }" } ?? ":"
+    return livenessProbeFragment(zmxPath: zmxPath, sessionName: sessionName, agent: agent)
+      + "; case \"$gc_lv\" in "
+      + "live) exit 0;; "
+      + "unlabelled) \(adopt); exit 0;; "
+      + "unknown) \(log("skipped-unknown")); exit 0;; "
+      + "lsfail) \(log("skipped-ls-failed")); exit 0;; "
+      + "esac; "
+      + (logFragment.map { "\($0); " } ?? "") + launch
   }
 
 }
