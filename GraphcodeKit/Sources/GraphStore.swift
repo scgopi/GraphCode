@@ -122,6 +122,11 @@ public actor GraphStore {
   /// Whether a local loop's session is alive and not a husk — what decides if a pane
   /// closing may resolve the loop (`sessionPermitsResolution`).
   private let onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
+  /// The three-way form of `onSessionAlive`, which every decision that would launch, kill,
+  /// resolve or type on a `false` asks instead (`sessionLiveness(of:)`): a session zmx could
+  /// not get an answer out of is `.unknown`, which none of them may act on. Absent, it is
+  /// derived from `onSessionAlive` and never answers `.unknown`.
+  private let onSessionLiveness: (@Sendable (LoopNode, String?) async -> SessionLiveness)?
 
   /// Whether the terminal pane that opens an attended loop launches its session. The Mac
   /// app's panes do (`GhosttyTerminalView` starts the agent); the Windows shell's panes only
@@ -394,6 +399,7 @@ public actor GraphStore {
     onReadPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? = nil,
     onReadGoalVerdict: (@Sendable (LoopNode, String?) async -> GoalVerdict?)? = nil,
     onSessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
+    onSessionLiveness: (@Sendable (LoopNode, String?) async -> SessionLiveness)? = nil,
     onEndSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
     onAttachedClients: (@Sendable (LoopNode, String?) async -> Int?)? = nil,
     onResumeSession: (@Sendable (LoopNode, String?) async -> Bool)? = nil,
@@ -444,6 +450,7 @@ public actor GraphStore {
     self.onResumeSession = onResumeSession
     self.onResolvedSessionGrace = onResolvedSessionGrace
     self.onSessionAlive = onSessionAlive
+    self.onSessionLiveness = onSessionLiveness
     self.onSpawnIntoProject = onSpawnIntoProject
     self.onAppendMemory = onAppendMemory
     self.onRemoveMemory = onRemoveMemory
@@ -2366,7 +2373,8 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID] else { return }
     let path = graph.project.path
     let stillCurrent = { [self] in graph.nodes[id: nodeID]?.loopType == node.loopType }
-    if await onSessionAlive?(node, path) == true {
+    switch await sessionLiveness(of: node) {
+    case .live:
       for message in messages {
         guard stillCurrent(), let target = graph.nodes[id: nodeID],
           MessageBus.deliverability(to: target) == nil
@@ -2374,6 +2382,19 @@ public actor GraphStore {
         _ = await deliverToSession(target, message)
       }
       return
+    case .unknown:
+      // zmx could not say whether the session runs: not resumed (a second agent beside a
+      // live one), and the messages are not dropped — they queue like any follow-up and
+      // go out, staged to memory meanwhile, once the session reads idle.
+      guard stillCurrent() else { return }
+      for message in messages {
+        pendingFollowUps.append(
+          PendingFollowUp(id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil))
+      }
+      await drainAndBroadcast()
+      return
+    case .absent:
+      break
     }
     guard let onResumeSession else {
       ensureSession(node)
@@ -2527,7 +2548,9 @@ public actor GraphStore {
       return
     }
     let path = graph.project.path
-    if await onSessionAlive?(node, path) != true {
+    // `unknown` skips the resume (no second agent beside a session that may be live) and
+    // queues the goal like a live session's: it is typed once the session reads idle.
+    if await sessionLiveness(of: node) == .absent {
       guard let onResumeSession else {
         ensureSession(node)
         goalFollowUps.removeValue(forKey: nodeID)
@@ -2559,7 +2582,9 @@ public actor GraphStore {
     else { return }
     resolvedSessionsOpened[nodeID] = Date()
     let path = graph.project.path
-    if await onSessionAlive?(node, path) == true { return }
+    // Live: nothing to bring back. Unknown: nothing may be launched into a session that
+    // may be running; opening the loop again asks again.
+    if await sessionLiveness(of: node) != .absent { return }
     var quiet = node
     quiet.loopType = .sketch
     quiet.firstInstruction =
@@ -2576,7 +2601,7 @@ public actor GraphStore {
   /// alive.
   private func ensureChatSession(_ node: LoopNode) async {
     guard launchesWhenOpened(node), node.state != .stopped,
-      await onSessionAlive?(node, graph.project.path) != true
+      await sessionLiveness(of: node) == .absent
     else { return }
     ensureSession(node)
   }
@@ -3222,6 +3247,16 @@ public actor GraphStore {
 
   // MARK: - Resolution + automatic edge firing
 
+  /// What is known about the node's local session — the three-way form every decision that
+  /// would launch, kill, resolve or forget on a `false` uses. Without an
+  /// `onSessionLiveness` it is derived from `onSessionAlive` (live or absent, never
+  /// unknown); with neither, absent, which is what `onSessionAlive?(…) == true` was.
+  private func sessionLiveness(of node: LoopNode) async -> SessionLiveness {
+    let path = graph.project.path
+    if let onSessionLiveness { return await onSessionLiveness(node, path) }
+    return await onSessionAlive?(node, path) == true ? .live : .absent
+  }
+
   /// Whether a resolution reported by a *surface* may be believed. Always, for a local
   /// project: the surface owned the process, and its exit is the fact being recorded.
   ///
@@ -3273,11 +3308,18 @@ public actor GraphStore {
     // A pane closing is not the loop finishing: ⌘W in a running agent pane (Ghostty's
     // own close binding, live whenever the app's Close Tab item is disabled) marked the
     // loop failed while its session carried on headless.
-    if let onSessionAlive, await onSessionAlive(node, graph.project.path) {
+    switch await sessionLiveness(of: node) {
+    case .live:
       recordMemory(nodeID, "\(report), but the session is still live — not resolved")
       return false
+    case .unknown:
+      // Resolution is irreversible and fires edges: it needs a session shown to be gone.
+      recordMemory(
+        nodeID, "\(report), but zmx could not tell whether the session is running — not resolved")
+      return false
+    case .absent:
+      return true
     }
-    return true
   }
 
   /// `sessionMayStillBeLive` is true only for predicate-driven resolutions: the goal
@@ -4413,6 +4455,7 @@ public actor GraphStore {
       onReadPresence: onReadPresence,
       onReadGoalVerdict: onReadGoalVerdict,
       onSessionAlive: onSessionAlive,
+      onSessionLiveness: onSessionLiveness,
       onAppendMemory: onAppendMemory,
       onRemoveMemory: onRemoveMemory,
       onRefinePlaybook: onRefinePlaybook,

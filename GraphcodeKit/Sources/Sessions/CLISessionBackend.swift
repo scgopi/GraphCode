@@ -382,6 +382,15 @@ extension CLISessionBackend {
     await ZmxSessionLauncher.isSessionAlive(node, projectPath: path)
   }
 
+  /// The three-way form of `sessionAlive`, for every decision that would launch, kill,
+  /// resolve, prune or forget on a `false`. Wired into the daemon's registry explicitly
+  /// (`ProjectRegistry.init(sessionLiveness:)`); a store without it derives `.live` /
+  /// `.absent` from `sessionAlive` and never produces `.unknown`.
+  public static let sessionLiveness: @Sendable (LoopNode, String?) async -> SessionLiveness = {
+    node, path in
+    await ZmxSessionLauncher.sessionLiveness(node, projectPath: path)
+  }
+
   public static let readPresence: @Sendable (LoopNode, String?) async -> PresenceReading = {
     node, path in
     await backend(for: node).presence(node, path)
