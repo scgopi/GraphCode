@@ -28,6 +28,7 @@ extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
 extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_set_canvas_bounds(provider: *NativeProvider, left: c_int, top: c_int, right: c_int, bottom: c_int) c.HRESULT;
+extern fn gc_uia_set_sidebar_scroll(provider: *NativeProvider, offset: c_int, max_offset: c_int, viewport: c_int) c.HRESULT;
 extern fn gc_uia_set_header_focus(provider: *NativeProvider, identity: ?[*:0]const u8) c.HRESULT;
 extern fn gc_uia_update(
     provider: *NativeProvider,
@@ -75,6 +76,8 @@ pub const DynamicElement = struct {
     selected: bool = false,
     eligible: bool = false,
     invokable: bool = true,
+    /// The element is part of the scrolling sidebar content, so UIA can scroll it into view.
+    sidebar_scroll: bool = false,
     left: i32,
     top: i32,
     right: i32,
@@ -98,6 +101,19 @@ pub const uia_workspace_delete_command: usize = 29;
 pub const uia_dynamic_invoke_tag: usize = 0x8000000000000000;
 pub const uia_dynamic_invoke_mask: usize = 0xC000000000000000;
 pub const wm_header_focus: u32 = 0x8000 + 46;
+/// Sent by the UIA scroll patterns. wParam is a `SidebarScrollOperation`; lParam is its argument.
+/// The window answers 1 when it performed the request and 0 when it could not.
+pub const wm_sidebar_scroll: u32 = 0x8000 + 47;
+pub const SidebarScrollOperation = struct {
+    pub const large_decrement: usize = 0;
+    pub const small_decrement: usize = 1;
+    pub const large_increment: usize = 3;
+    pub const small_increment: usize = 4;
+    /// lParam: the vertical scroll percent in hundredths of a percent.
+    pub const set_percent: usize = 5;
+    /// lParam: the identity payload (`worktreeIdentityPayload`) of the element to reveal.
+    pub const into_view: usize = 6;
+};
 
 pub fn worktreeIdentityPayload(path: []const u8) usize {
     var hash: u64 = 1469598103934665603;
@@ -232,7 +248,7 @@ pub const Provider = struct {
             parents[index] = element.parent;
             selected[index] = if (element.selected) 1 else 0;
             eligible[index] = if (element.eligible) 1 else 0;
-            invokable[index] = if (element.invokable) 1 else 0;
+            invokable[index] = (if (element.invokable) @as(c_int, 1) else 0) | (if (element.sidebar_scroll) @as(c_int, 2) else 0);
             bounds[index * 4] = element.left;
             bounds[index * 4 + 1] = element.top;
             bounds[index * 4 + 2] = element.right;
@@ -286,6 +302,13 @@ pub const Provider = struct {
         if (!builtin.link_libc) return;
         const native = self.native_provider orelse return;
         _ = gc_uia_set_canvas_bounds(native, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    }
+    /// Reports the sidebar's scroll offset, its maximum, and the visible height so the sidebar
+    /// lists can answer UIA scroll-pattern properties and raise changes.
+    pub fn syncSidebarScroll(self: *Provider, offset: i32, max_offset: i32, viewport: i32) void {
+        if (!builtin.link_libc) return;
+        const native = self.native_provider orelse return;
+        _ = gc_uia_set_sidebar_scroll(native, offset, max_offset, viewport);
     }
     pub fn add(self: *Provider, element: Element) !usize {
         const index = self.elements.items.len;

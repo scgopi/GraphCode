@@ -62,6 +62,10 @@ const c = Win32.c;
 /// Lets tests observe each production UIA publication (`syncAccessibility`); absent from product builds.
 var accessibility_publication_observer: if (builtin.is_test) ?*const fn (*App) void else void = if (builtin.is_test) null else {};
 
+/// Lets tests observe the update offer a banner click or UIA invoke opens, instead of raising the
+/// modal dialog; absent from product builds.
+var update_offer_observer: if (builtin.is_test) ?*const fn (*App, []const u8, []const u8) void else void = if (builtin.is_test) null else {};
+
 const title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Windows");
 const workspace_restart_message = "Workspace identity changed or could not be verified. Restart GraphCode before managing workspaces.";
 const WorktreeInspectRunner = *const fn (
@@ -1057,11 +1061,73 @@ const AccessibilityBounds = union(enum) {
     }
 };
 
+/// Smallest client height at which the sidebar keeps `Sidebar.min_content_region` of rows under
+/// the fixed header with the Workspace panel, Activity strip, and status line stacked below it.
+const min_client_height: i32 = Sidebar.content_top + Sidebar.min_content_region +
+    Sidebar.footerReserve(false, false) + Tokens.workspace_height + Tokens.activity_strip_height;
+
+extern "user32" fn AdjustWindowRectExForDpi(
+    rect: *c.RECT,
+    style: c.DWORD,
+    has_menu: c.BOOL,
+    ex_style: c.DWORD,
+    dpi: c.UINT,
+) callconv(.winapi) c.BOOL;
+
+/// The outer window height whose client area is `min_client_height` at `dpi`, in physical pixels.
+fn minimumWindowHeight(hwnd: c.HWND, dpi: u32) i32 {
+    var frame = c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = physicalCoordinate(min_client_height, dpi) };
+    const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+    const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
+    if (AdjustWindowRectExForDpi(&frame, style, has_menu, ex_style, Dpi.normalize(dpi)) == 0) return 0;
+    return frame.bottom - frame.top;
+}
+
 fn clipSidebarAccessibilityBounds(bounds: c.RECT, viewport_bottom: i32) c.RECT {
     const top = @max(bounds.top, Sidebar.content_top);
     const bottom = @min(bounds.bottom, viewport_bottom);
     if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     return .{ .left = bounds.left, .top = top, .right = bounds.right, .bottom = bottom };
+}
+
+/// UIA element kinds that move with the sidebar scroll offset. The fixed header, the update
+/// banner, and the error footer are not here: scrolling never reveals them.
+const sidebar_scroll_kinds = [_][]const u8{
+    "sidebar-section",
+    "project",
+    "open-project",
+    "project-new-loop",
+    "project-disclosure",
+    "loop",
+    "loop-disclosure",
+    "worktree",
+    "overview-destination",
+    "quick-chats-destination",
+    "quick-chats-header",
+    "quick-chats-disclosure",
+    "quick-chat-new",
+    "quick-chat-row",
+    "needs-you-header",
+    "needs-you-row",
+    "needs-you-stop",
+    "activity-header",
+    "activity-filter",
+    "activity-row",
+    "activity-control",
+};
+
+fn sidebarScrollsKind(kind: []const u8) bool {
+    for (sidebar_scroll_kinds) |candidate| if (std.mem.eql(u8, kind, candidate)) return true;
+    return false;
+}
+
+fn providerHasDecl(comptime Provider: type, comptime name: []const u8) bool {
+    return switch (@typeInfo(Provider)) {
+        .pointer => |pointer| @hasDecl(pointer.child, name),
+        .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(Provider, name),
+        else => false,
+    };
 }
 
 fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) InputBounds {
@@ -3647,6 +3713,10 @@ pub const App = struct {
             self.setStatus("Unable to prepare the update offer");
             return;
         }
+        if (builtin.is_test) if (update_offer_observer) |observe| {
+            observe(self, version.?, release_url.?);
+            return;
+        };
         self.showAvailableUpdate(version.?, release_url.?);
     }
 
@@ -6078,6 +6148,82 @@ pub const App = struct {
         self.clampSidebarScroll();
     }
 
+    const SidebarScrollSpan = struct { top: i32, bottom: i32 };
+
+    /// Collects the unclipped extent of the one scrolling sidebar element whose identity payload
+    /// matches, from the same elements UIA publishes.
+    const SidebarScrollSpanSink = struct {
+        dpi: u32,
+        payload: usize,
+        span: ?SidebarScrollSpan = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            for (elements) |element| {
+                if (!element.sidebar_scroll) continue;
+                if (Accessibility.worktreeIdentityPayload(element.identity) != self.payload) continue;
+                self.span = .{ .top = logicalCoordinate(element.top, self.dpi), .bottom = logicalCoordinate(element.bottom, self.dpi) };
+                return;
+            }
+        }
+    };
+
+    /// The element's extent in unscrolled sidebar coordinates, or null when no scrolling sidebar
+    /// element has that identity. It is read from the published elements with the offset at zero
+    /// and a client tall enough that nothing is clipped, so it cannot drift from what UIA publishes.
+    fn sidebarScrollSpan(self: *App, payload: usize) ?SidebarScrollSpan {
+        const saved = self.sidebar_scroll;
+        self.sidebar_scroll = 0;
+        defer self.sidebar_scroll = saved;
+        var sink = SidebarScrollSpanSink{ .dpi = self.dpi, .payload = payload };
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        self.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = client.right, .bottom = client.bottom + sidebar_unclipped_extent });
+        return sink.span;
+    }
+
+    const sidebar_line_scroll: i32 = 24;
+    const sidebar_unclipped_extent: i32 = 100_000;
+
+    /// Performs a UIA scroll request on the sidebar's single scroll offset. Returns false when
+    /// the request cannot be honoured (no scrollable viewport, or no such element), so the UIA
+    /// caller sees a failure instead of a viewport that did not move.
+    fn applySidebarScroll(self: *App, operation: usize, argument: isize) bool {
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        const content_bottom = self.sidebarContentBottom(client.bottom);
+        const viewport = content_bottom - Sidebar.content_top;
+        if (viewport <= 0) return false;
+        const inspection = if (self.worktree_inspection) |*value| value else null;
+        const maximum = Sidebar.maxScroll(&self.model, inspection, content_bottom, &self.sidebar_state);
+        var next = self.sidebar_scroll;
+        switch (operation) {
+            Accessibility.SidebarScrollOperation.large_decrement => next -= viewport,
+            Accessibility.SidebarScrollOperation.large_increment => next += viewport,
+            Accessibility.SidebarScrollOperation.small_decrement => next -= sidebar_line_scroll,
+            Accessibility.SidebarScrollOperation.small_increment => next += sidebar_line_scroll,
+            Accessibility.SidebarScrollOperation.set_percent => {
+                if (argument < 0 or argument > 10_000) return false;
+                next = @intCast(@divTrunc(@as(i64, maximum) * argument + 5_000, 10_000));
+            },
+            Accessibility.SidebarScrollOperation.into_view => {
+                if (argument < 0) return false;
+                const span = self.sidebarScrollSpan(@intCast(argument)) orelse return false;
+                const top = span.top - next;
+                const bottom = span.bottom - next;
+                if (span.bottom - span.top > viewport or top < Sidebar.content_top) {
+                    next = span.top - Sidebar.content_top;
+                } else if (bottom > content_bottom) {
+                    next = span.bottom - content_bottom;
+                }
+            },
+            else => return false,
+        }
+        self.sidebar_scroll = Sidebar.clampScroll(next, maximum);
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
+    }
+
     fn updateBannerShown(self: *App) bool {
         self.update_lock.lock();
         defer self.update_lock.unlock();
@@ -6087,12 +6233,9 @@ pub const App = struct {
     /// Bottom edge of the scrollable sidebar content: the sidebar viewport minus the footer
     /// (status line, update banner, error footer) that is drawn over its lower edge.
     fn sidebarContentBottom(self: *App, client_bottom: i32) i32 {
-        const update_shown = self.updateBannerShown();
-        return Sidebar.contentViewportBottom(
-            GraphCanvas.sidebarBottom(client_bottom, self.workspace_controls, self.surface),
-            update_shown,
-            self.ingress_error.len != 0,
-        );
+        const viewport_bottom = GraphCanvas.sidebarBottom(client_bottom, self.workspace_controls, self.surface);
+        const footer = Sidebar.effectiveFooter(viewport_bottom, self.updateBannerShown(), self.ingress_error.len != 0);
+        return Sidebar.contentViewportBottom(viewport_bottom, footer.update, footer.ingress);
     }
 
     fn clampSidebarScroll(self: *App) void {
@@ -6983,6 +7126,14 @@ pub const App = struct {
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
+        // The scroll sink is optional so test sinks that only record elements need not declare it.
+        if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
+            provider.syncSidebarScroll(
+                self.sidebar_scroll,
+                Sidebar.maxScroll(&self.model, current_inspection, sidebar_bottom, &self.sidebar_state),
+                @max(sidebar_bottom - Sidebar.content_top, 0),
+            );
+        }
         var sidebar_rows = Sidebar.appendRows(
             self.allocator,
             &self.model,
@@ -7149,8 +7300,9 @@ pub const App = struct {
                 },
             }
         }
-        if (self.updateBannerShown()) {
-            const banner = Sidebar.updateBannerRect(footer_viewport_bottom, self.ingress_error.len != 0);
+        const footer = Sidebar.effectiveFooter(footer_viewport_bottom, self.updateBannerShown(), self.ingress_error.len != 0);
+        if (footer.update) {
+            const banner = Sidebar.updateBannerRect(footer_viewport_bottom, footer.ingress);
             self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-update-banner", "update", "Update available", 1, .{ .logical = banner }, false, false) catch return;
         }
         if (self.surface == .workspace and self.workspace_is_quick_chat) if (self.selected_quick_chat) |chat_index| {
@@ -7244,7 +7396,7 @@ pub const App = struct {
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-left", "Scroll activity left", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .left), sidebar_bottom) }, false, true) catch return;
             self.appendAccessibilityElement(&elements, &owned_identities, "activity-control", "scroll-right", "Scroll activity right", 1, .{ .logical = clipSidebarAccessibilityBounds(Sidebar.activityControlBounds(&self.model, current_inspection, &self.sidebar_state, self.sidebar_scroll, .right), sidebar_bottom) }, false, true) catch return;
         }
-        if (self.ingress_error.len != 0 and Sidebar.errorFooterVisible(footer_viewport_bottom)) {
+        if (footer.ingress and Sidebar.errorFooterVisible(footer_viewport_bottom)) {
             const bounds = (AccessibilityBounds{ .logical = Sidebar.errorFooterRect(footer_viewport_bottom) }).physicalRect(self.dpi);
             elements.append(.{
                 .identity = "sidebar-error-footer:ingress",
@@ -7467,6 +7619,7 @@ pub const App = struct {
             .selected = selected,
             .eligible = eligible,
             .invokable = parent != 3,
+            .sidebar_scroll = sidebarScrollsKind(kind),
             .left = bounds.left,
             .top = bounds.top,
             .right = bounds.right,
@@ -8323,6 +8476,16 @@ fn onWindowMessage(
         return true;
     }
     switch (message) {
+        c.WM_GETMINMAXINFO => {
+            // Below this the sidebar cannot keep two rows visible beneath the fixed header with the
+            // Workspace panel, Activity strip, and status line stacked under it. Only the height is
+            // constrained; width keeps the system minimum.
+            const info = Win32.messagePointer(*c.MINMAXINFO, lparam);
+            const minimum = minimumWindowHeight(hwnd, app.dpi);
+            if (minimum > info.ptMinTrackSize.y) info.ptMinTrackSize.y = minimum;
+            result.* = 0;
+            return true;
+        },
         c.WM_GETOBJECT => if (app.accessibility) |*provider| {
             const object = provider.getObject(hwnd, wparam, lparam);
             if (object != 0) {
@@ -8842,6 +9005,10 @@ fn onWindowMessage(
                     break;
                 }
             }
+            return true;
+        },
+        Accessibility.wm_sidebar_scroll => {
+            result.* = if (app.applySidebarScroll(wparam, lparam)) 1 else 0;
             return true;
         },
         c.WM_KEYDOWN, c.WM_SYSKEYDOWN => {
@@ -10854,13 +11021,19 @@ const sidebar_uia_prefixes = [_][]const u8{
 const SidebarUiaSink = struct {
     count: usize = 0,
     rects: [192]c.RECT = undefined,
-    names: [192][40]u8 = undefined,
+    names: [192][160]u8 = undefined,
     name_lens: [192]usize = undefined,
     invokable: [192]bool = undefined,
+    scrolls: [192]bool = undefined,
     labels: [192][40]u8 = undefined,
     label_lens: [192]usize = undefined,
+    scroll_state: ?struct { offset: i32, max_offset: i32, viewport: i32 } = null,
 
     fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+    fn syncSidebarScroll(self: *@This(), offset: i32, max_offset: i32, viewport: i32) void {
+        self.scroll_state = .{ .offset = offset, .max_offset = max_offset, .viewport = viewport };
+    }
 
     fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
         self.count = 0;
@@ -10877,6 +11050,7 @@ const SidebarUiaSink = struct {
             @memcpy(self.labels[self.count][0..label_len], element.name[0..label_len]);
             self.label_lens[self.count] = label_len;
             self.invokable[self.count] = element.invokable;
+            self.scrolls[self.count] = element.sidebar_scroll;
             self.count += 1;
         }
     }
@@ -10919,6 +11093,7 @@ const footer_layout_controls = [_]WorkspaceControls.State{
 
 fn deinitFooterLayoutApp(app: *App) void {
     if (app.update_version.len != 0) app.allocator.free(app.update_version);
+    if (app.update_release_url.len != 0) app.allocator.free(app.update_release_url);
     if (app.ingress_error.len != 0) app.allocator.free(app.ingress_error);
     deinitOverviewTestApp(app);
 }
@@ -10949,6 +11124,7 @@ fn footerLayoutApp(case: FooterLayoutCase, controls: WorkspaceControls.State, up
     if (update) {
         app.update_state.state = .available;
         app.update_version = try app.allocator.dupe(u8, "9.9.9-test");
+        app.update_release_url = try app.allocator.dupe(u8, "https://example.invalid/releases/tag/v9.9.9-test");
     }
     if (ingress) app.ingress_error = try app.allocator.dupe(u8, "Daemon ingress is unavailable");
     return app;
@@ -10961,7 +11137,10 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
         defer deinitFooterLayoutApp(&app);
         const client = logicalClientRect(app.window.hwnd, app.dpi);
         const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
-        const banner = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, ingress) }).physicalRect(app.dpi);
+        // On a viewport too short for two rows beside the banner, the banner (and error footer)
+        // collapse and content may extend to where they would have been.
+        const footer = Sidebar.effectiveFooter(sidebar_bottom, true, ingress);
+        const banner = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, footer.ingress) }).physicalRect(app.dpi);
         var published_anywhere: usize = 0;
         for ([_]i32{ 0, 37, 1_000_000 }) |requested_scroll| {
             app.sidebar_scroll = requested_scroll;
@@ -10973,7 +11152,7 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                 if (rectIsEmpty(bounds)) continue;
                 if (std.mem.startsWith(u8, sink.name(index), "sidebar-update-banner:")) continue;
                 if (!std.mem.startsWith(u8, sink.name(index), "sidebar-error-footer:")) published_anywhere += 1;
-                if (rectsIntersect(bounds, banner)) {
+                if (footer.update and rectsIntersect(bounds, banner)) {
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
@@ -11150,12 +11329,14 @@ test "sidebar status text, CHATS label, and Needs you stay separate and reachabl
         const content_bottom = app.sidebarContentBottom(client.bottom);
         const inspection = app.currentWorktreeInspection();
 
-        const status = Sidebar.statusTextRect(sidebar_bottom, footer.update, footer.ingress);
+        // Footer parts that do not leave two rows of room collapse; only the rest are laid out.
+        const effective = Sidebar.effectiveFooter(sidebar_bottom, footer.update, footer.ingress);
+        const status = Sidebar.statusTextRect(sidebar_bottom, effective.update, effective.ingress);
         try std.testing.expect(status.top >= content_bottom);
         try std.testing.expect(status.bottom <= sidebar_bottom);
         try std.testing.expect(status.left >= 0 and status.right <= Tokens.sidebar_width);
-        if (footer.update) try std.testing.expect(!rectsIntersect(status, Sidebar.updateBannerRect(sidebar_bottom, footer.ingress)));
-        if (footer.ingress) try std.testing.expect(!rectsIntersect(status, Sidebar.errorFooterRect(sidebar_bottom)));
+        if (effective.update) try std.testing.expect(!rectsIntersect(status, Sidebar.updateBannerRect(sidebar_bottom, effective.ingress)));
+        if (effective.ingress) try std.testing.expect(!rectsIntersect(status, Sidebar.errorFooterRect(sidebar_bottom)));
 
         // The production clamp must agree with the content viewport, so the last row is reachable.
         const max_scroll = Sidebar.maxScroll(&app.model, inspection, content_bottom, &app.sidebar_state);
@@ -11337,6 +11518,546 @@ test "sidebar UIA bounds are the drawn rect clipped to the scroll region at shor
     try std.testing.expect(destinations >= 32);
 }
 
+/// A pixel-addressable capture of `Sidebar.draw`, so a test can compare what is painted with
+/// the rects UIA publishes and clicks hit.
+const SidebarBitmap = struct {
+    dc: c.HDC,
+    bitmap: c.HBITMAP,
+    previous: c.HGDIOBJ,
+    bits: [*]const u32,
+    width: i32,
+    height: i32,
+
+    fn deinit(self: *SidebarBitmap) void {
+        _ = c.SelectObject(self.dc, self.previous);
+        _ = c.DeleteObject(self.bitmap);
+        _ = c.DeleteDC(self.dc);
+    }
+
+    fn pixel(self: *const SidebarBitmap, x: i32, y: i32) u32 {
+        if (x < 0 or y < 0 or x >= self.width or y >= self.height) return 0xFFFFFFFF;
+        return self.bits[@as(usize, @intCast(y)) * @as(usize, @intCast(self.width)) + @as(usize, @intCast(x))] & 0x00FFFFFF;
+    }
+};
+
+/// A 32-bit DIB stores 0x00RRGGBB; a GDI COLORREF is 0x00BBGGRR.
+fn dibColor(colorref: u32) u32 {
+    return ((colorref & 0xFF) << 16) | (colorref & 0xFF00) | ((colorref >> 16) & 0xFF);
+}
+
+fn paintSidebarBitmap(app: *App, viewport_bottom: i32, update: bool, scroll: i32) !SidebarBitmap {
+    const width: i32 = Tokens.sidebar_width + 40;
+    const height: i32 = @as(i32, @max(viewport_bottom, Tokens.header_height)) + 100;
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+    var bits: ?*anyopaque = null;
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestUnexpectedResult;
+    errdefer _ = c.DeleteDC(dc);
+    const bitmap = c.CreateDIBSection(dc, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.TestUnexpectedResult;
+    errdefer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(dc, bitmap);
+    Sidebar.draw(
+        dc,
+        &app.model,
+        app.currentWorktreeInspection(),
+        "",
+        scroll,
+        "status",
+        viewport_bottom,
+        if (update) app.update_version else "",
+        app.ingress_error,
+        &app.sidebar_state,
+        -1,
+        app.allocator,
+    );
+    _ = c.GdiFlush();
+    return .{
+        .dc = dc,
+        .bitmap = bitmap,
+        .previous = previous,
+        .bits = @ptrCast(@alignCast(bits orelse return error.TestUnexpectedResult)),
+        .width = width,
+        .height = height,
+    };
+}
+
+const SidebarControlKind = enum { stop, filter, left, right, card };
+const SidebarControl = struct {
+    kind: SidebarControlKind,
+    index: usize,
+    /// Unclipped logical rect at the scroll offset the control was asked for.
+    bounds: c.RECT,
+    fill: u32,
+};
+const stop_fill: u32 = 0x00353224;
+const activity_fill: u32 = 0x0026262B;
+
+fn collectSidebarControls(app: *App, scroll: i32, out: *std.array_list.Managed(SidebarControl)) !void {
+    const inspection = app.currentWorktreeInspection();
+    out.clearRetainingCapacity();
+    for (0..@min(app.model.attentionCount(), 4)) |index| try out.append(.{
+        .kind = .stop,
+        .index = index,
+        .bounds = Sidebar.needsYouStopBounds(&app.model, inspection, &app.sidebar_state, scroll, index),
+        .fill = stop_fill,
+    });
+    if (app.model.activity.items.len == 0) return;
+    try out.append(.{
+        .kind = .filter,
+        .index = 0,
+        .bounds = Sidebar.activityFilterBounds(&app.model, inspection, &app.sidebar_state, scroll),
+        .fill = if (app.sidebar_state.activity_attention_only) 0x00302B1D else activity_fill,
+    });
+    try out.append(.{ .kind = .left, .index = 0, .bounds = Sidebar.activityControlBounds(&app.model, inspection, &app.sidebar_state, scroll, .left), .fill = activity_fill });
+    try out.append(.{ .kind = .right, .index = 0, .bounds = Sidebar.activityControlBounds(&app.model, inspection, &app.sidebar_state, scroll, .right), .fill = activity_fill });
+    const viewport = Sidebar.activityViewport(&app.model, &app.sidebar_state);
+    for (0..viewport.visible_count) |visible| try out.append(.{
+        .kind = .card,
+        .index = visible,
+        .bounds = Sidebar.activityCardBounds(&app.model, inspection, &app.sidebar_state, scroll, visible),
+        .fill = activity_fill,
+    });
+}
+
+test "scrolled Needs you and Activity controls are painted where UIA publishes them and clicks land, 96 and 144 DPI" {
+    var painted_visible: usize = 0;
+    var painted_clipped: usize = 0;
+    var fully_hidden: usize = 0;
+    var clicked_stops: usize = 0;
+    for ([_]u32{ 96, 144 }) |dpi| for ([_]i32{ 820, 600, 500, 400, 300 }) |logical_height| for ([_]bool{ false, true }) |update| {
+        const case = FooterLayoutCase{ .dpi = dpi, .width = physicalCoordinate(960, dpi), .height = physicalCoordinate(logical_height, dpi) };
+        var app = try footerLayoutApp(case, footer_layout_controls[0], update, false);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
+        try std.testing.expect(app.model.attentionCount() >= 2);
+        try std.testing.expect(app.model.activity.items.len != 0);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const region_top = Sidebar.content_top;
+        const region_bottom = app.sidebarContentBottom(client.bottom);
+        const inspection = app.currentWorktreeInspection();
+        if (region_bottom - region_top < 20) continue;
+
+        var controls = std.array_list.Managed(SidebarControl).init(app.allocator);
+        defer controls.deinit();
+        try collectSidebarControls(&app, 0, &controls);
+        // Scroll offsets that leave the first control of each group fully visible, clipped by the
+        // header, clipped by the footer, and scrolled away entirely.
+        var offsets = std.array_list.Managed(i32).init(app.allocator);
+        defer offsets.deinit();
+        try offsets.appendSlice(&.{ 0, 37, 1_000_000 });
+        for (controls.items) |control| {
+            if (control.kind == .right or control.kind == .left or control.kind == .card) continue;
+            try offsets.append(control.bounds.top - region_top - 6);
+            try offsets.append(control.bounds.bottom - region_top - 6);
+            try offsets.append(control.bounds.top - region_bottom + 6);
+            try offsets.append(control.bounds.bottom - region_bottom + 6);
+            try offsets.append(control.bounds.top - region_top + 40);
+        }
+
+        for (offsets.items) |requested| {
+            app.sidebar_scroll = requested;
+            app.clampSidebarScroll();
+            const scroll = app.sidebar_scroll;
+            try collectSidebarControls(&app, scroll, &controls);
+            const context = .{ dpi, logical_height, update, scroll };
+
+            var bitmap = try paintSidebarBitmap(&app, sidebar_bottom, update, scroll);
+            defer bitmap.deinit();
+
+            // Nothing in a control's fill colour may be painted outside the control's clipped rect.
+            for ([_]u32{ stop_fill, activity_fill, 0x00302B1D }) |fill_color| {
+                const dib = dibColor(fill_color);
+                var y: i32 = 0;
+                while (y < bitmap.height) : (y += 1) {
+                    var x: i32 = 0;
+                    while (x < Tokens.sidebar_width) : (x += 1) {
+                        if (bitmap.pixel(x, y) != dib) continue;
+                        const inside = for (controls.items) |control| {
+                            if (control.fill != fill_color) continue;
+                            const clipped = clipSidebarAccessibilityBounds(control.bounds, region_bottom);
+                            if (x >= clipped.left and x < clipped.right and y >= clipped.top and y < clipped.bottom) break true;
+                        } else false;
+                        if (!inside) {
+                            std.debug.print("pixel {d},{d} painted in control fill {x} outside every control's clipped rect {any}\n", .{ x, y, fill_color, context });
+                            return error.SidebarControlPaintedOutsideItsRect;
+                        }
+                    }
+                }
+            }
+
+            var sink: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&sink, client);
+            var stop_seen: usize = 0;
+            var card_seen: usize = 0;
+            for (controls.items) |control| {
+                const clipped = clipSidebarAccessibilityBounds(control.bounds, region_bottom);
+                const published_index: ?usize = switch (control.kind) {
+                    .filter => sink.indexOfName("activity-filter:attention"),
+                    .left => sink.indexOfName("activity-control:scroll-left"),
+                    .right => sink.indexOfName("activity-control:scroll-right"),
+                    .stop, .card => blk: {
+                        const prefix: []const u8 = if (control.kind == .stop) "needs-you-stop:" else "activity-row:";
+                        const wanted = if (control.kind == .stop) &stop_seen else &card_seen;
+                        var found: ?usize = null;
+                        var seen: usize = 0;
+                        for (0..sink.count) |index| {
+                            if (!std.mem.startsWith(u8, sink.name(index), prefix)) continue;
+                            if (seen == wanted.*) {
+                                found = index;
+                                break;
+                            }
+                            seen += 1;
+                        }
+                        wanted.* += 1;
+                        break :blk found;
+                    },
+                };
+                const published = sink.rects[published_index orelse return error.SidebarControlNotPublished];
+                const expected = (AccessibilityBounds{ .logical = clipped }).physicalRect(app.dpi);
+                if (published.left != expected.left or published.top != expected.top or published.right != expected.right or published.bottom != expected.bottom) {
+                    std.debug.print("{s} {d} UIA {d},{d},{d},{d} != clipped drawn rect {d},{d},{d},{d} {any}\n", .{ @tagName(control.kind), control.index, published.left, published.top, published.right, published.bottom, expected.left, expected.top, expected.right, expected.bottom, context });
+                    return error.SidebarControlUiaMismatch;
+                }
+                if (rectIsEmpty(clipped)) {
+                    fully_hidden += 1;
+                    continue;
+                }
+                // The painted fill reaches the rect's right edge on its first and last visible rows.
+                const dib = dibColor(control.fill);
+                if (bitmap.pixel(clipped.right - 2, clipped.top) != dib or bitmap.pixel(clipped.right - 2, clipped.bottom - 1) != dib) {
+                    std.debug.print("{s} {d} not painted over its clipped rect {d},{d},{d},{d} {any}\n", .{ @tagName(control.kind), control.index, clipped.left, clipped.top, clipped.right, clipped.bottom, context });
+                    return error.SidebarControlNotPaintedWhereItIsPublished;
+                }
+                if (clipped.top == control.bounds.top and clipped.bottom == control.bounds.bottom) painted_visible += 1 else painted_clipped += 1;
+
+                const center_x = @divTrunc(clipped.left + clipped.right, 2);
+                const center_y = @divTrunc(clipped.top + clipped.bottom, 2);
+                switch (control.kind) {
+                    .stop => try std.testing.expectEqual(@as(?usize, control.index), Sidebar.needsYouStopAt(center_x, center_y, &app.model, inspection, &app.sidebar_state, scroll)),
+                    .filter => try std.testing.expectEqual(@as(?Sidebar.ActivityControl, .filter), Sidebar.activityControlAt(center_x, center_y, &app.model, inspection, &app.sidebar_state, scroll)),
+                    .left => try std.testing.expectEqual(@as(?Sidebar.ActivityControl, .left), Sidebar.activityControlAt(center_x, center_y, &app.model, inspection, &app.sidebar_state, scroll)),
+                    .right => try std.testing.expectEqual(@as(?Sidebar.ActivityControl, .right), Sidebar.activityControlAt(center_x, center_y, &app.model, inspection, &app.sidebar_state, scroll)),
+                    .card => try std.testing.expectEqual(Sidebar.activityEventAtVisible(&app.model, &app.sidebar_state, control.index), Sidebar.activityCardAt(center_x, center_y, &app.model, inspection, &app.sidebar_state, scroll)),
+                }
+                if (control.kind == .stop) {
+                    const before = app.client.outbound_count;
+                    try nativeClick(&app, physicalCoordinate(center_x, app.dpi), physicalCoordinate(center_y, app.dpi));
+                    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+                    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+                    try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+                    clicked_stops += 1;
+                }
+            }
+        }
+    };
+    // Each outcome must be exercised, or a fixture that paints nothing would pass vacuously.
+    try std.testing.expect(painted_visible >= 40);
+    try std.testing.expect(painted_clipped >= 10);
+    try std.testing.expect(fully_hidden >= 40);
+    try std.testing.expect(clicked_stops >= 10);
+}
+
+test "sidebar footer collapses the error footer then the banner to keep two rows, and a collapsed part is not painted, published or clickable" {
+    const banner_fill: u32 = 0x00352B1C;
+    const error_fill: u32 = 0x00242448;
+    var collapsed_error: usize = 0;
+    var collapsed_banner: usize = 0;
+    var showing_both: usize = 0;
+    var reachable: usize = 0;
+    for ([_]u32{ 96, 144 }) |dpi| for ([_]i32{ 300, 400, 517, 520, 560, 640, 820 }) |logical_height| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |update| for ([_]bool{ false, true }) |ingress| {
+        const case = FooterLayoutCase{ .dpi = dpi, .width = physicalCoordinate(960, dpi), .height = physicalCoordinate(logical_height, dpi) };
+        var app = try footerLayoutApp(case, controls, update, ingress);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const vb = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const footer = Sidebar.effectiveFooter(vb, update, ingress);
+        const region_bottom = app.sidebarContentBottom(client.bottom);
+        const context = .{ dpi, logical_height, controls.panel_visible, update, ingress };
+
+        // Two rows stay visible whenever the status line alone leaves room for them.
+        if (vb - Sidebar.footerReserve(false, false) - Sidebar.content_top >= Sidebar.min_content_region) {
+            reachable += 1;
+            if (region_bottom - Sidebar.content_top < Sidebar.min_content_region) {
+                std.debug.print("only {d}px of sidebar content {any}\n", .{ region_bottom - Sidebar.content_top, context });
+                return error.SidebarTooShortToShowTwoRows;
+            }
+        }
+        if (ingress and !footer.ingress) collapsed_error += 1;
+        if (update and !footer.update) collapsed_banner += 1;
+        if (footer.update and footer.ingress) showing_both += 1;
+        // A part collapses only to make room: the error footer first, then the banner.
+        if (footer.update != update) try std.testing.expect(!footer.ingress);
+        if (vb - Sidebar.footerReserve(footer.update, footer.ingress) >= Tokens.header_height)
+            try std.testing.expect(Sidebar.statusTextRect(vb, footer.update, footer.ingress).top >= region_bottom);
+
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        const banner_rect = Sidebar.updateBannerRect(vb, footer.ingress);
+        const error_rect = Sidebar.errorFooterRect(vb);
+        try std.testing.expectEqual(footer.update, sink.indexOfName("sidebar-update-banner:update") != null);
+        try std.testing.expectEqual(footer.ingress and Sidebar.errorFooterVisible(vb), sink.indexOfName("sidebar-error-footer:ingress") != null);
+        const center_x = @divTrunc(banner_rect.left + banner_rect.right, 2);
+        const center_y = @divTrunc(banner_rect.top + banner_rect.bottom, 2);
+        try std.testing.expectEqual(footer.update, Sidebar.updateBannerAt(center_x, center_y, vb, update, ingress));
+
+        var bitmap = try paintSidebarBitmap(&app, vb, update, 0);
+        defer bitmap.deinit();
+        const banner_painted = banner_rect.top >= Tokens.header_height and bitmap.pixel(banner_rect.left + 1, banner_rect.top + 1) == dibColor(banner_fill);
+        try std.testing.expectEqual(footer.update, banner_painted);
+        const error_painted = Sidebar.errorFooterVisible(vb) and bitmap.pixel(error_rect.left + 1, error_rect.top + 1) == dibColor(error_fill);
+        try std.testing.expectEqual(footer.ingress and Sidebar.errorFooterVisible(vb), error_painted);
+    };
+    // Each outcome must be exercised, or a layout that never collapses would pass vacuously.
+    try std.testing.expect(collapsed_error >= 4);
+    try std.testing.expect(collapsed_banner >= 4);
+    try std.testing.expect(showing_both >= 8);
+    try std.testing.expect(reachable >= 48);
+}
+
+test "the minimum window height keeps a two-row sidebar scroll region with the panel, strip, banner and error footer" {
+    for ([_]u32{ 96, 144 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        var info = std.mem.zeroes(c.MINMAXINFO);
+        info.ptMinTrackSize.y = 100;
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        // The test window is a frameless popup, so its outer height is its client height.
+        try std.testing.expectEqual(physicalCoordinate(min_client_height, dpi), info.ptMinTrackSize.y);
+        try std.testing.expectEqual(@as(i32, 517), min_client_height);
+        // A larger system minimum is never reduced.
+        info.ptMinTrackSize.y = physicalCoordinate(min_client_height, dpi) + 50;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        try std.testing.expectEqual(physicalCoordinate(min_client_height, dpi) + 50, info.ptMinTrackSize.y);
+    }
+    var covered: usize = 0;
+    for ([_]u32{ 96, 144 }) |dpi| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |update| for ([_]bool{ false, true }) |ingress| {
+        const case = FooterLayoutCase{ .dpi = dpi, .width = physicalCoordinate(960, dpi), .height = physicalCoordinate(min_client_height, dpi) };
+        var app = try footerLayoutApp(case, controls, update, ingress);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        try std.testing.expectEqual(min_client_height, client.bottom);
+        const region = app.sidebarContentBottom(client.bottom) - Sidebar.content_top;
+        try std.testing.expect(region >= Sidebar.min_content_region);
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        var rows: usize = 0;
+        for (0..sink.count) |index| {
+            if (sink.scrolls[index] and !rectIsEmpty(sink.rects[index])) rows += 1;
+        }
+        try std.testing.expect(rows >= 1);
+        covered += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 16), covered);
+}
+
+const OfferProbe = struct {
+    var count: usize = 0;
+    var version: [32]u8 = undefined;
+    var version_len: usize = 0;
+    var url: [96]u8 = undefined;
+    var url_len: usize = 0;
+
+    fn observe(_: *App, offered_version: []const u8, offered_url: []const u8) void {
+        count += 1;
+        version_len = @min(offered_version.len, version.len);
+        @memcpy(version[0..version_len], offered_version[0..version_len]);
+        url_len = @min(offered_url.len, url.len);
+        @memcpy(url[0..url_len], offered_url[0..url_len]);
+    }
+
+    fn reset() void {
+        count = 0;
+        version_len = 0;
+        url_len = 0;
+    }
+};
+
+test "banner click and the UIA dynamic invoke command open the same update offer" {
+    // The exact wParam the native provider's IInvokeProvider::Invoke posts for the banner:
+    // the dynamic-invoke tag over FNV-1a("sidebar-update-banner:update"). The native provider test
+    // (AccessibilityProvider.Native.Tests.cpp) asserts the same literal is what Invoke posts.
+    const uia_banner_command: usize = 0x83fd6a5f429785e1;
+    try std.testing.expectEqual(
+        uia_banner_command,
+        Accessibility.uia_dynamic_invoke_tag | Accessibility.worktreeIdentityPayload("sidebar-update-banner:update"),
+    );
+    update_offer_observer = OfferProbe.observe;
+    defer update_offer_observer = null;
+    var offers: usize = 0;
+    var collapsed: usize = 0;
+    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
+        var app = try footerLayoutApp(case, controls, true, ingress);
+        defer deinitFooterLayoutApp(&app);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const vb = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const footer = Sidebar.effectiveFooter(vb, true, ingress);
+        const banner = Sidebar.updateBannerRect(vb, footer.ingress);
+        const click_x = physicalCoordinate(@divTrunc(banner.left + banner.right, 2), app.dpi);
+        const click_y = physicalCoordinate(@divTrunc(banner.top + banner.bottom, 2), app.dpi);
+
+        OfferProbe.reset();
+        if (!footer.update) {
+            // A banner collapsed on a short viewport is not a click target.
+            try nativeClick(&app, click_x, click_y);
+            try std.testing.expectEqual(@as(usize, 0), OfferProbe.count);
+            collapsed += 1;
+            continue;
+        }
+        try nativeClick(&app, click_x, click_y);
+        try std.testing.expectEqual(@as(usize, 1), OfferProbe.count);
+        try std.testing.expectEqualStrings("9.9.9-test", OfferProbe.version[0..OfferProbe.version_len]);
+        try std.testing.expectEqualStrings(app.update_release_url, OfferProbe.url[0..OfferProbe.url_len]);
+
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_COMMAND, uia_banner_command, 0, &result));
+        try std.testing.expectEqual(@as(usize, 2), OfferProbe.count);
+        try std.testing.expectEqualStrings("9.9.9-test", OfferProbe.version[0..OfferProbe.version_len]);
+        try std.testing.expectEqualStrings(app.update_release_url, OfferProbe.url[0..OfferProbe.url_len]);
+
+        // No available update: neither route opens an offer.
+        app.update_state.state = .up_to_date;
+        try nativeClick(&app, click_x, click_y);
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_COMMAND, uia_banner_command, 0, &result));
+        try std.testing.expectEqual(@as(usize, 2), OfferProbe.count);
+        offers += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 14), offers);
+    try std.testing.expectEqual(@as(usize, 2), collapsed);
+}
+
+test "every scrolling sidebar element advertises scroll-into-view and the fixed footer and header do not" {
+    var scrolling: usize = 0;
+    var fixed: usize = 0;
+    for ([_]u32{ 96, 144 }) |dpi| for ([_]i32{ 820, 500 }) |logical_height| {
+        const case = FooterLayoutCase{ .dpi = dpi, .width = physicalCoordinate(960, dpi), .height = physicalCoordinate(logical_height, dpi) };
+        var app = try footerLayoutApp(case, footer_layout_controls[0], true, true);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const content_bottom = app.sidebarContentBottom(client.bottom);
+        for ([_]i32{ 0, 120, 1_000_000 }) |requested| {
+            app.sidebar_scroll = requested;
+            app.clampSidebarScroll();
+            var sink: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&sink, client);
+            for (0..sink.count) |index| {
+                const name = sink.name(index);
+                const is_fixed = std.mem.startsWith(u8, name, "sidebar-update-banner:") or std.mem.startsWith(u8, name, "sidebar-error-footer:");
+                try std.testing.expectEqual(!is_fixed, sink.scrolls[index]);
+                if (is_fixed) fixed += 1 else scrolling += 1;
+            }
+            const state = sink.scroll_state orelse return error.SidebarScrollStateNotPublished;
+            try std.testing.expectEqual(app.sidebar_scroll, state.offset);
+            try std.testing.expectEqual(Sidebar.maxScroll(&app.model, app.currentWorktreeInspection(), content_bottom, &app.sidebar_state), state.max_offset);
+            try std.testing.expectEqual(content_bottom - Sidebar.content_top, state.viewport);
+            try std.testing.expect(state.max_offset > 0);
+        }
+    };
+    try std.testing.expect(scrolling >= 400);
+    try std.testing.expect(fixed >= 20);
+}
+
+fn sidebarScrollMessage(app: *App, operation: usize, argument: isize) !bool {
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(app, app.window.hwnd, Accessibility.wm_sidebar_scroll, operation, argument, &result));
+    return result == 1;
+}
+
+test "UIA scroll-into-view brings every sidebar element fully into the scroll region from any offset, 96 and 144 DPI, 820 to 300" {
+    var revealed: usize = 0;
+    for ([_]u32{ 96, 144 }) |dpi| for ([_]i32{ 820, 500, 400, 300 }) |logical_height| for ([_]bool{ false, true }) |update| {
+        const case = FooterLayoutCase{ .dpi = dpi, .width = physicalCoordinate(960, dpi), .height = physicalCoordinate(logical_height, dpi) };
+        var app = try footerLayoutApp(case, footer_layout_controls[0], update, false);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        const region_top = Sidebar.content_top;
+        const region_bottom = app.sidebarContentBottom(client.bottom);
+        try std.testing.expect(region_bottom - region_top >= Sidebar.min_content_region);
+
+        // Every scrolling element's whole extent, from a client tall enough that nothing is clipped.
+        app.sidebar_scroll = 0;
+        var baseline: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&baseline, .{ .left = 0, .top = 0, .right = client.right, .bottom = client.bottom + 100_000 });
+        try std.testing.expect(baseline.count >= 60);
+
+        for ([_]i32{ 0, 1_000_000 }) |start| for (0..baseline.count) |index| {
+            if (!baseline.scrolls[index]) continue;
+            const whole = baseline.rects[index];
+            const height = logicalCoordinate(whole.bottom, app.dpi) - logicalCoordinate(whole.top, app.dpi);
+            const identity = baseline.name(index);
+            // A truncated identity would hash differently from the one the app matches on.
+            try std.testing.expect(identity.len < baseline.names[index].len);
+            app.sidebar_scroll = start;
+            app.clampSidebarScroll();
+            const payload = Accessibility.worktreeIdentityPayload(identity);
+            try std.testing.expect(try sidebarScrollMessage(&app, Accessibility.SidebarScrollOperation.into_view, @intCast(payload)));
+
+            var after: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&after, client);
+            const published = for (0..after.count) |after_index| {
+                if (std.mem.eql(u8, after.name(after_index), identity)) break after.rects[after_index];
+            } else return error.SidebarElementNotPublishedAfterScrollIntoView;
+            const top = logicalCoordinate(published.top, app.dpi);
+            const bottom = logicalCoordinate(published.bottom, app.dpi);
+            if (top < region_top or bottom > region_bottom or bottom - top != @min(height, region_bottom - region_top)) {
+                std.debug.print("{s} published {d}..{d} (whole height {d}) in region {d}..{d} after scroll-into-view from {d} dpi {d} height {d}\n", .{ identity, top, bottom, height, region_top, region_bottom, start, dpi, logical_height });
+                return error.SidebarElementNotFullyRevealed;
+            }
+            revealed += 1;
+        };
+    };
+    try std.testing.expect(revealed >= 1000);
+}
+
+test "UIA scroll requests move the one sidebar offset and refuse what they cannot do" {
+    const operations = Accessibility.SidebarScrollOperation;
+    var app = try footerLayoutApp(footer_layout_cases[0], footer_layout_controls[0], true, false);
+    defer deinitFooterLayoutApp(&app);
+    try loadManySidebarLoops(&app, 40);
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    const content_bottom = app.sidebarContentBottom(client.bottom);
+    const viewport = content_bottom - Sidebar.content_top;
+    const maximum = Sidebar.maxScroll(&app.model, app.currentWorktreeInspection(), content_bottom, &app.sidebar_state);
+    try std.testing.expect(maximum > viewport * 2);
+
+    app.sidebar_scroll = 0;
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.large_increment, 0));
+    try std.testing.expectEqual(viewport, app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.small_increment, 0));
+    try std.testing.expectEqual(viewport + 24, app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.small_decrement, 0));
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.large_decrement, 0));
+    try std.testing.expectEqual(@as(i32, 0), app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.large_decrement, 0));
+    try std.testing.expectEqual(@as(i32, 0), app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.set_percent, 10_000));
+    try std.testing.expectEqual(maximum, app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.large_increment, 0));
+    try std.testing.expectEqual(maximum, app.sidebar_scroll);
+    try std.testing.expect(try sidebarScrollMessage(&app, operations.set_percent, 5_000));
+    try std.testing.expectEqual(@divTrunc(maximum + 1, 2), app.sidebar_scroll);
+
+    // Refusals leave the offset alone.
+    const before = app.sidebar_scroll;
+    try std.testing.expect(!try sidebarScrollMessage(&app, operations.set_percent, 10_001));
+    try std.testing.expect(!try sidebarScrollMessage(&app, operations.set_percent, -1));
+    try std.testing.expect(!try sidebarScrollMessage(&app, 2, 0));
+    try std.testing.expect(!try sidebarScrollMessage(&app, operations.into_view, @intCast(Accessibility.worktreeIdentityPayload("sidebar-update-banner:update"))));
+    try std.testing.expect(!try sidebarScrollMessage(&app, operations.into_view, @intCast(Accessibility.worktreeIdentityPayload("header-jump:jump"))));
+    try std.testing.expect(!try sidebarScrollMessage(&app, operations.into_view, @intCast(Accessibility.worktreeIdentityPayload("loop:not-a-row"))));
+    try std.testing.expectEqual(before, app.sidebar_scroll);
+}
+
 test "update available banner is an invokable UIA button whose bounds are the drawn rect" {
     var published: usize = 0;
     for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| for ([_]bool{ false, true }) |update| {
@@ -11344,28 +12065,30 @@ test "update available banner is an invokable UIA button whose bounds are the dr
         defer deinitFooterLayoutApp(&app);
         const client = logicalClientRect(app.window.hwnd, app.dpi);
         const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
+        const footer = Sidebar.effectiveFooter(sidebar_bottom, update, ingress);
         for ([_]i32{ 0, 1_000_000 }) |requested_scroll| {
             app.sidebar_scroll = requested_scroll;
             app.clampSidebarScroll();
             var sink: SidebarUiaSink = .{};
             app.syncAccessibilityTo(&sink, client);
             const found = sink.indexOfName("sidebar-update-banner:update");
-            if (!update) {
+            // A banner that is absent, or collapsed on a viewport too short to also keep two rows, is not published.
+            if (!footer.update) {
                 try std.testing.expect(found == null);
                 continue;
             }
             const index = found orelse return error.UpdateBannerNotPublished;
-            const expected = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, ingress) }).physicalRect(app.dpi);
+            const expected = (AccessibilityBounds{ .logical = Sidebar.updateBannerRect(sidebar_bottom, footer.ingress) }).physicalRect(app.dpi);
             try std.testing.expectEqualDeep(expected, sink.rects[index]);
             try std.testing.expectEqualStrings("Update available", sink.label(index));
             try std.testing.expect(sink.invokable[index]);
             published += 1;
         }
     };
-    try std.testing.expect(published >= 32);
+    try std.testing.expect(published >= 28);
 
-    // Invoking it routes to the same update offer a click opens; with no update available the
-    // offer is a no-op, so this does not raise the modal dialog.
+    // Invoking it with no update available is a no-op; the real invoke-versus-click equivalence
+    // is covered by "banner click and the UIA dynamic invoke command open the same update offer".
     var app = try footerLayoutApp(footer_layout_cases[0], footer_layout_controls[0], false, false);
     defer deinitFooterLayoutApp(&app);
     try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("sidebar-update-banner:update")));

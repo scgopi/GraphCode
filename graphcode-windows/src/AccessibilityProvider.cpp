@@ -20,12 +20,30 @@ constexpr WPARAM kDynamicInvokeTag = 0x8000000000000000ULL;
 constexpr WPARAM kSelectionOperationMask = 0x3000000000000000ULL;
 constexpr int kSelectionOperationShift = 60;
 constexpr UINT kHeaderFocusMessage = WM_APP + 46;
+// Sidebar scroll requests from UIA. wParam is the operation: 0-4 are UIA ScrollAmount values
+// for a vertical Scroll, kScrollSetPercent carries hundredths of a percent in lParam, and
+// kScrollIntoView carries the row identity payload in lParam. The shell answers 1 when it
+// performed the request and 0 when it could not.
+constexpr UINT kSidebarScrollMessage = WM_APP + 47;
+constexpr WPARAM kScrollSetPercent = 5;
+constexpr WPARAM kScrollIntoView = 6;
+// Bits of a published row's flag word.
+constexpr int kRowInvokable = 1;
+constexpr int kRowScrollsWithSidebar = 2;
 
 static bool isHeader(const std::string &identity) {
   return identity == "header-attention:needs-you" ||
       identity == "header-worktree:worktrees" ||
       identity == "header-jump:jump" ||
       identity == "header-toggle-panel:control";
+}
+
+// Paint order for coordinate hit-testing: the fixed footer (update banner, error footer)
+// is above the fixed header, which is above everything that scrolls beneath them.
+static int hitTier(const std::string &identity) {
+  if (identity.rfind("sidebar-update-banner:", 0) == 0 ||
+      identity.rfind("sidebar-error-footer:", 0) == 0) return 3;
+  return isHeader(identity) ? 2 : 1;
 }
 
 static bool hasHeaderNativeFocus(HWND hwnd) {
@@ -46,6 +64,7 @@ struct Row {
   bool selected = false;
   bool eligible = false;
   bool invokable = false;
+  bool scrolls = false;
   RECT bounds{};
 };
 struct State {
@@ -74,6 +93,11 @@ struct State {
   // below. Until the app reports them the fixed elements use placeholder rects.
   RECT destination_bounds[2]{};
   bool has_destination_bounds[2]{};
+  // The sidebar's single scroll viewport, delivered through gc_uia_set_sidebar_scroll:
+  // current offset, maximum offset and visible height, in the same units.
+  int scroll_offset = 0;
+  int scroll_max = 0;
+  int scroll_viewport = 0;
 };
 
 static const char kOverviewDestinationIdentity[] = "overview-destination:graph";
@@ -118,7 +142,9 @@ class Node final : public IRawElementProviderSimple,
                    public IInvokeProvider,
                    public ISelectionProvider,
                    public ISelectionItemProvider,
-                   public IToggleProvider {
+                   public IToggleProvider,
+                   public IScrollProvider,
+                   public IScrollItemProvider {
  public:
   Node(std::shared_ptr<State> state, int64_t id) : state_(std::move(state)), id_(id), refs_(1) {
     if (id_ == 0) {
@@ -149,6 +175,10 @@ class Node final : public IRawElementProviderSimple,
       *out = static_cast<ISelectionItemProvider *>(this);
     else if (iid == __uuidof(IToggleProvider) && supportsToggle())
       *out = static_cast<IToggleProvider *>(this);
+    else if (iid == __uuidof(IScrollProvider) && supportsScroll())
+      *out = static_cast<IScrollProvider *>(this);
+    else if (iid == __uuidof(IScrollItemProvider) && supportsScrollItem())
+      *out = static_cast<IScrollItemProvider *>(this);
     else
       return E_NOINTERFACE;
     AddRef();
@@ -183,6 +213,10 @@ class Node final : public IRawElementProviderSimple,
       *value = static_cast<ISelectionItemProvider *>(this);
     else if (id == UIA_TogglePatternId && supportsToggle())
       *value = static_cast<IToggleProvider *>(this);
+    else if (id == UIA_ScrollPatternId && supportsScroll())
+      *value = static_cast<IScrollProvider *>(this);
+    else if (id == UIA_ScrollItemPatternId && supportsScrollItem())
+      *value = static_cast<IScrollItemProvider *>(this);
     else
       return S_FALSE;
     AddRef();
@@ -465,9 +499,53 @@ class Node final : public IRawElementProviderSimple,
     *value = static_cast<IRawElementProviderFragmentRoot *>(state_->root);
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double, double,
+  HRESULT STDMETHODCALLTYPE ElementProviderFromPoint(double x, double y,
                                                       IRawElementProviderFragment **value) override {
-    return focusedElement(value);
+    if (!value) return E_POINTER;
+    *value = nullptr;
+    HWND hwnd = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      hwnd = state_->hwnd;
+    }
+    POINT origin{0, 0};
+    ClientToScreen(hwnd, &origin);
+    const double px = x - origin.x;
+    const double py = y - origin.y;
+    Node *hit = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      int64_t best = -1;
+      int best_tier = 0;
+      long long best_area = 0;
+      // Higher tiers paint above lower ones; within a tier the smallest rect is the most
+      // specific (a control nested in its row), and a later-published element wins a tie.
+      auto consider = [&](int64_t id, int tier, const RECT &bounds) {
+        if (isEmptyRect(bounds)) return;
+        if (px < bounds.left || px >= bounds.right || py < bounds.top || py >= bounds.bottom) return;
+        const long long area = static_cast<long long>(bounds.right - bounds.left) *
+            static_cast<long long>(bounds.bottom - bounds.top);
+        if (best < 0 || tier > best_tier || (tier == best_tier && area <= best_area)) {
+          best = id;
+          best_tier = tier;
+          best_area = area;
+        }
+      };
+      if (state_->has_canvas_bounds) consider(4, 0, state_->canvas_bounds);
+      for (int slot = 0; slot < 2; ++slot) {
+        if (state_->has_destination_bounds[slot])
+          consider(14 + slot, 1, state_->destination_bounds[slot]);
+      }
+      for (int64_t key : state_->row_order) {
+        const Row &row = state_->rows.at(key);
+        consider(key, hitTier(row.identity), row.bounds);
+      }
+      if (best >= 0) hit = retainElementLocked(best);
+    }
+    if (hit) *value = static_cast<IRawElementProviderFragment *>(hit);
+    return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetFocus(IRawElementProviderFragment **value) override {
     return focusedElement(value);
@@ -582,6 +660,124 @@ class Node final : public IRawElementProviderSimple,
     return S_OK;
   }
 
+  HRESULT STDMETHODCALLTYPE Scroll(ScrollAmount horizontal, ScrollAmount vertical) override {
+    if (horizontal != ScrollAmount_NoAmount) return UIA_E_INVALIDOPERATION;
+    if (vertical == ScrollAmount_NoAmount) return S_OK;
+    if (vertical != ScrollAmount_LargeDecrement && vertical != ScrollAmount_SmallDecrement &&
+        vertical != ScrollAmount_LargeIncrement && vertical != ScrollAmount_SmallIncrement)
+      return E_INVALIDARG;
+    return sendSidebarScroll(static_cast<WPARAM>(vertical), 0);
+  }
+  HRESULT STDMETHODCALLTYPE SetScrollPercent(double horizontal, double vertical) override {
+    if (horizontal != UIA_ScrollPatternNoScroll) return UIA_E_INVALIDOPERATION;
+    if (vertical == UIA_ScrollPatternNoScroll) return S_OK;
+    if (!(vertical >= 0.0 && vertical <= 100.0)) return E_INVALIDARG;
+    return sendSidebarScroll(kScrollSetPercent, static_cast<LPARAM>(vertical * 100.0 + 0.5));
+  }
+  HRESULT STDMETHODCALLTYPE get_HorizontalScrollPercent(double *value) override {
+    if (!value) return E_POINTER;
+    *value = UIA_ScrollPatternNoScroll;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_VerticalScrollPercent(double *value) override {
+    if (!value) return E_POINTER;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    *value = verticalScrollPercentLocked();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_HorizontalViewSize(double *value) override {
+    if (!value) return E_POINTER;
+    *value = 100.0;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_VerticalViewSize(double *value) override {
+    if (!value) return E_POINTER;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    *value = verticalViewSizeLocked();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_HorizontallyScrollable(BOOL *value) override {
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE get_VerticallyScrollable(BOOL *value) override {
+    if (!value) return E_POINTER;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+    *value = state_->scroll_max > 0 ? TRUE : FALSE;
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE ScrollIntoView() override {
+    std::string identity;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (isRowKey(id_)) {
+        const Row &row = state_->rows.at(id_);
+        if (!row.scrolls) return UIA_E_INVALIDOPERATION;
+        identity = row.identity;
+      } else if ((id_ == 14 || id_ == 15) && state_->has_destination_bounds[id_ - 14]) {
+        identity = id_ == 14 ? kOverviewDestinationIdentity : kQuickChatsDestinationIdentity;
+      } else {
+        return UIA_E_INVALIDOPERATION;
+      }
+    }
+    return sendSidebarScroll(kScrollIntoView,
+        static_cast<LPARAM>(hashPath(identity) & kRowPayloadMask));
+  }
+
+  void setSidebarScroll(int offset, int max_offset, int viewport) {
+    struct Changed { Node *node; PROPERTYID property; double old_value; double new_value; };
+    std::vector<Changed> changes;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!state_->active) return;
+      const double old_percent = verticalScrollPercentLocked();
+      const double old_view = verticalViewSizeLocked();
+      const bool old_scrollable = state_->scroll_max > 0;
+      state_->scroll_max = (std::max)(max_offset, 0);
+      state_->scroll_offset = (std::min)((std::max)(offset, 0), state_->scroll_max);
+      state_->scroll_viewport = (std::max)(viewport, 0);
+      const double new_percent = verticalScrollPercentLocked();
+      const double new_view = verticalViewSizeLocked();
+      const bool new_scrollable = state_->scroll_max > 0;
+      for (int64_t list = 1; list <= 3; ++list) {
+        const auto node_for = [&](PROPERTYID property, double old_value, double new_value) {
+          if (old_value == new_value) return;
+          if (Node *node = retainElementLocked(list))
+            changes.push_back({node, property, old_value, new_value});
+        };
+        node_for(UIA_ScrollVerticalScrollPercentPropertyId, old_percent, new_percent);
+        node_for(UIA_ScrollVerticalViewSizePropertyId, old_view, new_view);
+        if (old_scrollable != new_scrollable) {
+          if (Node *node = retainElementLocked(list))
+            changes.push_back({node, UIA_ScrollVerticallyScrollablePropertyId,
+                               old_scrollable ? 1.0 : 0.0, new_scrollable ? 1.0 : 0.0});
+        }
+      }
+    }
+    for (const Changed &change : changes) {
+      VARIANT old_value, new_value;
+      VariantInit(&old_value);
+      VariantInit(&new_value);
+      if (change.property == UIA_ScrollVerticallyScrollablePropertyId) {
+        old_value.vt = new_value.vt = VT_BOOL;
+        old_value.boolVal = change.old_value != 0.0 ? VARIANT_TRUE : VARIANT_FALSE;
+        new_value.boolVal = change.new_value != 0.0 ? VARIANT_TRUE : VARIANT_FALSE;
+      } else {
+        old_value.vt = new_value.vt = VT_R8;
+        old_value.dblVal = change.old_value;
+        new_value.dblVal = change.new_value;
+      }
+      UiaRaiseAutomationPropertyChangedEvent(
+          static_cast<IRawElementProviderSimple *>(change.node), change.property, old_value, new_value);
+      change.node->Release();
+    }
+  }
+
   HRESULT setHeaderFocus(const char *identity) {
     Node *focused = nullptr;
     {
@@ -678,7 +874,8 @@ class Node final : public IRawElementProviderSimple,
             parents ? parents[index] : 3,
             selected && selected[index] != 0,
             eligible && eligible[index] != 0,
-            invokable && invokable[index] != 0,
+            invokable && (invokable[index] & kRowInvokable) != 0,
+            invokable && (invokable[index] & kRowScrollsWithSidebar) != 0,
             bounds ? RECT{bounds[index * 4], bounds[index * 4 + 1],
                           bounds[index * 4 + 2], bounds[index * 4 + 3]} : RECT{},
         });
@@ -823,6 +1020,41 @@ class Node final : public IRawElementProviderSimple,
   }
   bool supportsToggle() const {
     return id_ == 12 || id_ == 13;
+  }
+  bool supportsScroll() const { return id_ >= 1 && id_ <= 3; }
+  bool supportsScrollItem() const {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!isAvailableLocked()) return false;
+    if (isRowKey(id_)) return state_->rows.at(id_).scrolls;
+    return (id_ == 14 || id_ == 15) && state_->has_destination_bounds[id_ - 14];
+  }
+  double verticalScrollPercentLocked() const {
+    if (state_->scroll_max <= 0) return UIA_ScrollPatternNoScroll;
+    return 100.0 * state_->scroll_offset / state_->scroll_max;
+  }
+  double verticalViewSizeLocked() const {
+    if (state_->scroll_max <= 0) return 100.0;
+    const double viewport = (std::max)(state_->scroll_viewport, 1);
+    return 100.0 * viewport / (viewport + state_->scroll_max);
+  }
+  // Scrolling is delegated to the shell, which owns the one sidebar offset; a refusal or a
+  // hung shell is reported rather than pretending the viewport moved.
+  HRESULT sendSidebarScroll(WPARAM operation, LPARAM argument) {
+    HWND hwnd = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!isAvailableLocked()) return UIA_E_ELEMENTNOTAVAILABLE;
+      if (operation != kScrollIntoView && state_->scroll_max <= 0) return UIA_E_INVALIDOPERATION;
+      hwnd = state_->hwnd;
+    }
+    DWORD_PTR result = 0;
+    SetLastError(ERROR_SUCCESS);
+    if (!SendMessageTimeoutW(hwnd, kSidebarScrollMessage, operation, argument,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result)) {
+      const DWORD error = GetLastError();
+      return HRESULT_FROM_WIN32(error == ERROR_SUCCESS ? ERROR_TIMEOUT : error);
+    }
+    return result ? S_OK : UIA_E_INVALIDOPERATION;
   }
   bool worktreeFixedEnabledLocked(int64_t id) const {
     if (id == 3) return state_->worktrees_available;
@@ -1246,6 +1478,13 @@ extern "C" HRESULT gc_uia_set_canvas_bounds(IRawElementProviderSimple *provider,
                                              int right, int bottom) {
   if (!provider) return E_INVALIDARG;
   static_cast<Node *>(provider)->setCanvasBounds(left, top, right, bottom);
+  return S_OK;
+}
+
+extern "C" HRESULT gc_uia_set_sidebar_scroll(IRawElementProviderSimple *provider, int offset,
+                                              int max_offset, int viewport) {
+  if (!provider) return E_INVALIDARG;
+  static_cast<Node *>(provider)->setSidebarScroll(offset, max_offset, viewport);
   return S_OK;
 }
 
