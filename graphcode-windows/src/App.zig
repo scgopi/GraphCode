@@ -14444,6 +14444,41 @@ test "live terminal mouse: a press that could not be queued is not released at t
     try std.testing.expectEqual(@as(usize, 0), TeardownCapture.length);
 }
 
+/// A delivered press, then the program's output switches mouse tracking off and on again,
+/// reaching the shell only through `feedTerminalOutput` and with no mouse event after it.
+fn expectTrackingResetForgetsPress(output: []const []const u8) !void {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+    TeardownCapture.length = 0;
+    workspace.teardown_input_sink = &TeardownCapture.write;
+
+    buttons.press(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    for (output) |part| workspace.feedTerminalOutput(keyboard.index, part);
+    try std.testing.expect(workspace.surfaces[keyboard.index].vt.?.mouseTrackingEnabled());
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqual(@as(usize, 0), TeardownCapture.length);
+}
+
+test "live terminal mouse: tracking switched off and on in one output buffer forgets a delivered press" {
+    try expectTrackingResetForgetsPress(&.{"\x1b[?1002l\x1b[?1002h"});
+}
+
+test "live terminal mouse: tracking switched off by a sequence split across output buffers forgets a delivered press" {
+    try expectTrackingResetForgetsPress(&.{ "text\x1b[?10", "02l\x1b[?1002h" });
+}
+
 test "live terminal mouse: the teardown release is not written when the attach pipe is not non-blocking" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{.{ .id = "loop-a" }});

@@ -350,6 +350,8 @@ pub const Surface = struct {
     delivered_buttons: u8 = 0,
     delivered_pointer: struct { x: i32 = 0, y: i32 = 0, ctrl: bool = false } = .{},
     release_owed: u8 = 0,
+    // How many mouse-tracking resets of this surface's VT parser the ledger has been told of.
+    mouse_resets_seen: u32 = 0,
     // Buttons whose gesture was cancelled while the user still holds them; their release is
     // swallowed. See swallowsRelease.
     swallow_buttons: u8 = 0,
@@ -361,6 +363,7 @@ pub const Surface = struct {
         self.vt = null;
         self.mouse_gesture = .none;
         self.program_buttons = 0;
+        self.mouse_resets_seen = 0;
         self.swallow_buttons = 0;
         self.wheel_remainder = 0;
         self.clearSelection();
@@ -2881,26 +2884,33 @@ pub const Workspace = struct {
         self.surfaces[index].release_owed |= buttons;
     }
 
-    /// Queues again the releases that could not be queued when the user let go, once there is
-    /// room, for buttons the program was really told are down. A program that has stopped
-    /// tracking the mouse is told nothing.
-    fn retryOwedReleases(self: *Workspace) void {
-        for (&self.surfaces, 0..) |*slot, index| {
-            self.input_mutex.lock();
-            const owed = slot.release_owed;
-            const pointer = slot.delivered_pointer;
-            slot.release_owed = 0;
-            self.input_mutex.unlock();
-            if (owed == 0) continue;
-            const state = slot.vt orelse continue;
-            if (!state.mouseTrackingEnabled()) {
-                self.input_mutex.lock();
-                self.forgetDeliveredMouseLocked(slot);
-                self.input_mutex.unlock();
-                continue;
-            }
-            releaseProgramButtons(self, index, owed, pointer.x, pointer.y, pointer.ctrl, .queued);
+    /// Queues again the releases that could not be queued when the user let go, for the
+    /// buttons asked about, once there is room. Returns whether none of them is still owed.
+    /// A press of the same button must not be queued ahead of its owed release (the worker would
+    /// then clear the new press with the old release), so `reportMouseToProgram` calls this
+    /// first. A release goes to the program only for a button it was really told is down, and
+    /// one for a program that has stopped tracking the mouse is not sent.
+    fn flushOwedReleases(self: *Workspace, index: usize, buttons: u8) bool {
+        const slot = &self.surfaces[index];
+        self.input_mutex.lock();
+        const owed = slot.release_owed & buttons;
+        const pointer = slot.delivered_pointer;
+        slot.release_owed &= ~owed;
+        self.input_mutex.unlock();
+        if (owed == 0) return true;
+        const state = slot.vt orelse return true;
+        if (!state.mouseTrackingEnabled()) {
+            self.forgetDeliveredMouse(slot);
+            return true;
         }
+        releaseProgramButtons(self, index, owed, pointer.x, pointer.y, pointer.ctrl, .queued);
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        return (slot.release_owed & owed) == 0;
+    }
+
+    fn retryOwedReleases(self: *Workspace) void {
+        for (0..self.surfaces.len) |index| _ = self.flushOwedReleases(index, 0xFF);
     }
 
     /// Writes bytes straight to a surface's session. Used only while the surface is being torn
@@ -3306,6 +3316,17 @@ pub const Workspace = struct {
         self.surfaces[index].resetOutput();
     }
 
+    /// Whatever the program was sent before it switched mouse tracking off no longer counts,
+    /// however soon it switched it on again, and writes still in flight are voided. Runs after
+    /// every buffer of output, with no mouse event needed to notice.
+    fn noteMouseTrackingResets(self: *Workspace, index: usize) void {
+        const slot = &self.surfaces[index];
+        const state = slot.vt orelse return;
+        if (state.mouse_tracking_resets == slot.mouse_resets_seen) return;
+        slot.mouse_resets_seen = state.mouse_tracking_resets;
+        self.forgetDeliveredMouse(slot);
+    }
+
     pub fn feedTerminalOutput(self: *Workspace, index: usize, bytes: []const u8) void {
         const slot = &self.surfaces[index];
         const surface = slot.surface orelse return;
@@ -3316,6 +3337,7 @@ pub const Workspace = struct {
             .rows = slot.grid.rows,
         });
         self.routeVtResponses(index);
+        self.noteMouseTrackingResets(index);
         self.render_error = result.render_result;
         if (!std.meta.eql(previous, slot.output_result)) slot.output_result.logFailures(index);
     }
@@ -6045,6 +6067,9 @@ fn reportMouseToProgram(
             };
             const bit = programButtonBit(report.button);
             if (report.action == .press) {
+                // The release this button still owes goes first; if it cannot be queued yet,
+                // neither can this press, which would otherwise overtake it.
+                if (!workspace.flushOwedReleases(index, bit)) return;
                 report.any_button_pressed = true;
                 slot.program_buttons |= bit;
                 // Whatever the shell had selected is no longer what the user is pointing at.
@@ -6658,6 +6683,85 @@ fn tearDownMouseSlot(workspace: *Workspace) void {
     workspace.waitAttach(0);
 }
 
+test "mouse ledger: tracking switched off and on within one buffer voids a press still in flight, with no mouse event" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+    const slot = &workspace.surfaces[0];
+
+    reportMouse(&workspace, .press, .left, 3, 2);
+    pumpAll(&workspace);
+    try std.testing.expectEqual(@as(u8, 1), slot.delivered_buttons);
+    reportMouse(&workspace, .press, .right, 3, 2);
+    workspace.input_mutex.lock();
+    const in_flight = workspace.takeInputLocked().?;
+    workspace.input_mutex.unlock();
+    // The parser's output path (`feedTerminalOutput` does the same after publishing a buffer).
+    try slot.vt.?.feed("\x1b[?1002l\x1b[?1002h");
+    workspace.noteMouseTrackingResets(0);
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+    workspace.deliverInput(in_flight);
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+}
+
+fn programMouseEvent(kind: c_int, col: i32, row: i32, held: u32) c.winghostty_mouse_event {
+    var event = std.mem.zeroes(c.winghostty_mouse_event);
+    event.kind = @intCast(kind);
+    event.button = 1;
+    event.modifiers = held;
+    event.x = col * 8 + 4;
+    event.y = row * 16 + 8;
+    return event;
+}
+
+fn expectOwedReleaseStaysAheadOfNextPress(room: bool) !void {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    try armMouseSlot(&workspace);
+    defer workspace.surfaces[0].vt.?.destroy();
+    MouseLedgerHook.install(&workspace);
+    const slot = &workspace.surfaces[0];
+    var down = programMouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 3, 2, c.MK_LBUTTON);
+    var up = programMouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 3, 2, 0);
+
+    reportMouseToProgram(&workspace, 0, &down);
+    pumpAll(&workspace);
+    try fillInputQueue(&workspace);
+    reportMouseToProgram(&workspace, 0, &up);
+    try std.testing.expectEqual(@as(u8, 1), slot.release_owed);
+    if (room) {
+        workspace.input_queue.clear();
+    } else {
+        // Still no room: the next press must not be queued, or it would overtake the release it
+        // owes, and a release of that press is then the program's only one.
+        reportMouseToProgram(&workspace, 0, &down);
+        try std.testing.expectEqual(input_queue_capacity, workspace.input_queue.count);
+        try std.testing.expectEqual(@as(u8, 0), slot.program_buttons);
+        workspace.input_queue.clear();
+    }
+    // With room, the owed release is queued first, then the press, then that press's release.
+    reportMouseToProgram(&workspace, 0, &down);
+    reportMouseToProgram(&workspace, 0, &up);
+    pumpAll(&workspace);
+    try std.testing.expectEqualStrings(
+        "\x1b[<0;4;3M\x1b[<0;4;3m\x1b[<0;4;3M\x1b[<0;4;3m",
+        MouseLedgerHook.written(),
+    );
+    try std.testing.expectEqual(@as(u8, 0), slot.delivered_buttons);
+    try std.testing.expectEqual(@as(u8, 0), slot.release_owed);
+}
+
+test "mouse ledger: a release that could not be queued stays ahead of the next press of that button" {
+    try expectOwedReleaseStaysAheadOfNextPress(true);
+}
+
+test "mouse ledger: a press is not queued ahead of a release that still cannot be" {
+    try expectOwedReleaseStaysAheadOfNextPress(false);
+}
 test "mouse teardown: only the buttons still down are released, where the program last heard from the pointer" {
     var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
     defer workspace.layout.deinit();
