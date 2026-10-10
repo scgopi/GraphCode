@@ -321,9 +321,11 @@ is not reported with mouse events, the side buttons are not forwarded, and a
 horizontal wheel turn is reported as a vertical one. Shift is the shell's
 override and is never reported to the program. A button the program was told is
 down is released for it, at the pointer's last position, when the mouse capture
-is lost or the surface loses focus, and when the next pointer event shows the
+is lost, the surface loses focus or is torn down (for example recreated onto the
+same session), and when the next pointer event shows the
 button is up (a release outside the window); a program that stopped tracking is
-told nothing. `WM_CANCELMODE` is not handled separately. Without tracking the wheel
+told nothing, and the user's own later release of such a button is swallowed
+(it neither reaches the program nor opens the context menu). `WM_CANCELMODE` is not handled separately. Without tracking the wheel
 still does nothing: scrollback is not wired to it.
 
 Canvas and pointer actions still have no visible gesture hints: clicking

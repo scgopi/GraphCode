@@ -14086,6 +14086,96 @@ test "live terminal mouse: Shift pressed during a forwarded gesture is not repor
     try expectSentToProgram(&keyboard, "\x1b[<35;9;3M");
 }
 
+test "live terminal mouse: tearing a surface down releases a button the program still holds, once" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+
+    const Sink = struct {
+        var written: [64]u8 = undefined;
+        var length: usize = 0;
+        var calls: usize = 0;
+
+        fn write(_: ?*anyopaque, _: usize, bytes: []const u8) void {
+            @memcpy(written[length .. length + bytes.len], bytes);
+            length += bytes.len;
+            calls += 1;
+        }
+    };
+    Sink.length = 0;
+    Sink.calls = 0;
+    workspace.teardown_input_sink = &Sink.write;
+
+    buttons.press(.left, 0, 3, 2);
+    buttons.move(c.MK_LBUTTON, 5, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<32;6;3M");
+    // A recreate destroys the surface and re-attaches the same session: the press must not
+    // outlive the surface, so the release goes to the session before the attach is killed.
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqual(@as(usize, 1), Sink.calls);
+    try std.testing.expectEqualStrings("\x1b[<0;6;3m", Sink.written[0..Sink.length]);
+    try expectSentToProgram(&keyboard, "");
+    try std.testing.expect(workspace.surfaces[keyboard.index].mouse_gesture == .none);
+    try std.testing.expectEqual(@as(u8, 0), workspace.surfaces[keyboard.index].program_buttons);
+}
+
+test "live terminal mouse: the release of a cancelled program gesture neither reaches the program nor opens the menu" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    const vt = workspace.surfaces[keyboard.index].vt.?;
+    workspace.key_callback = &ClipboardRouteProbe.callback;
+    try vt.feed("\x1b[?1000h\x1b[?1006h");
+
+    // The program stops tracking while the right button is down: its release is nobody's.
+    ClipboardRouteProbe.calls = 0;
+    buttons.press(.right, 0, 3, 2);
+    try vt.feed("\x1b[?1000l");
+    buttons.release(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+    try expectSentToProgram(&keyboard, "\x1b[<2;4;3M");
+    // Afterwards the right button opens the menu again.
+    buttons.click(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+
+    // The same when focus is lost with the right button down.
+    try vt.feed("\x1b[?1000h");
+    ClipboardRouteProbe.calls = 0;
+    buttons.press(.right, 0, 3, 2);
+    _ = c.SendMessageW(keyboard.surface, c.WM_KILLFOCUS, 0, 0);
+    buttons.release(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+    try expectSentToProgram(&keyboard, "\x1b[<2;4;3M\x1b[<2;4;3m");
+    // A swallowed release that never comes does not swallow the next gesture's.
+    _ = c.SetFocus(keyboard.surface);
+    buttons.press(.right, 0, 3, 2);
+    _ = c.SendMessageW(keyboard.surface, c.WM_KILLFOCUS, 0, 0);
+    _ = c.SetFocus(keyboard.surface);
+    buttons.move(0, 4, 2);
+    try vt.feed("\x1b[?1000l");
+    buttons.click(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+}
+
 const KeyTableCase = struct {
     name: []const u8,
     chord: LiveKeyboard.Chord,
