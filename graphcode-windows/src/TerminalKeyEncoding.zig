@@ -277,6 +277,14 @@ test "key table: Alt chords on printable keys send an ESC prefix" {
     for (cases) |case| try expectEncoded(case.event, null, case.expected);
 }
 
+test "key table: Ctrl+S, T, D, W and N stay plain control bytes left to WM_CHAR" {
+    for ([_]u32{ 'S', 'T', 'D', 'W', 'N' }) |vk| try expectNotEncoded(.{ .vk = vk, .mods = ctrl });
+    try expectNotEncoded(.{ .vk = 'S', .mods = .{ .ctrl = true, .shift = true } });
+    try expectNotEncoded(.{ .vk = 'S', .mods = .{ .ctrl = true, .alt = true } });
+    try expectNotEncoded(.{ .vk = 'S' });
+    try expectNotEncoded(.{ .vk = 'S', .mods = alt });
+}
+
 test "key table: keys Windows already turns into text are left to WM_CHAR" {
     // Plain and shifted printable keys, Ctrl+letter control codes, AltGr (Ctrl+Alt), plain
     // Space, Alt+Space (the Windows system menu), Ctrl+Enter, and keys with no encoding.

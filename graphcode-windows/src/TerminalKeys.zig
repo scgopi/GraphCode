@@ -27,6 +27,7 @@ pub fn decodeProviderModifiers(mask: u32) Modifiers {
 
 pub const vk_insert: u32 = 0x2D;
 pub const vk_apps: u32 = 0x5D;
+pub const vk_f6: u32 = 0x75;
 pub const vk_f10: u32 = 0x79;
 
 /// The Menu key and Shift+F10 open the terminal's context menu, as the right button does.
@@ -69,6 +70,8 @@ pub const Route = enum {
     system_close,
     /// Alt+Space: the shell opens the window menu instead of typing a space.
     system_menu,
+    /// Ctrl+Shift+F10: the shell enters the menu bar, as a bare F10 or Alt tap does elsewhere.
+    menu_bar,
 };
 
 const vk_f4: u32 = 0x73;
@@ -78,15 +81,21 @@ const vk_oem_6: u32 = 0xDD;
 
 /// Terminal-focused keys win: plain Ctrl+D (EOF), Ctrl+W (delete word), Ctrl+S (XOFF and
 /// forward search), Ctrl+T (transpose), Ctrl+N (next history), and Ctrl+[ / Ctrl+] (ESC, GS)
-/// belong to the program in the terminal. Their menu commands keep the same keys elsewhere
-/// and have terminal-safe alternatives: Ctrl+Shift+T, Ctrl+Shift+N, Alt+Shift+D, Ctrl+Shift+W,
-/// and Ctrl+Shift+[ / ].
+/// belong to the program in the terminal, as do F6 and F10 (with or without Shift: Shift+F10
+/// is the context menu, decided in the terminal). Their shell commands keep the same keys
+/// elsewhere and have terminal-safe alternatives: Ctrl+Shift+T, Ctrl+Shift+N, Alt+Shift+D,
+/// Ctrl+Shift+W, Ctrl+Shift+[ / ], Ctrl+Shift+F6 (window toolbar, handled as a header key),
+/// and Ctrl+Shift+F10 (menu bar).
 pub fn routeChord(vk: u32, mods: Modifiers) Route {
     if (mods.alt and !mods.ctrl and !mods.shift) {
         if (vk == vk_f4) return .system_close;
         if (vk == vk_space) return .system_menu;
     }
-    if (mods.ctrl and mods.shift and !mods.alt and vk == 'W') return .close_tab;
+    if (mods.ctrl and mods.shift and !mods.alt) {
+        if (vk == 'W') return .close_tab;
+        if (vk == vk_f10) return .menu_bar;
+    }
+    if (!mods.ctrl and !mods.alt and (vk == vk_f6 or vk == vk_f10)) return .terminal;
     if (mods.ctrl and !mods.shift and !mods.alt) {
         switch (vk) {
             'D', 'W', 'S', 'T', 'N', vk_oem_4, vk_oem_6 => return .terminal,
@@ -123,6 +132,28 @@ test "Ctrl+Shift+W closes the terminal tab and Alt+F4 or Alt+Space stay Windows 
     try std.testing.expectEqual(Route.default, routeChord(0x73, .{}));
     try std.testing.expectEqual(Route.default, routeChord(0x20, .{}));
     try std.testing.expectEqual(Route.default, routeChord(0x73, .{ .alt = true, .shift = true }));
+}
+
+test "F6 and F10 are terminal input, with Shift as well, and no other function key is claimed" {
+    for ([_]u32{ vk_f6, vk_f10 }) |vk| {
+        try std.testing.expectEqual(Route.terminal, routeChord(vk, .{}));
+        try std.testing.expectEqual(Route.terminal, routeChord(vk, .{ .shift = true }));
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{ .alt = true }));
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{ .ctrl = true }));
+    }
+    var vk: u32 = 0x70;
+    while (vk <= 0x7B) : (vk += 1) {
+        if (vk == vk_f6 or vk == vk_f10) continue;
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{}));
+        try std.testing.expectEqual(Route.default, routeChord(vk, .{ .shift = true }));
+    }
+}
+
+test "Ctrl+Shift+F10 reaches the menu bar from a terminal and Ctrl+Shift+F6 stays a shell key" {
+    try std.testing.expectEqual(Route.menu_bar, routeChord(vk_f10, .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord(vk_f10, .{ .ctrl = true, .shift = true, .alt = true }));
+    try std.testing.expectEqual(Route.default, routeChord(vk_f6, .{ .ctrl = true, .shift = true }));
+    try std.testing.expectEqual(Route.default, routeChord(vk_f10, .{ .ctrl = true }));
 }
 
 test "Menu key and Shift+F10 open the terminal context menu" {
