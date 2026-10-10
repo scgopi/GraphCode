@@ -25,11 +25,13 @@ pub fn isShellUuid(text: []const u8) bool {
     return true;
 }
 
-/// The session name of a pane id when the pane can only be one of this shell's own plain
-/// shells: `graphcode-` plus a lowercase uuid, exactly. Null for anything else (an agent's
-/// uppercase uuid, a foreign or unprefixed name), which this shell must never end. A gate
-/// harness that sets `GRAPHCODE_SHELL_SESSION_PREFIX` makes the shell mint `<prefix>-<uuid>`
-/// ids (see `WorkspaceLayout.newSurfaceID`), which are accepted under that exact prefix only.
+/// The session name of a pane id when it has the shape of one of this shell's plain shells:
+/// `graphcode-` plus a lowercase uuid, exactly. Null for anything else (an agent's uppercase
+/// uuid, a foreign or unprefixed name). The shape is a necessary condition only: it does not
+/// say who made the session, which the shell's own record does (`WorkspaceLayout.isShellOwned`).
+/// A gate harness that sets `GRAPHCODE_SHELL_SESSION_PREFIX` makes the shell mint
+/// `<prefix>-<uuid>` ids (see `WorkspaceLayout.newSurfaceID`), which have the shape under
+/// that exact prefix only.
 pub fn shellSessionName(allocator: std.mem.Allocator, pane_id: []const u8) !?[]u8 {
     const harness = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SHELL_SESSION_PREFIX") catch "";
     defer if (harness.len != 0) allocator.free(harness);
@@ -103,7 +105,7 @@ test "canonical zmx session names add the ownership prefix exactly once" {
     );
 }
 
-test "only a lowercase uuid under the graphcode prefix names a shell session this shell may end" {
+test "only a lowercase uuid under the graphcode prefix has the shape of a shell session name" {
     const allocator = std.testing.allocator;
     const uuid = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
     const bare = (try shellSessionName(allocator, uuid)).?;

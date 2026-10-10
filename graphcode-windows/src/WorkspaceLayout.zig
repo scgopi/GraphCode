@@ -535,52 +535,110 @@ fn sameSession(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, left, right);
 }
 
+pub const Claim = enum { claimed, unclaimed, unknown };
+
 /// Whether any layout file in `root` other than `except_file` names `session` as a pane,
 /// whatever its project or loop. A session two layouts both claim is not safely one's to end.
-/// Files that cannot be read claim nothing.
-pub fn claimedByOtherLayout(allocator: std.mem.Allocator, root: []const u8, except_file: []const u8, session: []const u8) bool {
-    var directory = std.fs.cwd().openDir(root, .{ .iterate = true }) catch return false;
+/// `unknown` when the scan could not be completed (more files than the cap, a directory or
+/// file that could not be read, or one that is not a layout): absence of a claim is only
+/// known from a scan that saw every layout.
+pub fn claimedByOtherLayout(allocator: std.mem.Allocator, root: []const u8, except_file: []const u8, session: []const u8) Claim {
+    var directory = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |err| return if (err == error.FileNotFound) .unclaimed else .unknown;
     defer directory.close();
     const except_name = std.fs.path.basename(except_file);
     var iterator = directory.iterate();
     var seen: usize = 0;
-    while (iterator.next() catch null) |entry| {
+    var complete = true;
+    while (true) {
+        const entry = (iterator.next() catch {
+            complete = false;
+            break;
+        }) orelse break;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
         if (std.ascii.eqlIgnoreCase(entry.name, except_name)) continue;
         seen += 1;
-        if (seen > max_scanned_layouts) break;
-        const data = directory.readFileAlloc(allocator, entry.name, 4 * 1024 * 1024) catch continue;
-        defer allocator.free(data);
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch continue;
-        defer parsed.deinit();
-        const root_object = switch (parsed.value) {
-            .object => |value| value,
-            else => continue,
-        };
-        const tabs = switch (root_object.get("tabs") orelse continue) {
-            .array => |value| value.items,
-            else => continue,
-        };
-        for (tabs) |tab| {
-            const tab_object = switch (tab) {
-                .object => |value| value,
-                else => continue,
-            };
-            const panes = switch (tab_object.get("panes") orelse continue) {
-                .array => |value| value.items,
-                else => continue,
-            };
-            for (panes) |pane| {
-                const pane_object = switch (pane) {
-                    .object => |value| value,
-                    else => continue,
-                };
-                const id = pane_object.get("id") orelse continue;
-                if (id == .string and sameSession(id.string, session)) return true;
-            }
+        if (seen > max_scanned_layouts) {
+            complete = false;
+            break;
+        }
+        switch (fileClaim(allocator, directory, entry.name, session)) {
+            .claimed => return .claimed,
+            .unclaimed => {},
+            .unknown => complete = false,
         }
     }
-    return false;
+    return if (complete) .unclaimed else .unknown;
+}
+
+fn fileClaim(allocator: std.mem.Allocator, directory: std.fs.Dir, name: []const u8, session: []const u8) Claim {
+    const data = directory.readFileAlloc(allocator, name, 4 * 1024 * 1024) catch |err| {
+        // A file that vanished mid-scan claims nothing; one that cannot be read might.
+        return if (err == error.FileNotFound) .unclaimed else .unknown;
+    };
+    defer allocator.free(data);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return .unknown;
+    defer parsed.deinit();
+    const root_object = switch (parsed.value) {
+        .object => |value| value,
+        else => return .unknown,
+    };
+    const tabs = switch (root_object.get("tabs") orelse return .unknown) {
+        .array => |value| value.items,
+        else => return .unknown,
+    };
+    for (tabs) |tab| {
+        const tab_object = switch (tab) {
+            .object => |value| value,
+            else => return .unknown,
+        };
+        const panes = switch (tab_object.get("panes") orelse return .unknown) {
+            .array => |value| value.items,
+            else => return .unknown,
+        };
+        for (panes) |pane| {
+            const pane_object = switch (pane) {
+                .object => |value| value,
+                else => return .unknown,
+            };
+            const id = pane_object.get("id") orelse return .unknown;
+            if (id != .string) return .unknown;
+            if (sameSession(id.string, session)) return .claimed;
+        }
+    }
+    return .unclaimed;
+}
+
+pub const owned_sessions_directory_name = "shell-sessions";
+
+/// The record that a shell session is this shell's own: a file named for the session in
+/// `<root>\shell-sessions`, made when the shell mints the session for a new tab or split and
+/// before anything can attach to it. A name's shape cannot say who made the session; only
+/// this record, which no layout edit or corruption touches, can. Null when `session` is not
+/// a plain file name.
+fn ownedSessionPath(allocator: std.mem.Allocator, root: []const u8, session: []const u8) ?[]u8 {
+    if (!isFileSafeID(session)) return null;
+    return std.fmt.allocPrint(allocator, "{s}\\{s}\\{s}", .{ root, owned_sessions_directory_name, session }) catch null;
+}
+
+pub fn markShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) !void {
+    const path = ownedSessionPath(allocator, root, session) orelse return error.InvalidSessionName;
+    defer allocator.free(path);
+    if (std.fs.path.dirname(path)) |directory| try std.fs.cwd().makePath(directory);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    file.close();
+}
+
+pub fn isShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) bool {
+    const path = ownedSessionPath(allocator, root, session) orelse return false;
+    defer allocator.free(path);
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+pub fn forgetShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) void {
+    const path = ownedSessionPath(allocator, root, session) orelse return;
+    defer allocator.free(path);
+    std.fs.cwd().deleteFile(path) catch {};
 }
 
 /// A loop's layout from the project-wide legacy file, for a loop that has none of its own
@@ -1019,12 +1077,44 @@ test "a pane another layout names is claimed, however the session is spelled" {
     const mine = try loopLayoutPath(std.testing.allocator, root, "loop-a");
     defer std.testing.allocator.free(mine);
 
-    try std.testing.expect(claimedByOtherLayout(std.testing.allocator, root, mine, "graphcode-shared"));
-    try std.testing.expect(claimedByOtherLayout(std.testing.allocator, root, mine, "shared"));
-    try std.testing.expect(!claimedByOtherLayout(std.testing.allocator, root, mine, "unshared"));
+    try std.testing.expectEqual(Claim.claimed, claimedByOtherLayout(std.testing.allocator, root, mine, "graphcode-shared"));
+    try std.testing.expectEqual(Claim.claimed, claimedByOtherLayout(std.testing.allocator, root, mine, "shared"));
+    // An unreadable layout might name anything, so nothing is known to be unclaimed.
+    try std.testing.expectEqual(Claim.unknown, claimedByOtherLayout(std.testing.allocator, root, mine, "unshared"));
+    try tmp.dir.deleteFile("garbage.json");
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, root, mine, "unshared"));
     // The layout being retired never makes its own panes shared.
-    try std.testing.expect(!claimedByOtherLayout(std.testing.allocator, root, other_path, "shared"));
-    try std.testing.expect(!claimedByOtherLayout(std.testing.allocator, "C:\\no\\such\\layouts", mine, "shared"));
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, root, other_path, "shared"));
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, "C:\\no\\such\\layouts", mine, "shared"));
+}
+
+test "a layout scan past its cap is unknown, not unclaimed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    for (0..max_scanned_layouts + 5) |index| {
+        var name: [32]u8 = undefined;
+        try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&name, "filler-{d:0>4}.json", .{index}), .data = "{\"tabs\":[]}" });
+    }
+    try tmp.dir.writeFile(.{ .sub_path = "zzz-claimant.json", .data = "{\"tabs\":[{\"panes\":[{\"id\":\"shared\"}]}]}" });
+    try std.testing.expectEqual(Claim.unknown, claimedByOtherLayout(std.testing.allocator, root, "", "shared"));
+}
+
+test "a shell session is owned only once the shell has recorded it, and not after it is forgotten" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const name = "graphcode-5e11ba5e-0001-4000-8000-000000000001";
+    try std.testing.expect(!isShellOwned(std.testing.allocator, root, name));
+    try markShellOwned(std.testing.allocator, root, name);
+    try std.testing.expect(isShellOwned(std.testing.allocator, root, name));
+    try std.testing.expect(!isShellOwned(std.testing.allocator, root, "graphcode-5e11ba5e-0002-4000-8000-000000000002"));
+    try std.testing.expect(!isShellOwned(std.testing.allocator, root, "..\\escape"));
+    try std.testing.expectError(error.InvalidSessionName, markShellOwned(std.testing.allocator, root, "..\\escape"));
+    forgetShellOwned(std.testing.allocator, root, name);
+    try std.testing.expect(!isShellOwned(std.testing.allocator, root, name));
 }
 
 test "saving replaces a layout whole, leaves no temporary file, and keeps the old one when it fails" {

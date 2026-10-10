@@ -378,11 +378,14 @@ const KillJob = struct {
     child: std.process.Child,
     argv: [][]const u8,
     names: [][]u8,
+    /// The layout directory whose ownership records name these sessions; empty when none.
+    owner_root: []u8,
 
     fn deinit(self: *KillJob, allocator: std.mem.Allocator) void {
         for (self.names) |name| allocator.free(name);
         allocator.free(self.names);
         allocator.free(self.argv);
+        allocator.free(self.owner_root);
     }
 };
 
@@ -401,22 +404,22 @@ pub const KnownNodes = struct {
 };
 /// A saved project layout, or null when there is none to use. One whose contents are not a
 /// layout of this shell (corrupt, another project's, a newer schema) is moved aside as `.bad`
-/// rather than left for the next save to overwrite.
-fn loadSavedLayout(allocator: std.mem.Allocator, path: []const u8, project: []const u8) ?WorkspaceLayout.Layout {
+/// rather than left for the next save to overwrite; when it cannot be moved aside the load
+/// fails, since the caller would otherwise write a fresh layout over it.
+fn loadSavedLayout(allocator: std.mem.Allocator, path: []const u8, project: []const u8) !?WorkspaceLayout.Layout {
     return WorkspaceLayout.Layout.load(allocator, path, project) catch |err| {
-        keepUnusableLayout(allocator, path, err);
+        try keepUnusableLayout(allocator, path, err);
         return null;
     };
 }
 
-fn keepUnusableLayout(allocator: std.mem.Allocator, path: []const u8, err: anyerror) void {
+fn keepUnusableLayout(allocator: std.mem.Allocator, path: []const u8, err: anyerror) !void {
     if (!WorkspaceLayout.isInvalidLayout(err)) return;
-    const kept = WorkspaceLayout.setAside(allocator, path, "bad");
-    std.log.warn("workspace layout {s} is not usable ({s}); {s}", .{
-        path,
-        @errorName(err),
-        if (kept) "kept as .bad" else "left in place",
-    });
+    if (!WorkspaceLayout.setAside(allocator, path, "bad")) {
+        std.log.warn("workspace layout {s} is not usable ({s}) and could not be set aside; left untouched", .{ path, @errorName(err) });
+        return error.LayoutNotPreserved;
+    }
+    std.log.warn("workspace layout {s} is not usable ({s}); kept as .bad", .{ path, @errorName(err) });
 }
 
 /// The project key under which a quick chat's layout is saved. It is no project's path, so
@@ -558,9 +561,15 @@ pub const Workspace = struct {
         }
         workspace.layout_path = try workspace.layoutPathForProject(workspace.project_key);
         if (workspace.layout_path.len != 0) {
-            if (loadSavedLayout(allocator_, workspace.layout_path, workspace.project_key)) |restored| {
-                workspace.layout.deinit();
-                workspace.layout = restored;
+            if (loadSavedLayout(allocator_, workspace.layout_path, workspace.project_key)) |maybe_restored| {
+                if (maybe_restored) |restored| {
+                    workspace.layout.deinit();
+                    workspace.layout = restored;
+                }
+            } else |_| {
+                // Unusable and not preserved: persistence stays off so no save overwrites it.
+                allocator_.free(workspace.layout_path);
+                workspace.layout_path = &.{};
             }
         }
         if (c.winghostty_host_initialize(&workspace.host) != c.WINGHOSTTY_OK) {
@@ -628,7 +637,7 @@ pub const Workspace = struct {
         errdefer self.allocator.free(new_layout_path);
         var new_layout = try WorkspaceLayout.Layout.init(self.allocator, project);
         errdefer new_layout.deinit();
-        if (loadSavedLayout(self.allocator, new_layout_path, project)) |restored| {
+        if (try loadSavedLayout(self.allocator, new_layout_path, project)) |restored| {
             new_layout.deinit();
             new_layout = restored;
         }
@@ -671,7 +680,7 @@ pub const Workspace = struct {
         if (key_changed) {
             new_layout = try WorkspaceLayout.Layout.init(self.allocator, project_path);
             errdefer new_layout.deinit();
-            if (loadSavedLayout(self.allocator, new_layout_path, project_path)) |restored| {
+            if (try loadSavedLayout(self.allocator, new_layout_path, project_path)) |restored| {
                 new_layout.deinit();
                 new_layout = restored;
             }
@@ -837,7 +846,7 @@ pub const Workspace = struct {
                 // Not known to be bad, so not replaced: the next save would overwrite it.
                 return err;
             } else {
-                keepUnusableLayout(self.allocator, path, err);
+                try keepUnusableLayout(self.allocator, path, err);
             }
         }
         return WorkspaceLayout.Layout.initForLoop(self.allocator, layout_project, loop);
@@ -1005,25 +1014,33 @@ pub const Workspace = struct {
         refused: usize = 0,
     };
 
-    /// Whether this shell may end the zmx session `name` (already a valid shell session name).
-    fn mayEndShell(self: *Workspace, name: []const u8, options: EndOptions) bool {
+    /// Why this shell must not end the zmx session `name` (already a valid shell session
+    /// name), or null when it may. Ownership is proven by the record the shell made when it
+    /// minted the session, never by the name's shape; a session with no record, one a graph
+    /// node or another layout also names, and one whose layouts could not all be read are
+    /// all refused.
+    fn refuseEnding(self: *Workspace, name: []const u8, options: EndOptions) ?[]const u8 {
         const uuid = name[ZmxSession.prefix.len..];
-        if (self.loop_id.len != 0 and std.ascii.eqlIgnoreCase(uuid, self.loop_id)) return false;
+        const root = self.layoutRoot() orelse return "no layout directory records which sessions this shell made";
+        if (!WorkspaceLayout.isShellOwned(self.allocator, root, name)) return "this shell has no record of having made it";
+        if (self.loop_id.len != 0 and std.ascii.eqlIgnoreCase(uuid, self.loop_id)) return "it is the open loop's session";
         if (options.known) |known| {
-            if (known.contains(known.context, uuid)) return false;
+            if (known.contains(known.context, uuid)) return "it names a node of the graph";
         }
-        if (options.check_open_layout and (self.layout.hasPane(uuid) or self.layout.hasPane(name))) return false;
-        if (self.layoutRoot()) |root| {
-            if (WorkspaceLayout.claimedByOtherLayout(self.allocator, root, options.except_layout, name)) return false;
-        }
-        return true;
+        if (options.check_open_layout and (self.layout.hasPane(uuid) or self.layout.hasPane(name))) return "the open layout also names it";
+        return switch (WorkspaceLayout.claimedByOtherLayout(self.allocator, root, options.except_layout, name)) {
+            .unclaimed => null,
+            .claimed => "another layout also names it",
+            .unknown => "the other saved layouts could not all be read",
+        };
     }
 
     /// `zmx kill <sessions> --force`, run beside the UI and reaped by `poll`, for the panes in
-    /// `ids` that are provably this shell's own plain shells: a name that is exactly
-    /// `graphcode-` plus a lowercase uuid (never an agent's uppercase one, a foreign or an
-    /// unprefixed name), that is no node's id and no other layout's pane, and that a fresh,
-    /// successful `zmx ls` shows running. Anything else is refused and logged, never ended.
+    /// `ids` whose session has the shape of a shell's (exactly `graphcode-` plus a lowercase
+    /// uuid, never an agent's uppercase one, a foreign or an unprefixed name), that this shell
+    /// recorded having minted (`refuseEnding`), that is no node's id and no other layout's
+    /// pane, and that a fresh, successful `zmx ls` shows running. Anything else is refused and
+    /// logged, never ended.
     fn endShellSessions(self: *Workspace, ids: []const []const u8, options: EndOptions) EndOutcome {
         var outcome: EndOutcome = .{};
         var names: std.ArrayListUnmanaged([]u8) = .empty;
@@ -1046,8 +1063,8 @@ pub const Workspace = struct {
                 self.allocator.free(name);
                 continue;
             }
-            if (!self.mayEndShell(name, options)) {
-                std.log.warn("not ending zmx session {s}: it names a node or belongs to another layout", .{name});
+            if (self.refuseEnding(name, options)) |reason| {
+                std.log.warn("not ending zmx session {s}: {s}", .{ name, reason });
                 self.allocator.free(name);
                 outcome.refused += 1;
                 continue;
@@ -1071,6 +1088,8 @@ pub const Workspace = struct {
                 names.items[live] = name;
                 live += 1;
             } else {
+                // Already gone: nothing is left to end, so the record of it goes too.
+                if (self.layoutRoot()) |root| WorkspaceLayout.forgetShellOwned(self.allocator, root, name);
                 self.allocator.free(name);
             }
         }
@@ -1097,11 +1116,20 @@ pub const Workspace = struct {
             outcome.started = false;
             return outcome;
         };
-        self.kill_jobs.append(self.allocator, .{ .child = child, .argv = argv, .names = owned }) catch {
+        const owner_root = self.allocator.dupe(u8, self.layoutRoot() orelse "") catch {
             _ = child.kill() catch {};
             for (owned) |name| self.allocator.free(name);
             self.allocator.free(owned);
             self.allocator.free(argv);
+            outcome.started = false;
+            return outcome;
+        };
+        self.kill_jobs.append(self.allocator, .{ .child = child, .argv = argv, .names = owned, .owner_root = owner_root }) catch {
+            _ = child.kill() catch {};
+            for (owned) |name| self.allocator.free(name);
+            self.allocator.free(owned);
+            self.allocator.free(argv);
+            self.allocator.free(owner_root);
             outcome.started = false;
             return outcome;
         };
@@ -1119,6 +1147,9 @@ pub const Workspace = struct {
                 continue;
             }
             _ = job.child.wait() catch {};
+            if (exit_code == 0 and job.owner_root.len != 0) {
+                for (job.names) |name| WorkspaceLayout.forgetShellOwned(self.allocator, job.owner_root, name);
+            }
             var finished = self.kill_jobs.orderedRemove(index);
             finished.deinit(self.allocator);
         }
@@ -1524,9 +1555,22 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    /// Records, before any attach can create the session, that the shell minted this tab's
+    /// session: only a session with such a record is ever ended by the shell (`refuseEnding`).
+    /// Best effort: a tab whose record could not be written works, but is never ended for it.
+    fn recordShellOwned(self: *Workspace, surface_id: []const u8) void {
+        const root = self.layoutRoot() orelse return;
+        const name = ZmxSession.allocName(self.allocator, surface_id) catch return;
+        defer self.allocator.free(name);
+        WorkspaceLayout.markShellOwned(self.allocator, root, name) catch |err| {
+            std.log.warn("could not record shell session {s} as this shell's own: {s}", .{ name, @errorName(err) });
+        };
+    }
+
     pub fn newTab(self: *Workspace) !void {
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
+        self.recordShellOwned(surface_id);
         const previous_selected = self.layout.selected_tab;
         const previous_next_id = self.layout.next_tab_id;
         const index = try self.createAttachedSurface(surface_id, try self.workspaceGridSize());
@@ -1757,6 +1801,7 @@ pub const Workspace = struct {
     pub fn splitFocused(self: *Workspace, direction: WorkspaceLayout.Direction) !void {
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
+        self.recordShellOwned(surface_id);
         const tab = self.layout.selected() orelse return error.NoTabs;
         const previous_focus = tab.focused_pane;
         const previous_direction = tab.split_direction;
