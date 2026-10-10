@@ -273,6 +273,9 @@ pub const InputQueue = struct {
 pub const Surface = struct {
     surface: ?*c.winghostty_surface = null,
     attach: ?std.process.Child = null,
+    // Whether the attach pipe took non-blocking mode; a write the surface's teardown makes
+    // itself is skipped when it did not, since it could block the shell.
+    attach_nonblocking: bool = false,
     session_name: []u8 = &.{},
     project_path: []u8 = &.{},
     destroying: bool = false,
@@ -312,10 +315,25 @@ pub const Surface = struct {
     // scrolls. `selection_dirty` marks a change not yet drawn into the published snapshot.
     selection: TerminalSelection.State = .{},
     selection_dirty: bool = false,
+    // Which route the held mouse buttons began on, and the wheel movement not yet worth a
+    // whole notch; see routeMouse.
+    mouse_gesture: enum { none, selection, program } = .none,
+    // The buttons the program has been told are down (bit 0 left, 1 right, 2 middle) and where
+    // it last heard from the pointer, so a gesture that ends without a release can be closed.
+    program_buttons: u8 = 0,
+    // Buttons whose gesture was cancelled while the user still holds them; their release is
+    // swallowed. See swallowsRelease.
+    swallow_buttons: u8 = 0,
+    program_pointer: struct { x: i32 = 0, y: i32 = 0, ctrl: bool = false } = .{},
+    wheel_remainder: i32 = 0,
 
     fn resetOutput(self: *Surface) void {
         if (self.vt) |state| state.destroy();
         self.vt = null;
+        self.mouse_gesture = .none;
+        self.program_buttons = 0;
+        self.swallow_buttons = 0;
+        self.wheel_remainder = 0;
         self.clearSelection();
         self.parser = .normal;
         self.csi_value = 0;
@@ -423,6 +441,10 @@ pub const Workspace = struct {
     resize_child_session: []u8 = &.{},
     input_queue: InputQueue,
     input_error_message: []const u8 = "",
+    /// Where the release a surface's teardown owes its program is written instead of the
+    /// session's attach pipe; set by tests, which have no pipe to read.
+    teardown_input_sink: ?*const fn (context: ?*anyopaque, index: usize, bytes: []const u8) void = null,
+    teardown_input_context: ?*anyopaque = null,
     layout: WorkspaceLayout.Layout,
     layout_path: []u8,
     project_key: []u8,
@@ -2240,8 +2262,24 @@ pub const Workspace = struct {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
         slot.destroying = true;
+        const undelivered = self.inputPending(index);
         self.cancelSurfaceInput(index);
         self.waitInputIdle(index);
+        // A button the program was told is down must not stay down in a session that outlives
+        // this surface (a recreate re-attaches the same one). The surface's queue is gone by
+        // now, so the release goes straight to the attach pipe, before the attach is killed.
+        // Only when the press was delivered: input still queued (or being written) is dropped
+        // with the surface, and a release for a press the program never saw would be an orphan,
+        // so then the buttons are just forgotten. Known limitation: "pending" is any input for this
+        // surface, not only the press, so a press that was delivered followed by other queued
+        // bytes (a key, a motion report) also skips the release, and the program keeps the button
+        // down until its next click. Telling those apart needs a per-report delivered flag.
+        if (slot.mouse_gesture == .program or slot.program_buttons != 0) {
+            if (undelivered) {
+                slot.program_buttons = 0;
+                slot.mouse_gesture = .none;
+            } else cancelProgramGesture(self, index, .direct);
+        }
         self.waitAttach(index);
         if (slot.surface) |surface| {
             _ = c.winghostty_surface_destroy(surface);
@@ -2343,12 +2381,14 @@ pub const Workspace = struct {
         }
         var child = ZmxSession.child(self.allocator, attach_args[0..attach_len], directory, .attach);
         try child.spawn();
+        var nonblocking = false;
         if (child.stdin) |stdin| {
             var mode: c.DWORD = c.PIPE_NOWAIT;
-            _ = c.SetNamedPipeHandleState(stdin.handle, &mode, null, null);
+            nonblocking = c.SetNamedPipeHandleState(stdin.handle, &mode, null, null) != 0;
         }
         self.input_mutex.lock();
         self.surfaces[index].attach = child;
+        self.surfaces[index].attach_nonblocking = nonblocking;
         self.surfaces[index].vt = vt;
         self.surfaces[index].last_resize_size = size;
         self.surfaces[index].attempted_resize_size = null;
@@ -2364,6 +2404,28 @@ pub const Workspace = struct {
             _ = child.wait() catch {};
             self.surfaces[index].attach = null;
         }
+    }
+
+    /// Whether input for a surface is still queued or being written, so not yet delivered.
+    fn inputPending(self: *Workspace, index: usize) bool {
+        self.input_mutex.lock();
+        defer self.input_mutex.unlock();
+        if (self.input_busy and self.input_worker_surface == index) return true;
+        var position: usize = 0;
+        while (position < self.input_queue.count) : (position += 1) {
+            if (self.input_queue.items[(self.input_queue.head + position) % input_queue_capacity].surface == index) return true;
+        }
+        return false;
+    }
+
+    /// Writes bytes straight to a surface's session. Used only while the surface is being torn
+    /// down, after its queued input is gone and before its attach is killed.
+    fn writeTeardownInput(self: *Workspace, index: usize, bytes: []const u8) void {
+        if (!self.surfaces[index].attach_nonblocking) return;
+        if (self.teardown_input_sink) |sink| return sink(self.teardown_input_context, index, bytes);
+        const child = self.surfaces[index].attach orelse return;
+        const stdin = child.stdin orelse return;
+        _ = writeInputBounded(stdin.handle, bytes) catch {};
     }
 
     fn enqueueInput(self: *Workspace, index: usize, bytes: []const u8) void {
@@ -4156,8 +4218,15 @@ test "terminal redraw does not overwrite a replacement surface diagnostic" {
 
 fn onFocus(user_data: ?*anyopaque, surface: *c.winghostty_surface, focused: u8) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
-    if (focused == 0) return;
+    const focused_slot = callbackSlot(workspace, surface) orelse return;
+    if (focused == 0) {
+        // A button held when focus leaves will not be released where the program can hear it.
+        if (focused_slot.mouse_gesture == .program) {
+            const index = surfaceIndex(workspace, surface) orelse return;
+            cancelProgramGesture(workspace, index, .queued);
+        }
+        return;
+    }
     if (workspace.syncing_topology or workspace.syncing_focus) return;
     for (&workspace.surfaces, 0..) |*slot, index| {
         if (slot.surface == surface) {
@@ -5035,6 +5104,52 @@ test "provider mouse events become selection input only for the left button and 
     try std.testing.expect(selectionInputFor(&wheel) == null);
 }
 
+test "mouse events go to the program only while it tracks the mouse and Shift is not held" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const slot = &workspace.surfaces[0];
+    const left_held: u32 = 0x1;
+    const down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 1, 0, 0, left_held, 1);
+    const up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 1, 0, 0, 0, 1);
+    const move_held = mouseEvent(c.WINGHOSTTY_MOUSE_MOVE, 0, 0, 0, left_held, 1);
+    const hover = mouseEvent(c.WINGHOSTTY_MOUSE_MOVE, 0, 0, 0, 0, 1);
+    const wheel = mouseEvent(c.WINGHOSTTY_MOUSE_WHEEL, 0, 0, 0, 0, 1);
+    const shift_down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 1, 0, 0, left_held | provider_shift, 1);
+    const shift_up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 1, 0, 0, provider_shift, 1);
+    const shift_wheel = mouseEvent(c.WINGHOSTTY_MOUSE_WHEEL, 0, 0, 0, provider_shift, 1);
+    const side_down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 4, 0, 0, 0, 1);
+
+    // With no parser there is nothing to ask, so everything is the shell's.
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &up));
+
+    slot.vt = try TerminalVt.State.create(std.testing.allocator, 20, 3);
+    defer slot.vt.?.destroy();
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &wheel));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &up));
+
+    try slot.vt.?.feed("\x1b[?1000h");
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &wheel));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &hover));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_wheel));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &side_down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 4, 0, 0, 0, 1)));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &move_held));
+    // The program stops tracking mid-gesture: the release still belongs to the program.
+    try slot.vt.?.feed("\x1b[?1000l");
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &move_held));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &up));
+    try std.testing.expect(slot.mouse_gesture == .none);
+
+    try slot.vt.?.feed("\x1b[?1000h");
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &move_held));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_up));
+    try std.testing.expect(slot.mouse_gesture == .none);
+}
+
 const NoAccessibilityCopy = struct {
     fn copyRange(_: *c.winghostty_surface, _: u64, _: u64, _: []u8, _: *u64) c.winghostty_result {
         return c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE;
@@ -5290,15 +5405,267 @@ test "committed IME composition enters the terminal input queue" {
     try std.testing.expectEqualStrings(committed, item.bytes);
 }
 
+const MouseRoute = enum { selection, program };
+
+const mouse_button_flags: u32 = 0x1 | 0x2 | 0x10; // MK_LBUTTON, MK_RBUTTON, MK_MBUTTON
+const wheel_notch: i32 = 120;
+const max_wheel_reports_per_event: i32 = 8;
+
+/// Decides who a pointer event belongs to. While the running program tracks the mouse
+/// (DECSET 9/1000/1002/1003) its events go to the program, and Shift hands a gesture back to the
+/// shell's own selection, as in xterm and Windows Terminal. A gesture keeps the route it
+/// began on until every button is up, so a program that changes its mode mid-drag does not
+/// get half of one or turn it into a selection.
+fn routeMouse(slot: *Surface, event: *const c.winghostty_mouse_event) MouseRoute {
+    const state = slot.vt orelse return .selection;
+    const tracking = state.mouseTrackingEnabled();
+    const shift = TerminalKeys.decodeProviderModifiers(event.modifiers).shift;
+    switch (event.kind) {
+        c.WINGHOSTTY_MOUSE_BUTTON_DOWN => {
+            if (slot.mouse_gesture == .none) {
+                // Winghostty numbers the buttons left 1, right 2, middle 3, then the side buttons.
+                const reportable = event.button >= 1 and event.button <= 3;
+                slot.mouse_gesture = if (tracking and !shift and reportable) .program else .selection;
+            }
+        },
+        c.WINGHOSTTY_MOUSE_BUTTON_UP => {
+            const route: MouseRoute = if (slot.mouse_gesture == .program) .program else .selection;
+            if ((event.modifiers & mouse_button_flags) == 0) slot.mouse_gesture = .none;
+            return route;
+        },
+        c.WINGHOSTTY_MOUSE_MOVE => {
+            if (slot.mouse_gesture == .none) return if (tracking and !shift) .program else .selection;
+        },
+        c.WINGHOSTTY_MOUSE_WHEEL => return if (tracking and !shift) .program else .selection,
+        else => return .selection,
+    }
+    return if (slot.mouse_gesture == .program) .program else .selection;
+}
+
+/// The cell size comes from the metrics the shell already records for each surface when it
+/// sizes it and when the provider reports a change; without them nothing can be encoded.
+fn mouseGeometry(slot: *const Surface) ?TerminalVt.MouseGeometry {
+    const metrics = slot.cell_metrics;
+    if (metrics.cell_width == 0 or metrics.cell_height == 0) return null;
+    return .{
+        .columns = slot.grid.cols,
+        .rows = slot.grid.rows,
+        .cell_width = metrics.cell_width,
+        .cell_height = metrics.cell_height,
+    };
+}
+
+/// Sends a pointer event to the program in the mouse protocol it asked for. The button states
+/// come from the provider's modifier mask; Alt is not reported with mouse events and the side
+/// buttons are not forwarded. Horizontal and vertical wheel turns are indistinguishable in the
+/// provider's event, so both are reported as vertical.
+fn reportMouseToProgram(
+    workspace: *Workspace,
+    index: usize,
+    event: *const c.winghostty_mouse_event,
+) void {
+    const slot = &workspace.surfaces[index];
+    if (slot.vt == null) return;
+    const modifiers = TerminalKeys.decodeProviderModifiers(event.modifiers);
+    // Shift is the shell's override for selecting with the mouse, not a modifier the program
+    // is told about, even when it is pressed part-way through a gesture the program owns.
+    var report = TerminalVt.MouseEvent{
+        .action = .motion,
+        .ctrl = modifiers.ctrl,
+        .shift = false,
+        .x = event.x,
+        .y = event.y,
+        .any_button_pressed = (event.modifiers & mouse_button_flags) != 0,
+    };
+    switch (event.kind) {
+        c.WINGHOSTTY_MOUSE_BUTTON_DOWN, c.WINGHOSTTY_MOUSE_BUTTON_UP => {
+            report.action = if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_DOWN) .press else .release;
+            report.button = switch (event.button) {
+                1 => .left,
+                2 => .right,
+                3 => .middle,
+                else => return,
+            };
+            const bit = programButtonBit(report.button);
+            if (report.action == .press) {
+                report.any_button_pressed = true;
+                slot.program_buttons |= bit;
+                // Whatever the shell had selected is no longer what the user is pointing at.
+                slot.clearSelection();
+            } else {
+                slot.program_buttons &= ~bit;
+            }
+        },
+        c.WINGHOSTTY_MOUSE_MOVE => {
+            const held = event.modifiers;
+            report.button = if ((held & 0x1) != 0) .left else if ((held & 0x10) != 0) .middle else if ((held & 0x2) != 0) .right else .none;
+        },
+        c.WINGHOSTTY_MOUSE_WHEEL => return reportWheelToProgram(workspace, index, event.wheel_delta, report),
+        else => return,
+    }
+    slot.program_pointer = .{ .x = event.x, .y = event.y, .ctrl = modifiers.ctrl };
+    sendMouseReport(workspace, index, .queued, report);
+}
+
+fn programButtonBit(button: TerminalVt.MouseButton) u8 {
+    return switch (button) {
+        .left => 1,
+        .right => 2,
+        .middle => 4,
+        else => 0,
+    };
+}
+
+/// Tells the program that each button in `buttons` came up at the given pointer position.
+fn releaseProgramButtons(workspace: *Workspace, index: usize, buttons: u8, x: i32, y: i32, ctrl: bool, delivery: MouseDelivery) void {
+    var remaining = buttons;
+    for ([_]TerminalVt.MouseButton{ .left, .right, .middle }) |button| {
+        const bit = programButtonBit(button);
+        if ((buttons & bit) == 0) continue;
+        remaining &= ~bit;
+        sendMouseReport(workspace, index, delivery, .{
+            .action = .release,
+            .button = button,
+            .ctrl = ctrl,
+            .x = x,
+            .y = y,
+            .any_button_pressed = remaining != 0,
+        });
+    }
+}
+
+/// Ends a gesture the program owns when its release will not arrive (capture lost, focus lost,
+/// the surface being torn down), telling the program the buttons it still believes are down came
+/// up where it last saw the pointer. A program that has stopped tracking is told nothing. The
+/// user's own release of those buttons may still arrive later; it belongs to nobody and is
+/// swallowed (see `swallow_buttons`), so it neither reaches the program nor opens a menu.
+fn cancelProgramGesture(workspace: *Workspace, index: usize, delivery: MouseDelivery) void {
+    const slot = &workspace.surfaces[index];
+    const buttons = slot.program_buttons;
+    slot.program_buttons = 0;
+    slot.swallow_buttons |= buttons;
+    if (slot.mouse_gesture == .program) slot.mouse_gesture = .none;
+    const state = slot.vt orelse return;
+    if (buttons == 0 or !state.mouseTrackingEnabled()) return;
+    releaseProgramButtons(workspace, index, buttons, slot.program_pointer.x, slot.program_pointer.y, slot.program_pointer.ctrl, delivery);
+}
+
+/// How an encoded report reaches the session: through the input queue, or, while a surface is
+/// being torn down and its queue is gone, written straight to the session's attach pipe.
+const MouseDelivery = enum { queued, direct };
+
+/// Runs before every pointer event of a surface whose gesture belongs to the program, and
+/// closes what the event itself shows is over: a program that stopped tracking forgets the
+/// gesture, and a button it was told is down that the pointer reports up (a release that landed
+/// outside the window, where the provider never saw it) is released at the pointer's position.
+fn reconcileProgramGesture(workspace: *Workspace, index: usize, event: *const c.winghostty_mouse_event) void {
+    const slot = &workspace.surfaces[index];
+    if (slot.mouse_gesture != .program) return;
+    const state = slot.vt orelse return;
+    if (!state.mouseTrackingEnabled()) {
+        slot.swallow_buttons |= slot.program_buttons;
+        slot.program_buttons = 0;
+        slot.mouse_gesture = .none;
+        return;
+    }
+    // A leave carries no button state, and a wheel turn is not about buttons.
+    if (event.kind == c.WINGHOSTTY_MOUSE_LEAVE) return;
+    var held: u8 = 0;
+    if ((event.modifiers & 0x1) != 0) held |= 1;
+    if ((event.modifiers & 0x2) != 0) held |= 2;
+    if ((event.modifiers & 0x10) != 0) held |= 4;
+    var closing = slot.program_buttons & ~held;
+    // The release being delivered right now is the program's to receive as itself.
+    if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP) closing &= ~programButtonBit(switch (event.button) {
+        1 => .left,
+        2 => .right,
+        3 => .middle,
+        else => .none,
+    });
+    if (closing == 0) return;
+    slot.program_buttons &= ~closing;
+    const modifiers = TerminalKeys.decodeProviderModifiers(event.modifiers);
+    releaseProgramButtons(workspace, index, closing, event.x, event.y, modifiers.ctrl, .queued);
+    if (slot.program_buttons == 0 and event.kind != c.WINGHOSTTY_MOUSE_BUTTON_UP) slot.mouse_gesture = .none;
+}
+
+/// A wheel notch is 120 units. Finer wheels add up to whole notches, and a turn the other way
+/// drops the part-notch left over, so a program sees one report per notch and never a reversal
+/// from a leftover.
+fn reportWheelToProgram(
+    workspace: *Workspace,
+    index: usize,
+    delta: i32,
+    base: TerminalVt.MouseEvent,
+) void {
+    const slot = &workspace.surfaces[index];
+    if (delta == 0) return;
+    if (slot.wheel_remainder != 0 and (delta > 0) != (slot.wheel_remainder > 0)) slot.wheel_remainder = 0;
+    slot.wheel_remainder +|= delta;
+    const notches = @divTrunc(slot.wheel_remainder, wheel_notch);
+    slot.wheel_remainder -= notches * wheel_notch;
+    var report = base;
+    report.action = .press;
+    report.any_button_pressed = false;
+    report.button = if (notches > 0) .wheel_up else .wheel_down;
+    var remaining = @min(@as(i32, @intCast(@abs(notches))), max_wheel_reports_per_event);
+    while (remaining > 0) : (remaining -= 1) sendMouseReport(workspace, index, .queued, report);
+}
+
+fn sendMouseReport(workspace: *Workspace, index: usize, delivery: MouseDelivery, report: TerminalVt.MouseEvent) void {
+    const slot = &workspace.surfaces[index];
+    const state = slot.vt orelse return;
+    const geometry = mouseGeometry(slot) orelse return;
+    var buffer: [TerminalVt.max_mouse_sequence_bytes]u8 = undefined;
+    const bytes = state.encodeMouse(&buffer, report, geometry) catch return;
+    switch (delivery) {
+        .queued => workspace.enqueueInput(index, bytes),
+        .direct => workspace.writeTeardownInput(index, bytes),
+    }
+}
+
+/// The release of a button whose gesture was cancelled (the program stopped tracking, the capture
+/// or focus was lost) is not an event for anyone: it must not open the context menu or end a
+/// selection. A bit that is not consumed by its release is dropped by the next press of that
+/// button or by any event that shows the button is no longer down.
+fn swallowsRelease(slot: *Surface, event: *const c.winghostty_mouse_event) bool {
+    if (slot.swallow_buttons == 0) return false;
+    const bit: u8 = switch (event.button) {
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        else => 0,
+    };
+    if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP and (slot.swallow_buttons & bit) != 0) {
+        slot.swallow_buttons &= ~bit;
+        return true;
+    }
+    if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_DOWN) slot.swallow_buttons &= ~bit;
+    if (event.kind != c.WINGHOSTTY_MOUSE_BUTTON_UP and event.kind != c.WINGHOSTTY_MOUSE_LEAVE) {
+        var held: u8 = 0;
+        if ((event.modifiers & 0x1) != 0) held |= 1;
+        if ((event.modifiers & 0x2) != 0) held |= 2;
+        if ((event.modifiers & 0x10) != 0) held |= 4;
+        slot.swallow_buttons &= held;
+    }
+    return false;
+}
+
 fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    const index = surfaceIndex(workspace, surface) orelse return;
+    // The pointer left (or re-entered) the surface, so the next motion is a new report.
+    if (event.kind == c.WINGHOSTTY_MOUSE_LEAVE) {
+        if (slot.vt) |state| state.resetMouse();
+    }
+    reconcileProgramGesture(workspace, index, event);
+    if (swallowsRelease(slot, event)) return;
+    const route = routeMouse(slot, event);
+    if (route == .program) return reportMouseToProgram(workspace, index, event);
     // Winghostty numbers the buttons left 1, right 2, middle 3.
     if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP and event.button == 2) workspace.runContextMenu();
-    if (selectionInputFor(event)) |input| {
-        const index = surfaceIndex(workspace, surface) orelse return;
-        workspace.selectionMouse(index, input);
-    }
+    if (selectionInputFor(event)) |input| workspace.selectionMouse(index, input);
 }
 
 /// The callback the host window gets: the mouse handling above, then the selection it changed
@@ -5380,8 +5747,16 @@ fn applySelectionInput(slot: *Surface, input: SelectionInput, now_ms: u64, doubl
 fn onSelection(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_selection_event) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
     const slot = callbackSlot(workspace, surface) orelse return;
-    // The provider ends a drag without a button-up when it loses mouse capture.
-    if (event.dragging == 0) slot.selection.release();
+    // The provider ends a drag without a button-up when it loses mouse capture. It reports a
+    // normal release here too, but before it lets go of the capture, so a drag the program
+    // owns that has lost the capture is the one that will never see its button-up.
+    if (event.dragging == 0) {
+        slot.selection.release();
+        if (slot.mouse_gesture == .program and c.GetCapture() != c.winghostty_surface_get_hwnd(surface)) {
+            const index = surfaceIndex(workspace, surface) orelse return;
+            cancelProgramGesture(workspace, index, .queued);
+        }
+    }
 }
 
 fn onLink(
