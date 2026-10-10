@@ -108,8 +108,11 @@ struct ZmxUnknownLivenessStoreTests {
     await store.handle(
       .promoteNode(
         goal.id, promotion: .timed(triggerPrompt: "/loop 1h check the flake"), promotedBy: nil))
-    await store.handle(.resumeSession(goal.id))
-    await store.handle(.resumeSession(goal.id))
+    let held = await eventually {
+      await store.handle(.resumeSession(goal.id))
+      return session.memos.value.contains { $0.hasPrefix("follow-up staged") }
+    }
+    #expect(held, "held and staged")
 
     #expect(session.delivered.value.isEmpty, "nothing is typed while unknown")
     #expect(session.resumed.value == 0)
@@ -137,7 +140,11 @@ struct ZmxUnknownLivenessStoreTests {
     let id = await store.graph.nodes[0].id
     await store.handle(.completeNode(id, result: nil, from: id))
     await store.handle(.updateNode(id, update: NodeUpdate(goalSummary: "Add examples")))
-    await store.handle(.resumeSession(id))
+    let held = await eventually {
+      await store.handle(.resumeSession(id))
+      return session.memos.value.contains { $0.hasPrefix("follow-up staged") }
+    }
+    #expect(held, "held and staged")
 
     #expect(session.delivered.value.isEmpty, "nothing is typed while unknown")
     #expect(session.resumed.value == 0)

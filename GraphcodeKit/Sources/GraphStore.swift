@@ -265,10 +265,17 @@ public actor GraphStore {
     /// time the item is actually put back rather than when it was queued — see
     /// `staged(_:)`.
     var recorded: Bool = false
+    /// A retype or a reopened goal was typed into a session this store would have resumed
+    /// had it been gone: if the session turns out to be definitely absent by the time the
+    /// drain reaches it, the drain resumes it (once) and keeps the message for it.
+    var resumesIfAbsent: Bool = false
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
   private var unknownNotedAt: [UUID: Date] = [:]
+  /// When the drain last resumed a session on behalf of queued work, so a resumed session
+  /// that is still starting (and so still reads absent) is not resumed again every pass.
+  private var queuedResumeAt: [UUID: Date] = [:]
   /// Each target's `node send` messages still being typed, chained so they land in the
   /// order they were sent — see `typeAfterAcknowledging`.
   private var sessionTyping: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
@@ -317,6 +324,9 @@ public actor GraphStore {
   /// so a live-but-slow host still answers inside this. Short enough that a wedge costs
   /// one poll, not the process.
   private let presenceReadDeadline: Duration
+  /// How long a three-way liveness read may take before it is `.unknown`: `zmx ls` has no
+  /// wall-clock bound of its own, and the queue drain holds one lease for the whole project.
+  private let livenessDeadline: Duration
 
   private let deliveryDeadline: Duration
 
@@ -422,6 +432,7 @@ public actor GraphStore {
     goalCache: GoalEvaluationCache? = nil,
     recurrence: RecurrenceSink? = nil,
     presenceReadDeadline: Duration = .seconds(45),
+    livenessDeadline: Duration = .seconds(15),
     drainLeaseDuration: Duration = .seconds(300),
     subGraphDepth: Int = 0,
     panesLaunchAttendedSessions: Bool = GraphStore.platformPanesLaunchAttendedSessions
@@ -467,6 +478,7 @@ public actor GraphStore {
     self.goalCache = goalCache ?? GoalEvaluationCache()
     self.recurrence = recurrence
     self.presenceReadDeadline = presenceReadDeadline
+    self.livenessDeadline = livenessDeadline
     self.deliveryDeadline = deliveryDeadline
     self.drainLeaseDuration = drainLeaseDuration
   }
@@ -520,14 +532,33 @@ public actor GraphStore {
   /// Every delivery goes through here for the same reason: the path is what lets a
   /// send reach a remote session over ssh instead of asking the local zmx about a
   /// session it has never heard of.
-  private func deliverToSession(_ target: LoopNode, _ message: String) async -> Bool {
-    guard let onDeliverMessage else { return false }
-    // The last check this store makes before typing, for every path that types (the queue,
-    // a stop request, a heartbeat, a reflection prompt): a session zmx cannot vouch for is
-    // not typed into, and `false` is what each caller already does something safe with.
-    // The transport's own send gate remains behind it.
-    if onSessionLiveness != nil, await sessionLiveness(of: target) == .unknown { return false }
-    return await onDeliverMessage(target, message, graph.project.path)
+  /// What came of one typing. `deferredUnknown` is its own case because `false` is read as
+  /// "the session is gone" by the two callers that kill or relaunch on it, and a session zmx
+  /// could not classify is neither gone nor reachable.
+  enum DeliveryOutcome: Sendable, Equatable {
+    case delivered
+    case deferredUnknown
+    case failed
+  }
+
+  /// `liveness` is the caller's one fresh answer for this item, passed down so it is not
+  /// asked for again; without it the answer is read here (bounded). A failure is re-read
+  /// once, so a gate that refused because the session turned unknown is not reported as a
+  /// dead one. The transport's own send gate remains the check that races last.
+  private func deliverToSession(
+    _ target: LoopNode, _ message: String, liveness: SessionLiveness? = nil
+  ) async -> DeliveryOutcome {
+    guard let onDeliverMessage else { return .failed }
+    if onSessionLiveness != nil {
+      let known: SessionLiveness
+      if let liveness { known = liveness } else { known = await sessionLiveness(of: target) }
+      if known == .unknown { return .deferredUnknown }
+    }
+    if await onDeliverMessage(target, message, graph.project.path) { return .delivered }
+    if onSessionLiveness != nil, await sessionLiveness(of: target) == .unknown {
+      return .deferredUnknown
+    }
+    return .failed
   }
 
   /// Every session start goes through here rather than calling `onEnsureSession` directly,
@@ -2377,43 +2408,41 @@ public actor GraphStore {
   /// a fresh launch already opens with the new shape's prompt.
   private func deliverRetype(_ nodeID: UUID, messages: [String]) async {
     guard let node = graph.nodes[id: nodeID] else { return }
-    let path = graph.project.path
     let stillCurrent = { [self] in graph.nodes[id: nodeID]?.loopType == node.loopType }
-    switch await sessionLiveness(of: node) {
-    case .live:
-      for message in messages {
+    var remaining = messages[...]
+    var known = await sessionLiveness(of: node)
+    if known == .live {
+      while let message = remaining.first {
         guard stillCurrent(), let target = graph.nodes[id: nodeID],
           MessageBus.deliverability(to: target) == nil
         else { return }
-        _ = await deliverToSession(target, message)
+        // Typed only after the fresh answer above; the transport's send gate is the last check.
+        guard await deliverToSession(target, message, liveness: .live) == .delivered else { break }
+        remaining.removeFirst()
       }
-      return
-    case .unknown:
-      // zmx could not say whether the session runs: not resumed (a second agent beside a
-      // live one), and the messages are not dropped — they queue like any follow-up and
-      // go out, staged to memory meanwhile, once the session reads idle.
-      guard stillCurrent() else { return }
-      for message in messages {
-        pendingFollowUps.append(
-          PendingFollowUp(id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil))
+      if remaining.isEmpty { return }
+      // The final send was refused: what the session is now decides what happens to what is
+      // left, not the answer it had a moment ago.
+      known = await sessionLiveness(of: node)
+    }
+    guard stillCurrent() else { return }
+    if known == .absent {
+      guard let onResumeSession else {
+        ensureSession(node)
+        return
       }
-      await drainAndBroadcast()
-      return
-    case .absent:
-      break
+      guard await onResumeSession(node, graph.project.path), stillCurrent() else { return }
     }
-    guard let onResumeSession else {
-      ensureSession(node)
-      return
-    }
-    guard await onResumeSession(node, path), stillCurrent() else { return }
-    for message in messages {
+    // Live (a refused send), unknown, or just resumed: kept, never dropped, and typed by the
+    // drain once the session reads idle. A session that turns out absent later is resumed
+    // there (`resumesIfAbsent`).
+    for message in remaining {
       pendingFollowUps.append(
-        PendingFollowUp(id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil))
+        PendingFollowUp(
+          id: UUID(), nodeID: nodeID, text: message, watchedPostID: nil, resumesIfAbsent: true))
     }
     await drainAndBroadcast()
   }
-
   /// A learned note into a node's memory log — `graphcode node memo`, the agent-written
   /// half of the log (the daemon's episode records being the objective half). The store
   /// only routes it; byte caps and formatting live in `NodeMemory`.
@@ -2568,7 +2597,8 @@ public actor GraphStore {
       }
     }
     guard graph.nodes[id: nodeID]?.goal?.summary == node.goal?.summary else { return }
-    let followUp = PendingFollowUp(id: UUID(), nodeID: nodeID, text: prompt, watchedPostID: nil)
+    let followUp = PendingFollowUp(
+      id: UUID(), nodeID: nodeID, text: prompt, watchedPostID: nil, resumesIfAbsent: true)
     pendingFollowUps.append(followUp)
     goalFollowUps[nodeID] = followUp.id
     await drainAndBroadcast()
@@ -3248,8 +3278,13 @@ public actor GraphStore {
     // node already marked `.stopped` reads as unreachable — which would fall straight
     // through to the kill this exists to avoid.
     var asked = false
+    var undecided = false
     if MessageBus.deliverability(to: node) == nil {
-      asked = await deliverToSession(node, MessageBus.stopRequest)
+      switch await deliverToSession(node, MessageBus.stopRequest) {
+      case .delivered: asked = true
+      case .deferredUnknown: undecided = true
+      case .failed: break
+      }
     }
     setNodeState(node.id, .stopped)
     graph.nodes[id: node.id]?.pendingCompletion = nil
@@ -3257,12 +3292,17 @@ public actor GraphStore {
     // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
     // the timer — no typed request needed for a schedule the agent never owned.
     cancelHeartbeat(node.id)
+    // Only a session shown to be unreachable is killed. One zmx could not classify is left
+    // alone and the memo says so: killing it would end a session that may be running.
     recordMemory(
       node.id,
       asked
         ? "\(reason) — its session was asked to stop looping"
-        : "\(reason) — its session could not be reached, so it was killed")
-    if !asked { terminateSession(node) }
+        : undecided
+          ? "\(reason) — zmx could not tell whether its session is running, so it was not "
+            + "killed or asked to stop"
+          : "\(reason) — its session could not be reached, so it was killed")
+    if !asked && !undecided { terminateSession(node) }
     fireOutgoingEdges(from: node.id, sourceSucceeded: false)
   }
 
@@ -3280,7 +3320,10 @@ public actor GraphStore {
   /// unknown); with neither, absent, which is what `onSessionAlive?(…) == true` was.
   private func sessionLiveness(of node: LoopNode) async -> SessionLiveness {
     let path = graph.project.path
-    if let onSessionLiveness { return await onSessionLiveness(node, path) }
+    if let onSessionLiveness {
+      let read = onSessionLiveness
+      return await withDeadline(livenessDeadline) { await read(node, path) } ?? .unknown
+    }
     return await onSessionAlive?(node, path) == true ? .live : .absent
   }
 
@@ -3633,7 +3676,7 @@ public actor GraphStore {
         undeliveredMessages.append((edgeID, .emptyMessage))
         continue
       }
-      guard await deliverToSession(target, text) else {
+      guard await deliverToSession(target, text) == .delivered else {
         undeliveredMessages.append((edgeID, .transportFailed))
         continue
       }
@@ -3760,7 +3803,7 @@ public actor GraphStore {
 
       var delivered = false
       if MessageBus.deliverability(to: target) == nil {
-        delivered = await deliverToSession(target, message)
+        delivered = await deliverToSession(target, message) == .delivered
       }
       // Staged, not dropped: the wake digest carries it into the next session.
       recordMemory(
@@ -3973,13 +4016,20 @@ public actor GraphStore {
     // cancelled send reads as failed, and retrying or staging again from here would
     // respawn the loop and type into it behind the chain's next message.
     if resolved {
-      if await deliverToSession(target, message) { return .typed }
+      let outcome = await deliverToSession(target, message)
+      if outcome == .delivered { return .typed }
       if Task.isCancelled { return .staged(reason: "deadline") }
       stageUntyped(message, to: target)
-      return .staged(reason: "session-gone")
+      return .staged(reason: outcome == .deferredUnknown ? "session-unknown" : "session-gone")
     }
-    if await deliverToSession(target, message) { return .typed }
+    let first = await deliverToSession(target, message)
+    if first == .delivered { return .typed }
     if Task.isCancelled { return .staged(reason: "deadline") }
+    if first == .deferredUnknown {
+      // Not relaunched: a second agent beside one that may be running is the harm.
+      stageUntyped(message, to: target)
+      return .staged(reason: "session-unknown")
+    }
     // The transport can also fail because the session died after the graph last
     // looked — a goal loop whose agent exited on its very first turn had no session
     // left to type into, and (before sessions that answer while dead stopped passing
@@ -3995,7 +4045,7 @@ public actor GraphStore {
       ensureSession(target)
       try? await Task.sleep(for: Self.respawnedSessionSettle)
       if Task.isCancelled { return .staged(reason: "deadline") }
-      if await deliverToSession(target, message) { return .typed }
+      if await deliverToSession(target, message) == .delivered { return .typed }
       if Task.isCancelled { return .staged(reason: "deadline") }
     }
     stageUntyped(message, to: target)
@@ -4199,6 +4249,9 @@ public actor GraphStore {
     // the batch either goes out in order or waits together for the next pass. It also
     // costs one probe per target rather than one per message.
     var readings: [UUID: Presence] = [:]
+    var livenessReadings: [UUID: SessionLiveness] = [:]
+    var resumedThisPass: Set<UUID> = []
+    var resumeFailedThisPass: Set<UUID> = []
     while index < batch.count {
       guard drainOwner == owner else { return }
       let pending = batch[index]
@@ -4256,6 +4309,57 @@ public actor GraphStore {
         drainInFlight = nil
         continue
       }
+      // One bounded liveness answer per target per pass, taken before presence (an absent
+      // session reads neither idle nor busy, and must not wait forever behind that) and
+      // passed down to the send so it is not asked again. Unknown is held and staged, never
+      // typed into however idle a presence reads; a session that is now definitely absent is
+      // resumed once for the items that carry that policy, and they are kept for it. Without
+      // a liveness hook none of this applies and the drain behaves as it always has.
+      var liveness: SessionLiveness?
+      if onSessionLiveness != nil {
+        if let seen = livenessReadings[pending.nodeID] {
+          liveness = seen
+        } else {
+          let fresh = await sessionLiveness(of: node)
+          guard drainOwner == owner else { return }
+          livenessReadings[pending.nodeID] = fresh
+          liveness = fresh
+        }
+        if liveness == .unknown {
+          noteDeferredOnUnknown(pending.nodeID, "a queued follow-up")
+          remaining.append(staged(pending))
+          drainDeferred = remaining
+          drainInFlight = nil
+          continue
+        }
+        if liveness == .absent, pending.resumesIfAbsent || resumedThisPass.contains(node.id) {
+          let cooling = queuedResumeAt[node.id].map { Date().timeIntervalSince($0) < 30 } ?? false
+          if !cooling, resumedThisPass.insert(node.id).inserted {
+            queuedResumeAt[node.id] = Date()
+            let resumed: Bool
+            if let onResumeSession {
+              resumed = await onResumeSession(node, graph.project.path)
+            } else {
+              ensureSession(node)
+              resumed = true
+            }
+            guard drainOwner == owner else { return }
+            if !resumed { resumeFailedThisPass.insert(node.id) }
+          }
+          if resumeFailedThisPass.contains(node.id) {
+            // Could not be brought back: the message goes to memory for its next wake
+            // rather than being retried against a session that will not come.
+            if !pending.recorded {
+              recordMemory(pending.nodeID, "while you were away: \(pending.text)")
+            }
+          } else {
+            remaining.append(pending)
+            drainDeferred = remaining
+          }
+          drainInFlight = nil
+          continue
+        }
+      }
       let presence: Presence
       if let known = readings[pending.nodeID] {
         presence = known
@@ -4272,24 +4376,11 @@ public actor GraphStore {
         drainInFlight = nil
         continue
       }
-      // Asked fresh for each message, not read once per pass: a session zmx cannot vouch for
-      // is not typed into however idle its presence reads (a control socket or a test double
-      // can say idle for a session nobody has proven alive). It stays queued, staged to
-      // memory once, for a pass that gets a clean answer; the transport's own send gate
-      // remains the last check.
-      if onSessionLiveness != nil, await sessionLiveness(of: node) == .unknown {
-        guard drainOwner == owner else { return }
-        noteDeferredOnUnknown(pending.nodeID, "a queued follow-up")
-        remaining.append(staged(pending))
-        drainDeferred = remaining
-        drainInFlight = nil
-        continue
-      }
-      guard drainOwner == owner else { return }
       pendingDeliveryAttempts.insert(pending.id)
       let attempt = DeliveryAttempt()
       let delivered = await withDeadline(deliveryDeadline) {
-        let result = await self.deliverToSession(node, pending.text)
+        let result =
+          await self.deliverToSession(node, pending.text, liveness: liveness) == .delivered
         await attempt.complete(result)
         return result
       }
@@ -4730,8 +4821,9 @@ public actor GraphStore {
     // reads the exhaustion from memory.
     var asked = false
     if MessageBus.deliverability(to: current) == nil {
-      asked = await deliverToSession(
-        current, MessageBus.budgetExhaustedRequest(used: used, budget: budget))
+      asked =
+        await deliverToSession(
+          current, MessageBus.budgetExhaustedRequest(used: used, budget: budget)) == .delivered
     }
     graph.nodes[id: nodeID]?.state = .stalled
     graph.nodes[id: nodeID]?.stallReason = "budget exhausted: \(used) of \(budget) tokens spent"
@@ -4759,7 +4851,7 @@ public actor GraphStore {
     let message =
       "[graphcode] Goal not met yet: `\(predicate)` still exits non-zero. "
       + "Its output ends with: \(tail)"
-    guard await deliverToSession(node, message) else { return }
+    guard await deliverToSession(node, message) == .delivered else { return }
     goalCache.setFeedback(tail, for: node.id)
     recordMemory(node.id, "predicate feedback: \(tail)")
   }
