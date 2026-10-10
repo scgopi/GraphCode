@@ -273,16 +273,14 @@ fn terminalPasteFailureStatus(err: anyerror) []const u8 {
     return "Unable to paste clipboard text";
 }
 
-/// What the status line says when the Windows clipboard refused a copy. The user's previous
-/// clipboard text is restored when the write fails, and the message says whether it was.
+/// What the status line says when a copy to the Windows clipboard fails. A copy that fails
+/// after the clipboard was emptied leaves it empty, and the message says so; nothing earlier is
+/// restored.
 fn terminalCopyFailureStatus(err: anyerror) []const u8 {
-    if (err == error.ClipboardWriteFailedKeptPreviousText)
-        return "Unable to copy: the clipboard refused the text; its previous text was kept";
-    if (err == error.ClipboardWriteFailedLostPreviousText)
-        return "Unable to copy: the clipboard refused the text and its previous text could not be restored";
+    if (err == error.ClipboardWriteFailed)
+        return "Unable to copy: the clipboard refused the text and may now be empty";
+    if (err == error.OutOfMemory) return "Unable to copy: not enough memory; the clipboard was left unchanged";
     if (err == error.ClipboardOpenFailed) return "Unable to copy: the clipboard is in use by another program";
-    if (err == error.ClipboardPreviousTextUnreadable)
-        return "Unable to copy: the clipboard's current text could not be read, so it was left unchanged";
     return "Unable to copy terminal selection";
 }
 
@@ -10734,24 +10732,20 @@ test "terminal paste refuses clipboard text above the size limit with a clear st
     }
 }
 
-test "a refused terminal copy says whether the user's previous clipboard text survived" {
+test "a failed terminal copy says what happened to the clipboard" {
     try std.testing.expectEqualStrings(
-        "Unable to copy: the clipboard refused the text; its previous text was kept",
-        terminalCopyFailureStatus(error.ClipboardWriteFailedKeptPreviousText),
+        "Unable to copy: the clipboard refused the text and may now be empty",
+        terminalCopyFailureStatus(error.ClipboardWriteFailed),
     );
     try std.testing.expectEqualStrings(
-        "Unable to copy: the clipboard refused the text and its previous text could not be restored",
-        terminalCopyFailureStatus(error.ClipboardWriteFailedLostPreviousText),
+        "Unable to copy: not enough memory; the clipboard was left unchanged",
+        terminalCopyFailureStatus(error.OutOfMemory),
     );
     try std.testing.expectEqualStrings(
         "Unable to copy: the clipboard is in use by another program",
         terminalCopyFailureStatus(error.ClipboardOpenFailed),
     );
-    try std.testing.expectEqualStrings(
-        "Unable to copy: the clipboard's current text could not be read, so it was left unchanged",
-        terminalCopyFailureStatus(error.ClipboardPreviousTextUnreadable),
-    );
-    try std.testing.expectEqualStrings("Unable to copy terminal selection", terminalCopyFailureStatus(error.ClipboardWriteFailed));
+    try std.testing.expectEqualStrings("Unable to copy terminal selection", terminalCopyFailureStatus(error.ClipboardClearFailed));
 }
 
 test "workspace cycle keyboard fallback never turns Alt paging into terminal tabs" {
@@ -14402,10 +14396,10 @@ test "live terminal copy: a clipboard that refuses the text keeps the selection 
             return err;
         }
     };
-    Refusing.err = error.ClipboardWriteFailedLostPreviousText;
+    Refusing.err = error.ClipboardWriteFailed;
     fixture.app.copyTerminalSelectionWith(Refusing);
     try std.testing.expectEqualStrings(
-        "Unable to copy: the clipboard refused the text and its previous text could not be restored",
+        "Unable to copy: the clipboard refused the text and may now be empty",
         fixture.app.status(),
     );
     // Nothing was copied, so the selection stays for another attempt.
