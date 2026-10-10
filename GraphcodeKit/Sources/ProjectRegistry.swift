@@ -78,6 +78,7 @@ public actor ProjectRegistry {
   private let readSummary: (@Sendable (LoopNode, String?) async -> SummaryReading?)?
   private let readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)?
   private let sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)?
+  private let sessionLiveness: (@Sendable (LoopNode, String?) async -> SessionLiveness)?
   private let composeBoard:
     (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)?
   /// Non-nil only while at least one client is attached — see `startPresencePolling`.
@@ -146,6 +147,11 @@ public actor ProjectRegistry {
     readPresence: (@Sendable (LoopNode, String?) async -> PresenceReading)? =
       CLISessionBackend.readPresence,
     sessionAlive: (@Sendable (LoopNode, String?) async -> Bool)? = CLISessionBackend.sessionAlive,
+    // Nil on purpose, unlike `sessionAlive`: a registry given only a `sessionAlive` stub must
+    // not reach the real zmx for the three-way answer. The daemon passes
+    // `CLISessionBackend.sessionLiveness`; without it a store derives live/absent from
+    // `sessionAlive` and never sees `.unknown`.
+    sessionLiveness: (@Sendable (LoopNode, String?) async -> SessionLiveness)? = nil,
     composeBoard: (@Sendable (LoopNode, LoopSummary, String?, String?) async -> SummaryBoard?)? =
       CLISessionBackend.composeBoard,
     reapCondemnedSessions: Bool = false,
@@ -179,6 +185,7 @@ public actor ProjectRegistry {
     self.readSummary = readSummary
     self.readPresence = readPresence
     self.sessionAlive = sessionAlive
+    self.sessionLiveness = sessionLiveness
     self.composeBoard = composeBoard
     self.startQuickChat =
       startQuickChat ?? { node, path in
@@ -1252,6 +1259,7 @@ public actor ProjectRegistry {
       onReadPresence: readPresence,
       onReadGoalVerdict: readGoalVerdict,
       onSessionAlive: sessionAlive,
+      onSessionLiveness: sessionLiveness,
       onEndSession: CLISessionBackend.endSession,
       onAttachedClients: CLISessionBackend.attachedClients,
       onResumeSession: CLISessionBackend.resumeSession,

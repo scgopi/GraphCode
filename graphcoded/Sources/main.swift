@@ -135,7 +135,8 @@ import GraphcodeKit
   let handshakeLimiter = WindowsPipeHandshakeLimiter(limit: 32)
   let registry = ProjectRegistry(
     persistenceDirectory: supportDirectory,
-    replayStore: replayStore)
+    replayStore: replayStore,
+    sessionLiveness: CLISessionBackend.sessionLiveness)
   let replayCleanupTask = replayStore.startCleanup()
   let listener: WindowsNamedPipeListener = {
     do {
@@ -492,6 +493,7 @@ import GraphcodeKit
   // Before the shutdown handlers below, which flush its writer on the way out.
   let registry = ProjectRegistry(
     persistenceDirectory: supportDirectory,
+    sessionLiveness: CLISessionBackend.sessionLiveness,
     reapCondemnedSessions: true)
 
   // Termination is handled on the main queue, not in signal context (#167). The handlers
