@@ -182,8 +182,9 @@ pub fn draw(
     fill(hdc, sidebar, Tokens.workspace_rail);
     drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
     drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
-    const has_update = update_version.len != 0;
-    const has_error = ingress_error.len != 0;
+    const footer = effectiveFooter(viewport_bottom, update_version.len != 0, ingress_error.len != 0);
+    const has_update = footer.update;
+    const has_error = footer.ingress;
     const saved_clip = c.SaveDC(hdc);
     _ = c.IntersectClipRect(
         hdc,
@@ -286,7 +287,7 @@ pub fn draw(
             for (model.attention_entries.items[0..@min(model.attention_entries.items.len, 4)], 0..) |entry, index| {
                 drawText(hdc, allocator, entry.node.title, 24, attention_y, 11, 0x00E6E6E6);
                 drawText(hdc, allocator, attentionReason(entry.node), 24, attention_y + 15, 9, stateColor(entry.node.state));
-                const stop_bounds = needsYouStopBounds(model, inspection, state, 0, index);
+                const stop_bounds = needsYouStopBounds(model, inspection, state, scroll_offset, index);
                 fill(hdc, stop_bounds, 0x00353224);
                 drawTextRect(hdc, allocator, "Stop", stop_bounds, 9, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
                 attention_y += 34;
@@ -295,7 +296,7 @@ pub fn draw(
             for (model.attention.items[0..@min(model.attention.items.len, 4)], 0..) |node, index| {
                 drawText(hdc, allocator, node.title, 24, attention_y, 11, 0x00E6E6E6);
                 drawText(hdc, allocator, attentionReason(node), 24, attention_y + 15, 9, stateColor(node.state));
-                const stop_bounds = needsYouStopBounds(model, inspection, state, 0, index);
+                const stop_bounds = needsYouStopBounds(model, inspection, state, scroll_offset, index);
                 fill(hdc, stop_bounds, 0x00353224);
                 drawTextRect(hdc, allocator, "Stop", stop_bounds, 9, 0x00FFCD7A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
                 attention_y += 34;
@@ -306,11 +307,11 @@ pub fn draw(
         const attention_rows = @min(model.attentionCount(), 4);
         const activity_y = section_y + 30 + (@as(i32, @intCast(attention_rows)) * 34) + 18;
         drawText(hdc, allocator, "Activity", 18, activity_y, 11, 0x00B8B8B8);
-        const filter_bounds = activityFilterBounds(model, inspection, state, 0);
+        const filter_bounds = activityFilterBounds(model, inspection, state, scroll_offset);
         fill(hdc, filter_bounds, if (state.activity_attention_only) 0x00302B1D else 0x0026262B);
         drawTextRect(hdc, allocator, "Attention only", filter_bounds, 9, if (state.activity_attention_only) 0x00FFCD7A else 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-        const left_bounds = activityControlBounds(model, inspection, state, 0, .left);
-        const right_bounds = activityControlBounds(model, inspection, state, 0, .right);
+        const left_bounds = activityControlBounds(model, inspection, state, scroll_offset, .left);
+        const right_bounds = activityControlBounds(model, inspection, state, scroll_offset, .right);
         fill(hdc, left_bounds, 0x0026262B);
         fill(hdc, right_bounds, 0x0026262B);
         drawTextRect(hdc, allocator, "<", left_bounds, 10, 0x00B8B8B8, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
@@ -319,7 +320,7 @@ pub fn draw(
         for (0..viewport.visible_count) |visible_index| {
             const activity_index = activityEventAtVisible(model, state, visible_index) orelse break;
             const event = model.activity.items[activity_index];
-            const card = activityCardBounds(model, inspection, state, 0, visible_index);
+            const card = activityCardBounds(model, inspection, state, scroll_offset, visible_index);
             const stamp = std.fmt.allocPrint(allocator, "{d}m", .{@max(0, @divTrunc(std.time.timestamp() - event.timestamp, 60))}) catch null;
             defer if (stamp) |value| allocator.free(value);
             fill(hdc, card, 0x0026262B);
@@ -329,13 +330,13 @@ pub fn draw(
         }
     }
     if (saved_clip != 0) _ = c.RestoreDC(hdc, saved_clip);
-    if (ingress_error.len != 0 and errorFooterVisible(viewport_bottom)) {
+    if (has_error and errorFooterVisible(viewport_bottom)) {
         const bounds = errorFooterRect(viewport_bottom);
         fill(hdc, bounds, 0x00242448);
         drawTextRect(hdc, allocator, ingress_error, errorFooterTextRect(viewport_bottom), 10, 0x006060FF, c.DT_LEFT | c.DT_WORDBREAK | c.DT_NOPREFIX);
     }
-    if (update_version.len != 0) {
-        const bounds = updateBannerRect(viewport_bottom, ingress_error.len != 0);
+    if (has_update) {
+        const bounds = updateBannerRect(viewport_bottom, has_error);
         fill(hdc, bounds, 0x00352B1C);
         drawText(hdc, allocator, "v", bounds.left + 10, bounds.top + 10, 14, 0x00FF840A);
         drawText(hdc, allocator, "Update available", bounds.left + 30, bounds.top + 7, 12, 0x00F0F0F0);
@@ -347,7 +348,7 @@ pub fn draw(
         hdc,
         allocator,
         status,
-        statusTextRect(viewport_bottom, update_version.len != 0, ingress_error.len != 0),
+        statusTextRect(viewport_bottom, has_update, has_error),
         11,
         0x00909090,
         c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
@@ -391,6 +392,33 @@ pub fn footerReserve(has_update: bool, has_error: bool) i32 {
     return footer_status_extent +
         (if (has_error) footer_error_extent else 0) +
         (if (has_update) footer_update_extent else 0);
+}
+
+/// Scroll region (52 px, room for two 24 px row slots) the sidebar keeps before it gives footer space back to content. It is a region height, not a guarantee of two published elements at every offset.
+pub const min_content_region: i32 = 52;
+
+pub const Footer = struct {
+    /// The update banner is shown above the status line.
+    update: bool,
+    /// The inline ingress error footer is shown above the update banner.
+    ingress: bool,
+};
+
+/// The footer parts that fit while still leaving `min_content_region` of scrolling content. On a
+/// short viewport the error footer collapses first, then the update banner; the status line is
+/// the footer's floor. The same result drives drawing, hit testing, and UIA, so a collapsed
+/// part is neither painted nor published nor clickable.
+pub fn effectiveFooter(viewport_bottom: i32, has_update: bool, has_error: bool) Footer {
+    var footer = Footer{ .update = has_update, .ingress = has_error };
+    if (footerLeavesRegion(viewport_bottom, footer)) return footer;
+    footer.ingress = false;
+    if (footerLeavesRegion(viewport_bottom, footer)) return footer;
+    footer.update = false;
+    return footer;
+}
+
+fn footerLeavesRegion(viewport_bottom: i32, footer: Footer) bool {
+    return viewport_bottom - footerReserve(footer.update, footer.ingress) - content_top >= min_content_region;
 }
 
 /// Bottom edge of the scrollable sidebar content; rows, labels, hit targets, and UIA
@@ -439,8 +467,9 @@ pub fn updateBannerRect(viewport_bottom: i32, has_error: bool) c.RECT {
 }
 
 pub fn updateBannerAt(x: i32, y: i32, viewport_bottom: i32, available: bool, has_error: bool) bool {
-    if (!available) return false;
-    const bounds = updateBannerRect(viewport_bottom, has_error);
+    const footer = effectiveFooter(viewport_bottom, available, has_error);
+    if (!footer.update) return false;
+    const bounds = updateBannerRect(viewport_bottom, footer.ingress);
     return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
 }
 
@@ -1034,7 +1063,7 @@ pub fn activityControlBounds(
     control: ActivityDirection,
 ) c.RECT {
     const top = activityHeaderTop(model, inspection, state, scroll_offset);
-    const left: i32 = if (control == .left) 184 else 208;
+    const left: i32 = if (control == .left) 172 else 196;
     return rect(left, top, left + 22, top + 22);
 }
 
@@ -1866,6 +1895,33 @@ test "update banner is a bounded footer action" {
     try std.testing.expect(!updateBannerAt(bounds.right, bounds.bottom - 1, 700, true, false));
     try std.testing.expect(!updateBannerAt(bounds.left, bounds.top, 700, false, false));
     try std.testing.expect(updateBannerRect(700, true).bottom < errorFooterRect(700).top);
+}
+
+test "footer parts collapse error footer first, then the update banner, to keep a 52 px scroll region" {
+    // Room for everything: nothing collapses.
+    try std.testing.expectEqual(Footer{ .update = true, .ingress = true }, effectiveFooter(700, true, true));
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(700, false, false));
+    try std.testing.expectEqual(Footer{ .update = true, .ingress = false }, effectiveFooter(700, true, false));
+    // The collapse points are exact: the stack fits when viewport - reserve - content_top >= min.
+    const status_only = content_top + min_content_region + footerReserve(false, false);
+    const with_update = content_top + min_content_region + footerReserve(true, false);
+    const with_both = content_top + min_content_region + footerReserve(true, true);
+    try std.testing.expectEqual(Footer{ .update = true, .ingress = true }, effectiveFooter(with_both, true, true));
+    try std.testing.expectEqual(Footer{ .update = true, .ingress = false }, effectiveFooter(with_both - 1, true, true));
+    try std.testing.expectEqual(Footer{ .update = true, .ingress = false }, effectiveFooter(with_update, true, true));
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(with_update - 1, true, true));
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(status_only, true, true));
+    // An error footer collapses without an update banner too, and nothing is ever added.
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = true }, effectiveFooter(content_top + min_content_region + footerReserve(false, true), false, true));
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(content_top + min_content_region + footerReserve(false, true) - 1, false, true));
+    try std.testing.expectEqual(Footer{ .update = false, .ingress = false }, effectiveFooter(10, false, false));
+    // The collapsed footer is the one the content region, status line, and banner hit test use.
+    for ([_]i32{ status_only, with_update - 1, with_update, with_both - 1, with_both }) |viewport| {
+        const footer = effectiveFooter(viewport, true, true);
+        try std.testing.expect(viewport - footerReserve(footer.update, footer.ingress) - content_top >= min_content_region or !footer.update and !footer.ingress);
+        const banner = updateBannerRect(viewport, footer.ingress);
+        try std.testing.expectEqual(footer.update, updateBannerAt(banner.left, banner.top, viewport, true, true));
+    }
 }
 
 test "error footer exposes an inset wrapping rect" {
