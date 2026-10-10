@@ -527,11 +527,15 @@ unchanged; none of them can cause a session to be ended.
 - **A failed rollback save is not handled.** When the session start or the native
   surface then fails, the claim is taken back in memory and saved again; if that
   second save fails it is only dropped, and the on-disk layout keeps a pane that
-  names a session that was never created. The record is already removed, so the
-  claim cannot authorize a kill; a later successful save of the layout, or the
-  next restore (which drops a pane whose session `zmx ls` does not show running),
-  clears it. Retiring such a loop moves its layout aside as `.refused` instead of
-  deleting it. A retry of the save was considered and not built: `Layout.save`
+  names either a session that was never created (the start failed) or one that
+  survived the failure (the native surface failed after the attach was spawned).
+  The record is already removed, so the claim cannot authorize a kill. A later
+  successful save of the layout clears it. A restore clears it only after a
+  successful `zmx ls` shows the session not running; when the listing fails the
+  pane stays saved and is retried, and a surviving session is re-attached as a
+  tab with no record. Retiring such a loop moves its layout aside as `.refused`
+  instead of deleting it. A retry of the save was considered and not built:
+  `Layout.save`
   replaces the file with no compare-and-swap, so a deferred retry could overwrite
   a newer layout written by another shell, and loop switches swap the layout and
   its path.
