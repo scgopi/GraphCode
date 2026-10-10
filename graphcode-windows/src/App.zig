@@ -21039,13 +21039,17 @@ const SheetCancel = struct {
 
     /// Call `defer disarm()` right after this: neither timer may outlive the test that armed it,
     /// or it could close an unrelated sheet later.
-    fn arm(chosen: Method) void {
+    fn arm(chosen: Method) !void {
         disarm();
         method = chosen;
         fired = false;
         watchdog_fired = false;
         fire_timer = c.SetTimer(null, 0, 700, &fire);
         watchdog_timer = c.SetTimer(null, 0, 8000, &watchdog);
+        if (fire_timer == 0 or watchdog_timer == 0) {
+            disarm();
+            return error.TestTimerUnavailable;
+        }
     }
 
     fn disarm() void {
@@ -21116,7 +21120,7 @@ fn closePaneAfterCancelledSheet(method: SheetCancel.Method) !void {
     try std.testing.expect(state.focus_on_focused_pane);
 
     // Ctrl+Shift+N opens the New Loop sheet (a modal loop), which is cancelled from inside it.
-    SheetCancel.arm(method);
+    try SheetCancel.arm(method);
     defer SheetCancel.disarm();
     _ = try RealShellWindow.press(&fixture, .{ .vk = 'N', .ctrl = true, .shift = true });
     try std.testing.expect(SheetCancel.fired);
