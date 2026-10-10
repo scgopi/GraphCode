@@ -12,6 +12,42 @@ pub fn allocName(allocator: std.mem.Allocator, session: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, prefix ++ "{s}", .{session});
 }
 
+/// The uuid this shell mints for a tab or split's session (`WorkspaceLayout.newSurfaceID`):
+/// lowercase 8-4-4-4-12 hex. The daemon names its agent sessions after the node's uuid in
+/// uppercase, so the two namespaces never overlap and a case-sensitive test tells them apart.
+pub fn isShellUuid(text: []const u8) bool {
+    if (text.len != 36) return false;
+    for (text, 0..) |byte, index| {
+        if (index == 8 or index == 13 or index == 18 or index == 23) {
+            if (byte != '-') return false;
+        } else if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    }
+    return true;
+}
+
+/// The session name of a pane id when the pane can only be one of this shell's own plain
+/// shells: `graphcode-` plus a lowercase uuid, exactly. Null for anything else (an agent's
+/// uppercase uuid, a foreign or unprefixed name), which this shell must never end. A gate
+/// harness that sets `GRAPHCODE_SHELL_SESSION_PREFIX` makes the shell mint `<prefix>-<uuid>`
+/// ids (see `WorkspaceLayout.newSurfaceID`), which are accepted under that exact prefix only.
+pub fn shellSessionName(allocator: std.mem.Allocator, pane_id: []const u8) !?[]u8 {
+    const harness = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SHELL_SESSION_PREFIX") catch "";
+    defer if (harness.len != 0) allocator.free(harness);
+    return shellSessionNameWith(allocator, pane_id, harness);
+}
+
+fn shellSessionNameWith(allocator: std.mem.Allocator, pane_id: []const u8, harness_prefix: []const u8) !?[]u8 {
+    const unprefixed = if (std.mem.startsWith(u8, pane_id, prefix)) pane_id[prefix.len..] else pane_id;
+    var uuid = unprefixed;
+    if (harness_prefix.len != 0 and std.mem.startsWith(u8, unprefixed, harness_prefix) and
+        unprefixed.len > harness_prefix.len and unprefixed[harness_prefix.len] == '-')
+    {
+        uuid = unprefixed[harness_prefix.len + 1 ..];
+    }
+    if (!isShellUuid(uuid)) return null;
+    return try std.fmt.allocPrint(allocator, prefix ++ "{s}", .{unprefixed});
+}
+
 pub const ChildStdio = enum {
     /// `zmx attach`: the shell writes terminal input and reads terminal output.
     attach,
@@ -65,6 +101,57 @@ test "canonical zmx session names add the ownership prefix exactly once" {
         "graphcode-alpha",
         try nameBuffer("graphcode-alpha", &storage),
     );
+}
+
+test "only a lowercase uuid under the graphcode prefix names a shell session this shell may end" {
+    const allocator = std.testing.allocator;
+    const uuid = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const bare = (try shellSessionName(allocator, uuid)).?;
+    defer allocator.free(bare);
+    try std.testing.expectEqualStrings("graphcode-" ++ uuid, bare);
+    const prefixed = (try shellSessionName(allocator, "graphcode-" ++ uuid)).?;
+    defer allocator.free(prefixed);
+    try std.testing.expectEqualStrings("graphcode-" ++ uuid, prefixed);
+
+    for ([_][]const u8{
+        "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D",
+        "graphcode-0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D",
+        "0a1b2c3d-4e5f-4a6b-8c7d-9E0F1A2B3C4D",
+        "other-" ++ uuid,
+        "Graphcode-" ++ uuid,
+        "graphcode-graphcode-" ++ uuid,
+        "alpha",
+        "graphcode-alpha",
+        "graphcode-",
+        "",
+        uuid ++ "0",
+        "0a1b2c3d4e5f4a6b8c7d9e0f1a2b3c4d",
+        "0g1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    }) |not_ours| {
+        try std.testing.expect((try shellSessionName(allocator, not_ours)) == null);
+    }
+}
+
+test "a gate harness's session prefix is accepted only as exactly that prefix before a lowercase uuid" {
+    const allocator = std.testing.allocator;
+    const uuid = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const ok = (try shellSessionNameWith(allocator, "gs-abc-" ++ uuid, "gs-abc")).?;
+    defer allocator.free(ok);
+    try std.testing.expectEqualStrings("graphcode-gs-abc-" ++ uuid, ok);
+    const prefixed = (try shellSessionNameWith(allocator, "graphcode-gs-abc-" ++ uuid, "gs-abc")).?;
+    defer allocator.free(prefixed);
+    try std.testing.expectEqualStrings("graphcode-gs-abc-" ++ uuid, prefixed);
+    for ([_][]const u8{
+        "other-" ++ uuid,
+        "gs-abc-gs-abc-" ++ uuid,
+        "gs-abc-0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D",
+        "gs-abc" ++ uuid,
+        "gs-abc-alpha",
+        "gs-abc-",
+    }) |not_ours| {
+        try std.testing.expect((try shellSessionNameWith(allocator, not_ours, "gs-abc")) == null);
+    }
+    try std.testing.expect((try shellSessionNameWith(allocator, "gs-abc-" ++ uuid, "")) == null);
 }
 
 test "zmx listing capture has readable output without stdin or a console" {
