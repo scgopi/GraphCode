@@ -4484,6 +4484,103 @@ test "ordinary Tab production dispatch reaches the real terminal key callback" {
     }
 }
 
+test "every function key F1 to F12 reaches a focused terminal exactly once through production dispatch" {
+    const MainWindow = @import("MainWindow.zig");
+    const Probe = OrdinaryTabKeyboardTest;
+    const Api = struct {
+        var workspace: *Workspace = undefined;
+        var event: c.winghostty_key_event = undefined;
+        var dispatch_calls: usize = 0;
+        var shell_keys: usize = 0;
+
+        pub fn translateAccelerator(_: c.HWND, _: c.HACCEL, _: *c.MSG) c_int {
+            return 0;
+        }
+
+        pub fn translateMessage(_: *const c.MSG) c.BOOL {
+            return 1;
+        }
+
+        pub fn dispatchMessage(_: *const c.MSG) c.LRESULT {
+            dispatch_calls += 1;
+            onKey(@ptrCast(workspace), Probe.registered, &event);
+            return 0;
+        }
+
+        fn route(_: ?*anyopaque, message: *const c.MSG, ctrl: bool, shift: bool, alt: bool) MainWindow.TerminalKeyRoute {
+            return TerminalKeys.routeChord(@intCast(message.wParam), .{ .ctrl = ctrl, .shift = shift, .alt = alt });
+        }
+
+        // Stands in for App.onShellKey, which enters the window toolbar on F6.
+        fn shellKey(_: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+            const handled = @import("InputRouter.zig").headerKey(key, ctrl, shift, alt, false) != .none;
+            if (handled) shell_keys += 1;
+            return handled;
+        }
+    };
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    Api.workspace = &workspace;
+    const owner: c.HWND = @ptrFromInt(0x1000);
+    const child: c.HWND = @ptrFromInt(0x2000);
+    var window = MainWindow.Window{
+        .hwnd = owner,
+        .accelerators = @ptrFromInt(0x3000),
+        .terminal_route = &Api.route,
+        .key_callback = &Api.shellKey,
+    };
+    const keys = MainWindow.KeyContext{
+        .active = true,
+        .owner_enabled = true,
+        .target_owned = true,
+        .target_visible = true,
+        .target_enabled = true,
+    };
+    const expected = [_][]const u8{
+        "\x1bOP",  "\x1bOQ",  "\x1bOR",  "\x1bOS",
+        "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
+        "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
+    };
+    // Plain F10 and F-keys with no Alt context arrive as either key-down family.
+    for ([_]c.UINT{ c.WM_KEYDOWN, c.WM_SYSKEYDOWN }) |down| {
+        for (expected, 0..) |bytes, index| {
+            const vk: usize = c.VK_F1 + index;
+            var message = std.mem.zeroes(c.MSG);
+            message.hwnd = child;
+            message.message = down;
+            message.wParam = vk;
+            message.lParam = 0x00440001;
+            Api.dispatch_calls = 0;
+            Api.shell_keys = 0;
+            Api.event = providerKey(vk, 0, c.WINGHOSTTY_KEY_PRESS);
+            window.dispatchMessageWith(Api, &message, keys, child);
+            try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+            if (Api.shell_keys != 0) {
+                std.debug.print("F{d} was taken by the shell instead of the terminal\n", .{index + 1});
+                return error.TestUnexpectedResult;
+            }
+            try Probe.expectInput(&workspace, bytes);
+            try std.testing.expectEqual(@as(usize, 0), probe.calls);
+        }
+    }
+    // Shift+F6 keeps its modifier parameter instead of entering the window toolbar.
+    var shifted = std.mem.zeroes(c.MSG);
+    shifted.hwnd = child;
+    shifted.message = c.WM_KEYDOWN;
+    shifted.wParam = c.VK_F6;
+    Api.dispatch_calls = 0;
+    Api.event = providerKey(c.VK_F6, provider_shift, c.WINGHOSTTY_KEY_PRESS);
+    var shift_keys = keys;
+    shift_keys.shift = true;
+    window.dispatchMessageWith(Api, &shifted, shift_keys, child);
+    try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+    try std.testing.expectEqual(@as(usize, 0), Api.shell_keys);
+    try Probe.expectInput(&workspace, "\x1b[17;2~");
+}
+
 test "TerminalSurface.isApplicationShortcut forwards only the chords a terminal does not keep" {
     try std.testing.expect(isApplicationShortcut(c.VK_PRIOR, true, false, false));
     try std.testing.expect(isApplicationShortcut(c.VK_NEXT, true, false, false));
@@ -4596,6 +4693,21 @@ test "Ctrl+Alt held on every application-shortcut key leaves the key to the term
         onKey(@ptrCast(&workspace), Probe.registered, &key);
         try std.testing.expectEqual(@as(usize, 1), probe.calls);
     }
+}
+
+test "terminal Ctrl+S, T, D, W and N add nothing beyond the WM_CHAR control byte" {
+    const Probe = OrdinaryTabKeyboardTest;
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    defer workspace.input_queue.clear();
+    var probe = Probe{};
+    probe.bind(&workspace);
+    for ([_]usize{ 'S', 'T', 'D', 'W', 'N' }) |vk| {
+        const event = providerKey(vk, provider_ctrl, c.WINGHOSTTY_KEY_PRESS);
+        onKey(@ptrCast(&workspace), Probe.registered, &event);
+        try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
 }
 
 test "provider Shift modifier bit makes Tab a backtab instead of loop navigation" {

@@ -6898,7 +6898,7 @@ pub const App = struct {
         switch (command) {
             .none => return false,
             .enter => {
-                const action = layout.step(null, shift) orelse return false;
+                const action = layout.step(null, shift and !ctrl) orelse return false;
                 return self.focusHeader(action);
             },
             .exit => self.leaveHeader(true),
@@ -12526,7 +12526,7 @@ const LiveKeyboard = struct {
     index: usize,
     original_state: [256]u8,
 
-    const Chord = struct { vk: u32, ctrl: bool = false, shift: bool = false, alt: bool = false, extended: bool = false, repeat: bool = false };
+    const Chord = struct { vk: u32, ctrl: bool = false, shift: bool = false, alt: bool = false, extended: bool = false, repeat: bool = false, system: bool = false };
 
     fn begin(fixture: *LiveTerminalFixture, session: []const u8) !LiveKeyboard {
         const class = std.unicode.utf8ToUtf16LeStringLiteral("WinghosttyEmbeddableSurface");
@@ -12541,6 +12541,7 @@ const LiveKeyboard = struct {
         // The production accelerator table and terminal key routing, as the shell installs them.
         fixture.app.window.accelerators = MainWindow.createAccelerators();
         fixture.app.window.terminal_route = &App.onTerminalKeyRoute;
+        fixture.app.window.key_callback = &App.onShellKey;
         fixture.app.window.context = &fixture.app;
         return .{ .fixture = fixture, .surface = surface, .index = index, .original_state = original };
     }
@@ -12551,6 +12552,7 @@ const LiveKeyboard = struct {
         if (window.accelerators != null) _ = c.DestroyAcceleratorTable(window.accelerators);
         window.accelerators = null;
         window.terminal_route = null;
+        window.key_callback = null;
         window.context = null;
         _ = c.ShowWindow(window.hwnd, c.SW_HIDE);
     }
@@ -12585,7 +12587,7 @@ const LiveKeyboard = struct {
         try setModifiers(chord);
         var message = std.mem.zeroes(c.MSG);
         message.hwnd = self.surface;
-        message.message = if (chord.alt) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
+        message.message = if (chord.alt or chord.system) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
         message.wParam = chord.vk;
         const scan = c.MapVirtualKeyW(chord.vk, c.MAPVK_VK_TO_VSC);
         message.lParam = @intCast(1 | (scan << 16) | (@as(u32, @intFromBool(chord.extended)) << 24) |
@@ -13050,6 +13052,13 @@ test "live terminal keyboard: key table of editing, cursor, function, and Ctrl/A
         .{ .name = "F1", .chord = .{ .vk = f1 }, .expected = "\x1bOP" },
         .{ .name = "F4", .chord = .{ .vk = f1 + 3 }, .expected = "\x1bOS" },
         .{ .name = "F5", .chord = .{ .vk = f1 + 4 }, .expected = "\x1b[15~" },
+        // F6 and F10 used to be taken by the shell (window toolbar, native menu bar).
+        .{ .name = "F6", .chord = .{ .vk = f1 + 5 }, .expected = "\x1b[17~" },
+        .{ .name = "Shift+F6", .chord = .{ .vk = f1 + 5, .shift = true }, .expected = "\x1b[17;2~" },
+        .{ .name = "F10", .chord = .{ .vk = f1 + 9 }, .expected = "\x1b[21~" },
+        .{ .name = "F10 as a system key", .chord = .{ .vk = f1 + 9, .system = true }, .expected = "\x1b[21~" },
+        .{ .name = "Ctrl+F10", .chord = .{ .vk = f1 + 9, .ctrl = true }, .expected = "\x1b[21;5~" },
+        .{ .name = "F11", .chord = .{ .vk = f1 + 10 }, .expected = "\x1b[23~" },
         .{ .name = "F12", .chord = .{ .vk = f1 + 11 }, .expected = "\x1b[24~" },
         .{ .name = "a", .chord = .{ .vk = 'A' }, .expected = "a" },
         .{ .name = "Shift+A", .chord = .{ .vk = 'A', .shift = true }, .expected = "A" },
@@ -13163,6 +13172,9 @@ test "live terminal keyboard: Ctrl+Shift+W and the Windows system keys become sh
     try keyboard.press(.{ .vk = c.VK_F4, .alt = true });
     try std.testing.expectEqual(@as(?c.WPARAM, c.SC_CLOSE), keyboard.takePosted(c.WM_SYSCOMMAND));
     try keyboard.press(.{ .vk = c.VK_SPACE, .alt = true });
+    try std.testing.expectEqual(@as(?c.WPARAM, c.SC_KEYMENU), keyboard.takePosted(c.WM_SYSCOMMAND));
+    // Ctrl+Shift+F10 enters the menu bar from a terminal.
+    try keyboard.press(.{ .vk = c.VK_F10, .ctrl = true, .shift = true });
     try std.testing.expectEqual(@as(?c.WPARAM, c.SC_KEYMENU), keyboard.takePosted(c.WM_SYSCOMMAND));
     try keyboard.drainInput(&sent);
     try std.testing.expectEqualStrings("", sent.items);

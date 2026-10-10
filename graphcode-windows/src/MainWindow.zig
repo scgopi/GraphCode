@@ -14,6 +14,7 @@ pub const MessageCallback = *const fn (
 pub const KeyCallback = *const fn (context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool;
 
 pub const TerminalKeyRoute = @import("TerminalKeys.zig").Route;
+const TerminalKeys = @import("TerminalKeys.zig");
 
 /// Reports how a key aimed at `message.hwnd` is handled when that window is a terminal.
 pub const TerminalRouteCallback = *const fn (
@@ -256,11 +257,15 @@ pub const Window = struct {
 
     pub fn dispatchMessageWith(self: *Window, comptime Api: type, message: *c.MSG, keys: KeyContext, focused: c.HWND) void {
         if (self.consumeRejectedCycleKey(message, keys)) return;
-        if (self.pretranslateKey(message, keys)) {
+        const route = self.terminalRouteFor(message, keys);
+        // A terminal-owned key (F6, F10, ...) must reach the terminal untouched, so the
+        // shell's own key handling and the buffered native F10 pair never see it.
+        if (route == .terminal) {
+            self.pending_native_f10 = null;
+        } else if (self.pretranslateKey(message, keys)) {
             self.pending_native_f10 = null;
             return;
         }
-        const route = self.terminalRouteFor(message, keys);
         switch (route) {
             .default, .terminal => {},
             .close_tab => {
@@ -275,6 +280,12 @@ pub const Window = struct {
                 self.postWindowMessage(Api, c.WM_SYSCOMMAND, c.SC_KEYMENU, ' ');
                 return;
             },
+            .menu_bar => {
+                // A held chord repeats; entering the menu once is enough.
+                if ((@as(usize, @bitCast(message.lParam)) & (1 << 30)) == 0)
+                    self.postWindowMessage(Api, c.WM_SYSCOMMAND, c.SC_KEYMENU, 0);
+                return;
+            },
         }
         const ordinary_tab = message.message == c.WM_KEYDOWN and message.wParam == c.VK_TAB and !keys.ctrl and !keys.alt;
         const accelerator_eligible = route != .terminal and (!ordinary_tab or
@@ -283,7 +294,7 @@ pub const Window = struct {
             self.pending_native_f10 = null;
             return;
         }
-        if (self.dispatchNativeF10(message, keys, focused)) return;
+        if (route != .terminal and self.dispatchNativeF10(message, keys, focused)) return;
         _ = Api.translateMessage(message);
         _ = Api.dispatchMessage(message);
     }
@@ -629,7 +640,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(terminal, "Paste\tCtrl+Shift+V", @intFromEnum(Command.terminal_paste));
 
     append(view, "Global Overview", @intFromEnum(Command.open_global_overview));
-    append(view, "Focus Window Toolbar\tF6", @intFromEnum(Command.focus_header));
+    append(view, "Focus Window Toolbar\tF6 (Ctrl+Shift+F6 in terminal)", @intFromEnum(Command.focus_header));
     append(view, "Show Application Sidebar\tCtrl+Shift+L", @intFromEnum(Command.toggle_sidebar));
     append(view, "Show Terminal Workspace\tCtrl+Shift+B", @intFromEnum(Command.toggle_workspace));
     append(view, "Show Activity Strip\tCtrl+Shift+A", @intFromEnum(Command.toggle_activity));
@@ -657,6 +668,8 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V / Shift+Insert");
     appendInfo(discovery, "Terminal context menu\tRight-click / Menu key / Shift+F10");
     appendInfo(discovery, "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell");
+    appendInfo(discovery, "Terminal-focused F6 / F10\tSent to the shell");
+    appendInfo(discovery, "Window toolbar / menu bar from a terminal\tCtrl+Shift+F6 / Ctrl+Shift+F10");
     appendInfo(discovery, "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits");
     appendInfo(discovery, "Jump palette: Up / Down navigate; Enter opens the selected loop");
     appendInfo(discovery, "Canvas: drag empty space to pan; wheel or pinch to zoom");
@@ -1024,6 +1037,7 @@ test "terminal routes decide accelerators, translation, and shell commands for a
         .{ .route = .close_tab, .message = c.WM_COMMAND, .wparam = @intFromEnum(Command.close_tab) },
         .{ .route = .system_close, .message = c.WM_SYSCOMMAND, .wparam = c.SC_CLOSE },
         .{ .route = .system_menu, .message = c.WM_SYSCOMMAND, .wparam = c.SC_KEYMENU },
+        .{ .route = .menu_bar, .message = c.WM_SYSCOMMAND, .wparam = c.SC_KEYMENU },
     };
     for (commands) |case| {
         Api.reset();
@@ -1114,6 +1128,7 @@ test "main and help menus expose shortcuts and interaction guidance" {
         .{ .menu = file, .command = .edit_worktree_policy, .expected = "Project Worktree Policy...\tCtrl+Shift+P" },
         .{ .menu = loop, .command = .show_graph, .expected = "Show in Graph\tCtrl+Shift+G" },
         .{ .menu = view, .command = .reconnect, .expected = "Reconnect\tCtrl+R" },
+        .{ .menu = view, .command = .focus_header, .expected = "Focus Window Toolbar\tF6 (Ctrl+Shift+F6 in terminal)" },
     };
     for (actual_labels) |item| {
         var label: [128]u16 = undefined;
@@ -1138,6 +1153,8 @@ test "main and help menus expose shortcuts and interaction guidance" {
         "Paste terminal text\tCtrl+Shift+V / Shift+Insert",
         "Terminal context menu\tRight-click / Menu key / Shift+F10",
         "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell",
+        "Terminal-focused F6 / F10\tSent to the shell",
+        "Window toolbar / menu bar from a terminal\tCtrl+Shift+F6 / Ctrl+Shift+F10",
         "Focused toolbar: Tab / arrows / Home / End move; Enter / Space activate; Esc exits",
         "Jump palette: Up / Down navigate; Enter opens the selected loop",
         "Canvas: drag empty space to pan; wheel or pinch to zoom",
@@ -1438,6 +1455,180 @@ test "native F10 system messages with no Alt context reach the real menu" {
     try std.testing.expect(window.pending_native_f10 == null);
     try std.testing.expect(std.meta.eql(original_down, down));
     try std.testing.expect(std.meta.eql(original_up, up));
+}
+
+const FocusedTerminalTest = struct {
+    var terminal: c.HWND = null;
+    var shell_keys: usize = 0;
+
+    fn route(_: ?*anyopaque, message: *const c.MSG, ctrl: bool, shift: bool, alt: bool) TerminalKeyRoute {
+        if (message.hwnd != terminal) return .default;
+        return TerminalKeys.routeChord(@intCast(message.wParam), .{ .ctrl = ctrl, .shift = shift, .alt = alt });
+    }
+
+    // Stands in for App.onShellKey, which enters the window toolbar on F6.
+    fn shellKey(_: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
+        shell_keys += 1;
+        return @import("InputRouter.zig").headerKey(key, ctrl, shift, alt, false) != .none;
+    }
+};
+
+test "plain and Shift F10 reach a focused terminal and never the native menu bar" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    FocusedTerminalTest.terminal = fixture.child;
+    defer FocusedTerminalTest.terminal = null;
+    for ([_]bool{ false, true }) |shift| {
+        for ([_][2]c.UINT{ .{ c.WM_KEYDOWN, c.WM_KEYUP }, .{ c.WM_SYSKEYDOWN, c.WM_SYSKEYUP } }) |family| {
+            var window = Window{ .hwnd = fixture.parent, .terminal_route = &FocusedTerminalTest.route };
+            var down = NativeMenuDispatchTest.key(fixture.child, family[0]);
+            var up = NativeMenuDispatchTest.key(fixture.child, family[1]);
+            var keys = NativeMenuDispatchTest.eligible;
+            keys.shift = shift;
+            NativeMenuDispatchTest.reset();
+            window.dispatchMessage(&down, keys, fixture.child);
+            try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+            try std.testing.expect(window.pending_native_f10 == null);
+            window.dispatchMessage(&up, keys, fixture.child);
+            try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+            try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+            try std.testing.expect(window.pending_native_f10 == null);
+        }
+    }
+}
+
+test "a terminal F10 key-down followed by a focus change still delivers the key-up and never activates the menu bar" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    FocusedTerminalTest.terminal = fixture.child;
+    defer FocusedTerminalTest.terminal = null;
+    for ([_][2]c.UINT{ .{ c.WM_KEYDOWN, c.WM_KEYUP }, .{ c.WM_SYSKEYDOWN, c.WM_SYSKEYUP } }) |family| {
+        var window = Window{ .hwnd = fixture.parent, .terminal_route = &FocusedTerminalTest.route };
+        var down = NativeMenuDispatchTest.key(fixture.child, family[0]);
+        var up = NativeMenuDispatchTest.key(fixture.child, family[1]);
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        // Focus leaves the terminal between the key-down and the key-up.
+        window.cancelNativeF10ForMessage(c.WM_KILLFOCUS, 0, 0);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.parent);
+        try std.testing.expectEqual(@as(usize, 2), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expect(window.pending_native_f10 == null);
+        // A later plain F10 outside the terminal is not left half-paired.
+        FocusedTerminalTest.terminal = null;
+        var next_down = NativeMenuDispatchTest.key(fixture.child, family[0]);
+        var next_up = NativeMenuDispatchTest.key(fixture.child, family[1]);
+        window.dispatchMessage(&next_down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&next_up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        FocusedTerminalTest.terminal = fixture.child;
+    }
+}
+
+test "F10 outside a terminal still enters the native menu bar with a terminal route installed" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    FocusedTerminalTest.terminal = null;
+    for ([_][2]c.UINT{ .{ c.WM_KEYDOWN, c.WM_KEYUP }, .{ c.WM_SYSKEYDOWN, c.WM_SYSKEYUP } }) |family| {
+        var window = Window{ .hwnd = fixture.parent, .terminal_route = &FocusedTerminalTest.route };
+        var down = NativeMenuDispatchTest.key(fixture.child, family[0]);
+        var up = NativeMenuDispatchTest.key(fixture.child, family[1]);
+        NativeMenuDispatchTest.reset();
+        window.dispatchMessage(&down, NativeMenuDispatchTest.eligible, fixture.child);
+        window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+        try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+        try std.testing.expectEqual(@as(usize, 0), NativeMenuDispatchTest.keys_consumed);
+        try std.testing.expect(window.pending_native_f10 == null);
+    }
+}
+
+test "F6 reaches a focused terminal but still enters the window toolbar elsewhere" {
+    const Api = struct {
+        var accelerator_calls: usize = 0;
+        var dispatch_calls: usize = 0;
+
+        pub fn translateAccelerator(_: c.HWND, _: c.HACCEL, _: *c.MSG) c_int {
+            accelerator_calls += 1;
+            return 0;
+        }
+
+        pub fn translateMessage(_: *const c.MSG) c.BOOL {
+            return 1;
+        }
+
+        pub fn dispatchMessage(_: *const c.MSG) c.LRESULT {
+            dispatch_calls += 1;
+            return 0;
+        }
+    };
+    const owner: c.HWND = @ptrFromInt(0x1000);
+    const child: c.HWND = @ptrFromInt(0x2000);
+    var window = Window{
+        .hwnd = owner,
+        .accelerators = @ptrFromInt(0x3000),
+        .terminal_route = &FocusedTerminalTest.route,
+        .key_callback = &FocusedTerminalTest.shellKey,
+    };
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = child;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_F6;
+    for ([_]bool{ false, true }) |shift| {
+        const keys = KeyContext{
+            .active = true, .owner_enabled = true, .target_owned = true,
+            .target_visible = true, .target_enabled = true, .shift = shift,
+        };
+        FocusedTerminalTest.terminal = child;
+        FocusedTerminalTest.shell_keys = 0;
+        Api.dispatch_calls = 0;
+        window.dispatchMessageWith(Api, &message, keys, child);
+        try std.testing.expectEqual(@as(usize, 0), FocusedTerminalTest.shell_keys);
+        try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+
+        FocusedTerminalTest.terminal = null;
+        window.dispatchMessageWith(Api, &message, keys, child);
+        try std.testing.expectEqual(@as(usize, 1), FocusedTerminalTest.shell_keys);
+        try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
+    }
+
+    // Ctrl+Shift+F6 is the documented way to the toolbar from a terminal: the shell takes it.
+    FocusedTerminalTest.terminal = child;
+    FocusedTerminalTest.shell_keys = 0;
+    Api.dispatch_calls = 0;
+    const chord = KeyContext{
+        .active = true, .owner_enabled = true, .target_owned = true,
+        .target_visible = true, .target_enabled = true, .ctrl = true, .shift = true,
+    };
+    window.dispatchMessageWith(Api, &message, chord, child);
+    try std.testing.expectEqual(@as(usize, 1), FocusedTerminalTest.shell_keys);
+    try std.testing.expectEqual(@as(usize, 0), Api.dispatch_calls);
+    FocusedTerminalTest.terminal = null;
+}
+
+test "Ctrl+Shift+F10 enters the menu bar from a focused terminal once, not the terminal" {
+    const fixture = try NativeMenuDispatchTest.init();
+    defer fixture.deinit();
+    FocusedTerminalTest.terminal = fixture.child;
+    defer FocusedTerminalTest.terminal = null;
+    var window = Window{ .hwnd = fixture.parent, .terminal_route = &FocusedTerminalTest.route };
+    var keys = NativeMenuDispatchTest.eligible;
+    keys.ctrl = true;
+    keys.shift = true;
+    var down = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    var repeat = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYDOWN);
+    repeat.lParam |= 1 << 30;
+    var up = NativeMenuDispatchTest.key(fixture.child, c.WM_KEYUP);
+    NativeMenuDispatchTest.reset();
+    window.dispatchMessage(&down, keys, fixture.child);
+    window.dispatchMessage(&repeat, keys, fixture.child);
+    window.dispatchMessage(&up, NativeMenuDispatchTest.eligible, fixture.child);
+    var pending: c.MSG = undefined;
+    while (c.PeekMessageW(&pending, fixture.parent, 0, 0, c.PM_REMOVE) != 0) _ = c.DispatchMessageW(&pending);
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.menu_commands);
+    try std.testing.expectEqual(fixture.parent, NativeMenuDispatchTest.last_menu_target);
+    // Only the release reaches the terminal; the F10 pair is never buffered for native handling.
+    try std.testing.expectEqual(@as(usize, 1), NativeMenuDispatchTest.keys_consumed);
+    try std.testing.expect(window.pending_native_f10 == null);
 }
 
 test "native F10 system pairs preserve repeats orphan and cancellation boundaries" {

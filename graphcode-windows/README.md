@@ -196,19 +196,31 @@ actions use the Windows `IFileOpenDialog` folder picker. The no-project state
 also presents accessible native buttons for opening a folder or the global
 overview; recent projects remain selectable in the sidebar.
 
-Pressing and releasing unmodified `F10` enters the native menu bar, including
-while an embedded terminal has focus. The shell passes the original key pair
+Pressing and releasing unmodified `F10` enters the native menu bar. While an
+embedded terminal has focus, `F10` and `F6` belong to the program in it and are
+sent through the key encoder (`ESC[21~` and `ESC[17~`, with modifier
+parameters such as `Shift+F6` -> `ESC[17;2~`); use `Ctrl+Shift+F10` to enter
+the menu bar and `Ctrl+Shift+F6` to enter the window toolbar from a terminal.
+`Alt+Space` still opens the window menu and `Alt+F4` closes the window. Alt
+alone and Alt+letter chords are terminal input (an ESC prefix), so the menu
+mnemonics (Alt+F, Alt+E, ...) are unavailable while a terminal has focus; use
+`Ctrl+Shift+F10`, or click the menu bar, instead.
+Outside a terminal, the shell passes the original key pair
 to Windows default menu processing only when the release still targets the
 same eligible, app-owned window. Observed focus/activation changes, modal
 disablement, and intervening input cancel the pending pair; modified `F10`
-(including `Shift+F10`) retains its existing input route.
+(including `Shift+F10`) retains its existing input route (in a terminal,
+`Shift+F10` opens the terminal context menu). A terminal-owned `F10` is never
+buffered, so the menu bar cannot be left active by a key that went to the
+terminal.
 Both ordinary and system-key plain `F10` messages use this route; an Alt-context
 message is excluded even if the modifier snapshot no longer shows Alt pressed.
 
 `F6` (or View > Focus Window Toolbar) enters the window toolbar; `Shift+F6`
-enters at its last visible control. Within the toolbar, `Tab`/`Shift+Tab` and
+enters at its last visible control; `Ctrl+Shift+F6` enters it at the first
+control and works while a terminal has focus. Within the toolbar, `Tab`/`Shift+Tab` and
 Left/Right move between controls, Home/End select the first/last control, and
-Enter/Space activate it. `F6`, `Shift+F6`, or Escape leave the toolbar and restore
+Enter/Space activate it. `F6`, `Shift+F6`, `Ctrl+Shift+F6`, or Escape leave the toolbar and restore
 the still-visible app-owned focus target. Outside the toolbar, Tab/Shift+Tab keep
 their loop-navigation behavior and Ctrl+Tab still advances attention selection.
 The header's loop-panel button is available only in a loop workspace with
@@ -237,17 +249,26 @@ chat deletion.
 
 These root-window bindings are not universal terminal or dialog shortcuts.
 While a terminal has focus it keeps `Ctrl+D` (EOF), `Ctrl+W` (delete word),
-`Ctrl+S`, `Ctrl+T`, `Ctrl+N`, `Ctrl+[` and `Ctrl+]` for the program running in
+`Ctrl+S`, `Ctrl+T`, `Ctrl+N`, `Ctrl+[`, `Ctrl+]`, `F6` and `F10` for the program running in
 it, so those menu accelerators apply only elsewhere. The terminal-safe
 alternatives work everywhere: `Ctrl+Shift+T` (new tab), `Ctrl+Shift+N` (new
-loop), `Alt+Shift+D` (split right), `Ctrl+Shift+D` (split down), and
-`Ctrl+Shift+[` / `Ctrl+Shift+]` (pane focus); `Ctrl+Shift+W` closes the tab
+loop), `Alt+Shift+D` (split right), `Ctrl+Shift+D` (split down),
+`Ctrl+Shift+[` / `Ctrl+Shift+]` (pane focus), `Ctrl+Shift+F6` (window toolbar),
+and `Ctrl+Shift+F10` (menu bar); `Ctrl+Shift+W` closes the tab
 while a terminal has focus (it opens Worktrees elsewhere). `Ctrl+J` and
 `Ctrl+O` remain application keys in a terminal and `Ctrl+P` is not forwarded.
 The terminal sends editing, cursor, Home/End, Insert/Delete, Page, and function
 keys through the pinned Ghostty key encoder, so cursor-key application mode,
 modifier parameters, and Alt's ESC prefix match the macOS terminal; Backspace
-sends DEL and Ctrl+Backspace sends BS. In the jump palette,
+sends DEL and Ctrl+Backspace sends BS. Plain `Ctrl+S` is sent as the raw 0x13
+byte, like `Ctrl+T`, `Ctrl+D`, `Ctrl+W` and `Ctrl+N` (0x14, 0x04, 0x17, 0x0E).
+Known limitation: in a program that reads keys with line input enabled (for
+example PowerShell's `[Console]::ReadKey`), the Windows console's pause-output
+handling swallows `Ctrl+S` and then the next key; `Ctrl+T` on its own works. A
+workaround that sent `Ctrl+S` as a win32-input-mode key pair was rejected because
+it broke Git MSYS vim (Enter no longer honored) and made cmd.exe insert a literal
+`^S` instead of pausing output. This comes from an isolated zmx matrix, not a Dev
+Box walkthrough, and `Ctrl+S` is not claimed to work in such programs. In the jump palette,
 Up/Down moves through results and Enter accepts the selection, returning to
 the selected loop in the graph rather than opening its terminal. Native forms
 keep their own text editing, Tab navigation, and acceptance/cancellation;

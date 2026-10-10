@@ -3,6 +3,8 @@ const std = @import("std");
 pub const HeaderKey = enum { none, enter, exit, next, previous, first, last, activate };
 
 pub fn headerKey(key: usize, ctrl: bool, shift: bool, alt: bool, focused: bool) HeaderKey {
+    // Ctrl+Shift+F6 is the chord that reaches the toolbar from a terminal, which owns plain F6.
+    if (key == 0x75 and ctrl and shift and !alt) return if (focused) .exit else .enter;
     if (ctrl or alt) return .none;
     if (key == 0x75) return if (focused) .exit else .enter;
     if (!focused) return .none;
@@ -217,6 +219,12 @@ test "header keys are scoped and preserve modified and global navigation" {
         try std.testing.expectEqual(HeaderKey.none, headerKey(key, true, false, false, true));
         try std.testing.expectEqual(HeaderKey.none, headerKey(key, false, false, true, true));
     }
+    // Ctrl+Shift+F6 enters and leaves the toolbar from a terminal that owns plain F6.
+    try std.testing.expectEqual(HeaderKey.enter, headerKey(0x75, true, true, false, false));
+    try std.testing.expectEqual(HeaderKey.exit, headerKey(0x75, true, true, false, true));
+    try std.testing.expectEqual(HeaderKey.none, headerKey(0x75, true, true, true, false));
+    try std.testing.expectEqual(HeaderKey.none, headerKey(0x75, true, true, true, true));
+    try std.testing.expectEqual(HeaderKey.none, headerKey(0x09, true, true, false, true));
 }
 
 test "attention and worktree shortcuts are distinct from ordinary selection" {
