@@ -43,7 +43,14 @@ pub fn dismissWith(comptime Api: type, dialog: c.HWND, owner: c.HWND) void {
 /// Dismiss a modal window and return activation to its owner.
 pub fn dismiss(dialog: c.HWND, owner: c.HWND) void {
     dismissWith(RealApi, dialog, owner);
+    if (after_dismiss) |hook| hook(after_dismiss_context, owner);
 }
+
+/// Told, after every real modal is gone and its owner is active again, which window that was.
+/// The shell uses it to put keyboard focus back where the user was typing, because the owner
+/// itself can be left holding the focus, which sends terminal keys to the wrong window.
+pub var after_dismiss: ?*const fn (context: ?*anyopaque, owner: c.HWND) void = null;
+pub var after_dismiss_context: ?*anyopaque = null;
 
 const Call = enum { enable_owner, destroy_dialog, activate_owner };
 
@@ -110,4 +117,34 @@ test "owner is already enabled at the moment the modal is destroyed" {
     // window and leave the shell's main window transiently WS_DISABLED.
     try std.testing.expect(recorded_owner_enabled_at_destroy != null);
     try std.testing.expect(recorded_owner_enabled_at_destroy.?);
+}
+
+test "the real teardown tells the shell which owner was reactivated, after the dialog is gone" {
+    const Probe = struct {
+        var owner: c.HWND = null;
+        var dialog_alive_at_call = true;
+        var calls: usize = 0;
+        var dialog: c.HWND = null;
+
+        fn hook(_: ?*anyopaque, window: c.HWND) void {
+            owner = window;
+            calls += 1;
+            dialog_alive_at_call = c.IsWindow(dialog) != 0;
+        }
+    };
+    const class = std.unicode.utf8ToUtf16LeStringLiteral("STATIC");
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("modal teardown hook");
+    const instance = c.GetModuleHandleW(null);
+    const owner = c.CreateWindowExW(0, class, title, c.WS_OVERLAPPED, 0, 0, 100, 100, null, null, instance, null) orelse
+        return error.WindowCreationFailed;
+    defer _ = c.DestroyWindow(owner);
+    Probe.dialog = c.CreateWindowExW(0, class, title, c.WS_OVERLAPPED, 0, 0, 100, 100, owner, null, instance, null) orelse
+        return error.WindowCreationFailed;
+    after_dismiss = &Probe.hook;
+    defer after_dismiss = null;
+    Probe.calls = 0;
+    dismiss(Probe.dialog, owner);
+    try std.testing.expectEqual(@as(usize, 1), Probe.calls);
+    try std.testing.expect(Probe.owner == owner);
+    try std.testing.expect(!Probe.dialog_alive_at_call);
 }

@@ -25,6 +25,7 @@ const Sidebar = @import("Sidebar.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
+const ModalTeardown = @import("ModalTeardown.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
 const Clipboard = @import("Clipboard.zig");
@@ -1639,6 +1640,8 @@ pub const App = struct {
         try self.window.create(self, &onWindowMessage, title.ptr);
         self.window.key_callback = &onShellKey;
         self.window.terminal_route = &onTerminalKeyRoute;
+        ModalTeardown.after_dismiss = &onModalDismissed;
+        ModalTeardown.after_dismiss_context = self;
         try self.revalidateWorkspaceIdentity();
         if (!self.window.gesture_config_registered) {
             // Non-fatal: the canvas simply falls back to wheel-only zoom (no
@@ -7015,6 +7018,27 @@ pub const App = struct {
             }
         }
         self.syncHeaderFocus();
+    }
+
+    fn onModalDismissed(context: ?*anyopaque, owner: c.HWND) void {
+        const self: *App = @ptrCast(@alignCast(context orelse return));
+        if (owner != self.window.hwnd) return;
+        self.restoreFocusAfterModal();
+    }
+
+    /// A sheet or dialog that closes can leave the shell window itself holding keyboard focus,
+    /// and keys typed then go to the shell window instead of the terminal: Ctrl+Shift+W reaches
+    /// the accelerator table (Worktrees) instead of closing the terminal tab. While the
+    /// workspace is what the user was looking at, focus goes back to the selected terminal.
+    fn restoreFocusAfterModal(self: *App) void {
+        if (self.header_focus != null) return;
+        const workspace = self.workspace orelse return;
+        if (!(self.surface == .workspace or self.workspace_controls.panel_visible)) return;
+        const focus = c.GetFocus();
+        if (workspace.ownsSurfaceWindow(focus)) return;
+        // Some other control the user deliberately focused keeps it.
+        if (focus != null and focus != self.window.hwnd) return;
+        workspace.focusRestoredPane() catch self.setStatus("Unable to restore selected terminal focus");
     }
 
     fn onTerminalKeyRoute(context: ?*anyopaque, message: *const c.MSG, ctrl: bool, shift: bool, alt: bool) MainWindow.TerminalKeyRoute {
@@ -13266,6 +13290,9 @@ const LiveKeyboard = struct {
         fixture.app.window.terminal_route = &App.onTerminalKeyRoute;
         fixture.app.window.key_callback = &App.onShellKey;
         fixture.app.window.context = &fixture.app;
+        // The shell registers the same hook when it starts.
+        ModalTeardown.after_dismiss = &App.onModalDismissed;
+        ModalTeardown.after_dismiss_context = &fixture.app;
         return .{ .fixture = fixture, .surface = surface, .index = index, .original_state = original };
     }
 
@@ -13275,6 +13302,8 @@ const LiveKeyboard = struct {
         if (window.accelerators != null) _ = c.DestroyAcceleratorTable(window.accelerators);
         window.accelerators = null;
         window.terminal_route = null;
+        ModalTeardown.after_dismiss = null;
+        ModalTeardown.after_dismiss_context = null;
         window.key_callback = null;
         window.context = null;
         _ = c.ShowWindow(window.hwnd, c.SW_HIDE);
@@ -13355,6 +13384,34 @@ const LiveKeyboard = struct {
         self.fixture.app.window.dispatchMessage(&message, keys, self.surface);
         while (c.PeekMessageW(&message, self.surface, c.WM_CHAR, c.WM_SYSDEADCHAR, c.PM_REMOVE) != 0) {}
         _ = c.SendMessageW(self.surface, c.WM_CHAR, unit, 1);
+    }
+
+    /// Like `press`, but sent to whatever window has the keyboard focus, as the message loop
+    /// does: a key typed while focus has left the terminal reaches the shell window instead.
+    fn pressFocused(self: *LiveKeyboard, chord: Chord) !void {
+        try setModifiers(chord);
+        var message = std.mem.zeroes(c.MSG);
+        const target = c.GetFocus() orelse self.fixture.app.window.hwnd;
+        message.hwnd = target;
+        message.message = if (chord.alt) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
+        message.wParam = chord.vk;
+        const scan = c.MapVirtualKeyW(chord.vk, c.MAPVK_VK_TO_VSC);
+        message.lParam = @intCast(1 | (scan << 16) | (@as(u32, @intFromBool(chord.alt)) << 29));
+        const keys = MainWindow.KeyContext.capture(self.fixture.app.window.hwnd, target);
+        var forced = keys;
+        forced.active = true;
+        forced.ctrl = chord.ctrl;
+        forced.shift = chord.shift;
+        forced.alt = chord.alt;
+        self.fixture.app.window.dispatchMessage(&message, forced, target);
+    }
+
+    /// Delivers the commands the shell posted to its own window, as its message loop would.
+    fn pumpCommands(self: *LiveKeyboard) void {
+        var posted: c.MSG = undefined;
+        while (c.PeekMessageW(&posted, self.fixture.app.window.hwnd, c.WM_COMMAND, c.WM_COMMAND, c.PM_REMOVE) != 0) {
+            _ = c.DispatchMessageW(&posted);
+        }
     }
 
     /// Everything queued for the shell since the last call.
@@ -13878,6 +13935,69 @@ test "live terminal keyboard: dead keys and AltGr still commit text instead of b
     });
 }
 
+/// What a modal sheet does to the shell window: the owner is disabled while the sheet runs and
+/// the production teardown (`ModalTeardown.dismiss`) enables it, destroys the sheet and
+/// activates the owner again. The sheet here is a plain window, not the node-creation form.
+fn runCancelledSheet(owner: c.HWND) void {
+    const sheet = c.CreateWindowExW(
+        c.WS_EX_DLGMODALFRAME,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("stand-in sheet"),
+        c.WS_OVERLAPPED | c.WS_CAPTION,
+        0,
+        0,
+        300,
+        200,
+        owner,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return;
+    _ = c.EnableWindow(owner, 0);
+    _ = c.ShowWindow(sheet, c.SW_SHOW);
+    _ = c.SetForegroundWindow(sheet);
+    var message: c.MSG = undefined;
+    while (c.PeekMessageW(&message, null, 0, 0, c.PM_REMOVE) != 0) {
+        _ = c.TranslateMessage(&message);
+        _ = c.DispatchMessageW(&message);
+    }
+    @import("ModalTeardown.zig").dismiss(sheet, owner);
+    while (c.PeekMessageW(&message, null, 0, 0, c.PM_REMOVE) != 0) {
+        _ = c.TranslateMessage(&message);
+        _ = c.DispatchMessageW(&message);
+    }
+}
+
+test "live terminal keyboard: Ctrl+Shift+W still closes the tab after a cancelled sheet and a split" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const workspace = &fixture.workspace;
+
+    // Ctrl+Shift+N opens the New Loop sheet; cancelling it tears the sheet down through the
+    // same ModalTeardown the real sheets use. The keyboard focus must be back on the terminal
+    // child, since key routing only recognizes a terminal key by the window it is sent to.
+    runCancelledSheet(fixture.app.window.hwnd);
+    try std.testing.expect(workspace.ownsSurfaceWindow(c.GetFocus()));
+
+    // Alt+Shift+D splits (the accelerator ends in this action); focus stays on a live terminal.
+    fixture.app.handleAction(.split_horizontal);
+    try std.testing.expectEqual(@as(usize, 2), workspace.layout.selectedConst().?.panes.items.len);
+    try std.testing.expect(workspace.ownsSurfaceWindow(c.GetFocus()));
+
+    // Ctrl+Shift+W, sent to whatever has focus, is the close-tab command; applying it closes
+    // the pane and focus is again on a live terminal.
+    try keyboard.pressFocused(.{ .vk = 'W', .ctrl = true, .shift = true });
+    try std.testing.expectEqual(@as(?c.WPARAM, @intFromEnum(MainWindow.Command.close_tab)), keyboard.takePosted(c.WM_COMMAND));
+    fixture.app.handleAction(.close_tab);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.selectedConst().?.panes.items.len);
+    try std.testing.expect(workspace.ownsSurfaceWindow(c.GetFocus()));
+}
 test "live terminal keyboard: Ctrl+Shift+W and the Windows system keys become shell commands" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{.{ .id = "loop-a" }});
