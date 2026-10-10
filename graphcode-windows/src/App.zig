@@ -12992,7 +12992,7 @@ const fake_zmx_script =
     "exit /b 0\r\n" ++
     ":attach\r\n" ++
     ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
-    "if exist \"%~dp0loop-a.json\" copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
+    "if exist \"%~dp0record-attach.txt\" if exist \"%~dp0loop-a.json\" copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
     "if exist \"%~dp0shell-sessions\\%~2\" (echo yes>\"%~dp0marker-at-attach-%~2.txt\") else (echo no>\"%~dp0marker-at-attach-%~2.txt\")\r\n" ++
     "pause >nul\r\n" ++
     "exit /b 0\r\n";
@@ -15419,11 +15419,14 @@ test "workspace layout: a new tab's layout claim and ownership record exist befo
     const app = &fixture.app;
 
     try fixture.setLive(&.{"loop-a"});
+    try fixture.setFlag("record-attach.txt", true);
     try clickSidebarLoopRow(app, fixture.project, "loop-a");
     try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
     try fixture.newTab();
     const tab_shell = try fixture.selectedPane(0);
     defer std.testing.allocator.free(tab_shell);
+    // The attach copies the layout file; wait for it so the next save does not race that read.
+    try fixture.waitFor(LiveTerminalFixture.attachSaw, tab_shell);
     try fixture.splitRight();
     const split_shell = try fixture.selectedPane(1);
     defer std.testing.allocator.free(split_shell);
