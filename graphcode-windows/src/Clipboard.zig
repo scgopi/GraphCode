@@ -31,6 +31,12 @@ fn snapshotUnits(allocator: std.mem.Allocator, units: [*]const u16, capacity: us
     return .{ .units = copy };
 }
 
+/// A clipboard block as Windows reports it: a size in bytes that must hold whole UTF-16 units.
+fn snapshotBlock(allocator: std.mem.Allocator, units: [*]const u16, byte_count: usize) Snapshot {
+    if (byte_count < @sizeOf(u16) or byte_count % @sizeOf(u16) != 0) return .unreadable;
+    return snapshotUnits(allocator, units, byte_count / @sizeOf(u16));
+}
+
 const NativeApi = struct {
     fn open(owner: c.HWND) bool {
         return c.OpenClipboard(owner) != 0;
@@ -48,11 +54,10 @@ const NativeApi = struct {
         if (c.IsClipboardFormatAvailable(c.CF_UNICODETEXT) == 0) return .none;
         const memory = c.GetClipboardData(c.CF_UNICODETEXT) orelse return .unreadable;
         const byte_count = c.GlobalSize(memory);
-        if (byte_count < @sizeOf(u16)) return .unreadable;
         const locked = c.GlobalLock(memory) orelse return .unreadable;
         defer _ = c.GlobalUnlock(memory);
         const source: [*]const u16 = @ptrCast(@alignCast(locked));
-        return snapshotUnits(allocator, source, byte_count / @sizeOf(u16));
+        return snapshotBlock(allocator, source, byte_count);
     }
 
     /// Hands `units` (terminator included) to the clipboard, which owns the memory on success.
@@ -196,6 +201,8 @@ const FakeClipboard = struct {
     var open_ok = true;
     var empty_ok = true;
     var unreadable = false;
+    /// The block size Windows would report, when it is not a whole number of units.
+    var reported_bytes: ?usize = null;
     var refused_sets: usize = 0;
     var sets: usize = 0;
     var closes: usize = 0;
@@ -213,6 +220,7 @@ const FakeClipboard = struct {
         open_ok = true;
         empty_ok = true;
         unreadable = false;
+        reported_bytes = null;
         refused_sets = 0;
         sets = 0;
         closes = 0;
@@ -235,7 +243,7 @@ const FakeClipboard = struct {
     fn snapshot(allocator: std.mem.Allocator) Snapshot {
         if (unreadable) return .unreadable;
         const value = held orelse return .none;
-        return snapshotUnits(allocator, value.ptr, value.len);
+        return snapshotBlock(allocator, value.ptr, reported_bytes orelse value.len * @sizeOf(u16));
     }
 
     fn setUnits(value: []const u16) bool {
@@ -385,6 +393,27 @@ test "unreadable or unterminated existing text stops a copy before the clipboard
         writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
     );
     try FakeClipboard.expectHeld(&[_]u16{ 'a', 'b', 'c' });
+    try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
+}
+
+test "a block whose size is not whole UTF-16 units is unreadable and stops the copy before the clipboard is emptied" {
+    const allocator = std.testing.allocator;
+    const block = [_]u16{ 'a', 0, 'b' };
+    for ([_]usize{ 0, 1, 3, 5 }) |bytes| try std.testing.expect(snapshotBlock(allocator, &block, bytes) == .unreadable);
+    const whole = snapshotBlock(allocator, &block, 4);
+    defer allocator.free(whole.units);
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 'a', 0 }, whole.units);
+
+    // Windows reports 3 bytes for the existing item: it must not be truncated to one unit and
+    // treated as valid, nor emptied and lost.
+    FakeClipboard.reset(FakeClipboard.units("old"));
+    FakeClipboard.reported_bytes = 3;
+    FakeClipboard.refused_sets = 1;
+    try std.testing.expectError(
+        error.ClipboardPreviousTextUnreadable,
+        writeTextWith(FakeClipboard, fake_owner, std.testing.allocator, "new"),
+    );
+    try FakeClipboard.expectHeld(FakeClipboard.units("old"));
     try std.testing.expectEqual(@as(usize, 0), FakeClipboard.sets);
 }
 
