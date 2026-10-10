@@ -4292,8 +4292,9 @@ fn discardTranslatedCharacters(target: c.HWND) void {
 fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool, alt: bool) bool {
     if (key == c.VK_TAB) return ctrl;
     // Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt chord types text on layouts that have
-    // one and is never a shortcut here; Ctrl+Alt+PageUp/PageDown stay with the window's own
-    // accelerators, which are handled before the key reaches the terminal.
+    // one and is never a shortcut here, except Tab (handled above and in onKey, unchanged);
+    // Ctrl+Alt+PageUp/PageDown stay with the window's own accelerators, which are handled
+    // before the key reaches the terminal.
     if (!ctrl or alt) return false;
     return switch (key) {
         'O', 'J', c.VK_PRIOR, c.VK_NEXT, 0xBC => true,
