@@ -127,6 +127,22 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     }
   }
 
+  /// A freshly written stub can still be held by a scanner on a CI runner (Win32 sharing
+  /// violation), so a write is retried briefly before it counts as a failure.
+  private static func put(_ text: String, to url: URL) throws {
+    var attempt = 0
+    while true {
+      do {
+        try text.write(to: url, atomically: false, encoding: .utf8)
+        return
+      } catch {
+        attempt += 1
+        if attempt >= 20 { throw error }
+        Thread.sleep(forTimeInterval: 0.1)
+      }
+    }
+  }
+
   private static let shells: [URL] = {
     #if os(Windows)
       let paths = [
@@ -161,21 +177,17 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       esac
 
       """
-    try script.write(
-      to: directory.appendingPathComponent("zmx"), atomically: true, encoding: .utf8)
+    try Self.put(script, to: directory.appendingPathComponent("zmx"))
     try FileManager.default.setAttributes(
       [.posixPermissions: 0o755], ofItemAtPath: directory.appendingPathComponent("zmx").path)
     // The remote ensure shells out to python3 for its delivery; a stub keeps the test about zmx.
-    try "#!/bin/sh\nexit 0\n".write(
-      to: directory.appendingPathComponent("python3"), atomically: true, encoding: .utf8)
+    try Self.put("#!/bin/sh\nexit 0\n", to: directory.appendingPathComponent("python3"))
     try FileManager.default.setAttributes(
       [.posixPermissions: 0o755], ofItemAtPath: directory.appendingPathComponent("python3").path)
     if let listing {
-      try listing.write(
-        to: directory.appendingPathComponent("ls.out"), atomically: true, encoding: .utf8)
+      try Self.put(listing, to: directory.appendingPathComponent("ls.out"))
     } else {
-      try "x".write(
-        to: directory.appendingPathComponent("ls.fail"), atomically: true, encoding: .utf8)
+      try Self.put("x", to: directory.appendingPathComponent("ls.fail"))
     }
     return Fixture(directory: directory)
   }
@@ -198,7 +210,7 @@ final class ZmxUnknownLivenessTests: XCTestCase {
       let base = fixture.directory.path.replacingOccurrences(of: "\\", with: "/")
       let shims = ["zmx", "python3"].map { "\($0)() { \"\(base)/\($0)\" \"$@\"; }\n" }.joined()
       let file = fixture.directory.appendingPathComponent("script.sh")
-      try (shims + script).write(to: file, atomically: true, encoding: .utf8)
+      try Self.put((shims + script), to: file)
       process.arguments =
         flags.filter { $0 != "-c" } + [file.path.replacingOccurrences(of: "\\", with: "/")]
     #else
@@ -378,11 +390,9 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     for variant in Self.variants {
       let fixture = try fixture(listing: "")
       let flip = Self.row(name).replacingOccurrences(of: "\t", with: "\\t")
-      try
-        "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) printf '\(flip)\\n' > \"$d/ls.out\";; esac\nexit 0\n"
-        .write(
-          to: fixture.directory.appendingPathComponent("python3"), atomically: true,
-          encoding: .utf8)
+      try Self.put(
+        "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) printf '\(flip)\\n' > \"$d/ls.out\";; esac\nexit 0\n",
+        to: fixture.directory.appendingPathComponent("python3"))
       let node = LoopNode(
         id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
         title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
