@@ -281,6 +281,8 @@ fn terminalCopyFailureStatus(err: anyerror) []const u8 {
     if (err == error.ClipboardWriteFailedLostPreviousText)
         return "Unable to copy: the clipboard refused the text and its previous text could not be restored";
     if (err == error.ClipboardOpenFailed) return "Unable to copy: the clipboard is in use by another program";
+    if (err == error.ClipboardPreviousTextUnreadable)
+        return "Unable to copy: the clipboard's current text could not be read, so it was left unchanged";
     return "Unable to copy terminal selection";
 }
 
@@ -10714,6 +10716,10 @@ test "a refused terminal copy says whether the user's previous clipboard text su
     try std.testing.expectEqualStrings(
         "Unable to copy: the clipboard is in use by another program",
         terminalCopyFailureStatus(error.ClipboardOpenFailed),
+    );
+    try std.testing.expectEqualStrings(
+        "Unable to copy: the clipboard's current text could not be read, so it was left unchanged",
+        terminalCopyFailureStatus(error.ClipboardPreviousTextUnreadable),
     );
     try std.testing.expectEqualStrings("Unable to copy terminal selection", terminalCopyFailureStatus(error.ClipboardWriteFailed));
 }

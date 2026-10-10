@@ -2296,8 +2296,12 @@ pub const Workspace = struct {
         options.input_callbacks.on_mouse = @ptrCast(&onMouseDrawn);
         options.input_callbacks.on_selection = @ptrCast(&onSelection);
         options.input_callbacks.on_link = @ptrCast(&onLink);
-        // No on_paste: the provider's paste entry point always brackets and does not sanitize.
-        // Every paste goes through Workspace.pasteText, which follows the program's own mode.
+        // No on_paste. In the pinned provider (winghostty 6286560, win32_host.zig) emitPaste is
+        // reached only from the exported winghostty_surface_paste_text, which this shell never
+        // calls: the host has no WM_PASTE, drag-and-drop, middle-click or context-menu paste.
+        // That entry point always brackets and does not sanitize, so a callback would be an
+        // unsanitized route for any future caller. Every paste the shell performs goes through
+        // Workspace.pasteText.
         options.input_callbacks.on_clipboard_read = @ptrCast(&onClipboardRead);
         options.input_callbacks.on_clipboard_write = @ptrCast(&onClipboardWrite);
         options.input.cell_width = 8;

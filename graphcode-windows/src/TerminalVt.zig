@@ -585,15 +585,40 @@ pub fn encodePaste(
     defer allocator.free(normalized);
     var length: usize = 0;
     var index: usize = 0;
-    while (index < text.len) : (index += 1) {
+    while (index < text.len) {
         const byte = text[index];
         if (byte == '\r') {
-            if (index + 1 < text.len and text[index + 1] == '\n') index += 1;
+            index += if (index + 1 < text.len and text[index + 1] == '\n') 2 else 1;
             normalized[length] = '\n';
-        } else {
-            normalized[length] = byte;
+            length += 1;
+            continue;
         }
-        length += 1;
+        if (byte < 0x80) {
+            normalized[length] = byte;
+            length += 1;
+            index += 1;
+            continue;
+        }
+        // C1 controls (U+0080 to U+009F) include the 8-bit CSI, OSC and DCS introducers that some
+        // terminals honour even in UTF-8, so a pasted one is blanked, as a lone byte in that range
+        // is. Other multi-byte characters are copied whole.
+        const sequence = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+        const whole = sequence > 1 and index + sequence <= text.len;
+        const codepoint: ?u21 = if (whole) std.unicode.utf8Decode(text[index .. index + sequence]) catch null else null;
+        if (codepoint) |value| {
+            if (value >= 0x80 and value <= 0x9f) {
+                normalized[length] = ' ';
+                length += 1;
+            } else {
+                @memcpy(normalized[length .. length + sequence], text[index .. index + sequence]);
+                length += sequence;
+            }
+            index += sequence;
+        } else {
+            normalized[length] = if (byte >= 0x80 and byte <= 0x9f) ' ' else byte;
+            length += 1;
+            index += 1;
+        }
     }
     const data = normalized[0..length];
     if (!bracketed and !allow_unbracketed_multiline and !c.ghostty_paste_is_safe(data.ptr, data.len))
@@ -645,6 +670,28 @@ test "paste encoding keeps Unicode and blanks escapes that could close the brack
     try std.testing.expect(std.mem.endsWith(u8, hostile, "\x1b[201~"));
     const inner = hostile["\x1b[200~".len .. hostile.len - "\x1b[201~".len];
     try std.testing.expect(std.mem.indexOfScalar(u8, inner, 0x1b) == null);
+}
+
+test "paste encoding blanks C1 control characters, which some terminals read as escape introducers" {
+    const allocator = std.testing.allocator;
+    // U+009B is the 8-bit CSI: "\xc2\x9b" as UTF-8, or a lone 0x9b byte. It is blanked with the
+    // rest of the C1 range (0x80 to 0x9f) whether or not the program asked for brackets.
+    const cases = [_]struct { text: []const u8, bracketed: bool, expected: []const u8 }{
+        .{ .text = "x\xc2\x9b201~y", .bracketed = false, .expected = "x 201~y" },
+        .{ .text = "x\xc2\x9b201~y", .bracketed = true, .expected = "\x1b[200~x 201~y\x1b[201~" },
+        .{ .text = "x\x9b201~y", .bracketed = false, .expected = "x 201~y" },
+        .{ .text = "x\x9b201~y", .bracketed = true, .expected = "\x1b[200~x 201~y\x1b[201~" },
+        .{ .text = "a\xc2\x90b\xc2\x9dc\xc2\x9fd", .bracketed = false, .expected = "a b c d" },
+        // Characters whose UTF-8 bytes merely contain bytes in that range are untouched.
+        .{ .text = "\xe2\x82\xac\xc3\xa9\xf0\x9f\x98\x80", .bracketed = false, .expected = "\xe2\x82\xac\xc3\xa9\xf0\x9f\x98\x80" },
+        .{ .text = "\xc2\xa0\xc2\x80", .bracketed = false, .expected = "\xc2\xa0 " },
+    };
+    for (cases) |case| {
+        const encoded = try encodePaste(allocator, case.text, case.bracketed, true);
+        defer allocator.free(encoded);
+        if (!std.mem.eql(u8, case.expected, encoded)) std.debug.print("C1 case {any}: got {any}\n", .{ case.text, encoded });
+        try std.testing.expectEqualSlices(u8, case.expected, encoded);
+    }
 }
 
 test "VT reports the program's bracketed-paste request" {
