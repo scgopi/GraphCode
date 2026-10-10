@@ -7,3 +7,4 @@ pub const loopBarLayout = TerminalSurface.loopBarLayout;
 pub const tabBounds = TerminalSurface.tabBounds;
 pub const chromeControlBounds = TerminalSurface.chromeControlBounds;
 pub const quick_chat_scope_project = TerminalSurface.quick_chat_scope_project;
+pub const KnownNodes = TerminalSurface.KnownNodes;

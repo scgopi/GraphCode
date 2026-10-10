@@ -289,35 +289,48 @@ pub const Layout = struct {
         if (self.tabs.items.len != 0 and self.selected_tab >= self.tabs.items.len)
             return error.InvalidTopology;
         if (self.tabs.items.len != 0) try self.validateTopology();
-        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{file_path});
+        // A name of its own per writer: two shells sharing the support directory must never
+        // interleave their bytes in one temporary file before it is renamed over the layout.
+        var nonce: [8]u8 = undefined;
+        std.crypto.random.bytes(&nonce);
+        const tmp_path = try std.fmt.allocPrint(self.allocator, "{s}.{x}.tmp", .{ file_path, std.mem.readInt(u64, &nonce, .little) });
         defer self.allocator.free(tmp_path);
         if (std.fs.path.dirname(file_path)) |directory| try std.fs.cwd().makePath(directory);
-        var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
-        defer file.close();
-        var buffer: [4096]u8 = undefined;
-        var writer = file.writer(&buffer);
-        try writer.interface.writeAll("{\"schemaVersion\":2,\"project\":");
-        try writer.interface.print("{f}", .{std.json.fmt(self.project_key, .{})});
-        if (self.loop_key.len != 0) try writer.interface.print(",\"loop\":{f}", .{std.json.fmt(self.loop_key, .{})});
-        try writer.interface.print(",\"selectedTab\":{d},\"tabs\":[", .{self.selected_tab});
+        {
+            var file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+            errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+            defer file.close();
+            var buffer: [4096]u8 = undefined;
+            var writer = file.writer(&buffer);
+            try self.writeJson(&writer.interface);
+            try writer.interface.flush();
+            try file.sync();
+        }
+        errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+        try std.fs.cwd().rename(tmp_path, file_path);
+    }
+
+    fn writeJson(self: *const Layout, writer: *std.Io.Writer) !void {
+        try writer.writeAll("{\"schemaVersion\":2,\"project\":");
+        try writer.print("{f}", .{std.json.fmt(self.project_key, .{})});
+        if (self.loop_key.len != 0) try writer.print(",\"loop\":{f}", .{std.json.fmt(self.loop_key, .{})});
+        try writer.print(",\"selectedTab\":{d},\"tabs\":[", .{self.selected_tab});
         for (self.tabs.items, 0..) |tab, tab_index| {
-            if (tab_index != 0) try writer.interface.writeByte(',');
-            try writer.interface.print(
+            if (tab_index != 0) try writer.writeByte(',');
+            try writer.print(
                 "{{\"id\":{d},\"direction\":\"{s}\",\"focused\":{d},\"panes\":[",
                 .{ tab.id, @tagName(tab.split_direction), tab.focused_pane },
             );
             for (tab.panes.items, 0..) |pane, pane_index| {
-                if (pane_index != 0) try writer.interface.writeByte(',');
-                try writer.interface.print(
+                if (pane_index != 0) try writer.writeByte(',');
+                try writer.print(
                     "{{\"id\":{f},\"agent\":{s}}}",
                     .{ std.json.fmt(pane.id, .{}), if (pane.launches_agent) "true" else "false" },
                 );
             }
-            try writer.interface.writeAll("]}");
+            try writer.writeAll("]}");
         }
-        try writer.interface.writeAll("]}");
-        try writer.interface.flush();
-        try std.fs.cwd().rename(tmp_path, file_path);
+        try writer.writeAll("]}");
     }
 
     pub fn load(
@@ -335,7 +348,11 @@ pub const Layout = struct {
         expected_project: []const u8,
         expected_loop: []const u8,
     ) !Layout {
-        const data = try std.fs.cwd().readFileAlloc(allocator, file_path, 4 * 1024 * 1024);
+        const data = std.fs.cwd().readFileAlloc(allocator, file_path, 4 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound, error.OutOfMemory => return err,
+            // Locked by another shell, denied, too large: nothing says the layout is bad.
+            else => return error.LayoutUnreadable,
+        };
         defer allocator.free(data);
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
         defer parsed.deinit();
@@ -484,6 +501,149 @@ pub fn legacyLayoutPath(allocator: std.mem.Allocator, directory: []const u8, pro
     return std.fmt.allocPrint(allocator, "{s}\\graphcode-workspace.{s}.json", .{ directory, projectSuffix(project) });
 }
 
+/// Whether a failed load means the file's contents are not a usable layout of this shell
+/// (corrupt, foreign, or from a newer schema), as opposed to it being unreadable right now.
+pub fn isInvalidLayout(err: anyerror) bool {
+    return switch (err) {
+        error.FileNotFound, error.LayoutUnreadable, error.OutOfMemory => false,
+        else => true,
+    };
+}
+
+/// Moves a layout file this shell must not use or delete aside as `<file>.<suffix>`, or
+/// `<file>.<suffix>.<n>` when that is taken: renaming over an earlier one would lose it.
+/// False when it could not be moved, in which case the file is left where it is.
+pub fn setAside(allocator: std.mem.Allocator, file_path: []const u8, suffix: []const u8) bool {
+    var attempt: usize = 0;
+    while (attempt < 100) : (attempt += 1) {
+        const target = if (attempt == 0)
+            std.fmt.allocPrint(allocator, "{s}.{s}", .{ file_path, suffix }) catch return false
+        else
+            std.fmt.allocPrint(allocator, "{s}.{s}.{d}", .{ file_path, suffix, attempt }) catch return false;
+        defer allocator.free(target);
+        if (std.fs.cwd().access(target, .{})) |_| continue else |_| {}
+        std.fs.cwd().rename(file_path, target) catch return false;
+        return true;
+    }
+    return false;
+}
+
+fn sameSession(a: []const u8, b: []const u8) bool {
+    const prefix = "graphcode-";
+    const left = if (std.mem.startsWith(u8, a, prefix)) a[prefix.len..] else a;
+    const right = if (std.mem.startsWith(u8, b, prefix)) b[prefix.len..] else b;
+    return std.mem.eql(u8, left, right);
+}
+
+pub const Claim = enum { claimed, unclaimed, unknown };
+
+/// Whether any layout file in `root` other than `except_file` names `session` as a pane,
+/// whatever its project or loop. A session two layouts both claim is not safely one's to end.
+/// `unknown` when the scan could not be completed (more files than the cap, a directory or
+/// file that could not be read, or one that is not a layout): absence of a claim is only
+/// known from a scan that saw every layout.
+pub fn claimedByOtherLayout(allocator: std.mem.Allocator, root: []const u8, except_file: []const u8, session: []const u8) Claim {
+    var directory = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |err| return if (err == error.FileNotFound) .unclaimed else .unknown;
+    defer directory.close();
+    const except_name = std.fs.path.basename(except_file);
+    var iterator = directory.iterate();
+    var seen: usize = 0;
+    var complete = true;
+    while (true) {
+        const entry = (iterator.next() catch {
+            complete = false;
+            break;
+        }) orelse break;
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        if (std.ascii.eqlIgnoreCase(entry.name, except_name)) continue;
+        seen += 1;
+        if (seen > max_scanned_layouts) {
+            complete = false;
+            break;
+        }
+        switch (fileClaim(allocator, directory, entry.name, session)) {
+            .claimed => return .claimed,
+            .unclaimed => {},
+            .unknown => complete = false,
+        }
+    }
+    return if (complete) .unclaimed else .unknown;
+}
+
+fn fileClaim(allocator: std.mem.Allocator, directory: std.fs.Dir, name: []const u8, session: []const u8) Claim {
+    const data = directory.readFileAlloc(allocator, name, 4 * 1024 * 1024) catch |err| {
+        // A file that vanished mid-scan claims nothing; one that cannot be read might.
+        return if (err == error.FileNotFound) .unclaimed else .unknown;
+    };
+    defer allocator.free(data);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return .unknown;
+    defer parsed.deinit();
+    const root_object = switch (parsed.value) {
+        .object => |value| value,
+        else => return .unknown,
+    };
+    const tabs = switch (root_object.get("tabs") orelse return .unknown) {
+        .array => |value| value.items,
+        else => return .unknown,
+    };
+    for (tabs) |tab| {
+        const tab_object = switch (tab) {
+            .object => |value| value,
+            else => return .unknown,
+        };
+        const panes = switch (tab_object.get("panes") orelse return .unknown) {
+            .array => |value| value.items,
+            else => return .unknown,
+        };
+        for (panes) |pane| {
+            const pane_object = switch (pane) {
+                .object => |value| value,
+                else => return .unknown,
+            };
+            const id = pane_object.get("id") orelse return .unknown;
+            if (id != .string) return .unknown;
+            if (sameSession(id.string, session)) return .claimed;
+        }
+    }
+    return .unclaimed;
+}
+
+pub const owned_sessions_directory_name = "shell-sessions";
+
+/// The record that a GraphCode shell minted a shell session for a loop's layout: a file named
+/// for the session in `<root>\shell-sessions` whose content is the loop it was minted for (empty
+/// when the layout is not loop-scoped). Written after the layout claiming the session is saved
+/// and before the session starts. A name's shape cannot say who made the session, and a layout
+/// edit or corruption does not touch this record; but the root is shared by every GraphCode
+/// shell of the user, so it proves "some GraphCode shell recorded it for that loop", not which
+/// shell. Null when `session` is not a plain file name.
+fn ownedSessionPath(allocator: std.mem.Allocator, root: []const u8, session: []const u8) ?[]u8 {
+    if (!isFileSafeID(session)) return null;
+    return std.fmt.allocPrint(allocator, "{s}\\{s}\\{s}", .{ root, owned_sessions_directory_name, session }) catch null;
+}
+
+pub fn markShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8, loop: []const u8) !void {
+    const path = ownedSessionPath(allocator, root, session) orelse return error.InvalidSessionName;
+    defer allocator.free(path);
+    if (std.fs.path.dirname(path)) |directory| try std.fs.cwd().makePath(directory);
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = loop });
+}
+
+/// Whether a record says `session` was minted for `loop`.
+pub fn isShellOwnedBy(allocator: std.mem.Allocator, root: []const u8, session: []const u8, loop: []const u8) bool {
+    const path = ownedSessionPath(allocator, root, session) orelse return false;
+    defer allocator.free(path);
+    const recorded = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch return false;
+    defer allocator.free(recorded);
+    return std.mem.eql(u8, recorded, loop);
+}
+
+pub fn forgetShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) void {
+    const path = ownedSessionPath(allocator, root, session) orelse return;
+    defer allocator.free(path);
+    std.fs.cwd().deleteFile(path) catch {};
+}
+
 /// A loop's layout from the project-wide legacy file, for a loop that has none of its own
 /// yet. The legacy file mixed every loop of the project: it is adopted only when it names
 /// `loop` as one of its panes, and then without the agent panes of any other loop. Null
@@ -522,6 +682,8 @@ pub fn adoptLegacyLayout(
 pub const LoopRecord = struct {
     loop: []u8,
     project: []u8,
+    /// When the layout file was last written, in nanoseconds since 1970 (0 when unknown).
+    modified_ns: i128 = 0,
 };
 
 pub fn freeLoopRecords(allocator: std.mem.Allocator, records: []LoopRecord) void {
@@ -569,7 +731,8 @@ pub fn scanLoopLayouts(allocator: std.mem.Allocator, root: []const u8) ![]LoopRe
         errdefer allocator.free(owned_loop);
         const owned_project = try allocator.dupe(u8, project.string);
         errdefer allocator.free(owned_project);
-        try records.append(allocator, .{ .loop = owned_loop, .project = owned_project });
+        const modified_ns: i128 = if (directory.statFile(entry.name)) |stat| stat.mtime else |_| std.math.maxInt(i128);
+        try records.append(allocator, .{ .loop = owned_loop, .project = owned_project, .modified_ns = modified_ns });
     }
     return records.toOwnedSlice(allocator);
 }
@@ -845,4 +1008,154 @@ test "scanning loop layouts reports only loop-scoped files and skips everything 
     const missing = try scanLoopLayouts(std.testing.allocator, "C:\\no\\such\\layouts");
     defer freeLoopRecords(std.testing.allocator, missing);
     try std.testing.expectEqual(@as(usize, 0), missing.len);
+    try std.testing.expect(records[0].modified_ns > 0);
+}
+
+test "a layout is set aside under a name that never replaces an earlier one" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}\\loop.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    try tmp.dir.writeFile(.{ .sub_path = "loop.json", .data = "first" });
+    try std.testing.expect(setAside(std.testing.allocator, path, "bad"));
+    try tmp.dir.writeFile(.{ .sub_path = "loop.json", .data = "second" });
+    try std.testing.expect(setAside(std.testing.allocator, path, "bad"));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("loop.json", .{}));
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("first", try tmp.dir.readFile("loop.json.bad", &buffer));
+    try std.testing.expectEqualStrings("second", try tmp.dir.readFile("loop.json.bad.1", &buffer));
+    try std.testing.expect(!setAside(std.testing.allocator, path, "bad"));
+}
+
+test "loading tells a missing layout, an unreadable one and an invalid one apart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}\\loop.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectError(error.FileNotFound, Layout.loadFor(std.testing.allocator, path, "project-a", "loop"));
+    try std.testing.expect(!isInvalidLayout(error.FileNotFound));
+
+    // A directory where the file should be cannot be read, and says nothing about its contents.
+    try tmp.dir.makePath("loop.json");
+    try std.testing.expectError(error.LayoutUnreadable, Layout.loadFor(std.testing.allocator, path, "project-a", "loop"));
+    try std.testing.expect(!isInvalidLayout(error.LayoutUnreadable));
+    try tmp.dir.deleteDir("loop.json");
+
+    const invalid = [_][]const u8{
+        "{\"schemaVersion\":2,\"project\":\"",
+        "{\"schemaVersion\":3,\"project\":\"project-a\",\"loop\":\"loop\",\"selectedTab\":0,\"tabs\":[]}",
+        "{\"schemaVersion\":2,\"project\":\"project-b\",\"loop\":\"loop\",\"selectedTab\":0,\"tabs\":[]}",
+        "{\"schemaVersion\":2,\"project\":\"project-a\",\"loop\":\"other\",\"selectedTab\":0,\"tabs\":[]}",
+        "[]",
+    };
+    for (invalid) |data| {
+        try tmp.dir.writeFile(.{ .sub_path = "loop.json", .data = data });
+        if (Layout.loadFor(std.testing.allocator, path, "project-a", "loop")) |value| {
+            var loaded = value;
+            loaded.deinit();
+            return error.TestExpectedInvalidLayout;
+        } else |err| try std.testing.expect(isInvalidLayout(err));
+    }
+}
+
+test "a pane another layout names is claimed, however the session is spelled" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    var other = try Layout.initForLoop(std.testing.allocator, "project-a", "loop-b");
+    defer other.deinit();
+    try other.addTab("loop-b", true);
+    try other.addTab("graphcode-shared", false);
+    const other_path = try loopLayoutPath(std.testing.allocator, root, "loop-b");
+    defer std.testing.allocator.free(other_path);
+    try other.save(other_path);
+    try tmp.dir.writeFile(.{ .sub_path = "garbage.json", .data = "{ not a layout" });
+    const mine = try loopLayoutPath(std.testing.allocator, root, "loop-a");
+    defer std.testing.allocator.free(mine);
+
+    try std.testing.expectEqual(Claim.claimed, claimedByOtherLayout(std.testing.allocator, root, mine, "graphcode-shared"));
+    try std.testing.expectEqual(Claim.claimed, claimedByOtherLayout(std.testing.allocator, root, mine, "shared"));
+    // An unreadable layout might name anything, so nothing is known to be unclaimed.
+    try std.testing.expectEqual(Claim.unknown, claimedByOtherLayout(std.testing.allocator, root, mine, "unshared"));
+    try tmp.dir.deleteFile("garbage.json");
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, root, mine, "unshared"));
+    // The layout being retired never makes its own panes shared.
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, root, other_path, "shared"));
+    try std.testing.expectEqual(Claim.unclaimed, claimedByOtherLayout(std.testing.allocator, "C:\\no\\such\\layouts", mine, "shared"));
+}
+
+test "a layout scan past its cap is unknown, not unclaimed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    for (0..max_scanned_layouts + 5) |index| {
+        var name: [32]u8 = undefined;
+        try tmp.dir.writeFile(.{ .sub_path = try std.fmt.bufPrint(&name, "filler-{d:0>4}.json", .{index}), .data = "{\"tabs\":[]}" });
+    }
+    try tmp.dir.writeFile(.{ .sub_path = "zzz-claimant.json", .data = "{\"tabs\":[{\"panes\":[{\"id\":\"shared\"}]}]}" });
+    try std.testing.expectEqual(Claim.unknown, claimedByOtherLayout(std.testing.allocator, root, "", "shared"));
+}
+
+test "a shell session is owned only for the loop its record names, and not after it is forgotten" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const name = "graphcode-5e11ba5e-0001-4000-8000-000000000001";
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
+    try markShellOwned(std.testing.allocator, root, name, "loop-a");
+    try std.testing.expect(isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
+    // A record names the loop it was minted for; another loop's retirement does not qualify.
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-b"));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, ""));
+    try markShellOwned(std.testing.allocator, root, "graphcode-5e11ba5e-0003-4000-8000-000000000003", "");
+    try std.testing.expect(isShellOwnedBy(std.testing.allocator, root, "graphcode-5e11ba5e-0003-4000-8000-000000000003", ""));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, "graphcode-5e11ba5e-0002-4000-8000-000000000002", "loop-a"));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, "..\\escape", "loop-a"));
+    try std.testing.expectError(error.InvalidSessionName, markShellOwned(std.testing.allocator, root, "..\\escape", "loop-a"));
+    forgetShellOwned(std.testing.allocator, root, name);
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
+}
+
+test "saving replaces a layout whole, leaves no temporary file, and keeps the old one when it fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    const path = try loopLayoutPath(std.testing.allocator, root, "loop-a");
+    defer std.testing.allocator.free(path);
+
+    var first = try Layout.initForLoop(std.testing.allocator, "project-a", "loop-a");
+    defer first.deinit();
+    try first.addTab("loop-a", true);
+    try first.save(path);
+    var second = try Layout.initForLoop(std.testing.allocator, "project-a", "loop-a");
+    defer second.deinit();
+    try second.addTab("loop-a", true);
+    try second.addTab("shell", false);
+    try second.save(path);
+    var loaded = try Layout.loadFor(std.testing.allocator, path, "project-a", "loop-a");
+    defer loaded.deinit();
+    try std.testing.expect(loaded.hasPane("shell"));
+
+    // A layout that fails validation never touches the file.
+    second.selected_tab = 9;
+    try std.testing.expectError(error.InvalidTopology, second.save(path));
+    var kept = try Layout.loadFor(std.testing.allocator, path, "project-a", "loop-a");
+    kept.deinit();
+
+    var directory = try tmp.dir.openDir(".", .{ .iterate = true });
+    defer directory.close();
+    var iterator = directory.iterate();
+    while (try iterator.next()) |entry| {
+        try std.testing.expect(!std.mem.endsWith(u8, entry.name, ".tmp"));
+    }
 }

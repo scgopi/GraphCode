@@ -378,15 +378,49 @@ const KillJob = struct {
     child: std.process.Child,
     argv: [][]const u8,
     names: [][]u8,
+    /// The layout directory whose ownership records name these sessions; empty when none.
+    owner_root: []u8,
 
     fn deinit(self: *KillJob, allocator: std.mem.Allocator) void {
         for (self.names) |name| allocator.free(name);
         allocator.free(self.names);
         allocator.free(self.argv);
+        allocator.free(self.owner_root);
     }
 };
 
 const kill_wait_ms: i64 = 3_000;
+
+const MissingLoop = struct {
+    project: []u8,
+    loop: []u8,
+};
+
+/// Answers whether an id names a node of the graph the caller holds. A shell session is
+/// never ended when its uuid is one, whatever case either is written in.
+pub const KnownNodes = struct {
+    context: *const anyopaque,
+    contains: *const fn (context: *const anyopaque, id: []const u8) bool,
+};
+/// A saved project layout, or null when there is none to use. One whose contents are not a
+/// layout of this shell (corrupt, another project's, a newer schema) is moved aside as `.bad`
+/// rather than left for the next save to overwrite; when it cannot be moved aside the load
+/// fails, since the caller would otherwise write a fresh layout over it.
+fn loadSavedLayout(allocator: std.mem.Allocator, path: []const u8, project: []const u8) !?WorkspaceLayout.Layout {
+    return WorkspaceLayout.Layout.load(allocator, path, project) catch |err| {
+        try keepUnusableLayout(allocator, path, err);
+        return null;
+    };
+}
+
+fn keepUnusableLayout(allocator: std.mem.Allocator, path: []const u8, err: anyerror) !void {
+    if (!WorkspaceLayout.isInvalidLayout(err)) return;
+    if (!WorkspaceLayout.setAside(allocator, path, "bad")) {
+        std.log.warn("workspace layout {s} is not usable ({s}) and could not be set aside; left untouched", .{ path, @errorName(err) });
+        return error.LayoutNotPreserved;
+    }
+    std.log.warn("workspace layout {s} is not usable ({s}); kept as .bad", .{ path, @errorName(err) });
+}
 
 /// The project key under which a quick chat's layout is saved. It is no project's path, so
 /// a chat's layout is never mistaken for a graph loop's when loops are reconciled.
@@ -454,6 +488,18 @@ pub const Workspace = struct {
     /// working directory, which for the installed shell is its install `bin` folder.
     legacy_directory: []u8 = &.{},
     kill_jobs: std.ArrayListUnmanaged(KillJob) = .empty,
+    /// When this shell started. A loop layout saved after that was not left by an earlier
+    /// run, so it may be another shell's and is never swept as a deleted loop's. Zero (never
+    /// set) counts every layout as newer.
+    started_ns: i128 = 0,
+    /// Slots whose saved shell tab awaits a session listing that proves it live (see
+    /// `restorePersistedSurfaces`): attaching blind would start a bare shell under its name.
+    restore_verify: [max_surfaces]bool = [_]bool{false} ** max_surfaces,
+    restore_attempts: [max_surfaces]u8 = [_]u8{0} ** max_surfaces,
+    /// Failed listings after which a pending shell tab is left saved until its loop reopens.
+    restore_retry_limit: u8 = 5,
+    /// Loops a snapshot reported missing once; a second agreeing one makes them deleted.
+    missing_loops: std.ArrayListUnmanaged(MissingLoop) = .empty,
     key_callback: ?WorkspaceKeyCallback = null,
     key_callback_context: ?*anyopaque = null,
     layout_origin_x: i32 = 0,
@@ -481,6 +527,7 @@ pub const Workspace = struct {
             .allocator = allocator_,
             .experimental_vt = experimental_vt,
             .zmx_path = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_ZMX") catch "zmx.exe"),
+            .started_ns = std.time.nanoTimestamp(),
             .cwd = try allocator_.dupe(u8, std.process.getEnvVarOwned(allocator_, "GRAPHCODE_GATE_CWD") catch "."),
             .input_queue = .{ .allocator = allocator_ },
             .layout = try WorkspaceLayout.Layout.init(
@@ -514,10 +561,16 @@ pub const Workspace = struct {
         }
         workspace.layout_path = try workspace.layoutPathForProject(workspace.project_key);
         if (workspace.layout_path.len != 0) {
-            if (WorkspaceLayout.Layout.load(allocator_, workspace.layout_path, workspace.project_key)) |restored| {
-                workspace.layout.deinit();
-                workspace.layout = restored;
-            } else |_| {}
+            if (loadSavedLayout(allocator_, workspace.layout_path, workspace.project_key)) |maybe_restored| {
+                if (maybe_restored) |restored| {
+                    workspace.layout.deinit();
+                    workspace.layout = restored;
+                }
+            } else |_| {
+                // Unusable and not preserved: persistence stays off so no save overwrites it.
+                allocator_.free(workspace.layout_path);
+                workspace.layout_path = &.{};
+            }
         }
         if (c.winghostty_host_initialize(&workspace.host) != c.WINGHOSTTY_OK) {
             return error.WinghosttyHostInitializeFailed;
@@ -535,6 +588,7 @@ pub const Workspace = struct {
         self.stopInputWorker();
         self.cancelAllLaunchWaits();
         self.finishKillJobs();
+        self.clearMissingLoops();
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         for (&self.recreate_sessions) |*session| {
             if (session.*.len != 0) self.allocator.free(session.*);
@@ -583,10 +637,10 @@ pub const Workspace = struct {
         errdefer self.allocator.free(new_layout_path);
         var new_layout = try WorkspaceLayout.Layout.init(self.allocator, project);
         errdefer new_layout.deinit();
-        if (WorkspaceLayout.Layout.load(self.allocator, new_layout_path, project)) |restored| {
+        if (try loadSavedLayout(self.allocator, new_layout_path, project)) |restored| {
             new_layout.deinit();
             new_layout = restored;
-        } else |_| {}
+        }
         var old_layout = self.layout;
         const old_project_key = self.project_key;
         const old_layout_path = self.layout_path;
@@ -626,10 +680,10 @@ pub const Workspace = struct {
         if (key_changed) {
             new_layout = try WorkspaceLayout.Layout.init(self.allocator, project_path);
             errdefer new_layout.deinit();
-            if (WorkspaceLayout.Layout.load(self.allocator, new_layout_path, project_path)) |restored| {
+            if (try loadSavedLayout(self.allocator, new_layout_path, project_path)) |restored| {
                 new_layout.deinit();
                 new_layout = restored;
-            } else |_| {}
+            }
         } else {
             new_layout = self.layout;
         }
@@ -751,7 +805,12 @@ pub const Workspace = struct {
     /// as it is.
     pub fn scopeToLoop(self: *Workspace, loop: []const u8, layout_project: []const u8, launches_agent: bool) !void {
         if (loop.len == 0) return;
-        if (std.mem.eql(u8, self.loop_id, loop) and std.mem.eql(u8, self.layout.project_key, layout_project)) return;
+        if (std.mem.eql(u8, self.loop_id, loop) and std.mem.eql(u8, self.layout.project_key, layout_project)) {
+            // Reopening the open loop picks up a saved pane an earlier restore could not attach.
+            self.expediteShellRestores();
+            self.restorePersistedSurfaces(loop, 1);
+            return;
+        }
         const root = self.layoutRoot() orelse return;
         const new_path = try WorkspaceLayout.loopLayoutPath(self.allocator, root, loop);
         errdefer self.allocator.free(new_path);
@@ -780,8 +839,15 @@ pub const Workspace = struct {
     fn loadLoopLayout(self: *Workspace, path: []const u8, layout_project: []const u8, loop: []const u8) !WorkspaceLayout.Layout {
         if (WorkspaceLayout.Layout.loadFor(self.allocator, path, layout_project, loop)) |saved| {
             return saved;
-        } else |err| if (err == error.FileNotFound) {
-            if (try self.adoptLegacy(path, layout_project, loop)) |adopted| return adopted;
+        } else |err| {
+            if (err == error.FileNotFound) {
+                if (try self.adoptLegacy(path, layout_project, loop)) |adopted| return adopted;
+            } else if (err == error.LayoutUnreadable or err == error.OutOfMemory) {
+                // Not known to be bad, so not replaced: the next save would overwrite it.
+                return err;
+            } else {
+                try keepUnusableLayout(self.allocator, path, err);
+            }
         }
         return WorkspaceLayout.Layout.initForLoop(self.allocator, layout_project, loop);
     }
@@ -800,17 +866,35 @@ pub const Workspace = struct {
         if (std.fs.cwd().access(marker, .{})) |_| return null else |_| {}
         const legacy_path = try WorkspaceLayout.legacyLayoutPath(self.allocator, self.legacy_directory, self.project_key);
         defer self.allocator.free(legacy_path);
-        const adopted = (try WorkspaceLayout.adoptLegacyLayout(self.allocator, legacy_path, self.project_key, loop, layout_project)) orelse return null;
-        std.fs.cwd().makePath(root) catch {};
-        std.fs.cwd().writeFile(.{ .sub_path = marker, .data = loop }) catch {};
+        var adopted = (try WorkspaceLayout.adoptLegacyLayout(self.allocator, legacy_path, self.project_key, loop, layout_project)) orelse return null;
+        // Without the marker every loop of the project would adopt the same shells, so a
+        // marker that cannot be written means no adoption this time, not a shared one.
+        const marked = marked: {
+            std.fs.cwd().makePath(root) catch break :marked false;
+            std.fs.cwd().writeFile(.{ .sub_path = marker, .data = loop }) catch break :marked false;
+            break :marked true;
+        };
+        if (!marked) {
+            adopted.deinit();
+            return null;
+        }
         return adopted;
     }
 
-    /// Ends the shell sessions saved in a deleted loop's layout and forgets the layout. The
-    /// sessions ended are exactly the plain-shell panes that layout names; the loop's own
-    /// session belongs to the daemon and no other loop's is touched. A layout that cannot be
-    /// read ends nothing. Returns how many sessions were ended.
+    /// Ends the shell sessions saved in a deleted loop's layout and forgets the layout. Only
+    /// plain-shell panes are candidates, and only those whose session is one this shell made
+    /// (`ZmxSession.shellSessionName`) and a fresh `zmx ls` shows running (`endShellSessions`):
+    /// the loop's own session belongs to the daemon, and no other loop's or user's is touched.
+    /// A layout that cannot be read ends nothing and stays; so does one whose sessions could
+    /// not be listed, to be retried by the next sweep. A layout naming a session this shell
+    /// refused to end is set aside as `.refused` rather than deleted. Returns how many
+    /// sessions were ended.
     pub fn retireLoop(self: *Workspace, loop: []const u8, layout_project: []const u8) usize {
+        return self.retireLoopGuarded(loop, layout_project, null);
+    }
+
+    /// `retireLoop` that also refuses any session whose uuid names a node of the caller's graph.
+    pub fn retireLoopGuarded(self: *Workspace, loop: []const u8, layout_project: []const u8, known: ?KnownNodes) usize {
         const root = self.layoutRoot() orelse return 0;
         if (loop.len == 0) return 0;
         const path = WorkspaceLayout.loopLayoutPath(self.allocator, root, loop) catch return 0;
@@ -828,13 +912,17 @@ pub const Workspace = struct {
             if (pane.launches_agent or std.mem.eql(u8, pane.id, loop)) continue;
             sessions.append(self.allocator, pane.id) catch return 0;
         };
-        const count = sessions.items.len;
         if (open) {
             // Detached first, so ending a shell never reads as an exit to re-create.
             for (self.surfaces, 0..) |_, index| self.destroySurface(index);
             self.clearAllRecreateState();
         }
-        const started = self.endSessions(sessions.items);
+        const outcome = self.endShellSessions(sessions.items, .{
+            .known = known,
+            .except_layout = path,
+            .check_open_layout = !open,
+            .owner = loop,
+        });
         if (open) {
             if (WorkspaceLayout.Layout.init(self.allocator, self.layout.project_key)) |emptied| {
                 var old_layout = self.layout;
@@ -847,8 +935,61 @@ pub const Workspace = struct {
                 self.clearLoopScope();
             } else |_| {}
         }
-        std.fs.cwd().deleteFile(path) catch {};
-        return if (started) count else 0;
+        if (!outcome.listed or !outcome.started or outcome.deferred != 0) return 0;
+        if (outcome.refused != 0) {
+            _ = WorkspaceLayout.setAside(self.allocator, path, "refused");
+        } else {
+            std.fs.cwd().deleteFile(path) catch {};
+        }
+        return outcome.ended;
+    }
+
+    /// Remembers that a snapshot of `project` lacked `loop`. A loop is only ended once a
+    /// second snapshot agrees (`takeMissingLoops`): one cut short by a daemon restart or a
+    /// stale replay must not cost a user's shells.
+    pub fn markLoopMissing(self: *Workspace, project: []const u8, loop: []const u8) !void {
+        const owned_project = try self.allocator.dupe(u8, project);
+        errdefer self.allocator.free(owned_project);
+        const owned_loop = try self.allocator.dupe(u8, loop);
+        errdefer self.allocator.free(owned_loop);
+        try self.missing_loops.append(self.allocator, .{ .project = owned_project, .loop = owned_loop });
+    }
+
+    /// The loops an earlier snapshot of `project` reported missing, forgotten as they are
+    /// handed over; the caller checks them against the new snapshot and frees them with
+    /// `freeLoopIds`.
+    pub fn takeMissingLoops(self: *Workspace, project: []const u8) ![][]u8 {
+        var taken: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (taken.items) |id| self.allocator.free(id);
+            taken.deinit(self.allocator);
+        }
+        var index: usize = 0;
+        while (index < self.missing_loops.items.len) {
+            if (!std.mem.eql(u8, self.missing_loops.items[index].project, project)) {
+                index += 1;
+                continue;
+            }
+            const entry = self.missing_loops.items[index];
+            try taken.append(self.allocator, entry.loop);
+            self.allocator.free(entry.project);
+            _ = self.missing_loops.orderedRemove(index);
+        }
+        return taken.toOwnedSlice(self.allocator);
+    }
+
+    pub fn freeLoopIds(self: *const Workspace, ids: [][]u8) void {
+        for (ids) |id| self.allocator.free(id);
+        self.allocator.free(ids);
+    }
+
+    fn clearMissingLoops(self: *Workspace) void {
+        for (self.missing_loops.items) |entry| {
+            self.allocator.free(entry.project);
+            self.allocator.free(entry.loop);
+        }
+        self.missing_loops.deinit(self.allocator);
+        self.missing_loops = .empty;
     }
 
     /// The loop-scoped layouts saved beside this workspace's, for reconciling with the graph.
@@ -857,33 +998,153 @@ pub const Workspace = struct {
         return WorkspaceLayout.scanLoopLayouts(self.allocator, root);
     }
 
-    /// `zmx kill <sessions> --force`, run beside the UI and reaped by `poll`. Never the
-    /// session of the open loop itself. False when nothing could be started.
-    fn endSessions(self: *Workspace, sessions: []const []const u8) bool {
-        if (sessions.len == 0) return true;
-        const names = self.allocator.alloc([]u8, sessions.len) catch return false;
-        var named: usize = 0;
-        errdefer {
-            for (names[0..named]) |name| self.allocator.free(name);
-            self.allocator.free(names);
+    const EndOptions = struct {
+        known: ?KnownNodes = null,
+        /// The layout file being retired, which naming a session does not make it shared.
+        except_layout: []const u8 = "",
+        /// Whether the layout open in memory is another loop's, and so can share a session.
+        check_open_layout: bool = true,
+        /// The loop whose layout names the sessions: an ownership record must name it too.
+        owner: []const u8 = "",
+    };
+
+    const EndOutcome = struct {
+        /// False when the sessions could not be listed, so nothing was ended.
+        listed: bool = true,
+        /// False when the `zmx kill` could not be started.
+        started: bool = true,
+        ended: usize = 0,
+        /// Entries refused for good: the same answer next time.
+        refused: usize = 0,
+        /// Entries refused because the other layouts could not all be read: retryable.
+        deferred: usize = 0,
+    };
+
+    const Refusal = struct { reason: []const u8, retryable: bool = false };
+
+    /// Why this shell must not end the zmx session `name` (already a valid shell session
+    /// name), or null when it may. Ownership is proven by a record some GraphCode shell made in
+    /// the shared layout directory for this loop (`WorkspaceLayout.isShellOwnedBy`), never by
+    /// the name's shape; a session with no such record, one a graph node or another layout
+    /// also names, and one whose layouts could not all be read are all refused.
+    fn refuseEnding(self: *Workspace, name: []const u8, options: EndOptions) ?Refusal {
+        const uuid = name[ZmxSession.prefix.len..];
+        const root = self.layoutRoot() orelse return .{ .reason = "no layout directory records which sessions GraphCode made" };
+        if (!WorkspaceLayout.isShellOwnedBy(self.allocator, root, name, options.owner))
+            return .{ .reason = "no GraphCode shell recorded it for this loop" };
+        if (self.loop_id.len != 0 and std.ascii.eqlIgnoreCase(uuid, self.loop_id)) return .{ .reason = "it is the open loop's session" };
+        if (options.known) |known| {
+            if (known.contains(known.context, uuid)) return .{ .reason = "it names a node of the graph" };
         }
-        for (sessions) |session| {
-            names[named] = ZmxSession.allocName(self.allocator, session) catch return false;
-            named += 1;
+        if (options.check_open_layout and (self.layout.hasPane(uuid) or self.layout.hasPane(name)))
+            return .{ .reason = "the open layout also names it" };
+        return switch (WorkspaceLayout.claimedByOtherLayout(self.allocator, root, options.except_layout, name)) {
+            .unclaimed => null,
+            .claimed => .{ .reason = "another layout also names it" },
+            .unknown => .{ .reason = "the other saved layouts could not all be read", .retryable = true },
+        };
+    }
+
+    /// `zmx kill <sessions> --force`, run beside the UI and reaped by `poll`, for the panes in
+    /// `ids` whose session has the shape of a shell's (exactly `graphcode-` plus a lowercase
+    /// uuid, never an agent's uppercase one, a foreign or an unprefixed name), that this shell
+    /// recorded having minted (`refuseEnding`), that is no node's id and no other layout's
+    /// pane, and that a fresh, successful `zmx ls` shows running. Anything else is refused and
+    /// logged, never ended.
+    fn endShellSessions(self: *Workspace, ids: []const []const u8, options: EndOptions) EndOutcome {
+        var outcome: EndOutcome = .{};
+        var names: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (names.items) |name| self.allocator.free(name);
+            names.deinit(self.allocator);
         }
-        const argv = self.allocator.alloc([]const u8, sessions.len + 3) catch return false;
-        errdefer self.allocator.free(argv);
+        for (ids) |id| {
+            const name = (ZmxSession.shellSessionName(self.allocator, id) catch {
+                outcome.started = false;
+                return outcome;
+            }) orelse {
+                std.log.warn("not ending zmx session for pane {s}: not one of this shell's session names", .{id});
+                outcome.refused += 1;
+                continue;
+            };
+            var duplicate = false;
+            for (names.items) |existing| duplicate = duplicate or std.mem.eql(u8, existing, name);
+            if (duplicate) {
+                self.allocator.free(name);
+                continue;
+            }
+            if (self.refuseEnding(name, options)) |refusal| {
+                std.log.warn("not ending zmx session {s}: {s}", .{ name, refusal.reason });
+                self.allocator.free(name);
+                if (refusal.retryable) outcome.deferred += 1 else outcome.refused += 1;
+                continue;
+            }
+            names.append(self.allocator, name) catch {
+                self.allocator.free(name);
+                outcome.started = false;
+                return outcome;
+            };
+        }
+        if (names.items.len == 0) return outcome;
+
+        var listing = self.sessionListing() orelse {
+            outcome.listed = false;
+            return outcome;
+        };
+        defer listing.deinit(self.allocator);
+        var live: usize = 0;
+        for (names.items) |name| {
+            if (LoopLaunchWait.listingShowsLive(listing.items, name)) {
+                names.items[live] = name;
+                live += 1;
+            } else {
+                // Already gone: nothing is left to end, so the record of it goes too.
+                if (self.layoutRoot()) |root| WorkspaceLayout.forgetShellOwned(self.allocator, root, name);
+                self.allocator.free(name);
+            }
+        }
+        names.shrinkRetainingCapacity(live);
+        if (live == 0) return outcome;
+
+        const argv = self.allocator.alloc([]const u8, live + 3) catch {
+            outcome.started = false;
+            return outcome;
+        };
         argv[0] = self.zmxExecutable();
         argv[1] = "kill";
-        for (names, 0..) |name, index| argv[index + 2] = name;
+        for (names.items, 0..) |name, index| argv[index + 2] = name;
         argv[argv.len - 1] = "--force";
         var child = ZmxSession.child(self.allocator, argv, self.cwd, .control);
-        child.spawn() catch return false;
-        self.kill_jobs.append(self.allocator, .{ .child = child, .argv = argv, .names = names }) catch {
-            _ = child.kill() catch {};
-            return false;
+        child.spawn() catch {
+            self.allocator.free(argv);
+            outcome.started = false;
+            return outcome;
         };
-        return true;
+        const owned = names.toOwnedSlice(self.allocator) catch {
+            _ = child.kill() catch {};
+            self.allocator.free(argv);
+            outcome.started = false;
+            return outcome;
+        };
+        const owner_root = self.allocator.dupe(u8, self.layoutRoot() orelse "") catch {
+            _ = child.kill() catch {};
+            for (owned) |name| self.allocator.free(name);
+            self.allocator.free(owned);
+            self.allocator.free(argv);
+            outcome.started = false;
+            return outcome;
+        };
+        self.kill_jobs.append(self.allocator, .{ .child = child, .argv = argv, .names = owned, .owner_root = owner_root }) catch {
+            _ = child.kill() catch {};
+            for (owned) |name| self.allocator.free(name);
+            self.allocator.free(owned);
+            self.allocator.free(argv);
+            self.allocator.free(owner_root);
+            outcome.started = false;
+            return outcome;
+        };
+        outcome.ended = live;
+        return outcome;
     }
 
     fn pollKillJobs(self: *Workspace) void {
@@ -896,6 +1157,9 @@ pub const Workspace = struct {
                 continue;
             }
             _ = job.child.wait() catch {};
+            if (exit_code == 0 and job.owner_root.len != 0) {
+                for (job.names) |name| WorkspaceLayout.forgetShellOwned(self.allocator, job.owner_root, name);
+            }
             var finished = self.kill_jobs.orderedRemove(index);
             finished.deinit(self.allocator);
         }
@@ -1011,9 +1275,13 @@ pub const Workspace = struct {
     /// wedged zmx cannot hold the UI thread; null when it could not be read. The caller
     /// owns the bytes.
     fn sessionListing(self: *Workspace) ?std.ArrayListUnmanaged(u8) {
+        return self.sessionListingWithin(restore_probe_timeout_ms);
+    }
+
+    fn sessionListingWithin(self: *Workspace, timeout_ms: i64) ?std.ArrayListUnmanaged(u8) {
         var child = self.spawnListing() orelse return null;
         var output: std.ArrayListUnmanaged(u8) = .empty;
-        const deadline = nowMilliseconds() + restore_probe_timeout_ms;
+        const deadline = nowMilliseconds() + timeout_ms;
         var exit_code: c.DWORD = c.STILL_ACTIVE;
         while (true) {
             self.drainListing(&child, &output) catch {
@@ -1297,25 +1565,55 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    /// Records, before any attach can create the session, that the shell minted this tab's
+    /// session for the open loop: only a session with such a record, naming the loop whose
+    /// layout is being retired or closed, is ever ended by the shell (`refuseEnding`). Written
+    /// after the layout claim is saved and before the session starts. Best effort: a tab whose
+    /// record could not be written works, but is never ended for it.
+    fn recordShellOwned(self: *Workspace, surface_id: []const u8) void {
+        const root = self.layoutRoot() orelse return;
+        const name = ZmxSession.allocName(self.allocator, surface_id) catch return;
+        defer self.allocator.free(name);
+        WorkspaceLayout.markShellOwned(self.allocator, root, name, self.loop_id) catch |err| {
+            std.log.warn("could not record shell session {s} as a GraphCode shell's: {s}", .{ name, @errorName(err) });
+        };
+    }
+
+    fn forgetShellOwned(self: *Workspace, surface_id: []const u8) void {
+        const root = self.layoutRoot() orelse return;
+        const name = ZmxSession.allocName(self.allocator, surface_id) catch return;
+        defer self.allocator.free(name);
+        WorkspaceLayout.forgetShellOwned(self.allocator, root, name);
+    }
+
+    /// The layout claims the new session before it exists: a layout naming it is on disk
+    /// (visible to any other shell sharing the layout directory) before the record is written
+    /// and the session started, and any failure afterwards takes the claim back.
     pub fn newTab(self: *Workspace) !void {
         const surface_id = try self.layout.newSurfaceID();
         defer self.allocator.free(surface_id);
+        const initial_grid = try self.workspaceGridSize();
         const previous_selected = self.layout.selected_tab;
         const previous_next_id = self.layout.next_tab_id;
-        const index = try self.createAttachedSurface(surface_id, try self.workspaceGridSize());
-        errdefer self.destroySurface(index);
-        self.layout.addTab(surface_id, false) catch |err| {
-            self.destroySurface(index);
+        try self.layout.addTab(surface_id, false);
+        self.persistLayout() catch |err| {
+            self.rollBackNewTab(surface_id, previous_selected, previous_next_id);
             return err;
         };
-        self.persistLayout() catch |err| {
-            _ = self.layout.removePane(surface_id);
-            self.layout.selected_tab = previous_selected;
-            self.layout.next_tab_id = previous_next_id;
-            self.destroySurface(index);
+        self.recordShellOwned(surface_id);
+        _ = self.createAttachedSurface(surface_id, initial_grid) catch |err| {
+            self.rollBackNewTab(surface_id, previous_selected, previous_next_id);
+            self.persistLayout() catch {};
+            self.forgetShellOwned(surface_id);
             return err;
         };
         self.syncTopology();
+    }
+
+    fn rollBackNewTab(self: *Workspace, surface_id: []const u8, previous_selected: usize, previous_next_id: u64) void {
+        _ = self.layout.removePane(surface_id);
+        self.layout.selected_tab = previous_selected;
+        self.layout.next_tab_id = previous_next_id;
     }
 
     fn createAttachedSurface(self: *Workspace, session: []const u8, initial_grid: GridSize) !usize {
@@ -1362,6 +1660,8 @@ pub const Workspace = struct {
         for (self.layout.tabs.items) |tab| for (tab.panes.items) |pane| {
             if (count == ids.len) break;
             if (skip_id.len != 0 and std.mem.eql(u8, pane.id, skip_id)) continue;
+            // Reopening the open loop reaches here with panes already shown or already queued.
+            if (self.paneShown(pane.id) or self.restoreQueued(pane.id)) continue;
             ids[count] = self.allocator.dupe(u8, pane.id) catch continue;
             agents[count] = pane.launches_agent;
             count += 1;
@@ -1373,9 +1673,10 @@ pub const Workspace = struct {
         for (ids[0..count], agents[0..count]) |id, launches_agent| {
             const live: ?bool = if (listing) |value| LoopLaunchWait.listingShowsLive(value.items, id) else null;
             if (live == null) {
-                // Unknown is not gone: the pane stays saved. A loop pane retries; a shell is
-                // never attached blind, since attaching creates the session when it is missing.
-                if (launches_agent) self.queueRestoreRetry(first_slot, id, error.SessionListingUnavailable, true);
+                // Unknown is not gone: the pane stays saved. Either kind retries, but a shell
+                // only re-lists and is never attached blind, since attaching creates the
+                // session when it is missing.
+                self.queueRestoreRetry(first_slot, id, error.SessionListingUnavailable, launches_agent);
                 continue;
             }
             if (!LoopLaunchWait.restoreKeepsPane(launches_agent, live)) {
@@ -1397,17 +1698,83 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    fn restoreQueued(self: *const Workspace, id: []const u8) bool {
+        for (self.recreate_sessions) |session| {
+            if (session.len != 0 and std.mem.eql(u8, session, id)) return true;
+        }
+        return false;
+    }
+
+    fn restoreFirstSlot(self: *const Workspace) usize {
+        return if (self.loop_id.len == 0) 0 else 1;
+    }
+
+    const restore_retry_base_ms: i64 = 1_000;
+    const restore_retry_probe_timeout_ms: i64 = 500;
+
     fn queueRestoreRetry(self: *Workspace, first_slot: usize, session: []const u8, err: anyerror, daemon_session: bool) void {
+        // A shell is retried by re-listing, never by a blind attach; with no retries allowed
+        // it stays saved until its loop is reopened.
+        if (!daemon_session and self.restore_retry_limit == 0) return;
         for (self.surfaces, 0..) |slot, index| {
             if (index < first_slot) continue;
             if (slot.surface == null and slot.attach == null and self.recreate_sessions[index].len == 0) {
                 self.daemon_sessions[index] = daemon_session;
                 self.recreate_sessions[index] = self.allocator.dupe(u8, session) catch &.{};
-                self.recreate_due_ms[index] = nowMilliseconds() + self.recreate_delay_ms[index];
+                if (self.recreate_sessions[index].len == 0) return;
+                self.restore_verify[index] = !daemon_session;
+                self.restore_attempts[index] = 0;
+                self.recreate_due_ms[index] = nowMilliseconds() +
+                    if (daemon_session) self.recreate_delay_ms[index] else restore_retry_base_ms;
                 const message = std.fmt.allocPrint(self.allocator, "workspace restore pending: {s}", .{@errorName(err)}) catch return;
                 self.restore_errors[index] = message;
                 return;
             }
+        }
+    }
+
+    /// One retry of a saved shell tab that could not be attached yet: attach it only once a
+    /// successful listing shows its session running, drop it once one shows it gone, and
+    /// leave it saved (to be restored by reopening its loop) after `restore_retry_limit`
+    /// listings that failed.
+    fn retryShellRestore(self: *Workspace, index: usize, now: i64) void {
+        const id = self.allocator.dupe(u8, self.recreate_sessions[index]) catch return;
+        defer self.allocator.free(id);
+        var listing = self.sessionListingWithin(restore_retry_probe_timeout_ms) orelse return self.deferShellRestore(index, now);
+        defer listing.deinit(self.allocator);
+        if (!LoopLaunchWait.listingShowsLive(listing.items, id)) {
+            self.clearRecreateSession(index);
+            self.clearRestoreError(index);
+            if (self.layout.removePane(id)) self.persistLayout() catch {};
+            self.syncTopology();
+            return;
+        }
+        const initial_grid = self.gridForSession(id) catch return self.deferShellRestore(index, now);
+        const attached = self.createAttachedSurfaceFrom(self.restoreFirstSlot(), id, initial_grid) catch
+            return self.deferShellRestore(index, now);
+        self.daemon_sessions[attached] = false;
+        self.clearRecreateSession(index);
+        self.clearRestoreError(index);
+        self.syncTopology();
+    }
+
+    fn deferShellRestore(self: *Workspace, index: usize, now: i64) void {
+        self.restore_attempts[index] +|= 1;
+        if (self.restore_attempts[index] >= self.restore_retry_limit) {
+            self.clearRecreateSession(index);
+            self.clearRestoreError(index);
+            return;
+        }
+        const doublings: u6 = @intCast(@min(self.restore_attempts[index], 3));
+        self.recreate_due_ms[index] = now + (restore_retry_base_ms << doublings);
+    }
+
+    /// A reopened loop retries its pending shell tabs now, with a fresh budget.
+    fn expediteShellRestores(self: *Workspace) void {
+        for (self.recreate_sessions, 0..) |session, index| {
+            if (session.len == 0 or !self.restore_verify[index]) continue;
+            self.restore_attempts[index] = 0;
+            self.recreate_due_ms[index] = 0;
         }
     }
 
@@ -1419,6 +1786,8 @@ pub const Workspace = struct {
     fn clearRecreateSession(self: *Workspace, index: usize) void {
         if (self.recreate_sessions[index].len != 0) self.allocator.free(self.recreate_sessions[index]);
         self.recreate_sessions[index] = &.{};
+        self.restore_verify[index] = false;
+        self.restore_attempts[index] = 0;
     }
 
     fn clearAllRecreateState(self: *Workspace) void {
@@ -1428,6 +1797,8 @@ pub const Workspace = struct {
             session.* = &.{};
             self.recreate_due_ms[index] = 0;
             self.recreate_delay_ms[index] = 100;
+            self.restore_verify[index] = false;
+            self.restore_attempts[index] = 0;
         }
         for (&self.restore_errors) |*message| {
             if (message.*.len != 0) self.allocator.free(message.*);
@@ -1460,22 +1831,28 @@ pub const Workspace = struct {
         const tab = self.layout.selected() orelse return error.NoTabs;
         const previous_focus = tab.focused_pane;
         const previous_direction = tab.split_direction;
-        const index = try self.createAttachedSurface(surface_id, try self.splitGridSize(direction));
-        errdefer self.destroySurface(index);
-        self.layout.splitFocused(direction, surface_id) catch |err| {
-            self.destroySurface(index);
+        const initial_grid = try self.splitGridSize(direction);
+        try self.layout.splitFocused(direction, surface_id);
+        self.persistLayout() catch |err| {
+            self.rollBackSplit(surface_id, previous_focus, previous_direction);
             return err;
         };
-        self.persistLayout() catch |err| {
-            _ = self.layout.removePane(surface_id);
-            if (self.layout.selected()) |current| {
-                current.focused_pane = previous_focus;
-                current.split_direction = previous_direction;
-            }
-            self.destroySurface(index);
+        self.recordShellOwned(surface_id);
+        _ = self.createAttachedSurface(surface_id, initial_grid) catch |err| {
+            self.rollBackSplit(surface_id, previous_focus, previous_direction);
+            self.persistLayout() catch {};
+            self.forgetShellOwned(surface_id);
             return err;
         };
         self.syncTopology();
+    }
+
+    fn rollBackSplit(self: *Workspace, surface_id: []const u8, previous_focus: usize, previous_direction: WorkspaceLayout.Direction) void {
+        _ = self.layout.removePane(surface_id);
+        if (self.layout.selected()) |current| {
+            current.focused_pane = previous_focus;
+            current.split_direction = previous_direction;
+        }
     }
 
     pub fn selectTab(self: *Workspace, index: usize) !void {
@@ -1527,7 +1904,7 @@ pub const Workspace = struct {
         // A shell's session is the pane's reason for existing: closing the pane ends it, as
         // on macOS. The loop's own session belongs to the daemon and ends with the loop.
         if (!record.launches_agent and !std.mem.eql(u8, record.id, self.loop_id))
-            _ = self.endSessions(&.{record.id});
+            _ = self.endShellSessions(&.{record.id}, .{ .owner = self.loop_id });
         self.syncTopology();
     }
 
@@ -2725,6 +3102,10 @@ pub const Workspace = struct {
     fn pollRecreates(self: *Workspace) void {
         const now = nowMilliseconds();
         for (self.recreate_sessions, 0..) |session, index| {
+            if (session.len != 0 and self.restore_verify[index] and now >= self.recreate_due_ms[index]) {
+                self.retryShellRestore(index, now);
+                continue;
+            }
             if (session.len == 0 or self.surfaces[index].surface != null or now < self.recreate_due_ms[index]) {
                 continue;
             }
