@@ -14,8 +14,27 @@ pub const open_timeout_ms: i64 = 30_000;
 /// After a passive check found nothing, how long before another passive check.
 pub const passive_retry_ms: i64 = 5_000;
 
-pub const Probe = enum { running, live, missing };
+/// `missing` is a definite answer (a clean listing without the session, an ended task, or a
+/// dead daemon). `unknown` is not: the listing could not be taken, or zmx could not reach a
+/// session that may be busy rather than gone.
+pub const Probe = enum { running, live, missing, unknown };
 pub const Step = enum { idle, start_probe, attach, give_up };
+
+/// Longest pause between probes while the answer stays unknown. Every probe is a connection to
+/// the session zmx already failed to reach in time, so these back off instead of polling.
+pub const unknown_backoff_cap_ms: i64 = 4_000;
+
+pub fn unknownBackoffMs(streak: u8) i64 {
+    const shift: u6 = @intCast(@min(streak, 6));
+    return @min(probe_interval_ms << shift, unknown_backoff_cap_ms);
+}
+
+pub const Liveness = enum { live, absent, unknown };
+
+/// The one error name `zmx ls` prints for a daemon that is definitively gone (its pipe or
+/// socket refuses the connection). Every other `err=` (Timeout, BrokenPipe, Unexpected...)
+/// describes a probe that failed against a session that may well be running.
+const dead_daemon_error = "ConnectionRefused";
 
 /// Whether a persisted pane is restored: only while its session is still running (or when
 /// the listing could not say). A shell tab's session ended with the machine, or was killed
@@ -34,6 +53,9 @@ pub const Wait = struct {
     probing: bool = false,
     /// An explicit open reports a launch that never came; a passive check stays quiet.
     reports_timeout: bool = false,
+    /// Consecutive probes that could not tell; nonzero when the wait gives up means the
+    /// session's state was never learned rather than known to be missing.
+    unknown_streak: u8 = 0,
 
     pub fn active(self: *const Wait) bool {
         return self.session.len != 0;
@@ -71,12 +93,21 @@ pub const Wait = struct {
                 .running => return .idle,
                 .live => {
                     self.probing = false;
+                    self.unknown_streak = 0;
                     return .attach;
                 },
                 .missing => {
                     self.probing = false;
+                    self.unknown_streak = 0;
                     if (now_ms >= self.deadline_ms) return .give_up;
                     self.next_probe_ms = now_ms + probe_interval_ms;
+                    return .idle;
+                },
+                .unknown => {
+                    self.probing = false;
+                    self.unknown_streak +|= 1;
+                    if (now_ms >= self.deadline_ms) return .give_up;
+                    self.next_probe_ms = now_ms + unknownBackoffMs(self.unknown_streak);
                     return .idle;
                 },
             }
@@ -94,22 +125,45 @@ pub fn probeArguments(program: []const u8, output: *[2][]const u8) []const []con
     return output;
 }
 
-/// The daemon's own test (`ZmxSessionLauncher.isSessionAlive`): the session is listed and
-/// its task has neither ended nor become unreachable.
-pub fn listingShowsLive(listing: []const u8, session: []const u8) bool {
+/// What a clean listing says about `session`:
+/// - `live`: a row whose task has not ended;
+/// - `absent`: no row, an ended task, or `err=ConnectionRefused` (the daemon behind it is gone);
+/// - `unknown`: an `err=` row of any other kind. zmx could not get an answer out of the session
+///   (a 1 s connect or 5 s read timeout while the daemon was busy); that is not evidence the
+///   session is gone, so nothing may be launched, killed, forgotten or pruned on it.
+pub fn listingLiveness(listing: []const u8, session: []const u8) Liveness {
     var name_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
-    const name = ZmxSession.nameBuffer(session, &name_buffer) catch return false;
+    const name = ZmxSession.nameBuffer(session, &name_buffer) catch return .absent;
     var lines = std.mem.splitScalar(u8, listing, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimRight(u8, raw, "\r");
-        if (std.mem.indexOf(u8, line, "\tended=") != null or
-            std.mem.indexOf(u8, line, "\texit_code=") != null or
-            std.mem.indexOf(u8, line, "\terr=") != null) continue;
         var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const field = fields.next() orelse continue;
-        if (std.mem.startsWith(u8, field, "name=") and std.mem.eql(u8, field["name=".len..], name)) return true;
+        const first = fields.next() orelse continue;
+        if (!std.mem.startsWith(u8, first, "name=") or !std.mem.eql(u8, first["name=".len..], name)) continue;
+        if (errorField(line)) |err_name| {
+            return if (std.mem.eql(u8, err_name, dead_daemon_error)) .absent else .unknown;
+        }
+        if (std.mem.indexOf(u8, line, "\tended=") != null or
+            std.mem.indexOf(u8, line, "\texit_code=") != null) return .absent;
+        return .live;
     }
-    return false;
+    return .absent;
+}
+
+/// The value of the tab-preceded `err=` field of one row, if it has one.
+fn errorField(line: []const u8) ?[]const u8 {
+    var parts = std.mem.splitScalar(u8, line, '\t');
+    _ = parts.next();
+    while (parts.next()) |part| {
+        if (std.mem.startsWith(u8, part, "err=")) return std.mem.trimRight(u8, part["err=".len..], " ");
+    }
+    return null;
+}
+
+/// The daemon's own test (`ZmxSessionLauncher.isSessionAlive`): the session is listed and
+/// its task has neither ended nor become unreachable.
+pub fn listingShowsLive(listing: []const u8, session: []const u8) bool {
+    return listingLiveness(listing, session) == .live;
 }
 
 test "an explicit open probes until the daemon's session exists, then attaches" {
@@ -208,4 +262,83 @@ test "a session name mentioned in another task command is not a live session" {
         "name=graphcode-other\tpid=1\tcmd=echo name=graphcode-wanted\n",
         "wanted",
     ));
+}
+
+test "an err= row is absent only for a refused connection and unknown for every other error" {
+    const listing =
+        "  name=graphcode-refused\terr=ConnectionRefused\tstatus=unreachable\n" ++
+        "  name=graphcode-busy\terr=Timeout\tstatus=unreachable\r\n" ++
+        "  name=graphcode-odd\terr=Unexpected\tstatus=unreachable\n" ++
+        "  name=graphcode-prefix\terr=ConnectionRefusedAgain\tstatus=unreachable\n" ++
+        "name=graphcode-fine\tpid=1\tclients=0\tcreated=1\n";
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(listing, "refused"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(listing, "busy"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(listing, "odd"));
+    try std.testing.expectEqual(Liveness.unknown, listingLiveness(listing, "prefix"));
+    try std.testing.expectEqual(Liveness.live, listingLiveness(listing, "fine"));
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(listing, "nothing"));
+    try std.testing.expectEqual(Liveness.absent, listingLiveness("", "nothing"));
+    try std.testing.expect(!listingShowsLive(listing, "busy"));
+}
+
+test "an ended task stays absent and an err= word inside another field is not an error row" {
+    try std.testing.expectEqual(Liveness.absent, listingLiveness(
+        "name=graphcode-a\tpid=1\tended=5\texit_code=0\n",
+        "a",
+    ));
+    try std.testing.expectEqual(Liveness.live, listingLiveness(
+        "name=graphcode-a\tpid=1\tcmd=echo err=Timeout\n",
+        "a",
+    ));
+}
+
+test "an unknown probe backs off exponentially to a cap and a definite answer resets it" {
+    try std.testing.expectEqual(@as(i64, 500), unknownBackoffMs(1));
+    try std.testing.expectEqual(@as(i64, 1_000), unknownBackoffMs(2));
+    try std.testing.expectEqual(@as(i64, 2_000), unknownBackoffMs(3));
+    try std.testing.expectEqual(unknown_backoff_cap_ms, unknownBackoffMs(4));
+    try std.testing.expectEqual(unknown_backoff_cap_ms, unknownBackoffMs(255));
+
+    var name = "loop".*;
+    var wait: Wait = .{};
+    wait.begin(&name, 0, open_timeout_ms, true);
+    var now: i64 = 0;
+    try std.testing.expectEqual(Step.start_probe, wait.step(now, null));
+    var previous_gap: i64 = 0;
+    var starts: usize = 0;
+    var last_start: i64 = 0;
+    while (now <= open_timeout_ms) : (now += 10) {
+        const step = wait.step(now, if (wait.probing) .unknown else null);
+        try std.testing.expect(step != .attach);
+        if (step == .start_probe) {
+            starts += 1;
+            const gap = now - last_start;
+            try std.testing.expect(gap >= previous_gap);
+            previous_gap = gap;
+            last_start = now;
+        }
+        if (step == .give_up) break;
+    }
+    // A fixed 250 ms poll would have started about 120 probes in the 30 s open window.
+    try std.testing.expect(starts < 15);
+    try std.testing.expect(wait.unknown_streak != 0);
+
+    var fresh: Wait = .{};
+    fresh.begin(&name, 0, open_timeout_ms, true);
+    fresh.unknown_streak = 3;
+    fresh.probing = true;
+    try std.testing.expectEqual(Step.idle, fresh.step(100, .missing));
+    try std.testing.expectEqual(@as(u8, 0), fresh.unknown_streak);
+    try std.testing.expectEqual(@as(i64, 100 + probe_interval_ms), fresh.next_probe_ms);
+}
+
+test "an unknown probe never attaches and gives up only at the deadline" {
+    var name = "loop".*;
+    var wait: Wait = .{};
+    wait.begin(&name, 0, 100, true);
+    try std.testing.expectEqual(Step.start_probe, wait.step(0, null));
+    try std.testing.expectEqual(Step.idle, wait.step(10, .unknown));
+    try std.testing.expectEqual(Step.idle, wait.step(400, null));
+    try std.testing.expectEqual(Step.start_probe, wait.step(510, null));
+    try std.testing.expectEqual(Step.give_up, wait.step(520, .unknown));
 }

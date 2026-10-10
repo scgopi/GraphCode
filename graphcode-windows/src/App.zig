@@ -13133,6 +13133,18 @@ const LiveTerminalFixture = struct {
         try self.tmp.dir.writeFile(.{ .sub_path = "live.txt", .data = listing.items });
     }
 
+    /// `setLive`, plus rows as `zmx ls` prints one for a session it could not get an answer
+    /// from: `err_name` is zmx's own error name (`Timeout` while the daemon is busy,
+    /// `ConnectionRefused` once it is gone), and the row carries no `pid=` or `clients=`.
+    fn setUnreachable(self: *LiveTerminalFixture, live: []const []const u8, stuck: []const []const u8, err_name: []const u8) !void {
+        const allocator = std.testing.allocator;
+        var listing: std.ArrayListUnmanaged(u8) = .empty;
+        defer listing.deinit(allocator);
+        for (live) |id| try listing.writer(allocator).print("name=graphcode-{s}\tpid=1\tclients=0\r\n", .{id});
+        for (stuck) |id| try listing.writer(allocator).print("  name=graphcode-{s}\terr={s}\tstatus=unreachable\n", .{ id, err_name });
+        try self.tmp.dir.writeFile(.{ .sub_path = "live.txt", .data = listing.items });
+    }
+
     fn slotFor(self: *const LiveTerminalFixture, session: []const u8) ?usize {
         for (self.workspace.surfaces, 0..) |slot, index| {
             if (slot.surface != null and std.mem.eql(u8, slot.session_name, session)) return index;
@@ -15023,6 +15035,107 @@ test "workspace layout: restore drops a pane whose session is gone instead of re
 
 fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
     return fixture.slotFor(session) != null;
+}
+
+test "workspace layout: restore keeps a pane whose session zmx could not reach, and still drops one whose daemon is gone" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{ "loop-a", "loop-b" });
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const busy = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(busy);
+    try fixture.newTab();
+    const stale = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(stale);
+    try clickSidebarLoopRow(app, fixture.project, "loop-b");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-b");
+
+    // On the way back, `busy`'s daemon timed out (a live session that did not answer in time)
+    // while `stale`'s refused the connection (it is gone).
+    try fixture.setUnreachable(&.{ "loop-a", "loop-b" }, &.{busy}, "Timeout");
+    {
+        const text = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, "live.txt", 1 << 12);
+        defer std.testing.allocator.free(text);
+        const row = try std.fmt.allocPrint(std.testing.allocator, "  name=graphcode-{s}\terr=ConnectionRefused\tstatus=unreachable\n", .{stale});
+        defer std.testing.allocator.free(row);
+        const joined = try std.mem.concat(std.testing.allocator, u8, &.{ text, row });
+        defer std.testing.allocator.free(joined);
+        try fixture.tmp.dir.writeFile(.{ .sub_path = "live.txt", .data = joined });
+    }
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    fixture.settle();
+    try std.testing.expect(fixture.slotFor(busy) == null);
+    try std.testing.expect(fixture.slotFor(stale) == null);
+    try std.testing.expect(fixture.workspace.layout.hasPane(busy));
+    try std.testing.expect(!fixture.workspace.layout.hasPane(stale));
+    try fixture.expectKills("");
+
+    // Once the daemon answers, the pane that was kept comes back by the restore retry.
+    try fixture.setLive(&.{ "loop-a", "loop-b", busy });
+    try fixture.waitFor(restoredAliveShell, busy);
+    try std.testing.expect(fixture.workspace.layout.hasPane(busy));
+    try fixture.expectKills("");
+}
+
+test "workspace layout: a loop's shells are neither ended nor forgotten while zmx cannot reach their session" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
+
+    try fixture.setUnreachable(&.{"loop-a"}, &.{shell_uuid_one}, "Timeout");
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("gone-loop.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_one));
+
+    // The daemon answers on the next sweep: the shell is ended then, and only then.
+    try fixture.setLive(&.{ "loop-a", shell_uuid_one });
+    try std.testing.expectEqual(@as(usize, 1), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("kill graphcode-" ++ shell_uuid_one ++ " --force");
+    try std.testing.expect(!fixture.layoutExists("gone-loop.json"));
+}
+
+test "workspace layout: a shell whose daemon refused the connection is gone: its record is forgotten and nothing is killed" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
+
+    try fixture.setUnreachable(&.{"loop-a"}, &.{shell_uuid_one}, "ConnectionRefused");
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(!fixture.layoutExists("gone-loop.json"));
+    try std.testing.expect(fixture.markerGone(shell_uuid_one));
+}
+
+test "live terminal: opening a loop whose session zmx could not reach waits and attaches only once it answers" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setUnreachable(&.{}, &.{"loop-a"}, "Timeout");
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    fixture.settle();
+    try std.testing.expect(fixture.slotFor("loop-a") == null);
+    try std.testing.expect(fixture.workspace.isAwaitingLaunch(0));
+    try fixture.expectKills("");
+
+    try fixture.setLive(&.{"loop-a"});
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.expectKills("");
 }
 
 test "workspace layout: the installed shell saves its layout under the support directory, never beside itself" {

@@ -1133,13 +1133,23 @@ pub const Workspace = struct {
         defer listing.deinit(self.allocator);
         var live: usize = 0;
         for (names.items) |name| {
-            if (LoopLaunchWait.listingShowsLive(listing.items, name)) {
-                names.items[live] = name;
-                live += 1;
-            } else {
-                // Already gone: nothing is left to end, so the record of it goes too.
-                if (self.layoutRoot()) |root| WorkspaceLayout.forgetShellOwned(self.allocator, root, name);
-                self.allocator.free(name);
+            switch (LoopLaunchWait.listingLiveness(listing.items, name)) {
+                .live => {
+                    names.items[live] = name;
+                    live += 1;
+                },
+                .absent => {
+                    // Already gone: nothing is left to end, so the record of it goes too.
+                    if (self.layoutRoot()) |root| WorkspaceLayout.forgetShellOwned(self.allocator, root, name);
+                    self.allocator.free(name);
+                },
+                .unknown => {
+                    // zmx could not reach it: it may be running. Neither ended nor forgotten,
+                    // and retryable (the owning layout is kept for the next sweep).
+                    std.log.warn("not ending zmx session {s}: zmx could not reach it", .{name});
+                    outcome.deferred += 1;
+                    self.allocator.free(name);
+                },
             }
         }
         names.shrinkRetainingCapacity(live);
@@ -1423,6 +1433,9 @@ pub const Workspace = struct {
                     }
                 },
                 .give_up => {
+                    if (wait.unknown_streak != 0) {
+                        std.log.warn("loop session {s} never answered a definite listing; not attached or launched", .{wait.session});
+                    }
                     if (wait.reports_timeout) {
                         self.launch_outcome = .not_started;
                     } else {
@@ -1442,11 +1455,13 @@ pub const Workspace = struct {
     fn launchProbeOutcome(self: *Workspace, index: usize, overdue: bool) ?LoopLaunchWait.Probe {
         const child = if (self.launch_probes[index]) |*value| value else return null;
         const output = &self.launch_probe_output[index];
+        // A listing that could not be read, ran too long or failed says nothing about the
+        // session: `unknown`, never `missing`.
         self.drainListing(child, output) catch {
             _ = child.kill() catch {};
             self.launch_probes[index] = null;
             self.setInputError("Unable to read loop session listing");
-            return .missing;
+            return .unknown;
         };
         var exit_code: c.DWORD = 0;
         if (c.GetExitCodeProcess(child.id, &exit_code) == 0 or
@@ -1454,20 +1469,23 @@ pub const Workspace = struct {
         {
             _ = child.kill() catch {};
             self.launch_probes[index] = null;
-            return .missing;
+            return .unknown;
         }
         if (exit_code == c.STILL_ACTIVE) return .running;
         self.drainListing(child, output) catch {
             _ = child.wait() catch {};
             self.launch_probes[index] = null;
             self.setInputError("Unable to read loop session listing");
-            return .missing;
+            return .unknown;
         };
         _ = child.wait() catch {};
         self.launch_probes[index] = null;
-        const live = exit_code == 0 and
-            LoopLaunchWait.listingShowsLive(output.items, self.launch_waits[index].session);
-        return if (live) .live else .missing;
+        if (exit_code != 0) return .unknown;
+        return switch (LoopLaunchWait.listingLiveness(output.items, self.launch_waits[index].session)) {
+            .live => .live,
+            .absent => .missing,
+            .unknown => .unknown,
+        };
     }
 
     fn cancelLaunchWait(self: *Workspace, index: usize) void {
@@ -1724,7 +1742,13 @@ pub const Workspace = struct {
         defer if (listing) |*value| value.deinit(self.allocator);
         var pruned = false;
         for (ids[0..count], agents[0..count]) |id, launches_agent| {
-            const live: ?bool = if (listing) |value| LoopLaunchWait.listingShowsLive(value.items, id) else null;
+            // Unknown is not gone: a listing that could not be taken, and a row zmx could not
+            // get an answer for (not a dead daemon), both leave the pane saved.
+            const live: ?bool = if (listing) |value| switch (LoopLaunchWait.listingLiveness(value.items, id)) {
+                .live => true,
+                .absent => false,
+                .unknown => null,
+            } else null;
             if (live == null) {
                 // Unknown is not gone: the pane stays saved. Either kind retries, but a shell
                 // only re-lists and is never attached blind, since attaching creates the
@@ -1795,12 +1819,16 @@ pub const Workspace = struct {
         defer self.allocator.free(id);
         var listing = self.sessionListingWithin(restore_retry_probe_timeout_ms) orelse return self.deferShellRestore(index, now);
         defer listing.deinit(self.allocator);
-        if (!LoopLaunchWait.listingShowsLive(listing.items, id)) {
-            self.clearRecreateSession(index);
-            self.clearRestoreError(index);
-            if (self.layout.removePane(id)) self.persistLayout() catch {};
-            self.syncTopology();
-            return;
+        switch (LoopLaunchWait.listingLiveness(listing.items, id)) {
+            .live => {},
+            .unknown => return self.deferShellRestore(index, now),
+            .absent => {
+                self.clearRecreateSession(index);
+                self.clearRestoreError(index);
+                if (self.layout.removePane(id)) self.persistLayout() catch {};
+                self.syncTopology();
+                return;
+            },
         }
         const initial_grid = self.gridForSession(id) catch return self.deferShellRestore(index, now);
         const attached = self.createAttachedSurfaceFrom(self.restoreFirstSlot(), id, initial_grid) catch
