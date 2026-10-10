@@ -14003,6 +14003,89 @@ test "live terminal mouse: a high-resolution wheel reports one step per full not
     try expectSentToProgram(&keyboard, "\x1b[<65;4;3M");
 }
 
+test "live terminal mouse: a forwarded gesture that loses its release is closed and later clicks work" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const vt = fixture.workspace.surfaces[keyboard.index].vt.?;
+    try vt.feed("\x1b[?1002h\x1b[?1006h");
+
+    // Mouse capture is lost mid-drag: the program is told the button came up where it last
+    // saw the pointer, then Shift selects locally and a new click reaches the program.
+    buttons.press(.left, 0, 3, 2);
+    buttons.move(c.MK_LBUTTON, 5, 2);
+    _ = c.ReleaseCapture();
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m");
+    buttons.press(.left, c.MK_SHIFT, 0, 1);
+    buttons.move(c.MK_LBUTTON | c.MK_SHIFT, 8, 1);
+    buttons.release(.left, c.MK_SHIFT, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+    try expectSentToProgram(&keyboard, "");
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;4;3m");
+
+    // A right button released outside the window never reaches the surface; the next event
+    // that shows it is up closes the gesture at that pointer position.
+    buttons.press(.right, 0, 3, 2);
+    buttons.move(0, 6, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<2;4;3M\x1b[<2;7;3m");
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;4;3m");
+
+    // A button down when the surface loses focus is released too.
+    buttons.press(.left, 0, 3, 2);
+    _ = c.SendMessageW(keyboard.surface, c.WM_KILLFOCUS, 0, 0);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;4;3m");
+
+    // A button down when the program stops tracking is forgotten: the next gesture is a
+    // selection, and Shift or no Shift never meets a stuck program gesture.
+    _ = c.SetFocus(keyboard.surface);
+    buttons.press(.left, 0, 3, 2);
+    try vt.feed("\x1b[?1002l");
+    mouse.drag(0, 1, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+}
+
+test "live terminal mouse: Shift pressed during a forwarded gesture is not reported, and leaving the surface resets hover" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const vt = fixture.workspace.surfaces[keyboard.index].vt.?;
+    try vt.feed("\x1b[?1003h\x1b[?1006h");
+
+    // SGR would add 4 to the button code for Shift; the program never hears about it.
+    buttons.press(.left, 0, 3, 2);
+    buttons.move(c.MK_LBUTTON | c.MK_SHIFT, 5, 2);
+    buttons.release(.left, c.MK_SHIFT, 5, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<32;6;3M\x1b[<0;6;3m");
+
+    // The pointer leaving and coming back to the same cell is reported again.
+    buttons.move(0, 8, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<35;9;3M");
+    buttons.move(0, 8, 2);
+    try expectSentToProgram(&keyboard, "");
+    _ = c.SendMessageW(keyboard.surface, c.WM_MOUSELEAVE, 0, 0);
+    buttons.move(0, 8, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<35;9;3M");
+}
+
 const KeyTableCase = struct {
     name: []const u8,
     chord: LiveKeyboard.Chord,
