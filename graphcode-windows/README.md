@@ -296,9 +296,16 @@ it. Copy puts exactly the selected text on the clipboard: soft-wrapped rows join
 into one line and trailing blanks are dropped. Plain
 `Ctrl+V` stays terminal input and plain `Ctrl+C` stays the interrupt, except
 that `Ctrl+C` copies while the terminal has a selection. Paste reads only
-`CF_UNICODETEXT`, normalises line endings, blanks unsafe control bytes, and
+`CF_UNICODETEXT`, normalises line endings, blanks the control bytes xterm blanks
+(NUL, BS, ESC, DEL and the tty's special characters; BEL and tab pass through) plus
+the C1 controls U+0080 to U+009F (8-bit CSI and friends), and
 wraps the text in bracketed-paste markers only when the running program asked
-for them (DECSET 2004); multi-line text for a program that did not ask asks for
+for them (DECSET 2004); text over 1,000,000 UTF-8 bytes is refused. A copy that the
+Windows clipboard refuses puts the previous Unicode text back and says whether
+that worked; if the existing Unicode text cannot be copied safely the copy is
+refused before the clipboard is touched. Only the Unicode text is protected:
+emptying the clipboard removes every other format (an image, HTML, RTF), which a
+copy replaces and a failed copy does not restore. Multi-line text for a program that did not ask asks for
 confirmation first instead of running each line as it is pasted. That includes
 `pwsh` and `cmd.exe`: neither asks for bracketed paste under ConPTY, and each
 runs the pasted lines as they arrive. macOS auto-confirms that case without a
