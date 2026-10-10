@@ -64,8 +64,8 @@ pub const Route = enum {
     default,
     /// The key belongs to the program in the terminal; no accelerator may take it.
     terminal,
-    /// Ctrl+Shift+W closes the terminal tab (Worktrees owns it outside a terminal).
-    close_tab,
+    /// Ctrl+Shift+W closes the focused pane, and its tab if it is the last one (Worktrees owns it outside a terminal).
+    close_pane,
     /// Alt+F4: the terminal window swallows system keys, so the shell closes the window.
     system_close,
     /// Alt+Space: the shell opens the window menu instead of typing a space.
@@ -92,7 +92,7 @@ pub fn routeChord(vk: u32, mods: Modifiers) Route {
         if (vk == vk_space) return .system_menu;
     }
     if (mods.ctrl and mods.shift and !mods.alt) {
-        if (vk == 'W') return .close_tab;
+        if (vk == 'W') return .close_pane;
         if (vk == vk_f10) return .menu_bar;
     }
     if (!mods.ctrl and !mods.alt and (vk == vk_f6 or vk == vk_f10)) return .terminal;
@@ -124,8 +124,8 @@ test "chords that keep their application meaning in a terminal" {
     try std.testing.expectEqual(Route.default, routeChord('A', .{}));
 }
 
-test "Ctrl+Shift+W closes the terminal tab and Alt+F4 or Alt+Space stay Windows system keys" {
-    try std.testing.expectEqual(Route.close_tab, routeChord('W', .{ .ctrl = true, .shift = true }));
+test "Ctrl+Shift+W closes the focused pane and Alt+F4 or Alt+Space stay Windows system keys" {
+    try std.testing.expectEqual(Route.close_pane, routeChord('W', .{ .ctrl = true, .shift = true }));
     try std.testing.expectEqual(Route.default, routeChord('W', .{ .ctrl = true, .shift = true, .alt = true }));
     try std.testing.expectEqual(Route.system_close, routeChord(0x73, .{ .alt = true }));
     try std.testing.expectEqual(Route.system_menu, routeChord(0x20, .{ .alt = true }));

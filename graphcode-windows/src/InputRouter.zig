@@ -60,6 +60,8 @@ pub const Action = enum {
     select_next,
     select_previous,
     new_tab,
+    close_pane,
+    /// Menu only: no key maps to it.
     close_tab,
     split_horizontal,
     split_vertical,
@@ -114,7 +116,7 @@ pub fn keyAction(key: usize, ctrl: bool, shift: bool) Action {
     if (key == 0x09) return .select_next;
     if (ctrl and key == 'D' and shift) return .split_vertical;
     if (ctrl and key == 'D') return .split_horizontal;
-    if (ctrl and key == 'W') return .close_tab;
+    if (ctrl and key == 'W') return .close_pane;
     if (ctrl and key == 'T') return .new_tab;
     if (ctrl and key == 0xDB) return .focus_previous_pane;
     if (ctrl and key == 0xDD) return .focus_next_pane;
@@ -170,6 +172,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
         .select_next => allocator.dupe(u8, "Select next node"),
         .select_previous => allocator.dupe(u8, "Select previous node"),
         .new_tab => allocator.dupe(u8, "New terminal tab"),
+        .close_pane => allocator.dupe(u8, "Close terminal pane"),
         .close_tab => allocator.dupe(u8, "Close terminal tab"),
         .split_horizontal => allocator.dupe(u8, "Split terminal right"),
         .split_vertical => allocator.dupe(u8, "Split terminal down"),
@@ -191,7 +194,7 @@ pub fn commandText(allocator: std.mem.Allocator, action: Action) ![]u8 {
 
 test "workspace shortcuts route to tabs splits and panes" {
     try std.testing.expectEqual(Action.new_tab, keyAction('T', true, false));
-    try std.testing.expectEqual(Action.close_tab, keyAction('W', true, false));
+    try std.testing.expectEqual(Action.close_pane, keyAction('W', true, false));
     try std.testing.expectEqual(Action.split_horizontal, keyAction('D', true, false));
     try std.testing.expectEqual(Action.split_vertical, keyAction('D', true, true));
     try std.testing.expectEqual(Action.focus_previous_pane, keyAction(0xDB, true, false));
@@ -229,7 +232,7 @@ test "header keys are scoped and preserve modified and global navigation" {
 
 test "attention and worktree shortcuts are distinct from ordinary selection" {
     try std.testing.expectEqual(Action.cycle_attention, keyAction(0x09, true, false));
-    try std.testing.expectEqual(Action.close_tab, keyAction('W', true, false));
+    try std.testing.expectEqual(Action.close_pane, keyAction('W', true, false));
     try std.testing.expectEqual(Action.inspect_worktrees, keyAction('W', true, true));
     try std.testing.expectEqual(Action.select_next, keyAction(0x09, false, false));
     try std.testing.expectEqual(Action.select_previous, keyAction(0x09, false, true));

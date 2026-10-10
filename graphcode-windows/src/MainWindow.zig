@@ -51,7 +51,7 @@ pub const Command = enum(u16) {
     stop_loop = 4207,
     show_graph = 4208,
     new_tab = 4301,
-    close_tab = 4302,
+    close_pane = 4302,
     split_right = 4303,
     split_down = 4304,
     next_tab = 4305,
@@ -60,6 +60,8 @@ pub const Command = enum(u16) {
     focus_previous_pane = 4308,
     terminal_copy = 4309,
     terminal_paste = 4310,
+    /// Closes every pane of the selected tab. Menu only, as on macOS: Ctrl+W closes a pane.
+    close_tab = 4311,
     reconnect = 4401,
     settings = 4402,
     product_settings = 4403,
@@ -128,6 +130,8 @@ pub const MenuState = struct {
     can_cycle_tabs: bool,
     can_cycle_panes: bool,
     has_attention: bool,
+    /// Closing the focused pane would not remove the workspace's last tab.
+    can_close_pane: bool = false,
     can_close_tab: bool,
     /// The focused terminal reports selected text to copy.
     can_copy_terminal: bool = false,
@@ -268,8 +272,8 @@ pub const Window = struct {
         }
         switch (route) {
             .default, .terminal => {},
-            .close_tab => {
-                self.postWindowMessage(Api, c.WM_COMMAND, @intFromEnum(Command.close_tab), 0);
+            .close_pane => {
+                self.postWindowMessage(Api, c.WM_COMMAND, @intFromEnum(Command.close_pane), 0);
                 return;
             },
             .system_close => {
@@ -626,7 +630,8 @@ pub fn installMenu(hwnd: c.HWND) !void {
     append(loop, "Stop Loop\tCtrl+S outside terminal", @intFromEnum(Command.stop_loop));
 
     append(terminal, "New Tab\tCtrl+Shift+T", @intFromEnum(Command.new_tab));
-    append(terminal, "Close Tab\tCtrl+W (Ctrl+Shift+W in terminal)", @intFromEnum(Command.close_tab));
+    append(terminal, "Close Pane\tCtrl+W (Ctrl+Shift+W in terminal)", @intFromEnum(Command.close_pane));
+    append(terminal, "Close Tab", @intFromEnum(Command.close_tab));
     separator(terminal);
     append(terminal, "Split Right\tAlt+Shift+D", @intFromEnum(Command.split_right));
     append(terminal, "Split Down\tCtrl+Shift+D", @intFromEnum(Command.split_down));
@@ -667,6 +672,7 @@ pub fn installMenu(hwnd: c.HWND) !void {
     appendInfo(discovery, "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert");
     appendInfo(discovery, "Paste terminal text\tCtrl+Shift+V / Shift+Insert");
     appendInfo(discovery, "Terminal context menu\tRight-click / Menu key / Shift+F10");
+    appendInfo(discovery, "Close Pane: closes the focused pane; closes its tab if it is the last pane\tCtrl+W (Ctrl+Shift+W in terminal)");
     appendInfo(discovery, "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell");
     appendInfo(discovery, "Terminal-focused F6 / F10\tSent to the shell");
     appendInfo(discovery, "Window toolbar / menu bar from a terminal\tCtrl+Shift+F6 / Ctrl+Shift+F10");
@@ -716,6 +722,7 @@ pub fn updateMenu(hwnd: c.HWND, state: MenuState, refresh: MenuRefresh) void {
     setEnabled(hwnd, .stop_loop, state.has_selected_loop);
     setEnabled(hwnd, .show_graph, state.has_workspace);
     setEnabled(hwnd, .new_tab, state.has_workspace);
+    setEnabled(hwnd, .close_pane, state.can_close_pane);
     setEnabled(hwnd, .close_tab, state.can_close_tab);
     setEnabled(hwnd, .split_right, state.has_workspace);
     setEnabled(hwnd, .split_down, state.has_workspace);
@@ -906,7 +913,7 @@ const accelerator_entries = [_]c.ACCEL{
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'N', .cmd = @intFromEnum(Command.create_node) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'S', .cmd = @intFromEnum(Command.stop_loop) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'T', .cmd = @intFromEnum(Command.new_tab) },
-        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.close_tab) },
+        .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'W', .cmd = @intFromEnum(Command.close_pane) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_right) },
         .{ .fVirt = c.FCONTROL | c.FSHIFT | c.FVIRTKEY, .key = 'D', .cmd = @intFromEnum(Command.split_down) },
         .{ .fVirt = c.FCONTROL | c.FVIRTKEY, .key = c.VK_NEXT, .cmd = @intFromEnum(Command.next_tab) },
@@ -1034,7 +1041,7 @@ test "terminal routes decide accelerators, translation, and shell commands for a
     try std.testing.expectEqual(@as(usize, 1), Api.dispatch_calls);
 
     const commands = [_]struct { route: TerminalKeyRoute, message: c.UINT, wparam: c.WPARAM }{
-        .{ .route = .close_tab, .message = c.WM_COMMAND, .wparam = @intFromEnum(Command.close_tab) },
+        .{ .route = .close_pane, .message = c.WM_COMMAND, .wparam = @intFromEnum(Command.close_pane) },
         .{ .route = .system_close, .message = c.WM_SYSCOMMAND, .wparam = c.SC_CLOSE },
         .{ .route = .system_menu, .message = c.WM_SYSCOMMAND, .wparam = c.SC_KEYMENU },
         .{ .route = .menu_bar, .message = c.WM_SYSCOMMAND, .wparam = c.SC_KEYMENU },
@@ -1052,7 +1059,7 @@ test "terminal routes decide accelerators, translation, and shell commands for a
     // The route is consulted only for key-down messages of an eligible, owned window.
     Api.reset();
     Route.calls = 0;
-    Route.next = .close_tab;
+    Route.next = .close_pane;
     message.message = c.WM_KEYUP;
     window.dispatchMessageWith(Api, &message, keys, child);
     message.message = c.WM_KEYDOWN;
@@ -1152,6 +1159,7 @@ test "main and help menus expose shortcuts and interaction guidance" {
         "Copy terminal text\tCtrl+Shift+C / Ctrl+Insert",
         "Paste terminal text\tCtrl+Shift+V / Shift+Insert",
         "Terminal context menu\tRight-click / Menu key / Shift+F10",
+        "Close Pane: closes the focused pane; closes its tab if it is the last pane\tCtrl+W (Ctrl+Shift+W in terminal)",
         "Terminal-focused Ctrl+D / W / S / T / N / [ / ]\tSent to the shell",
         "Terminal-focused F6 / F10\tSent to the shell",
         "Window toolbar / menu bar from a terminal\tCtrl+Shift+F6 / Ctrl+Shift+F10",
@@ -1288,6 +1296,67 @@ test "Terminal menu offers discoverable Copy and Paste that follow terminal stat
     state.can_copy_terminal = true;
     updateMenu(hwnd, state, .state_change);
     try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.terminal_copy), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+}
+
+fn menuLabelById(menu: c.HMENU, id: c.UINT) ![]u8 {
+    var label: [128]u16 = undefined;
+    const length = c.GetMenuStringW(menu, id, &label, label.len, c.MF_BYCOMMAND);
+    if (length <= 0 or length >= label.len - 1) return error.MenuItemMissing;
+    return std.unicode.utf16LeToUtf8Alloc(std.testing.allocator, label[0..@intCast(length)]);
+}
+
+test "Terminal menu offers Close Pane on Ctrl+W and a separate Close Tab with no shortcut" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const terminal = c.GetSubMenu(c.GetMenu(hwnd), 2);
+    try std.testing.expect(terminal != null);
+
+    // 4302 is the command Ctrl+W and Ctrl+Shift+W (in a terminal) have always posted.
+    const pane = try menuLabelById(terminal, 4302);
+    defer std.testing.allocator.free(pane);
+    try std.testing.expectEqualStrings("Close Pane\tCtrl+W (Ctrl+Shift+W in terminal)", pane);
+    const tab = try menuLabelById(terminal, 4311);
+    defer std.testing.allocator.free(tab);
+    try std.testing.expectEqualStrings("Close Tab", tab);
+
+    // Close Tab is menu-only: no accelerator may post it, and Ctrl+W / Ctrl+Shift+W keep their commands.
+    for (accelerator_entries) |entry| try std.testing.expect(entry.cmd != 4311);
+    var ctrl_w: usize = 0;
+    var ctrl_shift_w: usize = 0;
+    for (accelerator_entries) |entry| {
+        if (entry.key != 'W') continue;
+        if (entry.fVirt == c.FCONTROL | c.FVIRTKEY) {
+            ctrl_w += 1;
+            try std.testing.expectEqual(@as(u16, 4302), entry.cmd);
+        }
+        if (entry.fVirt == c.FCONTROL | c.FSHIFT | c.FVIRTKEY) {
+            ctrl_shift_w += 1;
+            try std.testing.expectEqual(@as(u16, @intFromEnum(Command.worktrees)), entry.cmd);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), ctrl_w);
+    try std.testing.expectEqual(@as(usize, 1), ctrl_shift_w);
+}
+
+test "Close Pane and Close Tab are enabled by their own capabilities" {
+    const hwnd = try hiddenWorkspaceTestWindow();
+    defer _ = c.DestroyWindow(hwnd);
+    try installMenu(hwnd);
+    const terminal = c.GetSubMenu(c.GetMenu(hwnd), 2);
+    try std.testing.expect(terminal != null);
+    var state = quietMenuState();
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_pane), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_tab), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    state.can_close_pane = true;
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_pane), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_tab), c.MF_BYCOMMAND) & c.MF_GRAYED != 0);
+    state.can_close_tab = true;
+    updateMenu(hwnd, state, .state_change);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_pane), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
+    try std.testing.expect(c.GetMenuState(terminal, @intFromEnum(Command.close_tab), c.MF_BYCOMMAND) & c.MF_GRAYED == 0);
 }
 
 test "terminal context menu carries the same Copy and Paste commands" {
@@ -2190,7 +2259,7 @@ test "workspace cycle keyboard actual accelerator descriptors provide both direc
     try std.testing.expectEqual(@as(usize, 23), accelerator_entries.len);
     const previous_commands = [_]Command{
         .open_folder, .worktrees, .jump_loop, .review_attention, .next_loop,
-        .previous_loop, .create_node, .stop_loop, .new_tab, .close_tab,
+        .previous_loop, .create_node, .stop_loop, .new_tab, .close_pane,
         .split_right, .split_down, .next_tab, .previous_tab, .settings, .product_settings,
     };
     for (previous_commands, accelerator_entries[0..16]) |command, entry| {
