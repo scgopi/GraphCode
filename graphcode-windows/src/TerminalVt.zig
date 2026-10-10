@@ -177,6 +177,30 @@ fn rgb(color: c.GhosttyColorRgb) u32 {
     return (@as(u32, color.r) << 16) | (@as(u32, color.g) << 8) | color.b;
 }
 
+pub const max_mouse_sequence_bytes = 32;
+
+pub const MouseAction = enum { press, release, motion };
+pub const MouseButton = enum { none, left, middle, right, wheel_up, wheel_down };
+
+/// One pointer event in surface pixels. `any_button_pressed` says whether a button is down
+/// (motion with no button reports differently from a drag).
+pub const MouseEvent = struct {
+    action: MouseAction,
+    button: MouseButton = .none,
+    shift: bool = false,
+    ctrl: bool = false,
+    x: i32,
+    y: i32,
+    any_button_pressed: bool = false,
+};
+
+pub const MouseGeometry = struct {
+    columns: u16,
+    rows: u16,
+    cell_width: u32,
+    cell_height: u32,
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     bridge: c.GhosttyAllocator,
@@ -192,6 +216,8 @@ pub const State = struct {
     response_length: usize = 0,
     response_overflow: bool = false,
     response_delivery_failed: bool = false,
+    mouse_encoder: c.GhosttyMouseEncoder = null,
+    mouse_last_cell: ?[2]u32 = null,
 
     pub fn create(allocator: std.mem.Allocator, columns: usize, rows: usize) Error!*State {
         const size = try dimensions(columns, rows);
@@ -218,6 +244,7 @@ pub const State = struct {
 
     pub fn destroy(self: *State) void {
         if (self.snapshot) |*snapshot| snapshot.deinit();
+        if (self.mouse_encoder != null) c.ghostty_mouse_encoder_free(self.mouse_encoder);
         c.ghostty_render_state_row_cells_free(self.row_cells);
         c.ghostty_render_state_row_iterator_free(self.row_iterator);
         c.ghostty_render_state_free(self.render);
@@ -274,6 +301,98 @@ pub const State = struct {
         if (c.ghostty_terminal_mode_get(self.terminal, c.ghostty_mode_new(2004, false), &enabled) != c.GHOSTTY_SUCCESS)
             return false;
         return enabled;
+    }
+
+    /// Whether the running program asked for mouse reports (DECSET 9, 1000, 1002 or 1003).
+    pub fn mouseTrackingEnabled(self: *const State) bool {
+        var enabled = false;
+        if (c.ghostty_terminal_get(self.terminal, c.GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &enabled) != c.GHOSTTY_SUCCESS)
+            return false;
+        return enabled;
+    }
+
+    /// Encodes one mouse event the way the program asked to receive it (tracking mode from
+    /// DECSET 9/1000/1002/1003, format from 1005/1006/1015/1016). The result is empty when the
+    /// program's mode does not report this event, for example motion under normal tracking.
+    /// Motion that stays in the cell of the last report is dropped here (except in SGR-pixels
+    /// format, where it is meaningful): the encoder's own cell tracking resets whenever its
+    /// options are refreshed from the terminal, which this does on every call.
+    pub fn encodeMouse(
+        self: *State,
+        buffer: *[max_mouse_sequence_bytes]u8,
+        event: MouseEvent,
+        geometry: MouseGeometry,
+    ) Error![]const u8 {
+        if (geometry.cell_width == 0 or geometry.cell_height == 0 or geometry.columns == 0 or geometry.rows == 0)
+            return error.InvalidSize;
+        if (!self.mouseTrackingEnabled()) {
+            self.mouse_last_cell = null;
+            return buffer[0..0];
+        }
+        if (self.mouse_encoder == null) try check(c.ghostty_mouse_encoder_new(&self.bridge, &self.mouse_encoder));
+        const encoder = self.mouse_encoder;
+        c.ghostty_mouse_encoder_setopt_from_terminal(encoder, self.terminal);
+        var size = std.mem.zeroes(c.GhosttyMouseEncoderSize);
+        size.size = @sizeOf(c.GhosttyMouseEncoderSize);
+        size.screen_width = @as(u32, geometry.columns) * geometry.cell_width;
+        size.screen_height = @as(u32, geometry.rows) * geometry.cell_height;
+        size.cell_width = geometry.cell_width;
+        size.cell_height = geometry.cell_height;
+        c.ghostty_mouse_encoder_setopt(encoder, c.GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+        c.ghostty_mouse_encoder_setopt(encoder, c.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &event.any_button_pressed);
+
+        var native: c.GhosttyMouseEvent = null;
+        try check(c.ghostty_mouse_event_new(&self.bridge, &native));
+        defer c.ghostty_mouse_event_free(native);
+        c.ghostty_mouse_event_set_action(native, switch (event.action) {
+            .press => c.GHOSTTY_MOUSE_ACTION_PRESS,
+            .release => c.GHOSTTY_MOUSE_ACTION_RELEASE,
+            .motion => c.GHOSTTY_MOUSE_ACTION_MOTION,
+        });
+        switch (event.button) {
+            .none => c.ghostty_mouse_event_clear_button(native),
+            .left => c.ghostty_mouse_event_set_button(native, c.GHOSTTY_MOUSE_BUTTON_LEFT),
+            .middle => c.ghostty_mouse_event_set_button(native, c.GHOSTTY_MOUSE_BUTTON_MIDDLE),
+            .right => c.ghostty_mouse_event_set_button(native, c.GHOSTTY_MOUSE_BUTTON_RIGHT),
+            .wheel_up => c.ghostty_mouse_event_set_button(native, c.GHOSTTY_MOUSE_BUTTON_FOUR),
+            .wheel_down => c.ghostty_mouse_event_set_button(native, c.GHOSTTY_MOUSE_BUTTON_FIVE),
+        }
+        var mods: c.GhosttyMods = 0;
+        if (event.shift) mods |= c.GHOSTTY_MODS_SHIFT;
+        if (event.ctrl) mods |= c.GHOSTTY_MODS_CTRL;
+        c.ghostty_mouse_event_set_mods(native, mods);
+        const max_x: i32 = @intCast(size.screen_width - 1);
+        const max_y: i32 = @intCast(size.screen_height - 1);
+        const x = std.math.clamp(event.x, 0, max_x);
+        const y = std.math.clamp(event.y, 0, max_y);
+        c.ghostty_mouse_event_set_position(native, .{ .x = @floatFromInt(x), .y = @floatFromInt(y) });
+        const cell = [2]u32{
+            @intCast(@divTrunc(x, @as(i32, @intCast(geometry.cell_width)))),
+            @intCast(@divTrunc(y, @as(i32, @intCast(geometry.cell_height)))),
+        };
+        if (event.action == .motion and !self.modeEnabled(1016)) {
+            if (self.mouse_last_cell) |last| {
+                if (last[0] == cell[0] and last[1] == cell[1]) return buffer[0..0];
+            }
+        }
+
+        var written: usize = 0;
+        try check(c.ghostty_mouse_encoder_encode(encoder, native, buffer, buffer.len, &written));
+        if (written != 0) self.mouse_last_cell = cell;
+        return buffer[0..written];
+    }
+
+    fn modeEnabled(self: *const State, mode: u16) bool {
+        var enabled = false;
+        if (c.ghostty_terminal_mode_get(self.terminal, c.ghostty_mode_new(mode, false), &enabled) != c.GHOSTTY_SUCCESS)
+            return false;
+        return enabled;
+    }
+
+    /// Forgets the last reported cell, so the next motion is reported even if it is in the same
+    /// cell. Call when the pointer leaves the terminal.
+    pub fn resetMouse(self: *State) void {
+        self.mouse_last_cell = null;
     }
 
     /// First screen row (scrollback included) shown at the top of the viewport.
@@ -702,6 +821,103 @@ test "VT reports the program's bracketed-paste request" {
     try std.testing.expect(state.bracketedPasteEnabled());
     try state.feed("\x1b[?2004l");
     try std.testing.expect(!state.bracketedPasteEnabled());
+}
+
+const test_mouse_geometry = MouseGeometry{ .columns = 200, .rows = 24, .cell_width = 8, .cell_height = 16 };
+
+fn expectMouse(state: *State, event: MouseEvent, expected: []const u8) !void {
+    var buffer: [max_mouse_sequence_bytes]u8 = undefined;
+    const bytes = try state.encodeMouse(&buffer, event, test_mouse_geometry);
+    try std.testing.expectEqualSlices(u8, expected, bytes);
+}
+
+/// The pixel at the middle of a cell.
+fn cellCenter(column: i32, row: i32) [2]i32 {
+    return .{ column * 8 + 4, row * 16 + 8 };
+}
+
+test "VT reports whether the program asked for mouse tracking" {
+    const state = try State.create(std.testing.allocator, 20, 3);
+    defer state.destroy();
+    try std.testing.expect(!state.mouseTrackingEnabled());
+    for ([_][]const u8{ "9", "1000", "1002", "1003" }) |mode| {
+        var on: [16]u8 = undefined;
+        var off: [16]u8 = undefined;
+        try state.feed(try std.fmt.bufPrint(&on, "\x1b[?{s}h", .{mode}));
+        try std.testing.expect(state.mouseTrackingEnabled());
+        try state.feed(try std.fmt.bufPrint(&off, "\x1b[?{s}l", .{mode}));
+        try std.testing.expect(!state.mouseTrackingEnabled());
+    }
+    // An encoding request alone is not tracking.
+    try state.feed("\x1b[?1006h");
+    try std.testing.expect(!state.mouseTrackingEnabled());
+}
+
+test "mouse events are encoded in the tracking mode and format the program chose" {
+    const state = try State.create(std.testing.allocator, 200, 24);
+    defer state.destroy();
+    const at = cellCenter(3, 2);
+    const press = MouseEvent{ .action = .press, .button = .left, .x = at[0], .y = at[1], .any_button_pressed = true };
+    const release = MouseEvent{ .action = .release, .button = .left, .x = at[0], .y = at[1] };
+
+    // No tracking: nothing to report.
+    try expectMouse(state, press, "");
+
+    // Normal tracking, X10 format: ESC [ M, button + 32, column + 33, row + 33 (one-based).
+    try state.feed("\x1b[?1000h");
+    try expectMouse(state, press, "\x1b[M $#");
+    try expectMouse(state, release, "\x1b[M#$#");
+    // SGR format.
+    try state.feed("\x1b[?1006h");
+    try expectMouse(state, press, "\x1b[<0;4;3M");
+    try expectMouse(state, release, "\x1b[<0;4;3m");
+    try expectMouse(state, .{ .action = .press, .button = .right, .x = at[0], .y = at[1], .any_button_pressed = true }, "\x1b[<2;4;3M");
+    try expectMouse(state, .{ .action = .press, .button = .middle, .x = at[0], .y = at[1], .any_button_pressed = true }, "\x1b[<1;4;3M");
+    try expectMouse(state, .{ .action = .press, .button = .left, .ctrl = true, .x = at[0], .y = at[1], .any_button_pressed = true }, "\x1b[<16;4;3M");
+    try expectMouse(state, .{ .action = .press, .button = .wheel_up, .x = at[0], .y = at[1] }, "\x1b[<64;4;3M");
+    try expectMouse(state, .{ .action = .press, .button = .wheel_down, .x = at[0], .y = at[1] }, "\x1b[<65;4;3M");
+    // Normal tracking has no motion.
+    const next = cellCenter(4, 2);
+    try expectMouse(state, .{ .action = .motion, .button = .left, .x = next[0], .y = next[1], .any_button_pressed = true }, "");
+
+    // Button tracking reports a drag once per cell; any-event tracking also reports a hover.
+    try state.feed("\x1b[?1002h");
+    try expectMouse(state, .{ .action = .motion, .button = .left, .x = next[0], .y = next[1], .any_button_pressed = true }, "\x1b[<32;5;3M");
+    try expectMouse(state, .{ .action = .motion, .button = .left, .x = next[0] + 1, .y = next[1], .any_button_pressed = true }, "");
+    try expectMouse(state, .{ .action = .motion, .x = next[0], .y = next[1] + 16 }, "");
+    try state.feed("\x1b[?1003h");
+    try expectMouse(state, .{ .action = .motion, .x = next[0], .y = next[1] + 32 }, "\x1b[<35;5;5M");
+    state.resetMouse();
+    try expectMouse(state, .{ .action = .motion, .x = next[0], .y = next[1] + 32 }, "\x1b[<35;5;5M");
+    // Disabling a mode turns tracking off whatever was enabled before, so the program asks again.
+    try state.feed("\x1b[?1003l\x1b[?1002l\x1b[?1000h");
+
+    // URXVT, SGR-pixels, and UTF-8 formats; the legacy X10 mode (9) reports presses only.
+    try state.feed("\x1b[?1006l\x1b[?1015h");
+    try expectMouse(state, press, "\x1b[32;4;3M");
+    try state.feed("\x1b[?1015l\x1b[?1016h");
+    try expectMouse(state, press, "\x1b[<0;28;40M");
+    try state.feed("\x1b[?1016l\x1b[?1005h");
+    const far = cellCenter(100, 2);
+    try expectMouse(state, .{ .action = .press, .button = .left, .x = far[0], .y = far[1], .any_button_pressed = true }, "\x1b[M \xc2\x85#");
+    try state.feed("\x1b[?1005l\x1b[?1000l\x1b[?9h");
+    try expectMouse(state, press, "\x1b[M $#");
+    try expectMouse(state, release, "");
+}
+
+test "mouse positions outside the surface clamp to its edge cells and an empty geometry is refused" {
+    const state = try State.create(std.testing.allocator, 200, 24);
+    defer state.destroy();
+    try state.feed("\x1b[?1002h\x1b[?1006h");
+    try expectMouse(state, .{ .action = .press, .button = .left, .x = -50, .y = -50, .any_button_pressed = true }, "\x1b[<0;1;1M");
+    try expectMouse(state, .{ .action = .release, .button = .left, .x = 99999, .y = 99999 }, "\x1b[<0;200;24m");
+    var buffer: [max_mouse_sequence_bytes]u8 = undefined;
+    try std.testing.expectError(error.InvalidSize, state.encodeMouse(&buffer, .{ .action = .press, .x = 0, .y = 0 }, .{
+        .columns = 0,
+        .rows = 24,
+        .cell_width = 8,
+        .cell_height = 16,
+    }));
 }
 
 test "VT parser is production default with an explicit legacy opt-out" {

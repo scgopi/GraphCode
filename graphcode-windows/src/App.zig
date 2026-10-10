@@ -13752,6 +13752,257 @@ test "live terminal mouse: selection is highlighted, copied once through the sha
     try std.testing.expectEqualStrings("\r", sent.items);
 }
 
+/// Native mouse messages for a real terminal surface, one per button and the wheel, so the
+/// reporting tests read as the gestures they stand for.
+const LiveMouseButtons = struct {
+    mouse: LiveMouse,
+
+    const Button = enum { left, middle, right };
+
+    fn downMessage(button: Button) c.UINT {
+        return switch (button) {
+            .left => c.WM_LBUTTONDOWN,
+            .middle => c.WM_MBUTTONDOWN,
+            .right => c.WM_RBUTTONDOWN,
+        };
+    }
+
+    fn upMessage(button: Button) c.UINT {
+        return switch (button) {
+            .left => c.WM_LBUTTONUP,
+            .middle => c.WM_MBUTTONUP,
+            .right => c.WM_RBUTTONUP,
+        };
+    }
+
+    fn heldFlag(button: Button) c.WPARAM {
+        return switch (button) {
+            .left => c.MK_LBUTTON,
+            .middle => c.MK_MBUTTON,
+            .right => c.MK_RBUTTON,
+        };
+    }
+
+    fn press(self: LiveMouseButtons, button: Button, extra: c.WPARAM, col: i32, row: i32) void {
+        self.mouse.sendWith(downMessage(button), heldFlag(button) | extra, col, row);
+    }
+
+    fn release(self: LiveMouseButtons, button: Button, extra: c.WPARAM, col: i32, row: i32) void {
+        self.mouse.sendWith(upMessage(button), extra, col, row);
+    }
+
+    fn click(self: LiveMouseButtons, button: Button, extra: c.WPARAM, col: i32, row: i32) void {
+        self.press(button, extra, col, row);
+        self.release(button, extra, col, row);
+    }
+
+    fn move(self: LiveMouseButtons, held: c.WPARAM, col: i32, row: i32) void {
+        self.mouse.sendWith(c.WM_MOUSEMOVE, held, col, row);
+    }
+
+    /// A wheel turn of `delta` units (120 is one notch, positive is away from the user).
+    fn wheel(self: LiveMouseButtons, delta: i32, extra: c.WPARAM, col: i32, row: i32) void {
+        const mouse = self.mouse;
+        var point = c.POINT{
+            .x = col * mouse.cell_width + @divTrunc(mouse.cell_width, 2),
+            .y = row * mouse.cell_height + @divTrunc(mouse.cell_height, 2),
+        };
+        _ = c.ClientToScreen(mouse.keyboard.surface, &point);
+        const position: c.LPARAM = (@as(c.LPARAM, point.y & 0xFFFF) << 16) | @as(c.LPARAM, point.x & 0xFFFF);
+        const wheel_bits: c.WPARAM = @as(c.WPARAM, @as(u16, @bitCast(@as(i16, @intCast(delta))))) << 16;
+        _ = c.SendMessageW(mouse.keyboard.surface, c.WM_MOUSEWHEEL, wheel_bits | extra, position);
+    }
+};
+
+fn expectSentToProgram(keyboard: *LiveKeyboard, expected: []const u8) !void {
+    var sent: std.ArrayListUnmanaged(u8) = .empty;
+    defer sent.deinit(std.testing.allocator);
+    try keyboard.drainInput(&sent);
+    try std.testing.expectEqualSlices(u8, expected, sent.items);
+}
+
+test "live terminal mouse: a program that asks for mouse tracking receives presses, releases, motion and wheel, not a selection" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const vt = fixture.workspace.surfaces[keyboard.index].vt.?;
+    try expectSentToProgram(&keyboard, "");
+
+    // Without tracking nothing is sent: the wheel does nothing and a click only selects.
+    buttons.wheel(120, 0, 3, 2);
+    mouse.click(3, 2);
+    try expectSentToProgram(&keyboard, "");
+
+    // Normal tracking with SGR encoding (DECSET 1000 and 1006), cell (3, 2) is column 4 row 3.
+    try vt.feed("\x1b[?1000h\x1b[?1006h");
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;4;3m");
+    try mouse.expectNoSelection();
+    buttons.click(.middle, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<1;4;3M\x1b[<1;4;3m");
+    buttons.click(.right, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<2;4;3M\x1b[<2;4;3m");
+    buttons.click(.left, c.MK_CONTROL, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<16;4;3M\x1b[<16;4;3m");
+    buttons.wheel(120, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<64;4;3M");
+    buttons.wheel(-120, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<65;4;3M");
+    // Normal tracking reports no motion, so a drag is a press and a release.
+    mouse.drag(3, 2, 6, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;7;3m");
+    try mouse.expectNoSelection();
+
+    // Button-event tracking (1002) adds motion while a button is held, once per cell.
+    try vt.feed("\x1b[?1002h");
+    mouse.drag(3, 2, 6, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<32;5;3M\x1b[<32;7;3M\x1b[<0;7;3m");
+    buttons.move(0, 5, 2);
+    try expectSentToProgram(&keyboard, "");
+
+    // Any-event tracking (1003) reports a hover too, and not twice for the same cell.
+    try vt.feed("\x1b[?1003h");
+    buttons.move(0, 5, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<35;6;3M");
+    buttons.move(0, 5, 2);
+    try expectSentToProgram(&keyboard, "");
+    try vt.feed("\x1b[?1003l\x1b[?1002l\x1b[?1000h\x1b[?1006l");
+
+    // Without SGR the default X10 encoding is used: ESC [ M, button + 32, column + 33, row + 33.
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[M $#\x1b[M#$#");
+    // URXVT encoding (1015) is decimal.
+    try vt.feed("\x1b[?1015h");
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[32;4;3M\x1b[35;4;3M");
+    try vt.feed("\x1b[?1015l");
+    // The legacy X10 mode (DECSET 9) reports presses only.
+    try vt.feed("\x1b[?1000l\x1b[?9h");
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[M $#");
+
+    // Once the program turns tracking off, the mouse selects again and reports nothing.
+    try vt.feed("\x1b[?9l");
+    mouse.drag(0, 1, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+    try expectSentToProgram(&keyboard, "");
+}
+
+test "live terminal mouse: Shift keeps selecting locally while the program tracks the mouse" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const vt = fixture.workspace.surfaces[keyboard.index].vt.?;
+    try vt.feed("\x1b[?1003h\x1b[?1006h");
+
+    // Shift+drag selects and sends nothing, including the motion any-event tracking would report.
+    buttons.press(.left, c.MK_SHIFT, 0, 1);
+    buttons.move(c.MK_LBUTTON | c.MK_SHIFT, 4, 1);
+    buttons.move(c.MK_LBUTTON | c.MK_SHIFT, 8, 1);
+    buttons.release(.left, c.MK_SHIFT, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+    buttons.move(c.MK_SHIFT, 9, 1);
+    buttons.wheel(120, c.MK_SHIFT, 9, 1);
+    try expectSentToProgram(&keyboard, "");
+
+    // An ordinary click right after is the program's and replaces the selection.
+    buttons.click(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M\x1b[<0;4;3m");
+    try mouse.expectNoSelection();
+}
+
+test "live terminal mouse: a gesture follows the route it started on and the right button opens the menu only for the shell" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    const vt = workspace.surfaces[keyboard.index].vt.?;
+    workspace.key_callback = &ClipboardRouteProbe.callback;
+
+    // A drag that began as a selection stays one when the program turns tracking on mid-drag.
+    buttons.press(.left, 0, 0, 1);
+    try vt.feed("\x1b[?1002h\x1b[?1006h");
+    buttons.move(c.MK_LBUTTON, 8, 1);
+    buttons.release(.left, 0, 8, 1);
+    try mouse.expectSelected("GC-COPY-2");
+    try expectSentToProgram(&keyboard, "");
+
+    // A press the program received is not turned into a selection when it stops tracking.
+    buttons.press(.left, 0, 3, 2);
+    try vt.feed("\x1b[?1002l");
+    buttons.move(c.MK_LBUTTON, 6, 2);
+    buttons.release(.left, 0, 6, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    try mouse.expectNoSelection();
+
+    // The right button belongs to the program while it tracks the mouse; Shift gets the menu.
+    try vt.feed("\x1b[?1000h");
+    ClipboardRouteProbe.calls = 0;
+    buttons.click(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 0), ClipboardRouteProbe.calls);
+    try expectSentToProgram(&keyboard, "\x1b[<2;4;3M\x1b[<2;4;3m");
+    buttons.click(.right, c.MK_SHIFT, 3, 2);
+    try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+    try std.testing.expectEqual(@as(usize, TerminalKeys.vk_apps), ClipboardRouteProbe.key);
+    try expectSentToProgram(&keyboard, "");
+    // Without tracking the right button opens the menu as before.
+    try vt.feed("\x1b[?1000l");
+    ClipboardRouteProbe.calls = 0;
+    buttons.click(.right, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 1), ClipboardRouteProbe.calls);
+    try expectSentToProgram(&keyboard, "");
+}
+
+test "live terminal mouse: a high-resolution wheel reports one step per full notch" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    try fixture.workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1000h\x1b[?1006h");
+
+    buttons.wheel(60, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "");
+    buttons.wheel(60, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<64;4;3M");
+    buttons.wheel(240, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<64;4;3M\x1b[<64;4;3M");
+    // A turn the other way discards a partial notch instead of cancelling against it.
+    buttons.wheel(60, 0, 3, 2);
+    buttons.wheel(-120, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<65;4;3M");
+}
+
 const KeyTableCase = struct {
     name: []const u8,
     chord: LiveKeyboard.Chord,

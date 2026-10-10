@@ -312,10 +312,16 @@ pub const Surface = struct {
     // scrolls. `selection_dirty` marks a change not yet drawn into the published snapshot.
     selection: TerminalSelection.State = .{},
     selection_dirty: bool = false,
+    // Which route the held mouse buttons began on, and the wheel movement not yet worth a
+    // whole notch; see routeMouse.
+    mouse_gesture: enum { none, selection, program } = .none,
+    wheel_remainder: i32 = 0,
 
     fn resetOutput(self: *Surface) void {
         if (self.vt) |state| state.destroy();
         self.vt = null;
+        self.mouse_gesture = .none;
+        self.wheel_remainder = 0;
         self.clearSelection();
         self.parser = .normal;
         self.csi_value = 0;
@@ -5035,6 +5041,52 @@ test "provider mouse events become selection input only for the left button and 
     try std.testing.expect(selectionInputFor(&wheel) == null);
 }
 
+test "mouse events go to the program only while it tracks the mouse and Shift is not held" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+    const slot = &workspace.surfaces[0];
+    const left_held: u32 = 0x1;
+    const down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 1, 0, 0, left_held, 1);
+    const up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 1, 0, 0, 0, 1);
+    const move_held = mouseEvent(c.WINGHOSTTY_MOUSE_MOVE, 0, 0, 0, left_held, 1);
+    const hover = mouseEvent(c.WINGHOSTTY_MOUSE_MOVE, 0, 0, 0, 0, 1);
+    const wheel = mouseEvent(c.WINGHOSTTY_MOUSE_WHEEL, 0, 0, 0, 0, 1);
+    const shift_down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 1, 0, 0, left_held | provider_shift, 1);
+    const shift_up = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 1, 0, 0, provider_shift, 1);
+    const shift_wheel = mouseEvent(c.WINGHOSTTY_MOUSE_WHEEL, 0, 0, 0, provider_shift, 1);
+    const side_down = mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_DOWN, 4, 0, 0, 0, 1);
+
+    // With no parser there is nothing to ask, so everything is the shell's.
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &up));
+
+    slot.vt = try TerminalVt.State.create(std.testing.allocator, 20, 3);
+    defer slot.vt.?.destroy();
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &wheel));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &up));
+
+    try slot.vt.?.feed("\x1b[?1000h");
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &wheel));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &hover));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_wheel));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &side_down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &mouseEvent(c.WINGHOSTTY_MOUSE_BUTTON_UP, 4, 0, 0, 0, 1)));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &down));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &move_held));
+    // The program stops tracking mid-gesture: the release still belongs to the program.
+    try slot.vt.?.feed("\x1b[?1000l");
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &move_held));
+    try std.testing.expectEqual(MouseRoute.program, routeMouse(slot, &up));
+    try std.testing.expect(slot.mouse_gesture == .none);
+
+    try slot.vt.?.feed("\x1b[?1000h");
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_down));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &move_held));
+    try std.testing.expectEqual(MouseRoute.selection, routeMouse(slot, &shift_up));
+    try std.testing.expect(slot.mouse_gesture == .none);
+}
+
 const NoAccessibilityCopy = struct {
     fn copyRange(_: *c.winghostty_surface, _: u64, _: u64, _: []u8, _: *u64) c.winghostty_result {
         return c.WINGHOSTTY_CLIPBOARD_UNAVAILABLE;
@@ -5290,9 +5342,142 @@ test "committed IME composition enters the terminal input queue" {
     try std.testing.expectEqualStrings(committed, item.bytes);
 }
 
+const MouseRoute = enum { selection, program };
+
+const mouse_button_flags: u32 = 0x1 | 0x2 | 0x10; // MK_LBUTTON, MK_RBUTTON, MK_MBUTTON
+const wheel_notch: i32 = 120;
+const max_wheel_reports_per_event: i32 = 8;
+
+/// Decides who a pointer event belongs to. While the running program tracks the mouse
+/// (DECSET 9/1000/1002/1003) its events go to the program, and Shift hands a gesture back to the
+/// shell's own selection, as in xterm and Windows Terminal. A gesture keeps the route it
+/// began on until every button is up, so a program that changes its mode mid-drag does not
+/// get half of one or turn it into a selection.
+fn routeMouse(slot: *Surface, event: *const c.winghostty_mouse_event) MouseRoute {
+    const state = slot.vt orelse return .selection;
+    const tracking = state.mouseTrackingEnabled();
+    const shift = TerminalKeys.decodeProviderModifiers(event.modifiers).shift;
+    switch (event.kind) {
+        c.WINGHOSTTY_MOUSE_BUTTON_DOWN => {
+            if (slot.mouse_gesture == .none) {
+                // Winghostty numbers the buttons left 1, right 2, middle 3, then the side buttons.
+                const reportable = event.button >= 1 and event.button <= 3;
+                slot.mouse_gesture = if (tracking and !shift and reportable) .program else .selection;
+            }
+        },
+        c.WINGHOSTTY_MOUSE_BUTTON_UP => {
+            const route: MouseRoute = if (slot.mouse_gesture == .program) .program else .selection;
+            if ((event.modifiers & mouse_button_flags) == 0) slot.mouse_gesture = .none;
+            return route;
+        },
+        c.WINGHOSTTY_MOUSE_MOVE => {
+            if (slot.mouse_gesture == .none) return if (tracking and !shift) .program else .selection;
+        },
+        c.WINGHOSTTY_MOUSE_WHEEL => return if (tracking and !shift) .program else .selection,
+        else => return .selection,
+    }
+    return if (slot.mouse_gesture == .program) .program else .selection;
+}
+
+/// The cell size comes from the metrics the shell already records for each surface when it
+/// sizes it and when the provider reports a change; without them nothing can be encoded.
+fn mouseGeometry(slot: *const Surface) ?TerminalVt.MouseGeometry {
+    const metrics = slot.cell_metrics;
+    if (metrics.cell_width == 0 or metrics.cell_height == 0) return null;
+    return .{
+        .columns = slot.grid.cols,
+        .rows = slot.grid.rows,
+        .cell_width = metrics.cell_width,
+        .cell_height = metrics.cell_height,
+    };
+}
+
+/// Sends a pointer event to the program in the mouse protocol it asked for. The button states
+/// come from the provider's modifier mask; Alt is not reported with mouse events and the side
+/// buttons are not forwarded. Horizontal and vertical wheel turns are indistinguishable in the
+/// provider's event, so both are reported as vertical.
+fn reportMouseToProgram(
+    workspace: *Workspace,
+    index: usize,
+    event: *const c.winghostty_mouse_event,
+) void {
+    const slot = &workspace.surfaces[index];
+    const state = slot.vt orelse return;
+    const modifiers = TerminalKeys.decodeProviderModifiers(event.modifiers);
+    var report = TerminalVt.MouseEvent{
+        .action = .motion,
+        .ctrl = modifiers.ctrl,
+        .shift = modifiers.shift,
+        .x = event.x,
+        .y = event.y,
+        .any_button_pressed = (event.modifiers & mouse_button_flags) != 0,
+    };
+    switch (event.kind) {
+        c.WINGHOSTTY_MOUSE_LEAVE => return state.resetMouse(),
+        c.WINGHOSTTY_MOUSE_BUTTON_DOWN, c.WINGHOSTTY_MOUSE_BUTTON_UP => {
+            report.action = if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_DOWN) .press else .release;
+            report.button = switch (event.button) {
+                1 => .left,
+                2 => .right,
+                3 => .middle,
+                else => return,
+            };
+            if (report.action == .press) {
+                report.any_button_pressed = true;
+                // Whatever the shell had selected is no longer what the user is pointing at.
+                slot.clearSelection();
+            }
+        },
+        c.WINGHOSTTY_MOUSE_MOVE => {
+            const held = event.modifiers;
+            report.button = if ((held & 0x1) != 0) .left else if ((held & 0x10) != 0) .middle else if ((held & 0x2) != 0) .right else .none;
+        },
+        c.WINGHOSTTY_MOUSE_WHEEL => return reportWheelToProgram(workspace, index, event.wheel_delta, report),
+        else => return,
+    }
+    sendMouseReport(workspace, index, report);
+}
+
+/// A wheel notch is 120 units. Finer wheels add up to whole notches, and a turn the other way
+/// drops the part-notch left over, so a program sees one report per notch and never a reversal
+/// from a leftover.
+fn reportWheelToProgram(
+    workspace: *Workspace,
+    index: usize,
+    delta: i32,
+    base: TerminalVt.MouseEvent,
+) void {
+    const slot = &workspace.surfaces[index];
+    if (delta == 0) return;
+    if (slot.wheel_remainder != 0 and (delta > 0) != (slot.wheel_remainder > 0)) slot.wheel_remainder = 0;
+    slot.wheel_remainder +|= delta;
+    const notches = @divTrunc(slot.wheel_remainder, wheel_notch);
+    slot.wheel_remainder -= notches * wheel_notch;
+    var report = base;
+    report.action = .press;
+    report.any_button_pressed = false;
+    report.button = if (notches > 0) .wheel_up else .wheel_down;
+    var remaining = @min(@as(i32, @intCast(@abs(notches))), max_wheel_reports_per_event);
+    while (remaining > 0) : (remaining -= 1) sendMouseReport(workspace, index, report);
+}
+
+fn sendMouseReport(workspace: *Workspace, index: usize, report: TerminalVt.MouseEvent) void {
+    const slot = &workspace.surfaces[index];
+    const state = slot.vt orelse return;
+    const geometry = mouseGeometry(slot) orelse return;
+    var buffer: [TerminalVt.max_mouse_sequence_bytes]u8 = undefined;
+    const bytes = state.encodeMouse(&buffer, report, geometry) catch return;
+    workspace.enqueueInput(index, bytes);
+}
+
 fn onMouse(user_data: ?*anyopaque, surface: *c.winghostty_surface, event: *const c.winghostty_mouse_event) callconv(.c) void {
     const workspace = workspaceFromUserData(user_data) orelse return;
-    _ = callbackSlot(workspace, surface) orelse return;
+    const slot = callbackSlot(workspace, surface) orelse return;
+    const route = routeMouse(slot, event);
+    if (route == .program) {
+        const index = surfaceIndex(workspace, surface) orelse return;
+        return reportMouseToProgram(workspace, index, event);
+    }
     // Winghostty numbers the buttons left 1, right 2, middle 3.
     if (event.kind == c.WINGHOSTTY_MOUSE_BUTTON_UP and event.button == 2) workspace.runContextMenu();
     if (selectionInputFor(event)) |input| {

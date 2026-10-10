@@ -312,6 +312,16 @@ runs the pasted lines as they arrive. macOS auto-confirms that case without a
 dialog. Dragging past the edge of the terminal does not scroll it, and there is
 no block selection.
 
+While the program in the terminal tracks the mouse (DECSET 9, 1000, 1002 or
+1003, with the 1005, 1006, 1015 or 1016 encodings) the mouse belongs to it:
+presses, releases, drags, hover (any-event mode) and the wheel are sent in the
+protocol it asked for, and the left button does not select. Hold `Shift` to
+select with the mouse anyway, and `Shift`+right-click for the context menu. Alt
+is not reported with mouse events, the side buttons are not forwarded, a
+horizontal wheel turn is reported as a vertical one, and a drag that loses mouse
+capture is not reported to the program as released. Without tracking the wheel
+still does nothing: scrollback is not wired to it.
+
 Canvas and pointer actions still have no visible gesture hints: clicking
 selects/opens canvas items; dragging blank canvas pans, dragging a node moves
 it, and dragging a connector to another node creates an edge; wheel and
