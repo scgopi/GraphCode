@@ -165,14 +165,16 @@ struct RemoteSessionResumeTests {
     // the launch argv as `--settings "$HOME/.graphcode/hooks/claude-code.json"`, so this
     // assertion would pass with the write deleted entirely.
     let write = try #require(remoteCommand.range(of: "mkdir -p \"$HOME/.graphcode/hooks\""))
-    // And inside the create branch, not merely after the check — textual order alone
-    // would be satisfied by a fragment sitting outside the group. The check and the
-    // group are no longer adjacent: the readiness repair sits between them (#272), so
-    // the group opener is what this anchors on.
-    let branch = try #require(remoteCommand.range(of: " || { "))
+    // And inside the create-only branch (behind the `zmx get` hint), not merely after
+    // something — textual order alone would be satisfied by a fragment sitting outside
+    // the gate. The write sits ahead of the liveness listing, so nothing can come between
+    // that listing and the launch.
+    let get = try #require(remoteCommand.range(of: "'get'"))
+    let check = try #require(remoteCommand.range(of: "ls 2>/dev/null"))
     let run = try #require(remoteCommand.range(of: "'run'"))
-    #expect(branch.lowerBound < write.lowerBound)
-    #expect(write.lowerBound < run.lowerBound)
+    #expect(get.lowerBound < write.lowerBound)
+    #expect(write.lowerBound < check.lowerBound)
+    #expect(check.lowerBound < run.lowerBound)
   }
 
   @Test
@@ -189,12 +191,14 @@ struct RemoteSessionResumeTests {
 
     #expect(remoteCommand.contains(RemoteGraphAccess.cliShimStamp))
     #expect(remoteCommand.contains("cat \(RemoteGraphAccess.shimStampPath)"))
-    // Session missing *or* stamp differs — a fresh launch must re-deliver whatever the
-    // stamp says, because the argv it is about to run names the briefing, wake digest
-    // and prompt files that ride in this same fragment.
-    let gate = try #require(remoteCommand.range(of: "if ! "))
+    // The delivery is decided by the host's receipt alone — never by the session — so a
+    // fresh launch re-delivers whatever the receipt says is stale, and a pane that creates
+    // the session mid-delivery cannot turn a stale listing into a launch.
+    let gate = try #require(
+      remoteCommand.range(of: "if [ \"$(cat \(RemoteGraphAccess.shimStampPath)"))
     let deliver = try #require(remoteCommand.range(of: "b64decode"))
     #expect(gate.lowerBound < deliver.lowerBound)
+    #expect(!remoteCommand[gate.lowerBound..<deliver.lowerBound].contains("'zmx'"))
   }
 
   @Test

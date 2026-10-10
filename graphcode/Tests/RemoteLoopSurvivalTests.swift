@@ -51,13 +51,15 @@ struct RemoteLoopSurvivalTests {
     #expect(remoteCommand.contains(ZmxSessionLauncher.remoteProbeMarker))
     #expect(remoteCommand.contains("'get'"))
     #expect(remoteCommand.contains("presence"))
-    #expect(remoteCommand.contains("'ls'"))
+    #expect(remoteCommand.contains(" ls 2>/dev/null"))
     #expect(!remoteCommand.contains("history"))
-    // `grep -F` never interprets escapes: the name pattern's tab has to be a real one.
-    // A literal `\t` would match no row and every probe would report absent.
+    // The tab in the row pattern comes from `printf`, never a literal `\t` in a pattern
+    // `grep` would not interpret: that would match no row and every probe would report
+    // absent. And a row zmx could not get an answer out of is `unknown`, not `absent`.
     let sessionName = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
-    #expect(remoteCommand.contains("name=\(sessionName)\t'"))
-    #expect(!remoteCommand.contains("'name=\(sessionName)\\t'"))
+    #expect(remoteCommand.contains("gc_tab=$(printf"))
+    #expect(remoteCommand.contains("name=\(sessionName)(${gc_tab}"))
+    #expect(remoteCommand.contains("\(ZmxSessionLauncher.remoteProbeMarker) unknown"))
     #expect(
       remoteCommand.contains(SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName))
   }

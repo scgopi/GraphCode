@@ -27,6 +27,16 @@ public enum CLISessionStartOutcome: Equatable, Sendable {
 /// all, so it can't assume a terminal view exists to attach to. Only `attach`/`detach`
 /// may assume that; `launch`, `sendInput`, and `presence` may not
 /// (docs/04-cli-backends.md#launch-must-work-headlessly-with-no-app-running).
+/// What is known about a loop's local session. `.absent` includes a session whose task
+/// ended (a husk a keystroke cannot reach); `.unknown` is a session `zmx` could not get an
+/// answer out of (or a listing that could not be taken), which is not evidence that it is
+/// gone: callers defer, stage or retry on it, and never launch, kill, resolve, prune or
+/// forget.
+public enum SessionLiveness: Sendable, Equatable {
+  case live
+  case absent
+  case unknown
+}
 public struct CLISessionBackend: Sendable {
   public let kind: CLISessionBackendKind
   public var capabilities: BackendCapabilities { kind.capabilities }
