@@ -73,55 +73,96 @@ struct ZmxUnknownLivenessStoreTests {
     }
   }
 
-  @Test
-  func aRetypeIntoAnUnknownSessionResumesNothingAndLosesNoMessage() async {
+  /// A session whose liveness the test flips, with presence that always reads idle: the
+  /// case a three-way check must still hold, because idle says nothing about whether the
+  /// session exists.
+  private final class Session: @unchecked Sendable {
+    let liveness = LockIsolated<SessionLiveness>(.unknown)
     let delivered = LockIsolated<[String]>([])
     let resumed = LockIsolated(0)
-    let store = GraphStore(
-      onDeliverMessage: { _, text, _ in
-        delivered.withValue { $0.append(text) }
-        return true
-      },
-      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
-      onSessionLiveness: { _, _ in .unknown },
-      onResumeSession: { _, _ in
-        resumed.withValue { $0 += 1 }
-        return true
-      })
+    let memos = LockIsolated<[String]>([])
+
+    func store() -> GraphStore {
+      GraphStore(
+        onDeliverMessage: { [self] _, text, _ in
+          delivered.withValue { $0.append(text) }
+          return true
+        },
+        onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
+        onSessionLiveness: { [self] _, _ in liveness.value },
+        onResumeSession: { [self] _, _ in
+          resumed.withValue { $0 += 1 }
+          return true
+        },
+        onAppendMemory: { [self] _, entry in memos.withValue { $0.append(entry) } })
+    }
+  }
+
+  @Test
+  func aRetypeIntoAnUnknownSessionIsHeldThenDeliveredOnceWhenItIsLive() async {
+    let session = Session()
+    let store = session.store()
     let goal = NodeDraft(
       title: "Flake", loopType: .goalBased, goal: GoalSpec(summary: "the flake is fixed"))
     await store.handle(.createNode(goal))
     await store.handle(
       .promoteNode(
         goal.id, promotion: .timed(triggerPrompt: "/loop 1h check the flake"), promotedBy: nil))
+    await store.handle(.resumeSession(goal.id))
+    await store.handle(.resumeSession(goal.id))
 
-    #expect(await eventually { delivered.value.count == 3 })
-    #expect(delivered.value.last == "/loop 1h check the flake")
-    #expect(resumed.value == 0)
+    #expect(session.delivered.value.isEmpty, "nothing is typed while unknown")
+    #expect(session.resumed.value == 0)
+    let staged = session.memos.value.filter { $0.hasPrefix("follow-up staged") }
+    #expect(!staged.isEmpty, "held work is visible in the loop's memory")
+    #expect(Set(staged).count == staged.count, "each is staged once: \(staged)")
+
+    session.liveness.withValue { $0 = .live }
+    let arrived = await eventually {
+      await store.handle(.resumeSession(goal.id))
+      return session.delivered.value.contains("/loop 1h check the flake")
+    }
+    #expect(arrived, "delivered: \(session.delivered.value)")
+    #expect(
+      session.delivered.value.count == Set(session.delivered.value).count,
+      "each exactly once: \(session.delivered.value)")
+    #expect(session.resumed.value == 0)
   }
 
   @Test
-  func aReopenedGoalIsQueuedNotResumedWhenTheSessionIsUnknown() async {
-    let delivered = LockIsolated<[String]>([])
-    let resumed = LockIsolated(0)
-    let store = GraphStore(
-      onDeliverMessage: { _, text, _ in
-        delivered.withValue { $0.append(text) }
-        return true
-      },
-      onReadPresence: { _, _ in PresenceReading(presence: .idle, confidence: .reported) },
-      onSessionLiveness: { _, _ in .unknown },
-      onResumeSession: { _, _ in
-        resumed.withValue { $0 += 1 }
-        return true
-      })
+  func aReopenedGoalIsHeldThenDeliveredOnceWhenItIsLiveAndNeverResumed() async {
+    let session = Session()
+    let store = session.store()
     await store.handle(.createNode(goalDraft()))
     let id = await store.graph.nodes[0].id
     await store.handle(.completeNode(id, result: nil, from: id))
-
     await store.handle(.updateNode(id, update: NodeUpdate(goalSummary: "Add examples")))
+    await store.handle(.resumeSession(id))
 
-    #expect(await eventually { delivered.value.contains { $0.contains("Add examples") } })
-    #expect(resumed.value == 0)
+    #expect(session.delivered.value.isEmpty, "nothing is typed while unknown")
+    #expect(session.resumed.value == 0)
+
+    session.liveness.withValue { $0 = .live }
+    let arrived = await eventually {
+      await store.handle(.resumeSession(id))
+      return session.delivered.value.contains { $0.contains("Add examples") }
+    }
+    #expect(arrived, "delivered: \(session.delivered.value)")
+    #expect(session.delivered.value.filter { $0.contains("Add examples") }.count == 1)
+    #expect(session.resumed.value == 0)
+  }
+
+  @Test
+  func anUnknownSessionTellsItsUserOnceWhatIsBeingHeld() async {
+    let session = Session()
+    let store = session.store()
+    await store.handle(.createNode(goalDraft()))
+    let id = await store.graph.nodes[0].id
+    await store.handle(.completeNode(id, result: nil, from: id))
+    await store.handle(.resumeSession(id))
+    await store.handle(.resumeSession(id))
+    let notes = session.memos.value.filter { $0.contains("will be retried") }
+    #expect(notes.count == 1, "\(notes)")
+    #expect(session.resumed.value == 0)
   }
 }

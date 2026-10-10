@@ -268,6 +268,7 @@ public actor GraphStore {
   }
 
   private var pendingFollowUps: [PendingFollowUp] = []
+  private var unknownNotedAt: [UUID: Date] = [:]
   /// Each target's `node send` messages still being typed, chained so they land in the
   /// order they were sent — see `typeAfterAcknowledging`.
   private var sessionTyping: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
@@ -521,6 +522,11 @@ public actor GraphStore {
   /// session it has never heard of.
   private func deliverToSession(_ target: LoopNode, _ message: String) async -> Bool {
     guard let onDeliverMessage else { return false }
+    // The last check this store makes before typing, for every path that types (the queue,
+    // a stop request, a heartbeat, a reflection prompt): a session zmx cannot vouch for is
+    // not typed into, and `false` is what each caller already does something safe with.
+    // The transport's own send gate remains behind it.
+    if onSessionLiveness != nil, await sessionLiveness(of: target) == .unknown { return false }
     return await onDeliverMessage(target, message, graph.project.path)
   }
 
@@ -2584,7 +2590,13 @@ public actor GraphStore {
     let path = graph.project.path
     // Live: nothing to bring back. Unknown: nothing may be launched into a session that
     // may be running; opening the loop again asks again.
-    if await sessionLiveness(of: node) != .absent { return }
+    switch await sessionLiveness(of: node) {
+    case .absent: break
+    case .unknown:
+      noteDeferredOnUnknown(nodeID, "resuming this loop's session")
+      return
+    case .live: return
+    }
     var quiet = node
     quiet.loopType = .sketch
     quiet.firstInstruction =
@@ -2600,10 +2612,25 @@ public actor GraphStore {
   /// Unattended loops already run; this starts the rest, and is a no-op while a session is
   /// alive.
   private func ensureChatSession(_ node: LoopNode) async {
-    guard launchesWhenOpened(node), node.state != .stopped,
-      await sessionLiveness(of: node) == .absent
-    else { return }
-    ensureSession(node)
+    guard launchesWhenOpened(node), node.state != .stopped else { return }
+    switch await sessionLiveness(of: node) {
+    case .absent: ensureSession(node)
+    case .unknown: noteDeferredOnUnknown(node.id, "starting this loop's session")
+    case .live: return
+    }
+  }
+
+  /// At most one note a minute per loop, so a session that stays unknown tells its user
+  /// that work is being held and will be retried without the memory filling up on every
+  /// open, send or poll.
+  private func noteDeferredOnUnknown(_ nodeID: UUID, _ what: String) {
+    let now = Date()
+    if let last = unknownNotedAt[nodeID], now.timeIntervalSince(last) < 60 { return }
+    unknownNotedAt[nodeID] = now
+    recordMemory(
+      nodeID,
+      "zmx could not tell whether this loop's session is running — \(what) is held and will be retried"
+    )
   }
 
   private func launchesWhenOpened(_ node: LoopNode) -> Bool {
@@ -4245,6 +4272,20 @@ public actor GraphStore {
         drainInFlight = nil
         continue
       }
+      // Asked fresh for each message, not read once per pass: a session zmx cannot vouch for
+      // is not typed into however idle its presence reads (a control socket or a test double
+      // can say idle for a session nobody has proven alive). It stays queued, staged to
+      // memory once, for a pass that gets a clean answer; the transport's own send gate
+      // remains the last check.
+      if onSessionLiveness != nil, await sessionLiveness(of: node) == .unknown {
+        guard drainOwner == owner else { return }
+        noteDeferredOnUnknown(pending.nodeID, "a queued follow-up")
+        remaining.append(staged(pending))
+        drainDeferred = remaining
+        drainInFlight = nil
+        continue
+      }
+      guard drainOwner == owner else { return }
       pendingDeliveryAttempts.insert(pending.id)
       let attempt = DeliveryAttempt()
       let delivered = await withDeadline(deliveryDeadline) {
