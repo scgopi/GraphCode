@@ -254,8 +254,10 @@ it, so those menu accelerators apply only elsewhere. The terminal-safe
 alternatives work everywhere: `Ctrl+Shift+T` (new tab), `Ctrl+Shift+N` (new
 loop), `Alt+Shift+D` (split right), `Ctrl+Shift+D` (split down),
 `Ctrl+Shift+[` / `Ctrl+Shift+]` (pane focus), `Ctrl+Shift+F6` (window toolbar),
-and `Ctrl+Shift+F10` (menu bar); `Ctrl+Shift+W` closes the tab
-while a terminal has focus (it opens Worktrees elsewhere). `Ctrl+J` and
+and `Ctrl+Shift+F10` (menu bar); `Ctrl+Shift+W` closes the focused pane (and
+its tab if that was the tab's last pane) while a terminal has focus (it opens
+Worktrees elsewhere). Terminal > **Close Tab**, which has no shortcut, closes
+every pane of the selected tab and keeps the loop's last tab. `Ctrl+J` and
 `Ctrl+O` remain application keys in a terminal and `Ctrl+P` is not forwarded.
 The terminal sends editing, cursor, Home/End, Insert/Delete, Page, and function
 keys through the pinned Ghostty key encoder, so cursor-key application mode,

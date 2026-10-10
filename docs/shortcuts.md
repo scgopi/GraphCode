@@ -67,7 +67,7 @@ terminals, in tabs and splits. These act on them:
 | Shortcut | Does |
 |---|---|
 | ⌘T | New tab |
-| ⌘W | Close tab (a loop always keeps its last one) |
+| ⌘W | Close the focused pane; closes its tab if it is the last pane |
 | ⌘1 … ⌘9 | Select that tab |
 | ⌘→ / ⌘← | Next / previous tab |
 | ⌘D | Split the pane right |
@@ -75,6 +75,9 @@ terminals, in tabs and splits. These act on them:
 | ⌘] / ⌘[ | Focus the next / previous pane of a split |
 | ⌘= / ⌘− | Bigger / smaller terminal font (⌘+ works too) |
 | ⌘0 | Reset the terminal font size |
+
+**Terminal ▸ Close Tab** closes every pane of the tab at once. It has no shortcut: ⌘W
+already closes a tab that isn't split.
 
 Canvas zoom and terminal font share keys on purpose: ⌘= acts on whatever is in front
 of you — the graph when the canvas has focus, the type when a terminal does.
