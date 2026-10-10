@@ -99,81 +99,6 @@ struct ZmxUnknownLivenessTests {
 
   // MARK: - The check-or-run script, against a fake zmx
 
-  private final class Fixture {
-    let directory: URL
-    var zmx: URL { directory.appendingPathComponent("zmx") }
-    var calls: [String] {
-      ((try? String(contentsOf: directory.appendingPathComponent("calls"), encoding: .utf8)) ?? "")
-        .split(separator: "\n").map(String.init)
-    }
-    var dialLog: String {
-      (try? String(
-        contentsOf: directory.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8))
-        ?? ""
-    }
-
-    /// `listing` is what the fake `zmx ls` prints; `nil` makes it exit 1; `slow` makes it
-    /// hang first.
-    init(listing: String?, slow: Bool = false) throws {
-      directory = FileManager.default.temporaryDirectory
-        .appendingPathComponent("zmx-unknown-\(UUID().uuidString)", isDirectory: true)
-      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      let script = """
-        #!/bin/sh
-        d=$(dirname "$0")
-        echo "$1" >> "$d/calls"
-        case "$1" in
-          ls) [ -f "$d/ls.slow" ] && sleep 30; [ -f "$d/ls.fail" ] && exit 1
-              cat "$d/ls.out"; exit 0;;
-          get) echo busy; exit 0;;
-          *) exit 0;;
-        esac
-
-        """
-      try script.write(to: zmx, atomically: true, encoding: .utf8)
-      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmx.path)
-      // The remote ensure shells out to python3 for its delivery; a stub keeps the test about
-      // zmx.
-      let python = directory.appendingPathComponent("python3")
-      try "#!/bin/sh\nexit 0\n".write(to: python, atomically: true, encoding: .utf8)
-      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: python.path)
-      if let listing {
-        try listing.write(
-          to: directory.appendingPathComponent("ls.out"), atomically: true, encoding: .utf8)
-      } else {
-        try "x".write(
-          to: directory.appendingPathComponent("ls.fail"), atomically: true, encoding: .utf8)
-      }
-      if slow {
-        try "x".write(
-          to: directory.appendingPathComponent("ls.slow"), atomically: true, encoding: .utf8)
-      }
-    }
-
-    deinit { try? FileManager.default.removeItem(at: directory) }
-
-    /// Runs `script` under `shell` with this directory as `$HOME` and first on `PATH` (the
-    /// remote scripts name a bare `zmx`), returning its stdout.
-    @discardableResult
-    func run(_ script: String, shell: String = "/bin/sh", flags: [String] = ["-c"]) throws
-      -> String
-    {
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: shell)
-      process.arguments = flags + [script]
-      process.environment = [
-        "HOME": directory.path, "PATH": "\(directory.path):/usr/bin:/bin:/usr/sbin:/sbin",
-      ]
-      let pipe = Pipe()
-      process.standardOutput = pipe
-      process.standardError = FileHandle.nullDevice
-      try process.run()
-      let data = pipe.fileHandleForReading.readDataToEndOfFile()
-      process.waitUntilExit()
-      return String(decoding: data, as: UTF8.self)
-    }
-  }
-
   /// Every shell the scripts must survive: the login shell may be `sh -e`, dash or bash, and
   /// nothing here may rely on `pipefail`.
   private static let variants: [(shell: String, flags: [String])] = {
@@ -304,11 +229,18 @@ struct ZmxUnknownLivenessTests {
 
   // MARK: - The remote ensure, executed against a fake zmx
 
-  private func remoteCalls(
+  private func remoteRun(
     listing: String?, backend: CLISessionBackendKind = .claudeCode,
-    variant: (shell: String, flags: [String])
-  ) throws -> [String] {
+    variant: (shell: String, flags: [String]), liveOnDelivery: String? = nil
+  ) throws -> Fixture {
     let fixture = try Fixture(listing: listing)
+    if let live = liveOnDelivery {
+      let row = live.replacingOccurrences(of: "\t", with: "\\t")
+      let stub = "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) "
+      try (stub + "printf '\(row)\\n' > \"$d/ls.out\";; esac\nexit 0\n").write(
+        to: fixture.directory.appendingPathComponent("python3"), atomically: true,
+        encoding: .utf8)
+    }
     let node = LoopNode(
       id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
       title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"),
@@ -319,9 +251,15 @@ struct ZmxUnknownLivenessTests {
       ZmxSessionLauncher.remoteEnsureDialScript(
         forNode: node, at: location, settings: GraphcodeSettings()))
     try fixture.run(built.script, shell: variant.shell, flags: variant.flags)
-    return fixture.calls
+    return fixture
   }
 
+  private func remoteCalls(
+    listing: String?, backend: CLISessionBackendKind = .claudeCode,
+    variant: (shell: String, flags: [String])
+  ) throws -> [String] {
+    try remoteRun(listing: listing, backend: backend, variant: variant).calls
+  }
   @Test
   func theRemoteEnsureListsOnceAndNeverRunsForAnythingButADefinitelyAbsentSession() throws {
     let name = "graphcode-5E11BA5E-0001-4000-8000-000000000001"
@@ -347,37 +285,19 @@ struct ZmxUnknownLivenessTests {
     }
   }
 
-  /// The delivery (a `python3` here) is the slow step in which a pane can create the session.
-  /// The stub flips the listing to a live row when the delivery's installer is invoked, which is exactly a
-  /// session appearing while the delivery runs: no `run` may follow, whatever the shell.
+  /// The delivery is the slow step in which a pane can create the session. The `python3`
+  /// stub flips the listing to a live row when the delivery's installer runs: a session
+  /// appearing while the delivery runs. No `run` may follow, whatever the shell.
   @Test
   func aSessionThatBecomesLiveDuringDeliveryIsNeverRunInto() throws {
     let name = "graphcode-5E11BA5E-0001-4000-8000-000000000001"
     for variant in Self.variants {
-      let fixture = try Fixture(listing: "")
-      let flip = Self.row(name).replacingOccurrences(of: "\t", with: "\\t")
-      try
-        "#!/bin/sh\nd=$(dirname \"$0\")\ncase \"$*\" in *b64decode*) printf '\(flip)\\n' > \"$d/ls.out\";; esac\nexit 0\n"
-        .write(
-          to: fixture.directory.appendingPathComponent("python3"), atomically: true,
-          encoding: .utf8)
-      let node = LoopNode(
-        id: UUID(uuidString: "5E11BA5E-0001-4000-8000-000000000001") ?? UUID(),
-        title: "Fix", loopType: .goalBased, goal: GoalSpec(summary: "tests pass"))
-      let location = RemoteProjectLocation(
-        user: "dev", host: "build-box", port: 2222, remotePath: fixture.directory.path)
-      let built = try #require(
-        ZmxSessionLauncher.remoteEnsureDialScript(
-          forNode: node, at: location, settings: GraphcodeSettings()))
-      try fixture.run(built.script, shell: variant.shell, flags: variant.flags)
-      let listing = try String(
-        contentsOf: fixture.directory.appendingPathComponent("ls.out"), encoding: .utf8)
-      #expect(listing.contains(name), "the delivery never ran, so nothing was raced")
+      let fixture = try remoteRun(listing: "", variant: variant, liveOnDelivery: Self.row(name))
+      #expect(fixture.calls.contains("ls"), "\(variant) the delivery never ran")
       #expect(!fixture.calls.contains("run"), "\(variant) \(fixture.calls)")
       #expect(fixture.calls.filter { $0 == "ls" }.count == 1, "\(variant) \(fixture.calls)")
     }
   }
-
   @Test
   func theRemoteEnsureStructureIsPinnedAsWell() throws {
     let node = LoopNode(
@@ -427,5 +347,80 @@ struct ZmxUnknownLivenessTests {
     #expect(
       ZmxSessionLauncher.parseRemoteStatus(succeeded: true, output: "\(marker) unknown")
         == .unreachable)
+  }
+}
+
+private final class Fixture {
+  let directory: URL
+  var zmx: URL { directory.appendingPathComponent("zmx") }
+  var calls: [String] {
+    ((try? String(contentsOf: directory.appendingPathComponent("calls"), encoding: .utf8)) ?? "")
+      .split(separator: "\n").map(String.init)
+  }
+  var dialLog: String {
+    (try? String(
+      contentsOf: directory.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8))
+      ?? ""
+  }
+
+  /// `listing` is what the fake `zmx ls` prints; `nil` makes it exit 1; `slow` makes it
+  /// hang first.
+  init(listing: String?, slow: Bool = false) throws {
+    directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("zmx-unknown-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let script = """
+      #!/bin/sh
+      d=$(dirname "$0")
+      echo "$1" >> "$d/calls"
+      case "$1" in
+        ls) [ -f "$d/ls.slow" ] && sleep 30; [ -f "$d/ls.fail" ] && exit 1
+            cat "$d/ls.out"; exit 0;;
+        get) echo busy; exit 0;;
+        *) exit 0;;
+      esac
+
+      """
+    try script.write(to: zmx, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmx.path)
+    // The remote ensure shells out to python3 for its delivery; a stub keeps the test about
+    // zmx.
+    let python = directory.appendingPathComponent("python3")
+    try "#!/bin/sh\nexit 0\n".write(to: python, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: python.path)
+    if let listing {
+      try listing.write(
+        to: directory.appendingPathComponent("ls.out"), atomically: true, encoding: .utf8)
+    } else {
+      try "x".write(
+        to: directory.appendingPathComponent("ls.fail"), atomically: true, encoding: .utf8)
+    }
+    if slow {
+      try "x".write(
+        to: directory.appendingPathComponent("ls.slow"), atomically: true, encoding: .utf8)
+    }
+  }
+
+  deinit { try? FileManager.default.removeItem(at: directory) }
+
+  /// Runs `script` under `shell` with this directory as `$HOME` and first on `PATH` (the
+  /// remote scripts name a bare `zmx`), returning its stdout.
+  @discardableResult
+  func run(_ script: String, shell: String = "/bin/sh", flags: [String] = ["-c"]) throws
+    -> String
+  {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: shell)
+    process.arguments = flags + [script]
+    process.environment = [
+      "HOME": directory.path, "PATH": "\(directory.path):/usr/bin:/bin:/usr/sbin:/sbin",
+    ]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return String(decoding: data, as: UTF8.self)
   }
 }
