@@ -6889,8 +6889,8 @@ pub const App = struct {
             .can_cycle_tabs = can_cycle_tabs,
             .can_cycle_panes = can_cycle_panes,
             .has_attention = self.model.attentionCount() != 0,
-            .can_close_pane = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
-            .can_close_tab = if (self.workspace) |workspace| workspace.tabCount() > 1 else false,
+            .can_close_pane = if (self.workspace) |workspace| workspace.canClosePane() else false,
+            .can_close_tab = if (self.workspace) |workspace| workspace.canCloseTab() else false,
             .can_copy_terminal = if (self.workspace) |workspace| workspace.hasSelection() else false,
             .can_paste_terminal = if (self.workspace) |workspace| workspace.hasSurface(workspace.active_surface) else false,
             .sidebar_visible = self.workspace_controls.rail_visible,
@@ -20916,8 +20916,8 @@ test "edge drop source remains valid across synchronous capture cancellation" {
 
 /// Hosts the shell in its real window class and window procedure. `LiveTerminalFixture` stands a
 /// never-shown STATIC window in for the shell, so none of its own WM_ACTIVATE, WM_SETFOCUS or
-/// WM_COMMAND handling runs there. Tests using this give up with `error.SkipZigTest` when the
-/// window cannot become the active window. They post no SendInput and race no
+/// WM_COMMAND handling runs there. Tests using this give up with `error.SkipZigTest` unless the
+/// window really is the foreground, active and visible window. They post no SendInput and race no
 /// other process for the foreground.
 const RealShellWindow = struct {
     fn install(fixture: *LiveTerminalFixture) !void {
@@ -20945,14 +20945,20 @@ const RealShellWindow = struct {
         app.product_settings = null;
     }
 
-    /// The tests need the window active on this thread, which `SetActiveWindow` gives without the
-    /// system foreground (a background or locked session may refuse that). They skip, rather
-    /// than pass vacuously, when even that is refused.
+    /// The tests need the shell window to be the real foreground, active and visible window, as it
+    /// is for a user. A background, locked or headless session refuses that, and the tests then
+    /// skip (`error.SkipZigTest`) instead of passing on synthetic state.
     fn requireActive(fixture: *LiveTerminalFixture) !void {
         const hwnd = fixture.app.window.hwnd;
+        _ = c.AllowSetForegroundWindow(c.GetCurrentProcessId());
         _ = c.SetForegroundWindow(hwnd);
-        _ = c.SetActiveWindow(hwnd);
-        if (c.GetActiveWindow() != hwnd) return error.SkipZigTest;
+        const foreground = c.GetForegroundWindow() == hwnd;
+        const active = c.GetActiveWindow() == hwnd;
+        const visible = c.IsWindowVisible(hwnd) != 0;
+        if (!foreground or !active or !visible) {
+            std.debug.print("real shell window test skipped: foreground={} active={} visible={}\n", .{ foreground, active, visible });
+            return error.SkipZigTest;
+        }
     }
 
     const State = struct {
@@ -21001,16 +21007,13 @@ const RealShellWindow = struct {
         message.message = if (chord.alt or chord.system) c.WM_SYSKEYDOWN else c.WM_KEYDOWN;
         message.wParam = chord.vk;
         message.lParam = @intCast(1 | (c.MapVirtualKeyW(chord.vk, c.MAPVK_VK_TO_VSC) << 16));
-        const keys = MainWindow.KeyContext{
-            .active = true,
-            .owner_enabled = true,
-            .target_owned = true,
-            .target_visible = true,
-            .target_enabled = true,
-            .ctrl = chord.ctrl,
-            .shift = chord.shift,
-            .alt = chord.alt,
-        };
+        // Window state comes from the real window, focus and foreground; only the modifier
+        // flags are the chord's, because the keyboard state is set by the test.
+        var keys = MainWindow.KeyContext.capture(hwnd, message.hwnd);
+        keys.ctrl = chord.ctrl;
+        keys.shift = chord.shift;
+        keys.alt = chord.alt;
+        try std.testing.expect(keys.eligible());
         const route = App.onTerminalKeyRoute(&fixture.app, &message, chord.ctrl, chord.shift, chord.alt);
         fixture.app.window.dispatchMessage(&message, keys, message.hwnd);
         var posted_command: ?c.WPARAM = null;
@@ -21031,13 +21034,25 @@ const SheetCancel = struct {
     var method: Method = .escape;
     var fired: bool = false;
     var watchdog_fired: bool = false;
+    var fire_timer: c.UINT_PTR = 0;
+    var watchdog_timer: c.UINT_PTR = 0;
 
+    /// Call `defer disarm()` right after this: neither timer may outlive the test that armed it,
+    /// or it could close an unrelated sheet later.
     fn arm(chosen: Method) void {
+        disarm();
         method = chosen;
         fired = false;
         watchdog_fired = false;
-        _ = c.SetTimer(null, 0, 700, &fire);
-        _ = c.SetTimer(null, 0, 8000, &watchdog);
+        fire_timer = c.SetTimer(null, 0, 700, &fire);
+        watchdog_timer = c.SetTimer(null, 0, 8000, &watchdog);
+    }
+
+    fn disarm() void {
+        if (fire_timer != 0) _ = c.KillTimer(null, fire_timer);
+        if (watchdog_timer != 0) _ = c.KillTimer(null, watchdog_timer);
+        fire_timer = 0;
+        watchdog_timer = 0;
     }
 
     fn form() c.HWND {
@@ -21045,8 +21060,10 @@ const SheetCancel = struct {
     }
 
     fn fire(_: c.HWND, _: c.UINT, id: c.UINT_PTR, _: c.DWORD) callconv(.winapi) void {
-        _ = c.KillTimer(null, id);
+        // No sheet yet: stay armed and try again on the next interval.
         const sheet = form() orelse return;
+        _ = c.KillTimer(null, id);
+        fire_timer = 0;
         fired = true;
         switch (method) {
             .escape => {
@@ -21064,6 +21081,7 @@ const SheetCancel = struct {
     // follows reports it.
     fn watchdog(_: c.HWND, _: c.UINT, id: c.UINT_PTR, _: c.DWORD) callconv(.winapi) void {
         _ = c.KillTimer(null, id);
+        watchdog_timer = 0;
         const sheet = form() orelse return;
         watchdog_fired = true;
         _ = c.PostMessageW(sheet, c.WM_SYSCOMMAND, c.SC_CLOSE, 0);
@@ -21099,6 +21117,7 @@ fn closePaneAfterCancelledSheet(method: SheetCancel.Method) !void {
 
     // Ctrl+Shift+N opens the New Loop sheet (a modal loop), which is cancelled from inside it.
     SheetCancel.arm(method);
+    defer SheetCancel.disarm();
     _ = try RealShellWindow.press(&fixture, .{ .vk = 'N', .ctrl = true, .shift = true });
     try std.testing.expect(SheetCancel.fired);
     try std.testing.expect(!SheetCancel.watchdog_fired);
@@ -21189,4 +21208,73 @@ test "real shell window: the Close Tab command removes every pane of a split tab
     try std.testing.expectEqual(@as(usize, 1), state.tabs);
     try std.testing.expectEqual(@as(usize, 1), state.panes);
     try std.testing.expectEqualStrings("Unable to close tab", fixture.app.status());
+}
+
+test "real shell window: Close Pane and Close Tab menu items follow the workspace's tabs and panes" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try RealShellWindow.install(&fixture);
+    defer RealShellWindow.detach(&fixture);
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    defer RealShellWindow.detach(&fixture);
+    try RealShellWindow.requireActive(&fixture);
+
+    const Items = struct {
+        pane: bool,
+        tab: bool,
+
+        // Through the shell's own capability calculation and the real menu bar.
+        fn read(f: *LiveTerminalFixture) !@This() {
+            f.app.updateNativeChrome(.state_change);
+            const terminal = c.GetSubMenu(c.GetMenu(f.app.window.hwnd), 2);
+            try std.testing.expect(terminal != null);
+            return .{
+                .pane = c.GetMenuState(terminal, @intFromEnum(MainWindow.Command.close_pane), c.MF_BYCOMMAND) & c.MF_GRAYED == 0,
+                .tab = c.GetMenuState(terminal, @intFromEnum(MainWindow.Command.close_tab), c.MF_BYCOMMAND) & c.MF_GRAYED == 0,
+            };
+        }
+    };
+
+    // One tab, one pane: closing the pane would close the last tab.
+    var state = RealShellWindow.state(&fixture);
+    try std.testing.expectEqual(@as(usize, 1), state.tabs);
+    try std.testing.expectEqual(@as(usize, 1), state.panes);
+    var items = try Items.read(&fixture);
+    try std.testing.expect(!items.pane);
+    try std.testing.expect(!items.tab);
+
+    // One tab, two panes: a pane can go, the only tab cannot.
+    _ = try RealShellWindow.press(&fixture, .{ .vk = 'D', .alt = true, .shift = true });
+    for (0..20) |_| fixture.tick();
+    state = RealShellWindow.state(&fixture);
+    try std.testing.expectEqual(@as(usize, 1), state.tabs);
+    try std.testing.expectEqual(@as(usize, 2), state.panes);
+    items = try Items.read(&fixture);
+    try std.testing.expect(items.pane);
+    try std.testing.expect(!items.tab);
+
+    // Back to one tab, one pane.
+    _ = try RealShellWindow.press(&fixture, .{ .vk = 'W', .ctrl = true, .shift = true });
+    for (0..20) |_| fixture.tick();
+    state = RealShellWindow.state(&fixture);
+    try std.testing.expectEqual(@as(usize, 1), state.tabs);
+    try std.testing.expectEqual(@as(usize, 1), state.panes);
+    items = try Items.read(&fixture);
+    try std.testing.expect(!items.pane);
+    try std.testing.expect(!items.tab);
+
+    // Two tabs, one pane each: either can go.
+    _ = try RealShellWindow.press(&fixture, .{ .vk = 'T', .ctrl = true, .shift = true });
+    for (0..20) |_| fixture.tick();
+    state = RealShellWindow.state(&fixture);
+    try std.testing.expectEqual(@as(usize, 2), state.tabs);
+    try std.testing.expectEqual(@as(usize, 1), state.panes);
+    items = try Items.read(&fixture);
+    try std.testing.expect(items.pane);
+    try std.testing.expect(items.tab);
 }

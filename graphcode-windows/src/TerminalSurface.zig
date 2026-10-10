@@ -1962,6 +1962,13 @@ pub const Workspace = struct {
         self.syncTopology();
     }
 
+    /// Whether closing the focused pane leaves something open: another tab exists, or the selected
+    /// tab holds more than one pane. Closing the last pane of the last tab is not offered.
+    pub fn canClosePane(self: *const Workspace) bool {
+        const tab = self.layout.selectedConst() orelse return false;
+        return self.layout.tabs.items.len > 1 or tab.panes.items.len > 1;
+    }
+
     pub fn canCloseTab(self: *const Workspace) bool {
         return self.layout.tabs.items.len > 1;
     }
