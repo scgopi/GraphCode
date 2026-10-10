@@ -198,7 +198,11 @@ final class ZmxUnknownLivenessTests: XCTestCase {
     var environment = ProcessInfo.processInfo.environment
     environment["HOME"] = fixture.directory.path
     #if os(Windows)
-      environment["PATH"] = "\(fixture.directory.path);\(environment["PATH"] ?? "")"
+      // Git's own `usr\bin` (dirname, grep, cat, tr) is not on every runner's PATH, and a
+      // non-login MSYS sh does not add it.
+      let tools = shell.deletingLastPathComponent().path
+      environment["PATH"] =
+        "\(fixture.directory.path);\(tools);\(environment["PATH"] ?? "")"
     #else
       environment["PATH"] = "\(fixture.directory.path):\(environment["PATH"] ?? "")"
     #endif
