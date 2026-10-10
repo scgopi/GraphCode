@@ -12992,6 +12992,8 @@ const fake_zmx_script =
     "exit /b 0\r\n" ++
     ":attach\r\n" ++
     ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
+    "if exist \"%~dp0loop-a.json\" copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
+    "if exist \"%~dp0shell-sessions\\%~2\" (echo yes>\"%~dp0marker-at-attach-%~2.txt\") else (echo no>\"%~dp0marker-at-attach-%~2.txt\")\r\n" ++
     "pause >nul\r\n" ++
     "exit /b 0\r\n";
 
@@ -13333,14 +13335,14 @@ const LiveTerminalFixture = struct {
         return true;
     }
 
-    /// Records, as the shell does when it mints a tab's session, that these bare uuids are
-    /// its own shell sessions.
-    fn markOwned(self: *LiveTerminalFixture, ids: []const []const u8) !void {
+    /// Records, as the shell does when it mints a tab's session for a loop, that these bare
+    /// uuids are shell sessions minted for `loop`.
+    fn markOwned(self: *LiveTerminalFixture, loop: []const u8, ids: []const []const u8) !void {
         try self.tmp.dir.makePath("shell-sessions");
         for (ids) |id| {
             const name = try std.fmt.allocPrint(std.testing.allocator, "shell-sessions\\graphcode-{s}", .{id});
             defer std.testing.allocator.free(name);
-            try self.tmp.dir.writeFile(.{ .sub_path = name, .data = "" });
+            try self.tmp.dir.writeFile(.{ .sub_path = name, .data = loop });
         }
     }
 
@@ -13352,6 +13354,14 @@ const LiveTerminalFixture = struct {
 
     fn markerGone(self: *LiveTerminalFixture, session: []const u8) bool {
         return !self.ownedMarker(session);
+    }
+
+    /// What the session's attach process found when it started: the loop-a layout file as saved
+    /// and whether its ownership record existed.
+    fn attachSaw(self: *LiveTerminalFixture, session: []const u8) bool {
+        var name: [160]u8 = undefined;
+        const path = std.fmt.bufPrint(&name, "marker-at-attach-graphcode-{s}.txt", .{session}) catch return false;
+        return self.layoutExists(path);
     }
 
     fn newTab(self: *LiveTerminalFixture) !void {
@@ -15019,7 +15029,12 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
     try fixture.saveLoopLayout(other_project, "elsewhere-loop", &.{ .{ .id = "elsewhere-loop", .agent = true }, .{ .id = shell_uuid_four } });
     try fixture.saveLoopLayout(alias_project, "alias-loop", &.{ .{ .id = "alias-loop", .agent = true }, .{ .id = shell_uuid_five } });
     try fixture.saveLoopLayout(fixture.project, "Upper-Loop", &.{ .{ .id = "Upper-Loop", .agent = true }, .{ .id = shell_uuid_six } });
-    try fixture.markOwned(&.{ shell_uuid_one, shell_uuid_two, shell_uuid_three, shell_uuid_four, shell_uuid_five, shell_uuid_six });
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
+    try fixture.markOwned("loop-a", &.{shell_uuid_two});
+    try fixture.markOwned("nested-loop", &.{shell_uuid_three});
+    try fixture.markOwned("elsewhere-loop", &.{shell_uuid_four});
+    try fixture.markOwned("alias-loop", &.{shell_uuid_five});
+    try fixture.markOwned("Upper-Loop", &.{shell_uuid_six});
     try fixture.setLive(&.{ "loop-a", shell_uuid_one, shell_uuid_two, shell_uuid_three, shell_uuid_four, shell_uuid_five, shell_uuid_six });
     fixture.predateLayouts();
     try fixture.forgetGraph();
@@ -15048,7 +15063,8 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-a", &.{ .{ .id = "loop-a", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_two } });
-    try fixture.markOwned(&.{ shell_uuid_one, shell_uuid_two });
+    try fixture.markOwned("loop-a", &.{shell_uuid_one});
+    try fixture.markOwned("gone-loop", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", shell_uuid_one, shell_uuid_two });
     fixture.predateLayouts();
     try fixture.forgetGraph();
@@ -15092,7 +15108,7 @@ test "workspace layout: a loop deleted after the shell has seen the project is e
     try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-b", &.{ .{ .id = "loop-b", .agent = true }, .{ .id = shell_uuid_one } });
-    try fixture.markOwned(&.{shell_uuid_one});
+    try fixture.markOwned("loop-b", &.{shell_uuid_one});
     try fixture.setLive(&.{ "loop-a", "loop-b", shell_uuid_one });
 
     try fixture.deliver(&.{.{ .id = "loop-a" }});
@@ -15118,7 +15134,7 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
         .{ .id = node_uuid },
         .{ .id = shell_uuid_one },
     });
-    try fixture.markOwned(&.{ node_uuid, shell_uuid_one });
+    try fixture.markOwned("gone-loop", &.{ node_uuid, shell_uuid_one });
     try fixture.setLive(&.{ "loop-a", node_uuid, shell_uuid_one });
     fixture.predateLayouts();
     try fixture.forgetGraph();
@@ -15171,7 +15187,7 @@ test "workspace layout: deleting a loop ends only recorded, live, shell-shaped s
         .{ .id = shell_uuid_four },
     });
     try fixture.saveLoopLayout(fixture.project, "kept-loop", &.{ .{ .id = "kept-loop", .agent = true }, .{ .id = shell_uuid_three } });
-    try fixture.markOwned(&.{ shell_uuid_one, shell_uuid_three, shell_uuid_four });
+    try fixture.markOwned("gone-loop", &.{ shell_uuid_one, shell_uuid_three, shell_uuid_four });
     try fixture.setLive(&.{ "loop-a", agent_uuid_upper, foreign, "plain-name", shell_uuid_three, shell_uuid_one });
 
     try std.testing.expectEqual(@as(usize, 1), fixture.workspace.retireLoop("gone-loop", fixture.project));
@@ -15188,7 +15204,7 @@ test "workspace layout: a loop's shells are ended only after a successful sessio
     try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
-    try fixture.markOwned(&.{shell_uuid_one});
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
     try fixture.setLive(&.{ "loop-a", shell_uuid_one });
 
     try fixture.setFlag("ls-fail.txt", true);
@@ -15318,7 +15334,7 @@ test "workspace layout: a live session that only a layout names is never ended w
         .{ .id = shell_uuid_one },
         .{ .id = shell_uuid_two },
     });
-    try fixture.markOwned(&.{shell_uuid_two});
+    try fixture.markOwned("gone-loop", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", shell_uuid_one, shell_uuid_two });
 
     try std.testing.expectEqual(@as(usize, 1), fixture.workspace.retireLoop("gone-loop", fixture.project));
@@ -15363,7 +15379,7 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
     try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
-    try fixture.markOwned(&.{shell_uuid_one});
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
     try fixture.setLive(&.{ "loop-a", shell_uuid_one });
     // Past the scan cap, a layout that names the session sorts after every other file.
     for (0..1100) |index| {
@@ -15378,6 +15394,83 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
     try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("gone-loop", fixture.project));
     fixture.settle();
     try fixture.expectKills("");
+}
+
+test "workspace layout: a session another loop's record names is never ended by a different loop's retirement" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    // The window in a second shell sharing this layout directory: it has recorded a fresh
+    // session for its own loop-a, while a stale layout of the deleted gone-loop names the uuid.
+    try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("loop-a", &.{shell_uuid_one});
+    try fixture.setLive(&.{ "loop-a", shell_uuid_one });
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("gone-loop.json.refused"));
+}
+
+test "workspace layout: a new tab's layout claim and ownership record exist before its session starts" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    const app = &fixture.app;
+
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    try fixture.newTab();
+    const tab_shell = try fixture.selectedPane(0);
+    defer std.testing.allocator.free(tab_shell);
+    try fixture.splitRight();
+    const split_shell = try fixture.selectedPane(1);
+    defer std.testing.allocator.free(split_shell);
+
+    for ([_][]const u8{ tab_shell, split_shell }) |session| {
+        try fixture.waitFor(LiveTerminalFixture.attachSaw, session);
+        const name = try std.fmt.allocPrint(std.testing.allocator, "marker-at-attach-graphcode-{s}.txt", .{session});
+        defer std.testing.allocator.free(name);
+        const marker = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, name, 64);
+        defer std.testing.allocator.free(marker);
+        try std.testing.expectEqualStrings("yes", std.mem.trim(u8, marker, " \r\n"));
+    }
+    const claim_name = try std.fmt.allocPrint(std.testing.allocator, "layout-at-attach-graphcode-{s}.txt", .{split_shell});
+    defer std.testing.allocator.free(claim_name);
+    const claim = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, claim_name, 1 << 16);
+    defer std.testing.allocator.free(claim);
+    try std.testing.expect(std.mem.indexOf(u8, claim, split_shell) != null);
+    try std.testing.expect(std.mem.indexOf(u8, claim, tab_shell) != null);
+    // The record names the loop the session was minted for.
+    const record_name = try std.fmt.allocPrint(std.testing.allocator, "shell-sessions\\graphcode-{s}", .{tab_shell});
+    defer std.testing.allocator.free(record_name);
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("loop-a", try fixture.tmp.dir.readFile(record_name, &buffer));
+}
+
+test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("gone-loop", &.{shell_uuid_one});
+    try fixture.setLive(&.{ "loop-a", shell_uuid_one });
+    try fixture.tmp.dir.writeFile(.{ .sub_path = "unrelated.json", .data = "{ not a layout" });
+
+    try std.testing.expectEqual(@as(usize, 0), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("");
+    // Kept as it was, so a later sweep can retry; not set aside as a permanent refusal.
+    try std.testing.expect(fixture.layoutExists("gone-loop.json"));
+    try std.testing.expect(!fixture.layoutExists("gone-loop.json.refused"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_one));
+
+    try fixture.tmp.dir.deleteFile("unrelated.json");
+    try std.testing.expectEqual(@as(usize, 1), fixture.workspace.retireLoop("gone-loop", fixture.project));
+    fixture.settle();
+    try fixture.expectKills("kill graphcode-" ++ shell_uuid_one ++ " --force");
+    try std.testing.expect(!fixture.layoutExists("gone-loop.json"));
 }
 
 test "workspace layout: a corrupt layout that cannot be set aside is left as it is and its loop is not opened" {

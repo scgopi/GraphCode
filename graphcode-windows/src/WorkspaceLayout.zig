@@ -610,29 +610,32 @@ fn fileClaim(allocator: std.mem.Allocator, directory: std.fs.Dir, name: []const 
 
 pub const owned_sessions_directory_name = "shell-sessions";
 
-/// The record that a shell session is this shell's own: a file named for the session in
-/// `<root>\shell-sessions`, made when the shell mints the session for a new tab or split and
-/// before anything can attach to it. A name's shape cannot say who made the session; only
-/// this record, which no layout edit or corruption touches, can. Null when `session` is not
-/// a plain file name.
+/// The record that a GraphCode shell minted a shell session for a loop's layout: a file named
+/// for the session in `<root>\shell-sessions` whose content is the loop it was minted for (empty
+/// when the layout is not loop-scoped). Written after the layout claiming the session is saved
+/// and before the session starts. A name's shape cannot say who made the session, and a layout
+/// edit or corruption does not touch this record; but the root is shared by every GraphCode
+/// shell of the user, so it proves "some GraphCode shell recorded it for that loop", not which
+/// shell. Null when `session` is not a plain file name.
 fn ownedSessionPath(allocator: std.mem.Allocator, root: []const u8, session: []const u8) ?[]u8 {
     if (!isFileSafeID(session)) return null;
     return std.fmt.allocPrint(allocator, "{s}\\{s}\\{s}", .{ root, owned_sessions_directory_name, session }) catch null;
 }
 
-pub fn markShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) !void {
+pub fn markShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8, loop: []const u8) !void {
     const path = ownedSessionPath(allocator, root, session) orelse return error.InvalidSessionName;
     defer allocator.free(path);
     if (std.fs.path.dirname(path)) |directory| try std.fs.cwd().makePath(directory);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    file.close();
+    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = loop });
 }
 
-pub fn isShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) bool {
+/// Whether a record says `session` was minted for `loop`.
+pub fn isShellOwnedBy(allocator: std.mem.Allocator, root: []const u8, session: []const u8, loop: []const u8) bool {
     const path = ownedSessionPath(allocator, root, session) orelse return false;
     defer allocator.free(path);
-    std.fs.cwd().access(path, .{}) catch return false;
-    return true;
+    const recorded = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch return false;
+    defer allocator.free(recorded);
+    return std.mem.eql(u8, recorded, loop);
 }
 
 pub fn forgetShellOwned(allocator: std.mem.Allocator, root: []const u8, session: []const u8) void {
@@ -1101,20 +1104,25 @@ test "a layout scan past its cap is unknown, not unclaimed" {
     try std.testing.expectEqual(Claim.unknown, claimedByOtherLayout(std.testing.allocator, root, "", "shared"));
 }
 
-test "a shell session is owned only once the shell has recorded it, and not after it is forgotten" {
+test "a shell session is owned only for the loop its record names, and not after it is forgotten" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(root);
     const name = "graphcode-5e11ba5e-0001-4000-8000-000000000001";
-    try std.testing.expect(!isShellOwned(std.testing.allocator, root, name));
-    try markShellOwned(std.testing.allocator, root, name);
-    try std.testing.expect(isShellOwned(std.testing.allocator, root, name));
-    try std.testing.expect(!isShellOwned(std.testing.allocator, root, "graphcode-5e11ba5e-0002-4000-8000-000000000002"));
-    try std.testing.expect(!isShellOwned(std.testing.allocator, root, "..\\escape"));
-    try std.testing.expectError(error.InvalidSessionName, markShellOwned(std.testing.allocator, root, "..\\escape"));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
+    try markShellOwned(std.testing.allocator, root, name, "loop-a");
+    try std.testing.expect(isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
+    // A record names the loop it was minted for; another loop's retirement does not qualify.
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-b"));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, ""));
+    try markShellOwned(std.testing.allocator, root, "graphcode-5e11ba5e-0003-4000-8000-000000000003", "");
+    try std.testing.expect(isShellOwnedBy(std.testing.allocator, root, "graphcode-5e11ba5e-0003-4000-8000-000000000003", ""));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, "graphcode-5e11ba5e-0002-4000-8000-000000000002", "loop-a"));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, "..\\escape", "loop-a"));
+    try std.testing.expectError(error.InvalidSessionName, markShellOwned(std.testing.allocator, root, "..\\escape", "loop-a"));
     forgetShellOwned(std.testing.allocator, root, name);
-    try std.testing.expect(!isShellOwned(std.testing.allocator, root, name));
+    try std.testing.expect(!isShellOwnedBy(std.testing.allocator, root, name, "loop-a"));
 }
 
 test "saving replaces a layout whole, leaves no temporary file, and keeps the old one when it fails" {
