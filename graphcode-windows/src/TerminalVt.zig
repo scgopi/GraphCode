@@ -218,6 +218,10 @@ pub const State = struct {
     response_delivery_failed: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder = null,
     mouse_last_cell: ?[2]u32 = null,
+    /// How many times the program has switched mouse tracking from on to off (counting a
+    /// reset that is switched back on within the same buffer); see `feed`.
+    mouse_tracking_resets: u32 = 0,
+    mode_scan: enum { ground, escape, csi, private } = .ground,
 
     pub fn create(allocator: std.mem.Allocator, columns: usize, rows: usize) Error!*State {
         const size = try dimensions(columns, rows);
@@ -256,10 +260,64 @@ pub const State = struct {
         if (self.failure) |err| return err;
         self.snapshot_current = false;
         // vt_write returns void. A completed call is not a parse-success result.
-        c.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+        // The mouse-tracking state is looked at after every sequence that can switch it off, not
+        // only at the end, so a program that switches it off and on again within one buffer (or
+        // one sequence split across two) is still seen to have done so.
+        var was_tracking = self.mouseTrackingEnabled();
+        var start: usize = 0;
+        for (bytes, 0..) |byte, index| {
+            if (!self.endsMouseModeSequence(byte)) continue;
+            c.ghostty_terminal_vt_write(self.terminal, bytes[start..].ptr, index + 1 - start);
+            start = index + 1;
+            was_tracking = self.noteMouseTracking(was_tracking);
+        }
+        if (start < bytes.len or bytes.len == 0) {
+            c.ghostty_terminal_vt_write(self.terminal, bytes[start..].ptr, bytes.len - start);
+            _ = self.noteMouseTracking(was_tracking);
+        }
         try self.refresh();
         if (self.response_delivery_failed) return error.ResponseDeliveryFailed;
         if (self.response_overflow) return error.ResponseOverflow;
+    }
+
+    fn noteMouseTracking(self: *State, was_tracking: bool) bool {
+        const tracking = self.mouseTrackingEnabled();
+        if (was_tracking and !tracking) self.mouse_tracking_resets +%= 1;
+        return tracking;
+    }
+
+    /// Follows just enough of the escape sequences in the stream to tell where one that can
+    /// switch mouse tracking off ends: a private-mode reset (CSI ? ... l) or a full
+    /// terminal reset (ESC c). Other bytes only move it along; a wrong guess
+    /// (a sequence inside a string) costs a split of the buffer and nothing else.
+    fn endsMouseModeSequence(self: *State, byte: u8) bool {
+        const next: @TypeOf(self.mode_scan) = switch (self.mode_scan) {
+            .ground => if (byte == 0x1b) .escape else .ground,
+            .escape => switch (byte) {
+                '[' => .csi,
+                0x1b => .escape,
+                'c' => return self.endSequence(),
+                else => .ground,
+            },
+            .csi => switch (byte) {
+                '?' => .private,
+                0x1b => .escape,
+                else => .ground,
+            },
+            .private => switch (byte) {
+                '0'...'9', ';', ':' => .private,
+                'l' => return self.endSequence(),
+                0x1b => .escape,
+                else => .ground,
+            },
+        };
+        self.mode_scan = next;
+        return false;
+    }
+
+    fn endSequence(self: *State) bool {
+        self.mode_scan = .ground;
+        return true;
     }
 
     pub fn resize(self: *State, columns: usize, rows: usize) Error!void {
@@ -851,6 +909,37 @@ test "VT reports whether the program asked for mouse tracking" {
     // An encoding request alone is not tracking.
     try state.feed("\x1b[?1006h");
     try std.testing.expect(!state.mouseTrackingEnabled());
+}
+
+test "VT counts every time the program switched mouse tracking off, even when it is switched back on at once" {
+    const state = try State.create(std.testing.allocator, 20, 3);
+    defer state.destroy();
+    try state.feed("\x1b[?1002h\x1b[?1006h");
+    // Plain text, other private modes and turning modes on or off beside tracking change nothing.
+    try state.feed("hello l h \x1b[?25l\x1b[?25h\x1b[?1006l\x1b[?1002h");
+    try std.testing.expectEqual(@as(u32, 0), state.mouse_tracking_resets);
+
+    // Off and on within one buffer: the state afterwards is the same, the count is not.
+    try state.feed("\x1b[?1002l\x1b[?1002h");
+    try std.testing.expect(state.mouseTrackingEnabled());
+    try std.testing.expectEqual(@as(u32, 1), state.mouse_tracking_resets);
+
+    // The sequence split across two buffers, with the second also turning it back on.
+    try state.feed("text\x1b[?10");
+    try state.feed("02l\x1b[?1002h");
+    try std.testing.expectEqual(@as(u32, 2), state.mouse_tracking_resets);
+
+    // Switching to another tracking mode passes through off, as does a full reset.
+    try state.feed("\x1b[?1002l\x1b[?1000h");
+    try std.testing.expectEqual(@as(u32, 3), state.mouse_tracking_resets);
+    try state.feed("\x1bc\x1b[?1000h");
+    try std.testing.expectEqual(@as(u32, 4), state.mouse_tracking_resets);
+
+    // Off while already off is not a transition.
+    try state.feed("\x1b[?1000l");
+    try std.testing.expectEqual(@as(u32, 5), state.mouse_tracking_resets);
+    try state.feed("\x1b[?1000l");
+    try std.testing.expectEqual(@as(u32, 5), state.mouse_tracking_resets);
 }
 
 test "mouse events are encoded in the tracking mode and format the program chose" {

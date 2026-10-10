@@ -13546,15 +13546,34 @@ const LiveKeyboard = struct {
         _ = c.SendMessageW(self.surface, c.WM_CHAR, unit, 1);
     }
 
-    /// Everything queued for the shell since the last call.
+    /// Everything the input worker would have written for the shell since the last call, run
+    /// through its production step (`pumpInput`), so what was delivered also updates the
+    /// ledger of what the program has been sent.
     fn drainInput(self: *LiveKeyboard, out: *std.ArrayListUnmanaged(u8)) !void {
         out.clearRetainingCapacity();
         const workspace = &self.fixture.workspace;
-        while (workspace.input_queue.dequeue()) |item| {
-            defer workspace.allocator.free(item.bytes);
-            try std.testing.expectEqual(self.index, item.surface);
-            try out.appendSlice(std.testing.allocator, item.bytes);
-        }
+        InputCapture.length = 0;
+        InputCapture.wrong_surface = false;
+        InputCapture.surface = self.index;
+        workspace.input_write_hook = &InputCapture.write;
+        defer workspace.input_write_hook = null;
+        while (workspace.pumpInput()) {}
+        try std.testing.expect(!InputCapture.wrong_surface);
+        try out.appendSlice(std.testing.allocator, InputCapture.bytes[0..InputCapture.length]);
+    }
+};
+
+const InputCapture = struct {
+    var bytes: [4096]u8 = undefined;
+    var length: usize = 0;
+    var surface: usize = 0;
+    var wrong_surface = false;
+
+    fn write(_: ?*anyopaque, target: usize, data: []const u8) anyerror!usize {
+        if (target != surface) wrong_surface = true;
+        @memcpy(bytes[length..][0..data.len], data);
+        length += data.len;
+        return data.len;
     }
 };
 
@@ -14333,6 +14352,131 @@ test "live terminal mouse: a press still queued when the surface is torn down le
     try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
     try std.testing.expectEqual(@as(u8, 0), slot.program_buttons);
     try std.testing.expect(slot.mouse_gesture == .none);
+}
+
+const TeardownCapture = struct {
+    var written: [64]u8 = undefined;
+    var length: usize = 0;
+
+    fn write(_: ?*anyopaque, _: usize, bytes: []const u8) void {
+        @memcpy(written[length .. length + bytes.len], bytes);
+        length += bytes.len;
+    }
+};
+
+test "live terminal mouse: a delivered press is released at teardown though keys and motion are still queued behind it" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+    TeardownCapture.length = 0;
+    workspace.teardown_input_sink = &TeardownCapture.write;
+
+    buttons.press(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    // A drag and a typed key are still queued when the surface goes: they are dropped, and the
+    // button the program was told is down is released where it last heard from the pointer.
+    buttons.move(c.MK_LBUTTON, 5, 2);
+    try keyboard.press(.{ .vk = 'A' });
+    try std.testing.expect(workspace.input_queue.count > 1);
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqualStrings("\x1b[<0;4;3m", TeardownCapture.written[0..TeardownCapture.length]);
+}
+
+test "live terminal mouse: a release still queued when the surface is torn down is not lost" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+    TeardownCapture.length = 0;
+    workspace.teardown_input_sink = &TeardownCapture.write;
+
+    buttons.press(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    buttons.release(.left, 0, 3, 2);
+    try std.testing.expectEqual(@as(usize, 1), workspace.input_queue.count);
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqualStrings("\x1b[<0;4;3m", TeardownCapture.written[0..TeardownCapture.length]);
+}
+
+test "live terminal mouse: a press that could not be queued is not released at teardown" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+    TeardownCapture.length = 0;
+    workspace.teardown_input_sink = &TeardownCapture.write;
+
+    // Another pane's input fills the queue, so the press is never queued: the program did not
+    // see it, and must not be sent a release for it. (Only this surface's input is dropped.)
+    const other: usize = if (keyboard.index == 1) 2 else 1;
+    for (0..64) |_| try workspace.input_queue.enqueue(other, try std.testing.allocator.dupe(u8, "x"));
+    buttons.press(.left, 0, 3, 2);
+    workspace.destroySurface(keyboard.index);
+    workspace.input_queue.clear();
+    try std.testing.expectEqual(@as(usize, 0), TeardownCapture.length);
+}
+
+/// A delivered press, then the program's output switches mouse tracking off and on again,
+/// reaching the shell only through `feedTerminalOutput` and with no mouse event after it.
+fn expectTrackingResetForgetsPress(output: []const []const u8) !void {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    try fixture.setLive(&.{"loop-a"});
+    try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
+    try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    var keyboard = try LiveKeyboard.begin(&fixture, "loop-a");
+    defer keyboard.end();
+    const mouse = try LiveMouse.begin(&keyboard);
+    const buttons = LiveMouseButtons{ .mouse = mouse };
+    try feedMouseFixture(&fixture, keyboard.index);
+    const workspace = &fixture.workspace;
+    try workspace.surfaces[keyboard.index].vt.?.feed("\x1b[?1002h\x1b[?1006h");
+    TeardownCapture.length = 0;
+    workspace.teardown_input_sink = &TeardownCapture.write;
+
+    buttons.press(.left, 0, 3, 2);
+    try expectSentToProgram(&keyboard, "\x1b[<0;4;3M");
+    for (output) |part| workspace.feedTerminalOutput(keyboard.index, part);
+    try std.testing.expect(workspace.surfaces[keyboard.index].vt.?.mouseTrackingEnabled());
+    workspace.destroySurface(keyboard.index);
+    try std.testing.expectEqual(@as(usize, 0), TeardownCapture.length);
+}
+
+test "live terminal mouse: tracking switched off and on in one output buffer forgets a delivered press" {
+    try expectTrackingResetForgetsPress(&.{"\x1b[?1002l\x1b[?1002h"});
+}
+
+test "live terminal mouse: tracking switched off by a sequence split across output buffers forgets a delivered press" {
+    try expectTrackingResetForgetsPress(&.{ "text\x1b[?10", "02l\x1b[?1002h" });
 }
 
 test "live terminal mouse: the teardown release is not written when the attach pipe is not non-blocking" {
