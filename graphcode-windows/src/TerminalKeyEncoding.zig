@@ -1,6 +1,7 @@
 //! Translates a Windows key press into the bytes a terminal program expects, using the
 //! pinned Ghostty key encoder so cursor-key application mode, modifier parameters, and
-//! function keys match what the macOS terminal sends.
+//! function keys match what the macOS terminal sends. Presses and auto-repeats only:
+//! releases, application keypad mode, and Kitty-protocol event reporting are not handled.
 //!
 //! Keys that produce text (letters, digits, punctuation, dead keys, AltGr, IME) are not
 //! encoded here: Windows turns them into WM_CHAR and the surface forwards that text.
@@ -118,8 +119,13 @@ pub fn encodesAltChord(event: Event) bool {
         namedKey(event.vk, event.extended) == null;
 }
 
-/// Encodes one key event. `terminal` supplies the program's current modes (application
-/// cursor keys, Kitty keyboard flags, modifyOtherKeys); without it legacy defaults apply.
+/// Encodes one key event. `terminal`, when given, lends its current modes to the encoder
+/// (`ghostty_key_encoder_setopt_from_terminal`). Only application cursor keys (DECCKM) is
+/// exercised by the tests below; Kitty keyboard flags and modifyOtherKeys are whatever the
+/// pinned encoder does with them and are not verified here. Key releases never reach this
+/// function (`TerminalSurface.onKey` drops them), so Kitty release/event-type reporting is
+/// not implemented, and of the keypad keys only the numpad Enter is told apart from its
+/// main-keyboard twin. Without a terminal, legacy defaults apply.
 pub fn encode(buffer: *[max_sequence_bytes]u8, event: Event, terminal: c.GhosttyTerminal) Outcome {
     const key: c.GhosttyKey = if (encodes(event))
         namedKey(event.vk, event.extended).?
