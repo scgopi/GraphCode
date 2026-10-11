@@ -173,7 +173,8 @@ import XCTest
         zmx, ["ls"], extraEnvironment: ["ZMX_DIR": scratch.path])
       let result = try XCTUnwrap(listing, "zmx ls did not run")
 
-      XCTAssertEqual(\n        result.status, 0, "zmx ls output: \(result.output) (ZMX_DIR=\(scratch.path))")
+      XCTAssertEqual(
+        result.status, 0, "zmx ls output: \(result.output) (ZMX_DIR=\(scratch.path))")
       XCTAssertEqual(
         ZmxSessionLauncher.sessionLiveness(
           lsStatus: result.status, lsOutput: result.output, sessionName: "graphcode-x"),
