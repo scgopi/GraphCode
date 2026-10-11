@@ -13228,10 +13228,16 @@ const LiveTerminalFixture = struct {
     workspace: TerminalWorkspace.Workspace,
     app: App,
     sequence: usize,
+    /// The daemon's graph revision: each event it sends is one higher, and a read's reply
+    /// carries the latest one unless reply_revision says otherwise.
+    revision: u64,
+    reply_revision: ?u64,
 
     fn init(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
         const allocator = std.testing.allocator;
         self.sequence = 2;
+        self.revision = 1;
+        self.reply_revision = null;
         self.tmp = std.testing.tmpDir(.{});
         try self.tmp.dir.makePath("project");
         try self.tmp.dir.makePath("wt-a");
@@ -13317,8 +13323,8 @@ const LiveTerminalFixture = struct {
         defer allocator.free(nodes);
         return std.fmt.allocPrint(
             allocator,
-            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
-            .{ sequence, std.json.fmt(self.project, .{}), nodes },
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{d}}}}}}}}}",
+            .{ sequence, std.json.fmt(self.project, .{}), nodes, self.revision },
         );
     }
 
@@ -13328,10 +13334,11 @@ const LiveTerminalFixture = struct {
         const allocator = std.testing.allocator;
         const nodes = try nodesJson(loops);
         defer allocator.free(nodes);
+        self.revision += 1;
         const value = try std.fmt.allocPrint(
             allocator,
-            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
-            .{ self.sequence, std.json.fmt(self.project, .{}), nodes },
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{d}}}}}}}}}",
+            .{ self.sequence, std.json.fmt(self.project, .{}), nodes, self.revision },
         );
         self.sequence += 1;
         return value;
@@ -13347,8 +13354,8 @@ const LiveTerminalFixture = struct {
         _ = std.ascii.upperString(&upper, &request_id);
         return std.fmt.allocPrint(
             allocator,
-            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
-            .{ &upper, std.json.fmt(self.project, .{}), nodes },
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{d}}}}}}}}}",
+            .{ &upper, std.json.fmt(self.project, .{}), nodes, self.reply_revision orelse self.revision },
         );
     }
 
@@ -13362,8 +13369,8 @@ const LiveTerminalFixture = struct {
         _ = std.ascii.upperString(&upper, &ids[count - 1]);
         const value = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
-            .{ &upper, std.json.fmt(self.project, .{}), nodes },
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{d}}}}}}}}}",
+            .{ &upper, std.json.fmt(self.project, .{}), nodes, self.reply_revision orelse self.revision },
         );
         defer std.testing.allocator.free(value);
         self.feed(value, self.gen());
@@ -13382,6 +13389,14 @@ const LiveTerminalFixture = struct {
     /// Feeds one frame the way the client's `poll` does: stamped with the connection
     /// generation it was received on.
     fn feed(self: *LiveTerminalFixture, value: []const u8, generation: u64) void {
+        if (generation == self.gen()) {
+            // The real path: the client's inbound queue, then the window's WM_TIMER poll.
+            self.queue(value);
+            var result: c.LRESULT = 0;
+            _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
+            return;
+        }
+        // A forged stamp: a frame the transport would have delivered on another connection.
         self.app.client.delivering_generation = generation;
         self.app.onFrameWithAccessibilityPublish(value, App.publishAccessibility);
     }
@@ -13464,6 +13479,7 @@ const LiveTerminalFixture = struct {
 
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
+        self.revision += 1;
         const value = try self.frame(self.sequence, loops);
         defer std.testing.allocator.free(value);
         self.sequence += 1;
@@ -13683,15 +13699,23 @@ const LiveTerminalFixture = struct {
 
     /// A graph snapshot for the fixture's project given as raw node JSON.
     fn deliverNodes(self: *LiveTerminalFixture, nodes_json: []const u8) !void {
+        self.revision += 1;
         const value = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
-            .{ self.sequence, std.json.fmt(self.project, .{}), nodes_json },
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{d}}}}}}}}}",
+            .{ self.sequence, std.json.fmt(self.project, .{}), nodes_json, self.revision },
         );
         defer std.testing.allocator.free(value);
         self.sequence += 1;
-        self.feed(value, self.gen());
-        // A project with no graph yet is queued for the daemon's subscription; none runs here.
+        // Through the real inbound queue and poll, without the timer's project flush.
+        self.queue(value);
+        self.app.client.poll();
+        self.app.probeMissingLoops();
+        self.dropPendingProject();
+    }
+
+    /// A project with no graph yet is queued for the daemon's subscription; none runs here.
+    fn dropPendingProject(self: *LiveTerminalFixture) void {
         if (self.app.pending_project_path.len != 0) {
             std.testing.allocator.free(self.app.pending_project_path);
             self.app.pending_project_path = &.{};
@@ -16081,6 +16105,65 @@ test "workspace layout: a snapshot or reply without a revision never authorizes 
     fixture.settle();
     try fixture.expectKills("");
     try std.testing.expect(fixture.layoutExists("loop-c.json"));
+}
+
+test "workspace layout: a reply at a higher revision than the held snapshot still ends the loop once" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.all);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    // The daemon moved on (an unrelated change) between the held event and the reply.
+    fixture.reply_revision = fixture.revision + 5;
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    fixture.settle();
+    try std.testing.expectEqual(@as(usize, 1), try fixture.killCount(shell_uuid_one));
+    try std.testing.expectEqual(@as(usize, 0), fixture.opens());
+}
+
+test "workspace layout: a revision that is not a canonical unsigned integer never authorizes a read or a kill" {
+    const bad = [_][]const u8{ "7.5", "7e3", "-7", "\"7\"", "null", "07", "99999999999999999999999" };
+    for (bad) |revision| {
+        var fixture: LiveTerminalFixture = undefined;
+        try DeletedLoopScene.init(&fixture);
+        defer fixture.deinit();
+        const start = fixture.connect();
+        const nodes = try LiveTerminalFixture.nodesJson(DeletedLoopScene.remaining);
+        defer std.testing.allocator.free(nodes);
+
+        // Held snapshot with a malformed revision: no probe, no read.
+        const held = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":50,\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{s}}}}}}}}}",
+            .{ std.json.fmt(fixture.project, .{}), nodes, revision },
+        );
+        defer std.testing.allocator.free(held);
+        fixture.feed(held, fixture.gen());
+        fixture.timerTick(start + 4 * std.time.ns_per_s);
+        try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+        // A well-formed held snapshot, but a reply with the malformed revision.
+        try fixture.deliver(DeletedLoopScene.all);
+        try fixture.deliver(DeletedLoopScene.remaining);
+        fixture.timerTick(start + 8 * std.time.ns_per_s);
+        const read = try DeletedLoopScene.onlyRead(&fixture);
+        var upper: [36]u8 = undefined;
+        _ = std.ascii.upperString(&upper, &read);
+        const reply = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":{s}}}}}}}}}",
+            .{ &upper, std.json.fmt(fixture.project, .{}), nodes, revision },
+        );
+        defer std.testing.allocator.free(reply);
+        fixture.feed(reply, fixture.gen());
+        fixture.settle();
+        try fixture.expectKills("");
+        try std.testing.expect(fixture.layoutExists("loop-c.json"));
+    }
 }
 
 test "workspace layout: replies that do not answer the pending read end nothing and leave it pending" {

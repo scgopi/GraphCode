@@ -1563,6 +1563,15 @@ const JsonValue = struct {
         return std.fmt.parseInt(T, self.raw[0..end], 10) catch null;
     }
 
+    /// The whole scalar must be a canonical unsigned decimal integer: no sign, fraction,
+    /// exponent, quotes, leading zeros or overflow.
+    fn canonicalUnsigned(self: JsonValue) ?u64 {
+        const text = std.mem.trim(u8, self.raw, " \t\r\n");
+        if (text.len == 0 or (text.len > 1 and text[0] == '0')) return null;
+        for (text) |ch| if (!std.ascii.isDigit(ch)) return null;
+        return std.fmt.parseInt(u64, text, 10) catch null;
+    }
+
     fn float(self: JsonValue) ?f64 {
         return std.fmt.parseFloat(f64, self.raw) catch null;
     }
@@ -2278,7 +2287,7 @@ fn decodeGraphObject(allocator: std.mem.Allocator, parent_project: ?Project, jso
         defer project.deinit();
         graph.project.path = try project.get("path").duplicateString(allocator, "");
         graph.project.name = try project.get("name").duplicateString(allocator, "");
-        graph.revision = fields.get("revision").unsigned(u64);
+        graph.revision = fields.get("revision").canonicalUnsigned();
     }
     if (fields.get("nodes").container('[')) |nodes| try decodeNodes(allocator, nodes, &graph.nodes);
     if (fields.get("edges").container('[')) |edges| graph.edges = try decodeEdges(allocator, edges);
@@ -3741,6 +3750,37 @@ test "field scope node and edge scalars do not inherit arbitrary nested fields" 
     try std.testing.expectEqualStrings("handoff", edge.kind);
     try std.testing.expect(edge.blocks_target and !edge.fired);
     try std.testing.expectEqual(@as(u32, 0), edge.fire_count);
+}
+
+test "a graph revision is only a canonical unsigned integer" {
+    const cases = [_]struct { raw: []const u8, want: ?u64 }{
+        .{ .raw = "7", .want = 7 },
+        .{ .raw = "0", .want = 0 },
+        .{ .raw = "7.5", .want = null },
+        .{ .raw = "7e3", .want = null },
+        .{ .raw = "-7", .want = null },
+        .{ .raw = "\"7\"", .want = null },
+        .{ .raw = "null", .want = null },
+        .{ .raw = "07", .want = null },
+        .{ .raw = "99999999999999999999", .want = null },
+    };
+    for (cases) |case| {
+        var model = Model.init(std.testing.allocator);
+        defer model.deinit();
+        const frame = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":\"C:/p\",\"name\":\"P\"}},\"nodes\":[],\"edges\":[],\"revision\":{s}}}}}}}}}",
+            .{case.raw},
+        );
+        defer std.testing.allocator.free(frame);
+        // A scalar that is not even valid JSON rejects the whole frame: no graph, no revision.
+        _ = model.updateFromFrame(frame) catch {
+            try std.testing.expect(case.want == null);
+            try std.testing.expect(model.graphFor("C:/p") == null);
+            continue;
+        };
+        try std.testing.expectEqual(case.want, model.graphFor("C:/p").?.revision);
+    }
 }
 
 test "production daemon graphChanged associated-value frame decodes project and nodes" {
