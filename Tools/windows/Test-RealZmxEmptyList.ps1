@@ -31,8 +31,8 @@ if (-not (Test-Path -LiteralPath $zmxExe -PathType Leaf)) {
   throw "zmx build produced no executable at $zmxExe"
 }
 
-# zmx only accepts a state root owned by the current user's SID. A directory created by an
-# elevated token (hosted runners) is owned by Administrators, so reassign the owner.
+# Workaround: on the elevated hosted runner a scratch ZMX_DIR owned by BUILTIN\Administrators
+# failed with AccessDenied (coneilen/zmx#6, root cause unresolved), so reassign the owner.
 $scratch = Join-Path ([IO.Path]::GetTempPath()) "zmx-empty-$([guid]::NewGuid())"
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
