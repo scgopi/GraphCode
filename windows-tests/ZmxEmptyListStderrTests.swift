@@ -75,10 +75,25 @@ import XCTest
       try process.run()
       if exited.wait(timeout: .now() + timeout) == .timedOut {
         process.terminate()
-        _ = exited.wait(timeout: .now() + 5)
+        if exited.wait(timeout: .now() + 5) == .timedOut {
+          throw ReapError.couldNotReap
+        }
         return nil
       }
       return process.terminationStatus
+    }
+
+    private enum ReapError: Error, CustomStringConvertible {
+      case couldNotReap
+      var description: String { "could not reap child after terminate()" }
+    }
+
+    func testInjectedEnvironmentReplacesInheritedKeyCaseInsensitively() {
+      let merged = ZmxSessionLauncher.mergedEnvironment(
+        ["zmx_dir": "wrong", "PATH": "p"], adding: ["ZMX_DIR": "expected"])
+      XCTAssertEqual(merged["ZMX_DIR"], "expected")
+      XCTAssertNil(merged["zmx_dir"])
+      XCTAssertEqual(merged["PATH"], "p")
     }
 
     private static let flood =
@@ -152,19 +167,6 @@ import XCTest
         .map { URL(fileURLWithPath: $0) }
     }
 
-    private static func assignOwnerToCurrentUser(_ url: URL) {
-      let env = ProcessInfo.processInfo.environment
-      guard let user = env["USERNAME"] else { return }
-      let owner = env["USERDOMAIN"].map { "\($0)\\\(user)" } ?? user
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\icacls.exe")
-      process.arguments = [url.path, "/setowner", owner]
-      process.standardOutput = DiscardedStream.handle()
-      process.standardError = DiscardedStream.handle()
-      try? process.run()
-      process.waitUntilExit()
-    }
-
     /// The reported defect, end to end: the real `zmx ls` against an empty `ZMX_DIR`
     /// writes "no sessions found" to stderr, and through `runCollectingOutput` must
     /// exit 0 and map to `.absent`. Skipped, visibly, when no `zmx.exe` exists.
@@ -177,8 +179,8 @@ import XCTest
         throw XCTSkip(
           "no zmx.exe (set GRAPHCODE_ZMX_EXE or GRAPHCODE_ZMX_ROOT, or install beside graphcoded)")
       }
-      // CI hands in a scratch directory whose owner is the current user (zmx rejects a
-      // state root owned by another SID); otherwise create one here.
+      // CI hands in a scratch directory owned by the current user (a workaround, see
+      // coneilen/zmx#6); otherwise create one here.
       let scratch: URL
       if let provided = ProcessInfo.processInfo.environment["GRAPHCODE_ZMX_EMPTY_DIR"] {
         scratch = URL(fileURLWithPath: provided)
