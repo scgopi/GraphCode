@@ -32,13 +32,16 @@ enum FeatureRamps {
     /// GraphCode Nod, the chat-native backend. Beta-only: every surface that offers Nod
     /// (setup, Settings › Agents, the agent menu) checks this as well as `isSpiked`.
     case nod
+    /// Sessions named after their loop's title. Beta-only; `graphcoded` reads it through
+    /// `publishSessionNamingFlag`.
+    case sessionNaming
 
     /// The key this feature shipped under before it was renamed. ramps.json is fetched
     /// from graphcode.app, so a build that knew only the new spelling would stop seeing
     /// the kill switch the moment it shipped ahead of the deployed file.
     var legacyRawValue: String? {
       switch self {
-      case .codespaces, .codespaceMultiplex, .nod: return nil
+      case .codespaces, .codespaceMultiplex, .nod, .sessionNaming: return nil
       case .mailroom: return "artifactory"
       }
     }
@@ -53,6 +56,7 @@ enum FeatureRamps {
       case .mailroom: return ["beta": 100, "stable": 100]
       case .codespaceMultiplex: return ["beta": 100, "stable": 0]
       case .nod: return ["beta": 100, "stable": 0]
+      case .sessionNaming: return ["beta": 100, "stable": 0]
       }
     }
   }
@@ -101,6 +105,7 @@ enum FeatureRamps {
     defer {
       publishCodespaceMultiplexFlag(enabled: isEnabled(.codespaceMultiplex))
       publishNodFlag(enabled: isEnabled(.nod))
+      publishSessionNamingFlag(enabled: isEnabled(.sessionNaming))
     }
     var request = URLRequest(url: rampsURL)
     request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -130,6 +135,12 @@ enum FeatureRamps {
   /// The same mirror for `.nod`, which `graphcoded` and the CLI check before creating or
   /// launching a Nod loop (`NodRuntimeLocator.isRampedOn`).
   static func publishNodFlag(enabled: Bool, flag: URL = NodRuntimeLocator.rampFlag) {
+    publishCodespaceMultiplexFlag(enabled: enabled, flag: flag)
+  }
+
+  /// The same mirror for `.sessionNaming`, which every launch path checks
+  /// (`SessionNaming.isRampedOn`).
+  static func publishSessionNamingFlag(enabled: Bool, flag: URL = SessionNaming.rampFlag) {
     publishCodespaceMultiplexFlag(enabled: enabled, flag: flag)
   }
 

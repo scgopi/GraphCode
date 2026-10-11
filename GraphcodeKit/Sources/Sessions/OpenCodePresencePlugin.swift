@@ -48,8 +48,9 @@ enum OpenCodePresencePlugin {
     const ZMX = \(jsString(zmxPath))
     const SESSIONS = \(sessionsDirectoryExpression)
     const PREFIX = \(jsString(SurfaceRef.zmxSessionPrefix))
+    const TITLE = process.env.\(CLISessionBackendKind.sessionTitleVariable)
 
-    export const GraphcodePresence = async ({ directory }) => {
+    export const GraphcodePresence = async ({ directory, client }) => {
       const session = process.env.ZMX_SESSION
       if (!session || !session.startsWith(PREFIX)) return {}
       const nodeID = session.slice(PREFIX.length)
@@ -100,7 +101,13 @@ enum OpenCodePresencePlugin {
           switch (event.type) {
             case "session.created":
               if (p.info?.parentID) return
-              if (main === null) { main = p.info?.id ?? p.sessionID ?? null; if (main) bank(main) }
+              if (main === null) {
+                main = p.info?.id ?? p.sessionID ?? null
+                if (main) bank(main)
+                if (main && TITLE) {
+                  try { await client.session.update({ path: { id: main }, body: { title: TITLE } }) } catch {}
+                }
+              }
               set("presence=busy")
               return
             case "session.status":

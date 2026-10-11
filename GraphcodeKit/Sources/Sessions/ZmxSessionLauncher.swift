@@ -1514,7 +1514,8 @@ public enum ZmxSessionLauncher {
         hooksFile: hooksFile,
         sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
         zmxPath: reportingPath,
-        sessionsDirectory: sessionsDirectory)
+        sessionsDirectory: sessionsDirectory,
+        displayName: SessionNaming.displayName(forTitle: node.title))
     let command =
       [
         "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -1523,7 +1524,8 @@ public enum ZmxSessionLauncher {
         of: executable, arguments: arguments,
         environment: Self.environment(
           forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
+          remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath,
+          displayName: SessionNaming.displayName(forTitle: node.title)),
         scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
 
     // `zmx` types this command into the session's shell, and a tty in canonical mode
@@ -1548,7 +1550,8 @@ public enum ZmxSessionLauncher {
             hooksFile: hooksFile,
             sessionName: SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName,
             zmxPath: reportingPath,
-            sessionsDirectory: sessionsDirectory)
+            sessionsDirectory: sessionsDirectory,
+            displayName: SessionNaming.displayName(forTitle: node.title))
         return [
           "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
         ]
@@ -1556,7 +1559,8 @@ public enum ZmxSessionLauncher {
             of: executable, arguments: arguments,
             environment: Self.environment(
               forBackend: node.backend, briefingPath: briefingPath, hooksFile: hooksFile,
-              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath),
+              remoteHooksPath: remoteEnvironmentPath, nodeID: node.id, projectPath: projectPath,
+              displayName: SessionNaming.displayName(forTitle: node.title)),
             scriptSuffix: remoteHooksSuffix, usesWindowsShell: remote == nil)
       }
       let unbriefedCommand = shed(prompt: promptWithMemory, briefingPath: nil, extraPath: nil)
@@ -1685,7 +1689,8 @@ public enum ZmxSessionLauncher {
         hooksFile: hooksFile,
         sessionName: sessionName,
         zmxPath: reportingPath,
-        sessionsDirectory: sessionsDirectory)
+        sessionsDirectory: sessionsDirectory,
+        displayName: SessionNaming.displayName(forTitle: node.title), resuming: true)
       + node.backend.resumeArguments(sessionID: sessionID)
     return [
       "run", SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName, "-d",
@@ -1788,12 +1793,14 @@ public enum ZmxSessionLauncher {
   /// (`briefingEnvironment`) and OpenCode's presence plugin (`presenceEnvironment`).
   static func environment(
     forBackend backend: CLISessionBackendKind, briefingPath: String?, hooksFile: URL? = nil,
-    remoteHooksPath: String? = nil, nodeID: UUID? = nil, projectPath: String? = nil
+    remoteHooksPath: String? = nil, nodeID: UUID? = nil, projectPath: String? = nil,
+    displayName: String? = nil
   ) -> [String: String] {
     if backend == .nod, let nodeID {
       return NodRuntimeLocator.environment(forNodeID: nodeID, projectPath: projectPath)
     }
     let briefing = backend.briefingEnvironment(briefingPath: briefingPath)
+      .merging(backend.nameEnvironment(displayName: displayName)) { $1 }
     if backend == .openCode, let remoteHooksPath {
       return briefing.merging(["OPENCODE_CONFIG": remoteHooksPath]) { $1 }
     }

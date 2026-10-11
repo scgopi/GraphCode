@@ -104,13 +104,14 @@ extension CLISessionBackendKind {
     prompt: String?, tier: ModelTier, briefingPath: String? = nil,
     settings: GraphcodeSettings = GraphcodeSettings(), workspacePaths: [String] = [],
     hooksFile: URL? = nil, sessionName: String? = nil, zmxPath: String? = nil,
-    sessionsDirectory: String? = nil
+    sessionsDirectory: String? = nil, displayName: String? = nil, resuming: Bool = false
   ) -> [String] {
     let model =
       versionArguments(settings) + modelArguments(for: tier) + permissionArguments(settings)
       + presenceArguments(
         hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath,
-        sessionsDirectory: sessionsDirectory)
+        sessionsDirectory: sessionsDirectory, displayName: displayName)
+      + nameArguments(displayName: displayName, resuming: resuming)
     guard let prompt, !prompt.isEmpty else { return model }
     let briefingDirectory = (briefingPath as NSString?)?.deletingLastPathComponent
     switch self {
@@ -312,13 +313,18 @@ extension CLISessionBackendKind {
   /// every session did before any of this existed.
   public func presenceArguments(
     hooksFile: URL?, sessionName: String? = nil, zmxPath: String? = nil,
-    sessionsDirectory: String? = nil
+    sessionsDirectory: String? = nil, displayName: String? = nil
   ) -> [String] {
     switch self {
     case .claudeCode:
       return hooksFile.map { ["--settings", $0.path] } ?? []
     case .copilotCLI:
-      return sessionName.map { ["--name", $0] } ?? []
+      return sessionName.map { name in
+        [
+          "--name",
+          displayName.map { Self.copilotSessionName(title: $0, sessionName: name) } ?? name,
+        ]
+      } ?? []
     case .codex:
       // Codex reports only the *end* of a turn, through `notify`. Its other edge is
       // covered without asking Codex anything: see `ZmxSessionLauncher.codexPresence`.
@@ -339,6 +345,68 @@ extension CLISessionBackendKind {
     case .nod:
       return []
     }
+  }
+
+  /// The argv that shows a loop's title as its session's name, for the backends whose name
+  /// is a plain label. Copilot's `--name` doubles as graphcode's lookup key, so its title
+  /// rides in `presenceArguments` instead (`copilotSessionName`).
+  ///
+  /// Claude Code takes `--name` on resume too, which carries a sidebar rename into the
+  /// session. pi appends a fresh `session_info` record for every `--name`, even an
+  /// unchanged one, so it is named once, at first launch.
+  public func nameArguments(displayName: String?, resuming: Bool) -> [String] {
+    guard let name = displayName.flatMap(Self.sessionLabel) else { return [] }
+    switch self {
+    case .claudeCode: return ["--name", name]
+    case .pi: return resuming ? [] : ["--name", name]
+    case .copilotCLI, .codex, .openCode, .nod: return []
+    }
+  }
+
+  /// OpenCode's TUI has no title flag (`--title` is `opencode run`'s alone), so the title
+  /// rides to graphcode's plugin, which sets it when the session is created
+  /// (`OpenCodePresencePlugin`). A resumed session keeps the title it already has.
+  public func nameEnvironment(displayName: String?) -> [String: String] {
+    // Every launch path pastes environment values inside double quotes in a shell string,
+    // where these would expand or end the quote — and a title is anyone's to write.
+    let inert = displayName.map { $0.filter { !"\"$`\\!".contains($0) } }
+    guard self == .openCode, let name = inert.flatMap(Self.sessionLabel) else { return [:] }
+    return [Self.sessionTitleVariable: name]
+  }
+
+  public static let sessionTitleVariable = "GRAPHCODE_SESSION_TITLE"
+
+  /// A loop's title as one line a session picker can show, or `nil` when nothing is left.
+  static func sessionLabel(_ title: String) -> String? {
+    let line = title.components(separatedBy: .newlines).joined(separator: " ")
+      .trimmingCharacters(in: .whitespaces)
+    return line.isEmpty ? nil : line
+  }
+
+  /// Copilot's name for a titled session: the title, then enough of the node's id for
+  /// `CopilotSessionLog` to find it again. Copilot refuses `--name` beside `--resume`, so
+  /// this is fixed at first launch and outlives any later rename of the loop.
+  public static func copilotSessionName(title: String, sessionName: String) -> String {
+    guard let label = sessionLabel(title) else { return sessionName }
+    return "\(label) · \(copilotNameSuffix(of: sessionName))"
+  }
+
+  /// Whether `recorded`, a `name:` read back out of Copilot's `workspace.yaml`, belongs to
+  /// the session graphcode runs as `sessionName` — under either naming.
+  public static func isCopilotSessionName(_ recorded: String, for sessionName: String) -> Bool {
+    if recorded == sessionName { return true }
+    let unquoted =
+      recorded.count > 1 && recorded.first == recorded.last
+        && (recorded.first == "\"" || recorded.first == "'")
+      ? String(recorded.dropFirst().dropLast()) : recorded
+    return unquoted.hasSuffix(" · \(copilotNameSuffix(of: sessionName))")
+  }
+
+  private static func copilotNameSuffix(of sessionName: String) -> String {
+    let id =
+      sessionName.hasPrefix("graphcode-")
+      ? sessionName.dropFirst("graphcode-".count) : Substring(sessionName)
+    return String(id.prefix(8))
   }
 }
 

@@ -264,13 +264,14 @@ extension GhosttyTerminalView {
     else {
       return nil
     }
-    let presence = backend.presenceArguments(
-      hooksFile: hooksFile, sessionName: nil,
-      zmxPath: isRemote ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil),
-      sessionsDirectory: isRemote ? PresenceHooks.remoteSessionsExpression : nil
-    )
-    .map(PresenceHooks.singleQuoted)
-    .joined(separator: " ")
+    let presence =
+      (backend.presenceArguments(
+        hooksFile: hooksFile, sessionName: nil,
+        zmxPath: isRemote ? "zmx" : (ZmxLocator.isInstalled ? ZmxLocator.binaryURL.path : nil),
+        sessionsDirectory: isRemote ? PresenceHooks.remoteSessionsExpression : nil
+      ) + backend.nameArguments(displayName: sessionDisplayName, resuming: true))
+      .map(PresenceHooks.singleQuoted)
+      .joined(separator: " ")
     if !presence.isEmpty { parts.append(presence) }
     addRemotePresenceSettings(remoteSettingsPath, to: &parts)
     addBriefingEnvironment(briefingPath, to: &parts)
@@ -295,5 +296,12 @@ extension GhosttyTerminalView {
       remoteLocation != nil, let projectPath
     else { return nil }
     return RemoteGraphAccess.briefingPath(forProjectPath: projectPath)
+  }
+}
+
+extension GhosttyTerminalView {
+  var sessionDisplayName: String? {
+    guard launchesClaudeCode, let loopTitle else { return nil }
+    return SessionNaming.displayName(forTitle: loopTitle)
   }
 }

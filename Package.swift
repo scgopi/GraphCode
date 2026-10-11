@@ -66,6 +66,7 @@ import PackageDescription
       "Sessions/PiPresenceExtension.swift",
       "Sessions/ProviderPath.swift",
       "Sessions/SessionIDStore.swift",
+      "Sessions/SessionNaming.swift",
       "Sessions/SessionTransplant.swift",
       "Sessions/SessionTransplant+Layouts.swift",
       "Sessions/ShellPredicateEvaluator.swift",

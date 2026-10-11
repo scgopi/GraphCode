@@ -67,16 +67,17 @@ public enum CopilotSessionLog {
   }
 
   /// The session directory Copilot wrote for this node, found by the name graphcode gave
-  /// it at launch (`--name`, see `CLISessionBackendKind.presenceArguments`).
+  /// it at launch (`--name`, see `CLISessionBackendKind.presenceArguments`) — the bare
+  /// session name, or the loop's title ending in the node's short id.
   ///
   /// Newest first, and the first match wins: relaunching a node's session inside its
   /// still-live `zmx` window makes a *second* directory with the same name, and the one
   /// that matters is the one being written to now.
-  static func directory(forSessionNamed name: String) -> URL? {
+  static func directory(forSessionNamed name: String, in root: URL = stateDirectory) -> URL? {
     let manager = FileManager.default
     guard
       let entries = try? manager.contentsOfDirectory(
-        at: stateDirectory, includingPropertiesForKeys: [.contentModificationDateKey])
+        at: root, includingPropertiesForKeys: [.contentModificationDateKey])
     else { return nil }
     let newestFirst = entries.sorted { left, right in
       let leftDate =
@@ -87,7 +88,9 @@ public enum CopilotSessionLog {
         .contentModificationDate ?? .distantPast
       return leftDate > rightDate
     }
-    return newestFirst.first { names($0) == name }
+    return newestFirst.first { directory in
+      names(directory).map { CLISessionBackendKind.isCopilotSessionName($0, for: name) } ?? false
+    }
   }
 
   /// The `name:` line out of a session's `workspace.yaml`. Matched on the whole key rather

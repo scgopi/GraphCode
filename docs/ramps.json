@@ -19,6 +19,10 @@
     "artifactory": {
       "beta": 100,
       "stable": 100
+    },
+    "sessionNaming": {
+      "beta": 100,
+      "stable": 0
     }
   }
 }
