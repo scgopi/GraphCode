@@ -547,8 +547,13 @@ public actor ProjectRegistry {
         error = "readProjectGraph requires daemon protocol v2."
         break
       }
-      guard Self.isWellFormedProjectPath(path, platformPaths: platformPaths) else {
-        error = "\(path) isn't a project path."
+      // Refused before any membership or store lookup: the global graph and ssh:// remote
+      // projects are joined by other means and are not this command's to serve.
+      guard path != LoopGraphScope.globalPath,
+        RemoteProjectLocation.parse(projectPath: path) == nil,
+        Self.isWellFormedProjectPath(path, platformPaths: platformPaths)
+      else {
+        error = "\(path) isn't a local project path."
         break
       }
       let canonicalPath = Self.canonicalize(path, platformPaths: platformPaths)

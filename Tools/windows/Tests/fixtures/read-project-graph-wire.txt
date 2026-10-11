@@ -1,0 +1,58 @@
+>> [hello] {"version":2,"kind":"hello","supportedVersions":[1,2],"clientID":"00000000-0000-4000-8000-0000000000a1"}
+<< [hello] {"supportedVersions":[1,2],"selectedVersion":2,"version":2,"kind":"hello"}
+-- [hello] frames: 1
+>> [read-before-open] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000001","command":{"readProjectGraph":{"path":"RUNDIR/projA"}}}
+<< [read-before-open] {"requestID":"10000000-0000-4000-8000-000000000001","error":{"message":"RUNDIR\/projA isn't open on this connection — open it first.","code":"requestFailed"},"version":2,"kind":"error"}
+-- [read-before-open] frames: 1
+CHECK ok: read before open: exactly one error frame carrying the request id
+>> [open] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000002","command":{"openProject":{"path":"RUNDIR\\projA"}}}
+<< [open] {"version":2,"sequence":1,"event":{"graphChanged":{"_0":{"id":"CAC11E81-693C-4805-A2BD-920E9665AED3","project":{"path":"RUNDIR\/projA","name":"projA","lastOpenedAt":0},"mailroomDigest":{"count":0,"fingerprint":14695981039346656037,"latestID":0},"edges":[],"revision":0,"nodes":[]}}},"kind":"event"}
+<< [open] {"version":2,"requestID":"10000000-0000-4000-8000-000000000002","event":{"graphChanged":{"_0":{"project":{"lastOpenedAt":0,"name":"projA","path":"RUNDIR\/projA"},"revision":0,"nodes":[],"id":"CAC11E81-693C-4805-A2BD-920E9665AED3","mailroomDigest":{"latestID":0,"count":0,"fingerprint":14695981039346656037},"edges":[]}}},"kind":"response"}
+-- [open] frames: 2
+CHECK ok: openProject baseline: event then correlated response
+>> [read-open] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000003","command":{"readProjectGraph":{"path":"RUNDIR/projA"}}}
+<< [read-open] {"version":2,"requestID":"10000000-0000-4000-8000-000000000003","event":{"graphChanged":{"_0":{"project":{"path":"RUNDIR\/projA","name":"projA","lastOpenedAt":0},"edges":[],"revision":0,"id":"CAC11E81-693C-4805-A2BD-920E9665AED3","mailroomDigest":{"count":0,"fingerprint":14695981039346656037,"latestID":0},"nodes":[]}}},"kind":"response"}
+-- [read-open] frames: 1
+CHECK ok: joined local project: exactly one response, exact request id, no sequence, no event frame
+>> [read-noncanonical] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000004","command":{"readProjectGraph":{"path":"RUNDIR\\projA"}}}
+<< [read-noncanonical] {"version":2,"requestID":"10000000-0000-4000-8000-000000000004","error":{"code":"requestFailed","message":"RUNDIR\\projA isn't open on this connection — open it first."},"kind":"error"}
+-- [read-noncanonical] frames: 1
+CHECK ok: non-canonical spelling is refused, not redirected
+>> [read-never-opened] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000005","command":{"readProjectGraph":{"path":"RUNDIR\\projB"}}}
+<< [read-never-opened] {"version":2,"requestID":"10000000-0000-4000-8000-000000000005","error":{"code":"requestFailed","message":"RUNDIR\\projB isn't open on this connection — open it first."},"kind":"error"}
+-- [read-never-opened] frames: 1
+CHECK ok: never-opened project is refused
+>> [join-global] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000006","command":{"openGlobalGraph":{}}}
+<< [join-global] {"version":2,"sequence":2,"event":{"graphChanged":{"_0":{"project":{"path":"graphcode:\/\/global","name":"Graph","lastOpenedAt":0},"edges":[],"revision":0,"id":"0DB09660-B4DC-4DBC-A113-F2E3CAD3848F","mailroomDigest":{"count":0,"fingerprint":14695981039346656037,"latestID":0},"nodes":[]}}},"kind":"event"}
+<< [join-global] {"version":2,"requestID":"10000000-0000-4000-8000-000000000006","event":{"graphChanged":{"_0":{"project":{"name":"Graph","path":"graphcode:\/\/global","lastOpenedAt":0},"revision":0,"nodes":[],"id":"0DB09660-B4DC-4DBC-A113-F2E3CAD3848F","mailroomDigest":{"latestID":0,"count":0,"fingerprint":14695981039346656037},"edges":[]}}},"kind":"response"}
+-- [join-global] frames: 2
+CHECK ok: global graph joined (baseline frames)
+>> [read-global] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000007","command":{"readProjectGraph":{"path":"graphcode://global"}}}
+<< [read-global] {"version":2,"requestID":"10000000-0000-4000-8000-000000000007","error":{"code":"requestFailed","message":"graphcode:\/\/global isn't a local project path."},"kind":"error"}
+-- [read-global] frames: 1
+CHECK ok: global graph refused after joining it
+>> [join-remote] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000008","command":{"openProject":{"path":"ssh://host/repository"}}}
+<< [join-remote] {"version":2,"event":{"graphChanged":{"_0":{"nodes":[],"edges":[],"id":"47DE583F-A468-42D0-B93A-49533BE7A68B","mailroomDigest":{"latestID":0,"count":0,"fingerprint":14695981039346656037},"revision":0,"project":{"path":"ssh:\/\/host\/repository","lastOpenedAt":0,"name":"repository @ host"}}}},"sequence":3,"kind":"event"}
+<< [join-remote] {"version":2,"event":{"graphChanged":{"_0":{"nodes":[],"edges":[],"id":"47DE583F-A468-42D0-B93A-49533BE7A68B","mailroomDigest":{"latestID":0,"count":0,"fingerprint":14695981039346656037},"revision":0,"project":{"path":"ssh:\/\/host\/repository","lastOpenedAt":0,"name":"repository @ host"}}}},"requestID":"10000000-0000-4000-8000-000000000008","kind":"response"}
+-- [join-remote] frames: 2
+>> [read-remote] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000009","command":{"readProjectGraph":{"path":"ssh://host/repository"}}}
+<< [read-remote] {"version":2,"error":{"message":"ssh:\/\/host\/repository isn't a local project path.","code":"requestFailed"},"requestID":"10000000-0000-4000-8000-000000000009","kind":"error"}
+-- [read-remote] frames: 1
+CHECK ok: remote project refused after joining it
+>> [unknown-command] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000010","command":{"readProjectGraphTypo":{"path":"RUNDIR/projA"}}}
+<< [unknown-command] {"requestID":"10000000-0000-4000-8000-000000000010","error":{"message":"DecodingError.typeMismatch: expected value of type DaemonCommand. Path: command. Debug description: Invalid number of keys found, expected one.","code":"malformedEnvelope"},"kind":"error","version":2}
+-- [unknown-command] frames: 1
+CHECK ok: unknown command answers with an error carrying the request id
+>> [close] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000011","command":{"closeProject":{"path":"RUNDIR/projA"}}}
+<< [close] {"version":2,"event":{"graphChanged":{"_0":{"nodes":[],"edges":[],"id":"CAC11E81-693C-4805-A2BD-920E9665AED3","project":{"path":"RUNDIR\/projA","lastOpenedAt":0,"name":"projA"}}}},"requestID":"10000000-0000-4000-8000-000000000011","kind":"response"}
+-- [close] frames: 1
+>> [read-after-close] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000012","command":{"readProjectGraph":{"path":"RUNDIR/projA"}}}
+<< [read-after-close] {"version":2,"error":{"message":"RUNDIR\/projA isn't open on this connection — open it first.","code":"requestFailed"},"requestID":"10000000-0000-4000-8000-000000000012","kind":"error"}
+-- [read-after-close] frames: 1
+CHECK ok: read after close is refused
+>> [read-after-close-again] {"version":2,"kind":"request","requestID":"10000000-0000-4000-8000-000000000013","command":{"readProjectGraph":{"path":"RUNDIR/projA"}}}
+<< [read-after-close-again] {"version":2,"error":{"message":"RUNDIR\/projA isn't open on this connection — open it first.","code":"requestFailed"},"requestID":"10000000-0000-4000-8000-000000000013","kind":"error"}
+-- [read-after-close-again] frames: 1
+CHECK ok: project is still not reopened by a refused read
+CHECK ok: connection stays healthy throughout
+daemon exit=0

@@ -135,11 +135,47 @@ final class ReadProjectGraphTests: XCTestCase {
     await registry.addConnection(id: channel.id, connection: channel, mode: .v2(version: 2))
     let path = ProjectRegistry.canonicalize(folder.path)
     _ = await registry.apply(.openProject(path: path), connectionID: channel.id)
-    for bad in [path + "\\child", path + "\\", LoopGraphScope.globalPath, "ssh://host/repo", ""] {
+    for bad in [path + "\\child", path + "\\", ""] {
       let result = await registry.apply(.readProjectGraph(path: bad), connectionID: channel.id)
       XCTAssertNotNil(result?.error, "\(bad) should be refused")
       XCTAssertNil(result?.response, "\(bad) should not answer")
     }
+    await registry.removeConnection(channel.id)
+    registry.flushPersistence()
+  }
+
+  func testJoinedGlobalAndRemoteGraphsAreRefusedWithoutAnyFrameOrMutation() async throws {
+    let (root, folder) = try scratch()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let registry = fixtureRegistry(at: root)
+    let channel = ReadGraphMemoryConnection()
+    await registry.addConnection(id: channel.id, connection: channel, mode: .v2(version: 2))
+    let local = ProjectRegistry.canonicalize(folder.path)
+    let remote = ProjectRegistry.canonicalize("ssh://host/repository")
+    guard
+      case .graphChanged? = await registry.apply(.openGlobalGraph, connectionID: channel.id)?.response,
+      case .graphChanged(let remoteGraph)? = await registry.apply(
+        .openProject(path: remote), connectionID: channel.id)?.response
+    else { return XCTFail("Could not join the global and remote graphs") }
+    XCTAssertEqual(remoteGraph.project.path, remote)
+    _ = await registry.apply(.openProject(path: local), connectionID: channel.id)
+    registry.flushPersistence()
+    let stateBefore = persistedState(root)
+    let framesBefore = await channel.frames
+
+    // Both are joined by this very connection, so only the explicit refusal stands in the way.
+    for path in [LoopGraphScope.globalPath, remote] {
+      let result = await registry.apply(.readProjectGraph(path: path), connectionID: channel.id)
+      XCTAssertNotNil(result?.error, "\(path) should be refused")
+      XCTAssertNil(result?.response, "\(path) should not answer")
+    }
+    registry.flushPersistence()
+    XCTAssertEqual(persistedState(root), stateBefore)
+    let framesAfter = await channel.frames
+    XCTAssertEqual(framesAfter, framesBefore)
+    // The local project joined alongside them is still readable.
+    let localRead = await registry.apply(.readProjectGraph(path: local), connectionID: channel.id)
+    XCTAssertNotNil(localRead?.response)
     await registry.removeConnection(channel.id)
     registry.flushPersistence()
   }
@@ -159,12 +195,14 @@ final class ReadProjectGraphTests: XCTestCase {
     registry.flushPersistence()
   }
 
-  func testCommandRoundTripsAndOldDecoderRejectsUnknownCase() throws {
+  func testCommandRoundTripsThroughCodable() throws {
     let command = DaemonCommand.readProjectGraph(path: "C:\\synthetic\\read")
     let data = try JSONEncoder().encode(command)
     XCTAssertEqual(try JSONDecoder().decode(DaemonCommand.self, from: data), command)
     let text = String(decoding: data, as: UTF8.self)
     XCTAssertTrue(text.contains("readProjectGraph"), text)
+    // What a daemon that predates the command does with it is covered on the wire by
+    // Tools/windows/Tests/ReadProjectGraph.Wire.ps1 (an unknown command is answered with an error).
   }
 }
 

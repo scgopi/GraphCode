@@ -444,10 +444,7 @@ pub const DaemonClient = struct {
         if (self.protocolMode() == .v1 and !self.v1OpenReady()) return null;
         const command = Wire.commandOpenProject(self.allocator, path) catch return null;
         var request_id: [36]u8 = undefined;
-        self.mutex.lock();
-        makeRequestID(&request_id, self.next_request);
-        self.next_request +%= 1;
-        self.mutex.unlock();
+        _ = self.allocateRequestID(&request_id);
         if (!self.sendCommandWithRequestID(command, request_id)) return null;
         return request_id;
     }
@@ -973,19 +970,16 @@ pub const DaemonClient = struct {
         requested_id: ?[36]u8,
         expectation: V1Expectation,
     ) void {
+        var tracked_id: ?[36]u8 = null;
         const frame = if (self.mode == .v2) blk: {
             var request_id: [36]u8 = undefined;
             if (requested_id) |value| {
                 request_id = value;
             } else {
-                makeRequestID(&request_id, self.next_request);
-                self.next_request +%= 1;
+                _ = self.allocateRequestID(&request_id);
             }
-            if (!self.trackRequest(&request_id)) {
-                self.publishState(self.state, "too many outstanding daemon requests");
-                return;
-            }
-            break :blk Wire.v2Request(
+            // Encode first: a request that cannot be encoded must leave nothing pending.
+            const encoded = Wire.v2Request(
                 self.allocator,
                 &request_id,
                 command_json,
@@ -993,17 +987,20 @@ pub const DaemonClient = struct {
                 self.publishState(self.state, "request encoding failed");
                 return;
             };
+            if (!self.trackRequest(&request_id)) {
+                self.allocator.free(encoded);
+                self.publishState(self.state, "too many outstanding daemon requests");
+                return;
+            }
+            tracked_id = request_id;
+            break :blk encoded;
         } else Wire.v1Command(self.allocator, command_json) catch {
             self.publishState(self.state, "request encoding failed");
             return;
         };
         defer self.allocator.free(frame);
         self.writeFrame(frame) catch {
-            if (self.mode == .v2) {
-                if (Wire.responseRequestID(frame)) |request_id| {
-                    _ = self.completeRequest(request_id);
-                }
-            }
+            if (tracked_id) |request_id| _ = self.completeRequest(&request_id);
             self.markTransportFailure("daemon write failed");
             return;
         };
@@ -1198,7 +1195,7 @@ pub const DaemonClient = struct {
             return true;
         }
         if (self.mode == .v2) {
-            if (Wire.responseRequestID(frame)) |request_id| {
+            if (Wire.correlatedRequestID(frame)) |request_id| {
                 if (!self.completeRequest(request_id)) {
                     self.markProtocolFailure("unmatched daemon response");
                     return false;
@@ -1384,6 +1381,66 @@ test "a correlated response and an uncorrelated snapshot are told apart on real 
     try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
 }
 
+test "request ids minted by concurrent producers are all distinct" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    const threads = 4;
+    const each = 250;
+    const Worker = struct {
+        fn run(owner: *DaemonClient, out: *[each][36]u8) void {
+            for (out) |*slot| _ = owner.allocateRequestID(slot);
+        }
+    };
+    var ids: [threads][each][36]u8 = undefined;
+    var handles: [threads]std.Thread = undefined;
+    for (&handles, 0..) |*handle, index| handle.* = try std.Thread.spawn(.{}, Worker.run, .{ &client, &ids[index] });
+    for (handles) |handle| handle.join();
+    var seen = std.StringHashMap(void).init(std.testing.allocator);
+    defer seen.deinit();
+    for (&ids) |*group| {
+        for (group) |*id| {
+            const entry = try seen.getOrPut(id);
+            try std.testing.expect(!entry.found_existing);
+        }
+    }
+    try std.testing.expectEqual(@as(u32, threads * each), seen.count());
+}
+
+test "a request that cannot be encoded leaves nothing pending" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var client = try DaemonClient.initForTesting(failing.allocator());
+    defer client.deinit();
+    client.publishState(.connected, "");
+    client.mode = .v2;
+    failing.fail_index = failing.alloc_index;
+    client.sendCommandOnWorker("{\"listRecentProjects\":{}}", null, .graph_changed);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+}
+
+test "an event that merely carries a requestID does not complete a pending request" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    client.publishState(.connected, "");
+    const read = client.sendReadProjectGraph("C:\\work\\A").?;
+    try std.testing.expect(client.trackRequest(&read.request_id));
+    const spoof = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":3,\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
+        .{read.request_id},
+    );
+    defer std.testing.allocator.free(spoof);
+    try std.testing.expect(client.handleFrame(spoof));
+    try std.testing.expectEqual(@as(usize, 1), client.pending_request_count);
+    const response = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
+        .{read.request_id},
+    );
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(client.handleFrame(response));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+}
+
 test "an error envelope for the request correlates and an unknown-command error is not a response" {
     var client = try DaemonClient.initForTesting(std.testing.allocator);
     defer client.deinit();
@@ -1491,17 +1548,33 @@ test "v1 response accounting ignores unsolicited events before the expected resu
     /// full — and then nothing was queued. The caller keeps the returned id and
     /// generation and accepts only a reply that matches both.
     pub fn sendReadProjectGraph(self: *DaemonClient, path: []const u8) ?GraphRead {
+        const command = Wire.commandReadProjectGraph(self.allocator, path) catch return null;
+        var request_id: [36]u8 = undefined;
         self.mutex.lock();
         const eligible = self.mode == .v2 and self.state == .connected;
         const generation = self.connection_generation;
+        if (eligible) {
+            makeRequestID(&request_id, self.next_request);
+            self.next_request +%= 1;
+        }
         self.mutex.unlock();
-        if (!eligible) return null;
-        const command = Wire.commandReadProjectGraph(self.allocator, path) catch return null;
-        var request_id: [36]u8 = undefined;
-        makeRequestID(&request_id, self.next_request);
-        self.next_request +%= 1;
+        if (!eligible) {
+            self.allocator.free(command);
+            return null;
+        }
         if (!self.sendCommandWithRequestID(command, request_id)) return null;
         return .{ .request_id = request_id, .generation = generation };
+    }
+
+    /// The one place request ids are minted, under the queue mutex, so the caller's thread
+    /// and the writer thread can never draw the same counter value.
+    fn allocateRequestID(self: *DaemonClient, buffer: *[36]u8) u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const value = self.next_request;
+        makeRequestID(buffer, value);
+        self.next_request +%= 1;
+        return value;
     }
 
     fn trackRequest(self: *DaemonClient, request_id: *const [36]u8) bool {
