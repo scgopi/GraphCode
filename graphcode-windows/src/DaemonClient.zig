@@ -182,6 +182,8 @@ pub const DaemonClient = struct {
     client_id: [36]u8 = undefined,
     mode: Wire.ProtocolMode = .v2,
     state: Wire.ConnectionState = .disconnected,
+    /// Counts entries into `.connected`; a state taken before a reconnect carries an older one.
+    connection_generation: u64 = 0,
     selected_version: u8 = Wire.current_version,
     last_error: []const u8 = "",
     resume_from: u64 = 0,
@@ -734,6 +736,21 @@ pub const DaemonClient = struct {
         client.mutex.lock();
         defer client.mutex.unlock();
         return client.state;
+    }
+
+    pub fn connectionGeneration(self: *const DaemonClient) u64 {
+        const client: *DaemonClient = @constCast(self);
+        client.mutex.lock();
+        defer client.mutex.unlock();
+        return client.connection_generation;
+    }
+
+    /// Asks the daemon for a project's current graph as a correlated reply, which arrives as
+    /// a new frame. Only v2 can tell the reply from an older broadcast; v1 returns null.
+    /// `openProject` on a project this client has open re-sends its graph and changes nothing else.
+    pub fn sendFreshGraphRequest(self: *DaemonClient, path: []const u8) ?[36]u8 {
+        if (self.protocolMode() != .v2) return null;
+        return self.sendOpenProject(path);
     }
 
     pub fn protocolMode(self: *DaemonClient) Wire.ProtocolMode {
@@ -1318,6 +1335,7 @@ test "v1 response accounting ignores unsolicited events before the expected resu
 
     fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
         self.mutex.lock();
+        if (state == .connected and self.state != .connected) self.connection_generation +%= 1;
         self.state = state;
         self.last_error = message;
         self.mutex.unlock();
