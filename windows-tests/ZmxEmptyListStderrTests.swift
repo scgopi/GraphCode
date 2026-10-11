@@ -177,14 +177,17 @@ import XCTest
         throw XCTSkip(
           "no zmx.exe (set GRAPHCODE_ZMX_EXE or GRAPHCODE_ZMX_ROOT, or install beside graphcoded)")
       }
-      let scratch = FileManager.default.temporaryDirectory
-        .appendingPathComponent("zmx-empty-\(UUID().uuidString)")
-      try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-      defer { try? FileManager.default.removeItem(at: scratch) }
-      // zmx refuses a state root whose owner SID is not the current user. Directories
-      // created by an elevated token (hosted CI runners) are owned by Administrators.
-      Self.assignOwnerToCurrentUser(scratch)
-
+      // CI hands in a scratch directory whose owner is the current user (zmx rejects a
+      // state root owned by another SID); otherwise create one here.
+      let scratch: URL
+      if let provided = ProcessInfo.processInfo.environment["GRAPHCODE_ZMX_EMPTY_DIR"] {
+        scratch = URL(fileURLWithPath: provided)
+      } else {
+        scratch = FileManager.default.temporaryDirectory
+          .appendingPathComponent("zmx-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
+      }
       let listing = await ZmxSessionLauncher.runCollectingOutput(
         zmx, ["ls"], extraEnvironment: ["ZMX_DIR": scratch.path])
       let result = try XCTUnwrap(listing, "zmx ls did not run")

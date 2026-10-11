@@ -31,18 +31,30 @@ if (-not (Test-Path -LiteralPath $zmxExe -PathType Leaf)) {
   throw "zmx build produced no executable at $zmxExe"
 }
 
-$diagDir = Join-Path ([IO.Path]::GetTempPath()) "zmx-diag-$([guid]::NewGuid())"
-New-Item -ItemType Directory -Path $diagDir | Out-Null
+# zmx only accepts a state root owned by the current user's SID. A directory created by an
+# elevated token (hosted runners) is owned by Administrators, so reassign the owner.
+$scratch = Join-Path ([IO.Path]::GetTempPath()) "zmx-empty-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $scratch | Out-Null
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+Write-Host "DIAG current user SID=$($me.Value) owner-before=$((Get-Acl -LiteralPath $scratch).Owner)"
+& icacls.exe $scratch /setowner "*$($me.Value)" 2>&1 | ForEach-Object { Write-Host "DIAG icacls: $_" }
+$acl = Get-Acl -LiteralPath $scratch
+if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $me.Value) {
+  try {
+    $acl.SetOwner($me)
+    Set-Acl -LiteralPath $scratch -AclObject $acl
+  } catch { Write-Host "DIAG Set-Acl failed: $_" }
+}
+$ownerNow = (Get-Acl -LiteralPath $scratch).GetOwner([Security.Principal.SecurityIdentifier]).Value
+Write-Host "DIAG owner-after=$ownerNow"
 try {
-  & icacls.exe $diagDir /setowner "$env:USERDOMAIN\$env:USERNAME" 2>&1 | Out-Null
-  $env:ZMX_DIR = $diagDir
+  $env:ZMX_DIR = $scratch
   $diag = & $zmxExe ls 2>&1 | ForEach-Object { "$_" }
-  Write-Host "DIAG zmx ls direct: exit=$LASTEXITCODE output=[$($diag -join ' | ')] ZMX_DIR=$diagDir"
+  Write-Host "DIAG zmx ls direct: exit=$LASTEXITCODE output=[$(($diag | Select-Object -First 2) -join ' | ')]"
 } finally {
   Remove-Item Env:ZMX_DIR -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $diagDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-
+$env:GRAPHCODE_ZMX_EMPTY_DIR = $scratch
 $env:GRAPHCODE_ZMX_EXE = (Resolve-Path -LiteralPath $zmxExe).Path
 $env:GRAPHCODE_REQUIRE_ZMX = "1"
 $output = & $SwiftTest --package-path $repoRoot --disable-automatic-resolution `
@@ -60,3 +72,4 @@ if ($passed.Count -lt 1 -or $skipped.Count -gt 0 -or $executed.Count -lt 1) {
   throw "Real zmx test did not execute and pass (passed=$($passed.Count) skipped=$($skipped.Count) executed-line=$($executed.Count))"
 }
 Write-Host "REAL_ZMX_TEST_EXECUTED: $($passed[0].Trim())"
+Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
