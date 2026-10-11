@@ -3,6 +3,7 @@ param(
   [switch] $List,
   [switch] $WorkspaceTabSelectorOnly,
   [string] $ZigExecutable,
+  [switch] $UiaLiveGateTimeoutOnly,
   # Hosted CI splits the executable sections across runners. Shard/ShardCount
   # select one part of a deterministic, complete partition; the defaults run
   # every section, exactly as a local run always has.
@@ -201,8 +202,48 @@ function Assert-WorkspaceTabSelectors {
   Write-Host "UIA actual-tab selector contract: 7 predicates, 7 fixtures passed"
 }
 
+function Assert-UiaLiveGateTimeoutBoundary {
+  $gatePath = Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"
+  $gateSource = Get-Content -LiteralPath $gatePath -Raw
+  $worktreesTransition = [regex]::Match(
+    $gateSource,
+    '(?s)\$worktreesBeforeClick = Invoke-IsolatedDirectChildren.*?' +
+      '\$surfaceActionPatterns\["overview-destination"\]\.Invoke\(\)'
+  ).Value
+  Assert-Contract ($worktreesTransition -match
+      '(?s)\$laneWorktreeDeadline = \[DateTime\]::UtcNow\.AddMilliseconds\(5000\).*?' +
+      '\$laneWorktreeSnapshot = Invoke-IsolatedDirectChildren' -and
+      $worktreesTransition -notmatch 'Get-DirectChildren \$worktrees' -and
+      $gateSource -match 'catch \[TimeoutException\]' -and
+      $gateSource -match 'UIA_WORKTREES_READ_TIMEOUT' -and
+      $gateSource -match '\$worker\.Kill\(\$true\)' -and
+      $gateSource -match '\$worker\.WaitForExit\(5000\)') `
+    "Worktrees transition must use a fresh bounded worker, kill/join it on timeout, and avoid the captured element"
+  $output = @(& (Get-Process -Id $PID).Path -NoProfile -NonInteractive `
+      -File $gatePath -TimeoutContractOnly 2>&1)
+  $exitCode = $LASTEXITCODE
+  Assert-Contract ($exitCode -eq 0) `
+    "UIA live gate timeout contract failed with exit code ${exitCode}: $($output -join ' | ')"
+  $summary = @($output | Where-Object {
+      "$_" -match '^UIA_TIMEOUT_CONTRACT executed=(\d+) passed=(\d+)$'
+    })
+  Assert-Contract ($summary.Count -eq 1) `
+    "UIA live gate timeout contract emitted no unique execution summary: $($output -join ' | ')"
+  $null = "$($summary[0])" -match '^UIA_TIMEOUT_CONTRACT executed=(\d+) passed=(\d+)$'
+  $executed = [int]$Matches[1]
+  $passed = [int]$Matches[2]
+  Assert-Contract ($executed -gt 0 -and $passed -eq $executed) `
+    "UIA live gate timeout contract did not positively execute every case: $($summary[0])"
+  Write-Host "UIA live gate timeout boundary contract: $passed/$executed cases passed"
+}
+
+if ($UiaLiveGateTimeoutOnly) {
+  Assert-UiaLiveGateTimeoutBoundary
+  exit 0
+}
 Assert-WorkspaceTabSelectors
 if ($WorkspaceTabSelectorOnly) { exit 0 }
+Assert-UiaLiveGateTimeoutBoundary
 
 $shellSource = Get-Content $shellScript -Raw
 $appSource = Get-Content (Join-Path $shellRoot "src\App.zig") -Raw
