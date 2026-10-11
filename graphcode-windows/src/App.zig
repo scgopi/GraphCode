@@ -1446,6 +1446,10 @@ pub const App = struct {
     require_smoke_contract: bool = false,
     smoke_failure: bool = false,
     smoke_tick: usize = 0,
+    /// When loops an `endDeletedLoops` snapshot reported missing are re-checked against the
+    /// held graph without waiting for another graph change (`confirmMissingLoops`).
+    loop_confirm_due_ns: ?i128 = null,
+    loop_confirm_retries: u8 = 0,
     smoke_action_requested: bool = false,
     smoke_input_requested: bool = false,
     smoke_idle_ticks: usize = 0,
@@ -2087,7 +2091,15 @@ pub const App = struct {
         const previous = workspace.takeMissingLoops(identity.project) catch return;
         defer workspace.freeLoopIds(previous);
         for (previous) |id| {
-            if (!graphHasLoop(graph, id)) _ = workspace.retireLoopGuarded(id, identity.project, known);
+            if (graphHasLoop(graph, id)) continue;
+            _ = workspace.retireLoopGuarded(id, identity.project, known);
+            if (workspace.loopLayoutExists(id)) workspace.markLoopMissing(identity.project, id) catch {};
+        }
+        defer {
+            if (workspace.missing_loops.items.len != 0) {
+                self.loop_confirm_retries = 0;
+                self.armLoopConfirmation(std.time.nanoTimestamp());
+            }
         }
         if (identity.ids) |ids| {
             for (ids) |id| {
@@ -2103,6 +2115,51 @@ pub const App = struct {
             if (record.modified_ns >= workspace.started_ns) continue;
             if (graphHasLoop(graph, record.loop) or containsLoopId(previous, record.loop)) continue;
             workspace.markLoopMissing(identity.project, record.loop) catch {};
+        }
+    }
+
+    /// The deleted-loop sweep ends a loop's shell sessions only once a second look agrees it is
+    /// gone. A deletion is often the last graph change the daemon sends, so the second look
+    /// is also taken from the held graph once `loop_confirm_settle_ns` have passed with no
+    /// newer snapshot to contradict it (`confirmMissingLoops`, from the shell's timer).
+    const loop_confirm_settle_ns: i128 = 3 * std.time.ns_per_s;
+    const loop_confirm_retry_limit: u8 = 3;
+
+    fn armLoopConfirmation(self: *App, now_ns: i128) void {
+        self.loop_confirm_due_ns = now_ns + loop_confirm_settle_ns;
+    }
+
+    /// The settled second look: every loop still pending for a project whose non-empty
+    /// graph is held and lacks it is retired, as a second agreeing snapshot would. Anything
+    /// else keeps the pending state untouched for the next snapshot. A retirement that left
+    /// the layout behind (a failed listing, a layout it could not read) is tried again a
+    /// few times; one that ended nothing wrongly is never forced.
+    fn confirmMissingLoops(self: *App, now_ns: i128) void {
+        const due = self.loop_confirm_due_ns orelse return;
+        if (now_ns < due) return;
+        self.loop_confirm_due_ns = null;
+        const workspace = self.workspace orelse return;
+        const projects = workspace.missingProjects() catch return;
+        defer workspace.freeLoopIds(projects);
+        var retry = false;
+        for (projects) |project| {
+            const graph = self.model.graphFor(project) orelse continue;
+            if (graph.nodes.items.len == 0) continue;
+            const known: TerminalWorkspace.KnownNodes = .{ .context = graph, .contains = graphNamesNode };
+            const pending = workspace.takeMissingLoops(project) catch continue;
+            defer workspace.freeLoopIds(pending);
+            for (pending) |id| {
+                if (graphHasLoop(graph, id)) continue;
+                _ = workspace.retireLoopGuarded(id, project, known);
+                if (workspace.loopLayoutExists(id)) {
+                    workspace.markLoopMissing(project, id) catch continue;
+                    retry = true;
+                }
+            }
+        }
+        if (retry and self.loop_confirm_retries < loop_confirm_retry_limit) {
+            self.loop_confirm_retries += 1;
+            self.armLoopConfirmation(now_ns);
         }
     }
 
@@ -8925,6 +8982,13 @@ fn onWindowMessage(
             }
             app.client.poll();
             const connection_state = app.client.connectionState();
+            // A held graph is only a second opinion while the daemon is reachable; on a
+            // lost connection the next snapshot decides, as it always did.
+            if (connection_state == .connected) {
+                app.confirmMissingLoops(std.time.nanoTimestamp());
+            } else {
+                app.loop_confirm_due_ns = null;
+            }
             if (connection_state == .connected) app.flushPendingProject();
             if (app.client.connectionState() == .connected) {
                 if (app.open_project_pending and
@@ -15419,6 +15483,84 @@ test "workspace layout: a loop deleted after the shell has seen the project is e
     try fixture.deliver(&.{.{ .id = "loop-a" }});
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
     try std.testing.expect(!fixture.layoutExists("loop-b.json"));
+}
+
+test "workspace layout: a deleted loop's shell session ends once the settle delay passes, with no further graph change" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-c" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-b", &.{ .{ .id = "loop-b", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.saveLoopLayout(fixture.project, "loop-c", &.{ .{ .id = "loop-c", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-b", &.{shell_uuid_one});
+    try fixture.markOwned("loop-c", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-b", "loop-c", shell_uuid_one, shell_uuid_two, agent_uuid_upper });
+
+    // The one snapshot that lacks loop B: it is the only change the daemon will send.
+    try fixture.deliver(&.{ .{ .id = "loop-a" }, .{ .id = "loop-c" } });
+    const now = std.time.nanoTimestamp();
+    fixture.app.confirmMissingLoops(now);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    fixture.app.confirmMissingLoops(now + 10 * std.time.ns_per_s);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    fixture.settle();
+    try std.testing.expect(!fixture.layoutExists("loop-b.json"));
+    // Loop C is still in the graph, and the agent session is the daemon's.
+    try std.testing.expect(!fixture.killed(shell_uuid_two));
+    try std.testing.expect(!fixture.killed(agent_uuid_upper));
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+}
+
+test "workspace layout: the settle delay confirms nothing when a later snapshot restores the loop or leaves no loop at all" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-b", &.{ .{ .id = "loop-b", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("loop-b", &.{shell_uuid_one});
+    try fixture.setLive(&.{ "loop-a", "loop-b", shell_uuid_one });
+    const later = std.time.nanoTimestamp() + 10 * std.time.ns_per_s;
+
+    try fixture.deliver(&.{.{ .id = "loop-a" }});
+    // A replay that brings loop B back cancels the pending end.
+    try fixture.deliver(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    fixture.app.confirmMissingLoops(later);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // An empty snapshot proves nothing, however long it stands.
+    try fixture.deliver(&.{.{ .id = "loop-a" }});
+    try fixture.deliverNodes("");
+    fixture.app.confirmMissingLoops(later);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-b.json"));
+}
+
+test "workspace layout: an unlistable or unreachable session is not ended by the settle delay" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-b", &.{ .{ .id = "loop-b", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("loop-b", &.{shell_uuid_one});
+    try fixture.setLive(&.{ "loop-a", "loop-b", shell_uuid_one });
+    const later = std.time.nanoTimestamp() + 10 * std.time.ns_per_s;
+
+    try fixture.setFlag("ls-fail.txt", true);
+    try fixture.deliver(&.{.{ .id = "loop-a" }});
+    fixture.app.confirmMissingLoops(later);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-b.json"));
+
+    try fixture.setFlag("ls-fail.txt", false);
+    try fixture.setUnreachable(&.{ "loop-a", "loop-b" }, &.{shell_uuid_one}, "Timeout");
+    try fixture.deliver(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    try fixture.deliver(&.{.{ .id = "loop-a" }});
+    fixture.app.confirmMissingLoops(later);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-b.json"));
 }
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {

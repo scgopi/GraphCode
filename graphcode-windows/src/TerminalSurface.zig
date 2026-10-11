@@ -1017,6 +1017,32 @@ pub const Workspace = struct {
         return taken.toOwnedSlice(self.allocator);
     }
 
+    /// Whether `loop`'s saved layout is still on disk, i.e. its sessions were not all dealt with.
+    pub fn loopLayoutExists(self: *const Workspace, loop: []const u8) bool {
+        const root = self.layoutRoot() orelse return false;
+        const path = WorkspaceLayout.loopLayoutPath(self.allocator, root, loop) catch return false;
+        defer self.allocator.free(path);
+        std.fs.cwd().access(path, .{}) catch return false;
+        return true;
+    }
+
+    /// The projects with a loop awaiting its confirming snapshot, each once, to be freed with
+    /// `freeLoopIds`.
+    pub fn missingProjects(self: *const Workspace) ![][]u8 {
+        var projects: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (projects.items) |project| self.allocator.free(project);
+            projects.deinit(self.allocator);
+        }
+        for (self.missing_loops.items) |entry| {
+            var seen = false;
+            for (projects.items) |project| seen = seen or std.mem.eql(u8, project, entry.project);
+            if (seen) continue;
+            try projects.append(self.allocator, try self.allocator.dupe(u8, entry.project));
+        }
+        return projects.toOwnedSlice(self.allocator);
+    }
+
     pub fn freeLoopIds(self: *const Workspace, ids: [][]u8) void {
         for (ids) |id| self.allocator.free(id);
         self.allocator.free(ids);
