@@ -1221,7 +1221,8 @@ pub const DaemonClient = struct {
         return true;
     }
 
-    fn enqueueInbound(self: *DaemonClient, frame: []const u8) void {
+    /// Public so shell tests can queue a frame stamped with the generation it arrives on.
+    pub fn enqueueInbound(self: *DaemonClient, frame: []const u8) void {
         const copy = self.allocator.dupe(u8, frame) catch {
             self.publishState(self.state, "daemon event allocation failed");
             return;
