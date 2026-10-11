@@ -25,15 +25,21 @@ import Foundation
 /// pre-dial used to `rm -f` the socket unconditionally, which let a terminal opening in
 /// the app delete the daemon's working endpoint and leave every remote CLI call failing
 /// while both forwarders still looked alive. Now it removes the path only when a real
-/// daemon request through it goes unanswered (`claimCommand`); a live one makes this
-/// loop a standby that re-checks on `recheck` and takes over when the other owner's
-/// endpoint dies. The serving loop runs the same check on the same cadence, so a forward
-/// whose process is up but whose endpoint is gone is replaced rather than trusted.
+/// daemon request through it is refused (`claimCommand`); an answer, or a daemon too busy
+/// to answer in time, makes this loop a standby that re-claims on `recheck` and takes
+/// over when the other owner's endpoint dies.
+///
+/// A serving forward never probes or removes anything: it re-checks on the same cadence
+/// that the socket it bound is still the one at the path (`checkCommand`, by inode), and
+/// steps aside when it is gone or another owner's has replaced it. A stalled connection
+/// is ssh's to notice (`ServerAliveInterval`), not this loop's.
 ///
 /// Every dial runs in the background under a one-second `kill -0 $PPID` watch, so a
 /// forwarder never outlives the process that spawned it — not even while blocked inside
 /// a hung `ssh` or `gh`, which is how forwarders used to end up reparented to launchd,
-/// fighting a restarted daemon's for the bind. Each transition is a `dials.log` line.
+/// fighting a restarted daemon's for the bind. Each change of state is a `dials.log`
+/// line; repeats of the same state are not, since that log is shared with every launch
+/// decision on this Mac and a down host would otherwise trim them all away.
 public actor RemoteSocketForwarder {
   public static let shared = RemoteSocketForwarder()
 
@@ -68,59 +74,89 @@ public actor RemoteSocketForwarder {
 
   /// Which process a `dials.log` line came from — the app and the daemon both forward.
   static var owner: String {
-    let name = ProcessInfo.processInfo.processName.filter { $0.isLetter || $0.isNumber }
+    let name = ProcessInfo.processInfo.processName.filter {
+      $0.isASCII && ($0.isLetter || $0.isNumber)
+    }
     return name.isEmpty ? "unknown" : String(name.prefix(24))
+  }
+
+  /// ASCII and bounded in bytes, so a `dials.log` line stays inside the per-line budget
+  /// `DialLog`'s trim depends on.
+  static func logHost(_ authority: String) -> String {
+    String(String.UnicodeScalarView(authority.unicodeScalars.filter(\.isASCII).prefix(64)))
+  }
+
+  /// Runs `script` under `/bin/sh` on the remote, whatever the login shell is: sshd hands
+  /// the command to the user's shell, and fish or tcsh would reject `if`/`fi` and `2>&1`.
+  static func posix(_ script: String) -> String {
+    "exec /bin/sh -c " + RemoteProjectLocation.shellQuoted(script)
+  }
+
+  /// One framed `listRecentProjects` and the first byte back: an answer proves the whole
+  /// path — sshd's listener, the connection carrying it, and the daemon behind it. Exits
+  /// 0 when answered, 3 when nothing came back in time, and 1 when the path is refused,
+  /// missing, or closed on — only that last is a stale socket. A busy daemon is somebody's
+  /// working endpoint, so a timeout must never read as dead.
+  static func liveProbe(timeout: Int) -> String {
+    "import os,socket,struct,sys;"
+      + "sys.excepthook=lambda t,v,b:os._exit(3 if issubclass(t,socket.timeout) else 1);"
+      + "s=socket.socket(socket.AF_UNIX);s.settimeout(\(timeout));s.connect(sys.argv[1]);"
+      + "m=b'{\"listRecentProjects\":{}}';s.sendall(struct.pack('>I',len(m))+m);"
+      + "os._exit(0 if s.recv(1) else 1)"
+  }
+
+  /// Prints `live:$HOME` when another forward holds the canonical path, and otherwise
+  /// clears it (with the Windows bridge's state, which would shadow it) and prints
+  /// `free:$HOME`. Without python3 nothing can be proved either way, so an existing
+  /// socket is left alone: the delivered shim needs python3 too, so such a host has no
+  /// remote CLI to serve.
+  static func claimCommand(probeTimeout: Int = 10) -> String {
+    posix(
+      "S=\(socketExpression); mkdir -p \"$HOME/.graphcode\" || exit 1;"
+        + " if command -v python3 >/dev/null 2>&1; then python3 -c "
+        + RemoteProjectLocation.shellQuoted(liveProbe(timeout: probeTimeout))
+        + " \"$S\" >/dev/null 2>&1; P=$?; elif [ -S \"$S\" ]; then P=0; else P=1; fi;"
+        + " if [ $P -ne 1 ]; then printf 'live:%s' \"$HOME\"; else rm -f \"$S\""
+        + " \"$HOME/.graphcode/bridge-state.json\""
+        + " \"$HOME/.graphcode/bridge-state-generation\""
+        + " \"$HOME/.graphcode/bridge-state.json.lock\""
+        + " && printf 'free:%s' \"$HOME\"; fi")
+  }
+
+  /// Prints `ino:` and the inode of the socket at the canonical path, or `ino:` alone when
+  /// there is none — what a serving forward compares against the one it first saw.
+  static var checkCommand: String {
+    posix("S=\(socketExpression); [ -S \"$S\" ] && set -- $(ls -di \"$S\"); printf 'ino:%s' \"$1\"")
   }
 
   static let socketExpression = "\"$HOME/.graphcode/graphcoded.sock\""
 
-  /// One framed `listRecentProjects` and the first byte back: an answer proves the whole
-  /// path — sshd's listener, the connection carrying it, and the daemon behind it — where
-  /// a bare `connect` succeeds against a listener whose connection has stalled. Read-only,
-  /// and python3 is already the delivered shim's requirement; without it the probe fails
-  /// and the path is treated as stale, which is the old behaviour.
-  static let liveProbe =
-    "import socket,struct,sys;s=socket.socket(socket.AF_UNIX);s.settimeout(10);"
-    + "s.connect(sys.argv[1]);m=b'{\"listRecentProjects\":{}}';"
-    + "s.sendall(struct.pack('>I',len(m))+m);sys.exit(0 if s.recv(1) else 1)"
-
-  /// Prints `live:$HOME` when another forward already answers at the canonical path, and
-  /// otherwise clears it (with the Windows bridge's state, which would shadow it) and
-  /// prints `free:$HOME`.
-  static var claimCommand: String {
-    "mkdir -p \"$HOME/.graphcode\" && if python3 -c "
-      + RemoteProjectLocation.shellQuoted(liveProbe) + " \(socketExpression) >/dev/null 2>&1;"
-      + " then printf 'live:%s' \"$HOME\"; else rm -f \(socketExpression)"
-      + " \"$HOME/.graphcode/bridge-state.json\""
-      + " \"$HOME/.graphcode/bridge-state-generation\""
-      + " \"$HOME/.graphcode/bridge-state.json.lock\""
-      + " && printf 'free:%s' \"$HOME\"; fi"
-  }
-
   static func forwardScript(for location: RemoteProjectLocation, localSocketPath: String)
     -> String
   {
-    let claim = location.sshCommandLine(remoteCommand: claimCommand)
+    let claim = location.sshCommandLine(remoteCommand: claimCommand())
+    let check = location.sshCommandLine(remoteCommand: checkCommand)
     let forward = forwardCommandLine(for: location, localSocketPath: localSocketPath)
-    let host = String(location.authority.prefix(64))
+    let host = logHost(location.authority)
     if location.isCodespace {
-      return codespaceForwardScript(claim: claim, forward: forward, host: host)
+      return codespaceForwardScript(claim: claim, check: check, forward: forward, host: host)
     }
-    return sshForwardScript(claim: claim, forward: forward, host: host)
+    return sshForwardScript(claim: claim, check: check, forward: forward, host: host)
   }
 
   static func sshForwardScript(
-    claim: String, forward: String, host: String, recheck: Int = 60
+    claim: String, check: String, forward: String, host: String, recheck: Int = 60
   ) -> String {
-    supervisor(claim: claim, forward: forward, host: host, recheck: recheck) + """
+    supervisor(claim: claim, check: check, forward: forward, host: host, recheck: recheck)
+      + """
       while gc_up; do \
-      if R=$(gc_watch gc_claim); then \
+      if gc_watch gc_claim; then R=$(cat "$gc_tmp"); \
       case $R in \
-      live:*) gc_log standby; gc_nap \(recheck); continue;; \
+      live:*) gc_note standby; gc_nap \(recheck); continue;; \
       free:*) H=${R#free:}; gc_serve;; \
-      *) gc_log claim-unreadable;; \
+      *) gc_note claim-unreadable;; \
       esac; \
-      else gc_log claim-failed; fi; \
+      else gc_note claim-failed; fi; \
       gc_nap 5; \
       done; \
       gc_log parent-gone
@@ -138,21 +174,22 @@ public actor RemoteSocketForwarder {
   /// pre-dial can spend up to five minutes inside gh waiting for a codespace to start and
   /// still fail. A `live` answer proves it outright.
   static func codespaceForwardScript(
-    claim: String, forward: String, host: String = "test",
+    claim: String, check: String = "true", forward: String, host: String = "test",
     schedule: CodespaceDialSchedule = .standard, upAfter: Int = 60, maxWait: Int = 60,
     recheck: Int = 300
   ) -> String {
-    supervisor(claim: claim, forward: forward, host: host, recheck: recheck) + """
+    supervisor(claim: claim, check: check, forward: forward, host: host, recheck: recheck)
+      + """
       gc_down=; gc_wait=5; \
       while gc_up; do \
-      if R=$(gc_watch gc_claim); then \
+      if gc_watch gc_claim; then R=$(cat "$gc_tmp"); \
       case $R in \
-      live:*) gc_log standby; gc_down=; gc_wait=5; gc_nap \(recheck); continue;; \
+      live:*) gc_note standby; gc_down=; gc_wait=5; gc_nap \(recheck); continue;; \
       free:*) H=${R#free:}; gc_t=$(date +%s); gc_serve; \
       [ $(($(date +%s) - gc_t)) -ge \(upAfter) ] && { gc_down=; gc_wait=5; };; \
-      *) gc_log claim-unreadable;; \
+      *) gc_note claim-unreadable;; \
       esac; \
-      else gc_log claim-failed; fi; \
+      else gc_note claim-failed; fi; \
       gc_now=$(date +%s); gc_down=${gc_down:-$gc_now}; \
       [ $((gc_now - gc_down)) -ge \(schedule.pauseAfter) ] && { gc_log paused; exit 0; }; \
       gc_nap $gc_wait; gc_wait=$((gc_wait * 2)); \
@@ -162,29 +199,52 @@ public actor RemoteSocketForwarder {
       """
   }
 
-  /// The functions both loops share. `gc_watch` and `gc_serve` run their dial in the
-  /// background and poll, because a foreground `ssh` or `gh` that hangs would keep the
-  /// shell from ever reaching its next `kill -0 $PPID`. `gc_stop` takes the dial's own
-  /// children with it: a backgrounded function is a subshell, and killing only that
-  /// would orphan the `ssh` it is waiting on.
-  static func supervisor(claim: String, forward: String, host: String, recheck: Int) -> String {
+  /// The functions both loops share.
+  ///
+  /// - `gc_watch` runs a dial in the background, into `$gc_tmp` rather than a command
+  ///   substitution, and polls: a foreground `ssh` or `gh` that hangs would keep the shell
+  ///   from reaching its next `kill -0 $PPID`, and a `$(…)` would hold off the TERM trap
+  ///   until it returned.
+  /// - `gc_stop` takes the dial's own children with it: a backgrounded function is a
+  ///   subshell, and killing only that would orphan the `ssh` it is waiting on.
+  /// - `gc_serve` takes the first inode it sees as its own — a bind that failed would have
+  ///   ended the forward (`ExitOnForwardFailure`) — and checks every few seconds until it
+  ///   has one, since gh can take a while to connect.
+  /// - A forward that exits by itself within ten seconds failed to bind; `gc_note` keeps a host that
+  ///   refuses every bind to one line.
+  static func supervisor(
+    claim: String, check: String, forward: String, host: String, recheck: Int
+  ) -> String {
     """
-    gc_host=\(RemoteProjectLocation.shellQuoted(host)); gc_f=; \
+    gc_host=\(RemoteProjectLocation.shellQuoted(host)); gc_f=; gc_q=; gc_was=; \
+    gc_tmp=$(mktemp "${TMPDIR:-/tmp}/gcbridge.XXXXXX") || exit 1; \
     gc_up() { kill -0 $PPID 2>/dev/null; }; \
     gc_log() { gc_ev="$1 $gc_host ppid=$PPID"; \
     \(DialLog.fragment(session: "bridge", dial: owner, event: "forward", detailVariable: "gc_ev")); }; \
-    gc_stop() { pkill -TERM -P $1 2>/dev/null; kill $1 2>/dev/null; }; \
+    gc_note() { [ "$1" = "$gc_was" ] || gc_log "$1"; gc_was=$1; }; \
+    gc_stop() { [ -n "$1" ] || return 0; pkill -TERM -P $1 2>/dev/null; kill $1 2>/dev/null; }; \
     gc_nap() { gc_i=0; while [ $gc_i -lt $1 ] && gc_up; do sleep 1; gc_i=$((gc_i + 1)); done; }; \
     gc_claim() { \(claim); }; \
+    gc_check() { \(check); }; \
     gc_bind() { \(forward); }; \
-    gc_watch() { "$@" & gc_q=$!; \
-    while kill -0 $gc_q 2>/dev/null; do gc_up || gc_stop $gc_q; sleep 1; done; wait $gc_q; }; \
-    gc_serve() { gc_log bind; gc_bind & gc_f=$!; gc_n=0; \
-    while kill -0 $gc_f 2>/dev/null; do gc_up || break; sleep 1; gc_n=$((gc_n + 1)); \
-    [ $gc_n -lt \(recheck) ] && continue; gc_n=0; \
-    case $(gc_watch gc_claim) in free:*) gc_log endpoint-lost; break;; esac; done; \
-    gc_stop $gc_f; wait $gc_f 2>/dev/null; gc_f=; gc_log forward-ended; }; \
-    trap '[ -n "$gc_f" ] && gc_stop $gc_f; exit 0' TERM HUP INT; \
+    gc_watch() { "$@" > "$gc_tmp" 2>/dev/null & gc_q=$!; \
+    while kill -0 $gc_q 2>/dev/null; do gc_up || gc_stop $gc_q; sleep 1; done; \
+    wait $gc_q; gc_rc=$?; gc_q=; return $gc_rc; }; \
+    gc_serve() { [ "$gc_was" = forward-failed ] || gc_note bind; \
+    gc_t0=$(date +%s); gc_bind & gc_f=$!; gc_n=0; gc_ino=; gc_end=; gc_next=\(min(5, recheck)); \
+    while kill -0 $gc_f 2>/dev/null; do gc_up || { gc_end=parent; break; }; sleep 1; gc_n=$((gc_n + 1)); \
+    [ $gc_n -lt $gc_next ] && continue; gc_n=0; \
+    gc_watch gc_check || continue; gc_seen=$(cat "$gc_tmp"); \
+    case $gc_seen in ino:*) ;; *) continue;; esac; gc_seen=${gc_seen#ino:}; \
+    if [ -z "$gc_ino" ]; then [ -n "$gc_seen" ] && { gc_ino=$gc_seen; gc_next=\(recheck); }; \
+    elif [ -z "$gc_seen" ]; then gc_end=endpoint-lost; break; \
+    elif [ "$gc_seen" != "$gc_ino" ]; then gc_end=endpoint-replaced; break; fi; done; \
+    gc_stop $gc_f; wait $gc_f 2>/dev/null; gc_f=; \
+    if [ -n "$gc_end" ]; then [ $gc_end = parent ] || gc_note $gc_end; \
+    elif [ $(($(date +%s) - gc_t0)) -lt 10 ]; then gc_note forward-failed; \
+    else gc_note forward-ended; fi; }; \
+    trap 'rm -f "$gc_tmp"' EXIT; \
+    trap 'gc_stop "$gc_f"; gc_stop "$gc_q"; exit 0' TERM HUP INT; \
 
     """
   }

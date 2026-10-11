@@ -287,89 +287,189 @@ struct CodespaceDialScheduleTests {
 }
 
 /// The app and the daemon each forward the same remote socket; these pin that a second
-/// owner stands by instead of deleting the first one's endpoint, and that no forwarder
-/// outlives its parent.
+/// owner stands by instead of deleting the first one's endpoint, that a serving forward
+/// never tears down its own, and that no forwarder outlives its parent. The claim runs
+/// its real python3 probe against a real listener.
 extension CodespaceDialScheduleTests {
-  /// Runs `RemoteSocketForwarder.claimCommand` against a scratch home, with `python3`
-  /// replaced by a stub that answers the liveness probe with `probeStatus`.
-  private func claim(probeStatus: Int) async throws -> (output: String, socketKept: Bool) {
-    let home = try scratch()
-    let bin = home.appendingPathComponent("bin", isDirectory: true)
-    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    let stub = bin.appendingPathComponent("python3")
-    try "#!/bin/sh\nexit \(probeStatus)\n".write(to: stub, atomically: true, encoding: .utf8)
-    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.path)
-    let socket = home.appendingPathComponent(".graphcode/graphcoded.sock")
+  /// Short on purpose: the socket path inside it must fit `sun_path`'s 104 bytes.
+  private func shortHome() throws -> URL {
+    let home = URL(fileURLWithPath: "/tmp/gcb-\(UUID().uuidString.prefix(8))", isDirectory: true)
     try FileManager.default.createDirectory(
-      at: socket.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try Data().write(to: socket)
+      at: home.appendingPathComponent(".graphcode"), withIntermediateDirectories: true)
+    return home
+  }
+
+  private func socketPath(in home: URL) -> String {
+    home.appendingPathComponent(".graphcode/graphcoded.sock").path
+  }
+
+  /// Runs `RemoteSocketForwarder.claimCommand` against `home` and reports what it printed
+  /// before the colon, and whether the socket survived.
+  private func claim(in home: URL, path: String? = nil) async throws -> (
+    verdict: String, socketKept: Bool
+  ) {
     let (_, output) = try await runShell(
       "HOME=\(RemoteProjectLocation.shellQuoted(home.path));"
-        + " PATH=\(RemoteProjectLocation.shellQuoted(bin.path)):$PATH;"
-        + " \(RemoteSocketForwarder.claimCommand)")
-    return (output, FileManager.default.fileExists(atPath: socket.path))
+        + (path.map { " PATH=\(RemoteProjectLocation.shellQuoted($0));" } ?? "")
+        + " \(RemoteSocketForwarder.claimCommand(probeTimeout: 1))")
+    let verdict = String(output.prefix { $0 != ":" })
+    return (verdict, FileManager.default.fileExists(atPath: socketPath(in: home)))
+  }
+
+  private func dialsLog(in home: URL) -> String {
+    (try? String(
+      contentsOf: home.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8)) ?? ""
+  }
+
+  private func occurrences(of event: String, in log: String) -> Int {
+    log.components(separatedBy: " forward \(event) ").count - 1
   }
 
   @Test
   func aClaimLeavesAnAnsweringSocketAlone() async throws {
-    let (output, kept) = try await claim(probeStatus: 0)
-    #expect(output.hasPrefix("live:"))
+    let home = try shortHome()
+    let listener = try StandInListener(path: socketPath(in: home))
+    defer { listener.stop() }
+
+    let (verdict, kept) = try await claim(in: home)
+
+    #expect(verdict == "live")
     #expect(kept)
   }
 
   @Test
-  func aClaimClearsASocketNobodyAnswers() async throws {
-    let (output, kept) = try await claim(probeStatus: 1)
-    #expect(output.hasPrefix("free:"))
+  func aClaimTreatsADaemonTooBusyToAnswerAsLive() async throws {
+    let home = try shortHome()
+    let listener = try StandInListener(path: socketPath(in: home), delay: 3)
+    defer { listener.stop() }
+
+    let (verdict, kept) = try await claim(in: home)
+
+    #expect(verdict == "live")
+    #expect(kept)
+  }
+
+  @Test
+  func aClaimClearsASocketNobodyListensOn() async throws {
+    let home = try shortHome()
+    _ = try StandInListener(path: socketPath(in: home), answers: false)
+
+    let (verdict, kept) = try await claim(in: home)
+
+    #expect(verdict == "free")
     #expect(!kept)
   }
 
   @Test
-  func aForwarderStandsByWhileAnotherOwnerServes() async throws {
+  func withoutPython3AClaimNeverRemovesASocket() async throws {
+    let home = try shortHome()
+    _ = try StandInListener(path: socketPath(in: home), answers: false)
+
+    let (verdict, kept) = try await claim(in: home, path: "/bin")
+
+    #expect(verdict == "live")
+    #expect(kept)
+  }
+
+  @Test
+  func aClaimWithNoSocketIsFree() async throws {
+    let (verdict, _) = try await claim(in: try shortHome())
+    #expect(verdict == "free")
+  }
+
+  @Test
+  func aForwarderStandsByWhileAnotherOwnerServesAndSaysSoOnce() async throws {
     let home = try scratch()
     let forwarded = home.appendingPathComponent("forwarded")
     let script =
       "HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
       + RemoteSocketForwarder.sshForwardScript(
-        claim: "printf 'live:/remote'",
+        claim: "printf 'live:/remote'", check: "printf ino:5",
         forward: "touch \(RemoteProjectLocation.shellQuoted(forwarded.path))",
         host: "build-box", recheck: 1)
 
-    _ = try await runShell(script, limit: 3)
+    _ = try await runShell(script, limit: 6)
 
     #expect(!FileManager.default.fileExists(atPath: forwarded.path))
-    let log = try String(
-      contentsOf: home.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8)
+    let log = dialsLog(in: home)
     #expect(log.contains("bridge"))
-    #expect(log.contains("standby build-box"))
+    #expect(occurrences(of: "standby", in: log) == 1)
+  }
+
+  @Test
+  func aServingForwardNeverTearsDownItsOwnEndpoint() async throws {
+    let home = try scratch()
+    let binds = home.appendingPathComponent("binds")
+    let script =
+      "HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
+      + RemoteSocketForwarder.sshForwardScript(
+        claim: "printf 'free:/remote'", check: "printf ino:5",
+        forward: "echo bind >> \(RemoteProjectLocation.shellQuoted(binds.path)); sleep 30",
+        host: "build-box", recheck: 1)
+
+    _ = try await runShell(script, limit: 8)
+
+    #expect(lines(in: binds) == 1)
+    #expect(!dialsLog(in: home).contains("endpoint-"))
   }
 
   @Test
   func aServingForwardWhoseEndpointVanishedIsReplaced() async throws {
     let home = try scratch()
     let binds = home.appendingPathComponent("binds")
+    let seen = RemoteProjectLocation.shellQuoted(home.appendingPathComponent("seen").path)
     let script =
       "HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
       + RemoteSocketForwarder.sshForwardScript(
         claim: "printf 'free:/remote'",
+        check: "if [ -f \(seen) ]; then printf ino:; else touch \(seen); printf ino:5; fi",
         forward: "echo bind >> \(RemoteProjectLocation.shellQuoted(binds.path)); sleep 30",
         host: "build-box", recheck: 1)
 
-    _ = try await runShell(script, limit: 12)
+    _ = try await runShell(script, limit: 16)
 
-    // The forward process never exits on its own here; only the recheck finding the
-    // path unanswered (`free:`) can have started the second one.
+    // The forward process never exits on its own here; only the check finding the path
+    // gone can have started the second one.
     #expect(lines(in: binds) >= 2)
-    let log = try String(
-      contentsOf: home.appendingPathComponent(".graphcode/dials.log"), encoding: .utf8)
-    #expect(log.contains("endpoint-lost build-box"))
+    #expect(occurrences(of: "endpoint-lost", in: dialsLog(in: home)) == 1)
+  }
+
+  @Test
+  func aServingForwardStepsAsideForAnotherOwnersSocket() async throws {
+    let home = try scratch()
+    let seen = RemoteProjectLocation.shellQuoted(home.appendingPathComponent("seen").path)
+    let script =
+      "HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
+      + RemoteSocketForwarder.sshForwardScript(
+        claim: "printf 'free:/remote'",
+        check: "if [ -f \(seen) ]; then printf ino:6; else touch \(seen); printf ino:5; fi",
+        forward: "sleep 30", host: "build-box", recheck: 1)
+
+    _ = try await runShell(script, limit: 8)
+
+    #expect(occurrences(of: "endpoint-replaced", in: dialsLog(in: home)) == 1)
+  }
+
+  @Test
+  func aHostThatStaysDownIsLoggedOnce() async throws {
+    let home = try scratch()
+    let script =
+      "HOME=\(RemoteProjectLocation.shellQuoted(home.path)); "
+      + RemoteSocketForwarder.sshForwardScript(
+        claim: "false", check: "true", forward: "true", host: "build-box")
+
+    _ = try await runShell(script, limit: 14)
+
+    let log = dialsLog(in: home)
+    #expect(occurrences(of: "claim-failed", in: log) == 1)
+    #expect(log.split(separator: "\n").count == 1)
   }
 
   @Test
   func aForwarderBlockedInADialStillDiesWithItsParent() async throws {
     let marker = "sleep 31\(Int.random(in: 100...999))"
     let inner = RemoteSocketForwarder.sshForwardScript(
-      claim: marker, forward: "true", host: "build-box")
+      claim: marker, check: "true", forward: "true", host: "build-box")
     // The supervisor's parent is this short-lived shell, not the test runner.
     _ = try await runShell(
       "/bin/sh -c \(RemoteProjectLocation.shellQuoted(inner)) >/dev/null 2>&1 & sleep 1; exit 0")
@@ -377,5 +477,72 @@ extension CodespaceDialScheduleTests {
     try await Task.sleep(for: .seconds(3))
     let (_, survivors) = try await runShell("pgrep -f '\(marker)' || true")
     #expect(survivors.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  }
+
+  @Test
+  func terminatingAForwarderMidDialStopsTheDialToo() async throws {
+    let marker = "sleep 32\(Int.random(in: 100...999))"
+    let started = Date()
+
+    let (status, _) = try await runShell(
+      RemoteSocketForwarder.sshForwardScript(
+        claim: marker, check: "true", forward: "true", host: "build-box"),
+      limit: 2)
+
+    #expect(status == 0)
+    #expect(Date().timeIntervalSince(started) < 6)
+    let (_, survivors) = try await runShell("pgrep -f '\(marker)' || true")
+    #expect(survivors.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+  }
+}
+
+/// A unix listener standing in for sshd's end of a forward: it answers each framed
+/// request after `delay`, or, with `answers: false`, is bound and closed at once —
+/// the stale socket a crashed forward leaves behind.
+private final class StandInListener: @unchecked Sendable {
+  private let descriptor: Int32
+  private let answers: Bool
+
+  init(path: String, answers: Bool = true, delay: TimeInterval = 0) throws {
+    descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+    self.answers = answers
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &address.sun_path) { raw in
+      raw.copyBytes(from: path.utf8.prefix(raw.count - 1))
+    }
+    let bound = withUnsafePointer(to: &address) {
+      $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+        bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+      }
+    }
+    guard bound == 0, listen(descriptor, 8) == 0 else {
+      close(descriptor)
+      throw POSIXError(.EADDRINUSE)
+    }
+    guard answers else {
+      close(descriptor)
+      return
+    }
+    let listening = descriptor
+    Thread.detachNewThread {
+      while true {
+        let client = accept(listening, nil, nil)
+        guard client >= 0 else { return }
+        var noSignal: Int32 = 1
+        setsockopt(
+          client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+        var request = [UInt8](repeating: 0, count: 64)
+        _ = read(client, &request, request.count)
+        Thread.sleep(forTimeInterval: delay)
+        let reply: [UInt8] = [0, 0, 0, 2, 0x7B, 0x7D]
+        _ = write(client, reply, reply.count)
+        close(client)
+      }
+    }
+  }
+
+  func stop() {
+    if answers { close(descriptor) }
   }
 }
