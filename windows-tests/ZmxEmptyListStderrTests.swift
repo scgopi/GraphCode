@@ -152,6 +152,19 @@ import XCTest
         .map { URL(fileURLWithPath: $0) }
     }
 
+    private static func assignOwnerToCurrentUser(_ url: URL) {
+      let env = ProcessInfo.processInfo.environment
+      guard let user = env["USERNAME"] else { return }
+      let owner = env["USERDOMAIN"].map { "\($0)\\\(user)" } ?? user
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\icacls.exe")
+      process.arguments = [url.path, "/setowner", owner]
+      process.standardOutput = DiscardedStream.handle()
+      process.standardError = DiscardedStream.handle()
+      try? process.run()
+      process.waitUntilExit()
+    }
+
     /// The reported defect, end to end: the real `zmx ls` against an empty `ZMX_DIR`
     /// writes "no sessions found" to stderr, and through `runCollectingOutput` must
     /// exit 0 and map to `.absent`. Skipped, visibly, when no `zmx.exe` exists.
@@ -168,6 +181,9 @@ import XCTest
         .appendingPathComponent("zmx-empty-\(UUID().uuidString)")
       try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
       defer { try? FileManager.default.removeItem(at: scratch) }
+      // zmx refuses a state root whose owner SID is not the current user. Directories
+      // created by an elevated token (hosted CI runners) are owned by Administrators.
+      Self.assignOwnerToCurrentUser(scratch)
 
       let listing = await ZmxSessionLauncher.runCollectingOutput(
         zmx, ["ls"], extraEnvironment: ["ZMX_DIR": scratch.path])
