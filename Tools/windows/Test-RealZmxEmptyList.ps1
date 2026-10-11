@@ -31,6 +31,17 @@ if (-not (Test-Path -LiteralPath $zmxExe -PathType Leaf)) {
   throw "zmx build produced no executable at $zmxExe"
 }
 
+$diagDir = Join-Path ([IO.Path]::GetTempPath()) "zmx-diag-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $diagDir | Out-Null
+try {
+  $env:ZMX_DIR = $diagDir
+  $diag = & $zmxExe ls 2>&1 | ForEach-Object { "$_" }
+  Write-Host "DIAG zmx ls direct: exit=$LASTEXITCODE output=[$($diag -join ' | ')] ZMX_DIR=$diagDir"
+} finally {
+  Remove-Item Env:ZMX_DIR -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $diagDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $env:GRAPHCODE_ZMX_EXE = (Resolve-Path -LiteralPath $zmxExe).Path
 $env:GRAPHCODE_REQUIRE_ZMX = "1"
 $output = & $SwiftTest --package-path $repoRoot --disable-automatic-resolution `
