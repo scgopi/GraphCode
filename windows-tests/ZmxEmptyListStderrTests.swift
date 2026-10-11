@@ -62,7 +62,7 @@ import XCTest
     /// Runs `cmd /c script` with the given sinks and waits at most `timeout` seconds;
     /// nil means it did not exit (a hang), and the child is terminated.
     private func exitStatus(
-      script: String, stdout: Any, stderr: Any, timeout: TimeInterval = 30
+      script: String, stdout: Any, stderr: Any, timeout: TimeInterval = 10
     ) throws -> Int32? {
       let process = Process()
       process.executableURL = cmd
@@ -75,6 +75,7 @@ import XCTest
       try process.run()
       if exited.wait(timeout: .now() + timeout) == .timedOut {
         process.terminate()
+        _ = exited.wait(timeout: .now() + 5)
         return nil
       }
       return process.terminationStatus
@@ -156,6 +157,10 @@ import XCTest
     /// exit 0 and map to `.absent`. Skipped, visibly, when no `zmx.exe` exists.
     func testRealZmxEmptyListThroughRunCollectingOutput() async throws {
       guard let zmx = realZmx() else {
+        if ProcessInfo.processInfo.environment["GRAPHCODE_REQUIRE_ZMX"] == "1" {
+          XCTFail("GRAPHCODE_REQUIRE_ZMX=1 but no zmx.exe was found")
+          return
+        }
         throw XCTSkip(
           "no zmx.exe (set GRAPHCODE_ZMX_EXE or GRAPHCODE_ZMX_ROOT, or install beside graphcoded)")
       }
@@ -163,11 +168,9 @@ import XCTest
         .appendingPathComponent("zmx-empty-\(UUID().uuidString)")
       try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
       defer { try? FileManager.default.removeItem(at: scratch) }
-      let previous = ProcessInfo.processInfo.environment["ZMX_DIR"]
-      XCTAssertEqual(_putenv_s("ZMX_DIR", scratch.path), 0)
-      defer { _ = _putenv_s("ZMX_DIR", previous ?? "") }
 
-      let listing = await ZmxSessionLauncher.runCollectingOutput(zmx, ["ls"])
+      let listing = await ZmxSessionLauncher.runCollectingOutput(
+        zmx, ["ls"], extraEnvironment: ["ZMX_DIR": scratch.path])
       let result = try XCTUnwrap(listing, "zmx ls did not run")
 
       XCTAssertEqual(result.status, 0)

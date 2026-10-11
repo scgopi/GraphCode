@@ -104,6 +104,15 @@ jobs:
         timeout-minutes: 35
         run: ./Tools/windows/validate.ps1 -Task swift-portable,swift-contracts,swift-production,swift-paths,swift-process,swift-named-pipe,swift-format
 
+      # The swift-production run above skips the real-zmx test (no zmx.exe). This step
+      # builds the pinned zmx and fails unless that test executed and passed.
+      - name: Run real zmx empty-list test (required, not skippable)
+        shell: pwsh
+        timeout-minutes: 20
+        run: |
+          $env:GRAPHCODE_ZMX_ROOT = (Resolve-Path .ci-providers/zmx).Path
+          $env:GRAPHCODE_ZIG0160 = (Resolve-Path .ci-tools/zig-0.16.0/zig.exe).Path
+          ./Tools/windows/Test-RealZmxEmptyList.ps1
   # Everything else in -Task all: remote bridge and E2E, visual baseline, TDD
   # evidence, privacy, and the pinned terminal gate.
   spikes-other:
