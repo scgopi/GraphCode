@@ -135,7 +135,12 @@ final class ReadProjectGraphTests: XCTestCase {
     await registry.addConnection(id: channel.id, connection: channel, mode: .v2(version: 2))
     let path = ProjectRegistry.canonicalize(folder.path)
     _ = await registry.apply(.openProject(path: path), connectionID: channel.id)
-    for bad in [path + "\\child", path + "\\", ""] {
+    // Spellings of the same folder (case, separators, dot segments) are not the canonical key.
+    let aliases = [
+      path.uppercased(), path.lowercased(), path.replacingOccurrences(of: "/", with: "\\"),
+      path + "/", path + "/.", path + "/../" + URL(fileURLWithPath: path).lastPathComponent,
+    ]
+    for bad in [path + "\\child", path + "\\", ""] + aliases where bad != path {
       let result = await registry.apply(.readProjectGraph(path: bad), connectionID: channel.id)
       XCTAssertNotNil(result?.error, "\(bad) should be refused")
       XCTAssertNil(result?.response, "\(bad) should not answer")

@@ -38,6 +38,7 @@ $failures = New-Object Collections.Generic.List[string]
 function Check([bool]$ok, [string]$what) { Lg("CHECK $(if ($ok) { 'ok' } else { 'FAILED' }): $what"); if (-not $ok) { $script:failures.Add($what) } }
 
 $cl = $null
+Lg("daemon sha256=$((Get-FileHash $Daemon -Algorithm SHA256).Hash)")
 try {
   Start-Sleep -Seconds 2
   $cl = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, 'InOut', 'None')
@@ -76,6 +77,9 @@ try {
   $r = Cmd 'read-open' 'readProjectGraph' $pa
   Check ($r.Frames.Count -eq 1 -and $r.Frames[0].kind -eq 'response' -and $r.Frames[0].requestID -eq $r.Id -and $null -ne $r.Frames[0].event.graphChanged -and $null -eq $r.Frames[0].sequence) 'joined local project: exactly one response, exact request id, no sequence, no event frame'
 
+  Start-Sleep -Milliseconds 500
+  Check ((SupportState) -eq $before) 'a successful read leaves the support directory byte-identical'
+
   $r = Cmd 'read-noncanonical' 'readProjectGraph' $projA
   Check (IsError $r) 'non-canonical spelling is refused, not redirected'
 
@@ -84,12 +88,17 @@ try {
 
   $id = Rid; $r = [pscustomobject]@{ Id = $id; Frames = (Exchange 'join-global' ('{"version":2,"kind":"request","requestID":"' + $id + '","command":{"openGlobalGraph":{}}}')) }
   Check ($r.Frames.Count -ge 1) 'global graph joined (baseline frames)'
-  $r = Cmd 'read-global' 'readProjectGraph' 'graphcode://global'
-  Check (IsError $r) 'global graph refused after joining it'
 
   $r = Cmd 'join-remote' 'openProject' 'ssh://host/repository'
+  Start-Sleep -Milliseconds 500
+  $beforeRefusals = SupportState
+  $r = Cmd 'read-global' 'readProjectGraph' 'graphcode://global'
+  Check (IsError $r) 'global graph refused after joining it'
   $r = Cmd 'read-remote' 'readProjectGraph' 'ssh://host/repository'
   Check (IsError $r) 'remote project refused after joining it'
+
+  Start-Sleep -Milliseconds 500
+  Check ((SupportState) -eq $beforeRefusals) 'refused reads (global, remote) leave the support directory byte-identical'
 
   $r = Cmd 'unknown-command' 'readProjectGraphTypo' $pa
   Check ($r.Frames.Count -eq 1 -and $r.Frames[0].kind -eq 'error' -and $r.Frames[0].requestID -eq $r.Id -and $r.Frames[0].error.code -eq 'malformedEnvelope') 'unknown command answers with an error carrying the request id'

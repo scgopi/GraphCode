@@ -236,9 +236,19 @@ test "envelope fields are read at the top level only and events never correlate"
 
 pub const FrameKind = enum { response, event, @"error", other };
 
+test "top-level fields are found around any JSON whitespace" {
+    const frame = "{\r\n  \"version\" : 2,\r\n  \"kind\"\r\n :\r\n \"response\",\r\n  \"requestID\"\t:\n\"abc\",\r\n \"event\":{\"kind\":\"event\"}\r\n}";
+    try std.testing.expectEqual(FrameKind.response, frameKind(frame));
+    try std.testing.expectEqualStrings("abc", correlatedRequestID(frame).?);
+}
+
 /// A value of the envelope's own top-level string field. `jsonString` takes the first
 /// match anywhere, which a loop's own JSON (an edge's `kind`) can shadow; this one
 /// looks at nesting depth 1 only.
+fn isJsonSpace(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
 pub fn topLevelString(data: []const u8, key: []const u8) ?[]const u8 {
     var depth: usize = 0;
     var cursor: usize = 0;
@@ -264,10 +274,10 @@ pub fn topLevelString(data: []const u8, key: []const u8) ?[]const u8 {
                 cursor = end;
                 if (depth != 1 or !std.mem.eql(u8, data[start..end], key)) continue;
                 var after = end + 1;
-                while (after < data.len and (data[after] == ' ' or data[after] == '\t')) : (after += 1) {}
+                while (after < data.len and isJsonSpace(data[after])) : (after += 1) {}
                 if (after >= data.len or data[after] != ':') continue;
                 after += 1;
-                while (after < data.len and (data[after] == ' ' or data[after] == '\t')) : (after += 1) {}
+                while (after < data.len and isJsonSpace(data[after])) : (after += 1) {}
                 if (after >= data.len or data[after] != '"') return null;
                 const value_start = after + 1;
                 var value_end = value_start;

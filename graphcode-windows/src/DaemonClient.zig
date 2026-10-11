@@ -1406,6 +1406,48 @@ test "request ids minted by concurrent producers are all distinct" {
     try std.testing.expectEqual(@as(u32, threads * each), seen.count());
 }
 
+test "public producers and the worker allocation never draw the same request id" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    client.publishState(.connected, "");
+    client.mode = .v2;
+    const producers = 2;
+    const sends = 20;
+    const worker_draws = 200;
+    const Shared = struct {
+        client: *DaemonClient,
+        ready: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+        go: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        fn arrive(self: *@This()) void {
+            _ = self.ready.fetchAdd(1, .acq_rel);
+            while (!self.go.load(.acquire)) std.Thread.yield() catch {};
+        }
+        fn produce(self: *@This()) void {
+            self.arrive();
+            for (0..sends) |index| {
+                var path_buffer: [16]u8 = undefined;
+                const path = std.fmt.bufPrint(&path_buffer, "C:\\p{d}", .{index}) catch return;
+                _ = self.client.sendReadProjectGraph(path);
+            }
+        }
+    };
+    var shared: Shared = .{ .client = &client };
+    var handles: [producers]std.Thread = undefined;
+    for (&handles) |*handle| handle.* = try std.Thread.spawn(.{}, Shared.produce, .{&shared});
+    while (shared.ready.load(.acquire) != producers) std.Thread.yield() catch {};
+    shared.go.store(true, .release);
+    var drawn: [worker_draws][36]u8 = undefined;
+    for (&drawn) |*slot| _ = client.allocateRequestID(slot);
+    for (handles) |handle| handle.join();
+
+    var seen = std.StringHashMap(void).init(std.testing.allocator);
+    defer seen.deinit();
+    for (&drawn) |*id| try std.testing.expect(!(try seen.getOrPut(id)).found_existing);
+    try std.testing.expectEqual(@as(usize, producers * sends), client.outbound_count);
+    for (client.outbound_request_ids[0..client.outbound_count]) |*maybe| {
+        try std.testing.expect(!(try seen.getOrPut(&maybe.*.?)).found_existing);
+    }
+}
 test "a request that cannot be encoded leaves nothing pending" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     var client = try DaemonClient.initForTesting(failing.allocator());
@@ -1550,15 +1592,8 @@ test "v1 response accounting ignores unsolicited events before the expected resu
     pub fn sendReadProjectGraph(self: *DaemonClient, path: []const u8) ?GraphRead {
         const command = Wire.commandReadProjectGraph(self.allocator, path) catch return null;
         var request_id: [36]u8 = undefined;
-        self.mutex.lock();
-        const eligible = self.mode == .v2 and self.state == .connected;
-        const generation = self.connection_generation;
-        if (eligible) {
-            makeRequestID(&request_id, self.next_request);
-            self.next_request +%= 1;
-        }
-        self.mutex.unlock();
-        if (!eligible) {
+        var generation: u64 = 0;
+        if (!self.allocateRequestIDIfConnected(&request_id, &generation)) {
             self.allocator.free(command);
             return null;
         }
@@ -1566,11 +1601,26 @@ test "v1 response accounting ignores unsolicited events before the expected resu
         return .{ .request_id = request_id, .generation = generation };
     }
 
-    /// The one place request ids are minted, under the queue mutex, so the caller's thread
-    /// and the writer thread can never draw the same counter value.
+    /// Request ids are only ever minted by these two helpers, under the queue mutex, so a
+    /// caller's thread and the writer thread can never draw the same counter value.
     fn allocateRequestID(self: *DaemonClient, buffer: *[36]u8) u64 {
         self.mutex.lock();
         defer self.mutex.unlock();
+        return self.mintLocked(buffer);
+    }
+
+    /// Mints an id only for a connected v2 client, and reports the connection generation
+    /// it was minted on, in the same critical section.
+    fn allocateRequestIDIfConnected(self: *DaemonClient, buffer: *[36]u8, generation: *u64) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.mode != .v2 or self.state != .connected) return false;
+        generation.* = self.connection_generation;
+        _ = self.mintLocked(buffer);
+        return true;
+    }
+
+    fn mintLocked(self: *DaemonClient, buffer: *[36]u8) u64 {
         const value = self.next_request;
         makeRequestID(buffer, value);
         self.next_request +%= 1;
