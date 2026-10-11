@@ -971,8 +971,8 @@ import Foundation
       let process = Process()
       process.executableURL = executable
       process.arguments = arguments
-      process.standardOutput = FileHandle.nullDevice
-      process.standardError = FileHandle.nullDevice
+      process.standardOutput = DiscardedStream.handle()
+      process.standardError = DiscardedStream.handle()
       try process.run()
       return WindowsSSHForwardSession(process: process)
     }

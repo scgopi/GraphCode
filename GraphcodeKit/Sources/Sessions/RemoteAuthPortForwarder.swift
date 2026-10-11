@@ -27,8 +27,8 @@ public actor RemoteAuthPortForwarder {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: invocation[0])
     process.arguments = Array(invocation.dropFirst())
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
+    process.standardOutput = DiscardedStream.handle()
+    process.standardError = DiscardedStream.handle()
     do {
       try process.run()
       forwards[key] = process

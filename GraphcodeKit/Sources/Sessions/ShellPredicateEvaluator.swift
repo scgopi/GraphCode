@@ -108,7 +108,7 @@ public enum ShellPredicateEvaluator {
 
     let stdout = Pipe()
     process.standardOutput = stdout
-    process.standardError = mergeStderr ? stdout as Any : FileHandle.nullDevice as Any
+    process.standardError = mergeStderr ? stdout as Any : DiscardedStream.handle()
     process.standardInput = FileHandle.nullDevice
 
     // Reader and exit are joined by a group, not sequenced: reading after exit
