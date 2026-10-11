@@ -1324,7 +1324,7 @@ public enum ZmxSessionLauncher {
     process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
-    process.standardError = FileHandle.nullDevice
+    process.standardError = DiscardedStream.handle()
     process.standardInput = FileHandle.nullDevice
     let group = DispatchGroup()
     let collected = CollectedOutput()
@@ -3085,7 +3085,7 @@ public enum ZmxSessionLauncher {
     process.arguments = ["history", name]
     let pipe = Pipe()
     process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
+    process.standardError = DiscardedStream.handle()
     do { try process.run() } catch { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
@@ -3169,8 +3169,8 @@ public enum ZmxSessionLauncher {
       if let workingDirectory {
         process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
       }
-      process.standardOutput = FileHandle.nullDevice
-      process.standardError = FileHandle.nullDevice
+      process.standardOutput = DiscardedStream.handle()
+      process.standardError = DiscardedStream.handle()
       do {
         try process.run()
         await Task.detached { process.waitUntilExit() }.value

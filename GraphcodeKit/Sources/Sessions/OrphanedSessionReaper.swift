@@ -159,7 +159,7 @@ public enum OrphanedSessionReaper {
     process.arguments = ["ls"]
     let pipe = Pipe()
     process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
+    process.standardError = DiscardedStream.handle()
     do { try process.run() } catch { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
