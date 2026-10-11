@@ -423,11 +423,6 @@ const KillJob = struct {
 
 const kill_wait_ms: i64 = 3_000;
 
-const MissingLoop = struct {
-    project: []u8,
-    loop: []u8,
-};
-
 /// Answers whether an id names a node of the graph the caller holds. A shell session is
 /// never ended when its uuid is one, whatever case either is written in.
 pub const KnownNodes = struct {
@@ -537,8 +532,6 @@ pub const Workspace = struct {
     restore_attempts: [max_surfaces]u8 = [_]u8{0} ** max_surfaces,
     /// Failed listings after which a pending shell tab is left saved until its loop reopens.
     restore_retry_limit: u8 = 5,
-    /// Loops a snapshot reported missing once; a second agreeing one makes them deleted.
-    missing_loops: std.ArrayListUnmanaged(MissingLoop) = .empty,
     key_callback: ?WorkspaceKeyCallback = null,
     key_callback_context: ?*anyopaque = null,
     layout_origin_x: i32 = 0,
@@ -627,7 +620,6 @@ pub const Workspace = struct {
         self.stopInputWorker();
         self.cancelAllLaunchWaits();
         self.finishKillJobs();
-        self.clearMissingLoops();
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         for (&self.recreate_sessions) |*session| {
             if (session.*.len != 0) self.allocator.free(session.*);
@@ -983,52 +975,13 @@ pub const Workspace = struct {
         return outcome.ended;
     }
 
-    /// Remembers that a snapshot of `project` lacked `loop`. A loop is only ended once a
-    /// second snapshot agrees (`takeMissingLoops`): one cut short by a daemon restart or a
-    /// stale replay must not cost a user's shells.
-    pub fn markLoopMissing(self: *Workspace, project: []const u8, loop: []const u8) !void {
-        const owned_project = try self.allocator.dupe(u8, project);
-        errdefer self.allocator.free(owned_project);
-        const owned_loop = try self.allocator.dupe(u8, loop);
-        errdefer self.allocator.free(owned_loop);
-        try self.missing_loops.append(self.allocator, .{ .project = owned_project, .loop = owned_loop });
-    }
-
-    /// The loops an earlier snapshot of `project` reported missing, forgotten as they are
-    /// handed over; the caller checks them against the new snapshot and frees them with
-    /// `freeLoopIds`.
-    pub fn takeMissingLoops(self: *Workspace, project: []const u8) ![][]u8 {
-        var taken: std.ArrayListUnmanaged([]u8) = .empty;
-        errdefer {
-            for (taken.items) |id| self.allocator.free(id);
-            taken.deinit(self.allocator);
-        }
-        var index: usize = 0;
-        while (index < self.missing_loops.items.len) {
-            if (!std.mem.eql(u8, self.missing_loops.items[index].project, project)) {
-                index += 1;
-                continue;
-            }
-            const entry = self.missing_loops.items[index];
-            try taken.append(self.allocator, entry.loop);
-            self.allocator.free(entry.project);
-            _ = self.missing_loops.orderedRemove(index);
-        }
-        return taken.toOwnedSlice(self.allocator);
-    }
-
-    pub fn freeLoopIds(self: *const Workspace, ids: [][]u8) void {
-        for (ids) |id| self.allocator.free(id);
-        self.allocator.free(ids);
-    }
-
-    fn clearMissingLoops(self: *Workspace) void {
-        for (self.missing_loops.items) |entry| {
-            self.allocator.free(entry.project);
-            self.allocator.free(entry.loop);
-        }
-        self.missing_loops.deinit(self.allocator);
-        self.missing_loops = .empty;
+    /// Whether the saved layout file of a loop still exists.
+    pub fn loopLayoutExists(self: *const Workspace, loop: []const u8) bool {
+        const root = self.layoutRoot() orelse return false;
+        const path = WorkspaceLayout.loopLayoutPath(self.allocator, root, loop) catch return false;
+        defer self.allocator.free(path);
+        std.fs.cwd().access(path, .{}) catch return false;
+        return true;
     }
 
     /// The loop-scoped layouts saved beside this workspace's, for reconciling with the graph.

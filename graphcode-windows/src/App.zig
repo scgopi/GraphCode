@@ -1446,6 +1446,12 @@ pub const App = struct {
     require_smoke_contract: bool = false,
     smoke_failure: bool = false,
     smoke_tick: usize = 0,
+    /// Loops a snapshot reported missing, each with its own timer, request budget and
+    /// outstanding read. Nothing here ends a session by itself: only the daemon's
+    /// correlated reply to `readProjectGraph` does.
+    loop_probes: std.ArrayListUnmanaged(LoopProbe) = .empty,
+    /// Replaces the wall clock for the probe timers in tests.
+    loop_clock_ns: ?i128 = null,
     smoke_action_requested: bool = false,
     smoke_input_requested: bool = false,
     smoke_idle_ticks: usize = 0,
@@ -1569,6 +1575,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.freeLoopProbes();
         self.workspace_summary_work.drain();
         self.drainWorktreeInspection();
         self.drainWorktreeReclaim();
@@ -1830,6 +1837,7 @@ pub const App = struct {
         comptime refresh: fn (*App) void,
         publish: anytype,
     ) void {
+        if (self.takeLoopRead(frame)) return;
         var incoming_project_path: ?[]u8 = null;
         defer if (incoming_project_path) |path| self.allocator.free(path);
         if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
@@ -2074,25 +2082,23 @@ pub const App = struct {
     /// daemon spells it.
     ///
     /// A snapshot alone is never proof a loop is gone: one cut short by a daemon restart, or
-    /// a replay of a stale one, lacks loops that still exist. So an empty snapshot proves
-    /// nothing, a loop must be missing from two successive snapshots before its sessions are
-    /// ended, and on the first snapshot only layouts older than this shell are considered (a
-    /// newer one is another shell's, whose loop this snapshot may simply predate).
+    /// a replay of a stale one, lacks loops that still exist, and so does a replay of the very
+    /// graph that lost it. So an empty snapshot proves nothing, and a loop missing from a
+    /// snapshot is only watched (`LoopProbe`): after a settle delay the shell asks the daemon
+    /// for the project's graph (`readProjectGraph`), and only that correlated reply, taken on
+    /// the same connection, can authorize ending the loop's sessions (`takeLoopRead`). Later
+    /// event snapshots are never that second look. On the first snapshot of a project only
+    /// layouts older than this shell are considered (a newer one is another shell's, whose
+    /// loop this snapshot may simply predate).
     fn endDeletedLoops(self: *App, identity: LoopIdentity) void {
         const workspace = self.workspace orelse return;
         const graph = self.model.graphFor(identity.project) orelse return;
         if (graph.nodes.items.len == 0) return;
-        const known: TerminalWorkspace.KnownNodes = .{ .context = graph, .contains = graphNamesNode };
-
-        const previous = workspace.takeMissingLoops(identity.project) catch return;
-        defer workspace.freeLoopIds(previous);
-        for (previous) |id| {
-            if (!graphHasLoop(graph, id)) _ = workspace.retireLoopGuarded(id, identity.project, known);
-        }
+        self.dropRestoredProbes(identity.project, graph);
         if (identity.ids) |ids| {
             for (ids) |id| {
-                if (graphHasLoop(graph, id) or containsLoopId(previous, id)) continue;
-                workspace.markLoopMissing(identity.project, id) catch {};
+                if (graphHasLoop(graph, id)) continue;
+                self.watchLoop(identity.project, id);
             }
             return;
         }
@@ -2101,16 +2107,200 @@ pub const App = struct {
         for (saved) |record| {
             if (!std.mem.eql(u8, record.project, identity.project)) continue;
             if (record.modified_ns >= workspace.started_ns) continue;
-            if (graphHasLoop(graph, record.loop) or containsLoopId(previous, record.loop)) continue;
-            workspace.markLoopMissing(identity.project, record.loop) catch {};
+            if (graphHasLoop(graph, record.loop)) continue;
+            self.watchLoop(identity.project, record.loop);
         }
     }
 
-    fn containsLoopId(ids: []const []u8, id: []const u8) bool {
-        for (ids) |candidate| {
-            if (std.mem.eql(u8, candidate, id)) return true;
+    const loop_settle_ns: i128 = 3 * std.time.ns_per_s;
+    const loop_read_timeout_ns: i128 = 10 * std.time.ns_per_s;
+    /// Reads sent per loop. Only a read that was queued counts; when they are spent the loop
+    /// is kept, as no fresh observation of the daemon's graph authorized ending it.
+    const loop_read_limit: u8 = 3;
+
+    const LoopProbe = struct {
+        project: []u8,
+        loop: []u8,
+        /// The connection this loop was seen missing on.
+        generation: u64,
+        due_ns: i128,
+        sends: u8 = 0,
+        read_id: ?[36]u8 = null,
+        read_generation: u64 = 0,
+        read_deadline_ns: i128 = 0,
+    };
+
+    fn loopNow(self: *const App) i128 {
+        return self.loop_clock_ns orelse std.time.nanoTimestamp();
+    }
+
+    fn freeLoopProbe(self: *App, probe: LoopProbe) void {
+        self.allocator.free(probe.project);
+        self.allocator.free(probe.loop);
+    }
+
+    fn freeLoopProbes(self: *App) void {
+        for (self.loop_probes.items) |probe| self.freeLoopProbe(probe);
+        self.loop_probes.deinit(self.allocator);
+        self.loop_probes = .empty;
+    }
+
+    fn findLoopProbe(self: *const App, project: []const u8, loop: []const u8) ?usize {
+        for (self.loop_probes.items, 0..) |probe, index| {
+            if (std.mem.eql(u8, probe.project, project) and std.mem.eql(u8, probe.loop, loop)) return index;
         }
-        return false;
+        return null;
+    }
+
+    fn removeLoopProbe(self: *App, index: usize) void {
+        self.freeLoopProbe(self.loop_probes.orderedRemove(index));
+    }
+
+    /// Starts the timer of a loop a snapshot of `project` lacks. Another project's traffic,
+    /// or a later snapshot that still lacks the loop, never touches an existing timer.
+    fn watchLoop(self: *App, project: []const u8, loop: []const u8) void {
+        const generation = self.client.connectionGeneration();
+        if (self.findLoopProbe(project, loop)) |index| {
+            if (self.loop_probes.items[index].generation == generation) return;
+            self.removeLoopProbe(index);
+        }
+        const owned_project = self.allocator.dupe(u8, project) catch return;
+        const owned_loop = self.allocator.dupe(u8, loop) catch {
+            self.allocator.free(owned_project);
+            return;
+        };
+        self.loop_probes.append(self.allocator, .{
+            .project = owned_project,
+            .loop = owned_loop,
+            .generation = generation,
+            .due_ns = self.loopNow() + loop_settle_ns,
+        }) catch {
+            self.allocator.free(owned_project);
+            self.allocator.free(owned_loop);
+        };
+    }
+
+    /// A snapshot that has a watched loop again (undo, a recreate) ends the watch.
+    fn dropRestoredProbes(self: *App, project: []const u8, graph: *const GraphModel.GraphSummary) void {
+        var index: usize = 0;
+        while (index < self.loop_probes.items.len) {
+            const probe = self.loop_probes.items[index];
+            if (std.mem.eql(u8, probe.project, project) and graphHasLoop(graph, probe.loop)) {
+                self.removeLoopProbe(index);
+            } else index += 1;
+        }
+    }
+
+    /// The shell timer's step: asks the daemon for a project's graph for the loops whose
+    /// own timer is due. A probe from an earlier connection is dropped (the daemon may have
+    /// restarted and replayed less). Nothing is asked while disconnected, on a v1 daemon
+    /// (which has no such command), or for a project the shell does not hold.
+    fn probeMissingLoops(self: *App) void {
+        if (self.loop_probes.items.len == 0) return;
+        const connected = self.client.connectionState() == .connected;
+        const generation = self.client.connectionGeneration();
+        const now = self.loopNow();
+        var index: usize = 0;
+        while (index < self.loop_probes.items.len) {
+            const probe = &self.loop_probes.items[index];
+            if (probe.generation != generation) {
+                self.removeLoopProbe(index);
+                continue;
+            }
+            index += 1;
+            if (!connected) continue;
+            if (probe.read_id != null) {
+                if (now >= probe.read_deadline_ns) probe.read_id = null;
+                continue;
+            }
+            if (now < probe.due_ns or probe.sends >= loop_read_limit) continue;
+            if (self.model.graphFor(probe.project) == null) continue;
+            self.sendLoopRead(probe.project, now);
+        }
+    }
+
+    fn sendLoopRead(self: *App, project: []const u8, now: i128) void {
+        const read = self.client.sendReadProjectGraph(project);
+        for (self.loop_probes.items) |*probe| {
+            if (!std.mem.eql(u8, probe.project, project) or probe.read_id != null) continue;
+            if (probe.sends >= loop_read_limit or now < probe.due_ns) continue;
+            probe.due_ns = now + loop_settle_ns;
+            const sent = read orelse continue;
+            probe.sends += 1;
+            probe.read_id = sent.request_id;
+            probe.read_generation = sent.generation;
+            probe.read_deadline_ns = now + loop_read_timeout_ns;
+        }
+    }
+
+    /// Handles the daemon's answer to a `readProjectGraph` this shell sent; false when the
+    /// frame answers no outstanding read. The answer is the second look at a missing loop, and
+    /// it ends the loop's sessions only when it arrived on the connection the read was sent
+    /// on, names the same canonical project, is not empty, and lacks the loop. An error, a
+    /// reply from another connection, or anything else keeps the sessions. It is never
+    /// applied to the model: it is a look, not a change.
+    fn takeLoopRead(self: *App, frame: []const u8) bool {
+        const kind = Wire.frameKind(frame);
+        if (kind != .response and kind != .@"error") return false;
+        const id = Wire.correlatedRequestID(frame) orelse return false;
+        var ours = false;
+        for (self.loop_probes.items) |probe| {
+            if (probe.read_id) |read_id| {
+                if (std.ascii.eqlIgnoreCase(&read_id, id)) ours = true;
+            }
+        }
+        if (!ours) return false;
+
+        const frame_generation = self.client.deliveringGeneration();
+        const connection_generation = self.client.connectionGeneration();
+        var scratch = GraphModel.Model.init(self.allocator);
+        defer scratch.deinit();
+        const parsed = kind == .response and blk: {
+            _ = scratch.updateFromFrame(frame) catch break :blk false;
+            break :blk scratch.currentGraph() != null;
+        };
+        const now = self.loopNow();
+        var index: usize = 0;
+        while (index < self.loop_probes.items.len) {
+            const probe = &self.loop_probes.items[index];
+            const read_id = probe.read_id orelse {
+                index += 1;
+                continue;
+            };
+            if (!std.ascii.eqlIgnoreCase(&read_id, id)) {
+                index += 1;
+                continue;
+            }
+            probe.read_id = null;
+            const graph = if (parsed) scratch.currentGraph() else null;
+            const fresh = graph != null and
+                frame_generation == probe.read_generation and
+                connection_generation == probe.read_generation and
+                probe.generation == probe.read_generation and
+                std.mem.eql(u8, graph.?.project.path, probe.project) and
+                graph.?.nodes.items.len != 0;
+            if (!fresh) {
+                index += 1;
+                continue;
+            }
+            if (graphHasLoop(graph.?, probe.loop)) {
+                self.removeLoopProbe(index);
+                continue;
+            }
+            const workspace = self.workspace orelse {
+                index += 1;
+                continue;
+            };
+            const known: TerminalWorkspace.KnownNodes = .{ .context = graph.?, .contains = graphNamesNode };
+            _ = workspace.retireLoopGuarded(probe.loop, probe.project, known);
+            // A layout that is still there was not ended (its sessions could not be listed,
+            // or the shell refused): ask again while the budget lasts, never kill unasked.
+            if (workspace.loopLayoutExists(probe.loop) and probe.sends < loop_read_limit) {
+                probe.due_ns = now + loop_settle_ns;
+                index += 1;
+            } else self.removeLoopProbe(index);
+        }
+        return true;
     }
 
     fn graphNamesNode(context: *const anyopaque, id: []const u8) bool {
@@ -8924,6 +9114,7 @@ fn onWindowMessage(
                 }
             }
             app.client.poll();
+            app.probeMissingLoops();
             const connection_state = app.client.connectionState();
             if (connection_state == .connected) app.flushPendingProject();
             if (app.client.connectionState() == .connected) {
@@ -13088,10 +13279,10 @@ const LiveTerminalFixture = struct {
         self.tmp.cleanup();
     }
 
-    fn frame(self: *LiveTerminalFixture, sequence: usize, loops: []const LiveLoop) ![]u8 {
+    fn nodesJson(loops: []const LiveLoop) ![]u8 {
         const allocator = std.testing.allocator;
         var nodes: std.ArrayListUnmanaged(u8) = .empty;
-        defer nodes.deinit(allocator);
+        errdefer nodes.deinit(allocator);
         for (loops, 0..) |loop, index| {
             const binding = if (loop.worktree) |path|
                 try std.fmt.allocPrint(allocator, ",\"worktreeBinding\":{{\"path\":{f}}}", .{std.json.fmt(path, .{})})
@@ -13106,12 +13297,159 @@ const LiveTerminalFixture = struct {
             defer allocator.free(node);
             try nodes.appendSlice(allocator, node);
         }
+        return nodes.toOwnedSlice(allocator);
+    }
+
+    fn frame(self: *LiveTerminalFixture, sequence: usize, loops: []const LiveLoop) ![]u8 {
+        const allocator = std.testing.allocator;
+        const nodes = try nodesJson(loops);
+        defer allocator.free(nodes);
         return std.fmt.allocPrint(
             allocator,
             "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[]}}}}}}",
-            .{ sequence, std.json.fmt(self.project, .{}), nodes.items },
+            .{ sequence, std.json.fmt(self.project, .{}), nodes },
         );
     }
+
+    /// An uncorrelated connection-snapshot event in the daemon's real envelope (the graph
+    /// wrapped in `_0`, as the daemon encodes `case graphChanged(LoopGraph)`).
+    fn eventFrame(self: *LiveTerminalFixture, loops: []const LiveLoop) ![]u8 {
+        const allocator = std.testing.allocator;
+        const nodes = try nodesJson(loops);
+        defer allocator.free(nodes);
+        const value = try std.fmt.allocPrint(
+            allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
+            .{ self.sequence, std.json.fmt(self.project, .{}), nodes },
+        );
+        self.sequence += 1;
+        return value;
+    }
+
+    /// The daemon's correlated answer to `readProjectGraph`: `kind: response` with the
+    /// request's id (echoed in uppercase) and the graph in the same `_0` shape.
+    fn responseFrame(self: *LiveTerminalFixture, request_id: [36]u8, loops: []const LiveLoop) ![]u8 {
+        const allocator = std.testing.allocator;
+        const nodes = try nodesJson(loops);
+        defer allocator.free(nodes);
+        var upper: [36]u8 = undefined;
+        _ = std.ascii.upperString(&upper, &request_id);
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
+            .{ &upper, std.json.fmt(self.project, .{}), nodes },
+        );
+    }
+
+    /// Ticks past the settle delay, then answers the read it sent with a snapshot of `nodes`.
+    fn confirmWith(self: *LiveTerminalFixture, start: i128, nodes: []const u8) !void {
+        self.timerTick(start + 4 * std.time.ns_per_s);
+        var ids: [8][36]u8 = undefined;
+        const count = self.reads(&ids);
+        try std.testing.expect(count > 0);
+        var upper: [36]u8 = undefined;
+        _ = std.ascii.upperString(&upper, &ids[count - 1]);
+        const value = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":0}}}}}}}}",
+            .{ &upper, std.json.fmt(self.project, .{}), nodes },
+        );
+        defer std.testing.allocator.free(value);
+        self.feed(value, self.gen());
+    }
+
+    fn errorFrame(request_id: [36]u8) ![]u8 {
+        var upper: [36]u8 = undefined;
+        _ = std.ascii.upperString(&upper, &request_id);
+        return std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"kind\":\"error\",\"requestID\":\"{s}\",\"error\":{{\"message\":\"The project isn't open on this connection\",\"code\":\"requestFailed\"}},\"version\":2}}",
+            .{&upper},
+        );
+    }
+
+    /// Feeds one frame the way the client's `poll` does: stamped with the connection
+    /// generation it was received on.
+    fn feed(self: *LiveTerminalFixture, value: []const u8, generation: u64) void {
+        self.app.client.delivering_generation = generation;
+        self.app.onFrameWithAccessibilityPublish(value, App.publishAccessibility);
+    }
+
+    /// The daemon replies to a read with its graph, on `generation`.
+    fn respond(self: *LiveTerminalFixture, request_id: [36]u8, generation: u64, loops: []const LiveLoop) !void {
+        const value = try self.responseFrame(request_id, loops);
+        defer std.testing.allocator.free(value);
+        self.feed(value, generation);
+    }
+
+    /// An uncorrelated event snapshot, on `generation`.
+    fn event(self: *LiveTerminalFixture, generation: u64, loops: []const LiveLoop) !void {
+        const value = try self.eventFrame(loops);
+        defer std.testing.allocator.free(value);
+        self.feed(value, generation);
+    }
+
+    /// Marks the daemon connected (v2) under a controlled clock; returns the clock's start.
+    fn connect(self: *LiveTerminalFixture) i128 {
+        const start = std.time.nanoTimestamp();
+        const client = &self.app.client;
+        client.mode = .v2;
+        client.state = .connected;
+        client.connection_generation +%= 1;
+        self.app.last_connection_state = .connected;
+        self.app.sync_requested = true;
+        self.app.restore_requested = true;
+        self.app.quick_chats_requested = true;
+        self.app.loop_clock_ns = start;
+        return start;
+    }
+
+    /// The daemon went away and came back: a new connection generation.
+    fn reconnect(self: *LiveTerminalFixture) void {
+        self.app.client.connection_generation +%= 1;
+    }
+
+    fn gen(self: *LiveTerminalFixture) u64 {
+        return self.app.client.connection_generation;
+    }
+
+    /// The ids of the `readProjectGraph` requests queued so far, in order.
+    fn reads(self: *LiveTerminalFixture, out: *[8][36]u8) usize {
+        const client = &self.app.client;
+        var count: usize = 0;
+        for (0..client.outbound_count) |offset| {
+            const index = (client.outbound_head + offset) % client.outbound.len;
+            if (std.mem.indexOf(u8, client.outbound[index], "readProjectGraph") == null) continue;
+            if (count == out.len) break;
+            out[count] = client.outbound_request_ids[index] orelse continue;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn readCount(self: *LiveTerminalFixture) usize {
+        var ids: [8][36]u8 = undefined;
+        return self.reads(&ids);
+    }
+
+    /// Every queued command that is not a `readProjectGraph`: none may ever be an open.
+    fn opens(self: *LiveTerminalFixture) usize {
+        const client = &self.app.client;
+        var count: usize = 0;
+        for (0..client.outbound_count) |offset| {
+            const index = (client.outbound_head + offset) % client.outbound.len;
+            if (std.mem.indexOf(u8, client.outbound[index], "openProject") != null) count += 1;
+        }
+        return count;
+    }
+
+    /// One WM_TIMER through the window procedure at `now`.
+    fn timerTick(self: *LiveTerminalFixture, now: i128) void {
+        self.app.loop_clock_ns = now;
+        var result: c.LRESULT = 0;
+        _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
+    }
+
 
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
@@ -13283,6 +13621,14 @@ const LiveTerminalFixture = struct {
         var name: [160]u8 = undefined;
         const needle = std.fmt.bufPrint(&name, "graphcode-{s}", .{session}) catch return false;
         return std.mem.indexOf(u8, text, needle) != null;
+    }
+
+    fn killCount(self: *LiveTerminalFixture, session: []const u8) !usize {
+        const text = try self.kills();
+        defer std.testing.allocator.free(text);
+        var name: [160]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&name, "graphcode-{s}", .{session});
+        return std.mem.count(u8, text, needle);
     }
 
     /// Ticks the shell for a while, so a kill that must not happen has had its chance.
@@ -14982,11 +15328,12 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
     // Loop A is deleted while loop B is the one open.
     try fixture.setLive(&.{ "loop-b", a_tab, a_split, b_tab });
+    const start = fixture.connect();
     try fixture.deliver(&.{.{ .id = "loop-b" }});
     fixture.settle();
     try std.testing.expect(!fixture.killed(a_tab));
-    // A second snapshot without loop A agrees it is gone.
-    try fixture.deliver(&.{.{ .id = "loop-b" }});
+    // The daemon's own answer to a read, not another event, agrees it is gone.
+    try fixture.confirmWith(start, node_loop_b);
     try fixture.waitFor(LiveTerminalFixture.killed, a_tab);
     try fixture.waitFor(LiveTerminalFixture.killed, a_split);
     fixture.settle();
@@ -15306,6 +15653,7 @@ const shell_uuid_six = "5e11ba5e-0006-4000-8000-000000000006";
 const shell_uuid_seven = "5e11ba5e-0007-4000-8000-000000000007";
 const agent_uuid_upper = "AAAA0000-0000-4000-8000-0000000000AA";
 
+const node_loop_b = "{\"id\":\"loop-b\",\"title\":\"b\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}";
 const node_loop_a = "{\"id\":\"loop-a\",\"title\":\"a\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}";
 
 /// The snapshot the daemon sends once its project has loaded: loop A, a composite nesting
@@ -15314,7 +15662,7 @@ const nodes_full = node_loop_a ++ "," ++
     "{\"id\":\"group\",\"title\":\"g\",\"loopType\":\"composite\",\"state\":{\"idle\":{}},\"subGraph\":{\"nodes\":[{\"id\":\"nested-loop\",\"title\":\"n\",\"state\":{\"idle\":{}}}],\"edges\":[]}}," ++
     "{\"id\":\"upper-loop\",\"title\":\"u\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}";
 
-test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once a second snapshot agrees, and only those" {
+test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once the daemon's own answer agrees, and only those" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
@@ -15337,6 +15685,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
     try fixture.setLive(&.{ "loop-a", shell_uuid_one, shell_uuid_two, shell_uuid_three, shell_uuid_four, shell_uuid_five, shell_uuid_six });
     fixture.predateLayouts();
     try fixture.forgetGraph();
+    const start = fixture.connect();
 
     // The first snapshot only records what is missing: one report is not proof.
     try fixture.deliverNodes(nodes_full);
@@ -15344,7 +15693,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
     try std.testing.expect(!fixture.killed(shell_uuid_one));
     try std.testing.expect(fixture.layoutExists("gone-loop.json"));
 
-    try fixture.deliverNodes(nodes_full);
+    try fixture.confirmWith(start, nodes_full);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
     fixture.settle();
     for ([_][]const u8{ shell_uuid_two, shell_uuid_three, shell_uuid_four, shell_uuid_five, shell_uuid_six }) |kept| {
@@ -15367,10 +15716,13 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
     try fixture.setLive(&.{ "loop-a", shell_uuid_one, shell_uuid_two });
     fixture.predateLayouts();
     try fixture.forgetGraph();
+    const start = fixture.connect();
 
     // A daemon that has not loaded its project reports no loops, however often it says so.
     try fixture.deliverNodes("");
     try fixture.deliverNodes("");
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
     fixture.settle();
     try fixture.expectKills("");
     try std.testing.expect(fixture.layoutExists("loop-a.json"));
@@ -15379,7 +15731,9 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
     // A snapshot cut short by a restart lacks loop A; the next one has it back.
     try fixture.forgetGraph();
     try fixture.deliverNodes("{\"id\":\"loop-z\",\"title\":\"z\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}");
-    try fixture.deliverNodes(node_loop_a ++ ",{\"id\":\"loop-z\",\"title\":\"z\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}");
+    const full = node_loop_a ++ ",{\"id\":\"loop-z\",\"title\":\"z\",\"loopType\":\"turnBased\",\"state\":{\"idle\":{}}}";
+    try fixture.deliverNodes(full);
+    try fixture.confirmWith(start + 20 * std.time.ns_per_s, full);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_two);
     fixture.settle();
     try std.testing.expect(!fixture.killed(shell_uuid_one));
@@ -15402,7 +15756,7 @@ test "workspace layout: a layout saved after this shell started is another shell
     try std.testing.expect(fixture.layoutExists("other-shells-loop.json"));
 }
 
-test "workspace layout: a loop deleted after the shell has seen the project is ended on the next snapshot that agrees" {
+test "workspace layout: a loop deleted after the shell has seen the project is ended when the daemon's own answer agrees" {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
     defer fixture.deinit();
@@ -15410,15 +15764,300 @@ test "workspace layout: a loop deleted after the shell has seen the project is e
     try fixture.markOwned("loop-b", &.{shell_uuid_one});
     try fixture.setLive(&.{ "loop-a", "loop-b", shell_uuid_one });
 
+    const start = fixture.connect();
     try fixture.deliver(&.{.{ .id = "loop-a" }});
     fixture.settle();
     try std.testing.expect(!fixture.killed(shell_uuid_one));
     // A snapshot that brings loop B back (a reconnect's replay) cancels the pending end.
     try fixture.deliver(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } });
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
     try fixture.deliver(&.{.{ .id = "loop-a" }});
-    try fixture.deliver(&.{.{ .id = "loop-a" }});
+    try fixture.confirmWith(start + 10 * std.time.ns_per_s, node_loop_a);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
     try std.testing.expect(!fixture.layoutExists("loop-b.json"));
+}
+
+const DeletedLoopScene = struct {
+    /// Loops A, B and C; C is deleted. C's layout holds a shell session this shell owns.
+    fn init(fixture: *LiveTerminalFixture) !void {
+        try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-c" } });
+        try fixture.saveLoopLayout(fixture.project, "loop-c", &.{ .{ .id = "loop-c", .agent = true }, .{ .id = shell_uuid_one } });
+        try fixture.markOwned("loop-c", &.{shell_uuid_one});
+        try fixture.setLive(&.{ "loop-a", "loop-b", "loop-c", shell_uuid_one });
+    }
+
+    const remaining: []const LiveLoop = &.{ .{ .id = "loop-a" }, .{ .id = "loop-b" } };
+    const all: []const LiveLoop = &.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-c" } };
+
+    /// The only read the shell has queued.
+    fn onlyRead(fixture: *LiveTerminalFixture) ![36]u8 {
+        var ids: [8][36]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), fixture.reads(&ids));
+        return ids[0];
+    }
+};
+
+test "workspace layout: the last graph change deleted a loop and no further one comes, its shell session is still ended" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    // A and B remain, C is deleted, and the daemon sends nothing more.
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 1 * std.time.ns_per_s);
+    fixture.timerTick(start + 2 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+    // After the settle delay the timer asks; the held graph alone ends nothing.
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // The daemon's correlated reply is the second look.
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    fixture.settle();
+    try std.testing.expect(!fixture.layoutExists("loop-c.json"));
+    try std.testing.expect(!fixture.killed("loop-a") and !fixture.killed("loop-b"));
+
+    // One kill, however long the shell keeps ticking afterwards, and no project is opened.
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    fixture.timerTick(start + 120 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    try std.testing.expectEqual(@as(usize, 0), fixture.opens());
+    fixture.settle();
+    try std.testing.expectEqual(@as(usize, 1), try fixture.killCount(shell_uuid_one));
+}
+
+test "workspace layout: event snapshots while a read is pending are not the second look" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+
+    // The daemon repeats the very graph that lost C, as an uncorrelated event, before and
+    // after the reply is due: none of them authorizes anything or restarts the timer.
+    try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 5 * std.time.ns_per_s);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+test "workspace layout: a reply that still has the loop, or has it again, ends nothing" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    // The loop was recreated before the timer ran: no read is sent at all.
+    try fixture.deliver(DeletedLoopScene.remaining);
+    try fixture.deliver(DeletedLoopScene.all);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+    // The loop was recreated after the read was sent: the reply has it.
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 8 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.all);
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+}
+
+test "workspace layout: an error reply, a refused queue, a v1 daemon and an empty reply end nothing" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.remaining);
+
+    // A refused queue sends nothing and spends none of the budget.
+    const client = &fixture.app.client;
+    const queued = client.outbound_count;
+    client.outbound_count = client.outbound.len;
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    fixture.timerTick(start + 8 * std.time.ns_per_s);
+    fixture.timerTick(start + 12 * std.time.ns_per_s);
+    client.outbound_count = queued;
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+    // A v1 daemon has no such command: nothing is asked, however long the shell waits.
+    client.mode = .v1;
+    fixture.timerTick(start + 40 * std.time.ns_per_s);
+    fixture.timerTick(start + 80 * std.time.ns_per_s);
+    client.mode = .v2;
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    try fixture.expectKills("");
+
+    // The daemon refuses the read (the project is not open on this connection).
+    fixture.timerTick(start + 100 * std.time.ns_per_s);
+    var read = try DeletedLoopScene.onlyRead(&fixture);
+    const refusal = try LiveTerminalFixture.errorFrame(read);
+    defer std.testing.allocator.free(refusal);
+    fixture.feed(refusal, fixture.gen());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+
+    // An empty reply proves nothing either (a daemon that just restarted).
+    fixture.timerTick(start + 110 * std.time.ns_per_s);
+    var ids: [8][36]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), fixture.reads(&ids));
+    read = ids[1];
+    try fixture.respond(read, fixture.gen(), &.{});
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+    try std.testing.expectEqual(@as(usize, 0), fixture.opens());
+}
+
+test "workspace layout: a reply from another connection ends nothing" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.remaining);
+
+    // The daemon went away between two ticks; the read's reply arrives on the old connection
+    // after the new one is up, and a reply stamped with the new one answers nothing asked there.
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    const old_generation = fixture.gen();
+    fixture.reconnect();
+    try fixture.respond(read, old_generation, DeletedLoopScene.remaining);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    fixture.timerTick(start + 8 * std.time.ns_per_s);
+    try fixture.respond(read, old_generation, DeletedLoopScene.remaining);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+
+    // What was seen before the reconnect does not count after it: the loop must be seen
+    // missing again, and asked about again, on the new connection.
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    fixture.timerTick(start + 100 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    try fixture.event(fixture.gen(), DeletedLoopScene.all);
+    try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
+    fixture.timerTick(start + 102 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    fixture.timerTick(start + 110 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 2), fixture.readCount());
+    var ids: [8][36]u8 = undefined;
+    _ = fixture.reads(&ids);
+    try fixture.respond(ids[1], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+test "workspace layout: reads stop at the budget, and nothing is ended unasked" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.remaining);
+
+    // The daemon never answers.
+    var step: i128 = 1;
+    while (step <= 40) : (step += 1) fixture.timerTick(start + step * 4 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 3), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+
+    // A reply that turns up after the shell gave up on it answers nothing.
+    var ids: [8][36]u8 = undefined;
+    _ = fixture.reads(&ids);
+    try fixture.respond(ids[0], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.respond(ids[2], fixture.gen(), DeletedLoopScene.remaining);
+    fixture.timerTick(start + 1000 * std.time.ns_per_s);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expectEqual(@as(usize, 3), fixture.readCount());
+}
+
+test "workspace layout: a session that cannot be listed is asked about again, and ended only by a later reply" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.remaining);
+
+    try fixture.setFlag("ls-fail.txt", true);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    try fixture.respond(try DeletedLoopScene.onlyRead(&fixture), fixture.gen(), DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+
+    try fixture.setFlag("ls-fail.txt", false);
+    fixture.timerTick(start + 8 * std.time.ns_per_s);
+    var ids: [8][36]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), fixture.reads(&ids));
+    try fixture.expectKills("");
+    try fixture.respond(ids[1], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+test "workspace layout: another project's traffic neither postpones nor shares a loop's cleanup" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    const other =
+        \\{"version":2,"kind":"event","sequence":900,"event":{"graphChanged":{"_0":{"project":{"path":"C:/another-project","name":"Other"},"nodes":[{"id":"other-1","title":"o","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}}
+    ;
+
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.app.loop_clock_ns = start + 2 * std.time.ns_per_s;
+    fixture.feed(other, fixture.gen());
+    fixture.app.loop_clock_ns = start + 3 * std.time.ns_per_s + 500 * std.time.ns_per_ms;
+    fixture.feed(other, fixture.gen());
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+test "workspace layout: an empty graph, and a project the shell does not hold, are never asked about" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    // Deleting every loop leaves an empty graph, which proves nothing: outside this fix.
+    try fixture.deliver(&.{});
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    fixture.timerTick(start + 20 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // A project the shell no longer holds is not asked about: that must never reopen it.
+    try fixture.deliver(DeletedLoopScene.all);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    try fixture.forgetGraph();
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    try std.testing.expectEqual(@as(usize, 0), fixture.opens());
+    fixture.settle();
+    try fixture.expectKills("");
 }
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {
@@ -15437,9 +16076,10 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
     try fixture.setLive(&.{ "loop-a", node_uuid, shell_uuid_one });
     fixture.predateLayouts();
     try fixture.forgetGraph();
+    const start = fixture.connect();
 
     try fixture.deliverNodes(nodes);
-    try fixture.deliverNodes(nodes);
+    try fixture.confirmWith(start, nodes);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
     fixture.settle();
     try std.testing.expect(!fixture.killed(node_uuid));
@@ -18131,6 +18771,7 @@ fn deinitOverviewTestApp(app: *App) void {
     app.allocator.free(app.canvas_press_project_path);
     app.allocator.free(app.canvas_press_node_id);
     app.client.deinit();
+    app.freeLoopProbes();
     app.model.deinit();
     app.sidebar_state.deinit();
     app.declared_entry_ids.deinit();
