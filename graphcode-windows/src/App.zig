@@ -2098,7 +2098,7 @@ pub const App = struct {
         if (identity.ids) |ids| {
             for (ids) |id| {
                 if (graphHasLoop(graph, id)) continue;
-                self.watchLoop(identity.project, id);
+                self.watchLoop(identity.project, id, graph.revision);
             }
             return;
         }
@@ -2108,7 +2108,7 @@ pub const App = struct {
             if (!std.mem.eql(u8, record.project, identity.project)) continue;
             if (record.modified_ns >= workspace.started_ns) continue;
             if (graphHasLoop(graph, record.loop)) continue;
-            self.watchLoop(identity.project, record.loop);
+            self.watchLoop(identity.project, record.loop, graph.revision);
         }
     }
 
@@ -2123,6 +2123,8 @@ pub const App = struct {
         loop: []u8,
         /// The connection this loop was seen missing on.
         generation: u64,
+        /// Revision of the snapshot that lacked the loop; a reply older than it is a stale read.
+        held_revision: ?u64 = null,
         due_ns: i128,
         sends: u8 = 0,
         read_id: ?[36]u8 = null,
@@ -2158,7 +2160,7 @@ pub const App = struct {
 
     /// Starts the timer of a loop a snapshot of `project` lacks. Another project's traffic,
     /// or a later snapshot that still lacks the loop, never touches an existing timer.
-    fn watchLoop(self: *App, project: []const u8, loop: []const u8) void {
+    fn watchLoop(self: *App, project: []const u8, loop: []const u8, held_revision: ?u64) void {
         const generation = self.client.connectionGeneration();
         if (self.findLoopProbe(project, loop)) |index| {
             if (self.loop_probes.items[index].generation == generation) return;
@@ -2173,6 +2175,7 @@ pub const App = struct {
             .project = owned_project,
             .loop = owned_loop,
             .generation = generation,
+            .held_revision = held_revision,
             .due_ns = self.loopNow() + loop_settle_ns,
         }) catch {
             self.allocator.free(owned_project);
@@ -2278,7 +2281,8 @@ pub const App = struct {
                 connection_generation == probe.read_generation and
                 probe.generation == probe.read_generation and
                 std.mem.eql(u8, graph.?.project.path, probe.project) and
-                graph.?.nodes.items.len != 0;
+                graph.?.nodes.items.len != 0 and
+                (probe.held_revision == null or (graph.?.revision != null and graph.?.revision.? >= probe.held_revision.?));
             if (!fresh) {
                 index += 1;
                 continue;
@@ -15856,6 +15860,37 @@ test "workspace layout: event snapshots while a read is pending are not the seco
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
 }
 
+test "workspace layout: a reply older than the snapshot that lost the loop ends nothing" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    const nodes = try LiveTerminalFixture.nodesJson(DeletedLoopScene.remaining);
+    defer std.testing.allocator.free(nodes);
+    const held = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":90,\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":7}}}}}}}}",
+        .{ std.json.fmt(fixture.project, .{}), nodes },
+    );
+    defer std.testing.allocator.free(held);
+    fixture.feed(held, fixture.gen());
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+
+    var upper: [36]u8 = undefined;
+    _ = std.ascii.upperString(&upper, &read);
+    const stale = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"_0\":{{\"project\":{{\"path\":{f},\"name\":\"Core\"}},\"nodes\":[{s}],\"edges\":[],\"revision\":6}}}}}}}}",
+        .{ &upper, std.json.fmt(fixture.project, .{}), nodes },
+    );
+    defer std.testing.allocator.free(stale);
+    fixture.feed(stale, fixture.gen());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+}
 test "workspace layout: a reply that still has the loop, or has it again, ends nothing" {
     var fixture: LiveTerminalFixture = undefined;
     try DeletedLoopScene.init(&fixture);
