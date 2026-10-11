@@ -210,6 +210,100 @@ pub fn commandOpenProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 
     });
 }
 
+/// Read-only: the daemon answers with one correlated graphChanged response for a
+/// project this connection already opened, or an error. Never opens anything.
+pub fn commandReadProjectGraph(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return daemonPathCommand(allocator, "readProjectGraph", path);
+}
+
+test "envelope fields are read at the top level only and events never correlate" {
+    const event = "{\"nodes\":[{\"kind\":\"response\",\"title\":\"x\"}],\"version\":2,\"requestID\":\"nested\"," ++
+        "\"kind\":\"event\",\"event\":{\"graphChanged\":{\"title\":\"\\\"requestID\\\":\\\"y\\\"\"}}}";
+    try std.testing.expectEqual(FrameKind.event, frameKind(event));
+    try std.testing.expect(correlatedRequestID(event) == null);
+    const response = "{\"event\":{\"graphChanged\":{\"kind\":\"event\"}},\"kind\":\"response\"," ++
+        "\"requestID\":\"11111111-1111-4111-8111-111111111111\",\"version\":2}";
+    try std.testing.expectEqual(FrameKind.response, frameKind(response));
+    try std.testing.expectEqualStrings("11111111-1111-4111-8111-111111111111", correlatedRequestID(response).?);
+    const failure = "{\"kind\":\"error\",\"requestID\":\"22222222-2222-4222-8222-222222222222\",\"error\":{\"code\":\"x\"}}";
+    try std.testing.expectEqual(FrameKind.@"error", frameKind(failure));
+    try std.testing.expectEqualStrings("22222222-2222-4222-8222-222222222222", correlatedRequestID(failure).?);
+    try std.testing.expectEqual(FrameKind.other, frameKind("{\"version\":2}"));
+    const command = try commandReadProjectGraph(std.testing.allocator, "C:\\w");
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("{\"readProjectGraph\":{\"path\":\"C:\\\\w\"}}", command);
+}
+
+pub const FrameKind = enum { response, event, @"error", other };
+
+/// A value of the envelope's own top-level string field. `jsonString` takes the first
+/// match anywhere, which a loop's own JSON (an edge's `kind`) can shadow; this one
+/// looks at nesting depth 1 only.
+pub fn topLevelString(data: []const u8, key: []const u8) ?[]const u8 {
+    var depth: usize = 0;
+    var cursor: usize = 0;
+    while (cursor < data.len) : (cursor += 1) {
+        switch (data[cursor]) {
+            '{', '[' => depth += 1,
+            '}', ']' => {
+                if (depth == 0) return null;
+                depth -= 1;
+            },
+            '"' => {
+                const start = cursor + 1;
+                var end = start;
+                var escaped = false;
+                while (end < data.len) : (end += 1) {
+                    if (escaped) {
+                        escaped = false;
+                    } else if (data[end] == '\\') {
+                        escaped = true;
+                    } else if (data[end] == '"') break;
+                }
+                if (end >= data.len) return null;
+                cursor = end;
+                if (depth != 1 or !std.mem.eql(u8, data[start..end], key)) continue;
+                var after = end + 1;
+                while (after < data.len and (data[after] == ' ' or data[after] == '\t')) : (after += 1) {}
+                if (after >= data.len or data[after] != ':') continue;
+                after += 1;
+                while (after < data.len and (data[after] == ' ' or data[after] == '\t')) : (after += 1) {}
+                if (after >= data.len or data[after] != '"') return null;
+                const value_start = after + 1;
+                var value_end = value_start;
+                var value_escaped = false;
+                while (value_end < data.len) : (value_end += 1) {
+                    if (value_escaped) {
+                        value_escaped = false;
+                    } else if (data[value_end] == '\\') {
+                        value_escaped = true;
+                    } else if (data[value_end] == '"') return data[value_start..value_end];
+                }
+                return null;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn frameKind(data: []const u8) FrameKind {
+    const kind = topLevelString(data, "kind") orelse return .other;
+    if (std.mem.eql(u8, kind, "response")) return .response;
+    if (std.mem.eql(u8, kind, "event")) return .event;
+    if (std.mem.eql(u8, kind, "error")) return .@"error";
+    return .other;
+}
+
+/// The request id of an envelope that answers a request — a response or an error — and
+/// only that. An event can never carry one that counts.
+pub fn correlatedRequestID(data: []const u8) ?[]const u8 {
+    switch (frameKind(data)) {
+        .response, .@"error" => return topLevelString(data, "requestID"),
+        else => return null,
+    }
+}
+
 pub fn commandCloseProject(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return daemonPathCommand(allocator, "closeProject", path);
 }

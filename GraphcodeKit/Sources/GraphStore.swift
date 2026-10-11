@@ -900,6 +900,23 @@ public actor GraphStore {
     transferAuthorizations.removeAll()
   }
 
+  /// The current graph as a v2 connection that has joined this store would be sent it,
+  /// with no side effect: no join, no authorization, no revision bump, no broadcast.
+  public func readSnapshot(
+    connectionID: UUID, channel expectedChannel: DaemonConnectionChannel
+  ) -> GraphStoreCommandResult {
+    guard subGraphDepth == 0, let channel = connections[connectionID],
+      channel === expectedChannel, case .v2 = channel.mode
+    else {
+      return .rejected(message: "The project is not joined by this v2 connection.", graph: graph)
+    }
+    let snapshot = graph.wireSnapshot(revision: revision)
+    guard Self.v2GraphChangeFits(snapshot, limit: FramedMessageIO.v2MaxPayloadBytes) else {
+      return .rejected(message: "Project snapshot exceeds the v2 payload limit.", graph: graph)
+    }
+    return .applied(graph: snapshot)
+  }
+
   public func snapshotForProjectTransfer(
     connectionID: UUID, token: UUID, channel expectedChannel: DaemonConnectionChannel? = nil
   ) -> GraphStoreCommandResult {

@@ -15,6 +15,14 @@ public enum DaemonCommand: Codable, Sendable, Equatable {
   case openProject(path: String)
   /// Read and authorize a joined local root on this v2 connection without opening it.
   case projectSnapshot(path: String, token: UUID)
+  /// Read the current graph of a project this v2 connection has already joined, answered
+  /// with exactly one correlated `.graphChanged` response and nothing else. Unlike
+  /// `.openProject` it never opens, joins, persists or broadcasts anything: a project the
+  /// connection has not joined (or that is closing) is refused with an error, so a client
+  /// can use it as an independent look at the daemon's graph without side effects. A
+  /// daemon that predates it answers with a `malformedEnvelope` error for the request;
+  /// a v1 connection cannot correlate it and is refused.
+  case readProjectGraph(path: String)
   /// Validation leaves the snapshot authorization available for one checked import.
   case validateProjectTransfer(path: String, expectedGraphID: UUID, snapshotToken: UUID)
   /// Distinct from legacy import so older daemons cannot silently import unchecked.

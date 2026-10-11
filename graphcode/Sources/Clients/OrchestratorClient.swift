@@ -292,7 +292,7 @@ private actor AppDaemonConnection {
         // These are the public join commands used by app startup. Coalesce each with
         // reconnect rejoin so concurrent startup sends cannot duplicate a join.
         try await sendJoin(command, on: connection)
-      case .projectSnapshot, .validateProjectTransfer, .importProjectChecked:
+      case .readProjectGraph, .projectSnapshot, .validateProjectTransfer, .importProjectChecked:
         // This app socket is v1. Never turn a checked transfer into a legacy import.
         throw OrchestratorClientError.requiresV2TransferConnection
       case .announce, .listRecentProjects, .listQuickChats, .createQuickChat, .openQuickChat,
