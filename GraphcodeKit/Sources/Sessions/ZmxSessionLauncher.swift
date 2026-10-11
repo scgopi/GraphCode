@@ -1311,6 +1311,18 @@ public enum ZmxSessionLauncher {
     await runCollectingOutput(ZmxLocator.binaryURL, arguments)
   }
 
+  /// A child's stderr sink. On Windows a child handed `FileHandle.nullDevice` as stderr
+  /// exits 1 on its first stderr write (`zmx ls` with no sessions prints "no sessions
+  /// found" there), so open `NUL` writable instead, falling back to a pipe nobody reads.
+  static func discardingErrorHandle() -> Any {
+    #if os(Windows)
+      if let nul = FileHandle(forWritingAtPath: "NUL") { return nul }
+      return Pipe()
+    #else
+      return FileHandle.nullDevice
+    #endif
+  }
+
   /// Runs a process to its exit and returns its status and stdout, without parking a
   /// cooperative-pool thread on either. `readDataToEndOfFile` and `waitUntilExit` both
   /// block their thread, and with every presence read and send doing it at once on a
@@ -1324,7 +1336,7 @@ public enum ZmxSessionLauncher {
     process.arguments = arguments
     let output = Pipe()
     process.standardOutput = output
-    process.standardError = FileHandle.nullDevice
+    process.standardError = discardingErrorHandle()
     process.standardInput = FileHandle.nullDevice
     let group = DispatchGroup()
     let collected = CollectedOutput()
@@ -3085,7 +3097,7 @@ public enum ZmxSessionLauncher {
     process.arguments = ["history", name]
     let pipe = Pipe()
     process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
+    process.standardError = discardingErrorHandle()
     do { try process.run() } catch { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
@@ -3170,7 +3182,7 @@ public enum ZmxSessionLauncher {
         process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory)
       }
       process.standardOutput = FileHandle.nullDevice
-      process.standardError = FileHandle.nullDevice
+      process.standardError = discardingErrorHandle()
       do {
         try process.run()
         await Task.detached { process.waitUntilExit() }.value
