@@ -13,6 +13,36 @@ struct CodespaceSelectionTests {
     var process: Process
     var output: Pipe
     var stdin: Pipe
+    var announcements: PaneOutput
+  }
+
+  /// What a pane has printed so far. Draining the pipe also keeps a chatty pane from
+  /// blocking on a full one.
+  private final class PaneOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var text = ""
+
+    init(_ pipe: Pipe) {
+      pipe.fileHandleForReading.readabilityHandler = { [self] handle in
+        let data = handle.availableData
+        guard !data.isEmpty else {
+          handle.readabilityHandler = nil
+          return
+        }
+        lock.lock()
+        text += String(decoding: data, as: UTF8.self)
+        lock.unlock()
+      }
+    }
+
+    /// The longest wait the pane has announced with "Retrying in Ns". Free retries back
+    /// off in a few seconds; only a hold announces a wait of minutes.
+    var longestAnnouncedWait: Int {
+      lock.lock()
+      defer { lock.unlock() }
+      return text.components(separatedBy: "Retrying in ").dropFirst()
+        .compactMap { Int($0.prefix(while: \.isNumber)) }.max() ?? 0
+    }
   }
 
   private let codespace = RemoteProjectLocation(
@@ -99,7 +129,8 @@ struct CodespaceSelectionTests {
     process.standardOutput = stdout
     process.standardError = FileHandle.nullDevice
     try process.run()
-    return Pane(process: process, output: stdout, stdin: stdin)
+    return Pane(
+      process: process, output: stdout, stdin: stdin, announcements: PaneOutput(stdout))
   }
 
   private func waitFor(
@@ -166,20 +197,27 @@ struct CodespaceSelectionTests {
     let log = directory.appendingPathComponent("dials")
     let marker = directory.appendingPathComponent("space.reconnect")
     let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
-    let held = CodespaceDialSchedule(freeRetryWindow: 1, holdUntil: 120, pauseAfter: 180)
+    // The script measures the outage in whole seconds from `date +%s`, so a 1s free window
+    // can be over before the first redial whenever a second boundary falls between its
+    // two clock reads: that pane holds after one dial. 3s is far from that resolution.
+    let held = CodespaceDialSchedule(freeRetryWindow: 3, holdUntil: 120, pauseAfter: 180)
     let pane = try startPane(
       SSHReconnectLoop.codespaceScript(
         connect: dial, reconnect: dial, pauseMarker: marker.path, schedule: held))
     defer { pane.process.terminate() }
 
-    // Two dials inside the free minute, then a hold that would last until 120s.
-    #expect(await waitFor { lines(in: log) >= 2 })
-    try await Task.sleep(for: .seconds(2))
+    // Free retries, then a hold until 120s. The hold is announced before the pane waits, so
+    // once it is seen no dial can follow until the marker is touched: the count is final
+    // without a sleep.
+    let announced = { pane.announcements.longestAnnouncedWait >= 60 }
+    try #require(await waitFor(within: .seconds(60), announced))
     let heldAt = lines(in: log)
+    #expect(heldAt >= 1)
 
     try touch(marker)
 
-    #expect(await waitFor(within: .seconds(5)) { lines(in: log) > heldAt })
+    // The pane polls once a second; 20s still tells a redial from a hold that has 100s+ to go.
+    #expect(await waitFor(within: .seconds(20)) { lines(in: log) > heldAt })
   }
 
   @Test
