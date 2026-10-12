@@ -5053,9 +5053,9 @@ public actor GraphStore {
   public func ensureUnattendedSessions() async {
     // A loop stopped for a missing CLI waits for the human's restart: relaunching it at
     // boot would only reach the same missing CLI and raise the same dialog. A loop the
-    // human stopped waits too: `.stopped` outranks its presence on every surface, so a
-    // session started here would work, and could ask a question, under a row that reads
-    // stopped.
+    // human stopped waits too: a session started here would run the loop's work again
+    // under a row that reads stopped, and `.stopped` outranks presence on every surface, so
+    // whatever it asked would be hidden.
     for node in graph.nodes
     where node.runsUnattended && node.launchFailure == nil && node.state != .stopped {
       if node.loopType == .goalBased {

@@ -506,8 +506,12 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   public var displayState: LoopState {
     // A stopped loop's session is asked to stop, not killed, so it stays live and its own
     // reply to the stop prompt reads busy and then awaitingInput. That is the stop taking
-    // effect, not a loop coming back: nothing in the store un-stops a node, so `.stopped`
-    // outranks every presence reading.
+    // effect, not a loop coming back, so `.stopped` outranks every presence reading. The
+    // stop action never moves the state itself; the only things that do (a missing-CLI
+    // restart, a new goal on a goal loop, a cycle re-entry) leave `.stopped`, and presence
+    // is followed again from there. Known limit: a human typing into the still-live pane,
+    // or a reboot restore of the session, re-engages the loop without leaving `.stopped`,
+    // and whatever it asks afterwards is hidden here.
     if state == .stopped { return .stopped }
     if presence?.exitCode == nil {
       switch presence?.presence {
