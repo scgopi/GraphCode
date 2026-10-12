@@ -198,8 +198,9 @@ struct CodespaceSelectionTests {
     let marker = directory.appendingPathComponent("space.reconnect")
     let dial = "(echo dial >> \(RemoteProjectLocation.shellQuoted(log.path)); exit 1)"
     // The script measures the outage in whole seconds from `date +%s`, so a 1s free window
-    // can be over before the first redial whenever a second boundary falls between its
-    // two clock reads: that pane holds after one dial. 3s is far from that resolution.
+    // could be over before the first redial whenever a second boundary fell between its two
+    // clock reads, and the pane would hold after a single dial. A 3s window removes that
+    // boundary case, and the test no longer needs two dials before the hold.
     let held = CodespaceDialSchedule(freeRetryWindow: 3, holdUntil: 120, pauseAfter: 180)
     let stressStart = ContinuousClock.now
     let pane = try startPane(
@@ -219,8 +220,9 @@ struct CodespaceSelectionTests {
     try touch(marker)
     let stressTouched = ContinuousClock.now
 
-    // The pane polls once a second; 20s still tells a redial from a hold that has 100s+ to go.
-    let stressOK = await waitFor(within: .seconds(20)) { lines(in: log) > heldAt }
+    // The pane polls once a second, so a selection redials within about a second (measured
+    // at most 1.8s under load); the hold has more than 100s left.
+    let stressOK = await waitFor(within: .seconds(5)) { lines(in: log) > heldAt }
     #expect(stressOK)
     // TEMPORARY stress instrumentation (stress branch only).
     let stressLine =
