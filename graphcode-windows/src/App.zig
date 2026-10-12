@@ -1451,8 +1451,12 @@ pub const App = struct {
     /// correlated reply to `readProjectGraph` does.
     loop_probes: std.ArrayListUnmanaged(LoopProbe) = .empty,
     /// What this shell itself saw before a reconnect: the loops of each project's last
-    /// snapshot, so the first snapshot of the next connection can be compared against it.
+    /// usable snapshot, so the first snapshot of the next connection can be compared against it.
     loop_held: std.ArrayListUnmanaged(LoopHeld) = .empty,
+    /// The connection generation on which this shell first connected (or, failing that, first
+    /// saw a project graph). Only on that connection may a project's first look sweep saved
+    /// layouts by age.
+    loop_origin_generation: ?u64 = null,
     /// Replaces the wall clock for the probe timers in tests.
     loop_clock_ns: ?i128 = null,
     smoke_action_requested: bool = false,
@@ -2056,7 +2060,9 @@ pub const App = struct {
     fn captureLoopIdentity(self: *App, frame: []const u8) ?LoopIdentity {
         if (self.smoke or Wire.eventKind(frame) != .graph_changed) return null;
         const project = (Wire.copyGraphChangedProjectPath(self.allocator, frame) catch return null) orelse return null;
-        return .{ .project = project, .generation = self.client.deliveringGeneration() };
+        const generation = self.client.deliveringGeneration();
+        if (self.loop_origin_generation == null) self.loop_origin_generation = generation;
+        return .{ .project = project, .generation = generation };
     }
 
     /// Ends the shell sessions of loops the daemon no longer has. The workspace owns those
@@ -2072,9 +2078,9 @@ pub const App = struct {
     /// snapshot is only watched (`LoopProbe`): after a settle delay the shell asks the daemon
     /// for the project's graph (`readProjectGraph`), and only that correlated reply, taken on
     /// the same connection, can authorize ending the loop's sessions (`takeLoopRead`). Later
-    /// event snapshots are never that second look. On the first snapshot of a project only
-    /// layouts older than this shell are considered (a newer one is another shell's, whose
-    /// loop this snapshot may simply predate).
+    /// event snapshots are never that second look. On the first snapshot of a project, and only
+    /// on the connection this shell first made, only layouts older than this shell are
+    /// considered (a newer one is another shell's, whose loop this snapshot may simply predate).
     ///
     /// Only a usable snapshot (delivered on the current connection, not empty, with a canonical
     /// revision) feeds what the shell compares against (`LoopHeld`) or cancels a watch: a frame
@@ -2084,7 +2090,8 @@ pub const App = struct {
     /// connection can already lack a loop whose deletion the old one showed. So a reconnect
     /// carries over only what this shell itself observed: a watch the reconnect cancelled
     /// (`LoopProbe.carried`) and the loops of its last usable snapshot. A layout the shell never
-    /// held is never considered after a reconnect, whatever its age. This is still not proof of
+    /// held is never considered after a reconnect, whatever its age: a project with neither a
+    /// carried watch nor a held snapshot is left alone. This is still not proof of
     /// deletion: a restarted daemon may have reloaded a graph from before a loop this shell saw
     /// created, and its reply then repeats that graph. Only a durable tombstone, or a daemon
     /// epoch with the persisted sequence in the reply, closes that.
@@ -2096,6 +2103,11 @@ pub const App = struct {
         const revision = graph.revision orelse return;
         self.dropRestoredProbes(identity.project, graph);
         if (self.observeLoops(identity.project, graph, identity.generation, revision)) return;
+        // Without a held snapshot the age filter is the only thing keeping another shell's
+        // loop out, and it only holds while no daemon restart could have replayed a graph that
+        // lacks a loop that shell had just made. After any reconnect that is not knowable, so
+        // nothing is inferred: a loop that is really gone then stays until it is seen deleted.
+        if (self.loop_origin_generation != identity.generation) return;
         const saved = workspace.savedLoopLayouts() catch return;
         defer @import("WorkspaceLayout.zig").freeLoopRecords(workspace.allocator, saved);
         for (saved) |record| {
@@ -9206,6 +9218,9 @@ fn onWindowMessage(
                         else => "Clone failed; partial output removed",
                     });
                 }
+            }
+            if (app.loop_origin_generation == null and app.client.connectionState() == .connected) {
+                app.loop_origin_generation = app.client.connectionGeneration();
             }
             app.client.poll();
             app.probeMissingLoops();
@@ -16459,6 +16474,76 @@ test "workspace layout: a stale or revisionless frame that names the loop again 
     try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
     try std.testing.expect(!fixture.layoutExists("loop-c.json"));
+}
+
+/// A layout older than this shell, with a recorded live shell session, for a loop the project's
+/// first usable snapshot will not name; the shell saw only an empty graph of the project before.
+fn emptyFirstGraphWithOldLayout(fixture: *LiveTerminalFixture) !i128 {
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-d", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
+    fixture.predateLayouts();
+    try fixture.forgetGraph();
+    const start = fixture.connect();
+    // A daemon that has not loaded its project reports no loops: no baseline is recorded.
+    try fixture.deliverNodes("");
+    fixture.timerTick(start + 1 * std.time.ns_per_s);
+    return start;
+}
+
+test "workspace layout: a project first usable on the shell's first connection still sweeps layouts older than the shell" {
+    var fixture: LiveTerminalFixture = undefined;
+    const start = try emptyFirstGraphWithOldLayout(&fixture);
+    defer fixture.deinit();
+
+    try fixture.deliverNodes(node_loop_a);
+    try fixture.confirmWith(start + 10 * std.time.ns_per_s, node_loop_a);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_two);
+    try fixture.waitFor(LiveTerminalFixture.markerGone, shell_uuid_two);
+    try std.testing.expect(!fixture.layoutExists("loop-d.json"));
+}
+
+test "workspace layout: after a reconnect a project the shell holds no snapshot of is left alone, whatever its layouts' age" {
+    var fixture: LiveTerminalFixture = undefined;
+    const start = try emptyFirstGraphWithOldLayout(&fixture);
+    defer fixture.deinit();
+
+    // The same layout, but the daemon restarted first and its first usable snapshot, like the
+    // reply a read would get, is a persisted graph that lacks another shell's loop D.
+    fixture.reconnect();
+    try fixture.deliverNodes(node_loop_a);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    fixture.timerTick(start + 30 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-d.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+    try std.testing.expect(!fixture.killed(shell_uuid_two));
+}
+
+test "workspace layout: a project first opened after a reconnect is left alone too" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-d", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
+    fixture.predateLayouts();
+    try fixture.forgetGraph();
+    const start = fixture.connect();
+
+    // The shell was connected, with no project open, when the daemon restarted.
+    fixture.timerTick(start + 1 * std.time.ns_per_s);
+    fixture.reconnect();
+    fixture.timerTick(start + 2 * std.time.ns_per_s);
+    try fixture.deliverNodes(node_loop_a);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-d.json"));
 }
 
 test "workspace layout: what a reconnect carried over is forgotten once the project is closed" {
