@@ -507,11 +507,13 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     // A stopped loop's session is asked to stop, not killed, so it stays live and its own
     // reply to the stop prompt reads busy and then awaitingInput. That is the stop taking
     // effect, not a loop coming back, so `.stopped` outranks every presence reading. The
-    // stop action never moves the state itself; the only things that do (a missing-CLI
-    // restart, a new goal on a goal loop, a cycle re-entry) leave `.stopped`, and presence
-    // is followed again from there. Known limit: a human typing into the still-live pane,
-    // or a reboot restore of the session, re-engages the loop without leaving `.stopped`,
-    // and whatever it asks afterwards is hidden here.
+    // stop action never moves the state itself, and nothing starts a session for a stopped
+    // node (restarts, pilot and arm of a composite, promotion and daemon start all refuse
+    // or skip it). The ways out are a missing-CLI restart, a new goal on a goal loop and a
+    // cycle re-entry; each leaves `.stopped`, and presence is followed again from there.
+    // Known limit: a human typing into the still-live pane, or a reboot restore of the
+    // session, re-engages the loop without leaving `.stopped`, and whatever it asks
+    // afterwards is hidden here.
     if state == .stopped { return .stopped }
     if presence?.exitCode == nil {
       switch presence?.presence {

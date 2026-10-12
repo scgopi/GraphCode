@@ -108,6 +108,108 @@ final class StoppedLoopPresenceTests: XCTestCase {
     XCTAssertEqual(reopened?.displayState, .awaitingInput)
   }
 
+  /// Nothing may start a session for a node that is still `.stopped`: the contract hides
+  /// whatever that session asks. The explicit ways back are a missing-CLI restart and a
+  /// new goal; Pilot and Arm of a composite are refused while it is stopped.
+  private func stoppedComposite(_ ensured: EnsuredTitles) async -> (GraphStore, UUID) {
+    var sub = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "sub"))
+    sub.nodes.append(
+      LoopNode(
+        title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .running))
+    var graph = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "p"))
+    let composite = LoopNode(
+      title: "Comp", loopType: .composite, subGraph: sub, pilotState: .piloted, state: .running)
+    graph.nodes.append(composite)
+    let store = GraphStore(
+      graph: graph, onEnsureSession: { node, _ in ensured.append(node.title) },
+      onDeliverMessage: { _, _, _ in true })
+    await store.handle(.stopNode(composite.id))
+    return (store, composite.id)
+  }
+
+  func testPilotingOrArmingAStoppedCompositeStartsNothing() async {
+    let ensured = EnsuredTitles()
+    let (store, id) = await stoppedComposite(ensured)
+    let before = await store.graph.nodes[id: id]
+    XCTAssertEqual(before?.state, .stopped)
+    XCTAssertEqual(before?.subGraph?.nodes.map(\.state), [.stopped])
+
+    await store.handle(.pilotComposite(id))
+    await store.handle(.armComposite(id))
+
+    let after = await store.graph.nodes[id: id]
+    XCTAssertEqual(after?.state, .stopped)
+    XCTAssertEqual(after?.pilotState, .piloted)
+    XCTAssertEqual(after?.subGraph?.nodes.map(\.state), [.stopped])
+    XCTAssertEqual(ensured.titles, [], "no session may start under a stopped row")
+  }
+
+  func testPilotingACompositeDoesNotStartAWorkerThatWasStoppedOnItsOwn() async {
+    var sub = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "sub"))
+    sub.nodes.append(
+      LoopNode(
+        title: "Stopped worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
+        state: .stopped))
+    sub.nodes.append(
+      LoopNode(
+        title: "Other worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check",
+        state: .idle))
+    var graph = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "p"))
+    let composite = LoopNode(title: "Comp", loopType: .composite, subGraph: sub)
+    graph.nodes.append(composite)
+    let ensured = EnsuredTitles()
+    let store = GraphStore(
+      graph: graph, onEnsureSession: { node, _ in ensured.append(node.title) })
+
+    await store.handle(.pilotComposite(composite.id))
+
+    XCTAssertEqual(ensured.titles, ["Other worker"])
+  }
+
+  func testPromotingAStoppedSketchIsRefused() async {
+    let ensured = EnsuredTitles()
+    var graph = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "p"))
+    let sketch = LoopNode(title: "Sketch", loopType: .sketch, state: .stopped)
+    graph.nodes.append(sketch)
+    let store = GraphStore(
+      graph: graph, onEnsureSession: { node, _ in ensured.append(node.title) })
+
+    await store.handle(
+      .promoteNode(sketch.id, promotion: .timed(triggerPrompt: "/loop 1h check"), promotedBy: nil))
+
+    let after = await store.graph.nodes[id: sketch.id]
+    XCTAssertEqual(after?.state, .stopped)
+    XCTAssertEqual(after?.loopType, .sketch)
+    XCTAssertEqual(ensured.titles, [])
+  }
+
+  func testSpawningFromAStoppedCompositeTemplateIsAFreshRun() async {
+    var sub = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "sub"))
+    sub.nodes.append(
+      LoopNode(
+        title: "Worker", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .stopped))
+    let template = LoopNode(
+      title: "Template", loopType: .composite, subGraph: sub, pilotState: .piloted,
+      state: .stopped)
+    let trigger = LoopNode(
+      title: "Trigger", loopType: .turnBased, checkDescription: "?", firstInstruction: "Work")
+    var graph = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "p"))
+    graph.nodes.append(contentsOf: [trigger, template])
+    graph.edges.append(LoopEdge(from: trigger.id, to: template.id, kind: .spawn))
+    let ensured = EnsuredTitles()
+    let store = GraphStore(
+      graph: graph, onEnsureSession: { node, _ in ensured.append(node.title) })
+
+    await store.handle(.nodeCheckApproved(trigger.id))
+
+    let spawned = await store.graph.nodes.last
+    XCTAssertEqual(spawned?.title.hasPrefix("Template"), true)
+    // Not a way back for the template's workers: the copy's own are re-identified and
+    // reset to idle, so what starts is a new run that follows presence like any other.
+    XCTAssertEqual(spawned?.subGraph?.nodes.map(\.state), [.idle])
+    XCTAssertEqual(ensured.titles, ["Worker"])
+  }
+
   /// A daemon restart used to launch a fresh session for a stopped time-based loop while
   /// leaving it `.stopped`: that session would run the loop's work, and could ask a
   /// question, under a row that reads stopped.

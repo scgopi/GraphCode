@@ -1649,6 +1649,12 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       node.subGraph != nil
     else { return }
+    // Stop means off and nothing resumes it: a pilot would put the composite back to
+    // `.running` and start sessions under workers that still read stopped.
+    guard node.state != .stopped else {
+      announceError("pilot refused: \(node.title) is stopped")
+      return
+    }
     // The template's edits land here, at the run boundary a following composite
     // has — see `resolveCompositeFollow`.
     resolveCompositeFollow(nodeID)
@@ -1657,8 +1663,9 @@ public actor GraphStore {
 
     // Start every unattended loop inside the composite. That *is* the pilot: real
     // sessions, real output, real cost — just not wired to the recurring trigger yet.
+    // A worker stopped on its own stays stopped, and starts nothing.
     if let subGraph = graph.nodes[id: nodeID]?.subGraph {
-      for child in subGraph.nodes where child.runsUnattended {
+      for child in subGraph.nodes where child.runsUnattended && child.state != .stopped {
         ensureSession(child)
       }
       // The pilot is also the moment the composite's loops become real, so it is the
@@ -1678,6 +1685,10 @@ public actor GraphStore {
     guard let node = graph.nodes[id: nodeID], node.loopType == .composite,
       node.pilotState.canArm
     else { return }
+    guard node.state != .stopped else {
+      announceError("arm refused: \(node.title) is stopped")
+      return
+    }
     graph.nodes[id: nodeID]?.pilotState = .armed
     setNodeState(nodeID, .running)
   }
@@ -2295,8 +2306,10 @@ public actor GraphStore {
       return
     }
     // Stopped is a human's hand on the loop; a new shape would restart work they paused.
-    if retypes, node.state == .stopped {
-      announceError("promotion refused: \(node.title) is stopped — resume it first")
+    // A sketch counts too: promoting it to a time-based loop launches its session without
+    // moving the state, so the new session would run under a row that reads stopped.
+    if node.state == .stopped {
+      announceError("promotion refused: \(node.title) is stopped")
       return
     }
     // Leaving goal is leaving a stop condition, and the loop under it may not do that:
@@ -5045,7 +5058,7 @@ public actor GraphStore {
   /// So is a goal that has already resolved: re-pursuing a met goal would restart work
   /// the graph has already recorded as finished. (A time-based node gets no such
   /// exclusion, matching the behaviour it had before goals existed — its whole premise
-  /// is that it keeps running.)
+  /// is that it keeps running. A stopped one of either type is excluded, below.)
   ///
   /// Safe to call repeatedly, but only because `ZmxSessionLauncher` checks for an
   /// existing session first — `zmx run` itself is *not* idempotent, and re-running it
