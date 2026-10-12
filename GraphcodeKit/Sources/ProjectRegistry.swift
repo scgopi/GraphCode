@@ -167,7 +167,11 @@ public actor ProjectRegistry {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths)
-    persistence.sweepAbandonedTempFiles()
+    #if os(Windows)
+      // Windows-only: the temp name shape is proven for swift-corelibs Windows Foundation;
+      // macOS Foundation names are unverified, so macOS behavior is unchanged.
+      persistence.sweepAbandonedTempFiles()
+    #endif
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)

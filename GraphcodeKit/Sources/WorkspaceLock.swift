@@ -16,6 +16,10 @@ import Foundation
 /// A pid file rather than a lock: the answer this needs is "who", not "may I" — the
 /// launcher wants a process to activate. Staleness is decided by asking the kernel about
 /// the pid rather than by trusting the file, because a crashed app never gets to clean up.
+public enum ProcessLiveness: Sendable, Equatable {
+  case alive, dead, unknown
+}
+
 public enum WorkspaceLock {
   public static func url(for workspace: Workspace) -> URL {
     workspace.url.appendingPathComponent("app.pid")
@@ -65,6 +69,27 @@ public enum WorkspaceLock {
       return nil
     }
     return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+  }
+
+  /// Whether the pid is definitively dead, definitively running, or could not be told.
+  /// Only `.dead` is proof; access denied or any failed query is `.unknown`.
+  public static func liveness(of pid: Int32) -> ProcessLiveness {
+    guard pid > 0 else { return .unknown }
+    #if os(Windows)
+      guard
+        let process = OpenProcess(
+          DWORD(PROCESS_QUERY_LIMITED_INFORMATION), false, DWORD(bitPattern: pid))
+      else {
+        return GetLastError() == DWORD(ERROR_INVALID_PARAMETER) ? .dead : .unknown
+      }
+      defer { CloseHandle(process) }
+      var exitCode: DWORD = 0
+      guard GetExitCodeProcess(process, &exitCode) else { return .unknown }
+      return exitCode == STILL_ACTIVE ? .alive : .dead
+    #else
+      if kill(pid, 0) == 0 { return .alive }
+      return errno == ESRCH ? .dead : .alive
+    #endif
   }
 
   /// `kill(pid, 0)` sends nothing; it just asks. `EPERM` means the process exists and

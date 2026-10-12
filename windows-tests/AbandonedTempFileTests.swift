@@ -36,6 +36,7 @@ final class AbandonedTempFileTests: XCTestCase {
       "v1-abc.json", "v1-abc.json.bak", ".dat.nosync.a30616", ".dat.nosync8040.a3061",
       ".dat.nosync8040.a306166", ".dat.nosync8040.a30616.json", ".dat.nosyncZZ.a30616",
       "x.dat.nosync8040.a30616", ".dat.nosync8040", ".dat.nosync8040.a3061!",
+      ".dat.nosyncdead.a1b2c3", ".dat.nosync1f.a1b2c3", ".dat.nosyncDeAD.a1b2c3",
     ] {
       XCTAssertNil(ProjectPersistence.atomicWriteTempFileOwner(name), name)
     }
@@ -60,7 +61,7 @@ final class AbandonedTempFileTests: XCTestCase {
     let unrelated = try plant("notes.txt", age: 3600)
     let backup = try plant("v1-deadbeef.json.bak", age: 3600)
 
-    let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 }
+    let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .dead }
 
     XCTAssertEqual(Set(removed), [stale1.lastPathComponent, stale2.lastPathComponent])
     XCTAssertFalse(exists(stale1))
@@ -72,15 +73,24 @@ final class AbandonedTempFileTests: XCTestCase {
     XCTAssertEqual(persistence.loadGraph(path: project.path)?.nodes.count, 1)
   }
 
-  func testLiveOwnersTempIsKeptUntilItCouldNotBeAWriteAnyMore() throws {
+  func testLiveOrUnknownOwnersTempIsKeptHoweverOld() throws {
     let persistence = ProjectPersistence(baseDirectory: base)
-    let old = try plant(".dat.nosync9000.a11111", age: 3600)
-    let ancient = try plant(".dat.nosync9000.a22222", age: 3 * 24 * 3600)
+    let alive = try plant(".dat.nosync9000.a11111", age: 3 * 24 * 3600)
+    let unknown = try plant(".dat.nosyncA000.a22222", age: 3 * 24 * 3600)
 
-    persistence.sweepAbandonedTempFiles { _ in true }
+    persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .unknown }
 
-    XCTAssertTrue(exists(old))
-    XCTAssertFalse(exists(ancient), "a reused pid must not pin a day-old temp forever")
+    XCTAssertTrue(exists(alive))
+    XCTAssertTrue(exists(unknown), "access denied / failed query must keep the file")
+  }
+
+  func testCandidateScanIsBounded() throws {
+    let persistence = ProjectPersistence(baseDirectory: base)
+    for index in 0..<5 { _ = try plant(".dat.nosync8040.a3061\(index)", age: 3600) }
+
+    let removed = persistence.sweepAbandonedTempFiles(maximumCandidates: 2) { _ in .dead }
+
+    XCTAssertEqual(removed.count, 2)
   }
 
   func testDirectoryNamedLikeATempFileIsNotDeleted() throws {
@@ -88,7 +98,7 @@ final class AbandonedTempFileTests: XCTestCase {
     let dir = projects.appendingPathComponent(".dat.nosync8040.a30616", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-    persistence.sweepAbandonedTempFiles(minimumAge: 0) { _ in false }
+    persistence.sweepAbandonedTempFiles(minimumAge: 0) { _ in .dead }
 
     XCTAssertTrue(exists(dir))
   }
@@ -132,4 +142,26 @@ final class AbandonedTempFileTests: XCTestCase {
     XCTAssertFalse(exists(dead))
     XCTAssertTrue(exists(mine))
   }
+
+  #if os(Windows)
+    func testRegistryStartupSweepsDeadOwnerAndKeepsLiveOwner() throws {
+      let child = Process()
+      child.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\cmd.exe")
+      child.arguments = ["/c", "ping -n 30 127.0.0.1 >nul"]
+      try child.run()
+      let childPID = child.processIdentifier
+      child.terminate()
+      child.waitUntilExit()
+      try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+      let hex = { (pid: Int32) in String(UInt32(bitPattern: pid), radix: 16, uppercase: true) }
+      let dead = try plant(".dat.nosync\(hex(childPID)).a30616", age: 3600)
+      let live = try plant(
+        ".dat.nosync\(hex(ProcessInfo.processInfo.processIdentifier)).a30617", age: 3600)
+
+      _ = ProjectRegistry(persistenceDirectory: base)
+
+      XCTAssertFalse(exists(dead))
+      XCTAssertTrue(exists(live))
+    }
+  #endif
 }

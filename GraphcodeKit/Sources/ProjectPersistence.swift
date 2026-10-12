@@ -46,37 +46,43 @@ public struct ProjectPersistence: Sendable {
     let parts = name.dropFirst(prefix.count).split(
       separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
     guard parts.count == 2, !parts[0].isEmpty, parts[0].count <= 8,
-      parts[0].allSatisfy({ $0.isHexDigit }),
+      parts[0].allSatisfy({ $0.isASCII && ($0.isNumber || ("A"..."F").contains($0)) }),
       parts[1].count == 6, parts[1].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
       let raw = UInt32(parts[0], radix: 16)
     else { return nil }
     return Int32(bitPattern: raw)
   }
 
-  /// Removes temp files abandoned by a writer that died mid-write. A file goes only when it
-  /// matches the temp pattern exactly, is a regular file, is at least `minimumAge` old, and
-  /// its owning pid is not running — or it is older than `maximumAge`, which no live write
-  /// can be (a pid can be reused by an unrelated process). A live writer's file is
-  /// milliseconds old and is never touched. Returns the names removed.
+  /// Removes temp files abandoned by a writer that died mid-write. A file goes only when its
+  /// name matches the Windows temp pattern (uppercase-hex pid), it is a regular file, it is
+  /// at least `minimumAge` old, and its owning pid is *definitively* dead. A live or
+  /// unknown owner (access denied, query failure) keeps its file however old: deleting a
+  /// live writer's temp would make its rename fail silently. A reused pid therefore pins a
+  /// stale file; that ambiguity is left alone rather than guessed at. The scan is
+  /// synchronous and examines at most `maximumCandidates` temp-named files.
+  /// Returns the names removed.
   @discardableResult
   public func sweepAbandonedTempFiles(
     now: Date = Date(),
     minimumAge: TimeInterval = 300,
-    maximumAge: TimeInterval = 24 * 3600,
-    isProcessRunning: ((Int32) -> Bool)? = nil
+    maximumCandidates: Int = 256,
+    liveness: ((Int32) -> ProcessLiveness)? = nil
   ) -> [String] {
-    let isRunning = isProcessRunning ?? { WorkspaceLock.isRunning($0) }
+    let liveness = liveness ?? { WorkspaceLock.liveness(of: $0) }
     let fileManager = FileManager.default
     var removed: [String] = []
+    var examined = 0
     for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? [] {
       guard let pid = Self.atomicWriteTempFileOwner(name) else { continue }
+      examined += 1
+      if examined > maximumCandidates { break }
       let url = projectsDirectory.appendingPathComponent(name)
       guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
         attributes[.type] as? FileAttributeType == .typeRegular,
         let modified = attributes[.modificationDate] as? Date
       else { continue }
       let age = now.timeIntervalSince(modified)
-      guard age >= minimumAge, age >= maximumAge || !isRunning(pid) else { continue }
+      guard age >= minimumAge, liveness(pid) == .dead else { continue }
       if (try? fileManager.removeItem(at: url)) != nil { removed.append(name) }
     }
     return removed

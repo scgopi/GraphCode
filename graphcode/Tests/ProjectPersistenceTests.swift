@@ -364,7 +364,7 @@ struct MailroomPersistenceTests {
     try plant(".dat.nosync8040.a22222", age: 1)
     try plant("notes.txt", age: 3600)
 
-    let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 }
+    let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .dead }
 
     #expect(removed == [".dat.nosync8040.a30616"])
     let left = try FileManager.default.contentsOfDirectory(atPath: projects.path)
