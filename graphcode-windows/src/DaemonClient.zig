@@ -179,6 +179,9 @@ pub const DaemonClient = struct {
     inbound_head: usize = 0,
     inbound_count: usize = 0,
     connection_generation: u64 = 0,
+    /// A connection has been established at least once, and again after an earlier one ended.
+    ever_connected: bool = false,
+    reconnected: bool = false,
     delivering_generation: u64 = 0,
     pipe: c.HANDLE = c.INVALID_HANDLE_VALUE,
     pipe_name: []u8 = &.{},
@@ -1355,6 +1358,30 @@ test "connection generation changes on every entry to connected and only then" {
     try std.testing.expect(client.connectionGeneration() != first);
 }
 
+test "a reconnect is recorded when the connection is established, once, and stays recorded" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    try std.testing.expect(!client.hasReconnected());
+    // Startup with the daemon down, then up: still the first connection.
+    client.publishState(.connecting, "");
+    client.publishState(.unavailable, "");
+    client.publishState(.connecting, "");
+    client.publishState(.connected, "");
+    client.publishState(.connected, "");
+    try std.testing.expect(!client.hasReconnected());
+
+    // The daemon dies and returns before anything polls: the transition itself records it.
+    client.publishState(.reconnecting, "");
+    try std.testing.expect(!client.hasReconnected());
+    client.publishState(.connected, "");
+    try std.testing.expect(client.hasReconnected());
+    client.connection_generation = std.math.maxInt(u64);
+    client.publishState(.reconnecting, "");
+    client.publishState(.connected, "");
+    try std.testing.expectEqual(@as(u64, 0), client.connectionGeneration());
+    try std.testing.expect(client.hasReconnected());
+}
+
 test "a correlated response and an uncorrelated snapshot are told apart on real envelopes" {
     var client = try DaemonClient.initForTesting(std.testing.allocator);
     defer client.deinit();
@@ -1557,10 +1584,24 @@ test "v1 response accounting ignores unsolicited events before the expected resu
 
     fn publishState(self: *DaemonClient, state: Wire.ConnectionState, message: []const u8) void {
         self.mutex.lock();
-        if (state == .connected and self.state != .connected) self.connection_generation +%= 1;
+        if (state == .connected and self.state != .connected) {
+            self.connection_generation +%= 1;
+            if (self.ever_connected) self.reconnected = true;
+            self.ever_connected = true;
+        }
         self.state = state;
         self.last_error = message;
         self.mutex.unlock();
+    }
+
+    /// Whether a connection was ever established after an earlier one. Sticky, recorded at the
+    /// state transition itself, so it does not depend on how often anything polls and does not
+    /// wrap: a first connection that comes up late (the daemon was down at startup) is still
+    /// the first.
+    pub fn hasReconnected(self: *DaemonClient) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.reconnected;
     }
 
     /// Identifies one established connection: it changes every time the client enters
