@@ -54,4 +54,46 @@ final class StoppedLoopPresenceTests: XCTestCase {
     XCTAssertEqual(sibling.displayState, .awaitingInput)
     XCTAssertEqual(AttentionRollup.reason(for: sibling), .awaitingInput)
   }
+
+  /// The mask above is only honest if nothing re-engages a stopped loop behind its back.
+  /// A daemon restart used to launch a fresh session for a stopped time-based loop while
+  /// leaving it `.stopped`: that session would work (and could ask a question) under a
+  /// row that reads stopped.
+  func testDaemonStartDoesNotRelaunchAStoppedUnattendedLoop() async {
+    var graph = LoopGraph(scope: LoopGraphScope(projectPath: "C:\\p", name: "p"))
+    graph.nodes.append(
+      LoopNode(
+        title: "stopped poller", loopType: .timeBased, triggerPrompt: "/loop 1h check",
+        state: .stopped))
+    graph.nodes.append(
+      LoopNode(
+        title: "stopped goal", loopType: .goalBased, goal: GoalSpec(summary: "ship"),
+        state: .stopped))
+    graph.nodes.append(
+      LoopNode(
+        title: "control", loopType: .timeBased, triggerPrompt: "/loop 1h check",
+        state: .running))
+    let ensured = EnsuredTitles()
+    let store = GraphStore(
+      graph: graph, onEnsureSession: { node, _ in ensured.append(node.title) })
+
+    await store.ensureUnattendedSessions()
+
+    XCTAssertEqual(ensured.titles, ["control"])
+  }
+
+  private final class EnsuredTitles: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func append(_ title: String) {
+      lock.lock()
+      defer { lock.unlock() }
+      stored.append(title)
+    }
+    var titles: [String] {
+      lock.lock()
+      defer { lock.unlock() }
+      return stored
+    }
+  }
 }

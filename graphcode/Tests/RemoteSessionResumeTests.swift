@@ -454,9 +454,8 @@ struct RemoteSessionResumeTests {
 
   @Test
   func theLivenessSweepLeavesAStoppedLoopStopped() async {
-    // The one place the sweep is deliberately stricter than the load-time ensure, which
-    // restarts a `.stopped` time-based node. Defensible once at boot; every minute it
-    // would mean a human who stopped a remote loop watches it come back.
+    // The load-time ensure skips a `.stopped` node too (`ensureUnattendedSessions`): a
+    // human who stopped a loop must not watch it come back, at boot or on any sweep.
     let started = LockIsolated<[LoopNode]>([])
     let node = LoopNode(
       title: "Poll", loopType: .timeBased, triggerPrompt: "/loop 1h Check", state: .stopped)

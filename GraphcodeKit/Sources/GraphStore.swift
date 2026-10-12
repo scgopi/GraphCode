@@ -5052,8 +5052,12 @@ public actor GraphStore {
   /// against a live session types the prompt in a second time.
   public func ensureUnattendedSessions() async {
     // A loop stopped for a missing CLI waits for the human's restart: relaunching it at
-    // boot would only reach the same missing CLI and raise the same dialog.
-    for node in graph.nodes where node.runsUnattended && node.launchFailure == nil {
+    // boot would only reach the same missing CLI and raise the same dialog. A loop the
+    // human stopped waits too: `.stopped` outranks its presence on every surface, so a
+    // session started here would work, and could ask a question, under a row that reads
+    // stopped.
+    for node in graph.nodes
+    where node.runsUnattended && node.launchFailure == nil && node.state != .stopped {
       if node.loopType == .goalBased {
         // A session end armed before the restart lived in memory: arm it again.
         guard !node.isResolved else {
@@ -5098,8 +5102,9 @@ public actor GraphStore {
   ///   sweep would never fire at all. The pollers are already running; they are in-memory
   ///   and a remote reboot doesn't touch them.
   /// - **Resolved nodes are never ensured, whatever their loop type.** The load-time
-  ///   version restarts a `.stopped` time-based node, which is defensible once at boot and
-  ///   wrong every minute: a human who stopped a remote loop would watch it come back.
+  ///   version restarts a finished time-based node (a stopped one is skipped there too),
+  ///   which is defensible once at boot and wrong every minute: a finished loop would
+  ///   come back to life on the next sweep.
   ///
   /// A resolved node's session is still brought back when the host's reboot killed it
   /// (`onRestoreRebootedSessions`): a pane leaves every unattended loop to this daemon,
