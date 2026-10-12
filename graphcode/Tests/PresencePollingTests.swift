@@ -134,6 +134,33 @@ struct PresencePollingTests {
   }
 
   @Test
+  func aStoppedLoopStaysStoppedWhileItsAgentAnswersTheStopPrompt() async {
+    let probe = Probe()
+    let store = GraphStore(
+      graph: graph([node("stopper", .running), node("sibling", .running)]),
+      onReadPresence: { node, _ in await probe.read(node) })
+    let descriptor = await attach(to: store)
+    defer { close(descriptor) }
+    let stopperID = await store.graph.nodes[0].id
+
+    await store.handle(.stopNode(stopperID))
+    for answer in [Presence.busy, .awaitingInput, .idle] {
+      await probe.answer("stopper", with: answer)
+      await probe.answer("sibling", with: .awaitingInput)
+      await store.pollPresence()
+
+      let stopped = await store.graph.nodes[id: stopperID]
+      #expect(stopped?.state == .stopped)
+      #expect(stopped?.displayState == .stopped)
+      #expect(stopped.flatMap { AttentionRollup.reason(for: $0) } == nil)
+    }
+    // Only the stopped loop is exempt: a loop nobody stopped still asks for the human.
+    let sibling = await store.graph.nodes[1]
+    #expect(sibling.displayState == .awaitingInput)
+    #expect(AttentionRollup.reason(for: sibling) == .awaitingInput)
+  }
+
+  @Test
   func theReadingItselfIsCorrectlyPickedUp() async {
     let probe = Probe()
     await probe.answer("A", with: .idle)

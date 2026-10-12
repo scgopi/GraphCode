@@ -504,6 +504,11 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
+    // A stopped loop's session is asked to stop, not killed, so it stays live and its own
+    // reply to the stop prompt reads busy and then awaitingInput. That is the stop taking
+    // effect, not a loop coming back: nothing in the store un-stops a node, so `.stopped`
+    // outranks every presence reading.
+    if state == .stopped { return .stopped }
     if presence?.exitCode == nil {
       switch presence?.presence {
       case .busy: return .running
