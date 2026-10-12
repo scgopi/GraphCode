@@ -13325,6 +13325,7 @@ const fake_zmx_script =
     "exit /b 0\r\n" ++
     ":attach\r\n" ++
     ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
+    "if exist \"%~dp0record-attach.txt\" if exist \"%~dp0loop-a.json\" if exist \"%~dp0hold-layout.txt\" <\"%~dp0loop-a.json\" ping -n 3 127.0.0.1 >nul\r\n" ++
     "if exist \"%~dp0record-attach.txt\" if exist \"%~dp0loop-a.json\" copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
     "if exist \"%~dp0shell-sessions\\%~2\" (echo yes>\"%~dp0marker-at-attach-%~2.txt\") else (echo no>\"%~dp0marker-at-attach-%~2.txt\")\r\n" ++
     "pause >nul\r\n" ++
@@ -17296,7 +17297,9 @@ test "workspace layout: a session another loop's record names is never ended by 
     try std.testing.expect(fixture.layoutExists("gone-loop.json.refused"));
 }
 
-test "workspace layout: a new tab's layout claim and ownership record exist before its session starts" {
+/// Drives the new-tab/split claim check; `hold_layout` makes every recording attach keep the
+/// loop's layout file open for a couple of seconds before it reads it, as a slow attach does.
+fn expectClaimAndRecordBeforeSession(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
@@ -17304,8 +17307,14 @@ test "workspace layout: a new tab's layout claim and ownership record exist befo
 
     try fixture.setLive(&.{"loop-a"});
     try fixture.setFlag("record-attach.txt", true);
+    try fixture.setFlag("hold-layout.txt", hold_layout);
     try clickSidebarLoopRow(app, fixture.project, "loop-a");
     try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
+    if (hold_layout) {
+        // The slow attach has started and is holding the layout open.
+        std.testing.allocator.free(try fixture.attachDirectory("loop-a"));
+        std.Thread.sleep(300 * std.time.ns_per_ms);
+    }
     try fixture.newTab();
     const tab_shell = try fixture.selectedPane(0);
     defer std.testing.allocator.free(tab_shell);
@@ -17334,6 +17343,14 @@ test "workspace layout: a new tab's layout claim and ownership record exist befo
     defer std.testing.allocator.free(record_name);
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("loop-a", try fixture.tmp.dir.readFile(record_name, &buffer));
+}
+
+test "workspace layout: a new tab's layout claim and ownership record exist before its session starts" {
+    try expectClaimAndRecordBeforeSession(false);
+}
+
+test "workspace layout: a new tab's claim and record exist before its session starts after a slow attach has read the layout" {
+    try expectClaimAndRecordBeforeSession(true);
 }
 
 /// How many shell-ownership records the shell has written beside its layouts.
