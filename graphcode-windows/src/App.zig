@@ -1450,6 +1450,9 @@ pub const App = struct {
     /// outstanding read. Nothing here ends a session by itself: only the daemon's
     /// correlated reply to `readProjectGraph` does.
     loop_probes: std.ArrayListUnmanaged(LoopProbe) = .empty,
+    /// The connection generation on which each project's saved loop layouts were last
+    /// reconciled with a graph snapshot (`endDeletedLoops`).
+    loop_sweeps: std.ArrayListUnmanaged(LoopSweep) = .empty,
     /// Replaces the wall clock for the probe timers in tests.
     loop_clock_ns: ?i128 = null,
     smoke_action_requested: bool = false,
@@ -1576,6 +1579,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         self.freeLoopProbes();
+        self.freeLoopSweeps();
         self.workspace_summary_work.drain();
         self.drainWorktreeInspection();
         self.drainWorktreeReclaim();
@@ -2093,7 +2097,10 @@ pub const App = struct {
     /// the same connection, can authorize ending the loop's sessions (`takeLoopRead`). Later
     /// event snapshots are never that second look. On the first snapshot of a project only
     /// layouts older than this shell are considered (a newer one is another shell's, whose
-    /// loop this snapshot may simply predate).
+    /// loop this snapshot may simply predate). The first snapshot of each later connection
+    /// reconciles the saved layouts again, without that age filter: a delete seen on the old
+    /// connection leaves no difference to find on the new one, and a layout newer than this
+    /// shell is then protected only by the correlated reply, which holds any loop that exists.
     fn endDeletedLoops(self: *App, identity: LoopIdentity) void {
         const workspace = self.workspace orelse return;
         const graph = self.model.graphFor(identity.project) orelse return;
@@ -2108,16 +2115,55 @@ pub const App = struct {
                 if (graphHasLoop(graph, id)) continue;
                 self.watchLoop(identity.project, id, identity.generation, revision);
             }
-            return;
         }
+        // The held graph says what was present, but a reconnect can leave it already without a
+        // loop whose pending look it cancelled: the delete's own snapshot was seen on the old
+        // connection. So the first current-generation snapshot of each connection also
+        // reconciles the project's saved loop layouts. Only the daemon's correlated reply can
+        // end a session, so a loop this sweep names wrongly is dropped by that reply.
+        // A project never reconciled this run keeps the first-snapshot rule: only layouts older
+        // than this shell, as a newer one may be another shell's loop this snapshot predates.
+        const swept = self.loopSweepGeneration(identity.project);
+        if (swept != null and swept.? == identity.generation) return;
+        const first_look = identity.ids == null or swept == null;
         const saved = workspace.savedLoopLayouts() catch return;
         defer @import("WorkspaceLayout.zig").freeLoopRecords(workspace.allocator, saved);
+        self.markLoopsSwept(identity.project, identity.generation);
         for (saved) |record| {
             if (!std.mem.eql(u8, record.project, identity.project)) continue;
-            if (record.modified_ns >= workspace.started_ns) continue;
+            if (first_look and record.modified_ns >= workspace.started_ns) continue;
             if (graphHasLoop(graph, record.loop)) continue;
             self.watchLoop(identity.project, record.loop, identity.generation, revision);
         }
+    }
+
+    const LoopSweep = struct {
+        project: []u8,
+        generation: u64,
+    };
+
+    fn loopSweepGeneration(self: *const App, project: []const u8) ?u64 {
+        for (self.loop_sweeps.items) |sweep| {
+            if (std.mem.eql(u8, sweep.project, project)) return sweep.generation;
+        }
+        return null;
+    }
+
+    fn markLoopsSwept(self: *App, project: []const u8, generation: u64) void {
+        for (self.loop_sweeps.items) |*sweep| {
+            if (std.mem.eql(u8, sweep.project, project)) {
+                sweep.generation = generation;
+                return;
+            }
+        }
+        const owned = self.allocator.dupe(u8, project) catch return;
+        self.loop_sweeps.append(self.allocator, .{ .project = owned, .generation = generation }) catch self.allocator.free(owned);
+    }
+
+    fn freeLoopSweeps(self: *App) void {
+        for (self.loop_sweeps.items) |sweep| self.allocator.free(sweep.project);
+        self.loop_sweeps.deinit(self.allocator);
+        self.loop_sweeps = .empty;
     }
 
     const loop_settle_ns: i128 = 3 * std.time.ns_per_s;
@@ -16022,20 +16068,21 @@ test "workspace layout: a reply from another connection ends nothing" {
     try fixture.expectKills("");
     try std.testing.expect(fixture.layoutExists("loop-c.json"));
 
-    // What was seen before the reconnect does not count after it: the loop must be seen
-    // missing again, and asked about again, on the new connection.
-    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    // What was seen before the reconnect does not count after it: the new connection's own
+    // snapshot lacked C (the frames above answered no outstanding read, so the shell took them
+    // as snapshots), and so the shell asks again, on the new connection, once the delay passes.
+    try std.testing.expectEqual(@as(usize, 2), fixture.readCount());
     fixture.timerTick(start + 100 * std.time.ns_per_s);
-    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    try std.testing.expectEqual(@as(usize, 2), fixture.readCount());
     try fixture.event(fixture.gen(), DeletedLoopScene.all);
     try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
     fixture.timerTick(start + 102 * std.time.ns_per_s);
-    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
-    fixture.timerTick(start + 110 * std.time.ns_per_s);
     try std.testing.expectEqual(@as(usize, 2), fixture.readCount());
+    fixture.timerTick(start + 110 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 3), fixture.readCount());
     var ids: [8][36]u8 = undefined;
     _ = fixture.reads(&ids);
-    try fixture.respond(ids[1], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.respond(ids[2], fixture.gen(), DeletedLoopScene.remaining);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
 }
 
@@ -16067,6 +16114,222 @@ test "workspace layout: a snapshot delivered before a reconnect is never the fir
     try fixture.expectKills("");
     try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+/// Delete loop C, let the shell see it gone and send its read, then lose the daemon: the held
+/// graph already lacks C when the new connection's first snapshot arrives.
+fn deletedThenReconnected(fixture: *LiveTerminalFixture, start: i128) !void {
+    try fixture.deliver(DeletedLoopScene.all);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 1 * std.time.ns_per_s);
+    fixture.reconnect();
+}
+
+test "workspace layout: a loop deleted before a reconnect is ended once the new connection's snapshot and reply both lack it" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    // The read is in flight when the daemon is killed; its reply is lost or arrives late.
+    try fixture.deliver(DeletedLoopScene.all);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const old_read = try DeletedLoopScene.onlyRead(&fixture);
+    const old_generation = fixture.gen();
+    fixture.reconnect();
+    try fixture.respond(old_read, old_generation, DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // The restarted daemon's first snapshot lacks C. The held graph lacked it too, so only the
+    // saved layout says the shell may still own a session for it.
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 6 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    var ids: [8][36]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), fixture.reads(&ids));
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // The old connection's reply and a pre-reconnect id answer nothing asked here.
+    try fixture.respond(old_read, old_generation, DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    try fixture.respond(ids[1], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    // The same retirement forgets the shell-ownership record and the layout.
+    try fixture.waitFor(LiveTerminalFixture.markerGone, shell_uuid_one);
+    try std.testing.expect(!fixture.layoutExists("loop-c.json"));
+    try std.testing.expect(!fixture.killed("loop-a") and !fixture.killed("loop-b"));
+}
+
+test "workspace layout: after a reconnect a loop's session is kept unless the new connection's own reply lacks the loop" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    // The new connection's snapshot lacks C; the read goes out once the settle delay passes.
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 3 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+    // Event snapshots, however many, never count as the second look.
+    try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.event(fixture.gen(), DeletedLoopScene.remaining);
+    fixture.timerTick(start + 8 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    // The loop is back by the time the daemon answers: nothing is ended, nothing is re-asked.
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.all);
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_one));
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+}
+
+test "workspace layout: a loop recreated before the read is sent drops the post-reconnect look" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    try fixture.deliver(DeletedLoopScene.remaining);
+    try fixture.deliver(DeletedLoopScene.all);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+}
+
+test "workspace layout: a stale snapshot delivered after a reconnect, or an empty one, never arms a look" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    // Queued on the old connection, polled on the new one.
+    fixture.reconnect();
+    const stale = try fixture.eventFrame(DeletedLoopScene.remaining);
+    defer std.testing.allocator.free(stale);
+    fixture.app.client.setCallback(&onDaemonFrame, &fixture.app);
+    fixture.app.client.connection_generation -%= 1;
+    fixture.app.client.enqueueInbound(stale);
+    fixture.app.client.connection_generation +%= 1;
+    fixture.timerTick(start + 2 * std.time.ns_per_s);
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+
+    // A restarted daemon that has not loaded its project reports no loops at all.
+    try fixture.deliverNodes("");
+    fixture.timerTick(start + 120 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+}
+
+test "workspace layout: after a reconnect only this project's own unclaimed, shell-recorded session is ended" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    // Another project's loop, a loop whose session was never recorded as a shell's, and a loop
+    // whose session zmx cannot list.
+    try fixture.saveLoopLayout("C:\\other-project", "foreign-loop", &.{ .{ .id = "foreign-loop", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("foreign-loop", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-b", "loop-c", shell_uuid_one, shell_uuid_two });
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    fixture.settle();
+    try std.testing.expect(!fixture.killed(shell_uuid_two));
+    try std.testing.expect(fixture.layoutExists("foreign-loop.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+}
+
+test "workspace layout: after a reconnect a loop another shell created since the snapshot is kept, and the deleted one is ended" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    // Another shell creates loop D and opens a shell tab in it just after the daemon built this
+    // snapshot, which therefore lacks D, but before this shell reads the layouts: D's layout,
+    // its ownership record and its live session are newer than this shell. The reconnect
+    // sweep relaxes the age filter, so only the daemon's own reply stands between D and a kill.
+    try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-d", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-b", "loop-d", shell_uuid_one, shell_uuid_two });
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 3 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    fixture.settle();
+    try fixture.expectKills("");
+
+    const with_d: []const LiveLoop = &.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-d" } };
+    try fixture.respond(read, fixture.gen(), with_d);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    fixture.settle();
+    try std.testing.expect(!fixture.killed(shell_uuid_two));
+    try std.testing.expect(fixture.layoutExists("loop-d.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+    try std.testing.expect(!fixture.layoutExists("loop-c.json"));
+
+    // D's look ended with the reply that holds it: nothing is asked again.
+    fixture.timerTick(start + 60 * std.time.ns_per_s);
+    fixture.settle();
+    try std.testing.expectEqual(@as(usize, 1), fixture.readCount());
+    try std.testing.expect(!fixture.killed(shell_uuid_two));
+}
+
+test "workspace layout: after a reconnect an unlistable or unrecorded session is never killed" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" }, .{ .id = "loop-b" }, .{ .id = "loop-c" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-c", &.{ .{ .id = "loop-c", .agent = true }, .{ .id = shell_uuid_one } });
+    try fixture.markOwned("loop-c", &.{shell_uuid_one});
+    try fixture.setUnreachable(&.{ "loop-a", "loop-b", "loop-c" }, &.{shell_uuid_one}, "Timeout");
+    const start = fixture.connect();
+    try deletedThenReconnected(&fixture, start);
+
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_one));
+
+    // A session that no GraphCode shell recorded for this loop is the user's.
+    try fixture.setLive(&.{ "loop-a", "loop-b", "loop-c", shell_uuid_one });
+    try fixture.tmp.dir.deleteFile("shell-sessions\\graphcode-" ++ shell_uuid_one);
+    fixture.timerTick(start + 20 * std.time.ns_per_s);
+    var ids: [8][36]u8 = undefined;
+    const count = fixture.reads(&ids);
+    try std.testing.expect(count >= 2);
+    try fixture.respond(ids[count - 1], fixture.gen(), DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
 }
 
 test "workspace layout: a snapshot or reply without a revision never authorizes a kill" {
@@ -19049,6 +19312,7 @@ fn deinitOverviewTestApp(app: *App) void {
     app.allocator.free(app.canvas_press_node_id);
     app.client.deinit();
     app.freeLoopProbes();
+    app.freeLoopSweeps();
     app.model.deinit();
     app.sidebar_state.deinit();
     app.declared_entry_ids.deinit();
