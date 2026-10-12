@@ -167,6 +167,7 @@ public actor ProjectRegistry {
     self.platformPaths = platformPaths
     persistence = ProjectPersistence(
       baseDirectory: persistenceDirectory, platformPaths: platformPaths)
+    persistence.sweepAbandonedTempFiles()
     writer = GraphWriter(persistence: persistence)
     self.persistsSynchronously = persistsSynchronously
     quickChatStore = QuickChatStore(baseDirectory: persistenceDirectory)

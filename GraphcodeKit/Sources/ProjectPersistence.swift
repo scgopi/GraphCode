@@ -29,6 +29,59 @@ public struct ProjectPersistence: Sendable {
       at: projectsDirectory, withIntermediateDirectories: true)
   }
 
+  // MARK: - Abandoned atomic-write temp files
+
+  /// The temp name Foundation's `.atomic` write mints beside its destination:
+  /// `.dat.nosync<pid in uppercase hex>.<6 random characters>`. The write goes
+  /// create(O_EXCL) -> write -> commit -> rename-over-destination, so a process killed
+  /// before the rename leaves this file behind while the destination still holds the last
+  /// completed version. Nothing here ever reads one back as a graph (readers only take
+  /// `.json`), and `saveGraph` returns only after the rename, so an unrenamed temp was never
+  /// acknowledged and is always discarded rather than recovered: even a complete one is a
+  /// write nobody was told landed, and a torn one cannot be told from a complete one.
+  /// Returns the owning pid, or nil for any name that is not exactly this pattern.
+  static func atomicWriteTempFileOwner(_ name: String) -> Int32? {
+    let prefix = ".dat.nosync"
+    guard name.hasPrefix(prefix) else { return nil }
+    let parts = name.dropFirst(prefix.count).split(
+      separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+    guard parts.count == 2, !parts[0].isEmpty, parts[0].count <= 8,
+      parts[0].allSatisfy({ $0.isHexDigit }),
+      parts[1].count == 6, parts[1].allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }),
+      let raw = UInt32(parts[0], radix: 16)
+    else { return nil }
+    return Int32(bitPattern: raw)
+  }
+
+  /// Removes temp files abandoned by a writer that died mid-write. A file goes only when it
+  /// matches the temp pattern exactly, is a regular file, is at least `minimumAge` old, and
+  /// its owning pid is not running — or it is older than `maximumAge`, which no live write
+  /// can be (a pid can be reused by an unrelated process). A live writer's file is
+  /// milliseconds old and is never touched. Returns the names removed.
+  @discardableResult
+  public func sweepAbandonedTempFiles(
+    now: Date = Date(),
+    minimumAge: TimeInterval = 300,
+    maximumAge: TimeInterval = 24 * 3600,
+    isProcessRunning: ((Int32) -> Bool)? = nil
+  ) -> [String] {
+    let isRunning = isProcessRunning ?? { WorkspaceLock.isRunning($0) }
+    let fileManager = FileManager.default
+    var removed: [String] = []
+    for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? [] {
+      guard let pid = Self.atomicWriteTempFileOwner(name) else { continue }
+      let url = projectsDirectory.appendingPathComponent(name)
+      guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+        attributes[.type] as? FileAttributeType == .typeRegular,
+        let modified = attributes[.modificationDate] as? Date
+      else { continue }
+      let age = now.timeIntervalSince(modified)
+      guard age >= minimumAge, age >= maximumAge || !isRunning(pid) else { continue }
+      if (try? fileManager.removeItem(at: url)) != nil { removed.append(name) }
+    }
+    return removed
+  }
+
   // MARK: - Per-project graph
 
   public func loadGraph(path: String) -> LoopGraph? {

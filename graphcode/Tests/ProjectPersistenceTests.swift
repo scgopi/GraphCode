@@ -341,4 +341,35 @@ struct MailroomPersistenceTests {
     writer.flush()
     #expect(try #require(persistence.loadGraph(path: path)).nodes[0].title == "v50")
   }
+
+  /// A writer killed between Foundation's temp create and rename leaves
+  /// `.dat.nosync<hexpid>.<6 chars>` beside the graph. Only dead-owner, old, exactly
+  /// matching files go; the graph and everything else stay.
+  @Test
+  func sweepRemovesOnlyAbandonedAtomicWriteTempFiles() throws {
+    let directory = makeDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let persistence = ProjectPersistence(baseDirectory: directory)
+    let project = ProjectRef(path: "/tmp/sweep", name: "sweep")
+    persistence.saveGraph(LoopGraph(project: project, nodes: []))
+    let projects = directory.appendingPathComponent("projects", isDirectory: true)
+    func plant(_ name: String, age: TimeInterval) throws {
+      let url = projects.appendingPathComponent(name)
+      try Data("{}".utf8).write(to: url)
+      try FileManager.default.setAttributes(
+        [.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: url.path)
+    }
+    try plant(".dat.nosync8040.a30616", age: 3600)
+    try plant(".dat.nosync9000.a11111", age: 3600)
+    try plant(".dat.nosync8040.a22222", age: 1)
+    try plant("notes.txt", age: 3600)
+
+    let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 }
+
+    #expect(removed == [".dat.nosync8040.a30616"])
+    let left = try FileManager.default.contentsOfDirectory(atPath: projects.path)
+    #expect(
+      Set(left).isSuperset(of: [".dat.nosync9000.a11111", ".dat.nosync8040.a22222", "notes.txt"]))
+    #expect(persistence.loadGraph(path: project.path) != nil)
+  }
 }
