@@ -1911,9 +1911,7 @@ public actor GraphStore {
     guard onReadPresence != nil else { return false }
     var changed = false
     for node in graph.nodes where readsPresence(of: node) {
-      guard let raw = await presenceReading(of: node) else { continue }
-      let (reading, replyMoved) = maskStopReply(raw, for: node.id)
-      if replyMoved { changed = true }
+      guard let reading = await presenceReading(of: node) else { continue }
       guard graph.nodes[id: node.id]?.presence != reading else { continue }
       graph.nodes[id: node.id]?.presence = reading
       changed = true
@@ -1930,61 +1928,6 @@ public actor GraphStore {
     }
     if refreshActiveDependents() { changed = true }
     return changed
-  }
-
-  /// How long after Stop a quiet reading may settle a stop reply that never showed busy:
-  /// the agent can answer between two polls, and a reply that never starts has nothing to
-  /// wait for. Long enough for a slow model to begin; short enough that a human who
-  /// re-engages a stopped loop is not mistaken for its stop reply for long.
-  static let stopReplyGrace: TimeInterval = 60
-
-  /// A stopped loop's agent answers the stop prompt (see `StopReply`), and that answer is
-  /// not the loop asking for anything — recorded raw, it moved the *derived* state off
-  /// `stopped` and listed the loop under Needs you. Masked here, at the single place a
-  /// reading becomes the node's `presence`, so every client (`displayState`, the status
-  /// line, the rollup, the Windows shell's Needs you list) sees the same thing, and the
-  /// moment the masking ends they all see the real reading with no client change.
-  ///
-  /// Masks busy and awaitingInput as idle until the reply has settled, then keeps masking
-  /// until the first busy turn after that: a human typing into the still-live pane, or a
-  /// restored session, starts with one, and its question is then genuine. Returns the
-  /// reading to record and whether the latch moved.
-  private func maskStopReply(_ raw: PresenceReading, for nodeID: UUID) -> (PresenceReading, Bool) {
-    guard let node = graph.nodes[id: nodeID], let reply = node.stopReply else {
-      return (raw, false)
-    }
-    // Left `.stopped` by a restart, a reopened goal or a cycle re-entry: nothing to mask.
-    guard node.state == .stopped else {
-      graph.nodes[id: nodeID]?.stopReply = nil
-      return (raw, true)
-    }
-    let gone = raw.exitCode != nil || raw.presence == .absent
-    let busy = raw.exitCode == nil && raw.presence == .busy
-    var next = reply
-    switch reply.phase {
-    case .awaitingReply:
-      if busy {
-        next.phase = .replying
-      } else if gone
-        || (raw.presence != .unknown
-          && Date().timeIntervalSince(reply.requestedAt) >= Self.stopReplyGrace)
-      {
-        next.phase = .settled
-      }
-    case .replying:
-      if gone || (!busy && raw.presence != .unknown) { next.phase = .settled }
-    case .settled:
-      if busy {
-        graph.nodes[id: nodeID]?.stopReply = nil
-        return (raw, true)
-      }
-    }
-    let moved = next != reply
-    if moved { graph.nodes[id: nodeID]?.stopReply = next }
-    guard raw.exitCode == nil, raw.presence == .busy || raw.presence == .awaitingInput else {
-      return (raw, moved)
-    }
-    return (PresenceReading(presence: .idle, confidence: raw.confidence), moved)
   }
 
   private func readsPresence(of node: LoopNode) -> Bool {
@@ -3394,10 +3337,6 @@ public actor GraphStore {
     }
     setNodeState(node.id, .stopped)
     graph.nodes[id: node.id]?.pendingCompletion = nil
-    // The agent will answer the stop prompt; that answer must not read as the loop coming
-    // back (`maskStopReply`). Only a delivered prompt gets one: a killed or unasked
-    // session has no reply coming, and whatever it does later is its own.
-    graph.nodes[id: node.id]?.stopReply = asked ? StopReply(requestedAt: Date()) : nil
     cancelGoalPoller(node.id)
     // The experiment's clean-stop dividend: a heartbeat loop's cadence dies here, with
     // the timer — no typed request needed for a schedule the agent never owned.
@@ -5012,7 +4951,6 @@ public actor GraphStore {
   /// way out makes that impossible: only the stall sites leave a reason behind.
   private func setNodeState(_ nodeID: UUID, _ state: LoopState) {
     graph.nodes[id: nodeID]?.state = state
-    if state != .stopped { graph.nodes[id: nodeID]?.stopReply = nil }
     if state != .stalled { graph.nodes[id: nodeID]?.stallReason = nil }
     if state != .succeeded && state != .failed { graph.nodes[id: nodeID]?.resolution = nil }
     if graph.nodes[id: nodeID]?.isResolved == false {
@@ -5115,8 +5053,9 @@ public actor GraphStore {
   public func ensureUnattendedSessions() async {
     // A loop stopped for a missing CLI waits for the human's restart: relaunching it at
     // boot would only reach the same missing CLI and raise the same dialog. A loop the
-    // human stopped waits too: a session started here would run the loop's work again
-    // under a row that reads stopped.
+    // human stopped waits too: `.stopped` outranks its presence on every surface, so a
+    // session started here would work, and could ask a question, under a row that reads
+    // stopped.
     for node in graph.nodes
     where node.runsUnattended && node.launchFailure == nil && node.state != .stopped {
       if node.loopType == .goalBased {
@@ -5192,13 +5131,6 @@ public actor GraphStore {
     if let onRestoreRebootedSessions, !finished.isEmpty {
       let path = graph.project.path
       let copies = finished.map(Self.rebootRestoreCopy)
-      // A stopped loop's last reading is usually `absent` (the reboot ended its session),
-      // and a resolved loop is not read again after that until someone opens it — which a
-      // stopped loop never triggers (`resumeResolvedSession`). Without this a human who
-      // re-engages the restored session would never reach Needs you.
-      for node in finished where node.state == .stopped {
-        resolvedSessionsOpened[node.id] = Date()
-      }
       Task.detached { await onRestoreRebootedSessions(copies, path) }
     }
     await broadcastIfTemplatesRefreshed()

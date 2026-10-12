@@ -1377,6 +1377,7 @@ pub fn findEdgeIndexByID(edges: []const Edge, id: []const u8) ?usize {
 }
 
 fn needsAttention(node: Node) bool {
+    if (std.mem.eql(u8, node.state, "stopped")) return false;
     return std.mem.eql(u8, node.state, "failed") or
         std.mem.eql(u8, node.state, "stalled") or
         std.mem.eql(u8, node.presence, "awaitingInput");
@@ -3235,24 +3236,14 @@ test "attention rollup surfaces awaiting input and failures" {
     try std.testing.expectEqualStrings("Question", model.attention.items[1].title);
 }
 
-test "a stopped loop's masked stop reply stays out of Needs you and a later question from it appears" {
+test "a stopped loop whose agent answers the stop prompt stays out of Needs you" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
-    // What the daemon sends while the stop reply is masked: stopped, reading recorded as idle,
-    // with the persisted latch riding the node (a field this shell does not use).
-    const masked =
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Stopped","loopType":"turnBased","state":"stopped","stopReply":{"requestedAt":780000000.5,"phase":"settled"},"presence":{"presence":"idle","confidence":"reported"}}],"edges":[]}}}
-    ;
-    _ = try model.updateFromFrame(masked);
-    try std.testing.expectEqual(@as(usize, 0), model.attentionCount());
-
-    // The human typed into the still-live pane and the agent asked: the daemon stopped masking.
-    const asking =
-        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Stopped","loopType":"turnBased","state":"stopped","presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
-    ;
-    _ = try model.updateFromFrame(asking);
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"C:\\work\\graph","name":"Graph","remote":false},"nodes":[{"id":"a","title":"Stopped","loopType":"turnBased","state":"stopped","presence":{"presence":"awaitingInput","confidence":"reported"}},{"id":"b","title":"Asker","loopType":"turnBased","state":"running","presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
+    );
     try std.testing.expectEqual(@as(usize, 1), model.attentionCount());
-    try std.testing.expectEqualStrings("Stopped", model.attention.items[0].title);
+    try std.testing.expectEqualStrings("Asker", model.attention.items[0].title);
 }
 
 test "activity log records state transitions but not initial snapshot" {
