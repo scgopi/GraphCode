@@ -209,6 +209,8 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// with. A backend verdict recorded before this belongs to an earlier goal.
   public var goalSetAt: Date?
   public var lineage: LoopLineage?
+  /// Set while a stopped loop's agent is answering the stop prompt; see `StopReply`.
+  public var stopReply: StopReply?
   public var state: LoopState
   public var createdAt: Date
 
@@ -504,11 +506,6 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
   /// A backend that reports nothing leaves `presence` nil and this returns `state`
   /// untouched, which is exactly the behaviour every surface had before presence existed.
   public var displayState: LoopState {
-    // A stopped loop's session is asked to stop, not killed, so it stays live and its own
-    // reply to the stop prompt reads busy and then awaitingInput. That is the stop taking
-    // effect, not a loop coming back: nothing in the store un-stops a node, so `.stopped`
-    // outranks every presence reading.
-    if state == .stopped { return .stopped }
     if presence?.exitCode == nil {
       switch presence?.presence {
       case .busy: return .running
@@ -595,7 +592,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
     case state, createdAt, activity, presence, firstInstruction, pausesBeforeWritesOnly
     case summary, board, heartbeatIntervalSeconds, stallReason, attachments
     case createdFromTemplateID, templateFollow, sessionRestarts, launchFailure, resolution
-    case pendingCompletion, goalSetAt, lineage
+    case pendingCompletion, goalSetAt, lineage, stopReply
   }
 
   /// Hand-written for the same reason `LoopEdge`'s is: `ProjectPersistence.loadGraph`
@@ -663,6 +660,7 @@ public struct LoopNode: Identifiable, Codable, Equatable, Sendable {
       try? container.decodeIfPresent(LoopResolution.self, forKey: .pendingCompletion)
     goalSetAt = try? container.decodeIfPresent(Date.self, forKey: .goalSetAt)
     lineage = try? container.decodeIfPresent(LoopLineage.self, forKey: .lineage)
+    stopReply = try? container.decodeIfPresent(StopReply.self, forKey: .stopReply)
     state = try container.decodeIfPresent(LoopState.self, forKey: .state) ?? .idle
     createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
   }

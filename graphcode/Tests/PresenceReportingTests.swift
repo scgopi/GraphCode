@@ -378,9 +378,7 @@ struct PresenceReportingTests {
   func aWorkingSessionReadsRunningWhateverTheGraphBelieves() {
     // An IDLE main loop a human just asked something, a DONE loop answering a follow-up:
     // the agent is working, and the card says so. Quiet leaves the graph's word alone.
-    // `.stopped` is the one exception: the stop prompt's own reply reads busy and then
-    // awaitingInput, and that must not bring a stopped loop back (see ResolvedSessionTests).
-    for state in LoopState.allCases where state != .running && state != .stopped {
+    for state in LoopState.allCases where state != .running {
       for loopType in [LoopType.goalBased, .sketch, .timeBased, .turnBased] {
         var working = node(state, .busy)
         working.loopType = loopType

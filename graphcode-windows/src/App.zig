@@ -13061,9 +13061,8 @@ const ShowGraphFixture = struct {
     tmp: std.testing.TmpDir,
     sequence: usize = 2,
 
-    /// Core project with loops A, B, C; A is running and asking the human a question, so
-    /// it is the one "Needs you" entry (a stopped loop never is), and a short canvas drag
-    /// left A graph-selected.
+    /// Core project with loops A, B, C; A stopped after spending a turn, so it is the
+    /// one "Needs you" entry, and a short canvas drag left A graph-selected.
     fn init(self: *ShowGraphFixture) !void {
         const allocator = std.testing.allocator;
         self.sequence = 2;
@@ -13083,7 +13082,7 @@ const ShowGraphFixture = struct {
         app.workspace = &self.workspace;
         try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
 
-        try deliverShowGraphFrame(app, self.sequence, "running", "awaitingInput");
+        try deliverShowGraphFrame(app, self.sequence, "stopped", "awaitingInput");
         self.sequence += 1;
         try std.testing.expectEqual(@as(usize, 1), app.model.attentionCount());
         try std.testing.expectEqualStrings("loop-a", app.model.attention_entries.items[0].node.id);

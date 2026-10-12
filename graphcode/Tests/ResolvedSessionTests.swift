@@ -199,10 +199,9 @@ struct ResolvedSessionTests {
       #expect(reading(state, nil).displayState == state)
       #expect(reading(state, .busy).isResolved)
     }
-    #expect(reading(.stalled, .busy).displayState == .running)
-    #expect(reading(.stalled, .idle).displayState == .stalled)
-    for presence in [Presence.busy, .awaitingInput, .idle, .absent] {
-      #expect(reading(.stopped, presence).displayState == .stopped)
+    for state in [LoopState.stalled, .stopped] {
+      #expect(reading(state, .busy).displayState == .running)
+      #expect(reading(state, .idle).displayState == state)
     }
     var exited = reading(.succeeded, .busy)
     exited.presence?.exitCode = 0

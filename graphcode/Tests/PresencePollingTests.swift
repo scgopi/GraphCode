@@ -134,19 +134,20 @@ struct PresencePollingTests {
   }
 
   @Test
-  func aStoppedLoopStaysStoppedWhileItsAgentAnswersTheStopPrompt() async {
+  func aStoppedLoopStaysStoppedWhileItsAgentAnswersTheStopPromptButAReEngagementSurfaces() async {
     let probe = Probe()
     let store = GraphStore(
       graph: graph([node("stopper", .running), node("sibling", .running)]),
+      onDeliverMessage: { _, _, _ in true },
       onReadPresence: { node, _ in await probe.read(node) })
     let descriptor = await attach(to: store)
     defer { close(descriptor) }
     let stopperID = await store.graph.nodes[0].id
 
     await store.handle(.stopNode(stopperID))
-    for answer in [Presence.busy, .awaitingInput, .idle] {
+    await probe.answer("sibling", with: .awaitingInput)
+    for answer in [Presence.busy, .awaitingInput, .idle, .awaitingInput] {
       await probe.answer("stopper", with: answer)
-      await probe.answer("sibling", with: .awaitingInput)
       await store.pollPresence()
 
       let stopped = await store.graph.nodes[id: stopperID]
@@ -158,6 +159,16 @@ struct PresencePollingTests {
     let sibling = await store.graph.nodes[1]
     #expect(sibling.displayState == .awaitingInput)
     #expect(AttentionRollup.reason(for: sibling) == .awaitingInput)
+
+    // The reply has settled; a new busy turn is a human typing into the live pane, and the
+    // question that follows is genuine.
+    await probe.answer("stopper", with: .busy)
+    await store.pollPresence()
+    await probe.answer("stopper", with: .awaitingInput)
+    await store.pollPresence()
+    let asking = await store.graph.nodes[id: stopperID]
+    #expect(asking?.displayState == .awaitingInput)
+    #expect(asking.flatMap { AttentionRollup.reason(for: $0) } == .awaitingInput)
   }
 
   @Test
