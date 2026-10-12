@@ -2084,8 +2084,12 @@ pub const App = struct {
     /// it names that the daemon has not persisted cannot be mistaken for one that was deleted.
     /// A daemon restart cancels the looks in flight, and the first usable snapshot of the new
     /// connection can already lack a loop whose deletion the old one showed. So a reconnect
-    /// carries over only what this shell itself observed: a watch the reconnect cancelled
-    /// (`LoopProbe.carried`) and the loops of its last usable snapshot. A layout the shell never
+    /// carries over only what this shell itself observed: a watch the reconnect cancelled for a
+    /// loop it held (`LoopProbe.held` and `.carried`; one the age sweep started for a saved
+    /// layout is dropped) and the loops of its last usable snapshot. Nothing is armed, cancelled,
+    /// recorded or confirmed while the client is not connected: between a transport failure and
+    /// the next connection the generation has not moved, so a frame queued before the failure
+    /// still carries it. A layout the shell never
     /// held is never considered after a reconnect, whatever its age: a project with neither a
     /// carried watch nor a held snapshot is left alone. This is still not proof of
     /// deletion: a restarted daemon may have reloaded a graph from before a loop this shell saw
@@ -2095,6 +2099,9 @@ pub const App = struct {
         const workspace = self.workspace orelse return;
         const graph = self.model.graphFor(identity.project) orelse return;
         if (graph.nodes.items.len == 0) return;
+        // A frame the reader queued before the transport failed is still stamped with the
+        // connection that has just ended, and the next one starts only when it is established.
+        if (self.client.connectionState() != .connected) return;
         if (identity.generation != self.client.connectionGeneration()) return;
         const revision = graph.revision orelse return;
         self.dropRestoredProbes(identity.project, graph);
@@ -2110,7 +2117,7 @@ pub const App = struct {
             if (!std.mem.eql(u8, record.project, identity.project)) continue;
             if (record.modified_ns >= workspace.started_ns) continue;
             if (graphHasLoop(graph, record.loop)) continue;
-            self.watchLoop(identity.project, record.loop, identity.generation, revision);
+            self.watchLoop(identity.project, record.loop, identity.generation, revision, false);
         }
     }
 
@@ -2134,6 +2141,7 @@ pub const App = struct {
     /// first look. Nothing here ends a session; the correlated reply still has to.
     fn observeLoops(self: *App, project: []const u8, graph: *const GraphModel.GraphSummary, generation: u64, held_revision: u64) bool {
         const now = self.loopNow();
+        self.fenceStaleProbes();
         for (self.loop_probes.items) |*probe| {
             if (!std.mem.eql(u8, probe.project, project)) continue;
             // Armed on an earlier connection, whether or not a timer tick has flagged it yet.
@@ -2158,7 +2166,7 @@ pub const App = struct {
         for (self.loop_held.items) |*entry| {
             if (!std.mem.eql(u8, entry.project, project)) continue;
             for (entry.ids) |id| {
-                if (!graphHasLoop(graph, id)) self.watchLoop(project, id, generation, held_revision);
+                if (!graphHasLoop(graph, id)) self.watchLoop(project, id, generation, held_revision, true);
             }
             for (entry.ids) |id| self.allocator.free(id);
             self.allocator.free(entry.ids);
@@ -2183,6 +2191,28 @@ pub const App = struct {
         for (self.loop_held.items) |entry| entry.deinit(self.allocator);
         self.loop_held.deinit(self.allocator);
         self.loop_held = .empty;
+    }
+
+    /// A reconnect ends every look that was not about a loop this shell held: one the age-based
+    /// sweep started for a saved layout it never saw is dropped, as a restarted daemon may have
+    /// replayed a graph that lacks a loop another shell had just made. Looks about a loop the
+    /// shell held are carried (`LoopProbe.carried`) until the new connection's first usable
+    /// snapshot re-arms them.
+    fn fenceStaleProbes(self: *App) void {
+        const generation = self.client.connectionGeneration();
+        var index: usize = 0;
+        while (index < self.loop_probes.items.len) {
+            const probe = &self.loop_probes.items[index];
+            if (probe.generation == generation and !probe.carried) {
+                index += 1;
+            } else if (!probe.held) {
+                self.removeLoopProbe(index);
+            } else {
+                probe.carried = true;
+                probe.read_id = null;
+                index += 1;
+            }
+        }
     }
 
     /// Forgets what a project the shell no longer holds carried over a reconnect.
@@ -2219,6 +2249,9 @@ pub const App = struct {
         held_revision: u64,
         due_ns: i128,
         sends: u8 = 0,
+        /// The loop was in this shell's own last usable snapshot of the project, so the look may
+        /// outlive a reconnect. A look the age-based sweep started for a saved layout does not.
+        held: bool = false,
         /// The reconnect cancelled this look. It asks nothing and ends nothing; the first
         /// qualifying snapshot of the new connection re-arms it if that still lacks the loop.
         carried: bool = false,
@@ -2255,9 +2288,12 @@ pub const App = struct {
 
     /// Starts the timer of a loop a snapshot of `project` lacks. Another project's traffic,
     /// or a later snapshot that still lacks the loop, never touches an existing timer.
-    fn watchLoop(self: *App, project: []const u8, loop: []const u8, generation: u64, held_revision: u64) void {
+    fn watchLoop(self: *App, project: []const u8, loop: []const u8, generation: u64, held_revision: u64, held: bool) void {
         if (self.findLoopProbe(project, loop)) |index| {
-            if (self.loop_probes.items[index].generation == generation) return;
+            if (self.loop_probes.items[index].generation == generation) {
+                if (held) self.loop_probes.items[index].held = true;
+                return;
+            }
             self.removeLoopProbe(index);
         }
         const owned_project = self.allocator.dupe(u8, project) catch return;
@@ -2270,6 +2306,7 @@ pub const App = struct {
             .loop = owned_loop,
             .generation = generation,
             .held_revision = held_revision,
+            .held = held,
             .due_ns = self.loopNow() + loop_settle_ns,
         }) catch {
             self.allocator.free(owned_project);
@@ -2296,15 +2333,10 @@ pub const App = struct {
         self.pruneLoopCarry();
         if (self.loop_probes.items.len == 0) return;
         const connected = self.client.connectionState() == .connected;
-        const generation = self.client.connectionGeneration();
         const now = self.loopNow();
         // A look from an earlier connection is carried, not answered: its reply, if it ever
         // comes, is stale, and the daemon may have restarted and replayed less.
-        for (self.loop_probes.items) |*probe| {
-            if (probe.generation == generation) continue;
-            probe.carried = true;
-            probe.read_id = null;
-        }
+        self.fenceStaleProbes();
         var index: usize = 0;
         while (index < self.loop_probes.items.len) {
             const probe = &self.loop_probes.items[index];
@@ -2354,6 +2386,9 @@ pub const App = struct {
 
         const frame_generation = self.client.deliveringGeneration();
         const connection_generation = self.client.connectionGeneration();
+        // Between a transport failure and the next connection the generation has not moved, so
+        // a reply the reader queued before the failure still carries the current one.
+        const connected = self.client.connectionState() == .connected;
         var scratch = GraphModel.Model.init(self.allocator);
         defer scratch.deinit();
         const parsed = kind == .response and blk: {
@@ -2375,6 +2410,7 @@ pub const App = struct {
             probe.read_id = null;
             const graph = if (parsed) scratch.currentGraph() else null;
             const fresh = graph != null and
+                connected and
                 frame_generation == probe.read_generation and
                 connection_generation == probe.read_generation and
                 probe.generation == probe.read_generation and
@@ -16563,6 +16599,93 @@ test "workspace layout: a reconnect before the shell's first poll or snapshot st
     try fixture.expectKills("");
     try std.testing.expect(fixture.layoutExists("loop-d.json"));
     try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+}
+
+test "workspace layout: a snapshot queued before the transport failed arms nothing while the client is not connected" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-d", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
+    fixture.predateLayouts();
+    try fixture.forgetGraph();
+    const start = fixture.connect();
+
+    // The reader queued a snapshot that omits another shell's older, recorded, live loop D, and
+    // then the pipe failed: the client is reconnecting, the generation has not moved, and the
+    // timer polls the queued frame in that gap.
+    fixture.app.client.state = .reconnecting;
+    try fixture.deliverNodes(node_loop_a);
+    fixture.reconnect();
+    fixture.app.client.state = .connected;
+
+    // The restarted daemon's own first snapshot omits D too.
+    try fixture.deliverNodes(node_loop_a);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    fixture.timerTick(start + 30 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-d.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+}
+
+test "workspace layout: a look the age sweep started for a layout the shell never held does not outlive the connection" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{ .{ .id = "loop-a" } });
+    defer fixture.deinit();
+    try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
+    try fixture.markOwned("loop-d", &.{shell_uuid_two});
+    try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
+    fixture.predateLayouts();
+    try fixture.forgetGraph();
+    const start = fixture.connect();
+
+    // On the first connection the sweep may watch D, which is older than this shell. The daemon
+    // restarts before the look is due; its first snapshot omits D as well.
+    try fixture.deliverNodes(node_loop_a);
+    try std.testing.expect(fixture.app.loop_probes.items.len == 1);
+    fixture.reconnect();
+    try fixture.deliverNodes(node_loop_a);
+    fixture.timerTick(start + 10 * std.time.ns_per_s);
+    fixture.timerTick(start + 30 * std.time.ns_per_s);
+    try std.testing.expectEqual(@as(usize, 0), fixture.readCount());
+    try std.testing.expectEqual(@as(usize, 0), fixture.app.loop_probes.items.len);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-d.json"));
+    try std.testing.expect(fixture.ownedMarker(shell_uuid_two));
+}
+
+test "workspace layout: a reply queued before the transport failed confirms nothing, and the held loop is still retired on the new connection" {
+    var fixture: LiveTerminalFixture = undefined;
+    try DeletedLoopScene.init(&fixture);
+    defer fixture.deinit();
+    const start = fixture.connect();
+    try fixture.deliver(DeletedLoopScene.all);
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 4 * std.time.ns_per_s);
+    const read = try DeletedLoopScene.onlyRead(&fixture);
+
+    // The correct reply was queued, then the pipe failed; it is polled while reconnecting.
+    fixture.app.client.state = .reconnecting;
+    try fixture.respond(read, fixture.gen(), DeletedLoopScene.remaining);
+    fixture.settle();
+    try fixture.expectKills("");
+    try std.testing.expect(fixture.layoutExists("loop-c.json"));
+
+    // C was held by this shell, so its look carries over and the new connection retires it.
+    fixture.reconnect();
+    fixture.app.client.state = .connected;
+    try fixture.deliver(DeletedLoopScene.remaining);
+    fixture.timerTick(start + 12 * std.time.ns_per_s);
+    var ids: [8][36]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), fixture.reads(&ids));
+    try fixture.respond(ids[1], fixture.gen(), DeletedLoopScene.remaining);
+    try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+    try fixture.waitFor(LiveTerminalFixture.markerGone, shell_uuid_one);
+    try std.testing.expect(!fixture.layoutExists("loop-c.json"));
 }
 
 test "workspace layout: what a reconnect carried over is forgotten once the project is closed" {
