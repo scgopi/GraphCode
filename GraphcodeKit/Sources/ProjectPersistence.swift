@@ -54,35 +54,29 @@ public struct ProjectPersistence: Sendable {
   }
 
   /// Removes temp files abandoned by a writer that died mid-write. A file goes only when its
-  /// name matches the Windows temp pattern (uppercase-hex pid), it is a regular file, it is
-  /// at least `minimumAge` old, and its owning pid is *definitively* dead. A live or
-  /// unknown owner (access denied, query failure) keeps its file however old: deleting a
-  /// live writer's temp would make its rename fail silently. A reused pid therefore pins a
-  /// stale file; that ambiguity is left alone rather than guessed at. The scan is
-  /// synchronous and examines at most `maximumCandidates` temp-named files.
+  /// name matches the Windows temp pattern (uppercase-hex pid), it is a regular file, and
+  /// its owning pid is *definitively* dead. No age floor: the pid in the name is the
+  /// process that created the file, and a dead process has no writer, so a fresh leftover
+  /// from a just-killed daemon is removed at the next start. A live or unknown owner
+  /// (access denied, query failure, reused pid) keeps its file however old: deleting a
+  /// live writer's temp would make its rename fail silently. A reused pid therefore pins
+  /// a stale file; that conservative ambiguity is left alone. The scan is synchronous and
+  /// unbounded; `projects/` holds one json per project plus a few temps.
   /// Returns the names removed.
   @discardableResult
   public func sweepAbandonedTempFiles(
-    now: Date = Date(),
-    minimumAge: TimeInterval = 300,
-    maximumCandidates: Int = 256,
     liveness: ((Int32) -> ProcessLiveness)? = nil
   ) -> [String] {
     let liveness = liveness ?? { WorkspaceLock.liveness(of: $0) }
     let fileManager = FileManager.default
     var removed: [String] = []
-    var examined = 0
     for name in (try? fileManager.contentsOfDirectory(atPath: projectsDirectory.path)) ?? [] {
       guard let pid = Self.atomicWriteTempFileOwner(name) else { continue }
-      examined += 1
-      if examined > maximumCandidates { break }
       let url = projectsDirectory.appendingPathComponent(name)
       guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
-        attributes[.type] as? FileAttributeType == .typeRegular,
-        let modified = attributes[.modificationDate] as? Date
+        attributes[.type] as? FileAttributeType == .typeRegular
       else { continue }
-      let age = now.timeIntervalSince(modified)
-      guard age >= minimumAge, liveness(pid) == .dead else { continue }
+      guard liveness(pid) == .dead else { continue }
       if (try? fileManager.removeItem(at: url)) != nil { removed.append(name) }
     }
     return removed

@@ -56,16 +56,19 @@ final class AbandonedTempFileTests: XCTestCase {
     let stale1 = try plant(".dat.nosync8040.a30616", age: 3600, body: "{\"torn\":")
     let stale2 = try plant(".dat.nosync8040.a35080", age: 3600)
     let live = try plant(".dat.nosync9000.a11111", age: 3600)
-    let young = try plant(".dat.nosync8040.a22222", age: 1)
+    let young = try plant(".dat.nosync9000.a22222", age: 1)
+    let fresh = try plant(".dat.nosync8040.a33333", age: 0)
     let lookalike = try plant(".dat.nosync8040.a30616.json", age: 3600)
     let unrelated = try plant("notes.txt", age: 3600)
     let backup = try plant("v1-deadbeef.json.bak", age: 3600)
 
     let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .dead }
 
-    XCTAssertEqual(Set(removed), [stale1.lastPathComponent, stale2.lastPathComponent])
+    XCTAssertEqual(
+      Set(removed), [stale1.lastPathComponent, stale2.lastPathComponent, fresh.lastPathComponent])
     XCTAssertFalse(exists(stale1))
     XCTAssertFalse(exists(stale2))
+    XCTAssertFalse(exists(fresh), "a just-killed writer's fresh leftover goes too")
     for kept in [live, young, lookalike, unrelated, backup] {
       XCTAssertTrue(exists(kept), kept.lastPathComponent)
     }
@@ -84,13 +87,16 @@ final class AbandonedTempFileTests: XCTestCase {
     XCTAssertTrue(exists(unknown), "access denied / failed query must keep the file")
   }
 
-  func testCandidateScanIsBounded() throws {
+  func testManyLiveCandidatesDoNotStarveALaterDeadOne() throws {
     let persistence = ProjectPersistence(baseDirectory: base)
-    for index in 0..<5 { _ = try plant(".dat.nosync8040.a3061\(index)", age: 3600) }
+    for index in 0..<300 { _ = try plant(".dat.nosync9000.b\(String(format: "%05d", index))", age: 1) }
+    let dead = try plant(".dat.nosync8040.a30616", age: 0)
 
-    let removed = persistence.sweepAbandonedTempFiles(maximumCandidates: 2) { _ in .dead }
+    persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .dead }
 
-    XCTAssertEqual(removed.count, 2)
+    XCTAssertFalse(exists(dead))
+    XCTAssertEqual(
+      try FileManager.default.contentsOfDirectory(atPath: projects.path).count, 300)
   }
 
   func testDirectoryNamedLikeATempFileIsNotDeleted() throws {
@@ -98,9 +104,25 @@ final class AbandonedTempFileTests: XCTestCase {
     let dir = projects.appendingPathComponent(".dat.nosync8040.a30616", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-    persistence.sweepAbandonedTempFiles(minimumAge: 0) { _ in .dead }
+    persistence.sweepAbandonedTempFiles { _ in .dead }
 
     XCTAssertTrue(exists(dir))
+  }
+
+  func testMatchingNameSymlinkAndItsTargetArePreserved() throws {
+    let persistence = ProjectPersistence(baseDirectory: base)
+    let target = try plant("target.txt", age: 3600)
+    let link = projects.appendingPathComponent(".dat.nosync8040.a30616")
+    do {
+      try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+    } catch {
+      throw XCTSkip("symlink creation unavailable: \(error)")
+    }
+
+    persistence.sweepAbandonedTempFiles { _ in .dead }
+
+    XCTAssertTrue(exists(target))
+    XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: link.path))
   }
 
   func testLoadNeverReadsATempFileAsAGraph() throws {
@@ -154,9 +176,9 @@ final class AbandonedTempFileTests: XCTestCase {
       child.waitUntilExit()
       try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
       let hex = { (pid: Int32) in String(UInt32(bitPattern: pid), radix: 16, uppercase: true) }
-      let dead = try plant(".dat.nosync\(hex(childPID)).a30616", age: 3600)
+      let dead = try plant(".dat.nosync\(hex(childPID)).a30616", age: 0)
       let live = try plant(
-        ".dat.nosync\(hex(ProcessInfo.processInfo.processIdentifier)).a30617", age: 3600)
+        ".dat.nosync\(hex(ProcessInfo.processInfo.processIdentifier)).a30617", age: 0)
 
       _ = ProjectRegistry(persistenceDirectory: base)
 

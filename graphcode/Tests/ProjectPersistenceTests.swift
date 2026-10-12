@@ -343,8 +343,8 @@ struct MailroomPersistenceTests {
   }
 
   /// A writer killed between Foundation's temp create and rename leaves
-  /// `.dat.nosync<hexpid>.<6 chars>` beside the graph. Only dead-owner, old, exactly
-  /// matching files go; the graph and everything else stay.
+  /// `.dat.nosync<hexpid>.<6 chars>` beside the graph. Only dead-owner files with
+  /// a matching name go, however fresh; the graph and everything else stay.
   @Test
   func sweepRemovesOnlyAbandonedAtomicWriteTempFiles() throws {
     let directory = makeDirectory()
@@ -366,10 +366,9 @@ struct MailroomPersistenceTests {
 
     let removed = persistence.sweepAbandonedTempFiles { $0 == 0x9000 ? .alive : .dead }
 
-    #expect(removed == [".dat.nosync8040.a30616"])
+    #expect(Set(removed) == [".dat.nosync8040.a30616", ".dat.nosync8040.a22222"])
     let left = try FileManager.default.contentsOfDirectory(atPath: projects.path)
-    #expect(
-      Set(left).isSuperset(of: [".dat.nosync9000.a11111", ".dat.nosync8040.a22222", "notes.txt"]))
+    #expect(Set(left).isSuperset(of: [".dat.nosync9000.a11111", "notes.txt"]))
     #expect(persistence.loadGraph(path: project.path) != nil)
   }
 }
