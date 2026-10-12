@@ -1358,6 +1358,20 @@ test "connection generation changes on every entry to connected and only then" {
     try std.testing.expect(client.connectionGeneration() != first);
 }
 
+test "a connected generation exists only while the client is connected" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    try std.testing.expect(client.connectedGeneration() == null);
+    client.publishState(.connected, "");
+    try std.testing.expectEqual(client.connectionGeneration(), client.connectedGeneration().?);
+    // A failure moves the state but not the generation.
+    client.publishState(.reconnecting, "");
+    try std.testing.expect(client.connectedGeneration() == null);
+    const failed_on = client.connectionGeneration();
+    client.publishState(.connected, "");
+    try std.testing.expect(client.connectedGeneration().? != failed_on);
+}
+
 test "a reconnect is recorded when the connection is established, once, and stays recorded" {
     var client = try DaemonClient.initForTesting(std.testing.allocator);
     defer client.deinit();
@@ -1611,6 +1625,14 @@ test "v1 response accounting ignores unsolicited events before the expected resu
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.connection_generation;
+    }
+
+    /// The generation of the current connection, or null unless the client is connected, read
+    /// under one lock. State and generation read separately can straddle a failure.
+    pub fn connectedGeneration(self: *DaemonClient) ?u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return if (self.state == .connected) self.connection_generation else null;
     }
 
     /// The generation the frame being delivered by `poll` was received on. Only

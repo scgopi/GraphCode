@@ -2101,8 +2101,9 @@ pub const App = struct {
         if (graph.nodes.items.len == 0) return;
         // A frame the reader queued before the transport failed is still stamped with the
         // connection that has just ended, and the next one starts only when it is established.
-        if (self.client.connectionState() != .connected) return;
-        if (identity.generation != self.client.connectionGeneration()) return;
+        // State and generation are read together: separately, a failure could land between.
+        const current = self.client.connectedGeneration() orelse return;
+        if (identity.generation != current) return;
         const revision = graph.revision orelse return;
         self.dropRestoredProbes(identity.project, graph);
         if (self.observeLoops(identity.project, graph, identity.generation, revision)) return;
@@ -2385,10 +2386,10 @@ pub const App = struct {
         if (!ours) return false;
 
         const frame_generation = self.client.deliveringGeneration();
-        const connection_generation = self.client.connectionGeneration();
         // Between a transport failure and the next connection the generation has not moved, so
-        // a reply the reader queued before the failure still carries the current one.
-        const connected = self.client.connectionState() == .connected;
+        // a reply the reader queued before the failure still carries the current one. The
+        // state and the generation are read under one lock.
+        const connected_generation = self.client.connectedGeneration();
         var scratch = GraphModel.Model.init(self.allocator);
         defer scratch.deinit();
         const parsed = kind == .response and blk: {
@@ -2410,9 +2411,9 @@ pub const App = struct {
             probe.read_id = null;
             const graph = if (parsed) scratch.currentGraph() else null;
             const fresh = graph != null and
-                connected and
+                connected_generation != null and
                 frame_generation == probe.read_generation and
-                connection_generation == probe.read_generation and
+                connected_generation.? == probe.read_generation and
                 probe.generation == probe.read_generation and
                 std.mem.eql(u8, graph.?.project.path, probe.project) and
                 graph.?.nodes.items.len != 0 and
