@@ -1,0 +1,123 @@
+# TEMPORARY. Lab for the flaky selectingTheLoopRedialsAHeldPaneAtOnce test. Lives only on
+# the stress/codespace-selection-flake branch and must never be merged.
+name: TEMPORARY stress codespace selection
+
+on:
+  push:
+    branches: [stress/codespace-selection-flake]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe ${{ matrix.scenario }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [race-free1, race-free3, select-free3]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Machine
+        run: |
+          sysctl -n hw.ncpu hw.model machdep.cpu.brand_string || true
+          sw_vers
+          xcodebuild -version
+      - name: Build the real script renderer
+        run: |
+          swiftc -o render \
+            GraphcodeKit/Sources/Domain/SSHReconnectLoop.swift \
+            GraphcodeKit/Sources/Domain/CodespaceDialSchedule.swift \
+            Tools/stress/main.swift
+      - name: Run the probe
+        env:
+          RENDER: ./render
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          case "$SCENARIO" in
+            race-free1)
+              bash Tools/stress/probe.sh race 1 60 1
+              bash Tools/stress/probe.sh race 1 240 6
+              bash Tools/stress/probe.sh race 1 480 24 ;;
+            race-free3)
+              bash Tools/stress/probe.sh race 3 60 1
+              bash Tools/stress/probe.sh race 3 240 6
+              bash Tools/stress/probe.sh race 3 480 24 ;;
+            select-free3)
+              bash Tools/stress/probe.sh select 3 40 1
+              bash Tools/stress/probe.sh select 3 120 6
+              bash Tools/stress/probe.sh select 3 240 24 ;;
+          esac
+
+  xcode:
+    name: xcode ${{ matrix.variant }} ${{ matrix.load }}
+    runs-on: macos-26
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [pre, post]
+        load: [idle, loaded]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Use the pre-fix test
+        if: matrix.variant == 'pre'
+        run: git checkout 39566623 -- graphcode/Tests/CodespaceSelectionTests.swift
+      - name: Which test file
+        run: |
+          git --no-pager diff --stat HEAD -- graphcode/Tests/CodespaceSelectionTests.swift
+          grep -n 'freeRetryWindow: [13], holdUntil: 120' graphcode/Tests/CodespaceSelectionTests.swift
+      - name: Prepare portable Swift sources
+        run: python3 Tools/portable-prepare.py
+      - name: Install pinned mise tools
+        run: |
+          brew install mise
+          mise install
+      - name: Install Tuist dependencies
+        run: mise exec -- tuist install
+      - name: Build and install zmx
+        run: mise exec -- make install-zmx
+      - name: Generate the workspace
+        run: mise exec -- make generate
+      - name: Build for testing
+        run: |
+          set -o pipefail
+          xcodebuild -workspace graphcode.xcworkspace -scheme graphcode \
+            -destination 'platform=macOS' -parallel-testing-enabled NO \
+            build-for-testing | tail -5
+      - name: Stress CodespaceSelectionTests
+        env:
+          LOAD: ${{ matrix.load }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set +e
+          sysctl -n hw.ncpu
+          if [ "$LOAD" = loaded ]; then
+            for i in 1 2 3 4 5 6; do ( while :; do :; done ) & done
+          fi
+          rm -f /tmp/gc-stress.log
+          start=$SECONDS; n=0; failing=0; ran=0
+          while [ "$n" -lt 60 ] && [ $((SECONDS - start)) -lt 2400 ]; do
+            n=$((n + 1))
+            xcodebuild -workspace graphcode.xcworkspace -scheme graphcode \
+              -destination 'platform=macOS' -parallel-testing-enabled NO \
+              -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+              -maximum-test-execution-time-allowance 180 \
+              test-without-building \
+              -only-testing:graphcodeTests/CodespaceSelectionTests > "/tmp/iter-$n.log" 2>&1
+            rc=$?
+            if grep -q 'selectingTheLoopRedialsAHeldPaneAtOnce' "/tmp/iter-$n.log"; then ran=$((ran + 1)); fi
+            issues=$(grep -E 'recorded an issue|Recorded an issue|Expectation failed' "/tmp/iter-$n.log" | sort -u | cut -c1-220)
+            if [ "$rc" -ne 0 ]; then failing=$((failing + 1)); fi
+            echo "ITER $n rc=$rc elapsed=$((SECONDS - start))s"
+            if [ -n "$issues" ]; then echo "$issues" | sed 's/^/    ISSUE: /'; fi
+          done
+          echo "STRESS-SUMMARY variant=$VARIANT load=$LOAD iterations=$n iterations_where_target_test_appears_in_log=$ran nonzero_exit=$failing"
+          echo "--- gc-stress.log"; cat /tmp/gc-stress.log 2>/dev/null || echo "(none)"
+          echo "--- last log tail"; tail -25 "/tmp/iter-$n.log"

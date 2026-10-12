@@ -201,6 +201,7 @@ struct CodespaceSelectionTests {
     // can be over before the first redial whenever a second boundary falls between its
     // two clock reads: that pane holds after one dial. 3s is far from that resolution.
     let held = CodespaceDialSchedule(freeRetryWindow: 3, holdUntil: 120, pauseAfter: 180)
+    let stressStart = ContinuousClock.now
     let pane = try startPane(
       SSHReconnectLoop.codespaceScript(
         connect: dial, reconnect: dial, pauseMarker: marker.path, schedule: held))
@@ -211,13 +212,27 @@ struct CodespaceSelectionTests {
     // without a sleep.
     let announced = { pane.announcements.longestAnnouncedWait >= 60 }
     try #require(await waitFor(within: .seconds(60), announced))
+    let stressHold = stressStart.duration(to: .now)
     let heldAt = lines(in: log)
     #expect(heldAt >= 1)
 
     try touch(marker)
+    let stressTouched = ContinuousClock.now
 
     // The pane polls once a second; 20s still tells a redial from a hold that has 100s+ to go.
-    #expect(await waitFor(within: .seconds(20)) { lines(in: log) > heldAt })
+    let stressOK = await waitFor(within: .seconds(20)) { lines(in: log) > heldAt }
+    #expect(stressOK)
+    // TEMPORARY stress instrumentation (stress branch only).
+    let stressLine =
+      "GC-STRESS hold_after=\(stressHold) heldAt=\(heldAt) redial_latency=\(stressTouched.duration(to: .now)) ok=\(stressOK)\n"
+    if let handle = FileHandle(forWritingAtPath: "/tmp/gc-stress.log")
+      ?? (FileManager.default.createFile(atPath: "/tmp/gc-stress.log", contents: nil)
+        ? FileHandle(forWritingAtPath: "/tmp/gc-stress.log") : nil)
+    {
+      handle.seekToEndOfFile()
+      handle.write(Data(stressLine.utf8))
+      try? handle.close()
+    }
   }
 
   @Test
