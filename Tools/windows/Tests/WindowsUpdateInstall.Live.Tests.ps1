@@ -18,11 +18,11 @@ $ErrorActionPreference = "Stop"
 #
 # What this proves, for real, right now:
 #   1. The real update-feed check against the actual scgopi/GraphCode
-#      releases API resolves no Windows asset for the current latest
-#      release -- the honest "no Windows build published" state the offer UI
-#      must show, not a fixture standing in for it. (The last recorded
-#      release-asset check found only macOS DMGs; this re-confirms that live
-#      at test time rather than assuming it still holds.)
+#      releases API, from an installed version of 0.0.0 on the stable
+#      channel, never offers a release without the Windows package. The feed
+#      is shared with macOS; while no stable release publishes
+#      graphcode-windows-x86_64.zip the check must read up_to_date with no
+#      asset. Once one does, it must read available with that asset.
 #   2. A real HTTPS download of a real, large (multi-megabyte) GitHub
 #      release asset through `WindowsUpdateInstall.install()` reports
 #      genuine, monotonically increasing download progress and verifies a
@@ -73,18 +73,21 @@ function Get-Field([string] $Output, [string] $Name) {
   return $match.Groups[1].Value.Trim()
 }
 
-# --- 1. Real feed check: confirms the honest "no Windows asset" state -----
+# --- 1. Real feed check: a release is offered only with a Windows asset ---
 $feed = Invoke-Runner @("feed-check")
 if ($feed.ExitCode -ne 0) { throw "real feed check failed: $($feed.Output)" }
 $feedState = Get-Field $feed.Output "state"
 $feedAssetUrl = Get-Field $feed.Output "asset_url"
-if ($feedState -ne "available") {
-  throw "expected the real scgopi/GraphCode feed to report an available release right now, got state=$feedState. If this repository has since started shipping stable releases with no update pending, this assertion needs revisiting rather than loosening -- do not just delete it."
-}
-if ($feedAssetUrl -ne "none") {
-  Write-Output "NOTE: a Windows asset is now published ($feedAssetUrl) -- the 'no Windows asset' constraint this gate exercises no longer holds for the current release. This is good news for the product; this gate's coverage of the no-asset path is now moot and the download/extract/upgrade path against a REAL Windows asset should be exercised live instead."
+if ($feedAssetUrl -eq "none") {
+  if ($feedState -ne "up_to_date") {
+    throw "the real feed offered a release with no Windows asset (state=${feedState}); Windows must never offer a macOS-only release: $($feed.Output)"
+  }
+  Write-Output "Real feed check: no stable release publishes a Windows asset, so nothing is offered (state=up_to_date, asset_url=none) -- PASS"
 } else {
-  Write-Output "Real feed check: latest release has no Windows asset (asset_url=none) -- PASS"
+  if ($feedState -ne "available") {
+    throw "a Windows asset was resolved ($feedAssetUrl) but state=${feedState}: $($feed.Output)"
+  }
+  Write-Output "Real feed check: a stable Windows release is offered with its asset ($feedAssetUrl) -- PASS. Exercise the real ZIP download/extract/upgrade path live as well."
 }
 
 # --- 2. Real download + real checksum verification (correct digest) -------

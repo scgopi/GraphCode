@@ -44,9 +44,9 @@ fn errorOut(message: []const u8) u8 {
 
 /// Exercises the exact production path an idle app takes: a real call to
 /// GitHub's API for the real repository, through the same `CheckClient` the
-/// shell uses. Prints whether a Windows asset was resolved for the current
-/// real latest release — this is the live counterpart to the "no Windows
-/// asset published" constraint the offer UI must handle honestly.
+/// shell uses. Prints the state and whether a Windows asset was resolved; a
+/// release without the Windows package is never offered, so `state=available`
+/// always comes with an `asset_url`.
 fn feedCheck(allocator: std.mem.Allocator) !u8 {
     var client = WindowsUpdates.CheckClient{ .allocator = allocator };
     var cancelled = std.atomic.Value(bool).init(false);

@@ -84,7 +84,9 @@ pub const CheckState = struct {
 
 pub const CheckClient = struct {
     allocator: std.mem.Allocator,
-    feed_url: []const u8 = "https://api.github.com/repos/scgopi/GraphCode/releases?per_page=30",
+    /// 100 per page (GitHub's maximum) so macOS releases, which share this feed,
+    /// do not push the newest Windows release out of view as quickly.
+    feed_url: []const u8 = "https://api.github.com/repos/scgopi/GraphCode/releases?per_page=100",
 
     pub fn check(self: CheckClient, beta_enabled: bool, current_version: []const u8) !CheckResult {
         var cancelled = std.atomic.Value(bool).init(false);
@@ -177,6 +179,16 @@ pub fn currentVersionFromMetadata(allocator: std.mem.Allocator, metadata: ?[]con
     return allocator.dupe(u8, "dev");
 }
 
+/// Whether a release publishes the Windows package. The release feed is shared
+/// with macOS, so a release with only macOS assets (for example a macOS-only
+/// stable `v0.1.80`) is not an update for this build and must not be offered.
+fn hasWindowsAsset(assets: []const Asset) bool {
+    for (assets) |asset| {
+        if (std.mem.eql(u8, asset.name, windows_asset_name) and asset.browser_download_url != null) return true;
+    }
+    return false;
+}
+
 fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, current_version: []const u8) !CheckResult {
     var parsed = try std.json.parseFromSlice([]const Release, allocator, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -184,12 +196,20 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
     defer installed.deinit(allocator);
     var greatest: ?struct { release: Release, version: SemVer } = null;
     defer if (greatest) |selected| selected.version.deinit(allocator);
+    var skipped_without_windows = false;
     for (parsed.value) |release| {
         if (release.draft or (channel == .stable and release.prerelease)) continue;
         const candidate = SemVer.parse(allocator, release.tag_name) catch |err| switch (err) {
             error.InvalidVersion => continue,
             else => return err,
         };
+        if (!hasWindowsAsset(release.assets)) {
+            // Only a valid, channel-eligible release counts toward "up to date";
+            // a malformed tag is skipped above without that meaning.
+            skipped_without_windows = true;
+            candidate.deinit(allocator);
+            continue;
+        }
         if (greatest == null or candidate.compare(greatest.?.version) == .greater) {
             if (greatest) |old| old.version.deinit(allocator);
             greatest = .{ .release = release, .version = candidate };
@@ -203,11 +223,10 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
         errdefer result.deinit(allocator);
         if (selected.release.html_url) |url| result.release_url = try allocator.dupe(u8, try releasePageUrl(url));
         if (state == .available) {
-            // `asset_url` staying null here (release has no matching Windows
-            // asset — e.g. the 2026-09-17 macOS-only publish) is itself a
-            // meaningful, honest result: callers must present that as "no
-            // Windows build attached to this release" rather than assuming
-            // an asset exists and letting a download 404.
+            // Only releases with the Windows package reach this point, so the
+            // asset is normally found. `asset_url` stays null only if the
+            // asset has no usable download URL; callers still present that as
+            // "no Windows build attached" rather than guessing a URL.
             if (try findWindowsAsset(allocator, selected.release.assets)) |found| {
                 result.asset_url = found.url;
                 result.asset_sha256 = found.sha256;
@@ -216,6 +235,9 @@ fn parseFeed(allocator: std.mem.Allocator, body: []const u8, channel: Channel, c
         }
         return result;
     }
+    // Releases exist for this channel but none publishes a Windows package:
+    // there is nothing to install, which is "up to date", not a failure.
+    if (skipped_without_windows) return .{ .channel = channel, .state = .up_to_date };
     return .{ .channel = channel, .state = .failed, .message = try allocator.dupe(u8, "No release found for selected channel") };
 }
 
@@ -379,7 +401,7 @@ const Asset = struct {
 
 test "default update feed uses the GraphCode release repository" {
     const client = CheckClient{ .allocator = std.testing.allocator };
-    try std.testing.expectEqualStrings("https://api.github.com/repos/scgopi/GraphCode/releases?per_page=30", client.feed_url);
+    try std.testing.expectEqualStrings("https://api.github.com/repos/scgopi/GraphCode/releases?per_page=100", client.feed_url);
 }
 
 test "background update checks do not interrupt the workspace with a modal offer" {
@@ -399,7 +421,8 @@ test "GitHub release response accepts additive metadata without losing channel f
         \\  {"id":100,"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0",
         \\   "prerelease":false,"draft":false,"name":"GraphCode 2.0.0","body":"Release notes",
         \\   "author":{"login":"fixture","id":1},"published_at":"2026-09-17T00:00:00Z",
-        \\   "assets":[{"name":"graphcode-macos-arm64.dmg","size":123,"digest":"sha256:fixture"}]},
+        \\   "assets":[{"name":"graphcode-macos-arm64.dmg","size":123,"digest":"sha256:fixture"},
+        \\     {"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip","size":456}]},
         \\  {"id":101,"tag_name":"v3.0.0-beta1","prerelease":true,"draft":false,"assets":[]},
         \\  {"id":102,"tag_name":"v9.0.0","prerelease":false,"draft":true,"immutable":false}
         \\]
@@ -413,7 +436,7 @@ test "GitHub release response accepts additive metadata without losing channel f
 
 test "known update feed fields remain type checked" {
     try std.testing.expectError(error.UnexpectedToken, parseFeed(std.testing.allocator,
-        \\[{"tag_name":"v2.0.0","prerelease":"false"}]
+        \\[{"tag_name":"v2.0.0","prerelease":"false","assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     , .stable, "1.0.0"));
 }
 
@@ -421,7 +444,7 @@ test "update feed allocation failures propagate without leaking selected release
     const Probe = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const releases =
-                \\[{"tag_name":"v1.1.0"},{"tag_name":"not-a-version"},{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0"}]
+                \\[{"tag_name":"v1.1.0","assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"not-a-version","assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0","assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
             ;
             var result = try parseFeed(allocator, releases, .stable, "1.0.0");
             defer result.deinit(allocator);
@@ -433,7 +456,7 @@ test "update feed allocation failures propagate without leaking selected release
 
 test "real update feed result follows stable and beta channels" {
     const stable =
-        \\[{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0","prerelease":false,"draft":false},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v2.0.0","html_url":"https://github.com/scgopi/GraphCode/releases/tag/v2.0.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v3.0.0-beta","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var stable_result = try parseFeed(std.testing.allocator, stable, .stable, "v1.0.0");
     defer stable_result.deinit(std.testing.allocator);
@@ -469,13 +492,13 @@ test "release page handoff stays within the GraphCode release repository" {
         releases_page_url ++ "/tag/v2#other",
     }) |invalid| try std.testing.expectError(error.InvalidReleaseUrl, releasePageUrl(invalid));
     try std.testing.expectError(error.InvalidReleaseUrl, parseFeed(std.testing.allocator,
-        \\[{"tag_name":"v2.0.0","html_url":"file:///C:/untrusted.exe"}]
+        \\[{"tag_name":"v2.0.0","html_url":"file:///C:/untrusted.exe","assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     , .stable, "1.0.0"));
 }
 
 test "release tags and installed versions compare semantically" {
     const releases =
-        \\[{"tag_name":"V1.2.3","prerelease":false,"draft":false}]
+        \\[{"tag_name":"V1.2.3","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .stable, "v1.2.3");
     defer result.deinit(std.testing.allocator);
@@ -483,7 +506,7 @@ test "release tags and installed versions compare semantically" {
     try std.testing.expectEqualStrings("V1.2.3", result.version.?);
 
     const prereleases =
-        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var beta = try parseFeed(std.testing.allocator, prereleases, .beta, "2.0.0-beta.1");
     defer beta.deinit(std.testing.allocator);
@@ -492,7 +515,7 @@ test "release tags and installed versions compare semantically" {
 
 test "stable channel ignores prerelease tags" {
     const releases =
-        \\[{"tag_name":"v3.0.0-beta.1","prerelease":true,"draft":false},{"tag_name":"v2.9.0","prerelease":false,"draft":false}]
+        \\[{"tag_name":"v3.0.0-beta.1","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v2.9.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .stable, "v2.9.0");
     defer result.deinit(std.testing.allocator);
@@ -502,7 +525,7 @@ test "stable channel ignores prerelease tags" {
 
 test "feed selection uses greatest stable version regardless of order" {
     const releases =
-        \\[{"tag_name":"v1.9.0","prerelease":false,"draft":false},{"tag_name":"v1.10.0","prerelease":false,"draft":false},{"tag_name":"v1.2.0","prerelease":false,"draft":false}]
+        \\[{"tag_name":"v1.9.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.10.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.2.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .stable, "v1.8.0");
     defer result.deinit(std.testing.allocator);
@@ -516,7 +539,7 @@ test "feed selection uses greatest stable version regardless of order" {
 
 test "beta selection prefers a final stable release over a beta" {
     const releases =
-        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false},{"tag_name":"v1.9.0","prerelease":false,"draft":false},{"tag_name":"v2.0.0","prerelease":false,"draft":false}]
+        \\[{"tag_name":"v2.0.0-beta.2","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.9.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .beta, "v2.0.0-beta.1");
     defer result.deinit(std.testing.allocator);
@@ -526,7 +549,7 @@ test "beta selection prefers a final stable release over a beta" {
 
 test "GraphCode beta identifiers compare by numeric suffix" {
     const releases =
-        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false},{"tag_name":"v1.0.0","prerelease":false,"draft":false},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.0.0","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .beta, "v1.0.0-beta9");
     defer result.deinit(std.testing.allocator);
@@ -534,7 +557,7 @@ test "GraphCode beta identifiers compare by numeric suffix" {
     try std.testing.expectEqualStrings("v1.0.0", result.version.?);
 
     const prereleases =
-        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false}]
+        \\[{"tag_name":"v1.0.0-beta9","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.0.0-beta1","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]},{"tag_name":"v1.0.0-beta10","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var numeric = try parseFeed(std.testing.allocator, prereleases, .beta, "v1.0.0-beta9");
     defer numeric.deinit(std.testing.allocator);
@@ -544,7 +567,7 @@ test "GraphCode beta identifiers compare by numeric suffix" {
 
 test "variable length GraphCode version tuples normalize trailing zeroes" {
     const releases =
-        \\[{"tag_name":"v0.1.26.1","prerelease":false,"draft":false}]
+        \\[{"tag_name":"v0.1.26.1","prerelease":false,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/fixture/graphcode-windows-x86_64.zip"}]}]
     ;
     var result = try parseFeed(std.testing.allocator, releases, .stable, "v0.1.26");
     defer result.deinit(std.testing.allocator);
@@ -594,10 +617,9 @@ test "a missing digest falls back to the published sha256 sidecar's own URL" {
     );
 }
 
-test "an available release with no Windows asset reports no asset rather than a guessed URL" {
-    // This is the honest, real state the 2026-09-17 asset check actually found:
-    // a release whose only published binaries are macOS DMGs. Present it as
-    // 'no asset' plainly rather than assuming a Windows asset exists.
+test "a release with no Windows asset is not offered to Windows" {
+    // The release feed is shared with macOS. A macOS-only release (only a DMG)
+    // has nothing to install on Windows, so it must not produce an update offer.
     const releases =
         \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
         \\  {"name":"graphcode-macos-arm64.dmg","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-macos-arm64.dmg"}
@@ -605,17 +627,85 @@ test "an available release with no Windows asset reports no asset rather than a 
     ;
     var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
     defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(State.available, result.state);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqual(@as(?[]u8, null), result.version);
     try std.testing.expectEqual(@as(?[]u8, null), result.asset_url);
-    try std.testing.expectEqual(@as(?[]u8, null), result.asset_sha256);
-    try std.testing.expectEqual(@as(?[]u8, null), result.asset_checksum_url);
+    try std.testing.expectEqual(@as(?[]u8, null), result.message);
 }
 
-test "a release with no assets array at all still resolves without an asset" {
+test "a release with no assets array at all is not offered to Windows" {
     var result = try parseFeed(std.testing.allocator, "[{\"tag_name\":\"v2.0.0\"}]", .stable, "1.0.0");
     defer result.deinit(std.testing.allocator);
-    try std.testing.expectEqual(State.available, result.state);
-    try std.testing.expectEqual(@as(?[]u8, null), result.asset_url);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+    try std.testing.expectEqual(@as(?[]u8, null), result.version);
+}
+
+test "only a valid channel-eligible release without a Windows asset reads as up to date" {
+    const Case = struct { feed: []const u8, channel: Channel, state: State };
+    for ([_]Case{
+        // Malformed tag with no asset: nothing valid was seen, so the check failed.
+        .{ .feed = "[{\"tag_name\":\"not-a-version\",\"assets\":[]}]", .channel = .stable, .state = .failed },
+        // Drafts never count.
+        .{ .feed = "[{\"tag_name\":\"v2.0.0\",\"draft\":true,\"assets\":[]}]", .channel = .stable, .state = .failed },
+        // Prereleases do not count on the stable channel.
+        .{ .feed = "[{\"tag_name\":\"v2.0.0-beta1\",\"prerelease\":true,\"assets\":[]}]", .channel = .stable, .state = .failed },
+        // A valid, eligible macOS-only release: nothing for Windows to install.
+        .{ .feed = "[{\"tag_name\":\"v2.0.0\",\"assets\":[]}]", .channel = .stable, .state = .up_to_date },
+        .{ .feed = "[{\"tag_name\":\"v2.0.0-beta1\",\"prerelease\":true,\"assets\":[]}]", .channel = .beta, .state = .up_to_date },
+    }) |case| {
+        var result = try parseFeed(std.testing.allocator, case.feed, case.channel, "1.0.0");
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(case.state, result.state);
+    }
+}
+
+test "skipping a release without a Windows asset releases its parsed version" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var result = try parseFeed(allocator, "[{\"tag_name\":\"v2.0.0-beta.1\",\"assets\":[]},{\"tag_name\":\"v3.0.0\",\"assets\":[]}]", .stable, "1.0.0");
+            defer result.deinit(allocator);
+            try std.testing.expectEqual(State.up_to_date, result.state);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
+test "a checksum sidecar alone does not make a release a Windows release" {
+    const releases =
+        \\[{"tag_name":"v2.0.0","prerelease":false,"draft":false,"assets":[
+        \\  {"name":"graphcode-windows-x86_64.zip.sha256","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v2.0.0/graphcode-windows-x86_64.zip.sha256"}
+        \\]}]
+    ;
+    var result = try parseFeed(std.testing.allocator, releases, .stable, "1.0.0");
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, result.state);
+}
+
+test "Windows preview ignores a newer macOS-only release and offers only Windows builds" {
+    // The 2026-10-13 feed shape: stable macOS v0.1.80 (DMG only) and macOS
+    // 0.1.80 betas, above the installed Windows preview 0.1.78-windows.beta25.
+    const feed =
+        \\[{"tag_name":"v0.1.80","prerelease":false,"draft":false,"assets":[{"name":"graphcode-macos-arm64.dmg","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/v0.1.80/graphcode-macos-arm64.dmg"}]},
+        \\ {"tag_name":"0.1.80-beta3","prerelease":true,"draft":false,"assets":[{"name":"graphcode-macos-arm64.dmg","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/0.1.80-beta3/graphcode-macos-arm64.dmg"}]},
+        \\ {"tag_name":"0.1.78-windows.beta25","prerelease":true,"draft":false,"assets":[{"name":"graphcode-windows-x86_64.zip","browser_download_url":"https://github.com/scgopi/GraphCode/releases/download/0.1.78-windows.beta25/graphcode-windows-x86_64.zip"}]}]
+    ;
+    var stable = try parseFeed(std.testing.allocator, feed, .stable, "0.1.78-windows.beta25");
+    defer stable.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, stable.state);
+    try std.testing.expectEqual(@as(?[]u8, null), stable.version);
+
+    var beta = try parseFeed(std.testing.allocator, feed, .beta, "0.1.78-windows.beta25");
+    defer beta.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.up_to_date, beta.state);
+    try std.testing.expectEqualStrings("0.1.78-windows.beta25", beta.version.?);
+
+    // A later Windows preview is offered on beta, with its asset, while the
+    // higher macOS-only releases are still ignored.
+    var older = try parseFeed(std.testing.allocator, feed, .beta, "0.1.78-windows.beta24");
+    defer older.deinit(std.testing.allocator);
+    try std.testing.expectEqual(State.available, older.state);
+    try std.testing.expectEqualStrings("0.1.78-windows.beta25", older.version.?);
+    try std.testing.expect(older.asset_url != null);
 }
 
 test "an up-to-date release never looks at assets" {
