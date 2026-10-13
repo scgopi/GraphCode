@@ -10,6 +10,51 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
+### 2026-10-13 published Windows preview (beta27, update-path target)
+
+`0.1.78-windows.beta27` is published as an unsigned, invitation-only GitHub
+prerelease, with operator approval:
+<https://github.com/scgopi/GraphCode/releases/tag/0.1.78-windows.beta27>. It
+exists so the in-app update path can be qualified from beta26 (#741–#744).
+
+- **Source.** `7a694c7dfc246f301c28930633a96f091129fd29`, tag object
+  `6fde254add52c874baa9cf3654c35b31c557d0c0`, pushed. Only `investigation/`
+  documents changed since beta26 (#718, #719, #754), so the product source is
+  identical to beta26 and the beta26 local validation applies. The daemon, CLI
+  and Setup script are byte-identical to beta26. The shell differs only by its
+  embedded version string, and zmx is a non-reproducible rebuild of the same
+  pin.
+- **Package.** ZIP `9b4855431acf6c9d7ee901efa3cb2bc63a30cddd1b27b8b7cc2606c314cde309` (48,818,178 bytes, 50 files).
+  - Repository and extracted setup verification each passed once.
+  - Packaged scrubbed startup passed 5/5.
+  - Source custody verification passed.
+  - GitHub's reported asset digest equals the local ZIP hash.
+  - `releases/latest` remains `v0.1.80`.
+
+  | Executable | SHA-256 |
+  | --- | --- |
+  | shell | `9f3553ad7113b7f3e2d1137d2b59903a46a334a205817d082898d1069be0303c` |
+  | daemon | `1e0c3c8431349ad17f4ec543dc6e5d5e6455a3212e080102e19d359fd78f97a2` |
+  | CLI | `4ba257d4841863b8a1ee956a069f4a7421ec7441d023725d91233b89ed32eb3c` |
+  | zmx | `135ccc5deb38fb5b5c471e907542ddd23b503d96d878b51f02657d0e76c5a96a` |
+- **Update-path pre-check.** Packaged beta26 was run against the live feed
+  with Help > Check for Updates. On the stable channel it reported "Stable
+  updates up to date" with no offer. With `betaUpdates` on, it opened the
+  update offer. The beta channel includes prereleases; the stable channel
+  ignores them.
+- **Testing-gaps Dev Box run.** A handoff
+  (`GraphCode-DevBox-TestingGaps-Handoff`, `hashes.sha256` `36ff8f0860b3f0a4fd80f3a33832d557f71353fce9ab60c547c877c541ad3342`;
+  plan `67add6e37785…` from `7a694c7d`) and its prompt target the
+  `testing gap` issues a Dev Box can close.
+  - **Run A** (beta26, injected input): #720–#722, #725, #727, #728, #733–#735,
+    #737, #738, #740, and the Windows captures for #750/#751/#753.
+  - **Run B** (beta26, operator physical input): #556, #747, and the
+    reachability gate.
+  - **Run C** (in-app upgrade beta26 to beta27): #741–#744, with a temporary
+    firewall rule to force the install failure.
+  - Not run on a Dev Box: #726 and #749 (hardware), and #739 (needs a
+    codespace-scoped token).
+
 ### 2026-10-13 published Windows preview (beta26)
 
 **`0.1.78-windows.beta26` is published** as an unsigned, invitation-only GitHub prerelease:
