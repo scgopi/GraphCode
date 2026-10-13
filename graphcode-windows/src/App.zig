@@ -1431,6 +1431,8 @@ pub const App = struct {
     pending_sent_path: []u8 = &.{},
     pending_folder_open_path: []u8 = &.{},
     last_connection_state: Wire.ConnectionState = .disconnected,
+    /// The connection generation the sync commands were last sent on.
+    last_connection_generation: u64 = 0,
     last_project_opened: []const u8 = "",
     accepted_subscription: []const u8 = "",
     pending_project_path: []u8 = &.{},
@@ -1550,6 +1552,21 @@ pub const App = struct {
             self.allocator.free(self.pending_rebind_path);
             self.pending_rebind_path = value;
         }
+    }
+
+    /// The daemon joins a connection only to the projects it asks for, so every new
+    /// connection must ask again (`listRecentProjects`, `listQuickChats`,
+    /// `restoreOpenProjects`). The timer sees connection states, and a re-dial can finish
+    /// between two reads of it (an accepted open triggers one from inside the frame poll);
+    /// the connection generation changes on every entry to `.connected`, so it is what
+    /// tells a new connection apart from the one already synchronized.
+    fn resyncOnNewConnection(self: *App) void {
+        const generation = self.client.connectedGeneration() orelse return;
+        if (generation == self.last_connection_generation) return;
+        self.last_connection_generation = generation;
+        self.sync_requested = false;
+        self.restore_requested = false;
+        self.quick_chats_requested = false;
     }
 
     fn sendPendingOpen(self: *App) void {
@@ -9254,6 +9271,7 @@ fn onWindowMessage(
             }
             app.client.poll();
             app.probeMissingLoops();
+            app.resyncOnNewConnection();
             const connection_state = app.client.connectionState();
             if (connection_state == .connected) app.flushPendingProject();
             if (app.client.connectionState() == .connected) {
@@ -13585,6 +13603,7 @@ const LiveTerminalFixture = struct {
         client.state = .connected;
         client.connection_generation +%= 1;
         self.app.last_connection_state = .connected;
+        self.app.last_connection_generation = client.connection_generation;
         self.app.sync_requested = true;
         self.app.restore_requested = true;
         self.app.quick_chats_requested = true;
@@ -13596,6 +13615,31 @@ const LiveTerminalFixture = struct {
     fn reconnect(self: *LiveTerminalFixture) void {
         self.app.client.connection_generation +%= 1;
         self.app.client.reconnected = true;
+    }
+
+    /// The drained re-dial a subscription change asks for (an accepted open does this from
+    /// inside the frame poll) whose worker finished the whole reconnect before the timer
+    /// tick after it read the connection state: the tick sees `.connected` again, never
+    /// `.reconnecting`, and only the generation shows that this is a new connection.
+    fn redialBetweenTicks(self: *LiveTerminalFixture, project: []const u8) void {
+        const client = &self.app.client;
+        client.setSubscription(project);
+        client.state = .connected;
+        client.connection_generation +%= 1;
+        client.reconnected = true;
+    }
+
+    /// How many queued commands are `name`.
+    fn queued(self: *LiveTerminalFixture, name: []const u8) usize {
+        const client = &self.app.client;
+        var needle: [64]u8 = undefined;
+        const key = std.fmt.bufPrint(&needle, "\"{s}\"", .{name}) catch return 0;
+        var count: usize = 0;
+        for (0..client.outbound_count) |offset| {
+            const index = (client.outbound_head + offset) % client.outbound.len;
+            if (std.mem.indexOf(u8, client.outbound[index], key) != null) count += 1;
+        }
+        return count;
     }
 
     fn gen(self: *LiveTerminalFixture) u64 {
@@ -16202,6 +16246,30 @@ test "workspace layout: a reply from another connection ends nothing" {
     _ = fixture.reads(&ids);
     try fixture.respond(ids[2], fixture.gen(), DeletedLoopScene.remaining);
     try fixture.waitFor(LiveTerminalFixture.killed, shell_uuid_one);
+}
+
+test "daemon connection: a re-dial that finished between two ticks still rejoins every open project" {
+    var fixture: LiveTerminalFixture = undefined;
+    try fixture.init(&.{.{ .id = "loop-a" }});
+    defer fixture.deinit();
+    const start = fixture.connect();
+
+    // The first connection was resynchronized at startup: its sync commands were sent and
+    // are not asked for again.
+    for (1..5) |step| fixture.timerTick(start + @as(i128, @intCast(step)) * 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 0), fixture.queued("restoreOpenProjects"));
+
+    // An accepted open changes the subscription; the daemon only joins a connection to the
+    // projects it asks for, so the new connection needs its own restore.
+    fixture.redialBetweenTicks("C:/GraphCode-Fixtures/Destructive");
+    for (5..12) |step| fixture.timerTick(start + @as(i128, @intCast(step)) * 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), fixture.queued("listRecentProjects"));
+    try std.testing.expectEqual(@as(usize, 1), fixture.queued("listQuickChats"));
+    try std.testing.expectEqual(@as(usize, 1), fixture.queued("restoreOpenProjects"));
+
+    // The same connection is not resynchronized again however long it lives.
+    for (12..30) |step| fixture.timerTick(start + @as(i128, @intCast(step)) * 100 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(usize, 1), fixture.queued("restoreOpenProjects"));
 }
 
 test "workspace layout: a snapshot delivered before a reconnect is never the first look, through the production poll" {
