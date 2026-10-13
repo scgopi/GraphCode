@@ -10,6 +10,81 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
+### 2026-10-13 testing-gaps Dev Box return (beta26 and beta27)
+
+The bundle `GraphCode-DevBox-Return-testing-gaps` (attempt 2) was reviewed on
+2026-10-13.
+
+- **Bundle.** 512/512 hashes match, and nothing secret-looking is present.
+- **Identities.** The handoff inventory `74a1e9b9…`, approval `d971f2a4…`,
+  and beta26/beta27 ZIPs `740d08dd…`/`9b485543…` match the published values.
+- **Environment.** Copilot CLI 1.0.96 is installed. The run used 2 backend
+  turns (about USD 0.22).
+- **Input.** Run A used injected input only. **Run B (operator physical input)
+  was not performed**, so #556 and the reachability gate stay NotExecuted.
+- **Cleanup.** The support directory was restored exactly, and the fixtures
+  are unchanged.
+- **Screenshot review.** The agent sampled the screenshots, and I reviewed the
+  canvas, Edit Details and offer captures myself.
+
+| Issue | Result | Disposition |
+| --- | --- | --- |
+| #725 Notebook grid | Passed | Row `Validated`, issue closed |
+| #737 Mounted background tabs | Passed | Row `Validated`, issue closed |
+| #738 Show in Graph | Passed | Row `Validated`, issue closed |
+| #741 Available update alert | Passed | Row `Validated`, issue closed |
+| #722 Menus | Item-by-item read | Reclassified as an implementation gap |
+| #742 Install progress | **Failed** | Root-caused; fix in a separate PR |
+| #720, #721, #727, #728, #733, #734, #740, #744 | Partial | Kept open, with results posted on each |
+| #735, #743, #556, reachability gate | NotExecuted | Kept open |
+| #750, #751, #753 | Windows captures delivered | Awaiting the macOS reference |
+
+**#722.** Six macOS Loop-menu commands have no Windows equivalent: Back,
+Forward, Show/Hide Loop Panel, Restart Session, Restart All Sessions… and Send
+Message to All Loops…. Enablement also diverges from the macOS
+`GraphcodeCommands` rules.
+
+**#742 root cause.** The in-app install failed every time, about 1 s into
+"Installing", with or without loops running.
+- **Not the cause.** The `event=fatal detail=WriteFailed` log lines were the
+  agent's own `--version` probes (stdout not redirected), not the install.
+- **The cause.** The harness started the shell from PowerShell 7, and the
+  shell passed that `PSModulePath` to `powershell.exe`. Windows PowerShell 5.1
+  then resolved PowerShell 7's Core-only `Microsoft.PowerShell.Utility` and
+  lost `Get-FileHash`, so `GraphCode-Setup.ps1 -Command Upgrade` exited 1.
+  Launching from the Start menu inherits a clean module path, which is why
+  earlier checks did not see this.
+- **Why the gate missed it.** The live update gate never runs a real Upgrade:
+  it stops at `ExtractionFailed` on a non-ZIP asset.
+- **Reproduced locally**, with the real beta27 asset driven through
+  `WindowsUpdateInstall.install()` into a scratch beta26 install.
+
+**Defects filed.**
+- #758: every in-app update leaves `.GraphCode-rollback-*` behind, because the
+  running shell locks it.
+- #759: edge-label boxes are drawn over card text.
+- #760: the Update node dialog's Check description field sits under OK and
+  Cancel.
+- #761: "Workspace name is required" leaks into the status line.
+
+**Not product defects.**
+- The CLI folds `--title` into one word (`LoopName.folded`). This is intended
+  and shared with macOS.
+- `node create --type turn` failed because the prompt's fixture omitted
+  `--check`. The prompts are corrected.
+- The per-card crops were mis-aimed by the harness.
+
+**Other observations, not filed.**
+- No minimum window width is enforced.
+- Worktrees added outside the app appear only after the project is reopened.
+- Card state text ("succeeded", "blocked") differs from the sidebar's
+  "Awaiting your input".
+- After `zmx kill` of every session the daemon was unresponsive, until a
+  reinstall. Seen once, not reproduced.
+
+**Parity.** The ledger now counts **97 surfaces: 67 Validated and 30
+Partial**.
+
 ### 2026-10-13 scope decision: international input is not a parity requirement
 
 The operator removed IME, AltGr, dead keys and other keyboard layouts from the
