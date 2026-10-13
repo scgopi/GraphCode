@@ -155,7 +155,40 @@ fn watchdog(handle: c.HANDLE, timeout_ms: u64, done: *std.atomic.Value(bool), ti
 /// (via the raw handle, not through `Child`'s own state, to avoid racing the
 /// main thread's `wait`) if `timeout_ms` elapses first.
 fn runPowerShell(allocator: std.mem.Allocator, script: []const u8, timeout_ms: u64) !RunResult {
+    var parent_environment = try std.process.getEnvMap(allocator);
+    defer parent_environment.deinit();
+    return runPowerShellWithEnvironment(allocator, &parent_environment, script, timeout_ms);
+}
+
+/// The environment `powershell.exe` is started with, derived from this
+/// process's own minus `PSModulePath` (#742). A shell launched from a
+/// PowerShell 7 session inherits PowerShell 7's module directories there.
+/// Windows PowerShell 5.1 then finds PowerShell 7's Core-only
+/// `Microsoft.PowerShell.Utility` first, cannot load it, and loses
+/// `Get-FileHash`, so `GraphCode-Setup.ps1 -Command Upgrade` fails at once.
+/// Left unset, `powershell.exe` rebuilds its own default module path; pwsh
+/// does the same when it starts Windows PowerShell itself.
+pub fn windowsPowerShellEnvironment(allocator: std.mem.Allocator, parent: *const std.process.EnvMap) !std.process.EnvMap {
+    var environment = std.process.EnvMap.init(allocator);
+    errdefer environment.deinit();
+    var iterator = parent.iterator();
+    while (iterator.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "PSModulePath")) continue;
+        try environment.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    return environment;
+}
+
+fn runPowerShellWithEnvironment(
+    allocator: std.mem.Allocator,
+    parent_environment: *const std.process.EnvMap,
+    script: []const u8,
+    timeout_ms: u64,
+) !RunResult {
+    var child_environment = try windowsPowerShellEnvironment(allocator, parent_environment);
+    defer child_environment.deinit();
     var child = std.process.Child.init(&.{ "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script }, allocator);
+    child.env_map = &child_environment;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -483,4 +516,74 @@ test "hex digest formatting is lowercase and matches the running SHA-256 output 
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         &hex,
     );
+}
+
+test "Windows PowerShell environment drops an inherited PSModulePath and keeps everything else" {
+    const allocator = std.testing.allocator;
+    var parent = std.process.EnvMap.init(allocator);
+    defer parent.deinit();
+    try parent.put("PSModulePath", "C:\\Program Files\\PowerShell\\7\\Modules");
+    try parent.put("GRAPHCODE_SUPPORT_DIR", "C:\\Users\\Test\\.graphcode");
+    try parent.put("TEMP", "C:\\Users\\Test\\AppData\\Local\\Temp");
+
+    var environment = try windowsPowerShellEnvironment(allocator, &parent);
+    defer environment.deinit();
+    try std.testing.expectEqual(@as(?[]const u8, null), environment.get("PSModulePath"));
+    try std.testing.expectEqualStrings("C:\\Users\\Test\\.graphcode", environment.get("GRAPHCODE_SUPPORT_DIR").?);
+    try std.testing.expectEqualStrings("C:\\Users\\Test\\AppData\\Local\\Temp", environment.get("TEMP").?);
+    try std.testing.expectEqual(@as(u32, 2), environment.count());
+}
+
+test "Windows PowerShell environment drops PSModulePath whatever its case" {
+    const allocator = std.testing.allocator;
+    var parent = std.process.EnvMap.init(allocator);
+    defer parent.deinit();
+    try parent.put("psmodulepath", "C:\\Program Files\\PowerShell\\7\\Modules");
+
+    var environment = try windowsPowerShellEnvironment(allocator, &parent);
+    defer environment.deinit();
+    try std.testing.expectEqual(@as(u32, 0), environment.count());
+}
+
+test "the setup child keeps Windows PowerShell's own cmdlets under a PowerShell 7 module path (#742)" {
+    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // A shell started from PowerShell 7 inherits its PSModulePath. This is the
+    // shape of PowerShell 7's Microsoft.PowerShell.Utility manifest: Core-only,
+    // so Windows PowerShell 5.1 finds it first, cannot load it, and loses
+    // Get-FileHash, which GraphCode-Setup.ps1 needs to verify the package.
+    var shadow = std.testing.tmpDir(.{});
+    defer shadow.cleanup();
+    try shadow.dir.makePath("Microsoft.PowerShell.Utility");
+    try shadow.dir.writeFile(.{
+        .sub_path = "Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1",
+        .data =
+        \\@{
+        \\ModuleVersion = "7.0.0.0"
+        \\CompatiblePSEditions = @("Core")
+        \\PowerShellVersion = "3.0"
+        \\CmdletsToExport = @('Get-FileHash')
+        \\NestedModules = "Microsoft.PowerShell.Commands.Utility.dll"
+        \\}
+        \\
+        ,
+    });
+    const shadow_root = try shadow.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(shadow_root);
+
+    var parent = try std.process.getEnvMap(allocator);
+    defer parent.deinit();
+    try parent.put("PSModulePath", shadow_root);
+
+    var result = try runPowerShellWithEnvironment(
+        allocator,
+        &parent,
+        "$ErrorActionPreference = 'Stop'; try { $hash = Get-FileHash -LiteralPath (Join-Path $PSHOME 'powershell.exe') } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 8 }; if ($hash.Hash.Length -eq 64) { exit 0 }; exit 9",
+        powershell_timeout_extract_ms,
+    );
+    defer result.deinit(allocator);
+    if (result.exit_code != 0) std.debug.print("powershell.exe stderr: {s}\n", .{result.stderr});
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(@as(?u32, 0), result.exit_code);
 }
