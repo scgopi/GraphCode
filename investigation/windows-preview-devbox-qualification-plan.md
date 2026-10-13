@@ -381,7 +381,9 @@ For the profile:
 4. Verify UIA names, roles, actions, focus, and live result for the supported
    route.
 5. Verify PR #597 canvas/sidebar guidance is visible and usable.
-6. Verify declared dead-key/IME committed text in a form and terminal.
+6. Type ordinary US English text in a form and the terminal, with no lost or
+   duplicated characters. IME, AltGr, dead keys and other layouts are outside
+   the parity scope (#747, #756); do not add layouts or claim them.
 7. Verify exact safe single-line paste, unsafe paste handling, and clipboard
    restoration.
 8. Verify no focus trap, clipped essential control, incorrect hit bounds,

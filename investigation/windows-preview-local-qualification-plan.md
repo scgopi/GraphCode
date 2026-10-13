@@ -58,7 +58,8 @@ Stop before creating the candidate unless these values are filled:
 - Minimum viewport at 100% scaling (no other scaling on a Dev Box; see #749):
 - Screenshot permission; video permission:
 - Accessibility scope: UIA + keyboard, or named screen reader/version:
-- Keyboard layouts/IME:
+- Keyboard layout (US English; IME and international layouts are outside
+  parity scope, see #747):
 - Clipboard mutation/restoration:
 - Named disposable fixture roots and destructive/Recycling permission:
 - Backend kind/model/attended permission mode (version: whatever the Dev Box

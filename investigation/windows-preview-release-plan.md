@@ -10,6 +10,32 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
+### 2026-10-13 scope decision: international input is not a parity requirement
+
+The operator removed IME, AltGr, dead keys and other keyboard layouts from the
+macOS/Windows parity requirement. macOS itself provides only system IME in its
+native form fields. Its terminal accepts committed text only: there is no inline
+preedit, and the candidate window sits at the view origin
+(`GhosttyTerminalNSView`'s `NSTextInputClient`). macOS has no tests for this
+input either.
+
+- **Ledger.** The `IME/dead keys/layouts` row moves to the matrix's new
+  *Outside parity scope* section with status `Out of scope`. The ledger now
+  counts **97 parity surfaces: 63 Validated and 34 Partial**.
+- **Issues.** #747 is relabelled `enhancement` (it was `parity` and
+  `testing gap`) and now holds an optional 5-minute remote-client check. #756
+  tracks inline preedit and cursor-placed candidate windows on both platforms.
+- **Qualification.** Approvals declare a US English layout only. Dev Box plan
+  step D8.6 no longer tests dead keys or IME, and the testing-gaps Run B drops
+  #747. The testing-gaps handoff was refreshed for this: its approval now
+  declares US English only, and its `hashes.sha256` is now
+  `74a1e9b97c6197878e9bebb5ce6729576096e655716bc252b7cae3df4fd00d0c`. That
+  supersedes the hash in the beta27 entry below. The handoff plan copy is
+  unchanged; the prompt applies the narrower D8.6.
+- **Preview scope.** Releases make no international-input claim. Ordinary US
+  English typing stays inside the reachability gate: losing or duplicating
+  typed input is still a core defect.
+
 ### 2026-10-13 published Windows preview (beta27, update-path target)
 
 `0.1.78-windows.beta27` is published as an unsigned, invitation-only GitHub
@@ -48,8 +74,8 @@ exists so the in-app update path can be qualified from beta26 (#741–#744).
   `testing gap` issues a Dev Box can close.
   - **Run A** (beta26, injected input): #720–#722, #725, #727, #728, #733–#735,
     #737, #738, #740, and the Windows captures for #750/#751/#753.
-  - **Run B** (beta26, operator physical input): #556, #747, and the
-    reachability gate.
+  - **Run B** (beta26, operator physical input): #556 and the reachability
+    gate.
   - **Run C** (in-app upgrade beta26 to beta27): #741–#744, with a temporary
     firewall rule to force the install failure.
   - Not run on a Dev Box: #726 and #749 (hardware), and #739 (needs a
@@ -2351,7 +2377,7 @@ observation. Notes distinguish the parts of mixed rows.
 | Install failure | O + F + P + E | Defer self-update; qualify safe recovery | Value-owned error mapping and injected browser invocation are covered, not an actual failing install/browser handoff. Manual installation must report cause and recovery paths without false success or lost data. Automated failure UX and exact presentation can follow with the updater. |
 | UI Automation tree | F + O + P + E | Qualify core reachability; defer full conformance | Stable live shell identities do not prove every dialog or terminal Text/Text2 range/selection/caret. Qualify named core controls, focus and keyboard reachability for the declared profile; treat production repros of inaccessible required actions as functional. Full provider/range conformance and extra HelpText remain separate work, not a blanket cosmetic waiver. |
 | Keyboard discovery | F + P + E | Qualify reachable commands; defer extra hints | Current menu/Help labels cover mapped core shortcuts, but canvas gestures and sidebar reorder lack visible hints. Verify usable mouse/keyboard routes for core tasks and exact text entry; then defer supplementary gesture guidance. A missing effective route is functional, not just a hint gap. |
-| IME/dead keys/layouts | F + O + P + E | Qualify declared input profile | Committed Japanese callback and hidden native dead-key/layout tests do not prove foreground terminal composition. No lost/duplicated committed text in supported form/terminal input is allowed; explicitly qualify supported layouts and non-ASCII scope. Defer additional language profiles and preedit presentation only where basic input remains usable, not required committed text. |
+| IME/dead keys/layouts | Out of parity scope (2026-10-13) | None for the preview; the declared profile is US English | Removed from parity by product decision; no international-input claim is made. Ordinary US English typed input stays under the reachability gate. Optional follow-up: #747 (live check) and #756 (terminal preedit and candidate placement). |
 | Clipboard/selection | F + O + P + E | Qualify relied-on paste; defer richer selection | Conversion/classification tests did not access the real clipboard or witness terminal selection. Verify exact safe single-line paste and no unsafe multiline/control execution if paste is offered or needed; visible refusal must be usable. Mouse selection/copy/offset correctness requires a leased desktop fixture; richer selection and hints can defer, silent input/data loss cannot. |
 | Per-monitor DPI | F + O + P + E | Qualify supported scales; defer wider monitor matrix | Startup awareness/font-scale propagation and metrics tests are not a real multi-monitor flight. At declared scales and viewport, all required controls/text must remain reachable/readable with correct hit bounds. Defer unadvertised monitor combinations and exact sizing fidelity, not clipped essential controls or wrong input coordinates. |
 | Dark visual language | F + P + E | Qualify legibility; defer full styling | Historical 96-DPI captures cover bounded canvas/settings/workspace samples, not all sheets/states. Review core contrast, state hierarchy and readable error/disabled text on the candidate. Exact dark materials and macOS matching can wait; illegible status or indistinguishable actions are functional failures. |
