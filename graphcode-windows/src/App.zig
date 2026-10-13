@@ -13325,9 +13325,29 @@ const fake_zmx_script =
     "exit /b 0\r\n" ++
     ":attach\r\n" ++
     ">\"%~dp0cwd-%~2.txt\" echo %CD%\r\n" ++
-    "if exist \"%~dp0record-attach.txt\" if exist \"%~dp0loop-a.json\" if exist \"%~dp0hold-layout.txt\" <\"%~dp0loop-a.json\" ping -n 3 127.0.0.1 >nul\r\n" ++
-    "if exist \"%~dp0record-attach.txt\" if exist \"%~dp0loop-a.json\" copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
-    "if exist \"%~dp0shell-sessions\\%~2\" (echo yes>\"%~dp0marker-at-attach-%~2.txt\") else (echo no>\"%~dp0marker-at-attach-%~2.txt\")\r\n" ++
+    "if not exist \"%~dp0record-attach.txt\" goto mark\r\n" ++
+    "if not exist \"%~dp0loop-a.json\" goto mark\r\n" ++
+    "if exist \"%~dp0hold-layout.txt\" <\"%~dp0loop-a.json\" ping -n 3 127.0.0.1 >nul\r\n" ++
+    // The shell saves the layout by renaming over it, and may do so while this copy is open or
+    // between its open and read; a copy that fails is tried again rather than skipped, for
+    // about five seconds at most (the tests wait twelve for the attach to finish).
+    "set tries=0\r\n" ++
+    ":snapshot\r\n" ++
+    "copy /y \"%~dp0loop-a.json\" \"%~dp0layout-at-attach-%~2.tmp\" >nul 2>nul && goto snapshotted\r\n" ++
+    "set /a tries+=1\r\n" ++
+    "if %tries% geq 6 goto mark\r\n" ++
+    "ping -n 2 127.0.0.1 >nul\r\n" ++
+    "goto snapshot\r\n" ++
+    ":snapshotted\r\n" ++
+    "move /y \"%~dp0layout-at-attach-%~2.tmp\" \"%~dp0layout-at-attach-%~2.txt\" >nul\r\n" ++
+    // Written whole, then renamed into place: a reader that sees the marker sees its content. The
+    // ownership record is copied first, so the test sees its content when the attach looked.
+    ":mark\r\n" ++
+    "if not exist \"%~dp0shell-sessions\\%~2\" goto marked\r\n" ++
+    "copy /y \"%~dp0shell-sessions\\%~2\" \"%~dp0record-at-attach-%~2.tmp\" >nul 2>nul && move /y \"%~dp0record-at-attach-%~2.tmp\" \"%~dp0record-at-attach-%~2.txt\" >nul\r\n" ++
+    ":marked\r\n" ++
+    "if exist \"%~dp0shell-sessions\\%~2\" (echo yes>\"%~dp0marker-tmp-%~2.txt\") else (echo no>\"%~dp0marker-tmp-%~2.txt\")\r\n" ++
+    "move /y \"%~dp0marker-tmp-%~2.txt\" \"%~dp0marker-at-attach-%~2.txt\" >nul\r\n" ++
     "pause >nul\r\n" ++
     "exit /b 0\r\n";
 
@@ -17299,7 +17319,9 @@ test "workspace layout: a session another loop's record names is never ended by 
 
 /// Drives the new-tab/split claim check; `hold_layout` makes every recording attach keep the
 /// loop's layout file open for a couple of seconds before it reads it, as a slow attach does.
-fn expectClaimAndRecordBeforeSession(hold_layout: bool) !void {
+/// Each save below is a rename over that file, which fails while an attach has it open, so the
+/// sequence waits for each attach to finish before the next save.
+fn expectClaimAndRecordSeenByAttach(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
     try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
@@ -17310,11 +17332,9 @@ fn expectClaimAndRecordBeforeSession(hold_layout: bool) !void {
     try fixture.setFlag("hold-layout.txt", hold_layout);
     try clickSidebarLoopRow(app, fixture.project, "loop-a");
     try fixture.waitFor(LiveTerminalFixture.shows, "loop-a");
-    if (hold_layout) {
-        // The slow attach has started and is holding the layout open.
-        std.testing.allocator.free(try fixture.attachDirectory("loop-a"));
-        std.Thread.sleep(300 * std.time.ns_per_ms);
-    }
+    // The loop's own attach reads the layout file too. A save renames over that file and fails
+    // while a reader has it open, so New Tab waits until that attach has finished reading.
+    try fixture.waitFor(LiveTerminalFixture.attachSaw, "loop-a");
     try fixture.newTab();
     const tab_shell = try fixture.selectedPane(0);
     defer std.testing.allocator.free(tab_shell);
@@ -17324,33 +17344,39 @@ fn expectClaimAndRecordBeforeSession(hold_layout: bool) !void {
     const split_shell = try fixture.selectedPane(1);
     defer std.testing.allocator.free(split_shell);
 
+    // What each session's own attach script found when it ran: a layout naming the session and
+    // an ownership record naming the loop. The script runs after its process is created, so
+    // this shows the claim and the valid record were present by then. The order that makes
+    // them precede the spawn is the order of the calls in newTab and splitFocused, which this
+    // cannot prove: a claim or record written a few milliseconds after the spawn also passes.
     for ([_][]const u8{ tab_shell, split_shell }) |session| {
         try fixture.waitFor(LiveTerminalFixture.attachSaw, session);
-        const name = try std.fmt.allocPrint(std.testing.allocator, "marker-at-attach-graphcode-{s}.txt", .{session});
-        defer std.testing.allocator.free(name);
-        const marker = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, name, 64);
-        defer std.testing.allocator.free(marker);
-        try std.testing.expectEqualStrings("yes", std.mem.trim(u8, marker, " \r\n"));
+
+        const claim_name = try std.fmt.allocPrint(std.testing.allocator, "layout-at-attach-graphcode-{s}.txt", .{session});
+        defer std.testing.allocator.free(claim_name);
+        const claim = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, claim_name, 1 << 16);
+        defer std.testing.allocator.free(claim);
+        try std.testing.expect(std.mem.indexOf(u8, claim, session) != null);
+        // The split joins the tab's layout, so its snapshot also holds the earlier claim.
+        if (std.mem.eql(u8, session, split_shell)) try std.testing.expect(std.mem.indexOf(u8, claim, tab_shell) != null);
+
+        // The record names the loop the session was minted for.
+        const record_name = try std.fmt.allocPrint(std.testing.allocator, "record-at-attach-graphcode-{s}.txt", .{session});
+        defer std.testing.allocator.free(record_name);
+        var buffer: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("loop-a", try fixture.tmp.dir.readFile(record_name, &buffer));
     }
-    const claim_name = try std.fmt.allocPrint(std.testing.allocator, "layout-at-attach-graphcode-{s}.txt", .{split_shell});
-    defer std.testing.allocator.free(claim_name);
-    const claim = try fixture.tmp.dir.readFileAlloc(std.testing.allocator, claim_name, 1 << 16);
-    defer std.testing.allocator.free(claim);
-    try std.testing.expect(std.mem.indexOf(u8, claim, split_shell) != null);
-    try std.testing.expect(std.mem.indexOf(u8, claim, tab_shell) != null);
-    // The record names the loop the session was minted for.
-    const record_name = try std.fmt.allocPrint(std.testing.allocator, "shell-sessions\\graphcode-{s}", .{tab_shell});
-    defer std.testing.allocator.free(record_name);
-    var buffer: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("loop-a", try fixture.tmp.dir.readFile(record_name, &buffer));
 }
 
-test "workspace layout: a new tab's layout claim and ownership record exist before its session starts" {
-    try expectClaimAndRecordBeforeSession(false);
+test "workspace layout: a new tab's and a split's layout claim and ownership record are present and valid when their attach observes them" {
+    try expectClaimAndRecordSeenByAttach(false);
 }
 
-test "workspace layout: a new tab's claim and record exist before its session starts after a slow attach has read the layout" {
-    try expectClaimAndRecordBeforeSession(true);
+// The slow attach reads (and holds open) the layout before it records anything, so this
+// sequence only passes by waiting for each attach to finish. It checks that waiting works with
+// a slow attach; it does not save the layout while a reader has it open.
+test "workspace layout: a new tab's claim and record are present when its attach observes them after a slow attach has read the layout" {
+    try expectClaimAndRecordSeenByAttach(true);
 }
 
 /// How many shell-ownership records the shell has written beside its layouts.
