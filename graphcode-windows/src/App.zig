@@ -13621,6 +13621,10 @@ const LiveTerminalFixture = struct {
     /// inside the frame poll) whose worker finished the whole reconnect before the timer
     /// tick after it read the connection state: the tick sees `.connected` again, never
     /// `.reconnecting`, and only the generation shows that this is a new connection.
+    /// Only `setSubscription` is the real client call; the state, generation and
+    /// `reconnected` are overwritten directly, bypassing `publishState`, the worker, the
+    /// drain decision and the hello. This exercises the generation comparison, not the
+    /// real worker's timing.
     fn redialBetweenTicks(self: *LiveTerminalFixture, project: []const u8) void {
         const client = &self.app.client;
         client.setSubscription(project);
@@ -16254,8 +16258,8 @@ test "daemon connection: a re-dial that finished between two ticks still rejoins
     defer fixture.deinit();
     const start = fixture.connect();
 
-    // The first connection was resynchronized at startup: its sync commands were sent and
-    // are not asked for again.
+    // `connect` pre-seeds the connection state, generation and the three sync flags as if
+    // the first connection were already synchronized; nothing is asked for again.
     for (1..5) |step| fixture.timerTick(start + @as(i128, @intCast(step)) * 100 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 0), fixture.queued("restoreOpenProjects"));
 
