@@ -10,6 +10,70 @@ The critical path is terminal correctness plus a packaged production-daemon
 flight, followed by fixes for any reproduced core bugs. It is not closing all
 36 Partial rows, and it is not just visual polish.
 
+### 2026-10-13 parity re-baseline: macOS ground truth and visual fidelity
+
+The operator made two decisions:
+- **macOS is the ground truth**, so requirements macOS doesn't have are not
+  parity;
+- **visual fidelity is part of parity.** The operator's own review of the macOS
+  captures found the macOS UI much better than Windows.
+
+The evidence came from three inputs:
+- the macOS reference Run A (app `09eda11a`);
+- a source audit of every open parity issue against macOS;
+- a side-by-side review of paired macOS and Windows captures. That review found
+  110 differences: 31 S1, 53 S2 and 26 S3. Some surfaces could not be reviewed
+  because images did not render.
+
+**Ledger changes.**
+- **31 rows reopened.** These `Validated` rows are reopened as Partial (visual),
+  each linked to its design issue. Examples:
+  - the right loop panel cuts every heading to one letter, because canvas text
+    is cut off at a fixed x=1200 (`GraphCanvas.zig:2308`);
+  - a Quick Chat workspace shows the previous loop's bar;
+  - dialogs clip their buttons.
+- **15 rows narrowed to macOS scope**, dropping Windows-only requirements:
+  Edit Details, edge UIA fragments, TextPattern, START/UNWIRED labels, labels
+  on every edge, touch gestures, and others.
+- **Edge editing (#731) is out of scope**: macOS has no edge editor.
+- **The new count is 96 parity surfaces: 36 Validated and 60 Partial**, plus 2
+  out of scope.
+
+**Issues.** New labels `P1 layout`, `P2 feature`, `P3 polish` and
+`visual parity`, applied to every open parity issue.
+- **Design issues #764–#778**, from the side-by-side review:
+  - P1: #764 (cards), #765 (edges), #766 (rail and chips), #767 (sidebar and
+    window), #768 (dialog framework), #773 (right panel), #774 (Quick Chat),
+    #776 (jump palette), #777 (Worktrees sheet);
+  - P2: #769 (New Loop sheet), #770 (edge form), #771 (Settings), #772
+    (workspace chrome), #778 (context menus);
+  - P3: #775 (terminal look).
+- **New gaps:** #779 (fifth onboarding page), #780 (update check for other open
+  workspaces) and #781 (grid and zoom metrics).
+- **Duplicates closed:** #759, #760 and #761 are folded into #765, #768 and #766.
+
+**Plan.** [windows-parity-orchestration-plan.md](windows-parity-orchestration-plan.md)
+covers:
+- the priority queue;
+- parallel lanes cut by file ownership;
+- the per-role model choices, with a reviewer from a different vendor;
+- the mandatory per-PR gate (RED test, full validation, before/after
+  captures, rubber duck, visual sign-off);
+- local testing without a Dev Box.
+
+**Local Sandbox result for #556.** Published beta27 ran in a clean Windows
+Sandbox with `<vGPU>Disable</vGPU>`, using injected keys.
+- **Passed:** Setup Verify and Install; Connected behind the owned, foreground
+  onboarding; named UIA; 29 checked keystrokes across all four pages and every
+  backend choice; connected Welcome; the `onboarding-seen` marker; and a
+  relaunch without onboarding.
+- **Not executed:** the physical-keyboard pass, because the operator wasn't
+  available.
+- **Also seen:** the main window's UIA status reads "Ready" while it paints
+  "Connected".
+
+#556 stays open for the physical pass.
+
 ### 2026-10-13 testing-gaps Dev Box return (beta26 and beta27)
 
 The bundle `GraphCode-DevBox-Return-testing-gaps` (attempt 2) was reviewed on

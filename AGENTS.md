@@ -370,7 +370,10 @@ edit `Package.resolved` to make a build pass.
 
 What parity means, per the ledger: the Windows implementation exposes the same
 user-visible information and actions as macOS, with runtime evidence.
-Platform-native chrome may differ. What parity does **not** mean: hiding a
+Platform-native chrome may differ. Since 2026-10-13, the macOS app is the ground truth, so a requirement macOS lacks
+is not parity, and visual fidelity (layout, hierarchy, components, typography,
+colour, wording) is part of parity, checked against paired macOS captures. See
+[the orchestration plan](investigation/windows-parity-orchestration-plan.md). What parity does **not** mean: hiding a
 feature behind an undocumented shortcut, replacing a structured screen with raw
 protocol fields, or a passing Zig unit test standing in for a live walkthrough.
 When in doubt, record the row as `Partial` and say why.
