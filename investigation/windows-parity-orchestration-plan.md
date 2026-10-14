@@ -118,6 +118,53 @@ and measure:
 
 Promote or demote models on that data, not on benchmarks alone.
 
+### Abandon and escalate a struggling session
+
+A session that is going in circles costs more than starting again on a stronger
+model. The coordinator watches each implementation session, and **abandons it**
+when **any one** of these conditions holds.
+
+| Trigger | Threshold |
+| --- | --- |
+| The same RED test or validation step still fails after successive fix attempts | 3 attempts |
+| The rubber duck or the visual sign-off rejects the PR, each time with substantive findings (not wording) | 2 rejections |
+| Exact-head CI fails for a reason the session caused | 2 times, after its own local validation said green |
+| An evidence claim is contradicted by the reviewer (overclaiming) | once, on a second offence |
+| No new passing test or accepted acceptance box | 90 minutes of busy time |
+| The session edits files outside its lane lease, or asks to widen the scope | once, unless the coordinator approves |
+
+**Abandoning is not deleting.** The coordinator:
+1. stops the session and keeps its branch and evidence;
+2. closes any open PR it made, unmerged, with a short "superseded by" note;
+3. writes a **handoff note** on the issue, covering:
+   - what was tried, and which approaches failed and why;
+   - the failing test and its output;
+   - the reviewer's findings;
+   - any parts of the diff worth keeping;
+4. starts a **new session** with a fresh branch from current `main`, the
+   handoff note in its kickoff, and the **next model on the escalation ladder**.
+
+The new session may reuse the old branch's commits only by deliberately
+cherry-picking them, and must name them in its PR.
+
+**Escalation ladder** (for implementation; reviewers stay a different vendor
+from the implementer at every step):
+
+| Step | Small, well-scoped fixes | Lane implementation and polish |
+| --- | --- | --- |
+| Start | `gpt-5.4-mini`, high | `gpt-6.1-sol`, high, long_context (polish: `mai-code-1.1-flash`, medium) |
+| 1st escalation | `gpt-6.1-sol`, high | `claude-sonnet-5.5`, xhigh, long_context |
+| 2nd escalation | `claude-sonnet-5.5`, xhigh | `claude-opus-5.5`, max, long_context |
+| 3rd escalation | `claude-opus-5.5`, max | `gpt-5.6-sol`, max, long_context (or `claude-opus-4.8` when the work is mainly visual) |
+| After that | Stop. The coordinator escalates the issue to the operator, with all the handoff notes. It is probably mis-specified or needs a design decision. | Same |
+
+**Reviewer for each step.** When the implementer is an Anthropic model, review
+with `gpt-6.1-sol` at high effort, or with `grok-4.7`.
+
+**Record every escalation** in the issue (old model, trigger, new model) and in
+the calibration data. A model that needs escalating on two issues in the same
+lane is demoted for that lane.
+
 ## Per-PR gate (mandatory)
 
 Every implementation session follows these steps in order. A step that can't be
