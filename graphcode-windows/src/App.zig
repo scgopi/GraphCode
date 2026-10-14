@@ -7576,7 +7576,8 @@ pub const App = struct {
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
-        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
+        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
+        const current_inspection = self.currentWorktreeInspection();
         // The scroll sink is optional so test sinks that only record elements need not declare it.
         if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
             provider.syncSidebarScroll(
@@ -11702,8 +11703,8 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
-                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
-                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
+                            sink.name(index), bounds.left,        bounds.top,   bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,         banner.right, banner.bottom, case.dpi,
                             case.width,       app.sidebar_scroll,
                         },
                     );
@@ -13783,7 +13784,6 @@ const LiveTerminalFixture = struct {
         _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
     }
 
-
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
         self.revision += 1;
@@ -15695,7 +15695,7 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
 test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -15736,7 +15736,7 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
 
 test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -15821,7 +15821,7 @@ test "workspace layout: restore keeps a pane whose session zmx could not reach, 
 
 test "workspace layout: a loop's shells are neither ended nor forgotten while zmx cannot reach their session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -15843,7 +15843,7 @@ test "workspace layout: a loop's shells are neither ended nor forgotten while zm
 
 test "workspace layout: a shell whose daemon refused the connection is gone: its record is forgotten and nothing is killed" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -15858,7 +15858,7 @@ test "workspace layout: a shell whose daemon refused the connection is gone: its
 
 test "live terminal: opening a loop whose session zmx could not reach waits and attaches only once it answers" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -16014,7 +16014,7 @@ const nodes_full = node_loop_a ++ "," ++
 
 test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once the daemon's own answer agrees, and only those" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const other_project = "C:\\another-project";
     const alias_project = try std.mem.replaceOwned(u8, std.testing.allocator, fixture.project, "\\", "/");
@@ -16057,7 +16057,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
 
 test "workspace layout: an empty or partial first snapshot sweeps nothing that the full snapshot still holds" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-a", &.{ .{ .id = "loop-a", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_two } });
@@ -16092,7 +16092,7 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
 
 test "workspace layout: a layout saved after this shell started is another shell's and is never swept" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Written while this shell runs, as a second shell sharing the support directory would.
     try fixture.saveLoopLayout(fixture.project, "other-shells-loop", &.{ .{ .id = "other-shells-loop", .agent = true }, .{ .id = shell_uuid_one } });
@@ -16699,7 +16699,7 @@ test "workspace layout: a stale or revisionless frame that names the loop again 
 /// A layout older than this shell, with a recorded live shell session, for a loop the project's
 /// first usable snapshot will not name; the shell saw only an empty graph of the project before.
 fn emptyFirstGraphWithOldLayout(fixture: *LiveTerminalFixture) !i128 {
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
@@ -16745,7 +16745,7 @@ test "workspace layout: after a reconnect a project the shell holds no snapshot 
 
 test "workspace layout: a project first opened after a reconnect is left alone too" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16768,7 +16768,7 @@ test "workspace layout: a project first opened after a reconnect is left alone t
 
 test "workspace layout: a reconnect before the shell's first poll or snapshot still ends the age sweep" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16793,7 +16793,7 @@ test "workspace layout: a reconnect before the shell's first poll or snapshot st
 
 test "workspace layout: a snapshot queued before the transport failed arms nothing while the client is not connected" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16823,7 +16823,7 @@ test "workspace layout: a snapshot queued before the transport failed arms nothi
 
 test "workspace layout: a look the age sweep started for a layout the shell never held does not outlive the connection" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -17196,7 +17196,7 @@ test "workspace layout: an empty graph, and a project the shell does not hold, a
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Node ids are uuids; the daemon names a loop's session after the uppercase one.
     const node_uuid = shell_uuid_seven;
@@ -17221,7 +17221,7 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
 
 test "workspace layout: a layout that cannot be attributed to the deleted loop ends nothing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17244,7 +17244,7 @@ test "workspace layout: a layout that cannot be attributed to the deleted loop e
 
 test "workspace layout: deleting a loop ends only recorded, live, shell-shaped sessions nothing else names" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const foreign = "other-" ++ shell_uuid_two;
     // A layout from an earlier shell, a stale copy or a hand edit can record anything as a
@@ -17274,7 +17274,7 @@ test "workspace layout: deleting a loop ends only recorded, live, shell-shaped s
 
 test "workspace layout: a loop's shells are ended only after a successful session listing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17398,7 +17398,7 @@ test "workspace layout: a corrupt, foreign or newer-schema loop layout is kept a
 
 test "workspace layout: a live session that only a layout names is never ended without proof the shell made it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // A foreign session that happens to look like a shell's: lowercase uuid, live, no node's
     // id, named by no other layout. The name shape is not provenance.
@@ -17418,7 +17418,7 @@ test "workspace layout: a live session that only a layout names is never ended w
 
 test "workspace layout: a tab's session is recorded as the shell's own when minted and forgotten once ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const workspace = &fixture.workspace;
@@ -17449,7 +17449,7 @@ test "workspace layout: a tab's session is recorded as the shell's own when mint
 
 test "workspace layout: a layout scan cut short by its cap refuses the kill instead of assuming nothing claims it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17471,7 +17471,7 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
 
 test "workspace layout: a session another loop's record names is never ended by a different loop's retirement" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // The window in a second shell sharing this layout directory: it has recorded a fresh
     // session for its own loop-a, while a stale layout of the deleted gone-loop names the uuid.
@@ -17491,7 +17491,7 @@ test "workspace layout: a session another loop's record names is never ended by 
 /// sequence waits for each attach to finish before the next save.
 fn expectClaimAndRecordSeenByAttach(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -17574,7 +17574,7 @@ fn attachStartCount(dir: std.fs.Dir) !usize {
 
 test "workspace layout: New Tab and Split with no free surface slot fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -17614,7 +17614,7 @@ test "workspace layout: New Tab and Split with no free surface slot fail before 
 
 test "workspace layout: New Tab and Split with every free slot reserved by a pending restore fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -17696,7 +17696,7 @@ test "workspace layout: a failed rollback save leaves the claim on disk, never a
 
 test "workspace layout: restore drops a loop layout's claimed pane whose session was never started" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17723,7 +17723,7 @@ test "workspace layout: restore drops a loop layout's claimed pane whose session
 
 test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17747,7 +17747,7 @@ test "workspace layout: an unreadable unrelated layout defers the cleanup, and t
 
 test "workspace layout: a corrupt layout that cannot be set aside is left as it is and its loop is not opened" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const truncated = "{\"schemaVersion\":2,\"project\":\"";
