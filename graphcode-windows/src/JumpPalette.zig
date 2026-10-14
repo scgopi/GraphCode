@@ -535,10 +535,12 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 c.GetModuleHandleW(null),
                 null,
             );
-            // A cosmetic sibling covers the native nonclient bar. Transparent
-            // hit testing passes input to LISTBOX; its scroll state and UIA stay native.
+            // An opaque sibling above the LISTBOX is excluded from the clip of the
+            // native nonclient scrollbar, so hover, drag and track painting cannot
+            // reach it. WM_NCHITTEST passes input through; scroll state and UIA stay native.
+            // WS_EX_TRANSPARENT must not be set: it exempts the sibling from that clip.
             dialog.scrollbar = c.CreateWindowExW(
-                c.WS_EX_TRANSPARENT | c.WS_EX_NOACTIVATE,
+                c.WS_EX_NOACTIVATE,
                 scrollbar_class.ptr,
                 null,
                 c.WS_CHILD | c.WS_CLIPSIBLINGS,
@@ -622,15 +624,17 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
         c.WM_SIZE => {
             var client: c.RECT = undefined;
             _ = c.GetClientRect(hwnd, &client);
+            // The region precedes every child move so the list and decoration are
+            // never laid out beneath a stale clip.
+            const radius = Dpi.scale(24, dialog.dpi);
+            const region = c.CreateRoundRectRgn(0, 0, client.right + 1, client.bottom + 1, radius, radius);
+            if (region != null and c.SetWindowRgn(hwnd, region, 1) == 0) _ = c.DeleteObject(region);
             const layout = fieldLayout(client.right, dialog.dpi);
             move(dialog.magnifier, layout.magnifier);
             move(dialog.edit, layout.edit);
             move(dialog.hint, layout.hint);
             move(dialog.list, .{ .left = 0, .top = Dpi.scale(field_height, dialog.dpi), .right = client.right, .bottom = client.bottom });
             move(dialog.empty_label, .{ .left = Dpi.scale(14, dialog.dpi), .top = Dpi.scale(56, dialog.dpi), .right = client.right - Dpi.scale(14, dialog.dpi), .bottom = client.bottom - Dpi.scale(14, dialog.dpi) });
-            const radius = Dpi.scale(24, dialog.dpi);
-            const region = c.CreateRoundRectRgn(0, 0, client.right + 1, client.bottom + 1, radius, radius);
-            if (region != null and c.SetWindowRgn(hwnd, region, 1) == 0) _ = c.DeleteObject(region);
             return 0;
         },
         c.WM_COMMAND => {
@@ -1607,6 +1611,118 @@ test "palette residual overflow paints a dark native scroll track after scrollin
         try std.testing.expect(c.GetWindowLongPtrW(dialog.list, c.GWL_STYLE) & c.WS_VSCROLL != 0);
     }
     try std.testing.expect(dialog.failure == null);
+}
+
+fn overflowTestEntries() [12]Entry {
+    var entries: [12]Entry = undefined;
+    for (&entries) |*entry| entry.* = .{ .project_path = "A", .project_name = "Alpha", .node_id = "row", .title = "Overflow row", .loop_type = "sketch", .state = "idle" };
+    return entries;
+}
+
+test "palette residual overflow at creation decorates the production list without latching it off" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    try std.testing.expectEqual(@as(c.LRESULT, 12), c.SendMessageW(dialog.list, c.LB_GETCOUNT, 0, 0));
+    try std.testing.expect(dialog.failure == null and !dialog.scrollbar_disabled);
+    try std.testing.expect(dialog.scrollbar_visible and dialog.scrollbar_timer_armed);
+    var info = std.mem.zeroes(c.SCROLLBARINFO);
+    info.cbSize = @sizeOf(c.SCROLLBARINFO);
+    try std.testing.expect(c.GetScrollBarInfo(dialog.list, c.OBJID_VSCROLL, &info) != 0);
+    var strip: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(dialog.scrollbar, &strip) != 0);
+    try std.testing.expectEqualDeep(info.rcScrollBar, strip);
+    try std.testing.expect(strip.right - strip.left > 0 and strip.bottom - strip.top > 0);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog.scrollbar, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    // The strip reaches the palette's rounded bottom-right corner, so the owner region must clip it.
+    const region = c.CreateRectRgn(0, 0, 0, 0) orelse return error.TestRegionUnavailable;
+    defer _ = c.DeleteObject(region);
+    try std.testing.expect(c.GetWindowRgn(hwnd, region) != c.ERROR);
+    try std.testing.expect(strip.right >= 460 and strip.bottom >= 380);
+    try std.testing.expect(c.PtInRegion(region, 459, 379) == 0);
+    try std.testing.expect(c.PtInRegion(region, 450, 200) != 0);
+}
+
+test "palette residual native nonclient painting is clipped around an opaque sibling decoration" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    // A WS_EX_TRANSPARENT sibling is excluded from the clip of the windows beneath it,
+    // which lets native scrollbar hover and drag painting land on the dark strip.
+    const strip_extended = c.GetWindowLongPtrW(dialog.scrollbar, c.GWL_EXSTYLE);
+    try std.testing.expect(strip_extended & c.WS_EX_TRANSPARENT == 0);
+    const strip_style = c.GetWindowLongPtrW(dialog.scrollbar, c.GWL_STYLE);
+    try std.testing.expect(strip_style & c.WS_CHILD != 0 and strip_style & c.WS_CLIPSIBLINGS != 0 and strip_style & c.WS_TABSTOP == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog.list, c.GWL_STYLE) & c.WS_CLIPSIBLINGS != 0);
+    try std.testing.expectEqual(hwnd, c.GetParent(dialog.scrollbar));
+    try std.testing.expectEqual(hwnd, c.GetParent(dialog.list));
+    var below = c.GetWindow(dialog.scrollbar, c.GW_HWNDNEXT);
+    var covers_list = false;
+    while (below != null) : (below = c.GetWindow(below, c.GW_HWNDNEXT)) {
+        if (below == dialog.list) covers_list = true;
+    }
+    try std.testing.expect(covers_list);
+    // Input still reaches the native list because the decoration declines hit testing.
+    try std.testing.expectEqual(@as(c.LRESULT, c.HTTRANSPARENT), c.SendMessageW(dialog.scrollbar, c.WM_NCHITTEST, 0, 0));
+}
+
+test "palette residual owner region is installed before the overflow list moves and the decoration follows" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    const Probe = struct {
+        var previous: c.WNDPROC = null;
+        var palette: c.HWND = null;
+        var region_right: c.LONG = -1;
+        var observations: usize = 0;
+        fn proc(list: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+            if (message == c.WM_WINDOWPOSCHANGED) {
+                const region = c.CreateRectRgn(0, 0, 0, 0);
+                defer _ = c.DeleteObject(region);
+                var box: c.RECT = undefined;
+                region_right = if (c.GetWindowRgn(palette, region) != c.ERROR and c.GetRgnBox(region, &box) != 0) box.right else -1;
+                observations += 1;
+            }
+            return c.CallWindowProcW(previous, list, message, wparam, lparam);
+        }
+    };
+    Probe.palette = hwnd;
+    Probe.observations = 0;
+    const installed = c.SetWindowLongPtrW(dialog.list, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&Probe.proc)));
+    try std.testing.expect(installed != 0);
+    Probe.previous = Win32.opaquePointerFromInt(c.WNDPROC, @bitCast(installed));
+    try std.testing.expect(c.SetWindowPos(hwnd, null, 0, 0, 500, 380, c.SWP_NOMOVE | c.SWP_NOZORDER | c.SWP_NOACTIVATE) != 0);
+    try std.testing.expect(Probe.observations > 0);
+    try std.testing.expect(Probe.region_right >= 500);
+    var info = std.mem.zeroes(c.SCROLLBARINFO);
+    info.cbSize = @sizeOf(c.SCROLLBARINFO);
+    try std.testing.expect(c.GetScrollBarInfo(dialog.list, c.OBJID_VSCROLL, &info) != 0);
+    var strip: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(dialog.scrollbar, &strip) != 0);
+    try std.testing.expectEqualDeep(info.rcScrollBar, strip);
+    try std.testing.expect(!dialog.scrollbar_disabled and dialog.failure == null);
 }
 
 test "palette residual registered backdrop is black layered nonactivating and bounded" {
