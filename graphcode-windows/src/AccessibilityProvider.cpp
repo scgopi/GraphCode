@@ -1244,6 +1244,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
           row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :
           row.identity.rfind("workspace-show-graph:", 0) == 0 ? L"workspace-show-graph-" :
+          row.identity.rfind("workspace-restart-session:", 0) == 0 ? L"workspace-restart-session-" :
           row.identity.rfind("workspace-stop:", 0) == 0 ? L"workspace-stop-" :
           row.identity.rfind("workspace-toggle-panel:", 0) == 0 ? L"workspace-toggle-panel-" :
           row.identity.rfind("workspace-detail-sparkline:", 0) == 0 ? L"workspace-detail-sparkline-" :
