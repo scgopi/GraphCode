@@ -3217,6 +3217,119 @@ try {
   if ($uiaParseErrors.Count -ne 0) {
     throw "RED: UIA live gate no longer parses after startup diagnostic changes"
   }
+  $sidebarOracleHelper = $uiaAst.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Get-SidebarNavigationSnapshot"
+    }, $true)
+  if ($null -eq $sidebarOracleHelper) {
+    throw "RED: UIA live gate is missing its functional sidebar navigation snapshot oracle"
+  }
+  . ([scriptblock]::Create($sidebarOracleHelper.Extent.Text))
+  & {
+    function New-SidebarNavigationElement(
+      [string] $automationId,
+      [string] $name,
+      [double] $left,
+      [double] $top,
+      [double] $right,
+      [double] $bottom
+    ) {
+      return [pscustomobject]@{
+        Current = [pscustomobject]@{
+          AutomationId = $automationId
+          Name = $name
+          BoundingRectangle = [pscustomobject]@{
+            Left = $left; Top = $top; Right = $right; Bottom = $bottom
+            Width = $right - $left; Height = $bottom - $top
+          }
+        }
+      }
+    }
+    $sidebarFixture = @(
+      (New-SidebarNavigationElement "overview-destination:graph" "Graph" 12 20 220 52),
+      (New-SidebarNavigationElement "quick-chats-destination:quick-chats" "Quick Chats" 12 56 220 88),
+      (New-SidebarNavigationElement "sidebar-section-1" "Open local folders" 12 100 220 121),
+      (New-SidebarNavigationElement "open-project-1" "UIA project" 12 121 220 153),
+      (New-SidebarNavigationElement "sidebar-section-2" "Open remote repositories" 12 168 220 189),
+      (New-SidebarNavigationElement "open-project-2" "Temporary remote" 12 192 220 224),
+      (New-SidebarNavigationElement "overview-destination" "Graph" 12 17 220 49),
+      (New-SidebarNavigationElement "quick-chats-destination" "Quick Chats" 12 53 220 85),
+      (New-SidebarNavigationElement "project-new-loop-1" "New Loop" 174 17 198 49),
+      (New-SidebarNavigationElement "project-disclosure-2" "Collapse project" 198 17 220 49),
+      (New-SidebarNavigationElement "quick-chat-new-3" "New Chat" 174 53 198 85),
+      (New-SidebarNavigationElement "quick-chats-disclosure-4" "Collapse Quick Chats" 198 53 220 85),
+      (New-SidebarNavigationElement "project-new-loop-5" "New Loop" 174 121 198 153),
+      (New-SidebarNavigationElement "project-disclosure-6" "Collapse project" 198 121 220 153)
+    )
+    $initial = Get-SidebarNavigationSnapshot $sidebarFixture
+    if (($initial.destinationIds -join "|") -cne "overview-destination|quick-chats-destination" -or
+        ($initial.destinationNames -join "|") -cne "Graph|Quick Chats" -or
+        $initial.ownerNames.Count -ne 2 -or
+        ($initial.ownerNames -join "|") -cne "UIA project|Temporary remote" -or
+        ($initial.sectionNames -join "|") -cne "Open local folders|Open remote repositories" -or
+        $initial.recentRowIds.Count -ne 0 -or
+        -not $initial.rowBoundsValid -or -not $initial.controlsValid -or
+        $initial.controlsChecked -ne 6) {
+      throw "RED: Sidebar navigation oracle missed destination order, open owners, section names, or contained controls"
+    }
+    $localCollapsed = @($sidebarFixture | Where-Object {
+      $_.Current.AutomationId -notin @(
+        "open-project-1",
+        "project-new-loop-5",
+        "project-disclosure-6"
+      )
+    })
+    $afterLocalCollapse = Get-SidebarNavigationSnapshot $localCollapsed
+    if (($afterLocalCollapse.ownerNames -join "|") -cne "Temporary remote") {
+      throw "RED: Sidebar navigation oracle did not isolate local owner collapse"
+    }
+    $remoteCollapsed = @($sidebarFixture | Where-Object {
+      $_.Current.AutomationId -ne "open-project-2"
+    })
+    $afterRemoteCollapse = Get-SidebarNavigationSnapshot $remoteCollapsed
+    if (($afterRemoteCollapse.ownerNames -join "|") -cne "UIA project") {
+      throw "RED: Sidebar navigation oracle did not isolate remote owner collapse"
+    }
+    $restoredFixture = @($sidebarFixture | Where-Object {
+      $_.Current.AutomationId -notin @(
+        "sidebar-section-2",
+        "open-project-2"
+      )
+    })
+    $restored = Get-SidebarNavigationSnapshot $restoredFixture
+    if (($restored.ownerNames -join "|") -cne "UIA project" -or
+        ($restored.sectionNames -join "|") -cne "Open local folders" -or
+        $restored.recentRowIds.Count -ne 0) {
+      throw "RED: Sidebar navigation oracle accepted a temporary remote owner after fixture restore"
+    }
+    $recentMutation = Get-SidebarNavigationSnapshot @(
+      $sidebarFixture + (New-SidebarNavigationElement "project-row-recent" "Recent folder" 12 228 220 260)
+    )
+    if ($recentMutation.recentRowIds.Count -ne 1) {
+      throw "RED: Sidebar navigation oracle failed to detect a projected unopened recent folder"
+    }
+    $clippedMutation = @($sidebarFixture | Where-Object {
+      $_.Current.AutomationId -ne "project-new-loop-5"
+    }) + (New-SidebarNavigationElement "project-new-loop-5" "New Loop" 174 121 228 153)
+    $clipped = Get-SidebarNavigationSnapshot $clippedMutation
+    if ($clipped.controlsValid) {
+      throw "RED: Sidebar navigation oracle accepted a row control extending beyond its owner"
+    }
+    $reorderedOwners = @($sidebarFixture | Where-Object {
+      $_.Current.AutomationId -notin @(
+        "open-project-1",
+        "open-project-2"
+      )
+    }) + @(
+      (New-SidebarNavigationElement "open-project-2" "Temporary remote" 12 124 220 156),
+      (New-SidebarNavigationElement "open-project-1" "UIA project" 12 192 220 224)
+    )
+    $reordered = Get-SidebarNavigationSnapshot $reorderedOwners
+    if (($reordered.ownerNames -join "|") -cne "Temporary remote|UIA project") {
+      throw "RED: Sidebar navigation oracle failed to preserve the owner order evidence"
+    }
+  }
   foreach ($helperName in @(
       "Protect-UiaStartupDiagnosticText",
       "Get-UiaStartupDiagnosticValue",

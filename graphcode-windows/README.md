@@ -365,11 +365,13 @@ the workspace identity region remains separate from the terminal's physical tabs
 
 ### Sidebar scrolling and short windows
 
-The sidebar rows, Needs you, and Activity scroll under the fixed GRAPH/Projects
-header and above the footer (status line, update banner, inline error footer).
-What is painted, what UIA publishes, and what a click hits are the same rect,
-clipped to that scroll region; the right-hand Activity control sits inside the
-220-pixel rail.
+Graph and Quick Chats stay first, followed by the open local-folder and remote-
+repository groups. Unopened recent folders remain available from File > Add
+Folder > Recent Folders rather than appearing as sidebar destinations. Sidebar
+rows, Needs you, and Activity scroll beneath the fixed window header and above
+the footer (status line, update banner, inline error footer). What is painted,
+what UIA publishes, and what a click hits are the same rect, clipped to that
+scroll region; the right-hand Activity control sits inside the 220-DIP rail.
 
 Keyboard and assistive clients reach offscreen rows through UIA, not a hidden
 shortcut: each sidebar list (Projects, Loops, Worktrees) exposes a vertical-only
@@ -380,16 +382,17 @@ with it (rows, controls, the Graph and Quick Chats destinations) exposes
 footer do not scroll and expose no scroll item. The root's coordinate hit-test
 returns the element under the point (banner above header above scrolled rows).
 
-Short windows: the sidebar keeps a 52 px scroll region (`Sidebar.min_content_region`,
-room for two 24 px row slots; the tests assert the region height and at least one
-published element, not two elements at every offset, and a 34 px Needs-you or
+Short windows: the sidebar keeps a 52-DIP scroll region (`Sidebar.min_content_region`,
+room for two 24-DIP loop-row slots; the tests assert the region height and at
+least one published element, not two elements at every offset, and a 34-DIP Needs-you or
 Activity card can fill it). If the footer would leave less, the error footer collapses
 first, then the update banner; the status line is the floor. A collapsed part is
 not painted, published, or clickable. The window's minimum height is the smallest
 client height at which the status line, Activity strip, and open Workspace panel
 still leave that region (`min_client_height`, enforced through
-`WM_GETMINMAXINFO`; width keeps the system minimum). This is layout and message
-evidence from App and native provider tests, not a screen-reader or Dev Box run.
+`WM_GETMINMAXINFO`; width keeps the system minimum, and the 517-DIP minimum-height
+expression is preserved). This is layout and message evidence from App and
+native provider tests, not a screen-reader or Dev Box run.
 
 ## Workspace lifecycle
 

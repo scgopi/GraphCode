@@ -4308,10 +4308,7 @@ pub const App = struct {
         self.workspace_controls.panel_visible = false;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
-        self.sidebar_scroll = Sidebar.clampScroll(
-            Sidebar.loopRowTopForModel(&self.model, node_index) - 24,
-            Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700, &self.sidebar_state),
-        );
+        self.ensureLoopVisible(selection.project_path, node_index);
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
@@ -5986,6 +5983,21 @@ pub const App = struct {
         return self.uia_fixture_project_path;
     }
 
+    fn appendTemporarySidebarOwner(self: *App) !void {
+        const path = "ssh://sidebar-fixture.invalid/remote";
+        const name = "Temporary remote";
+        for (self.model.open_projects.items) |project| {
+            if (!std.mem.eql(u8, project.path, path)) continue;
+            if (std.mem.eql(u8, project.name, name)) return;
+            return error.SidebarFixtureOwnerConflict;
+        }
+        const owner_path = try self.model.allocator.dupe(u8, path);
+        errdefer self.model.allocator.free(owner_path);
+        const owner_name = try self.model.allocator.dupe(u8, name);
+        errdefer self.model.allocator.free(owner_name);
+        try self.model.open_projects.append(.{ .path = owner_path, .name = owner_name });
+    }
+
     fn ownedUiaFixturePath(self: *const App, kind: UiaFixturePath) ![]u8 {
         return uiaFixturePath(self.allocator, try self.requiredUiaFixtureProject(), kind);
     }
@@ -6360,6 +6372,15 @@ pub const App = struct {
             self.editSelectedNodeDetails();
             return;
         }
+        if (mutation == 22) {
+            self.appendTemporarySidebarOwner() catch |err| {
+                self.reportWorktreeError("Unable to prepare temporary sidebar owner", err);
+                return;
+            };
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         const target_path = if (mutation == 2 or mutation == 3) self.ownedUiaFixturePath(if (mutation == 2) .safe else .unsafe) catch |err| {
             self.reportWorktreeError("UIA fixture owner unavailable", err);
@@ -6627,15 +6648,92 @@ pub const App = struct {
     }
 
     fn ensureWorktreeVisible(self: *App, index: usize) void {
+        const inspection = if (self.worktree_inspection) |*value| value else null;
+        var rows = Sidebar.appendRows(self.allocator, &self.model, inspection, 0, &self.sidebar_state) catch {
+            self.setStatus("Unable to calculate sidebar worktree position");
+            return;
+        };
+        defer rows.deinit(self.allocator);
+        for (rows.items) |row| {
+            if (row.kind != .worktree or row.index != index) continue;
+            self.ensureSidebarRowVisible(row, inspection);
+            return;
+        }
+    }
+
+    fn ensureLoopVisible(self: *App, project_path: []const u8, node_index: usize) void {
+        const inspection = self.currentWorktreeInspection();
+        var rows = Sidebar.appendRows(self.allocator, &self.model, inspection, 0, &self.sidebar_state) catch {
+            self.setStatus("Unable to calculate sidebar loop position");
+            return;
+        };
+        defer rows.deinit(self.allocator);
+        if (findSidebarLoopRow(rows.items, project_path, node_index)) |row| {
+            self.ensureSidebarRowVisible(row, inspection);
+            return;
+        }
+
+        const graph = Sidebar.graphForProject(&self.model, project_path) orelse return;
+        if (!graph.project().isGlobal()) {
+            if (graph.project().isRemote()) {
+                self.sidebar_state.remote_collapsed = false;
+            } else {
+                self.sidebar_state.local_collapsed = false;
+            }
+            rows.deinit(self.allocator);
+            rows = .empty;
+            rows = Sidebar.appendRows(self.allocator, &self.model, inspection, 0, &self.sidebar_state) catch {
+                self.setStatus("Unable to calculate sidebar loop position");
+                return;
+            };
+            if (findSidebarLoopRow(rows.items, project_path, node_index)) |row| {
+                self.ensureSidebarRowVisible(row, inspection);
+                return;
+            }
+        }
+        for (rows.items) |row| {
+            const is_owner = if (graph.project().isGlobal())
+                row.kind == .overview
+            else
+                row.kind == .open_project and row.project_path != null and
+                    std.mem.eql(u8, row.project_path.?, project_path);
+            if (!is_owner) continue;
+            self.ensureSidebarRowVisible(row, inspection);
+            return;
+        }
+    }
+
+    fn findSidebarLoopRow(rows: []const Sidebar.Row, project_path: []const u8, node_index: usize) ?Sidebar.Row {
+        for (rows) |row| {
+            if (row.kind != .loop or row.index != node_index or row.project_path == null or
+                !std.mem.eql(u8, row.project_path.?, project_path)) continue;
+            return row;
+        }
+        return null;
+    }
+
+    fn ensureSidebarRowVisible(
+        self: *App,
+        row: Sidebar.Row,
+        inspection: ?*const WorktreeStatus.Inspection,
+    ) void {
         const client = logicalClientRect(self.window.hwnd, self.dpi);
-        const loop_count = if (self.model.graph) |graph| graph.nodes.items.len else 0;
-        const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
-        const bottom = top + 34;
-        const viewport_top = Sidebar.content_top;
+        const bounds = Sidebar.rowBounds(row);
         const viewport_bottom = self.sidebarContentBottom(client.bottom);
-        if (top < viewport_top) self.sidebar_scroll -= viewport_top - top;
-        if (bottom > viewport_bottom) self.sidebar_scroll += bottom - viewport_bottom;
-        self.clampSidebarScroll();
+        const viewport_height = viewport_bottom - Sidebar.content_top;
+        if (viewport_height <= 0) return;
+        var next = self.sidebar_scroll;
+        if (bounds.bottom - next > viewport_bottom) {
+            next = if (bounds.bottom - bounds.top > viewport_height)
+                bounds.top - Sidebar.content_top
+            else
+                bounds.bottom - viewport_bottom;
+        }
+        if (bounds.top - next < Sidebar.content_top) next = bounds.top - Sidebar.content_top;
+        self.sidebar_scroll = Sidebar.clampScroll(
+            next,
+            Sidebar.maxScroll(&self.model, inspection, viewport_bottom, &self.sidebar_state),
+        );
     }
 
     const SidebarScrollSpan = struct { top: i32, bottom: i32 };
@@ -7627,7 +7725,7 @@ pub const App = struct {
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
-        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
+        const current_inspection = self.currentWorktreeInspection();
         // The scroll sink is optional so test sinks that only record elements need not declare it.
         if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
             provider.syncSidebarScroll(
@@ -7693,29 +7791,32 @@ pub const App = struct {
         };
 
         for (sidebar_rows.items) |row| {
-            const bounds = clipSidebarAccessibilityBounds(
-                .{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 },
-                sidebar_bottom,
-            );
+            const bounds = clipSidebarAccessibilityBounds(Sidebar.rowBounds(row), sidebar_bottom);
             switch (row.kind) {
-                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", "Local Projects", 1, .{ .logical = bounds }, false, false) catch return,
-                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", "Remote Repositories", 1, .{ .logical = bounds }, false, false) catch return,
+                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", row.project_name orelse "Open local folders", 1, .{ .logical = bounds }, false, false) catch return,
+                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", row.project_name orelse "Open remote repositories", 1, .{ .logical = bounds }, false, false) catch return,
                 .project => {
                     const project = self.model.recent_projects.items[row.index];
                     self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, .{ .logical = bounds }, false, false) catch return;
                 },
-                .open_project => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, .{ .logical = bounds }, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
-                    const new_bounds = clipSidebarAccessibilityBounds(
-                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
-                        sidebar_bottom,
-                    );
-                    self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
+                .open_project => if (row.project_path) |path| {
+                    self.appendAccessibilityElement(
+                        &elements,
+                        &owned_identities,
+                        "open-project",
+                        path,
+                        row.project_name orelse path,
+                        1,
+                        .{ .logical = bounds },
+                        self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path),
+                        false,
+                    ) catch return;
+                    if (Sidebar.graphForProject(&self.model, path) != null) {
+                        const new_bounds = clipSidebarAccessibilityBounds(Sidebar.newLoopBounds(row), sidebar_bottom);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
+                    }
                     if (row.has_children) {
-                        const disclosure_bounds = clipSidebarAccessibilityBounds(
-                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
-                            sidebar_bottom,
-                        );
+                        const disclosure_bounds = clipSidebarAccessibilityBounds(Sidebar.disclosureBounds(row), sidebar_bottom);
                         self.appendAccessibilityElement(
                             &elements,
                             &owned_identities,
@@ -7729,17 +7830,15 @@ pub const App = struct {
                         ) catch return;
                     }
                 },
-                .loop => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
-                    if (row.index < graph.nodes.items.len) {
-                        const node = graph.nodes.items[row.index];
+                .loop => if (row.project_path) |path| if (Sidebar.graphForProject(&self.model, path)) |graph| {
+                    const nodes = graph.nodes();
+                    if (row.index < nodes.len) {
+                        const node = nodes[row.index];
                         const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ path, node.id }) catch return;
                         defer self.allocator.free(key);
                         self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
                         if (row.has_children) {
-                            const disclosure_bounds = clipSidebarAccessibilityBounds(
-                                .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
-                                sidebar_bottom,
-                            );
+                            const disclosure_bounds = clipSidebarAccessibilityBounds(Sidebar.disclosureBounds(row), sidebar_bottom);
                             self.appendAccessibilityElement(
                                 &elements,
                                 &owned_identities,
@@ -7769,20 +7868,34 @@ pub const App = struct {
                         };
                     }
                 },
-                .overview => self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, self.surface == .overview, false) catch return,
+                .overview => {
+                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, self.surface == .overview, false) catch return;
+                    if (Sidebar.graphForProject(&self.model, "graphcode://global") != null) {
+                        const new_bounds = clipSidebarAccessibilityBounds(Sidebar.newLoopBounds(row), sidebar_bottom);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", "graphcode://global", "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
+                    }
+                    if (row.has_children) {
+                        const disclosure_bounds = clipSidebarAccessibilityBounds(Sidebar.disclosureBounds(row), sidebar_bottom);
+                        self.appendAccessibilityElement(
+                            &elements,
+                            &owned_identities,
+                            "project-disclosure",
+                            "graphcode://global",
+                            if (self.sidebar_state.isProjectCollapsed("graphcode://global")) "Expand project" else "Collapse project",
+                            1,
+                            .{ .logical = disclosure_bounds },
+                            false,
+                            false,
+                        ) catch return;
+                    }
+                },
                 .quick_chat_overview => {
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-destination", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
-                    const new_bounds = clipSidebarAccessibilityBounds(
-                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
-                        sidebar_bottom,
-                    );
+                    const new_bounds = clipSidebarAccessibilityBounds(Sidebar.newChatBounds(row), sidebar_bottom);
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (self.model.quick_chats.items.len != 0) {
-                        const disclosure_bounds = clipSidebarAccessibilityBounds(
-                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
-                            sidebar_bottom,
-                        );
+                        const disclosure_bounds = clipSidebarAccessibilityBounds(Sidebar.chatsDisclosureBounds(row), sidebar_bottom);
                         self.appendAccessibilityElement(
                             &elements,
                             &owned_identities,
@@ -8175,6 +8288,8 @@ pub const App = struct {
         const static_targets = [_]struct { identity: []const u8, target: UiaDynamicTarget }{
             .{ .identity = "sidebar-section:local", .target = .local_section },
             .{ .identity = "sidebar-section:remote", .target = .remote_section },
+            .{ .identity = "project-new-loop:graphcode://global", .target = .{ .project_new_loop = "graphcode://global" } },
+            .{ .identity = "project-disclosure:graphcode://global", .target = .{ .project_disclosure = "graphcode://global" } },
             .{ .identity = "quick-chats-header:quick-chats", .target = .quick_chats_header },
             .{ .identity = "quick-chats-disclosure:quick-chats", .target = .quick_chats_disclosure },
             .{ .identity = "quick-chat-new:quick-chats", .target = .new_quick_chat },
@@ -8220,23 +8335,25 @@ pub const App = struct {
             }
         }
         for (self.model.graphs.items) |graph| {
-            const project_identity = std.fmt.allocPrint(self.allocator, "open-project:{s}", .{graph.project.path}) catch return false;
-            defer self.allocator.free(project_identity);
-            if (Accessibility.worktreeIdentityPayload(project_identity) == payload) {
-                if (target != null) return false;
-                target = .{ .open_project = graph.project.path };
-            }
-            const project_new_identity = std.fmt.allocPrint(self.allocator, "project-new-loop:{s}", .{graph.project.path}) catch return false;
-            defer self.allocator.free(project_new_identity);
-            if (Accessibility.worktreeIdentityPayload(project_new_identity) == payload) {
-                if (target != null) return false;
-                target = .{ .project_new_loop = graph.project.path };
-            }
-            const project_disclosure_identity = std.fmt.allocPrint(self.allocator, "project-disclosure:{s}", .{graph.project.path}) catch return false;
-            defer self.allocator.free(project_disclosure_identity);
-            if (Accessibility.worktreeIdentityPayload(project_disclosure_identity) == payload) {
-                if (target != null) return false;
-                target = .{ .project_disclosure = graph.project.path };
+            if (!graph.project.isGlobal()) {
+                const project_identity = std.fmt.allocPrint(self.allocator, "open-project:{s}", .{graph.project.path}) catch return false;
+                defer self.allocator.free(project_identity);
+                if (Accessibility.worktreeIdentityPayload(project_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .open_project = graph.project.path };
+                }
+                const project_new_identity = std.fmt.allocPrint(self.allocator, "project-new-loop:{s}", .{graph.project.path}) catch return false;
+                defer self.allocator.free(project_new_identity);
+                if (Accessibility.worktreeIdentityPayload(project_new_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .project_new_loop = graph.project.path };
+                }
+                const project_disclosure_identity = std.fmt.allocPrint(self.allocator, "project-disclosure:{s}", .{graph.project.path}) catch return false;
+                defer self.allocator.free(project_disclosure_identity);
+                if (Accessibility.worktreeIdentityPayload(project_disclosure_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .project_disclosure = graph.project.path };
+                }
             }
             for (graph.nodes.items, 0..) |node, index| {
                 const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return false;
@@ -9637,8 +9754,9 @@ fn onWindowMessage(
                 const inspection = if (app.worktree_inspection) |*value| value else null;
                 if (Sidebar.rowAt(x, y, &app.model, inspection, app.sidebar_scroll, app.sidebarContentBottom(client.bottom), &app.sidebar_state)) |row| {
                     if (row.kind == .loop and row.depth == 0 and x < 198) {
-                        if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
-                            if (row.index < graph.nodes.items.len) app.beginSidebarRootDrag(path, graph.nodes.items[row.index].id, y);
+                        if (row.project_path) |path| if (Sidebar.graphForProject(&app.model, path)) |graph| {
+                            const nodes = graph.nodes();
+                            if (row.index < nodes.len) app.beginSidebarRootDrag(path, nodes[row.index].id, y);
                         };
                     } else {
                         app.clearSidebarRootDrag();
@@ -9903,20 +10021,23 @@ fn onWindowMessage(
                         .remote_heading => app.sidebar_state.remote_collapsed = !app.sidebar_state.remote_collapsed,
                         .project => app.openProject(app.model.recent_projects.items[row.index].path),
                         .open_project => if (row.project_path) |path| {
-                            if (x >= 198 and row.has_children) {
-                                app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
-                                app.clampSidebarScroll();
-                                app.syncAccessibility();
-                                _ = c.InvalidateRect(hwnd, null, 0);
-                                result.* = 0;
-                                return true;
-                            }
-                            if (x >= 174 and x < 198) {
-                                if (app.selectProject(path)) app.createNode();
-                                result.* = 0;
-                                return true;
-                            }
-                            if (app.selectProject(path)) {
+                            if (Sidebar.rowControlAt(x, y, row)) |control| switch (control) {
+                                .disclosure => {
+                                    app.sidebar_state.toggleProject(path) catch app.setStatus("Sidebar state could not be updated");
+                                    app.clampSidebarScroll();
+                                    app.syncAccessibility();
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                },
+                                .add_loop => {
+                                    if (app.selectProject(path)) app.createNode();
+                                    result.* = 0;
+                                    return true;
+                                },
+                                else => {},
+                            };
+                            if (Sidebar.graphForProject(&app.model, path) != null and app.selectProject(path)) {
                                 app.surface = .project;
                                 app.workspace_controls.panel_visible = false;
                                 app.layoutWorkspace();
@@ -9924,11 +10045,29 @@ fn onWindowMessage(
                                 app.rebindWorkspace(path);
                             }
                         },
-                        .overview => app.openGlobalOverview(),
-                        .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
-                            if (row.index < graph.nodes.items.len) {
-                                if (x >= 198 and row.has_children) {
-                                    app.sidebar_state.toggleNode(graph.nodes.items[row.index].id) catch app.setStatus("Sidebar state could not be updated");
+                        .overview => {
+                            if (Sidebar.rowControlAt(x, y, row)) |control| {
+                                if (control == .disclosure) {
+                                    app.sidebar_state.toggleProject("graphcode://global") catch app.setStatus("Sidebar state could not be updated");
+                                    app.clampSidebarScroll();
+                                    app.syncAccessibility();
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                }
+                                if (control == .add_loop) {
+                                    if (app.selectProject("graphcode://global")) app.createNode();
+                                    result.* = 0;
+                                    return true;
+                                }
+                            }
+                            app.openGlobalOverview();
+                        },
+                        .loop => if (row.project_path) |path| if (Sidebar.graphForProject(&app.model, path)) |graph| {
+                            const nodes = graph.nodes();
+                            if (row.index < nodes.len) {
+                                if (Sidebar.rowControlAt(x, y, row) == .disclosure) {
+                                    app.sidebar_state.toggleNode(nodes[row.index].id) catch app.setStatus("Sidebar state could not be updated");
                                     if (app.sidebar_store) |*store| store.save(&app.sidebar_state) catch app.setStatus("Sidebar expansion could not be saved");
                                     app.clampSidebarScroll();
                                     app.syncAccessibility();
@@ -9936,7 +10075,7 @@ fn onWindowMessage(
                                     result.* = 0;
                                     return true;
                                 }
-                                _ = app.activateLoop(path, graph.nodes.items[row.index].id);
+                                _ = app.activateLoop(path, nodes[row.index].id);
                             }
                         },
                         .worktree => if (app.worktree_inspection) |inspection| {
@@ -9948,19 +10087,22 @@ fn onWindowMessage(
                             app.ensureWorktreeVisible(row.index);
                         },
                         .quick_chat_overview => {
-                            if (x >= 198 and app.model.quick_chats.items.len != 0) {
-                                app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
-                                app.clampSidebarScroll();
-                                app.syncAccessibility();
-                                _ = c.InvalidateRect(hwnd, null, 0);
-                                result.* = 0;
-                                return true;
-                            }
-                            if (x >= 174 and x < 198) {
-                                app.createQuickChat();
-                                result.* = 0;
-                                return true;
-                            }
+                            if (Sidebar.rowControlAt(x, y, row)) |control| switch (control) {
+                                .chats_disclosure => {
+                                    app.sidebar_state.chats_collapsed = !app.sidebar_state.chats_collapsed;
+                                    app.clampSidebarScroll();
+                                    app.syncAccessibility();
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                },
+                                .new_chat => {
+                                    app.createQuickChat();
+                                    result.* = 0;
+                                    return true;
+                                },
+                                else => {},
+                            };
                             app.surface = .quick_chats;
                             app.workspace_controls.panel_visible = false;
                             app.layoutWorkspace();
@@ -10010,10 +10152,15 @@ fn onWindowMessage(
                             project_path = project.path;
                             remote = project.isRemote();
                         },
-                        .open_project => if (row.index < app.model.graphs.items.len) {
-                            const project = app.model.graphs.items[row.index].project;
-                            project_path = project.path;
-                            remote = project.isRemote();
+                        .open_project => if (row.project_path) |path| {
+                            project_path = path;
+                            remote = if (Sidebar.graphForProject(&app.model, path)) |graph|
+                                graph.project().isRemote()
+                            else
+                                std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
+                        },
+                        .overview => {
+                            project_path = "graphcode://global";
                         },
                         else => {},
                     }
@@ -10029,11 +10176,12 @@ fn onWindowMessage(
                             &onContextAction,
                         );
                     } else switch (row.kind) {
-                        .loop => if (row.project_path) |path| if (app.model.graphFor(path)) |graph| {
-                            if (row.index < graph.nodes.items.len) {
+                        .loop => if (row.project_path) |path| if (Sidebar.graphForProject(&app.model, path)) |graph| {
+                            const nodes = graph.nodes();
+                            if (row.index < nodes.len) {
                                 var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                                 _ = c.ClientToScreen(hwnd, &screen);
-                                app.showOwnedNodeContextMenu(path, null, graph.nodes.items[row.index].id, false, screen.x, screen.y);
+                                app.showOwnedNodeContextMenu(path, null, nodes[row.index].id, false, screen.x, screen.y);
                             }
                         },
                         .quick_chat => if (row.index < app.model.quick_chats.items.len) {
@@ -11685,6 +11833,271 @@ const SidebarUiaSink = struct {
         return null;
     }
 };
+
+fn countSidebarUiaIdentity(sink: *const SidebarUiaSink, identity: []const u8) usize {
+    var count: usize = 0;
+    for (0..sink.count) |index| if (std.mem.eql(u8, sink.name(index), identity)) {
+        count += 1;
+    };
+    return count;
+}
+
+fn navigationRowForProject(rows: []const Sidebar.Row, kind: Sidebar.RowKind, path: []const u8) ?Sidebar.Row {
+    for (rows) |row| {
+        if (row.kind == kind and row.project_path != null and std.mem.eql(u8, row.project_path.?, path)) return row;
+    }
+    return null;
+}
+
+fn countSidebarRows(rows: []const Sidebar.Row, kind: Sidebar.RowKind) usize {
+    var count: usize = 0;
+    for (rows) |row| if (row.kind == kind) {
+        count += 1;
+    };
+    return count;
+}
+
+fn updateSidebarNavigationTestGraph(
+    app: *App,
+    sequence: usize,
+    path: []const u8,
+    name: []const u8,
+    nodes: []const u8,
+    edges: []const u8,
+) !void {
+    const quoted_path = try std.json.Stringify.valueAlloc(app.allocator, path, .{});
+    defer app.allocator.free(quoted_path);
+    const quoted_name = try std.json.Stringify.valueAlloc(app.allocator, name, .{});
+    defer app.allocator.free(quoted_name);
+    const frame = try std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"event\",\"sequence\":{d},\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{s},\"name\":{s}}},\"nodes\":{s},\"edges\":{s}}}}}}}",
+        .{ sequence, quoted_path, quoted_name, nodes, edges },
+    );
+    defer app.allocator.free(frame);
+    _ = try app.model.updateFromFrame(frame);
+}
+
+fn expectSidebarNavigationElement(
+    sink: *const SidebarUiaSink,
+    identity: []const u8,
+    label: []const u8,
+    row: Sidebar.Row,
+    dpi: u32,
+) !c.RECT {
+    try std.testing.expectEqual(@as(usize, 1), countSidebarUiaIdentity(sink, identity));
+    const index = sink.indexOfName(identity) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(label, sink.label(index));
+    const expected = c.RECT{
+        .left = physicalCoordinate(12, dpi),
+        .top = physicalCoordinate(row.top - 3, dpi),
+        .right = physicalCoordinate(Tokens.sidebar_width, dpi),
+        .bottom = physicalCoordinate(row.top + 29, dpi),
+    };
+    try std.testing.expectEqualDeep(expected, sink.rects[index]);
+    return sink.rects[index];
+}
+
+test "parity sidebar navigation UIA matches painted owners and clipped row controls" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        const frames = [_][]const u8{
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"local-loop","title":"Local loop","state":"idle"}],"edges":[]}}}
+            ,
+            \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"ssh://host/remote","name":"Remote"},"nodes":[],"edges":[]}}}
+            ,
+            \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Graph"},"nodes":[{"id":"global-loop","title":"Global loop","state":"idle"}],"edges":[]}}}
+            ,
+            \\{"version":2,"kind":"event","sequence":4,"event":{"quickChatsListed":[{"id":"chat","title":"Chat","backend":"claudeCode"}]}}
+            ,
+            \\{"version":2,"kind":"event","sequence":5,"event":{"recentProjectsListed":[{"path":"C:\\recent","name":"Recent"}]}}
+            ,
+        };
+        for (frames) |frame| _ = try app.model.updateFromFrame(frame);
+        try app.model.open_projects.append(.{
+            .path = try app.allocator.dupe(u8, "codespace://fixture/loading"),
+            .name = try app.allocator.dupe(u8, "Loading remote"),
+        });
+        app.surface = .overview;
+
+        const client = c.RECT{ .left = 0, .top = 0, .right = 1200, .bottom = 900 };
+        const sidebar_bottom = app.sidebarContentBottom(client.bottom);
+        var rows = try Sidebar.appendRows(app.allocator, &app.model, null, 0, &app.sidebar_state);
+        defer rows.deinit(app.allocator);
+        try std.testing.expectEqual(@as(usize, 0), countSidebarRows(rows.items, .project));
+        const graph_row = for (rows.items) |row| {
+            if (row.kind == .overview) break row;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("graphcode://global", graph_row.project_path orelse "");
+        const local_row = navigationRowForProject(rows.items, .open_project, "C:\\local") orelse
+            return error.TestUnexpectedResult;
+        const remote_row = navigationRowForProject(rows.items, .open_project, "ssh://host/remote") orelse
+            return error.TestUnexpectedResult;
+        const loading_row = navigationRowForProject(rows.items, .open_project, "codespace://fixture/loading") orelse
+            return error.TestUnexpectedResult;
+        const quick_chats_row = for (rows.items) |row| {
+            if (row.kind == .quick_chat_overview) break row;
+        } else return error.TestUnexpectedResult;
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        const graph_bounds = try expectSidebarNavigationElement(&sink, "overview-destination:graph", "Graph", graph_row, dpi);
+        const quick_bounds = try expectSidebarNavigationElement(&sink, "quick-chats-destination:quick-chats", "Quick Chats", quick_chats_row, dpi);
+        const local_bounds = try expectSidebarNavigationElement(&sink, "open-project:C:\\local", "Local", local_row, dpi);
+        const remote_bounds = try expectSidebarNavigationElement(&sink, "open-project:ssh://host/remote", "Remote", remote_row, dpi);
+        const loading_bounds = try expectSidebarNavigationElement(&sink, "open-project:codespace://fixture/loading", "Loading remote", loading_row, dpi);
+        for ([_]c.RECT{ graph_bounds, quick_bounds, local_bounds, remote_bounds, loading_bounds }) |bounds| {
+            try std.testing.expect(bounds.left >= 0 and bounds.right <= physicalCoordinate(Tokens.sidebar_width, dpi));
+            try std.testing.expect(bounds.top >= physicalCoordinate(Sidebar.content_top, dpi));
+            try std.testing.expect(bounds.bottom <= physicalCoordinate(sidebar_bottom, dpi));
+        }
+
+        for (0..sink.count) |index| {
+            const identity = sink.name(index);
+            const is_control = std.mem.startsWith(u8, identity, "project-new-loop:") or
+                std.mem.startsWith(u8, identity, "project-disclosure:") or
+                std.mem.startsWith(u8, identity, "quick-chat-new:") or
+                std.mem.startsWith(u8, identity, "quick-chats-disclosure:");
+            if (!is_control or rectIsEmpty(sink.rects[index])) continue;
+            const is_quick_control = std.mem.startsWith(u8, identity, "quick-chat-new:") or
+                std.mem.startsWith(u8, identity, "quick-chats-disclosure:");
+            const owner = if (is_quick_control) blk: {
+                break :blk quick_bounds;
+            } else blk: {
+                const prefix = if (std.mem.startsWith(u8, identity, "project-new-loop:"))
+                    "project-new-loop:"
+                else
+                    "project-disclosure:";
+                const owner_path = identity[prefix.len..];
+                break :blk if (std.mem.eql(u8, owner_path, "graphcode://global"))
+                    graph_bounds
+                else if (std.mem.eql(u8, owner_path, "ssh://host/remote"))
+                    remote_bounds
+                else
+                    local_bounds;
+            };
+            const control = sink.rects[index];
+            try std.testing.expect(control.left >= owner.left and control.top >= owner.top);
+            try std.testing.expect(control.right <= owner.right and control.bottom <= owner.bottom);
+            try std.testing.expect(control.right <= physicalCoordinate(Tokens.sidebar_width, dpi));
+            try std.testing.expect(control.bottom <= physicalCoordinate(sidebar_bottom, dpi));
+        }
+        try std.testing.expect(sink.indexOfName("project-new-loop:C:\\local") != null);
+        try std.testing.expect(sink.indexOfName("quick-chat-new:quick-chats") != null);
+    }
+}
+
+test "parity sidebar navigation Jump and worktree tail scrolling preserve folds" {
+    const remote_path = "ssh://host/target";
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+
+    var filler_nodes: std.ArrayList(u8) = .empty;
+    defer filler_nodes.deinit(app.allocator);
+    try filler_nodes.append(app.allocator, '[');
+    for (0..18) |index| {
+        if (index != 0) try filler_nodes.append(app.allocator, ',');
+        try filler_nodes.writer(app.allocator).print(
+            "{{\"id\":\"filler-{d}\",\"title\":\"Filler {d}\",\"loopType\":\"turnBased\",\"state\":\"idle\"}}",
+            .{ index, index },
+        );
+    }
+    try filler_nodes.append(app.allocator, ']');
+    try updateSidebarNavigationTestGraph(
+        &app,
+        1,
+        "C:\\sidebar-filler",
+        "Sidebar filler",
+        filler_nodes.items,
+        "[]",
+    );
+    try updateSidebarNavigationTestGraph(
+        &app,
+        2,
+        remote_path,
+        "Target project",
+        \\[{"id":"target-root","title":"Target root","loopType":"turnBased","state":"idle"},{"id":"target-child","title":"Target child","loopType":"turnBased","state":"idle"}]
+        ,
+        \\[{"id":"target-edge","from":"target-root","to":"target-child","kind":"handoff"}]
+        ,
+    );
+    if (c.MoveWindow(app.window.hwnd, 0, 0, 1200, 360, 0) == 0) return error.TestWindowResizeFailed;
+
+    try app.sidebar_state.toggleProject(remote_path);
+    app.ensureLoopVisible(remote_path, 0);
+    try std.testing.expect(app.sidebar_state.isProjectCollapsed(remote_path));
+    try std.testing.expect(app.sidebar_scroll > 0);
+    var rows = try Sidebar.appendRows(app.allocator, &app.model, null, 0, &app.sidebar_state);
+    defer rows.deinit(app.allocator);
+    const owner = navigationRowForProject(rows.items, .open_project, remote_path) orelse
+        return error.TestExpectedVisibleOwner;
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    const viewport_bottom = app.sidebarContentBottom(client.bottom);
+    const collapsed_owner_bounds = Sidebar.rowBounds(owner);
+    try std.testing.expect(collapsed_owner_bounds.top - app.sidebar_scroll >= Sidebar.content_top);
+    try std.testing.expect(collapsed_owner_bounds.bottom - app.sidebar_scroll <= viewport_bottom);
+
+    try app.sidebar_state.toggleProject(remote_path);
+    app.sidebar_scroll = 0;
+    app.ensureLoopVisible(remote_path, 1);
+    try std.testing.expect(!app.sidebar_state.isProjectCollapsed(remote_path));
+    try std.testing.expect(!app.sidebar_state.isNodeExpanded("target-root"));
+    try std.testing.expect(app.sidebar_scroll > 0);
+    rows.deinit(app.allocator);
+    rows = try Sidebar.appendRows(app.allocator, &app.model, null, 0, &app.sidebar_state);
+    const child_visible = App.findSidebarLoopRow(rows.items, remote_path, 1) != null;
+    try std.testing.expect(!child_visible);
+    const expanded_owner = navigationRowForProject(rows.items, .open_project, remote_path) orelse
+        return error.TestExpectedVisibleOwner;
+    const expanded_owner_bounds = Sidebar.rowBounds(expanded_owner);
+    try std.testing.expect(expanded_owner_bounds.top - app.sidebar_scroll >= Sidebar.content_top);
+    try std.testing.expect(expanded_owner_bounds.bottom - app.sidebar_scroll <= viewport_bottom);
+
+    try installNoticeTestInspection(&app, "C:\\sidebar-filler", 12, 4096);
+    app.ensureWorktreeVisible(11);
+    try std.testing.expect(app.sidebar_scroll > 0);
+    var tail_rows = try Sidebar.appendRows(
+        app.allocator,
+        &app.model,
+        app.currentWorktreeInspection(),
+        0,
+        &app.sidebar_state,
+    );
+    defer tail_rows.deinit(app.allocator);
+    const tail = for (tail_rows.items) |row| {
+        if (row.kind == .worktree and row.index == 11) break row;
+    } else return error.TestExpectedTailWorktree;
+    const tail_bounds = Sidebar.rowBounds(tail);
+    try std.testing.expect(tail_bounds.top - app.sidebar_scroll >= Sidebar.content_top);
+    try std.testing.expect(tail_bounds.bottom - app.sidebar_scroll <= viewport_bottom);
+}
+
+test "parity sidebar navigation temporary remote fixture is bounded and idempotent" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\fixture","name":"Fixture local"},"nodes":[],"edges":[]}}}
+    );
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"recentProjectsListed":[{"path":"C:\\recent","name":"Recent local"},{"path":"ssh://host/recent","name":"Recent remote"}]}}
+    );
+    try app.appendTemporarySidebarOwner();
+    try app.appendTemporarySidebarOwner();
+    try std.testing.expectEqual(@as(usize, 2), app.model.open_projects.items.len);
+    const temporary = for (app.model.open_projects.items) |project| {
+        if (std.mem.eql(u8, project.path, "ssh://sidebar-fixture.invalid/remote")) break project;
+    } else return error.TestExpectedTemporarySidebarOwner;
+    try std.testing.expectEqualStrings("Temporary remote", temporary.name);
+    try std.testing.expectEqual(@as(usize, 2), app.model.recent_projects.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.model.graphs.items.len);
+
+    var rows = try Sidebar.appendRows(app.allocator, &app.model, null, 0, &app.sidebar_state);
+    defer rows.deinit(app.allocator);
+    try std.testing.expectEqual(@as(usize, 0), countSidebarRows(rows.items, .project));
+    try std.testing.expectEqual(@as(usize, 2), countSidebarRows(rows.items, .open_project));
+    try std.testing.expect(navigationRowForProject(rows.items, .open_project, "C:\\fixture") != null);
+    try std.testing.expect(navigationRowForProject(rows.items, .open_project, "ssh://sidebar-fixture.invalid/remote") != null);
+}
 
 fn rectIsEmpty(bounds: c.RECT) bool {
     return bounds.left >= bounds.right or bounds.top >= bounds.bottom;
