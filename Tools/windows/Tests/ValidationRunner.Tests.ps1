@@ -1604,6 +1604,56 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     return "Actual surface predicate rejects workspace chrome under a project expectation"
   }
   $rosterOwners = @($workspaceOwner, @{ path = "B"; node = $b; name = "Beta"; title = "Beta loop" })
+  Invoke-MultiCase "matching project surface selects its parent and selected loop" {
+    Assert-MultiCase (Test-MultiProjectOwnerSelection "project" $workspaceOwner $workspaceOwner $true $true) `
+      "matching project parent/loop selection rejected"
+    return "Matching project surface selects its owner and selected loop"
+  }
+  Invoke-MultiCase "other project owner stays unselected on project surface" {
+    Assert-MultiCase (Test-MultiProjectOwnerSelection "project" $rosterOwners[1] $workspaceOwner $false $false) `
+      "nonmatching project owner expected unselected"
+    return "Only the matching project owner and loop are selected"
+  }
+  Invoke-MultiCase "workspace keeps selected loop without parent-project selection" {
+    Assert-MultiCase (Test-MultiProjectOwnerSelection "workspace" $workspaceOwner $workspaceOwner $false $true) `
+      "workspace parent/loop selection expectation rejected"
+    return "Workspace preserves selected loop without selecting its parent project"
+  }
+  Invoke-MultiCase "overview keeps selected loop without parent-project selection" {
+    Assert-MultiCase (Test-MultiProjectOwnerSelection "overview" $workspaceOwner $workspaceOwner $false $true) `
+      "overview parent/loop selection expectation rejected"
+    return "Overview preserves selected loop without selecting its parent project"
+  }
+  Invoke-MultiCase "Quick Chats keeps selected loop without parent-project selection" {
+    Assert-MultiCase (Test-MultiProjectOwnerSelection "quick_chats" $workspaceOwner $workspaceOwner $false $true) `
+      "Quick Chats parent/loop selection expectation rejected"
+    return "Quick Chats does not select a stale parent project"
+  }
+  Invoke-MultiCase "workspace rejects selected parent project row" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectOwnerSelection "workspace" $workspaceOwner $workspaceOwner $true $true)) `
+      "workspace accepted selected parent project row"
+    return "Stale workspace parent-project selection rejected"
+  }
+  Invoke-MultiCase "project surface rejects missing selected parent row" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectOwnerSelection "project" $workspaceOwner $workspaceOwner $false $true)) `
+      "project surface accepted missing selected parent row"
+    return "Missing matching project selection rejected"
+  }
+  Invoke-MultiCase "overview rejects stale selected parent project row" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectOwnerSelection "overview" $workspaceOwner $workspaceOwner $true $true)) `
+      "overview accepted stale selected parent project row"
+    return "Stale overview parent-project selection rejected"
+  }
+  Invoke-MultiCase "Quick Chats rejects stale selected parent project row" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectOwnerSelection "quick_chats" $workspaceOwner $workspaceOwner $true $true)) `
+      "Quick Chats accepted stale selected parent project row"
+    return "Stale Quick Chats parent-project selection rejected"
+  }
+  Invoke-MultiCase "workspace rejects loss of selected loop owner" -Negative {
+    Assert-MultiCase (-not (Test-MultiProjectOwnerSelection "workspace" $workspaceOwner $workspaceOwner $false $false)) `
+      "workspace accepted loss of expected loop selection"
+    return "Missing selected loop-owner state rejected"
+  }
   function New-MultiRosterProjection {
     return [ordered]@{
       projectRows = @(
@@ -3599,8 +3649,10 @@ Start-Sleep -Seconds 60
   if (-not $metadataObserver -or $metadataObserver.Extent.Text.Contains(".StartsWith(") -or
       -not $metadataObserver.Extent.Text.Contains("Test-MultiProjectMetadataBatch") -or
       -not $metadataObserver.Extent.Text.Contains("unresolvedMetadataCount") -or
+      -not $metadataObserver.Extent.Text.Contains("Test-MultiProjectOwnerSelection `$surface `$owner `$selectedOwner `$projectSelected `$loopSelected") -or
+      $metadataObserver.Extent.Text.Contains("`$projectSelected -eq `$selected") -or
       -not $uiaLiveGateSource.Contains("UIA_MULTIPROJECT_METADATA_REACQUIRE=")) {
-    throw "RED: new observer prefix/typed metadata boundary remains unguarded or silently omitted"
+    throw "RED: new observer prefix/typed metadata/active-surface selection boundary remains unguarded or silently omitted"
   }
   foreach ($required in @("function Complete-MultiProjectCapture", "function Wait-MultiProjectCapture",
       "function Initialize-MultiProjectProcessJob", "StandaloneProcessJob", "rootStartUtcTicks", "targetStartUtcTicks",

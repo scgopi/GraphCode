@@ -3310,6 +3310,14 @@ function Get-MultiProjectExpectedCanvasRoster([string] $surface, $owners, $selec
     projectPath = $selectedOwner.path; nodeID = $selectedOwner.node })
 }
 
+function Test-MultiProjectOwnerSelection([string] $surface, $owner, $selectedOwner,
+    [bool] $projectSelected, [bool] $loopSelected) {
+  $selected = $false
+  if ($null -ne $selectedOwner) { $selected = $selectedOwner.path -ceq $owner.path }
+  $expectedProjectSelected = $surface -ceq "project" -and $selected
+  return $projectSelected -eq $expectedProjectSelected -and $loopSelected -eq $selected
+}
+
 function Test-MultiProjectObservedRoster([string] $surface, $projection, $expectedOwners, $selectedOwner, [int] $processId) {
   if ($surface -cnotin @("overview", "project", "workspace")) { throw "MULTIPROJECT_SURFACE: unsupported observed surface" }
   if ($projection -isnot [Collections.IDictionary] -or $projection.Count -ne 5 -or
@@ -4649,7 +4657,6 @@ function Invoke-MultiProjectRenamePhase {
       $cardId = Get-MultiProjectAutomationId $kind $owner.path $owner.node
       $card = @($ownedGraphMetadata | Where-Object { $_.automationID.value -ceq $cardId } | ForEach-Object { $_.element })
       $cardRequired = $surface -ceq "overview" -or ($null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path)
-      $selected = $null -ne $selectedOwner -and $selectedOwner.path -ceq $owner.path
       $projectSelected = $false; $loopSelected = $false
       if ($null -ne $project) { $projectSelected = $project.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
       if ($null -ne $loop) { $loopSelected = $loop.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected }
@@ -4660,7 +4667,9 @@ function Invoke-MultiProjectRenamePhase {
         $matches = $matches -and $projectEvidence.bounds[2] -gt $projectEvidence.bounds[0] -and
           $projectEvidence.bounds[3] -gt $projectEvidence.bounds[1] -and
           $loopEvidence.bounds[2] -gt $loopEvidence.bounds[0] -and $loopEvidence.bounds[3] -gt $loopEvidence.bounds[1]
-        if ($null -ne $selectedOwner) { $matches = $matches -and $projectSelected -eq $selected -and $loopSelected -eq $selected }
+        if ($null -ne $selectedOwner) {
+          $matches = $matches -and (Test-MultiProjectOwnerSelection $surface $owner $selectedOwner $projectSelected $loopSelected)
+        }
       }
       $cardEvidence = $null
       if ($cardRequired) {

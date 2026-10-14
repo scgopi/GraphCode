@@ -19421,7 +19421,7 @@ fn expectSettledGraphPublication(surface: GraphCanvas.Surface, owner: []const u8
     try std.testing.expectEqualDeep(original_canvas, F.sink.canvas.?);
     try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.loop_bars);
     try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.toolbars);
-    try std.testing.expectEqual(@as(usize, 1), F.selected_beta_projects);
+    try std.testing.expectEqual(@as(usize, if (surface == .project) 1 else 0), F.selected_beta_projects);
     try std.testing.expectEqual(@as(usize, if (surface == .overview) 0 else 1), F.selected_beta_cards);
 }
 
@@ -20854,7 +20854,7 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
             else => .{ 524, 884, 1024, 1076 },
         };
         var overview = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
-            .{ .identity = "open-project:A", .selected = true },
+            .{ .identity = "open-project:A" },
             .{ .identity = "open-project:B" },
             .{ .identity = "overview-card:A:a1" },
             .{ .identity = "overview-card:A:a2" },
@@ -20935,7 +20935,7 @@ test "cross-project overview refresh emits both projects without changing the se
     try expectOverviewSelection(&app, .overview, "B", "b2");
     var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
         .{ .identity = "open-project:A" },
-        .{ .identity = "open-project:B", .selected = true },
+        .{ .identity = "open-project:B" },
         .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 262, 118, 512, 214 } },
         .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 522, 118, 772, 214 } },
         .{ .identity = "overview-card:A:a2" },
@@ -21127,7 +21127,7 @@ fn exerciseOverviewWorktreesFixture() !void {
         defer allocator.free(other_identity);
         var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
             .{ .identity = row_identity, .name = row_name },
-            .{ .identity = project_identity, .selected = true },
+            .{ .identity = project_identity },
             .{ .identity = other_identity },
         } };
         try sink.expect(&app);
