@@ -316,6 +316,7 @@ $script:MacExceptions = @{
 
 # Windows-only source values are likewise enumerated rather than silently skipped.
 $script:WindowsExceptions = @{
+  "loop_minimap_surface" = "Mirrors the private RailMinimap.surface (#16161a) in LoopWorkspaceRail.swift, which is not a Theme.swift token."
   "window_background" = "Windows retains an alpha byte as future-consumer documentation; macOS applies a glass scrim at runtime."
   "canvas_edge" = "Windows canvas edge contrast is a renderer-specific stroke, with no standalone Theme.swift source token."
   "canvas_selection" = "Windows selection paint is renderer-specific; macOS selection uses system-driven interaction styling."
@@ -428,6 +429,22 @@ $windowsTokens = @(Get-WindowsPaletteTokens $designTokensText $designTokensPath)
 }
 
 Describe "Windows/macOS palette parity" {
+  It "mirrors the private RailMinimap surface without drifting behind its exception" {
+    $railPath = Join-Path $repoRoot "graphcode\Sources\Features\LoopWorkspace\LoopWorkspaceRail.swift"
+    $railText = Get-Content -LiteralPath $railPath -Raw
+    $minimap = [regex]::Match($railText, '(?s)private struct RailMinimap: View \{(.*?)\r?\n\}')
+    Assert-Contract $minimap.Success "private RailMinimap source is missing"
+    $surface = [regex]::Match($minimap.Groups[1].Value, 'private static let surface = (Color\([^\r\n]+?\))')
+    Assert-Contract $surface.Success "private RailMinimap.surface color is missing"
+    $mac = @(Get-SwiftColorExpressions $surface.Groups[1].Value $railPath 408)
+    $windows = @($windowsTokens | Where-Object Name -eq "loop_minimap_surface")
+    Assert-Contract ($mac.Count -eq 1 -and $windows.Count -eq 1) "minimap colors must be present and unambiguous"
+    Assert-Contract (($mac[0].Rgb -join ",") -eq ($windows[0].Rgb -join ",")) "private minimap surface RGB differs across platforms"
+    $literal = [regex]::Match($designTokensText, 'pub\s+const\s+loop_minimap_surface:\s*Color\s*=\s*(0x[0-9A-Fa-f]+)')
+    Assert-Contract ($literal.Success -and [Convert]::ToUInt32($literal.Groups[1].Value.Substring(2), 16) -eq 0x001A1616) `
+      "loop_minimap_surface must be exactly COLORREF 0x001A1616"
+  }
+
   It "parses supported white, RGB, and hexadecimal literals with baseline quantization" {
     $white = @(Get-SwiftColorExpressions "Color(white: 0.118)" "fixture.swift" 1)
     $rgb = @(Get-SwiftColorExpressions "Color(red: 0.039, green: 0.518, blue: 1.0)" "fixture.swift" 2)
