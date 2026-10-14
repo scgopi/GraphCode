@@ -41,11 +41,14 @@ you may run focused hidden-window tests, to confirm current behaviour. Don't use
    - edits to the gate or harness;
    - DPI or theme interactions;
    - known environment traps (see "Environment" below).
-7. **List the evidence plan:**
+7. **Rate the complexity:** `standard` or `highly complex`, with the reason. Highly complex means a new shared
+   framework or mechanism used by many surfaces, or architecture spanning several lanes' files. The
+   rating picks the implementer: `gpt-6-luna` for standard, `gpt-6.1-sol` for highly complex.
+8. **List the evidence plan:**
    - the exact surfaces and states to capture;
    - the fixture data needed;
    - the macOS capture to pair each one with.
-8. **Publish the plan** as one issue comment titled `Implementation plan (wave 2)`, using
+9. **Publish the plan** as one issue comment titled `Implementation plan (wave 2)`, using
    `gh issue comment`. Then message the coordinator `PLAN READY #<n>` with the comment URL.
    Don't start implementing.
 

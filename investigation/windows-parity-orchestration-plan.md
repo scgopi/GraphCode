@@ -77,7 +77,7 @@ through four steps:
 2. **Approve.** The coordinator checks the plan against the macOS source,
    approves its file scope (including any out-of-lease files, up front), and
    records `Plan approved` on the issue.
-3. **Implement.** An implementation worker executes the approved plan under the
+3. **Implement.** An implementation worker (`gpt-6-luna`, high; `gpt-6.1-sol`, high, long_context, for highly complex features) executes the approved plan under the
    per-PR gate. Exact-head CI is the regression gate, screenshots are taken once
    at the end, and escalation comes only after 5 failed iterations.
 4. **Merge.** The coordinator merges on exact-head CI, after the code and image
@@ -221,8 +221,8 @@ spots.
 | Role | Model, effort, context | Fallback | Why |
 | --- | --- | --- | --- |
 | **Investigation and planning (every issue, before implementation)** | `gpt-6.1-sol`, high, long_context | `gpt-6-sol`, high, long_context | Operator decision (2026-10-14): a separate high-reasoning worker investigates each issue and writes the implementation plan (see `investigation/windows-parity-lane-kickoff.md`), so the implementer executes a reviewed design instead of discovering it under the per-PR gate. |
-| Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-5.6-luna`, high (operator-chosen fallback if `gpt-6-luna` underperforms) | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
-| Lane implementation (#768, #764, #765, #767, #769, #778, #722, #771, #772) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Same price tier as Sonnet 5.5, with a 1.05M-token window for `App.zig`-scale files. Long context is only needed here. |
+| **Implementation (default)**: every issue unless the plan rates it highly complex | `gpt-6-luna`, high, default | `gpt-5.6-luna`, high (operator-chosen fallback) | Operator decision (2026-10-14). With an approved plan from a high-reasoning planner, the implementer executes a reviewed design, so the fast model is the default. Wave 1 used it unplanned on #774. |
+| **Implementation (highly complex features)**: new shared frameworks or mechanisms used by many surfaces, or architecture spanning several lanes' files (for example #768) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Operator decision (2026-10-14). The coordinator records the complexity rating and the model choice in the issue's `Plan approved` comment. A 1.05M-token window suits `App.zig`-scale files. |
 | Polish (P3) | `mai-code-1.1-flash`, medium, default | `claude-haiku-5.5`, medium | The cheapest model with a published coding score and a screenshot-to-code benchmark. |
 | Rubber-duck review (code and evidence) | `claude-sonnet-5.5`, high, default | `grok-4.7`, high | A different vendor from the OpenAI implementers. If an Anthropic model implemented the change, review it with `grok-4.7` or `gpt-6.1-sol`. |
 | Visual sign-off (paired screenshots) | `claude-sonnet-5.5`, high, default | `claude-opus-4.8`, high, only if Sonnet's verdict is disputed | Must open every image it cites. Opus 4.8 has the best-documented vision, but costs more. |
