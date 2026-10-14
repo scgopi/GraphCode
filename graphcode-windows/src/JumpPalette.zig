@@ -123,6 +123,7 @@ const Dialog = struct {
     edit: c.HWND = null,
     edit_proc: c.WNDPROC = null,
     list: c.HWND = null,
+    empty_label: c.HWND = null,
     background: c.HBRUSH = null,
     mono_font: c.HFONT = null,
     failure: ?anyerror = null,
@@ -258,6 +259,9 @@ test "empty palette creates native search controls and cancels without a selecti
     try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
     try std.testing.expect(dialog.edit != null and dialog.list != null);
     try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETCOUNT, 0, 0));
+    const empty_text = try readWindowText(std.testing.allocator, dialog.empty_label);
+    defer std.testing.allocator.free(empty_text);
+    try std.testing.expectEqualStrings("No loop matches “”", empty_text);
     accept(&dialog);
     try std.testing.expect(!dialog.accepted and !dialog.closed);
     _ = c.SendMessageW(hwnd, c.WM_COMMAND, cancel_id, 0);
@@ -358,13 +362,28 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 c.GetModuleHandleW(null),
                 null,
             );
-            if (dialog.magnifier == null or dialog.edit == null or dialog.hint == null or dialog.list == null) {
+            dialog.empty_label = c.CreateWindowExW(
+                0,
+                std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+                null,
+                c.WS_CHILD | c.SS_LEFT,
+                0,
+                0,
+                0,
+                0,
+                hwnd,
+                null,
+                c.GetModuleHandleW(null),
+                null,
+            );
+            if (dialog.magnifier == null or dialog.edit == null or dialog.hint == null or dialog.list == null or dialog.empty_label == null) {
                 fail(dialog, error.PaletteControlCreationFailed);
                 return -1;
             }
             _ = c.SendMessageW(dialog.edit, c.WM_SETFONT, @intFromPtr(AppFont.getForDpi(14, false, dialog.dpi)), 1);
             _ = c.SendMessageW(dialog.hint, c.WM_SETFONT, @intFromPtr(dialog.mono_font), 1);
             _ = c.SendMessageW(dialog.list, c.WM_SETFONT, @intFromPtr(AppFont.getForDpi(13, false, dialog.dpi)), 1);
+            _ = c.SendMessageW(dialog.empty_label, c.WM_SETFONT, @intFromPtr(AppFont.getForDpi(12, false, dialog.dpi)), 1);
             const previous = c.SetWindowLongPtrW(dialog.edit, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&editProc)));
             if (previous == 0) {
                 fail(dialog, error.PaletteEditSubclassFailed);
@@ -416,19 +435,6 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             _ = c.GetClientRect(hwnd, &client);
             _ = c.FillRect(hdc, &client, dialog.background);
             fill(hdc, .{ .left = 0, .top = Dpi.scale(field_height, dialog.dpi) - 1, .right = client.right, .bottom = Dpi.scale(field_height, dialog.dpi) }, 0x00333333);
-            if (dialog.state.matches.items.len == 0) {
-                const query = readWindowText(dialog.state.allocator, dialog.edit) catch |err| {
-                    fail(dialog, err);
-                    return 0;
-                };
-                defer dialog.state.allocator.free(query);
-                const text = std.fmt.allocPrint(dialog.state.allocator, "No loop matches “{s}”", .{query}) catch |err| {
-                    fail(dialog, err);
-                    return 0;
-                };
-                defer dialog.state.allocator.free(text);
-                drawText(dialog, hdc, text, .{ .left = Dpi.scale(14, dialog.dpi), .top = Dpi.scale(56, dialog.dpi), .right = client.right - Dpi.scale(14, dialog.dpi), .bottom = client.bottom }, 12, false, Tokens.dialog_muted_text) catch |err| fail(dialog, err);
-            }
             return 0;
         },
         c.WM_SIZE => {
@@ -439,6 +445,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             move(dialog.edit, layout.edit);
             move(dialog.hint, layout.hint);
             move(dialog.list, .{ .left = 0, .top = Dpi.scale(field_height, dialog.dpi), .right = client.right, .bottom = client.bottom });
+            move(dialog.empty_label, .{ .left = Dpi.scale(14, dialog.dpi), .top = Dpi.scale(56, dialog.dpi), .right = client.right - Dpi.scale(14, dialog.dpi), .bottom = client.bottom - Dpi.scale(14, dialog.dpi) });
             const radius = Dpi.scale(24, dialog.dpi);
             const region = c.CreateRoundRectRgn(0, 0, client.right + 1, client.bottom + 1, radius, radius);
             if (region != null and c.SetWindowRgn(hwnd, region, 1) == 0) _ = c.DeleteObject(region);
@@ -509,6 +516,16 @@ fn refillList(dialog: *Dialog) !void {
         if (added == c.LB_ERR or added == c.LB_ERRSPACE) return error.PaletteResultCreationFailed;
     }
     _ = c.ShowWindow(dialog.list, if (dialog.state.matches.items.len == 0) c.SW_HIDE else c.SW_SHOW);
+    if (dialog.state.matches.items.len == 0) {
+        const query = try readWindowText(dialog.state.allocator, dialog.edit);
+        defer dialog.state.allocator.free(query);
+        const text = try std.fmt.allocPrint(dialog.state.allocator, "No loop matches “{s}”", .{query});
+        defer dialog.state.allocator.free(text);
+        const wide = try utf8ToWideZ(dialog.state.allocator, text);
+        defer dialog.state.allocator.free(wide);
+        if (c.SetWindowTextW(dialog.empty_label, wide.ptr) == 0) return error.PaletteEmptyLabelUpdateFailed;
+    }
+    _ = c.ShowWindow(dialog.empty_label, if (dialog.state.matches.items.len == 0) c.SW_SHOW else c.SW_HIDE);
     syncListSelection(dialog);
 }
 
