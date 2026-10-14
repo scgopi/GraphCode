@@ -7806,14 +7806,12 @@ try {
     "plain loop context menu did not dismiss, leaving the shell blocked in its modal loop"
   $process.Refresh()
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the plain loop context menu was inspected"
-  $plainLoopLabels = @($plainLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
-  foreach ($expectedLabel in @(
-    "Open Terminal", "Edit Details...", "Save as Template...",
-    "Rename...`tF2", "Delete Loop...`tDelete"
-  )) {
-    Require ($plainLoopLabels -contains $expectedLabel) `
-      "plain loop context menu omitted '$expectedLabel': $plainLoopDescription"
-  }
+  $plainLoopOrder = @($plainLoopItems | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($plainLoopOrder -join "|") -ceq
+           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+    "plain loop context menu had unexpected ordered items: $plainLoopDescription"
   Require (@($plainLoopItems | Where-Object { $_.Id -eq 5102 }).Count -eq 0) `
     "succeeded loop context menu unexpectedly offered Stop: $plainLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108, 5109, 5112, 5115)) {
@@ -7839,15 +7837,12 @@ try {
     "composite loop context menu did not dismiss, leaving the shell blocked in its modal loop"
   $process.Refresh()
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the composite loop context menu was inspected"
-  $compositeLoopLabels = @($compositeLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
-  foreach ($expectedLabel in @(
-    "Open Terminal", "Open Group", "Pilot Once", "Arm Schedule",
-    "Edit Details...", "Save as Template...", "Rename...`tF2",
-    "Stop`tCtrl+S", "Delete Loop...`tDelete"
-  )) {
-    Require ($compositeLoopLabels -contains $expectedLabel) `
-      "composite loop context menu omitted '$expectedLabel': $compositeLoopDescription"
-  }
+  $compositeLoopOrder = @($compositeLoopItems | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($compositeLoopOrder -join "|") -ceq
+           "Open Terminal|New Child Node...|Open Group|Pilot Once…|Arm Schedule|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
+    "composite loop context menu had unexpected ordered items: $compositeLoopDescription"
   $armScheduleItem = @($compositeLoopItems | Where-Object { $_.Id -eq 5108 }) | Select-Object -First 1
   Require ($null -ne $armScheduleItem) "composite loop context menu omitted Arm Schedule (command 5108): $compositeLoopDescription"
   Require (-not $armScheduleItem.Enabled) `
@@ -7876,15 +7871,12 @@ try {
     "unwired loop context menu did not dismiss, leaving the shell blocked in its modal loop"
   $process.Refresh()
   Require (-not $process.HasExited) "shell exited with code $($process.ExitCode) while the unwired loop context menu was inspected"
-  $unwiredLoopLabels = @($unwiredLoopItems | Where-Object { -not $_.Separator } | ForEach-Object { $_.Text })
-  foreach ($expectedLabel in @(
-    "Open Terminal", "Wire it up", "Mark as entry",
-    "Edit Details...", "Save as Template...", "Rename...`tF2",
-    "Stop`tCtrl+S", "Delete Loop...`tDelete"
-  )) {
-    Require ($unwiredLoopLabels -contains $expectedLabel) `
-      "unwired loop context menu omitted '$expectedLabel': $unwiredLoopDescription"
-  }
+  $unwiredLoopOrder = @($unwiredLoopItems | ForEach-Object {
+    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+  })
+  Require (($unwiredLoopOrder -join "|") -ceq
+           "Open Terminal|New Child Node...|Rename...`tF2|Save as Template...|Stop Loop`tCtrl+S|<separator>|Edit Details...|Wire it up|Mark as entry|<separator>|Delete Loop...`tDelete") `
+    "unwired loop context menu had unexpected ordered items: $unwiredLoopDescription"
   foreach ($absentId in @(5113, 5107, 5108)) {
     Require (@($unwiredLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
       "unwired loop context menu unexpectedly offered composite-only command $absentId : $unwiredLoopDescription"
@@ -7973,11 +7965,18 @@ try {
     $edgePoint.X $edgePoint.Y "canvas edge"
 
   $backgroundMenuOrder = @($backgroundCanvasMenu.Items | ForEach-Object {
-    if ($_.Separator) { "<separator>" } else { [string]$_.Text }
+    if ($_.Separator) { "<separator>" }
+    elseif ($_.Id -eq 5142) { "<Worktrees>" }
+    else { [string]$_.Text }
   })
   Require (($backgroundMenuOrder -join "|") -ceq
-           "Worktrees...|Project Settings...|Show in Explorer|<separator>|Create Edge") `
+           "<Worktrees>|Project Settings...|Show in Explorer") `
     "canvas background context menu had unexpected ordered items: $($backgroundCanvasMenu.Description)"
+  $backgroundWorktreesItem = @($backgroundCanvasMenu.Items | Where-Object { $_.Id -eq 5142 }) |
+    Select-Object -First 1
+  Require (($null -ne $backgroundWorktreesItem) -and
+           ($backgroundWorktreesItem.Text -match '^Worktrees\.\.\.(?: [1-9][0-9]*)?$')) `
+    "canvas background Worktrees caption had an invalid reclaimable count: $($backgroundCanvasMenu.Description)"
   Require (@($backgroundCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
   }).Count -eq 0) `
@@ -8255,13 +8254,18 @@ try {
   $projectMenuLabels = @($projectMenuItems | Where-Object { -not $_.Separator } |
     ForEach-Object { $_.Text })
   foreach ($expectedLabel in @(
-    "Open Project", "New Loop...`tCtrl+N", "Worktrees...", "Project Settings...",
+    "Open Project", "New Loop...`tCtrl+N", "Project Settings...",
     "Show in Explorer", "Close Project", "Move to Recycle Bin...",
     "Remove from GraphCode...", "Delete All Loops..."
   )) {
     Require ($projectMenuLabels -contains $expectedLabel) `
       "project context menu omitted '$expectedLabel': $projectMenuDescription"
   }
+  $projectWorktreesItem = @($projectMenuItems | Where-Object { $_.Id -eq 5142 }) |
+    Select-Object -First 1
+  Require (($null -ne $projectWorktreesItem) -and
+           ($projectWorktreesItem.Text -match '^Worktrees\.\.\.(?: [1-9][0-9]*)?$')) `
+    "project context menu Worktrees caption had an invalid reclaimable count: $projectMenuDescription"
   $moveProjectItem = @($projectMenuItems | Where-Object { $_.Id -eq 5149 }) | Select-Object -First 1
   Require ($null -ne $moveProjectItem) `
     "project context menu omitted the Move Project item (command 5149): $projectMenuDescription"
@@ -8964,6 +8968,29 @@ try {
       $stream.Dispose()
     }
   }
+  function Select-EdgeConnectorCardPair(
+    [object[]] $cards, [string] $sourceTitle, [string] $targetTitle
+  ) {
+    if ([string]::IsNullOrWhiteSpace($sourceTitle) -or
+        [string]::IsNullOrWhiteSpace($targetTitle)) {
+      throw "edge connector selection requires non-empty source and target titles"
+    }
+    $sourceCards = @($cards | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and
+        $_.Current.Name -ceq $sourceTitle
+    })
+    $targetCards = @($cards | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and
+        $_.Current.Name -ceq $targetTitle
+    })
+    if ($sourceCards.Count -ne 1 -or $targetCards.Count -ne 1) {
+      throw "edge connector selection requires one source and one target card; source=$($sourceCards.Count) target=$($targetCards.Count)"
+    }
+    if ($sourceCards[0].Current.AutomationId -ceq $targetCards[0].Current.AutomationId) {
+      throw "edge connector selection resolved both endpoints to the same card"
+    }
+    return [ordered]@{ Source = $sourceCards[0]; Target = $targetCards[0] }
+  }
   function Edge-CanvasPoint([switch] $line) {
     $actual = Find-FragmentByIdWithRetry $renameRoot "actual-size" $rawWalker
     Require ($null -ne $actual) "edge workflow omitted Actual Size"
@@ -9004,7 +9031,70 @@ try {
       "edge workflow point absent/outside live graph; graph=$bounds source=$a target=$b"
     return $point
   }
+  function Open-EdgeCreateDialogByConnectorDrag {
+    $actual = Find-FragmentByIdWithRetry $renameRoot "actual-size" $rawWalker
+    Require ($null -ne $actual) "edge connector creation omitted Actual Size"
+    $actual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+    Require ($null -ne $graph) "edge connector creation omitted the live graph"
+    $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-'
+    })
+    $sourceCandidates = @($cards | Where-Object {
+      $_.Current.Name -in @($renameFinalTitle, $renameInitialTitle)
+    })
+    Require ($sourceCandidates.Count -eq 1) `
+      "edge connector creation requires one renamed source card; candidates=$($sourceCandidates.Count) cards=$(@($cards | ForEach-Object { $_.Current.Name }) -join ',')"
+    $sourceTitle = [string]$sourceCandidates[0].Current.Name
+    $cardPair = Select-EdgeConnectorCardPair $cards $sourceTitle "Stub node B"
+    $source = $cardPair.Source
+    $target = $cardPair.Target
+    $sourceBounds = $source.Current.BoundingRectangle
+    $targetBounds = $target.Current.BoundingRectangle
+    Require (($sourceBounds.Width -gt 0) -and ($sourceBounds.Height -gt 0) -and
+      ($targetBounds.Width -gt 0) -and ($targetBounds.Height -gt 0)) `
+      "edge connector source or target card has empty bounds: source=$sourceBounds target=$targetBounds"
+    $sourceScreenX = [int]$sourceBounds.Right
+    $sourceScreenY = [int](($sourceBounds.Top + $sourceBounds.Bottom) / 2)
+    $targetScreenX = [int](($targetBounds.Left + $targetBounds.Right) / 2)
+    $targetScreenY = [int](($targetBounds.Top + $targetBounds.Bottom) / 2)
+    $sourceClientX = 0; $sourceClientY = 0
+    $targetClientX = 0; $targetClientY = 0
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $renameShellWindow, $sourceScreenX, $sourceScreenY,
+      [ref]$sourceClientX, [ref]$sourceClientY
+    )) "edge connector source point could not be converted to client coordinates"
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $renameShellWindow, $targetScreenX, $targetScreenY,
+      [ref]$targetClientX, [ref]$targetClientY
+    )) "edge connector target point could not be converted to client coordinates"
+    Require (Ensure-ShellForeground $renameShellWindow "edge connector creation") `
+      "edge connector creation could not reacquire shell foreground"
+    Require ([GraphCodeUiaGateState]::PostMouseMoveAt(
+      $renameShellWindow, $sourceClientX, $sourceClientY
+    )) "edge connector hover move was rejected"
+    Start-Sleep -Milliseconds 100
+    Require ([GraphCodeUiaGateState]::PostMouseButtonAt(
+      $renameShellWindow, 0x0201, $sourceClientX, $sourceClientY
+    )) "edge connector drag mouse-down was rejected"
+    Require ([GraphCodeUiaGateState]::PostMouseMoveAt(
+      $renameShellWindow, $targetClientX, $targetClientY
+    )) "edge connector drag mouse-move was rejected"
+    Start-Sleep -Milliseconds 100
+    Require ([GraphCodeUiaGateState]::PostMouseButtonAt(
+      $renameShellWindow, 0x0202, $targetClientX, $targetClientY
+    )) "edge connector drag mouse-up was rejected"
+    return [ordered]@{
+      sourceTitle = $sourceTitle
+      sourceCardId = [string]$source.Current.AutomationId
+      sourcePoint = @($sourceScreenX, $sourceScreenY)
+      targetTitle = [string]$target.Current.Name
+      targetCardId = [string]$target.Current.AutomationId
+      targetPoint = @($targetScreenX, $targetScreenY)
+    }
+  }
   function Open-EdgeMenu([bool] $line, [int] $command) {
+    Require ($command -eq 5110) "edge context-menu fallback is reserved for Edit Edge"
     $lastMenu = "none"
     for ($probe = 0; $probe -lt $(if ($line) { 100 } else { 3 }); $probe++) {
       $point = Edge-CanvasPoint -line:$line
@@ -9042,7 +9132,7 @@ try {
     Require ([GraphCodeUiaGateState]::FindPopupMenuWindow([uint32]$renameProcess.Id) -eq [IntPtr]::Zero) `
       "edge workflow popup remained open after $command; hilite=$($click.Hilite)"
     Start-Sleep -Milliseconds 200
-    $expectedTitle = if ($command -eq 5120) { "Create or edit edge" } else { "Edit edge" }
+    $expectedTitle = "Edit edge"
     $commandFallback = $false
     if ([GraphCodeUiaGateState]::FindVisibleProcessWindow(
         [uint32]$renameProcess.Id, $expectedTitle) -eq [IntPtr]::Zero) {
@@ -9085,8 +9175,7 @@ try {
     }
     $waitCommandFallback = $false
     if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
-      $command = if ($title -eq "Create or edit edge") { 5120 } `
-        elseif ($title -eq "Edit edge") { 5110 } else { 0 }
+      $command = if ($title -eq "Edit edge") { 5110 } else { 0 }
       if ($command -ne 0) {
         $waitCommandFallback = [GraphCodeUiaGateState]::SendCommand(
           $renameShellWindow, [uint32]$command)
@@ -9310,17 +9399,17 @@ try {
   $edgeBaselineCount = Edge-GraphCount $edgeBefore
   Require ($edgeBaselineCount -gt 0 -and @($edgeBefore.edges).Count -eq 0) `
     "edge workflow stub baseline not ready: $(Read-UiaTextFile $renameStubResultPath)"
-  $edgeCreateMenu = Open-EdgeMenu $false 5120
+  $edgeCreateDrag = Open-EdgeCreateDialogByConnectorDrag
   Wait-EdgeWindow $edgeWorkflowTitle
-  Write-Host ("UIA_EDGE_ENTRY menuId=5120 point=$($edgeCreateMenu.point -join ',') " +
+  Write-Host ("UIA_EDGE_CONNECTOR_CREATE source='$($edgeCreateDrag.sourceTitle)'/$($edgeCreateDrag.sourceCardId) " +
+    "target='$($edgeCreateDrag.targetTitle)'/$($edgeCreateDrag.targetCardId) " +
+    "sourcePoint=$($edgeCreateDrag.sourcePoint -join ',') targetPoint=$($edgeCreateDrag.targetPoint -join ',') " +
     "nativeTitle='$([GraphCodeUiaGateState]::WindowTextOf($edgeWorkflowWindow))'")
-  $edgeSourceLive = [GraphCodeUiaGateState]::ComboSelection($edgeWorkflowWindow, 9100)
-  $edgeSourceMatched = $edgeSourceLive -match ('^\d+\|(.+) — ' + [regex]::Escape($edgeWorkflowSource) + '$')
-  Require $edgeSourceMatched `
-    "edge source picker did not expose the seeded daemon ID/title: '$edgeSourceLive'; stub=$(Read-UiaTextFile $renameStubResultPath)"
-  $edgeSourceTitle = $Matches[1]
-  $edgeSourceChoice = Edge-Combo 9100 0 "$edgeSourceTitle — $edgeWorkflowSource"
-  $edgeTargetChoice = Edge-Combo 9101 1 "Stub node B — $edgeWorkflowTarget"
+  $edgeSourceLocked = Read-EdgeStableText 9100 "locked source identity"
+  $edgeTargetLocked = Read-EdgeStableText 9101 "locked target identity"
+  Require ($edgeSourceLocked -ceq $edgeWorkflowSource -and
+    $edgeTargetLocked -ceq $edgeWorkflowTarget) `
+    "connector drag opened the wrong endpoint pair: source='$edgeSourceLocked' target='$edgeTargetLocked' expected=$edgeWorkflowSource->$edgeWorkflowTarget; stub=$(Read-UiaTextFile $renameStubResultPath)"
   $edgeKind = Edge-Combo 9102 0 "Hand-off — continue execution"
   $edgeCondition = Edge-Combo 9103 2 "Only after failure"
   $edgeTransform = Edge-Combo 9104 1 "Apply a text template"
@@ -9463,9 +9552,9 @@ try {
   $edgeFinalClick = Edge-Click 2 "close verified edge"
   Wait-EdgeClosed $edgeWorkflowTitle
   $edgeWorkflowEvidence = [ordered]@{
-    entryPoint = $edgeCreateMenu
+    entryPoint = $edgeCreateDrag
     invalid = [ordered]@{ reason = $edgeReason; reasonShown = $edgeReasonShown; nativeVisible = $true; nativeTitle = "Create or edit edge"; commandLogBytesUnchanged = $edgeInvalidBytesUnchanged; graphCommandsBefore = $edgeInvalidCount; graphCommandsAfter = (Edge-GraphCount $edgeInvalidAfter); appliedBefore = 0; appliedAfter = @($edgeInvalidAfter.appliedEdgeCreates).Count; click = $edgeInvalidClick }
-    created = [ordered]@{ sourceChoice = $edgeSourceChoice; targetChoice = $edgeTargetChoice; kind = $edgeKind; condition = $edgeCondition; transform = $edgeTransform; wire = $edgeCreateWire; requestId = $edgeCreateRequest; answered = $true; appliedCount = @($edgeCreated.appliedEdgeCreates).Count; graphSequence = $edgeCreated.graphSequence; click = $edgeCreateClick }
+    created = [ordered]@{ source = $edgeSourceLocked; target = $edgeTargetLocked; kind = $edgeKind; condition = $edgeCondition; transform = $edgeTransform; wire = $edgeCreateWire; requestId = $edgeCreateRequest; answered = $true; appliedCount = @($edgeCreated.appliedEdgeCreates).Count; graphSequence = $edgeCreated.graphSequence; click = $edgeCreateClick }
     rendered = [ordered]@{ edgeCount = @($edgeRendered.edges).Count; edgeId = $edgeId; source = $edgeWorkflowSource; target = $edgeWorkflowTarget; menu = $edgeEditMenu }
     edited = [ordered]@{ prefill = $edgePrefill; changedField = $edgeEditedChoice; wire = $edgeUpdateWire; requestId = $edgeUpdateRequest; answered = $true; appliedCount = @($edgeUpdated.appliedEdgeUpdates).Count; graphSequence = $edgeUpdated.graphSequence; renderedEdgeId = [string]$edgeUpdated.edges[0].id; renderedCount = @($edgeUpdated.edges).Count; postEditPrefill = $edgePostEdit; menu = $edgeUpdateMenu; click = $edgeEditClick }
     cancel = [ordered]@{ changedField = $edgeCancelledChoice; commandLogBytesUnchanged = $edgeCancelBytesUnchanged; graphCommandsBefore = (Edge-GraphCount $edgeCancelBefore); graphCommandsAfter = (Edge-GraphCount $edgeCancelAfter); appliedBefore = @($edgeCancelBefore.appliedEdgeUpdates).Count; appliedAfter = @($edgeCancelAfter.appliedEdgeUpdates).Count; reopenedValue = $edgeCancelReopened.condition; menu = $edgeFinalMenu; click = $edgeCancelClick; closeClick = $edgeFinalClick }

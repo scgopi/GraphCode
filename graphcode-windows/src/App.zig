@@ -4566,17 +4566,37 @@ pub const App = struct {
         defer self.allocator.free(project_path);
         GraphContextMenu.show(
             self.window.hwnd,
-            .{ .background = .{
-                .project_path = project_path,
-                .local_filesystem = graph.project.isLocalFilesystem(),
-                .can_create_edge = graph.nodes.items.len >= 2,
-                .worktrees_available = !self.worktreeProviderBusy(),
-            } },
+            .{ .background = self.backgroundContextMenuTarget(project_path, graph.project.isLocalFilesystem()) },
             x,
             y,
             self,
             &onContextAction,
         );
+    }
+
+    fn reclaimableWorktreeCount(self: *const App, project_path: []const u8) ?usize {
+        const graph = self.model.graphFor(project_path) orelse return null;
+        const notice = graph.worktree_notice orelse return null;
+        const observation = notice.observation orelse return null;
+        return if (observation.summary.reclaimable > 0) observation.summary.reclaimable else null;
+    }
+
+    fn projectContextMenuTarget(self: *const App, project_path: []const u8, remote: bool) GraphContextMenu.ProjectTarget {
+        return .{
+            .path = project_path,
+            .remote = remote,
+            .worktrees_available = !self.worktreeProviderBusy(),
+            .reclaimable_worktrees = self.reclaimableWorktreeCount(project_path),
+        };
+    }
+
+    fn backgroundContextMenuTarget(self: *const App, project_path: []const u8, local_filesystem: bool) GraphContextMenu.BackgroundTarget {
+        return .{
+            .project_path = project_path,
+            .local_filesystem = local_filesystem,
+            .worktrees_available = !self.worktreeProviderBusy(),
+            .reclaimable_worktrees = self.reclaimableWorktreeCount(project_path),
+        };
     }
 
     fn showEdgeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
@@ -4627,11 +4647,11 @@ pub const App = struct {
         );
         defer _ = c.KillTimer(hwnd, MainWindow.menu_watchdog_timer_id);
         const target: GraphContextMenu.Target = switch (target_kind) {
-            1 => .{ .project = .{ .path = self.requiredUiaFixtureProject() catch |err| {
+            1 => .{ .project = self.projectContextMenuTarget(self.requiredUiaFixtureProject() catch |err| {
                 self.reportWorktreeError("UIA fixture owner unavailable", err);
                 return;
-            }, .remote = false, .worktrees_available = !self.worktreeProviderBusy() } },
-            2 => .{ .project = .{ .path = uia_context_menu_remote_project_path, .remote = true, .worktrees_available = !self.worktreeProviderBusy() } },
+            }, false) },
+            2 => .{ .project = self.projectContextMenuTarget(uia_context_menu_remote_project_path, true) },
             3 => return self.showNodeContextMenu(0, uia_context_menu_x, uia_context_menu_y),
             4 => return self.showBackgroundContextMenu(uia_context_menu_x, uia_context_menu_y),
             5 => .quick_chats,
@@ -4931,7 +4951,6 @@ pub const App = struct {
                 }
                 const graph = self.model.graph orelse return;
                 switch (action) {
-                    .create_edge => if (graph.nodes.items.len >= 2) self.createEdge() else self.setStatus("Create Edge requires two loops"),
                     .inspect_project_worktrees => if (graph.project.isLocalFilesystem()) self.inspectWorktrees() else self.setStatus("Worktrees require a local filesystem project"),
                     .project_settings => if (graph.project.isLocalFilesystem()) self.editWorktreePolicy() else self.setStatus("Project settings require a local filesystem project"),
                     .reveal_project => if (graph.project.isLocalFilesystem()) self.revealProjectPath(stable.project_path) else self.setStatus("Explorer requires a local filesystem project"),
@@ -9858,7 +9877,7 @@ fn onWindowMessage(
                         _ = c.ClientToScreen(hwnd, &screen);
                         GraphContextMenu.show(
                             hwnd,
-                            .{ .project = .{ .path = path, .remote = remote, .worktrees_available = !app.worktreeProviderBusy() } },
+                            .{ .project = app.projectContextMenuTarget(path, remote) },
                             screen.x,
                             screen.y,
                             app,
@@ -19050,6 +19069,57 @@ fn installNoticeTestInspection(app: *App, project_path: []const u8, count: usize
     try app.acceptWorktreeInspection(inspection, WorktreeStatus.policyReadOutcome(error.FileNotFound));
 }
 
+fn setContextMenuNoticeCount(app: *App, project_path: []const u8, count: usize) !void {
+    for (app.model.graphs.items) |*graph| {
+        if (!std.mem.eql(u8, graph.project.path, project_path)) continue;
+        graph.worktree_notice = .{
+            .observation = .{
+                .summary = .{ .total = count, .reclaimable = count },
+                .size = .{ .complete = true },
+            },
+            .policy = WorktreeStatus.policyReadOutcome(error.FileNotFound),
+        };
+        return;
+    }
+    return error.ProjectNotOpen;
+}
+
+fn contextMenuBusyTestThread() void {}
+
+test "context menu target preparation uses the clicked project's reclaimable observation" {
+    var app = try noticeTestApp();
+    defer deinitNoticeTestApp(&app);
+    const unobserved_target = app.projectContextMenuTarget("C:\\notice-b", false);
+    try std.testing.expect(unobserved_target.reclaimable_worktrees == null);
+    try setContextMenuNoticeCount(&app, "C:\\notice-a", 5);
+    try setContextMenuNoticeCount(&app, "C:\\notice-b", 2);
+    try std.testing.expect(app.model.selectProject("C:\\notice-a"));
+
+    const project_target = app.projectContextMenuTarget("C:\\notice-b", false);
+    try std.testing.expectEqualStrings("C:\\notice-b", project_target.path);
+    try std.testing.expectEqual(@as(?usize, 2), project_target.reclaimable_worktrees);
+    try std.testing.expectEqual(
+        WorktreeStatus.NoticeState.below_threshold,
+        app.model.graphFor("C:\\notice-b").?.worktree_notice.?.state(),
+    );
+
+    const background_target = app.backgroundContextMenuTarget("C:\\notice-b", true);
+    try std.testing.expectEqualStrings("C:\\notice-b", background_target.project_path);
+    try std.testing.expectEqual(@as(?usize, 2), background_target.reclaimable_worktrees);
+
+    const missing_project_target = app.projectContextMenuTarget("C:\\notice-c", false);
+    try std.testing.expect(missing_project_target.reclaimable_worktrees == null);
+
+    var busy_thread = try std.Thread.spawn(.{}, contextMenuBusyTestThread, .{});
+    defer busy_thread.join();
+    app.worktree_inspection_thread = busy_thread;
+    const busy_project_target = app.projectContextMenuTarget("C:\\notice-b", false);
+    const busy_background_target = app.backgroundContextMenuTarget("C:\\notice-b", true);
+    app.worktree_inspection_thread = null;
+    try std.testing.expect(!busy_project_target.worktrees_available);
+    try std.testing.expect(!busy_background_target.worktrees_available);
+}
+
 test "worktree notice App installation is atomic and retains independent value snapshots" {
     var app = try noticeTestApp();
     defer deinitNoticeTestApp(&app);
@@ -20534,9 +20604,13 @@ fn custodyExpectExistingMenuActions(target: GraphContextMenu.NodeTarget) !void {
     for ([_]usize{ 5104, 5101, 5103, 5102 }) |id| {
         var found = false;
         for (plan.items[0..plan.len]) |item| {
-            if (item.id == id) {
+            const command_item = switch (item) {
+                .command => |command| command,
+                .separator, .promotion_submenu => continue,
+            };
+            if (command_item.id == id) {
                 found = true;
-                try std.testing.expect(item.enabled);
+                try std.testing.expect(command_item.enabled);
             }
         }
         try std.testing.expectEqual(id != 5102 or !target.resolved, found);

@@ -3857,10 +3857,20 @@ Start-Sleep -Seconds 60
       $openSketchMenuAst.Extent.Text -notmatch 'Get-DirectChildren \$graph \$rawWalker') {
     throw "RED: custody right-click can bypass fresh-fragment, unique-card, or hashed child-identity checks"
   }
-  if ($uiaLiveGateSource -notmatch 'Open-EdgeMenu \$false 5120' -or
+  if ($uiaLiveGateSource -match 'Open-EdgeMenu \$false\s+5120' -or
+      $uiaLiveGateSource -match 'Edge-Combo 9100\b' -or
+      $uiaLiveGateSource -match 'Edge-Combo 9101\b' -or
+      $uiaLiveGateSource -match '\$edgeCreateMenu\b' -or
+      $uiaLiveGateSource -match '\$edgeSourceChoice\b|\$edgeTargetChoice\b' -or
+      $uiaLiveGateSource -match 'if \(\$title -eq "Create or edit edge"\)\s*\{\s*5120' -or
+      $uiaLiveGateSource -notmatch 'function Select-EdgeConnectorCardPair\(' -or
+      $uiaLiveGateSource -notmatch 'function Open-EdgeCreateDialogByConnectorDrag\b' -or
+      $uiaLiveGateSource -notmatch 'Select-EdgeConnectorCardPair \$cards \$sourceTitle "Stub node B"' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::PostMouseButtonAt\(\s*\$renameShellWindow,\s*0x0201' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::PostMouseButtonAt\(\s*\$renameShellWindow,\s*0x0202' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9100 "locked source identity"' -or
+      $uiaLiveGateSource -notmatch 'Read-EdgeStableText 9101 "locked target identity"' -or
       $uiaLiveGateSource -notmatch 'Open-EdgeMenu \$true 5110' -or
-      $uiaLiveGateSource -notmatch 'Edge-Combo 9100 0' -or
-      $uiaLiveGateSource -notmatch 'Edge-Combo 9101 1' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9102 0' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9103 2 "Only after failure"' -or
       $uiaLiveGateSource -notmatch 'Edge-Combo 9103 1 "Only after success"' -or
@@ -3881,7 +3891,121 @@ Start-Sleep -Seconds 60
       $stubDaemonSource -notmatch 'appliedEdgeCreateRequests' -or
       $stubDaemonSource -notmatch 'appliedEdgeUpdateRequests' -or
       $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
-    throw "RED: edge workflow does not pin native input, exact CAS wire, correlated application, and stable rendered identity"
+    throw "RED: edge workflow does not use unique connector dragging and locked endpoints while preserving edit/CAS and no-mutation proofs"
+  }
+  $connectorCardSelectorAst = $edgeTextGateAst.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Select-EdgeConnectorCardPair"
+    }, $true)
+  if (-not $connectorCardSelectorAst) {
+    throw "RED: connector-card selector is not extractable for named functional cases"
+  }
+  . ([scriptblock]::Create($connectorCardSelectorAst.Extent.Text))
+  function New-EdgeConnectorTestCard([string] $automationId, [string] $name) {
+    return [pscustomobject]@{
+      Current = [pscustomobject]@{ AutomationId = $automationId; Name = $name }
+    }
+  }
+  $edgeConnectorCardCases = @(
+    @{
+      Name = "positive selects one named source and target"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-target" "target")
+      )
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $true
+      ExpectedSource = "canvas-card-source"
+      ExpectedTarget = "canvas-card-target"
+    },
+    @{
+      Name = "negative rejects duplicate source cards"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source-a" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-source-b" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-target" "target")
+      )
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects a missing source card"
+      Cards = @((New-EdgeConnectorTestCard "canvas-card-target" "target"))
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects a missing target card"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source" "source"),
+        (New-EdgeConnectorTestCard "button-target" "target")
+      )
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects a different named target card"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-target" "other target")
+      )
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects duplicate target cards"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-target-a" "target"),
+        (New-EdgeConnectorTestCard "canvas-card-target-b" "target")
+      )
+      SourceTitle = "source"
+      TargetTitle = "target"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects the same card as both endpoints"
+      Cards = @((New-EdgeConnectorTestCard "canvas-card-same" "same"))
+      SourceTitle = "same"
+      TargetTitle = "same"
+      ShouldSelect = $false
+    },
+    @{
+      Name = "negative rejects a blank endpoint title"
+      Cards = @(
+        (New-EdgeConnectorTestCard "canvas-card-source" "source"),
+        (New-EdgeConnectorTestCard "canvas-card-target" "target")
+      )
+      SourceTitle = " "
+      TargetTitle = "target"
+      ShouldSelect = $false
+    }
+  )
+  foreach ($case in $edgeConnectorCardCases) {
+    $selection = $null
+    $selectionError = $null
+    try {
+      $selection = Select-EdgeConnectorCardPair `
+        $case.Cards $case.SourceTitle $case.TargetTitle
+    } catch {
+      $selectionError = $_
+    }
+    if ($case.ShouldSelect) {
+      if ($null -ne $selectionError -or
+          $selection.Source.Current.AutomationId -cne $case.ExpectedSource -or
+          $selection.Target.Current.AutomationId -cne $case.ExpectedTarget) {
+        throw "RED: edge connector functional case '$($case.Name)' failed: $($selectionError.Exception.Message)"
+      }
+    } elseif ($null -eq $selectionError) {
+      throw "RED: edge connector functional case '$($case.Name)' unexpectedly selected ambiguous/missing cards"
+    }
+    Write-Host "UIA_EDGE_CONNECTOR_CASE name='$($case.Name)' result=PASS"
   }
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
   if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {
