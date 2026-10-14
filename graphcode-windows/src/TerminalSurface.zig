@@ -589,12 +589,14 @@ pub const Workspace = struct {
             .input_queue = .{ .allocator = allocator_ },
             .layout = try WorkspaceLayout.Layout.init(
                 allocator_,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
+                    catch "global",
             ),
             .layout_path = &.{},
             .project_key = try allocator_.dupe(
                 u8,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
+                    catch "global",
             ),
         };
         for (&workspace.surfaces) |*surface| {
