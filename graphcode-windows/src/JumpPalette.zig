@@ -13,6 +13,7 @@ pub const Entry = struct {
     title: []const u8,
     loop_type: []const u8,
     state: []const u8,
+    needs_human: bool = false,
 };
 
 pub const Match = struct {
@@ -50,18 +51,59 @@ pub const State = struct {
 
     pub fn filter(self: *State, raw_query: []const u8) !void {
         self.matches.clearRetainingCapacity();
-        const query = std.mem.trim(u8, raw_query, " \t\r\n");
+        self.selection = 0;
+        errdefer self.matches.clearRetainingCapacity();
+        const trimmed = try trimQuery(raw_query);
+        if (trimmed.len == 0) {
+            // The rollup is a membership signal, not the sidebar's traversal order.
+            for ([_]bool{ true, false }) |attention| {
+                for (self.entries, 0..) |entry, index| {
+                    if (entry.needs_human == attention) try self.matches.append(.{ .entry_index = index, .score = 0 });
+                }
+            }
+            return;
+        }
+        const query = try lowercase(self.allocator, trimmed);
+        defer self.allocator.free(query);
+        const titles = try self.allocator.alloc(?[]u16, self.entries.len);
+        @memset(titles, null);
+        defer {
+            for (titles) |title| if (title) |wide| self.allocator.free(wide);
+            self.allocator.free(titles);
+        }
         for (self.entries, 0..) |entry, index| {
-            const score = rank(entry, query) orelse continue;
+            titles[index] = try std.unicode.utf8ToUtf16LeAlloc(self.allocator, entry.title);
+            const title = try lowercase(self.allocator, entry.title);
+            defer self.allocator.free(title);
+            const score = (try rank(self.allocator, entry, title, query)) orelse continue;
             try self.matches.append(.{ .entry_index = index, .score = score });
         }
-        std.mem.sort(Match, self.matches.items, {}, struct {
-            fn lessThan(_: void, lhs: Match, rhs: Match) bool {
+        var comparison_failed = false;
+        const Context = struct {
+            entries: []const Entry,
+            titles: []const ?[]u16,
+            failed: *bool,
+
+            fn lessThan(context: @This(), lhs: Match, rhs: Match) bool {
                 if (lhs.score != rhs.score) return lhs.score < rhs.score;
+                const left = context.entries[lhs.entry_index];
+                const right = context.entries[rhs.entry_index];
+                if (left.needs_human != right.needs_human) return left.needs_human;
+                const a = context.titles[lhs.entry_index].?;
+                const b = context.titles[rhs.entry_index].?;
+                if (a.len == 0 or b.len == 0) {
+                    if (a.len != b.len) return a.len < b.len;
+                } else {
+                    const order = c.CompareStringEx(null, c.NORM_IGNORECASE, a.ptr, @intCast(a.len), b.ptr, @intCast(b.len), null, null, 0);
+                    if (order == 0) context.failed.* = true;
+                    if (order == c.CSTR_LESS_THAN) return true;
+                    if (order == c.CSTR_GREATER_THAN) return false;
+                }
                 return lhs.entry_index < rhs.entry_index;
             }
-        }.lessThan);
-        self.selection = 0;
+        };
+        std.mem.sort(Match, self.matches.items, Context{ .entries = self.entries, .titles = titles, .failed = &comparison_failed }, Context.lessThan);
+        if (comparison_failed) return error.PaletteTitleComparisonFailed;
     }
 
     pub fn moveSelection(self: *State, delta: i32) void {
@@ -83,29 +125,62 @@ pub const State = struct {
     }
 };
 
-fn rank(entry: Entry, query: []const u8) ?u8 {
-    if (query.len == 0) return 4;
-    if (std.ascii.eqlIgnoreCase(entry.node_id, query)) return 0;
-    if (std.ascii.eqlIgnoreCase(entry.title, query)) return 1;
-    if (startsWithIgnoreCase(entry.title, query)) return 2;
-    if (containsIgnoreCase(entry.title, query) or containsIgnoreCase(entry.node_id, query)) return 3;
-    return null;
-}
-
-fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
-    return value.len >= prefix.len and std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
-}
-
-fn containsIgnoreCase(value: []const u8, needle: []const u8) bool {
-    if (needle.len == 0 or needle.len > value.len) return false;
-    var index: usize = 0;
-    while (index + needle.len <= value.len) : (index += 1) {
-        if (std.ascii.eqlIgnoreCase(value[index .. index + needle.len], needle)) return true;
+pub fn needsHuman(attention_entries: anytype, project_path: []const u8, node_id: []const u8) bool {
+    for (attention_entries) |entry| {
+        if (std.mem.eql(u8, entry.project_path, project_path) and std.mem.eql(u8, entry.node.id, node_id)) return true;
     }
     return false;
 }
 
+fn rank(allocator: std.mem.Allocator, entry: Entry, title: []const u16, query: []const u16) !?u8 {
+    if (std.mem.startsWith(u16, title, query)) return 0;
+    if (std.mem.indexOf(u16, title, query) != null) return 1;
+    const kind = try lowercase(allocator, loopTypeLabel(entry.loop_type));
+    defer allocator.free(kind);
+    const word = try lowercase(allocator, displayState(entry));
+    defer allocator.free(word);
+    if (std.mem.indexOf(u16, kind, query) != null or std.mem.indexOf(u16, word, query) != null) return 2;
+    const project = try lowercase(allocator, entry.project_name);
+    defer allocator.free(project);
+    if (std.mem.indexOf(u16, project, query) != null) return 3;
+    return null;
+}
+
+fn trimQuery(value: []const u8) ![]const u8 {
+    var iterator = (try std.unicode.Utf8View.init(value)).iterator();
+    var first: ?usize = null;
+    var last: usize = 0;
+    while (iterator.nextCodepoint()) |scalar| {
+        const whitespace = scalar == '\t' or scalar == ' ' or scalar == 0xA0 or scalar == 0x1680 or
+            (scalar >= 0x2000 and scalar <= 0x200A) or scalar == 0x202F or scalar == 0x205F or scalar == 0x3000;
+        if (!whitespace) {
+            if (first == null) first = iterator.i - (std.unicode.utf8CodepointSequenceLength(scalar) catch unreachable);
+            last = iterator.i;
+        }
+    }
+    return if (first) |start| value[start..last] else value[0..0];
+}
+
+fn lowercase(allocator: std.mem.Allocator, value: []const u8) ![]u16 {
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, value);
+    defer allocator.free(wide);
+    if (wide.len == 0) return allocator.alloc(u16, 0);
+    const invariant = std.unicode.utf8ToUtf16LeStringLiteral("");
+    const count = c.LCMapStringEx(invariant.ptr, c.LCMAP_LOWERCASE, wide.ptr, @intCast(wide.len), null, 0, null, null, 0);
+    if (count == 0) return error.PaletteCaseMappingFailed;
+    const result = try allocator.alloc(u16, @intCast(count));
+    errdefer allocator.free(result);
+    if (c.LCMapStringEx(invariant.ptr, c.LCMAP_LOWERCASE, wide.ptr, @intCast(wide.len), result.ptr, count, null, null, 0) != count)
+        return error.PaletteCaseMappingFailed;
+    return result;
+}
+
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeJumpPalette");
+const backdrop_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeJumpBackdrop");
+const scrollbar_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeJumpScrollbar");
+const scrim_alpha = 102;
+const scrollbar_timer = 1;
+const scrollbar_thumb = 0x006D6D6D;
 const search_id = 9401;
 const results_id = 9402;
 const ok_id = 1;
@@ -124,6 +199,14 @@ const Dialog = struct {
     edit_proc: c.WNDPROC = null,
     pending_high_surrogate: ?u16 = null,
     list: c.HWND = null,
+    list_proc: c.WNDPROC = null,
+    scrollbar: c.HWND = null,
+    scroll_info: c.SCROLLBARINFO = std.mem.zeroes(c.SCROLLBARINFO),
+    scroll_origin: c.POINT = .{ .x = 0, .y = 0 },
+    scrollbar_visible: bool = false,
+    scrollbar_timer_armed: bool = false,
+    scrollbar_disabled: bool = false,
+    scrollbar_syncing: bool = false,
     empty_label: c.HWND = null,
     background: c.HBRUSH = null,
     mono_font: c.HFONT = null,
@@ -158,6 +241,8 @@ pub fn show(
     var origin = c.POINT{ .x = bounds.left, .y = bounds.top };
     if (c.ClientToScreen(parent, &origin) == 0) return error.PaletteOwnerBoundsUnavailable;
     const previous_focus = c.GetFocus();
+    var backdrop = try createBackdrop(parent);
+    defer releaseOwnedWindowWith(OwnedWindowApi, &backdrop);
     const hwnd = c.CreateWindowExW(
         c.WS_EX_CONTROLPARENT,
         class_name.ptr,
@@ -177,6 +262,7 @@ pub fn show(
         return err;
     }
     _ = c.EnableWindow(parent, 0);
+    _ = c.ShowWindow(backdrop, c.SW_SHOWNOACTIVATE);
     _ = c.ShowWindow(hwnd, c.SW_SHOW);
     _ = c.SetForegroundWindow(hwnd);
     _ = c.SetFocus(dialog.edit);
@@ -199,6 +285,7 @@ pub fn show(
         _ = c.DispatchMessageW(&message);
     }
     const selected = if (dialog.accepted) dialog.state.selectedEntry() else null;
+    releaseOwnedWindowWith(OwnedWindowApi, &backdrop);
     ModalTeardown.dismiss(hwnd, parent);
     if (c.IsWindow(previous_focus) != 0) _ = c.SetFocus(previous_focus);
     if (quit_code) |value| c.PostQuitMessage(@intCast(value));
@@ -212,13 +299,33 @@ pub fn show(
     };
 }
 
+const OwnedWindowApi = struct {
+    fn isWindow(hwnd: c.HWND) bool {
+        return c.IsWindow(hwnd) != 0;
+    }
+
+    pub fn destroyWindow(hwnd: c.HWND) void {
+        _ = c.DestroyWindow(hwnd);
+    }
+};
+
+fn releaseOwnedWindowWith(comptime Api: type, owned: *c.HWND) void {
+    const hwnd = owned.*;
+    owned.* = null;
+    if (hwnd != null and Api.isWindow(hwnd)) Api.destroyWindow(hwnd);
+}
+
 fn copyEntries(allocator: std.mem.Allocator, source: []const Entry) ![]Entry {
     const entries = try allocator.alloc(Entry, source.len);
     @memset(entries, .{ .project_path = &.{}, .project_name = &.{}, .node_id = &.{}, .title = &.{}, .loop_type = &.{}, .state = &.{} });
     errdefer freeEntries(allocator, entries);
     for (source, entries) |entry, *copy| {
         inline for (std.meta.fields(Entry)) |field| {
-            @field(copy, field.name) = try allocator.dupe(u8, @field(entry, field.name));
+            if (field.type == []const u8) {
+                @field(copy, field.name) = try allocator.dupe(u8, @field(entry, field.name));
+            } else {
+                @field(copy, field.name) = @field(entry, field.name);
+            }
         }
     }
     return entries;
@@ -227,7 +334,7 @@ fn copyEntries(allocator: std.mem.Allocator, source: []const Entry) ![]Entry {
 fn freeEntries(allocator: std.mem.Allocator, entries: []Entry) void {
     for (entries) |entry| {
         inline for (std.meta.fields(Entry)) |field| {
-            allocator.free(@field(entry, field.name));
+            if (field.type == []const u8) allocator.free(@field(entry, field.name));
         }
     }
     allocator.free(entries);
@@ -271,13 +378,64 @@ test "empty palette creates native search controls and cancels without a selecti
 }
 
 fn registerClass() !void {
-    var window_class: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    window_class.lpfnWndProc = @ptrCast(&windowProc);
-    window_class.hInstance = c.GetModuleHandleW(null);
-    window_class.lpszClassName = class_name.ptr;
-    window_class.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
-    if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
-        return error.PaletteClassRegistrationFailed;
+    const classes = [_]struct { name: [*:0]const u16, proc: c.WNDPROC }{
+        .{ .name = class_name.ptr, .proc = @ptrCast(&windowProc) },
+        .{ .name = backdrop_class.ptr, .proc = @ptrCast(&backdropProc) },
+        .{ .name = scrollbar_class.ptr, .proc = @ptrCast(&scrollbarProc) },
+    };
+    for (classes) |class| {
+        var window_class: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
+        window_class.lpfnWndProc = class.proc;
+        window_class.hInstance = c.GetModuleHandleW(null);
+        window_class.lpszClassName = class.name;
+        window_class.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
+        if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS) {
+            // Optional decoration creation below reports and latches its own failure.
+            if (class.name != scrollbar_class.ptr) return error.PaletteClassRegistrationFailed;
+        }
+    }
+}
+
+fn createBackdrop(owner: c.HWND) !c.HWND {
+    var client: c.RECT = undefined;
+    if (c.GetClientRect(owner, &client) == 0) return error.PaletteOwnerBoundsUnavailable;
+    var origin = c.POINT{ .x = client.left, .y = client.top };
+    if (c.ClientToScreen(owner, &origin) == 0) return error.PaletteOwnerBoundsUnavailable;
+    return c.CreateWindowExW(
+        c.WS_EX_LAYERED | c.WS_EX_NOACTIVATE | c.WS_EX_TOOLWINDOW,
+        backdrop_class.ptr,
+        null,
+        c.WS_POPUP,
+        origin.x,
+        origin.y,
+        client.right - client.left,
+        client.bottom - client.top,
+        owner,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse error.PaletteBackdropCreationFailed;
+}
+
+fn backdropProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    switch (message) {
+        c.WM_CREATE => return if (c.SetLayeredWindowAttributes(hwnd, 0, scrim_alpha, c.LWA_ALPHA) != 0) 0 else -1,
+        c.WM_MOUSEACTIVATE => return c.MA_NOACTIVATE,
+        c.WM_ERASEBKGND => {
+            var client: c.RECT = undefined;
+            _ = c.GetClientRect(hwnd, &client);
+            _ = c.FillRect(Win32.opaquePointerFromInt(c.HDC, wparam), &client, Win32.opaquePointerFromInt(c.HBRUSH, @intFromPtr(c.GetStockObject(c.BLACK_BRUSH))));
+            return 1;
+        },
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const dc = c.BeginPaint(hwnd, &paint);
+            defer _ = c.EndPaint(hwnd, &paint);
+            _ = c.FillRect(dc, &paint.rcPaint, Win32.opaquePointerFromInt(c.HBRUSH, @intFromPtr(c.GetStockObject(c.BLACK_BRUSH))));
+            return 0;
+        },
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
+    }
 }
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
@@ -352,7 +510,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 0,
                 std.unicode.utf8ToUtf16LeStringLiteral("LISTBOX").ptr,
                 null,
-                c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.WS_VSCROLL |
+                c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.WS_VSCROLL | c.WS_CLIPSIBLINGS |
                     c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT | c.LBS_OWNERDRAWFIXED | c.LBS_HASSTRINGS,
                 0,
                 0,
@@ -377,10 +535,27 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 c.GetModuleHandleW(null),
                 null,
             );
+            // A cosmetic sibling covers the native nonclient bar. Transparent
+            // hit testing passes input to LISTBOX; its scroll state and UIA stay native.
+            dialog.scrollbar = c.CreateWindowExW(
+                c.WS_EX_TRANSPARENT | c.WS_EX_NOACTIVATE,
+                scrollbar_class.ptr,
+                null,
+                c.WS_CHILD | c.WS_CLIPSIBLINGS,
+                0,
+                0,
+                0,
+                0,
+                hwnd,
+                null,
+                c.GetModuleHandleW(null),
+                null,
+            );
             if (dialog.magnifier == null or dialog.edit == null or dialog.hint == null or dialog.list == null or dialog.empty_label == null) {
                 fail(dialog, error.PaletteControlCreationFailed);
                 return -1;
             }
+            if (dialog.scrollbar == null) disableScrollbarWith(ScrollbarApi, dialog, error.PaletteScrollLayerCreationFailed);
             _ = c.SendMessageW(dialog.edit, c.WM_SETFONT, @intFromPtr(AppFont.getForDpi(14, false, dialog.dpi)), 1);
             _ = c.SendMessageW(dialog.hint, c.WM_SETFONT, @intFromPtr(dialog.mono_font), 1);
             _ = c.SendMessageW(dialog.list, c.WM_SETFONT, @intFromPtr(AppFont.getForDpi(13, false, dialog.dpi)), 1);
@@ -391,6 +566,12 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 return -1;
             }
             dialog.edit_proc = Win32.opaquePointerFromInt(c.WNDPROC, @bitCast(previous));
+            const previous_list = c.SetWindowLongPtrW(dialog.list, c.GWLP_WNDPROC, @bitCast(@intFromPtr(&listProc)));
+            if (previous_list == 0) {
+                disableScrollbarWith(ScrollbarApi, dialog, error.PaletteListSubclassFailed);
+            } else {
+                dialog.list_proc = Win32.opaquePointerFromInt(c.WNDPROC, @bitCast(previous_list));
+            }
             _ = c.SendMessageW(dialog.list, c.LB_SETITEMHEIGHT, 0, Dpi.scale(row_height, dialog.dpi));
             refillList(dialog) catch |err| {
                 fail(dialog, err);
@@ -420,7 +601,7 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             const hdc = Win32.opaquePointerFromInt(c.HDC, wparam);
             _ = c.SetTextColor(hdc, if (message == c.WM_CTLCOLORSTATIC) Tokens.dialog_muted_text else Tokens.dialog_title_text);
             _ = c.SetBkColor(hdc, Tokens.window_tone);
-            return @intCast(@intFromPtr(dialog.background));
+            return @bitCast(@intFromPtr(dialog.background));
         },
         c.WM_ERASEBKGND => {
             var client: c.RECT = undefined;
@@ -528,6 +709,446 @@ fn refillList(dialog: *Dialog) !void {
     }
     _ = c.ShowWindow(dialog.empty_label, if (dialog.state.matches.items.len == 0) c.SW_SHOW else c.SW_HIDE);
     syncListSelection(dialog);
+    syncScrollbar(dialog);
+}
+
+fn listProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    const result = c.CallWindowProcW(dialog.list_proc, hwnd, message, wparam, lparam);
+    if (!dialog.scrollbar_disabled and message == c.WM_PRINT and lparam & c.PRF_NONCLIENT != 0) {
+        var info = std.mem.zeroes(c.SCROLLBARINFO);
+        info.cbSize = @sizeOf(c.SCROLLBARINFO);
+        var window: c.RECT = undefined;
+        if (c.GetWindowLongPtrW(hwnd, c.GWL_STYLE) & c.WS_VSCROLL != 0 and
+            c.GetScrollBarInfo(hwnd, c.OBJID_VSCROLL, &info) != 0 and c.GetWindowRect(hwnd, &window) != 0)
+        {
+            const bounds = c.RECT{
+                .left = info.rcScrollBar.left - window.left,
+                .top = info.rcScrollBar.top - window.top,
+                .right = info.rcScrollBar.right - window.left,
+                .bottom = info.rcScrollBar.bottom - window.top,
+            };
+            drawScrollbar(Win32.opaquePointerFromInt(c.HDC, wparam), bounds, info, dialog.dpi);
+        }
+    }
+    switch (message) {
+        c.WM_NCPAINT,
+        c.WM_PAINT,
+        c.WM_NCMOUSEMOVE,
+        c.WM_NCLBUTTONDOWN,
+        c.WM_NCLBUTTONUP,
+        c.WM_NCMOUSELEAVE,
+        => syncScrollbarWith(ScrollbarApi, dialog, true),
+        c.WM_SIZE,
+        c.WM_WINDOWPOSCHANGED,
+        c.WM_VSCROLL,
+        c.WM_MOUSEWHEEL,
+        c.WM_KEYDOWN,
+        c.LB_RESETCONTENT,
+        c.LB_ADDSTRING,
+        c.LB_DELETESTRING,
+        c.LB_SETCURSEL,
+        c.LB_SETTOPINDEX,
+        => syncScrollbar(dialog),
+        else => {},
+    }
+    return result;
+}
+
+const ScrollBounds = struct {
+    info: c.SCROLLBARINFO,
+    origin: c.POINT,
+};
+
+const ScrollbarApi = struct {
+    fn bounds(list: c.HWND, scrollbar: c.HWND) !?ScrollBounds {
+        if (c.IsWindow(list) == 0) return null;
+        const style = c.GetWindowLongPtrW(list, c.GWL_STYLE);
+        if (style & c.WS_VSCROLL == 0 or style & c.WS_VISIBLE == 0) return null;
+        var info = std.mem.zeroes(c.SCROLLBARINFO);
+        info.cbSize = @sizeOf(c.SCROLLBARINFO);
+        if (c.GetScrollBarInfo(list, c.OBJID_VSCROLL, &info) == 0)
+            return error.PaletteScrollBoundsUnavailable;
+        var origin = c.POINT{ .x = info.rcScrollBar.left, .y = info.rcScrollBar.top };
+        if (c.ScreenToClient(c.GetParent(scrollbar), &origin) == 0)
+            return error.PaletteScrollBoundsUnavailable;
+        return .{ .info = info, .origin = origin };
+    }
+
+    fn position(hwnd: c.HWND, bounds_value: ScrollBounds) !void {
+        const rect = bounds_value.info.rcScrollBar;
+        if (c.SetWindowPos(hwnd, c.HWND_TOP, bounds_value.origin.x, bounds_value.origin.y, rect.right - rect.left, rect.bottom - rect.top, c.SWP_NOACTIVATE | c.SWP_SHOWWINDOW) == 0)
+            return error.PaletteScrollLayerPositionFailed;
+    }
+
+    fn armTimer(hwnd: c.HWND) !void {
+        if (c.SetTimer(hwnd, scrollbar_timer, 33, null) == 0) return error.PaletteScrollTimerFailed;
+    }
+
+    fn killTimer(hwnd: c.HWND) void {
+        _ = c.KillTimer(hwnd, scrollbar_timer);
+    }
+
+    fn hide(hwnd: c.HWND) void {
+        _ = c.ShowWindow(hwnd, c.SW_HIDE);
+    }
+
+    fn invalidate(hwnd: c.HWND) !void {
+        if (c.InvalidateRect(hwnd, null, 0) == 0) return error.PaletteScrollInvalidationFailed;
+    }
+
+    fn update(hwnd: c.HWND) !void {
+        if (c.UpdateWindow(hwnd) == 0) return error.PaletteScrollUpdateFailed;
+    }
+
+    fn warning(err: anyerror) void {
+        std.log.warn("Jump palette dark decoration unavailable: {s}; native scrolling retained", .{@errorName(err)});
+    }
+};
+
+fn syncScrollbar(dialog: *Dialog) void {
+    syncScrollbarWith(ScrollbarApi, dialog, false);
+}
+
+fn syncScrollbarWith(comptime Api: type, dialog: *Dialog, force_repaint: bool) void {
+    if (dialog.scrollbar == null or dialog.scrollbar_disabled or dialog.scrollbar_syncing) return;
+    dialog.scrollbar_syncing = true;
+    defer dialog.scrollbar_syncing = false;
+    const bounds_value = (Api.bounds(dialog.list, dialog.scrollbar) catch |err| {
+        disableScrollbarWith(Api, dialog, err);
+        return;
+    }) orelse {
+        if (dialog.scrollbar_timer_armed) {
+            dialog.scrollbar_timer_armed = false;
+            Api.killTimer(dialog.scrollbar);
+        }
+        if (dialog.scrollbar_visible) {
+            dialog.scrollbar_visible = false;
+            Api.hide(dialog.scrollbar);
+        }
+        return;
+    };
+    const rect = bounds_value.info.rcScrollBar;
+    const previous_rect = dialog.scroll_info.rcScrollBar;
+    const moved = !dialog.scrollbar_visible or !std.meta.eql(dialog.scroll_origin, bounds_value.origin) or
+        rect.right - rect.left != previous_rect.right - previous_rect.left or
+        rect.bottom - rect.top != previous_rect.bottom - previous_rect.top;
+    const changed = !std.meta.eql(dialog.scroll_info, bounds_value.info);
+    dialog.scroll_info = bounds_value.info;
+    dialog.scroll_origin = bounds_value.origin;
+    if (moved) Api.position(dialog.scrollbar, bounds_value) catch |err| {
+        disableScrollbarWith(Api, dialog, err);
+        return;
+    };
+    dialog.scrollbar_visible = true;
+    // Runs throughout each visible interval, including native scrollbar tracking.
+    if (!dialog.scrollbar_timer_armed) {
+        Api.armTimer(dialog.scrollbar) catch |err| {
+            disableScrollbarWith(Api, dialog, err);
+            return;
+        };
+        dialog.scrollbar_timer_armed = true;
+    }
+    if (changed or moved or force_repaint) {
+        Api.invalidate(dialog.scrollbar) catch |err| {
+            disableScrollbarWith(Api, dialog, err);
+            return;
+        };
+        Api.update(dialog.scrollbar) catch |err| {
+            disableScrollbarWith(Api, dialog, err);
+            return;
+        };
+    }
+}
+
+fn disableScrollbarWith(comptime Api: type, dialog: *Dialog, err: anyerror) void {
+    if (dialog.scrollbar_disabled) return;
+    dialog.scrollbar_disabled = true;
+    if (dialog.scrollbar_timer_armed) {
+        dialog.scrollbar_timer_armed = false;
+        Api.killTimer(dialog.scrollbar);
+    }
+    dialog.scrollbar_visible = false;
+    if (dialog.scrollbar != null) Api.hide(dialog.scrollbar);
+    Api.warning(err);
+}
+
+test "palette robustness backdrop releases once before modal teardown despite recycled handle" {
+    const Api = struct {
+        const Call = enum { backdrop, enable, palette, activate };
+        var calls: std.array_list.Managed(Call) = undefined;
+        var owned: *c.HWND = undefined;
+        var cleared_at_destroy = false;
+
+        fn isWindow(_: c.HWND) bool {
+            return true;
+        }
+        pub fn destroyWindow(hwnd: c.HWND) void {
+            if (@intFromPtr(hwnd) == 0x2000) {
+                cleared_at_destroy = owned.* == null;
+                calls.append(.backdrop) catch unreachable;
+            } else calls.append(.palette) catch unreachable;
+        }
+        pub fn enableWindow(_: c.HWND, _: c_int) void {
+            calls.append(.enable) catch unreachable;
+        }
+        pub fn setActiveWindow(_: c.HWND) void {
+            calls.append(.activate) catch unreachable;
+        }
+    };
+    Api.calls = std.array_list.Managed(Api.Call).init(std.testing.allocator);
+    defer Api.calls.deinit();
+    var owned = Win32.opaquePointerFromInt(c.HWND, 0x2000);
+    Api.owned = &owned;
+    releaseOwnedWindowWith(Api, &owned);
+    ModalTeardown.dismissWith(Api, Win32.opaquePointerFromInt(c.HWND, 0x3000), Win32.opaquePointerFromInt(c.HWND, 0x1000));
+    releaseOwnedWindowWith(Api, &owned);
+    try std.testing.expectEqualSlices(Api.Call, &.{ .backdrop, .enable, .palette, .activate }, Api.calls.items);
+    try std.testing.expect(Api.cleared_at_destroy);
+    try std.testing.expect(owned == null);
+}
+
+const RecordingScrollbarApi = struct {
+    const Failure = enum { bounds, position, timer, invalidate, update };
+    var failure: ?Failure = null;
+    var visible = true;
+    var queries: usize = 0;
+    var positions: usize = 0;
+    var arms: usize = 0;
+    var kills: usize = 0;
+    var hides: usize = 0;
+    var invalidations: usize = 0;
+    var updates: usize = 0;
+    var warnings: usize = 0;
+    var reenter: ?*Dialog = null;
+
+    fn reset() void {
+        failure = null;
+        visible = true;
+        queries = 0;
+        positions = 0;
+        arms = 0;
+        kills = 0;
+        hides = 0;
+        invalidations = 0;
+        updates = 0;
+        warnings = 0;
+        reenter = null;
+    }
+    fn bounds(_: c.HWND, _: c.HWND) !?ScrollBounds {
+        queries += 1;
+        if (failure == .bounds) return error.InjectedDecorationFailure;
+        if (!visible) return null;
+        var info = std.mem.zeroes(c.SCROLLBARINFO);
+        info.rcScrollBar = .{ .left = 443, .top = 42, .right = 460, .bottom = 378 };
+        info.xyThumbTop = 17;
+        info.xyThumbBottom = 100;
+        return .{ .info = info, .origin = .{ .x = 443, .y = 42 } };
+    }
+    fn position(_: c.HWND, _: ScrollBounds) !void {
+        positions += 1;
+        if (failure == .position) return error.InjectedDecorationFailure;
+    }
+    fn armTimer(_: c.HWND) !void {
+        arms += 1;
+        if (failure == .timer) return error.InjectedDecorationFailure;
+    }
+    fn killTimer(_: c.HWND) void {
+        kills += 1;
+    }
+    fn hide(_: c.HWND) void {
+        hides += 1;
+    }
+    fn invalidate(_: c.HWND) !void {
+        invalidations += 1;
+        if (failure == .invalidate) return error.InjectedDecorationFailure;
+    }
+    fn update(_: c.HWND) !void {
+        updates += 1;
+        if (failure == .update) return error.InjectedDecorationFailure;
+        if (reenter) |dialog| {
+            reenter = null;
+            syncScrollbarWith(@This(), dialog, true);
+        }
+    }
+    fn warning(_: anyerror) void {
+        warnings += 1;
+    }
+};
+
+test "palette robustness scrollbar timer and placement follow visible transitions only" {
+    const Api = RecordingScrollbarApi;
+    Api.reset();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}), .scrollbar = Win32.opaquePointerFromInt(c.HWND, 0x2000) };
+    defer dialog.state.deinit();
+    syncScrollbarWith(Api, &dialog, false);
+    syncScrollbarWith(Api, &dialog, false);
+    syncScrollbarWith(Api, &dialog, false);
+    try std.testing.expectEqual(@as(usize, 1), Api.arms);
+    try std.testing.expectEqual(@as(usize, 1), Api.positions);
+    try std.testing.expect(dialog.scrollbar_timer_armed);
+    Api.visible = false;
+    syncScrollbarWith(Api, &dialog, false);
+    syncScrollbarWith(Api, &dialog, false);
+    try std.testing.expectEqual(@as(usize, 1), Api.kills);
+    try std.testing.expectEqual(@as(usize, 1), Api.hides);
+    try std.testing.expect(!dialog.scrollbar_timer_armed);
+    Api.visible = true;
+    syncScrollbarWith(Api, &dialog, false);
+    try std.testing.expectEqual(@as(usize, 2), Api.arms);
+    try std.testing.expectEqual(@as(usize, 2), Api.positions);
+}
+
+test "palette robustness unchanged nonclient geometry still repaints synchronously without recursion" {
+    const Api = RecordingScrollbarApi;
+    Api.reset();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}), .scrollbar = Win32.opaquePointerFromInt(c.HWND, 0x2000) };
+    defer dialog.state.deinit();
+    syncScrollbarWith(Api, &dialog, false);
+    const previous_invalidations = Api.invalidations;
+    const previous_updates = Api.updates;
+    const previous_queries = Api.queries;
+    Api.reenter = &dialog;
+    syncScrollbarWith(Api, &dialog, true);
+    try std.testing.expectEqual(previous_invalidations + 1, Api.invalidations);
+    try std.testing.expectEqual(previous_updates + 1, Api.updates);
+    try std.testing.expectEqual(previous_queries + 1, Api.queries);
+    try std.testing.expectEqual(@as(usize, 1), Api.positions);
+    try std.testing.expectEqual(@as(usize, 1), Api.arms);
+}
+
+test "palette robustness cosmetic failures warn latch disable and retain functional selection" {
+    const Api = RecordingScrollbarApi;
+    for (std.enums.values(Api.Failure)) |failure| {
+        Api.reset();
+        Api.failure = failure;
+        const entries = [_]Entry{.{ .project_path = "A", .project_name = "Alpha", .node_id = "one", .title = "One", .loop_type = "sketch", .state = "idle" }};
+        var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries), .scrollbar = Win32.opaquePointerFromInt(c.HWND, 0x2000) };
+        defer dialog.state.deinit();
+        try dialog.state.filter("");
+        syncScrollbarWith(Api, &dialog, true);
+        try std.testing.expect(!dialog.closed and dialog.failure == null);
+        try std.testing.expect(dialog.scrollbar_disabled and !dialog.scrollbar_timer_armed and !dialog.scrollbar_visible);
+        try std.testing.expectEqual(@as(usize, 1), Api.warnings);
+        try std.testing.expectEqual(@as(usize, 1), Api.hides);
+        try std.testing.expectEqual(@as(usize, if (failure == .invalidate or failure == .update) 1 else 0), Api.kills);
+        const queries = Api.queries;
+        syncScrollbarWith(Api, &dialog, true);
+        try std.testing.expectEqual(queries, Api.queries);
+        try std.testing.expectEqual(@as(usize, 1), Api.warnings);
+        accept(&dialog);
+        try std.testing.expect(dialog.accepted);
+        try std.testing.expectEqualStrings("one", dialog.state.selectedEntry().?.node_id);
+    }
+}
+
+test "palette robustness late decoration failure stops the existing visible timer once" {
+    const Api = RecordingScrollbarApi;
+    Api.reset();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}), .scrollbar = Win32.opaquePointerFromInt(c.HWND, 0x2000) };
+    defer dialog.state.deinit();
+    syncScrollbarWith(Api, &dialog, false);
+    try std.testing.expect(dialog.scrollbar_timer_armed);
+    Api.failure = .bounds;
+    syncScrollbarWith(Api, &dialog, false);
+    const queries = Api.queries;
+    Api.failure = null;
+    syncScrollbarWith(Api, &dialog, true);
+    try std.testing.expect(!dialog.closed and dialog.failure == null);
+    try std.testing.expect(dialog.scrollbar_disabled and !dialog.scrollbar_visible and !dialog.scrollbar_timer_armed);
+    try std.testing.expectEqual(@as(usize, 1), Api.arms);
+    try std.testing.expectEqual(@as(usize, 1), Api.kills);
+    try std.testing.expectEqual(@as(usize, 1), Api.hides);
+    try std.testing.expectEqual(@as(usize, 1), Api.warnings);
+    try std.testing.expectEqual(queries, Api.queries);
+}
+
+fn scrollbarProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    switch (message) {
+        c.WM_NCHITTEST => return c.HTTRANSPARENT,
+        c.WM_MOUSEACTIVATE => return c.MA_NOACTIVATE,
+        c.WM_ERASEBKGND => return 1,
+        c.WM_TIMER => {
+            if (active) |dialog| {
+                if (wparam == scrollbar_timer and dialog.scrollbar_timer_armed) syncScrollbar(dialog);
+            }
+            return 0;
+        },
+        c.WM_NCDESTROY => {
+            if (active) |dialog| {
+                if (dialog.scrollbar == hwnd) {
+                    dialog.scrollbar = null;
+                    dialog.scrollbar_visible = false;
+                    dialog.scrollbar_timer_armed = false;
+                }
+            }
+            return c.DefWindowProcW(hwnd, message, wparam, lparam);
+        },
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const dc = c.BeginPaint(hwnd, &paint);
+            defer _ = c.EndPaint(hwnd, &paint);
+            if (active) |dialog| {
+                if (!dialog.scrollbar_disabled) {
+                    var client: c.RECT = undefined;
+                    _ = c.GetClientRect(hwnd, &client);
+                    drawScrollbar(dc, client, dialog.scroll_info, dialog.dpi);
+                }
+            }
+            return 0;
+        },
+        c.WM_PRINTCLIENT => {
+            if (active) |dialog| {
+                if (!dialog.scrollbar_disabled) {
+                    var client: c.RECT = undefined;
+                    _ = c.GetClientRect(hwnd, &client);
+                    drawScrollbar(Win32.opaquePointerFromInt(c.HDC, wparam), client, dialog.scroll_info, dialog.dpi);
+                }
+            }
+            return 0;
+        },
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
+    }
+}
+
+fn scrollbarThumb(bounds: c.RECT, info: c.SCROLLBARINFO, dpi: u32) c.RECT {
+    const width = @min(@max(0, bounds.right - bounds.left), Dpi.scale(6, dpi));
+    const left = bounds.left + @divTrunc(bounds.right - bounds.left - width, 2);
+    return .{
+        .left = left,
+        .top = std.math.clamp(bounds.top + info.xyThumbTop, bounds.top, bounds.bottom),
+        .right = left + width,
+        .bottom = std.math.clamp(bounds.top + info.xyThumbBottom, bounds.top, bounds.bottom),
+    };
+}
+
+fn drawScrollbar(dc: c.HDC, bounds: c.RECT, info: c.SCROLLBARINFO, dpi: u32) void {
+    fill(dc, bounds, Tokens.window_tone);
+    const thumb = scrollbarThumb(bounds, info, dpi);
+    if (thumb.bottom > thumb.top) {
+        const brush = c.CreateSolidBrush(scrollbar_thumb);
+        defer _ = c.DeleteObject(brush);
+        const old_brush = c.SelectObject(dc, brush);
+        defer _ = c.SelectObject(dc, old_brush);
+        const old_pen = c.SelectObject(dc, c.GetStockObject(c.NULL_PEN));
+        defer _ = c.SelectObject(dc, old_pen);
+        const radius = @max(1, thumb.right - thumb.left);
+        _ = c.RoundRect(dc, thumb.left, thumb.top, thumb.right, thumb.bottom, radius, radius);
+    }
+    const pen = c.CreatePen(c.PS_SOLID, @max(1, Dpi.scale(1, dpi)), scrollbar_thumb);
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(dc, pen);
+    defer _ = c.SelectObject(dc, old_pen);
+    const center = bounds.left + @divTrunc(bounds.right - bounds.left, 2);
+    const half = @min(Dpi.scale(3, dpi), @divTrunc(bounds.right - bounds.left, 3));
+    const top = bounds.top + @divTrunc(info.dxyLineButton, 2);
+    const bottom = bounds.bottom - @divTrunc(info.dxyLineButton, 2);
+    _ = c.MoveToEx(dc, center - half, top + half, null);
+    _ = c.LineTo(dc, center, top);
+    _ = c.LineTo(dc, center + half + 1, top + half + 1);
+    _ = c.MoveToEx(dc, center - half, bottom - half, null);
+    _ = c.LineTo(dc, center, bottom);
+    _ = c.LineTo(dc, center + half + 1, bottom - half - 1);
 }
 
 fn editProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
@@ -619,12 +1240,13 @@ fn resultText(allocator: std.mem.Allocator, entry: Entry) ![]u8 {
 
 fn paletteBounds(width: i32, height: i32, dpi: u32, count: usize) c.RECT {
     const margin = Dpi.scale(8, dpi);
-    const top = Dpi.scale(Tokens.header_height, dpi) + margin;
-    const available_bottom = @max(top, height - Dpi.scale(Tokens.activity_strip_height, dpi) - margin);
+    const available_top = Dpi.scale(Tokens.header_height, dpi) + margin;
+    const available_bottom = @max(available_top, height - Dpi.scale(Tokens.activity_strip_height, dpi) - margin);
     const palette_width = @max(0, @min(Dpi.scale(460, dpi), width - 2 * margin));
     const desired_height = Dpi.scale(field_height + row_height * @as(i32, @intCast(@min(8, @max(1, count)))), dpi);
-    const palette_height = @min(Dpi.scale(380, dpi), @min(desired_height, available_bottom - top));
+    const palette_height = @min(Dpi.scale(380, dpi), @min(desired_height, available_bottom - available_top));
     const left = @divTrunc(width - palette_width, 2);
+    const top = std.math.clamp(@divTrunc(height - palette_height, 2), available_top, available_bottom - palette_height);
     return .{ .left = left, .top = top, .right = left + palette_width, .bottom = top + palette_height };
 }
 
@@ -765,34 +1387,309 @@ fn envFlag(name: []const u8) bool {
     return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
-test "filter preserves exact ranking and deterministic cross-project order" {
+test "palette residual ranking follows macOS prefix substring attribute project without ID search" {
     const entries = [_]Entry{
         .{ .project_path = "A", .project_name = "Alpha", .node_id = "first", .title = "Authentication audit", .loop_type = "turnBased", .state = "idle" },
         .{ .project_path = "B", .project_name = "Beta", .node_id = "auth", .title = "Unrelated", .loop_type = "goalBased", .state = "running" },
         .{ .project_path = "B", .project_name = "Beta", .node_id = "third", .title = "Fix authentication", .loop_type = "proactive", .state = "failed" },
+        .{ .project_path = "C", .project_name = "Authentication", .node_id = "fourth", .title = "Nothing", .loop_type = "timeBased", .state = "idle" },
     };
     var state = State.init(std.testing.allocator, &entries);
     defer state.deinit();
 
     try state.filter("AUTH");
-    try std.testing.expectEqual(@as(usize, 1), state.matches.items[0].entry_index);
-    try std.testing.expectEqual(@as(u8, 0), state.matches.items[0].score);
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.matches.items[0].entry_index);
+    try std.testing.expectEqual(@as(usize, 2), state.matches.items[1].entry_index);
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items[2].entry_index);
 
     try state.filter("unrelated");
     try std.testing.expectEqual(@as(usize, 1), state.matches.items[0].entry_index);
-    try std.testing.expectEqual(@as(u8, 1), state.matches.items[0].score);
+    try std.testing.expectEqual(@as(u8, 0), state.matches.items[0].score);
 
     try state.filter("authentication");
     try std.testing.expectEqualSlices(usize, &.{ 0, 2 }, &.{
         state.matches.items[0].entry_index,
         state.matches.items[1].entry_index,
     });
-    try std.testing.expectEqual(@as(u8, 2), state.matches.items[0].score);
-    try std.testing.expectEqual(@as(u8, 3), state.matches.items[1].score);
+    try std.testing.expectEqual(@as(u8, 0), state.matches.items[0].score);
+    try std.testing.expectEqual(@as(u8, 1), state.matches.items[1].score);
 
     try state.filter("FIX AUTH");
     try std.testing.expectEqual(@as(usize, 2), state.matches.items[0].entry_index);
-    try std.testing.expectEqual(@as(u8, 2), state.matches.items[0].score);
+    try std.testing.expectEqual(@as(u8, 0), state.matches.items[0].score);
+    try state.filter("timed");
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items[0].entry_index);
+    try state.filter("scheduled");
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items[0].entry_index);
+    try state.filter("running");
+    try std.testing.expectEqual(@as(usize, 1), state.matches.items[0].entry_index);
+    try state.filter("third");
+    try std.testing.expectEqual(@as(usize, 0), state.matches.items.len);
+}
+
+test "palette residual empty query stably partitions rollup attention across projects not raw states" {
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "Alpha", .node_id = "quiet", .title = "ZZZ quiet", .loop_type = "sketch", .state = "awaitingInput" },
+        .{ .project_path = "A", .project_name = "Alpha", .node_id = "done", .title = "ZZZ done", .loop_type = "goalBased", .state = "succeeded", .needs_human = true },
+        .{ .project_path = "B", .project_name = "Beta", .node_id = "waiting", .title = "AAA waiting", .loop_type = "turnBased", .state = "waiting", .needs_human = true },
+        .{ .project_path = "B", .project_name = "Beta", .node_id = "other", .title = "AAA quiet", .loop_type = "sketch", .state = "idle" },
+    };
+    var state = State.init(std.testing.allocator, &entries);
+    defer state.deinit();
+    try state.filter("  ");
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 0, 3 }, &.{
+        state.matches.items[0].entry_index, state.matches.items[1].entry_index,
+        state.matches.items[2].entry_index, state.matches.items[3].entry_index,
+    });
+}
+
+test "palette residual query rank precedes attention then localized title ties" {
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "1", .title = "ZZZ match", .loop_type = "sketch", .state = "idle", .needs_human = true },
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "2", .title = "Match exact", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "3", .title = "delta match", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "4", .title = "Alpha match", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "5", .title = "Zulu match", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "A", .project_name = "Match folder", .node_id = "6", .title = "Éclair match", .loop_type = "sketch", .state = "idle" },
+    };
+    var state = State.init(std.testing.allocator, &entries);
+    defer state.deinit();
+    try state.filter("match");
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0, 3, 2, 5, 4 }, &.{
+        state.matches.items[0].entry_index, state.matches.items[1].entry_index,
+        state.matches.items[2].entry_index, state.matches.items[3].entry_index,
+        state.matches.items[4].entry_index, state.matches.items[5].entry_index,
+    });
+    try state.filter("  éCLAIR  ");
+    try std.testing.expectEqual(@as(usize, 1), state.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 5), state.matches.items[0].entry_index);
+}
+
+test "palette residual exact title shares prefix rank with attention and Unicode project matches" {
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "Ångström", .node_id = "same", .title = "Match", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "B", .project_name = "Other", .node_id = "same", .title = "Match suffix", .loop_type = "turnBased", .state = "waiting", .needs_human = true },
+    };
+    var state = State.init(std.testing.allocator, &entries);
+    defer state.deinit();
+    try state.filter("\u{2003}MATCH\u{A0}");
+    try std.testing.expectEqual(@as(usize, 2), state.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.matches.items[0].entry_index);
+    try std.testing.expectEqual(@as(u8, 0), state.matches.items[0].score);
+    try std.testing.expectEqual(@as(u8, 0), state.matches.items[1].score);
+    try state.filter("ÅNG");
+    try std.testing.expectEqual(@as(usize, 1), state.matches.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.matches.items[0].entry_index);
+    try std.testing.expectEqual(@as(u8, 3), state.matches.items[0].score);
+}
+
+test "palette residual waiting and DONE attention use exact project and node membership" {
+    const Attention = struct { project_path: []const u8, node: struct { id: []const u8 } };
+    const attention = [_]Attention{
+        .{ .project_path = "B", .node = .{ .id = "shared" } },
+        .{ .project_path = "A", .node = .{ .id = "done" } },
+    };
+    var entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "Alpha", .node_id = "shared", .title = "Quiet same ID", .loop_type = "sketch", .state = "awaitingInput" },
+        .{ .project_path = "A", .project_name = "Alpha", .node_id = "done", .title = "Done needs human", .loop_type = "goalBased", .state = "succeeded" },
+        .{ .project_path = "B", .project_name = "Beta", .node_id = "shared", .title = "Waiting needs human", .loop_type = "turnBased", .state = "waiting" },
+    };
+    for (&entries) |*entry| entry.needs_human = needsHuman(&attention, entry.project_path, entry.node_id);
+    try std.testing.expect(!needsHuman(&attention, "b", "shared"));
+    try std.testing.expect(!needsHuman(&attention, "B", "Shared"));
+    var state = State.init(std.testing.allocator, &entries);
+    defer state.deinit();
+    try state.filter("");
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 0 }, &.{
+        state.matches.items[0].entry_index, state.matches.items[1].entry_index, state.matches.items[2].entry_index,
+    });
+    try std.testing.expectEqualStrings("DONE", displayState(state.selectedEntry().?));
+    try state.filter("waiting");
+    try std.testing.expectEqual(@as(usize, 2), state.matches.items[0].entry_index);
+}
+
+fn filterAllocationCase(allocator: std.mem.Allocator) !void {
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "Match", .node_id = "one", .title = "Éclair match", .loop_type = "sketch", .state = "idle" },
+        .{ .project_path = "B", .project_name = "Match", .node_id = "two", .title = "Zulu match", .loop_type = "turnBased", .state = "waiting" },
+        .{ .project_path = "C", .project_name = "Match", .node_id = "three", .title = "Other", .loop_type = "goalBased", .state = "succeeded" },
+    };
+    var state = State.init(allocator, &entries);
+    defer state.deinit();
+    try state.filter("match");
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items.len);
+    try state.filter("");
+    try std.testing.expectEqual(@as(usize, 3), state.matches.items.len);
+}
+
+test "palette residual Unicode filtering unwinds every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, filterAllocationCase, .{});
+}
+
+test "palette residual bounds match window centered 750 reference and clamp small owners" {
+    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+        const bounds = paletteBounds(Dpi.scale(1440, dpi), Dpi.scale(900, dpi), dpi, 8);
+        try std.testing.expect(@abs(bounds.left - Dpi.scale(490, dpi)) <= 1);
+        try std.testing.expect(@abs(bounds.top - Dpi.scale(261, dpi)) <= 1);
+        try std.testing.expect(@abs(bounds.right - Dpi.scale(950, dpi)) <= 1);
+        try std.testing.expect(@abs(bounds.bottom - Dpi.scale(639, dpi)) <= 1);
+        try std.testing.expect(@abs(bounds.top + bounds.bottom - Dpi.scale(900, dpi)) <= 1);
+        try std.testing.expect(@abs(bounds.left + bounds.right - Dpi.scale(1440, dpi)) <= 1);
+        const small = paletteBounds(Dpi.scale(452, dpi), Dpi.scale(300, dpi), dpi, 12);
+        try std.testing.expect(small.top >= Dpi.scale(Tokens.header_height, dpi));
+        try std.testing.expect(small.bottom <= Dpi.scale(300 - Tokens.activity_strip_height, dpi));
+    }
+}
+
+test "palette residual overflow paints a dark native scroll track after scrolling" {
+    try registerClass();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &.{}) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    for (0..12) |_| {
+        try std.testing.expect(c.SendMessageW(dialog.list, c.LB_ADDSTRING, 0, @intCast(@intFromPtr(std.unicode.utf8ToUtf16LeStringLiteral("Overflow row").ptr))) >= 0);
+    }
+    _ = c.MoveWindow(dialog.list, 0, field_height, 460, 8 * row_height, 0);
+    _ = c.ShowWindow(dialog.list, c.SW_SHOW);
+    syncScrollbar(&dialog);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    try std.testing.expect(c.IsWindowVisible(dialog.scrollbar) == 0);
+    try std.testing.expectEqual(@as(c.LRESULT, c.HTTRANSPARENT), c.SendMessageW(dialog.scrollbar, c.WM_NCHITTEST, 0, 0));
+    try std.testing.expect(c.GetWindowLongPtrW(dialog.scrollbar, c.GWL_STYLE) & c.WS_TABSTOP == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog.list, c.GWL_STYLE) & c.WS_CLIPSIBLINGS != 0);
+    const dc = c.GetDC(hwnd);
+    defer _ = c.ReleaseDC(hwnd, dc);
+    const memory = c.CreateCompatibleDC(dc) orelse return error.TestDCUnavailable;
+    defer _ = c.DeleteDC(memory);
+    const bitmap = c.CreateCompatibleBitmap(dc, 460, 380) orelse return error.TestBitmapUnavailable;
+    defer _ = c.DeleteObject(bitmap);
+    const old_bitmap = c.SelectObject(memory, bitmap);
+    defer _ = c.SelectObject(memory, old_bitmap);
+    for ([_]c.WPARAM{ 0, 3, 4 }) |top| {
+        _ = c.SendMessageW(dialog.list, c.LB_SETTOPINDEX, top, 0);
+        var info = std.mem.zeroes(c.SCROLLBARINFO);
+        info.cbSize = @sizeOf(c.SCROLLBARINFO);
+        try std.testing.expect(c.GetScrollBarInfo(dialog.list, c.OBJID_VSCROLL, &info) != 0);
+        var window: c.RECT = undefined;
+        try std.testing.expect(c.GetWindowRect(dialog.list, &window) != 0);
+        _ = c.SendMessageW(dialog.list, c.WM_PRINT, @intFromPtr(memory), c.PRF_NONCLIENT | c.PRF_CLIENT | c.PRF_ERASEBKGND);
+        const x = info.rcScrollBar.left - window.left + 1;
+        const y = info.rcScrollBar.top - window.top + info.dxyLineButton + 1;
+        try std.testing.expectEqual(Tokens.window_tone, c.GetPixel(memory, x, y));
+        for (@as(usize, @intCast(info.rcScrollBar.top - window.top))..@as(usize, @intCast(info.rcScrollBar.bottom - window.top))) |py| {
+            for (@as(usize, @intCast(info.rcScrollBar.left - window.left))..@as(usize, @intCast(info.rcScrollBar.right - window.left))) |px| {
+                const pixel = c.GetPixel(memory, @intCast(px), @intCast(py));
+                try std.testing.expect(pixel == Tokens.window_tone or pixel == scrollbar_thumb);
+            }
+        }
+        var cosmetic: c.RECT = undefined;
+        try std.testing.expect(c.GetWindowRect(dialog.scrollbar, &cosmetic) != 0);
+        try std.testing.expectEqualDeep(info.rcScrollBar, cosmetic);
+        const thumb = scrollbarThumb(.{ .left = 0, .top = 0, .right = cosmetic.right - cosmetic.left, .bottom = cosmetic.bottom - cosmetic.top }, info, dialog.dpi);
+        try std.testing.expect(thumb.top >= info.dxyLineButton);
+        try std.testing.expect(thumb.bottom <= cosmetic.bottom - cosmetic.top - info.dxyLineButton);
+        _ = c.SendMessageW(dialog.scrollbar, c.WM_PRINTCLIENT, @intFromPtr(memory), 0);
+        try std.testing.expectEqual(Tokens.window_tone, c.GetPixel(memory, 1, info.dxyLineButton + 1));
+        try std.testing.expectEqual(@as(c.COLORREF, scrollbar_thumb), c.GetPixel(memory, @divTrunc(thumb.left + thumb.right, 2), @divTrunc(thumb.top + thumb.bottom, 2)));
+        var scroll = std.mem.zeroes(c.SCROLLINFO);
+        scroll.cbSize = @sizeOf(c.SCROLLINFO);
+        scroll.fMask = c.SIF_ALL;
+        try std.testing.expect(c.GetScrollInfo(dialog.list, c.SB_VERT, &scroll) != 0);
+        try std.testing.expectEqual(@as(c.INT, @intCast(top)), scroll.nPos);
+        try std.testing.expectEqual(@as(c.UINT, 8), scroll.nPage);
+        try std.testing.expect(c.GetWindowLongPtrW(dialog.list, c.GWL_STYLE) & c.WS_VSCROLL != 0);
+    }
+    try std.testing.expect(dialog.failure == null);
+}
+
+test "palette residual registered backdrop is black layered nonactivating and bounded" {
+    try registerClass();
+    const hwnd = c.CreateWindowExW(
+        c.WS_EX_LAYERED | c.WS_EX_NOACTIVATE | c.WS_EX_TOOLWINDOW,
+        std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeJumpBackdrop").ptr,
+        null,
+        c.WS_POPUP,
+        10,
+        20,
+        640,
+        430,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.PaletteBackdropCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expect(c.IsWindowVisible(hwnd) == 0);
+    var alpha: c.BYTE = 0;
+    var flags: c.DWORD = 0;
+    try std.testing.expect(c.GetLayeredWindowAttributes(hwnd, null, &alpha, &flags) != 0);
+    try std.testing.expectEqual(@as(c.BYTE, 102), alpha);
+    try std.testing.expectEqual(@as(c.DWORD, c.LWA_ALPHA), flags);
+    var bounds: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(hwnd, &bounds) != 0);
+    try std.testing.expectEqualDeep(c.RECT{ .left = 10, .top = 20, .right = 650, .bottom = 450 }, bounds);
+}
+
+test "palette residual backdrop covers only owner client and is destroyed with owner" {
+    try registerClass();
+    const owner = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, null, c.WS_OVERLAPPEDWINDOW, 300, 250, 640, 430, null, null, c.GetModuleHandleW(null), null) orelse return error.TestOwnerCreationFailed;
+    defer if (c.IsWindow(owner) != 0) {
+        _ = c.DestroyWindow(owner);
+    };
+    const backdrop = try createBackdrop(owner);
+    defer if (c.IsWindow(backdrop) != 0) {
+        _ = c.DestroyWindow(backdrop);
+    };
+    try std.testing.expect(c.IsWindowVisible(owner) == 0 and c.IsWindowVisible(backdrop) == 0);
+    try std.testing.expectEqual(owner, c.GetWindow(backdrop, c.GW_OWNER));
+    var expected: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(owner, &expected) != 0);
+    var origin = c.POINT{ .x = 0, .y = 0 };
+    try std.testing.expect(c.ClientToScreen(owner, &origin) != 0);
+    expected.left += origin.x;
+    expected.top += origin.y;
+    expected.right += origin.x;
+    expected.bottom += origin.y;
+    var actual: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(backdrop, &actual) != 0);
+    try std.testing.expectEqualDeep(expected, actual);
+    const style = c.GetWindowLongPtrW(backdrop, c.GWL_EXSTYLE);
+    try std.testing.expect(style & c.WS_EX_LAYERED != 0 and style & c.WS_EX_NOACTIVATE != 0);
+    {
+        const dc = c.GetDC(backdrop);
+        defer _ = c.ReleaseDC(backdrop, dc);
+        const memory = c.CreateCompatibleDC(dc) orelse return error.TestDCUnavailable;
+        defer _ = c.DeleteDC(memory);
+        const bitmap = c.CreateCompatibleBitmap(dc, 2, 2) orelse return error.TestBitmapUnavailable;
+        defer _ = c.DeleteObject(bitmap);
+        const old_bitmap = c.SelectObject(memory, bitmap);
+        defer _ = c.SelectObject(memory, old_bitmap);
+        try std.testing.expectEqual(@as(c.LRESULT, 1), c.SendMessageW(backdrop, c.WM_ERASEBKGND, @intFromPtr(memory), 0));
+        try std.testing.expectEqual(@as(c.COLORREF, 0), c.GetPixel(memory, 1, 1));
+    }
+    try std.testing.expect(c.DestroyWindow(owner) != 0);
+    try std.testing.expect(c.IsWindow(backdrop) == 0);
+}
+
+test "palette residual scrollbar thumb follows native geometry at each DPI" {
+    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+        var info = std.mem.zeroes(c.SCROLLBARINFO);
+        info.xyThumbTop = Dpi.scale(17, dpi);
+        info.xyThumbBottom = Dpi.scale(100, dpi);
+        const bounds = c.RECT{ .left = Dpi.scale(443, dpi), .top = Dpi.scale(42, dpi), .right = Dpi.scale(460, dpi), .bottom = Dpi.scale(378, dpi) };
+        const thumb = scrollbarThumb(bounds, info, dpi);
+        try std.testing.expectEqual(bounds.top + info.xyThumbTop, thumb.top);
+        try std.testing.expectEqual(bounds.top + info.xyThumbBottom, thumb.bottom);
+        try std.testing.expectEqual(Dpi.scale(6, dpi), thumb.right - thumb.left);
+        try std.testing.expect(thumb.left > bounds.left and thumb.right < bounds.right);
+    }
 }
 
 test "empty filtering and selection movement wrap safely" {
@@ -929,7 +1826,7 @@ fn snapshotAllocationCase(allocator: std.mem.Allocator) !void {
     var title = "Ref Main".*;
     const source = [_]Entry{
         .{ .project_path = "A", .project_name = "ParityRef", .node_id = "one", .title = &title, .loop_type = "sketch", .state = "idle" },
-        .{ .project_path = "B", .project_name = "Other", .node_id = "two", .title = "Ref Composite", .loop_type = "composite", .state = "running" },
+        .{ .project_path = "B", .project_name = "Other", .node_id = "two", .title = "Ref Composite", .loop_type = "composite", .state = "running", .needs_human = true },
     };
     const snapshot = try copyEntries(allocator, &source);
     defer freeEntries(allocator, snapshot);
@@ -937,7 +1834,11 @@ fn snapshotAllocationCase(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqualStrings("Ref Main", snapshot[0].title);
     for (source, snapshot) |entry, copy| {
         inline for (std.meta.fields(Entry)) |field| {
-            try std.testing.expect(@field(entry, field.name).ptr != @field(copy, field.name).ptr);
+            if (field.type == []const u8) {
+                try std.testing.expect(@field(entry, field.name).ptr != @field(copy, field.name).ptr);
+            } else {
+                try std.testing.expectEqual(@field(entry, field.name), @field(copy, field.name));
+            }
         }
     }
 }

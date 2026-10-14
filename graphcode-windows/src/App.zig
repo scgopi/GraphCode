@@ -4198,6 +4198,7 @@ pub const App = struct {
                     .title = node.title,
                     .loop_type = node.loop_type,
                     .state = node.state,
+                    .needs_human = JumpPalette.needsHuman(self.model.attention_entries.items, graph.project.path, node.id),
                 }) catch {
                     self.setStatus("Unable to collect jump results");
                     return;
