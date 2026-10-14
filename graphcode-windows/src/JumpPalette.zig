@@ -122,6 +122,7 @@ const Dialog = struct {
     hint: c.HWND = null,
     edit: c.HWND = null,
     edit_proc: c.WNDPROC = null,
+    pending_high_surrogate: ?u16 = null,
     list: c.HWND = null,
     empty_label: c.HWND = null,
     background: c.HBRUSH = null,
@@ -531,6 +532,22 @@ fn refillList(dialog: *Dialog) !void {
 
 fn editProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (message == c.WM_CHAR) {
+        if (wparam >= 0xD800 and wparam <= 0xDBFF) {
+            if (dialog.pending_high_surrogate != null) std.log.warn("Jump palette discarded an incomplete UTF-16 character", .{});
+            dialog.pending_high_surrogate = @intCast(wparam);
+            return 0;
+        }
+        if (dialog.pending_high_surrogate) |high| {
+            dialog.pending_high_surrogate = null;
+            if (wparam >= 0xDC00 and wparam <= 0xDFFF) {
+                // EN_CHANGE must observe the whole scalar, not a dangling high half.
+                const text = [_:0]u16{ high, @intCast(wparam) };
+                return c.CallWindowProcW(dialog.edit_proc, hwnd, c.EM_REPLACESEL, 1, @intCast(@intFromPtr(&text)));
+            }
+            std.log.warn("Jump palette discarded an incomplete UTF-16 character", .{});
+        }
+    }
     const result = c.CallWindowProcW(dialog.edit_proc, hwnd, message, wparam, lparam);
     // Plain EDIT controls do not render cue banners without a v6 controls manifest.
     if (message == c.WM_PAINT and c.GetWindowTextLengthW(hwnd) == 0) {
@@ -553,6 +570,7 @@ fn syncListSelection(dialog: *Dialog) void {
 }
 
 fn accept(dialog: *Dialog) void {
+    if (dialog.pending_high_surrogate != null) return;
     if (dialog.state.selectedEntry() == null) return;
     dialog.accepted = true;
     dialog.closed = true;
@@ -926,4 +944,42 @@ fn snapshotAllocationCase(allocator: std.mem.Allocator) !void {
 
 test "palette parity owns result strings across daemon refresh and unwinds every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, snapshotAllocationCase, .{});
+}
+
+test "palette parity native Unicode query survives a UTF-16 surrogate pair" {
+    try registerClass();
+    const entries = [_]Entry{
+        .{ .project_path = "A", .project_name = "ParityRef", .node_id = "unicode", .title = "Emoji 😀", .loop_type = "sketch", .state = "idle" },
+    };
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(
+        0,
+        class_name.ptr,
+        null,
+        c.WS_POPUP,
+        0,
+        0,
+        460,
+        380,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    _ = c.SendMessageW(dialog.edit, c.WM_CHAR, 0xD83D, 0);
+    try std.testing.expect(!dialog.closed);
+    accept(&dialog);
+    try std.testing.expect(!dialog.accepted and !dialog.closed);
+    _ = c.SendMessageW(dialog.edit, c.WM_CHAR, 0xDE00, 0);
+    try std.testing.expect(!dialog.closed and dialog.failure == null);
+    const query = try readWindowText(std.testing.allocator, dialog.edit);
+    defer std.testing.allocator.free(query);
+    try std.testing.expectEqualStrings("😀", query);
+    try std.testing.expectEqual(@as(usize, 1), dialog.state.matches.items.len);
 }
