@@ -36,24 +36,93 @@ truth for status. The issues carry the acceptance criteria and the priority.
 | D | #774 | `gpt-5.4-mini`, high; switched at 23:25 to `gpt-6-luna`, high (operator decision) |
 | E | #776 | `gpt-6.1-sol`, high, long_context (#788 merged); follow-up PR #792 escalated on 2026-10-14 at 02:50 (2 substantive source-review rejections of the scrollbar hover fix) to `claude-sonnet-5.5`, xhigh, long_context |
 
-**Desktop lease.** Integration validation (the UIA live gate), Windows Sandbox
-runs and screenshots of a running shell all take the desktop. One session
-holds it at a time, and the coordinator hands it out. Unit validation and
-`zig test` run in parallel, each in its own scratch roots.
+**Wave 1 outcome (closed 2026-10-14 at 07:40).**
+- **Merged:** #788 and #792 (jump palette, #776 closed) and #789 (right loop
+  panel, #773).
+- **Stopped by operator decision and restarted under the fixes below:** #768,
+  #764, #767 (PR #800), #774 (PR #787) and #778. Their PRs were closed unmerged,
+  their branches deleted, and their findings kept on the issues.
+
+**What went wrong, and the fix for each:**
+
+| Cause | Fix |
+| --- | --- |
+| Every lane's full unit and integration runs went through the one desktop, and were re-run each time a head moved. The queue dominated elapsed time. | Exact-head CI is the regression gate, and the desktop is for screenshots only: one slot of 15 minutes at most per PR, taken last (see below). |
+| Escalation thresholds of 2 or 3 restarted sessions, which lost bootstrap, builds and context. Every lane escalated at least once. | Escalate only after 5 failed iterations (operator decision; see "Abandon and escalate"). |
+| Kickoffs were hand-copied per lane, and drifted: an 8-character validation root that failed the 81-character preflight, a wrong `Refs` line, the wrong reviewer model. | One canonical kickoff, `investigation/windows-parity-lane-kickoff.md`. The coordinator sends only an issue block. |
+| Environment traps were rediscovered lane by lane: a junction root, the root length, a stale profile log, `onboarding-seen`, `CopyFromScreen` capturing the wrong app, the `ActivateWindow` Alt tap (#797), `zmx` daemons left running, `vcvars`, the PR tool failing on forks. | They are listed once, in the kickoff's "Environment" section. |
+| The coordinator relayed every PR creation and body edit. | Lanes create and edit their own PRs with gh as `coneilen`. |
+| A rebase conflict resolution silently reverted #789's geometry helpers. | After each rebase, the lane and its reviewer read `git diff origin/main...HEAD`. |
+| Broad new assertions in `uia-live-gate.ps1` (counting every canvas card) failed CI twice. | Gate edits assert on named elements, with local `ValidationRunner.Tests.ps1` cases. |
+| Screenshots were taken before review, then retaken after each fix. | Code review first; screenshots once, on the final head; then an image-only review. |
+
+**Coordinator rules (added 2026-10-14):**
+- **Verify before ruling.** Check a scope or parity ruling against the macOS
+  source before sending it. Two wave-1 rulings were reversed (a historical
+  baseline pin, and a Restart button macOS does show).
+- **Run harness changes end to end locally first.** A coordinator PR that changes
+  a validation script runs that script locally before merge. #802 merged with a
+  known local failure, and #805 had to fix it.
+- **Answer every lane message within one turn**, and keep the desktop queue
+  moving. An undeliverable grant goes to the next lane at once.
+
+## Wave 2 (started 2026-10-14)
+
+Every worker uses `investigation/windows-parity-lane-kickoff.md`. Each issue goes
+through four steps:
+
+1. **Plan.** A planning worker (`gpt-6.1-sol`, xhigh) investigates the issue and
+   publishes `Implementation plan (wave 2)` on it. It doesn't edit product code or
+   use the desktop.
+2. **Approve.** The coordinator checks the plan against the macOS source,
+   approves its file scope (including any out-of-lease files, up front), and
+   records `Plan approved` on the issue.
+3. **Implement.** An implementation worker executes the approved plan under the
+   per-PR gate. Exact-head CI is the regression gate, screenshots are taken once
+   at the end, and escalation comes only after 5 failed iterations.
+4. **Merge.** The coordinator merges on exact-head CI, after the code and image
+   reviews.
+
+Planning runs in parallel for all lanes. Implementation stays one per lane.
+
+| Lane | Issue | Planner | Implementer | Reviewer |
+| --- | --- | --- | --- | --- |
+
+**Desktop lease.** Screenshots of a running shell, Windows Sandbox runs and any
+local integration run take the desktop. One session holds it at a time, and the
+coordinator hands it out. Focused hidden-window `zig test` runs in parallel,
+each in its own scratch roots. Full unit and integration validation run in
+exact-head CI (see below).
 
 **Short validation root.** The UIA live-gate preflight refuses sandbox paths
 longer than 81 UTF-16 characters, and `validate.ps1` appends
-`<GUID>\temp\gu-<GUID>` to the root. Pass `-ShellValidationRoot C:\gc-<lane>`,
-where `C:\gc-<lane>` is a **real** short directory owned by the lane. Do **not**
+`<GUID>\temp\gu-<GUID>` to the root. Pass `-ShellValidationRoot C:\gc<lane>`,
+where `C:\gc<lane>` is a **real** directory owned by the lane and **at most 7
+characters** long (for example `C:\gcc2`). `C:\gc-c` passed and `C:\gc-c2` failed by
+one character on 2026-10-14. Do **not**
 use a junction. A junction makes fixture paths differ between the alias and the
 resolved path. That breaks the `WorktreeGitProcess` unit fixtures, and very
 probably caused local `ScrubbedShellStartup` `registered-project` failures that
 exact-head CI did not reproduce.
 
-**Desktop for unit tests too.** Some App and WindowsNativeDialogs unit roots
-call `ShowWindow`, `SetForegroundWindow` or `SetFocus`. So the **full unit
-part** also runs inside the desktop lease. Only focused hidden-window
-`zig test` runs freely.
+**The desktop is for screenshots only (since 2026-10-14).** One machine has one
+desktop, and wave 1 showed that serialising every lane's full unit and
+integration runs through it, and re-running them each time a head moved,
+dominated elapsed time: three product PRs merged in about ten hours. So:
+
+- **Exact-head CI is the regression gate.** Its three unit shards, the
+  integration job (the live UIA gate) and packaging run in parallel on hosted
+  runners, and they're authoritative. A `REGRESSION:` line may cite the exact-head
+  CI run and job IDs, with their counts.
+- **Don't run the full unit or integration part locally in a desktop slot**,
+  except to debug a CI failure you can't reproduce otherwise; ask first. Some
+  App and WindowsNativeDialogs unit roots call `ShowWindow`, `SetForegroundWindow`
+  or `SetFocus`, so they can't run outside a lease.
+- **Focused hidden-window `zig test` roots, `-Task visual-baseline` and
+  `ValidationRunner.Tests.ps1` run freely**, without the desktop.
+- **Desktop slots are 15 minutes at most, and one per PR.** Take one only after
+  the code review has accepted the code and exact-head CI is green, so that the
+  screenshots are taken once, on the final head.
 
 **Captures.**
 - Seed `onboarding-seen` in the fixture's `GRAPHCODE_SUPPORT_DIR`;
@@ -151,6 +220,7 @@ spots.
 
 | Role | Model, effort, context | Fallback | Why |
 | --- | --- | --- | --- |
+| **Investigation and planning (every issue, before implementation)** | `gpt-6.1-sol`, **xhigh**, long_context | `gpt-6-sol`, xhigh, long_context | Operator decision (2026-10-14): a separate high-reasoning worker investigates each issue and writes the implementation plan (see `investigation/windows-parity-lane-kickoff.md`), so the implementer executes a reviewed design instead of discovering it under the per-PR gate. |
 | Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-5.6-luna`, high (operator-chosen fallback if `gpt-6-luna` underperforms) | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
 | Lane implementation (#768, #764, #765, #767, #769, #778, #722, #771, #772) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Same price tier as Sonnet 5.5, with a 1.05M-token window for `App.zig`-scale files. Long context is only needed here. |
 | Polish (P3) | `mai-code-1.1-flash`, medium, default | `claude-haiku-5.5`, medium | The cheapest model with a published coding score and a screenshot-to-code benchmark. |
@@ -169,18 +239,26 @@ Promote or demote models on that data, not on benchmarks alone.
 
 ### Abandon and escalate a struggling session
 
-A session that is going in circles costs more than starting again on a stronger
-model. The coordinator watches each implementation session, and **abandons it**
-when **any one** of these conditions holds.
+Escalating restarts the work in a new session: bootstrap, provider builds and
+context are lost, and in wave 1 that restart cost more than the iterations it
+saved. Every lane escalated at least once on thresholds of 2 or 3, and three
+product PRs merged in about ten hours. So, by **operator decision**
+(2026-10-14), a session is abandoned **only after 5 failed iterations** of the
+same kind:
 
-| Trigger | Threshold |
+| Trigger (each counts as one failed iteration) | Threshold |
 | --- | --- |
-| The same RED test or validation step still fails after successive fix attempts | 3 attempts |
-| The rubber duck or the visual sign-off rejects the PR, each time with substantive findings (not wording) | 2 rejections |
-| Exact-head CI fails for a reason the session caused | 2 times, after its own local validation said green |
-| An evidence claim is contradicted by the reviewer (overclaiming) | once, on a second offence |
-| No new passing test or accepted acceptance box | 90 minutes of busy time |
-| The session edits files outside its lane lease, or asks to widen the scope | once, unless the coordinator approves |
+| The same RED test or validation step still fails after a fix attempt | 5 attempts |
+| The rubber duck or the visual sign-off rejects the PR with substantive findings (not wording) | 5 rejections |
+| Exact-head CI fails for a reason the session caused | 5 times |
+
+Everything else is **corrected in place, not escalated**:
+- A contradicted evidence claim (overclaiming) is fixed in the PR body, and the
+  reviewer re-checks it.
+- An edit outside the lane lease is reverted or approved.
+- A long idle or busy period gets a status question from the coordinator, not a
+  restart. Waiting for the desktop, CI or review doesn't count as a failed
+  iteration.
 
 **Abandoning is not deleting.** The coordinator:
 1. stops the session and keeps its branch and evidence;
@@ -233,9 +311,10 @@ silently.
 3. **Implement**, then run the focused Zig tests and paste their output
    counts. Assert a positive executed-test count, because a filter that matches
    nothing still exits 0.
-4. **Full validation**, run by a test-runner agent:
-   `Tools\windows\validate.ps1 -Task windows-shell -SkipTrayLive`, plus
-   `-Task packaging` when packaging changes, plus `-Task visual-baseline` when
+4. **Full validation is exact-head CI**: push, and wait for every workflow on
+   the exact head to be green. Locally, run only what doesn't need the desktop:
+   the focused roots, `ValidationRunner.Tests.ps1` when gate or runner scripts
+   change, `-Task packaging` when packaging changes, and `-Task visual-baseline` when
    `DesignTokens.zig`, palette, font or visual-contract files change. That task
    runs `VisualBaseline.Tests.ps1` and `PaletteParity.Tests.ps1`, which the shell
    suites don't. `windows-spikes` is a CI workflow job, not a `validate.ps1`
@@ -243,13 +322,17 @@ silently.
    every failure, including
    flakes, with the rerun result next to it. Never replace a failing log with a
    passing one.
-5. **Visual evidence (local).** Build in the session's own worktree, run the
-   shell in a Windows Sandbox (see Local testing) with the shared reference
-   fixture, and capture the surface **before and after** at 100%. The PR
+5. **Visual evidence (local), last.** Capture once, after steps 4 and 6 pass on
+   the final head, in one desktop slot of 15 minutes at most. Use the shared
+   reference fixture, and capture the surface **before and after** at 100%, with
+   `PrintWindow(hwnd, hdc, 2)` plus pixel verification. Don't use `ActivateWindow`
+   from `uia-live-gate.ps1` (#797). Afterwards, check that no processes you own remain,
+   including `zmx.exe` daemons. Windows Sandbox can't do 1440x900 captures. The PR
    includes a table: macOS capture, Windows before, Windows after, and the
    acceptance boxes each pair shows.
-6. **Rubber duck.** A reviewer from a different vendor receives the diff, the
-   PR body and the evidence folder. It must check:
+6. **Rubber duck, before the screenshots.** A reviewer from a different vendor
+   receives the diff, the PR body and the evidence folder; it sees the screenshots
+   in a final, image-only pass after step 5. It must check:
    - every RED/GREEN/REGRESSION line matches a log it opened;
    - every screenshot it cites shows the claimed state;
    - no criterion is claimed from a UIA readback or unit test alone;
