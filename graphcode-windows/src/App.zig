@@ -7953,14 +7953,6 @@ pub const App = struct {
                                     self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = detail_footer }, false, false) catch return;
                                 }
                             }
-                        } else if (self.selected_quick_chat) |chat_index| {
-                            if (chat_index < self.model.quick_chats.items.len) {
-                                const chat = self.model.quick_chats.items[chat_index];
-                                const loop_bar = workspaceQuickChatBar(self.workspace_controls, client.right);
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", chat.id, chat.title, 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", "control", "Restart session", 4, .{ .logical = loopBarRect(loop_bar.restart_session) }, false, false) catch return;
-                            }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
                             const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
@@ -8000,6 +7992,15 @@ pub const App = struct {
                 self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, .{ .logical = GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas) }, false, false) catch return;
             },
         }
+        if (self.surface == .workspace and self.workspace_is_quick_chat) if (self.selected_quick_chat) |chat_index| {
+            if (chat_index < self.model.quick_chats.items.len) {
+                const chat = self.model.quick_chats.items[chat_index];
+                const loop_bar = workspaceQuickChatBar(self.workspace_controls, client.right);
+                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", chat.id, chat.title, 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
+                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", "control", "Restart session", 4, .{ .logical = loopBarRect(loop_bar.restart_session) }, false, false) catch return;
+            }
+        };
         const canvas_alert = if (self.ingress_error.len != 0)
             self.ingress_error
         else if (self.connectionFailureVisible())
@@ -18005,6 +18006,43 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     try std.testing.expectEqual(true, app.workspace_controls.panel_visible);
     try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
     try std.testing.expect(!app.workspace_is_quick_chat);
+}
+
+test "quick chat workspace publishes its bar controls without a project graph" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    const listed =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatsListed":[{"id":"chat-1","title":"Chat 1","backend":"claudeCode","createdAt":0,"activity":null}]}}
+    ;
+    _ = try app.model.updateFromFrame(listed);
+    app.selected_quick_chat = 0;
+    app.workspace_is_quick_chat = true;
+    app.surface = .workspace;
+
+    const Probe = struct {
+        workspace: bool = false,
+        bar: bool = false,
+        show_graph: bool = false,
+        restart_session: bool = false,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "quick-chat-workspace:chat-1")) self.workspace = true;
+                if (std.mem.eql(u8, element.identity, "workspace-loop-bar:chat-1")) self.bar = true;
+                if (std.mem.eql(u8, element.identity, "workspace-show-graph:show-graph")) self.show_graph = true;
+                if (std.mem.eql(u8, element.identity, "workspace-restart-session:control")) self.restart_session = true;
+            }
+        }
+    };
+    var probe: Probe = .{};
+    app.syncAccessibilityTo(&probe, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expectEqual(true, probe.workspace);
+    try std.testing.expectEqual(true, probe.bar);
+    try std.testing.expectEqual(true, probe.show_graph);
+    try std.testing.expectEqual(true, probe.restart_session);
 }
 
 test "quick chat titles include the creation date" {
