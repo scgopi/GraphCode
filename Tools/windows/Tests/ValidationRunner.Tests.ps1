@@ -4007,6 +4007,86 @@ Start-Sleep -Seconds 60
     }
     Write-Host "UIA_EDGE_CONNECTOR_CASE name='$($case.Name)' result=PASS"
   }
+  function Test-SketchPromotionSubmenuCases([string] $gateSource) {
+    if ($gateSource -notmatch 'Test-SketchPromotionSubmenuItems \$subItems') {
+      throw "RED: live Promote submenu gate does not use its testable exact-shape oracle"
+    }
+    $gateTokens = $null
+    $gateParseErrors = $null
+    $gateAst = [System.Management.Automation.Language.Parser]::ParseInput(
+      $gateSource, [ref]$gateTokens, [ref]$gateParseErrors)
+    if ($gateParseErrors.Count -ne 0) {
+      throw "RED: live Promote submenu source does not parse for functional oracle tests"
+    }
+    $helperAst = $gateAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+          $node.Name -ceq "Test-SketchPromotionSubmenuItems"
+      }, $true)
+    if (-not $helperAst) {
+      throw "RED: live Promote submenu exact-shape oracle is not extractable"
+    }
+    . ([scriptblock]::Create($helperAst.Extent.Text))
+    function New-SketchPromotionTestItems {
+      return @(
+        [pscustomobject]@{
+          Id = 0; Text = "Keep the session, add a shape"; Enabled = $false; Separator = $false
+        },
+        [pscustomobject]@{
+          Id = 5116; Text = "Goal — asks for a done check"; Enabled = $true; Separator = $false
+        },
+        [pscustomobject]@{
+          Id = 5117; Text = "Turn — asks where to pause"; Enabled = $true; Separator = $false
+        },
+        [pscustomobject]@{
+          Id = 5118; Text = "Timed — asks for a cadence"; Enabled = $true; Separator = $false
+        }
+      )
+    }
+    $exact = @(New-SketchPromotionTestItems)
+    $extra = @(New-SketchPromotionTestItems) + @(
+      [pscustomobject]@{ Id = 5120; Text = "Unexpected"; Enabled = $true; Separator = $false }
+    )
+    $reorderedBase = @(New-SketchPromotionTestItems)
+    $reordered = @(
+      $reorderedBase[0], $reorderedBase[2], $reorderedBase[1], $reorderedBase[3]
+    )
+    $enabledHeading = @(New-SketchPromotionTestItems)
+    $enabledHeading[0].Enabled = $true
+    $disabledAction = @(New-SketchPromotionTestItems)
+    $disabledAction[1].Enabled = $false
+    $wrongCaption = @(New-SketchPromotionTestItems)
+    $wrongCaption[2].Text = "Turn — unexpected caption"
+    $separatorHeading = @(New-SketchPromotionTestItems)
+    $separatorHeading[0].Separator = $true
+    $cases = @(
+      @{
+        Name = "positive accepts exact disabled nonseparator heading and three enabled actions"
+        Items = $exact
+        Expected = $true
+      },
+      @{ Name = "negative rejects an extra item"; Items = $extra; Expected = $false },
+      @{ Name = "negative rejects reordered actions"; Items = $reordered; Expected = $false },
+      @{ Name = "negative rejects an enabled heading"; Items = $enabledHeading; Expected = $false },
+      @{ Name = "negative rejects a disabled action"; Items = $disabledAction; Expected = $false },
+      @{ Name = "negative rejects a wrong action caption"; Items = $wrongCaption; Expected = $false },
+      @{ Name = "negative rejects a separator heading"; Items = $separatorHeading; Expected = $false }
+    )
+    $passed = 0
+    foreach ($case in $cases) {
+      $actual = [bool](Test-SketchPromotionSubmenuItems $case.Items)
+      if ($actual -ne [bool]$case.Expected) {
+        throw "RED: Promote submenu functional case '$($case.Name)' returned $actual"
+      }
+      Write-Host "UIA_SKETCH_SUBMENU_CASE name='$($case.Name)' result=PASS"
+      $passed++
+    }
+    if ($passed -ne $cases.Count -or $passed -le 0) {
+      throw "RED: Promote submenu functional case count was $passed, expected $($cases.Count)"
+    }
+    Write-Host "UIA_SKETCH_SUBMENU_CASES executed=$passed"
+  }
+  Test-SketchPromotionSubmenuCases $uiaLiveGateSource
   $nativeFormsSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\NativeForms.zig") -Raw
   if ($nativeFormsSource -notmatch '(?s)const node_labels = \[_\]\[\]const u8\{(.*?)\};') {
     throw "RED: NativeForms.zig node_labels table not found for node creation sheet label contract"

@@ -10470,6 +10470,33 @@ try {
     @($sketchBaseline.receivedGraphCommands).Count -eq $sketchGraphBaseline) `
     "sketch/custody positive connected-daemon baseline absent"
   $sketchResults = [Collections.Generic.List[object]]::new()
+  function Test-SketchPromotionSubmenuItems([object[]] $Items) {
+    if ($null -eq $Items) { return $false }
+    $items = @($Items)
+    if ($items.Count -ne 4) { return $false }
+    $expectedIds = @(0, 5116, 5117, 5118)
+    $expectedCaptions = @(
+      "Keep the session, add a shape",
+      "Goal — asks for a done check",
+      "Turn — asks where to pause",
+      "Timed — asks for a cadence"
+    )
+    for ($index = 0; $index -lt $expectedIds.Count; $index++) {
+      $item = $items[$index]
+      if ($null -eq $item -or
+          $null -eq $item.PSObject.Properties["Id"] -or
+          $null -eq $item.PSObject.Properties["Text"] -or
+          $null -eq $item.PSObject.Properties["Enabled"] -or
+          $null -eq $item.PSObject.Properties["Separator"] -or
+          $item.Id -ne $expectedIds[$index] -or
+          [string]$item.Text -cne $expectedCaptions[$index] -or
+          [bool]$item.Enabled -ne ($index -ne 0) -or
+          [bool]$item.Separator) {
+        return $false
+      }
+    }
+    return $true
+  }
   $promotionCases = @(
     [pscustomobject]@{ Index = 1; Command = 5116; Target = "Goal"; Type = "goalBased" },
     [pscustomobject]@{ Index = 2; Command = 5117; Target = "Turn"; Type = "turnBased" },
@@ -10479,16 +10506,13 @@ try {
     $id = "66666666-6666-4666-8666-{0:x12}" -f $case.Index
     $title = "UIA sketch $($case.Index)"
     $menu = Open-SketchNodeMenu $title
-    $parent = @($menu.items | Where-Object { $_.Text -eq "Promote to..." -and $_.Enabled })
+    $parent = @($menu.items | Where-Object { $_.Text -ceq "Promote to…" -and $_.Enabled })
     Require ($parent.Count -eq 1) "sketch '$title' omitted native Promote to submenu"
     $rootHandle = [GraphCodeUiaGateState]::PopupMenuHandle($menu.popup)
     $subHandle = [GraphCodeUiaGateState]::NativeSubMenu($rootHandle, [int]$parent[0].Position)
     $subItems = @(Get-NativeMenuItems $subHandle)
-    Require ($subHandle -ne [IntPtr]::Zero -and $subItems.Count -eq 4 -and
-      (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "0,5116,5117,5118" -and
-      (($subItems | ForEach-Object { [string]$_.Text }) -join '|') -ceq "Keep the session, add a shape|Goal — asks for a done check|Turn — asks where to pause|Timed — asks for a cadence" -and
-      (-not $subItems[0].Enabled) -and $subItems[0].Text -ceq "Keep the session, add a shape" -and
-      @($subItems | Select-Object -Skip 1 | Where-Object { -not $_.Enabled }).Count -eq 0) `
+    Require ($subHandle -ne [IntPtr]::Zero -and
+      (Test-SketchPromotionSubmenuItems $subItems)) `
       "sketch '$title' real HMENU submenu differs: $(Format-PopupMenuItems $subItems)"
     $submenuKeyboardReveal = $false
     $submenuRevealed = [GraphCodeUiaGateState]::HoverPopupMenuItem(
@@ -10552,7 +10576,7 @@ try {
       $cancelAction = Sketch-Cancel "Turn promotion"
       $cancelled = Sketch-NoMutation "cancel Turn" $bytes $before
       $reopen = Open-SketchNodeMenu $title
-      $parent = @($reopen.items | Where-Object { $_.Text -eq "Promote to..." -and $_.Enabled })
+      $parent = @($reopen.items | Where-Object { $_.Text -ceq "Promote to…" -and $_.Enabled })
       Require ($parent.Count -eq 1) "cancelled sketch promotion disappeared from menu"
       $reopenRoot = [GraphCodeUiaGateState]::PopupMenuHandle($reopen.popup)
       $handle = [GraphCodeUiaGateState]::NativeSubMenu($reopenRoot, [int]$parent[0].Position)
@@ -10693,7 +10717,7 @@ try {
       $renderedPromotionMenu = @($renderMenu.items | ForEach-Object {
           [ordered]@{ id = $_.Id; text = $_.Text; enabled = $_.Enabled }
         })
-      $promotionChoices = @($renderMenu.items | Where-Object { $_.Text -eq "Promote to..." })
+      $promotionChoices = @($renderMenu.items | Where-Object { $_.Text -ceq "Promote to…" })
       $newChildChoices = @($renderMenu.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled })
       $sameCardAutomationId = $renderMenu.cardId -ceq $menu.cardId
       $renderedPromotedState = $sameCardAutomationId -and
