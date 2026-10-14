@@ -848,8 +848,8 @@ fn drawOverview(
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
             roundedCard(hdc, card, Tokens.loop_card_bottom, false);
             fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
-            drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
-            drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8);
+            drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF, card.right - scaledValue(14, state.zoom));
+            drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8, card.right - scaledValue(14, state.zoom));
         }
     }
 }
@@ -874,8 +874,8 @@ fn drawQuickChats(
         const card = quickChatCardBounds(index, bounds, state);
         roundedCard(hdc, card, Tokens.loop_card_bottom, false);
         fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), 0x007A7A7A);
-        drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF);
-        drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A);
+        drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF, card.right - scaledValue(14, state.zoom));
+        drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A, card.right - scaledValue(14, state.zoom));
     }
 }
 
@@ -1381,14 +1381,14 @@ fn attentionRail(
         std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
     const rail = attentionRailBounds(width);
     fill(hdc, rail, 0x002D2418);
-    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A);
+    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A, rail.right - 18);
     var age_buffer: [96]u8 = undefined;
     const oldest = if (model.attention_entries.items.len != 0)
         attentionAgeLabel(&age_buffer, model.attention_entries.items[0].node)
     else
         "none";
-    drawText(hdc, allocator, "Review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00E6E6E6);
-    drawText(hdc, allocator, oldest, Tokens.sidebar_width + 274, Tokens.header_height + 21, 10, 0x00B8B8B8);
+    drawText(hdc, allocator, "Review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00E6E6E6, rail.right - 18);
+    drawText(hdc, allocator, oldest, Tokens.sidebar_width + 274, Tokens.header_height + 21, 10, 0x00B8B8B8, rail.right - 18);
 }
 
 fn attentionAgeLabel(buffer: []u8, node: GraphModel.Node) []const u8 {
@@ -1405,10 +1405,10 @@ fn activityStrip(
     bounds: c.RECT,
 ) void {
     fill(hdc, bounds, 0x001D1D21);
-    drawText(hdc, allocator, "ACTIVITY", bounds.left + 16, bounds.top + 10, 10, 0x007A7A7A);
+    drawText(hdc, allocator, "ACTIVITY", bounds.left + 16, bounds.top + 10, 10, 0x007A7A7A, bounds.right - 12);
     var count_buffer: [32]u8 = undefined;
     const summary = std.fmt.bufPrint(&count_buffer, "{d} recent", .{model.activity.items.len}) catch "recent";
-    drawText(hdc, allocator, summary, bounds.left + 76, bounds.top + 10, 10, 0x00909098);
+    drawText(hdc, allocator, summary, bounds.left + 76, bounds.top + 10, 10, 0x00909098, bounds.right - 12);
     var x = bounds.left + 142;
     const visible_count = @min(model.activity.items.len, 4);
     const start = model.activity.items.len - visible_count;
@@ -1417,8 +1417,8 @@ fn activityStrip(
         if (card.right <= card.left) break;
         roundedCard(hdc, card, 0x0026262B, false);
         fill(hdc, rect(card.left, card.top, card.left + 3, card.bottom), stateColor(event.state, false));
-        drawText(hdc, allocator, event.title, card.left + 10, card.top + 7, 10, 0x00D8D8DE);
-        drawText(hdc, allocator, compactActivityState(event.state), card.left + 10, card.top + 22, 9, stateColor(event.state, false));
+        drawText(hdc, allocator, event.title, card.left + 10, card.top + 7, 10, 0x00D8D8DE, card.right - 10);
+        drawText(hdc, allocator, compactActivityState(event.state), card.left + 10, card.top + 22, 9, stateColor(event.state, false), card.right - 10);
         x += 184;
         if (x >= bounds.right - 80) break;
     }
@@ -1676,25 +1676,25 @@ fn drawNode(
     const role = nodeRole(edges, node.id, declared_entries);
     const reclaim_offer = hasReclaimOffer(node, inspection, kept_worktrees);
     const layout = cardTextLayout(state.zoom, role == .entry, attention);
-    if (layout.show_entry) drawText(hdc, allocator, "START", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x008A8A8A);
-    if (role == .unwired) drawText(hdc, allocator, "UNWIRED", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x00FFCD7A);
-    drawText(hdc, allocator, node.title, x + scaled(14, state), y + layout.title_y, scaled(14, state), 0x00FFFFFF);
-    drawText(hdc, allocator, node.state, x + scaled(14, state), y + layout.state_y, scaled(11, state), if (attention) 0x00FFB340 else 0x00B8B8B8);
+    if (layout.show_entry) drawText(hdc, allocator, "START", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x008A8A8A, bounds.right - scaled(14, state));
+    if (role == .unwired) drawText(hdc, allocator, "UNWIRED", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x00FFCD7A, bounds.right - scaled(14, state));
+    drawText(hdc, allocator, node.title, x + scaled(14, state), y + layout.title_y, scaled(14, state), 0x00FFFFFF, bounds.right - scaled(14, state));
+    drawText(hdc, allocator, node.state, x + scaled(14, state), y + layout.state_y, scaled(11, state), if (attention) 0x00FFB340 else 0x00B8B8B8, bounds.right - scaled(14, state));
     if (layout.show_activity) {
         const primary = nodePrimaryDetail(node);
         if (primary.len != 0)
-            drawText(hdc, allocator, primary, x + scaled(14, state), y + layout.state_y + scaled(20, state), scaled(9, state), 0x00A8A8A8);
+            drawText(hdc, allocator, primary, x + scaled(14, state), y + layout.state_y + scaled(20, state), scaled(9, state), 0x00A8A8A8, bounds.right - scaled(14, state));
         if (node.activity.len != 0 and !std.mem.eql(u8, node.activity, primary))
-            drawText(hdc, allocator, node.activity, x + scaled(14, state), y + layout.state_y + scaled(35, state), scaled(9, state), 0x008A8A8A);
+            drawText(hdc, allocator, node.activity, x + scaled(14, state), y + layout.state_y + scaled(35, state), scaled(9, state), 0x008A8A8A, bounds.right - scaled(14, state));
         var metadata_buffer: [128]u8 = undefined;
         const metadata = nodeMetadata(&metadata_buffer, node);
         if (metadata.len != 0 and (role != .unwired or reclaim_offer))
-            drawText(hdc, allocator, metadata, x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x007A7A7A);
+            drawText(hdc, allocator, metadata, x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x007A7A7A, bounds.right - scaled(14, state));
         if (role == .unwired and !reclaim_offer)
-            drawText(hdc, allocator, "No connections · right-click to recover", x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x00FFCD7A);
+            drawText(hdc, allocator, "No connections · right-click to recover", x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x00FFCD7A, bounds.right - scaled(14, state));
     }
     if (layout.show_attention) {
-        drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340);
+        drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340, bounds.right - scaled(18, state));
         const action = attentionActionBounds(bounds, state);
         fill(hdc, action, 0x00FF9F0A);
         drawTextRect(hdc, allocator, attentionActionLabel(node), action, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
@@ -2078,76 +2078,72 @@ pub fn paintLoopDetailRail(
     const node = graph.nodes.items[selected_index];
     fill(hdc, rect(left, top, client_right, client_bottom), 0x0028282C);
     fill(hdc, rect(left, top, left + 1, client_bottom), 0x0045454B);
-    drawText(hdc, allocator, "LOOP MAP", left + 18, top + 16, 11, 0x009898A0);
+    drawText(hdc, allocator, "THIS LOOP", left + 18, top + 16, 11, 0x009898A0, client_right - 18);
     const collapse = loopDetailCollapseBounds(client_right);
     fill(hdc, collapse, 0x00303035);
     drawTextRect(hdc, allocator, "Collapse", collapse, 10, 0x00D8D8DE, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
 
-    const map_top = top + 44;
-    roundedCard(hdc, rect(left + 18, map_top, client_right - 18, map_top + 72), 0x00303035, false);
-    const center_x = left + @divTrunc(Tokens.loop_detail_width, 2);
-    const center_y = map_top + 36;
-    for (graph.edges.items) |edge| {
-        const upstream = std.mem.eql(u8, edge.to, node.id);
-        const downstream = std.mem.eql(u8, edge.from, node.id);
-        if (!upstream and !downstream) continue;
-        const other_x = if (upstream) center_x - 72 else center_x + 72;
-        const pen = c.CreatePen(c.PS_SOLID, 2, if (edge.fired) 0x0058C878 else 0x00606068);
-        if (pen != null) {
-            const old = c.SelectObject(hdc, pen);
-            _ = c.MoveToEx(hdc, if (upstream) other_x + 8 else center_x + 8, center_y, null);
-            _ = c.LineTo(hdc, if (upstream) center_x - 8 else other_x - 8, center_y);
-            _ = c.SelectObject(hdc, old);
-            _ = c.DeleteObject(pen);
+    const map_layout = loopDetailMiniMapLayout(left, top, client_right);
+    roundedCard(hdc, map_layout.frame, 0x00303035, false);
+    const center_block = map_layout.center;
+    roundedCard(hdc, center_block, Tokens.loop_card_bottom, false);
+    fill(hdc, rect(center_block.left, center_block.top, center_block.left + 4, center_block.bottom), loopTypeColor(node.loop_type));
+    drawTextRect(hdc, allocator, node.title, rect(center_block.left + 10, center_block.top + 5, center_block.right - 10, center_block.top + 22), 10, 0x00FFFFFF, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    drawTextRect(hdc, allocator, node.state, rect(center_block.left + 10, center_block.top + 19, center_block.right - 10, center_block.top + 32), 8, 0x00B8B8B8, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    if (map_layout.incoming) |incoming_block| {
+        roundedCard(hdc, incoming_block, Tokens.loop_card_bottom, false);
+        fill(hdc, rect(incoming_block.left, incoming_block.top, incoming_block.left + 4, incoming_block.bottom), 0x00606068);
+        if (firstRelatedNode(graph, node.id, true)) |related| {
+            fill(hdc, rect(incoming_block.left, incoming_block.top, incoming_block.left + 4, incoming_block.bottom), loopTypeColor(related.loop_type));
+            drawTextRect(hdc, allocator, related.title, rect(incoming_block.left + 8, incoming_block.top + 2, incoming_block.right - 8, incoming_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
         }
-        drawDot(hdc, other_x, center_y, if (edge.fired) 0x0058C878 else 0x00606068, 6);
     }
-    drawDot(hdc, center_x, center_y, 0x00FFAE5A, 8);
-
-    var y = map_top + 92;
-    drawText(hdc, allocator, "UPSTREAM", left + 18, y, 11, 0x009898A0);
-    y += 24;
-    var upstream_count: usize = 0;
-    for (graph.edges.items) |edge| {
-        if (!std.mem.eql(u8, edge.to, node.id)) continue;
-        upstream_count += 1;
-        paintRelationRow(hdc, allocator, graph, edge.from, edge.condition, edge.fired, left, y);
-        y += 42;
-        if (upstream_count == 3) break;
-    }
-    if (upstream_count == 0) {
-        drawText(hdc, allocator, "No incoming loops", left + 28, y, 12, 0x007A7A82);
-        y += 34;
+    if (map_layout.outgoing) |outgoing_block| {
+        roundedCard(hdc, outgoing_block, Tokens.loop_card_bottom, false);
+        fill(hdc, rect(outgoing_block.left, outgoing_block.top, outgoing_block.left + 4, outgoing_block.bottom), 0x00606068);
+        if (firstRelatedNode(graph, node.id, false)) |related| {
+            fill(hdc, rect(outgoing_block.left, outgoing_block.top, outgoing_block.left + 4, outgoing_block.bottom), loopTypeColor(related.loop_type));
+            drawTextRect(hdc, allocator, related.title, rect(outgoing_block.left + 8, outgoing_block.top + 2, outgoing_block.right - 8, outgoing_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+        }
     }
 
-    y += 8;
-    drawText(hdc, allocator, "DOWNSTREAM", left + 18, y, 11, 0x009898A0);
+    var y = map_layout.frame.bottom + 18;
+    drawText(hdc, allocator, "HANDS OFF TO", left + 18, y, 11, 0x009898A0, client_right - 18);
     y += 24;
-    var downstream_count: usize = 0;
+    var handoff_count: usize = 0;
     for (graph.edges.items) |edge| {
         if (!std.mem.eql(u8, edge.from, node.id)) continue;
-        downstream_count += 1;
-        paintRelationRow(hdc, allocator, graph, edge.to, edge.condition, edge.fired, left, y);
+        handoff_count += 1;
+        paintRelationRow(hdc, allocator, graph, edge.to, edge.condition, edge.fired, left, client_right, y);
         y += 42;
-        if (downstream_count == 3) break;
+        if (handoff_count == 3) break;
     }
-    if (downstream_count == 0) {
-        drawText(hdc, allocator, "No outgoing loops", left + 28, y, 12, 0x007A7A82);
+    if (handoff_count == 0) {
+        drawText(hdc, allocator, "No outgoing loops", left + 28, y, 12, 0x007A7A82, client_right - 18);
         y += 34;
     }
 
     const footer_top = @max(y + 18, client_bottom - 188);
     fill(hdc, rect(left + 18, footer_top, client_right - 18, footer_top + 1), 0x0045454B);
-    drawText(hdc, allocator, "DETAIL", left + 18, footer_top + 14, 11, 0x009898A0);
+    var footer_buffer: [160]u8 = undefined;
+    const footer_text = loopDetailFooter(&footer_buffer, node);
+    drawText(hdc, allocator, footer_text, left + 18, footer_top + 14, 11, 0x009898A0, client_right - 18);
     const branch = if (node.worktree_branch.len != 0) node.worktree_branch else if (node.worktree_path.len != 0) node.worktree_path else "Primary checkout";
-    drawText(hdc, allocator, branch, left + 18, footer_top + 38, 12, 0x00D8D8DE);
+    drawText(hdc, allocator, branch, left + 18, footer_top + 38, 12, 0x00D8D8DE, client_right - 18);
     const metric = if (node.metric_command.len != 0) node.metric_command else if (node.goal_summary.len != 0) node.goal_summary else "No metric configured";
-    drawText(hdc, allocator, metric, left + 18, footer_top + 62, 12, 0x009898A0);
+    drawText(hdc, allocator, metric, left + 18, footer_top + 62, 12, 0x009898A0, client_right - 18);
     paintMetricSparkline(hdc, node, rect(left + 18, footer_top + 86, client_right - 18, footer_top + 118));
-    var meta: [160]u8 = undefined;
-    const meta_text = loopDetailFooter(&meta, node);
-    if (meta_text.len != 0) drawText(hdc, allocator, meta_text, left + 18, footer_top + 124, 11, 0x007AB8FF);
-    if (node.model_tier.len != 0) drawText(hdc, allocator, node.model_tier, left + 18, footer_top + 148, 12, 0x007AB8FF);
+    if (node.model_tier.len != 0) drawText(hdc, allocator, node.model_tier, left + 18, footer_top + 148, 12, 0x007AB8FF, client_right - 18);
+}
+
+fn firstRelatedNode(graph: *const GraphModel.GraphSummary, node_id: []const u8, incoming: bool) ?GraphModel.Node {
+    for (graph.edges.items) |edge| {
+        if (incoming and !std.mem.eql(u8, edge.to, node_id)) continue;
+        if (!incoming and !std.mem.eql(u8, edge.from, node_id)) continue;
+        const related_id = if (incoming) edge.from else edge.to;
+        return nodeById(graph, related_id);
+    }
+    return null;
 }
 
 fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
@@ -2221,6 +2217,57 @@ fn paintMetricSparkline(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT) void 
     if (fallback_pen != null) _ = c.DeleteObject(fallback_pen);
 }
 
+const LoopDetailRowLayout = struct {
+    row: c.RECT,
+    type_bar: c.RECT,
+    title: ?c.RECT,
+    condition: ?c.RECT,
+    status_dot: c.RECT,
+};
+
+fn textRect(x: i32, y: i32, size: i32, limit_right: i32) ?c.RECT {
+    if (limit_right - x < 24) return null;
+    return rect(x, y, limit_right, y + size + 8);
+}
+
+fn loopDetailMiniMapLayout(left: i32, top: i32, client_right: i32) struct {
+    frame: c.RECT,
+    incoming: ?c.RECT,
+    center: c.RECT,
+    outgoing: ?c.RECT,
+} {
+    const frame = rect(left + 18, top + 44, client_right - 18, top + 116);
+    const center = rect(@divTrunc(frame.left + frame.right - 100, 2), frame.top + 20, @divTrunc(frame.left + frame.right + 100, 2), frame.top + 56);
+    const incoming = rect(frame.left + 10, frame.top + 26, frame.left + 58, frame.top + 44);
+    const outgoing = rect(frame.right - 58, frame.top + 26, frame.right - 10, frame.top + 44);
+    return .{
+        .frame = frame,
+        .incoming = incoming,
+        .center = center,
+        .outgoing = outgoing,
+    };
+}
+
+fn loopDetailRowLayout(left: i32, y: i32, client_right: i32, condition: []const u8) LoopDetailRowLayout {
+    const row = rect(left + 18, y, client_right - 18, y + 34);
+    const type_bar = rect(row.left + 12, row.top + 6, row.left + 16, row.bottom - 6);
+    const status_dot = rect(row.right - 16, row.top + 13, row.right - 8, row.top + 21);
+    const show_condition = !std.mem.eql(u8, condition, "always");
+    const condition_bounds = if (show_condition)
+        textRect(row.right - 92, row.top + 7, 10, status_dot.left - 8)
+    else
+        null;
+    const title_limit = if (condition_bounds) |value| value.left - 8 else status_dot.left - 8;
+    const title = textRect(row.left + 44, row.top + 7, 12, title_limit);
+    return .{
+        .row = row,
+        .type_bar = type_bar,
+        .title = title,
+        .condition = condition_bounds,
+        .status_dot = status_dot,
+    };
+}
+
 fn paintRelationRow(
     hdc: c.HDC,
     allocator: std.mem.Allocator,
@@ -2229,18 +2276,32 @@ fn paintRelationRow(
     condition: []const u8,
     fired: bool,
     left: i32,
+    client_right: i32,
     y: i32,
 ) void {
-    roundedCard(hdc, rect(left + 18, y, left + Tokens.loop_detail_width - 18, y + 34), 0x00303035, false);
-    drawDot(hdc, left + 31, y + 17, if (fired) 0x0058C878 else 0x00686870, 4);
-    drawText(hdc, allocator, nodeTitle(graph, node_id), left + 44, y + 7, 12, 0x00E0E0E5);
-    if (!std.mem.eql(u8, condition, "always"))
-        drawText(hdc, allocator, condition, left + Tokens.loop_detail_width - 92, y + 7, 10, 0x009898A0);
+    const related = nodeById(graph, node_id) orelse return;
+    const layout = loopDetailRowLayout(left, y, client_right, condition);
+    roundedCard(hdc, layout.row, 0x00303035, false);
+    fill(hdc, layout.type_bar, loopTypeColor(related.loop_type));
+    if (layout.title) |title| drawText(hdc, allocator, related.title, title.left, title.top, 12, 0x00E0E0E5, title.right);
+    if (layout.condition) |condition_bounds|
+        drawText(hdc, allocator, condition, condition_bounds.left, condition_bounds.top, 10, 0x009898A0, condition_bounds.right);
+    drawDot(
+        hdc,
+        @divTrunc(layout.status_dot.left + layout.status_dot.right, 2),
+        @divTrunc(layout.status_dot.top + layout.status_dot.bottom, 2),
+        if (fired) 0x0058C878 else 0x00686870,
+        4,
+    );
+}
+
+fn nodeById(graph: *const GraphModel.GraphSummary, id: []const u8) ?GraphModel.Node {
+    for (graph.nodes.items) |node| if (std.mem.eql(u8, node.id, id)) return node;
+    return null;
 }
 
 fn nodeTitle(graph: *const GraphModel.GraphSummary, id: []const u8) []const u8 {
-    for (graph.nodes.items) |node| if (std.mem.eql(u8, node.id, id)) return node.title;
-    return "Unknown loop";
+    return (nodeById(graph, id) orelse return "Unknown loop").title;
 }
 
 fn drawDot(hdc: c.HDC, x: i32, y: i32, color: u32, radius: i32) void {
@@ -2298,15 +2359,17 @@ fn drawText(
     y: i32,
     size: i32,
     color: u32,
+    limit_right: i32,
 ) void {
+    const bounds = textRect(x, y, size, limit_right) orelse return;
     const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
     defer allocator.free(wide);
     if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
-    var bounds = rect(x, y, 1200, y + size + 8);
-    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    var draw_bounds = bounds;
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &draw_bounds, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
     _ = c.SelectObject(hdc, old_font);
 }
 
@@ -2762,6 +2825,46 @@ test "minimum zoom hides overflow-prone card content" {
     try std.testing.expect(!layout.show_activity);
     try std.testing.expect(!layout.show_attention);
     try std.testing.expect(layout.state_y < @as(i32, @intFromFloat(106 * 0.55)));
+}
+
+test "bounded text rectangles stop at the owning container" {
+    const wide = rect(1496, 34, 1780, 380);
+    const wide_text = textRect(wide.left + 18, wide.top + 16, 11, wide.right - 18) orelse
+        return error.TestExpectedRect;
+    try std.testing.expectEqual(wide.left + 18, wide_text.left);
+    try std.testing.expectEqual(wide.right - 18, wide_text.right);
+    try std.testing.expect(wide_text.right > wide_text.left);
+
+    const narrow = rect(1496, 34, 1600, 380);
+    const narrow_text = textRect(narrow.left + 18, narrow.top + 16, 11, narrow.right - 18) orelse
+        return error.TestExpectedRect;
+    try std.testing.expectEqual(narrow.right - 18, narrow_text.right);
+    try std.testing.expect(textRect(narrow.left + 18, narrow.top + 16, 11, narrow.left + 30) == null);
+}
+
+test "loop detail rows keep type, title, condition, and status apart" {
+    const client_right = 1780;
+    const left = client_right - Tokens.loop_detail_width;
+    const layout = loopDetailRowLayout(left, 244, client_right, "onSuccess");
+    const title = layout.title orelse return error.TestExpectedRect;
+    try std.testing.expect(layout.row.left >= left + 18);
+    try std.testing.expectEqual(client_right - 18, layout.row.right);
+    try std.testing.expect(layout.type_bar.right <= title.left);
+    const condition = layout.condition orelse return error.TestExpectedRect;
+    try std.testing.expect(title.right <= condition.left);
+    try std.testing.expect(condition.right <= layout.status_dot.left);
+    try std.testing.expect(layout.status_dot.right <= layout.row.right);
+}
+
+test "loop detail minimap blocks do not overlap" {
+    const layout = loopDetailMiniMapLayout(1496, 34, 1780);
+    try std.testing.expect(layout.frame.right <= 1780 - 18);
+    if (layout.incoming) |incoming| {
+        try std.testing.expect(incoming.right <= layout.center.left);
+    }
+    if (layout.outgoing) |outgoing| {
+        try std.testing.expect(layout.center.right <= outgoing.left);
+    }
 }
 
 test "loop card detail prioritizes goal and preserves metadata" {
