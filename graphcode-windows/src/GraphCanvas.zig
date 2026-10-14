@@ -2160,10 +2160,11 @@ fn drawCardBody(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node,
         const role_bounds = rect(if (reclaim) reclaimOfferBounds(bounds).keep.right + scaledValue(6, zoom) else layout.live.left, layout.detail.top, if (attention) attentionActionBounds(bounds, &.{ .zoom = zoom }).left - scaledValue(6, zoom) else layout.detail.right, layout.detail.bottom);
         try drawCardText(hdc, allocator, if (role == .entry) "START" else "UNWIRED", role_bounds, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
     }
+    const meta_text_bounds = rect(layout.meta.left + scaledValue(11, zoom), layout.meta.top, layout.meta.right, layout.meta.bottom);
     const meta = blk: {
         const old = try selectCardFont(hdc, 10.5 * zoom, .card_mono);
         defer _ = c.SelectObject(hdc, old);
-        break :blk cardMetaForWidth(hdc, allocator, node, @intCast(@max(0, std.time.timestamp())), layout.meta.right - layout.meta.left - scaledValue(10, zoom)) catch |err| switch (err) {
+        break :blk cardMetaForWidth(hdc, allocator, node, @intCast(@max(0, std.time.timestamp())), meta_text_bounds.right - meta_text_bounds.left) catch |err| switch (err) {
             error.CardMetadataTooWide => {
                 std.log.warn("Card {s} fixed metadata does not fit: {s}", .{ node.id, @errorName(err) });
                 try drawCardText(hdc, allocator, "Metadata unavailable", layout.meta, 10.5 * zoom, .card_mono, Tokens.dialog_error_text, true);
@@ -2175,7 +2176,7 @@ fn drawCardBody(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node,
     defer allocator.free(meta);
     const square_top = @divTrunc(layout.meta.top + layout.meta.bottom - scaledValue(6, zoom), 2);
     fill(hdc, rect(layout.meta.left, square_top, layout.meta.left + scaledValue(6, zoom), square_top + scaledValue(6, zoom)), loopTypeColor(node.loop_type));
-    try drawCardText(hdc, allocator, meta, rect(layout.meta.left + scaledValue(10, zoom), layout.meta.top, layout.meta.right, layout.meta.bottom), 10.5 * zoom, .card_mono, 0x008C8989, false);
+    try drawCardText(hdc, allocator, meta, meta_text_bounds, 10.5 * zoom, .card_mono, blendCardColor(0x00FFFFFF, Tokens.loop_card_bottom, 52), false);
 }
 
 pub fn nodeBounds(index: usize, state: *const CanvasState) c.RECT {
@@ -3590,7 +3591,7 @@ test "loop card parity both production renderers paint named pill and mono meta 
     try std.testing.expect(dib.count(project_rows.title, 0x00F4F4F4) > 0);
     try std.testing.expect(dib.count(project_rows.live, 0x009F9C9C) > 0);
     try std.testing.expect(dib.count(project_rows.meta, loopTypeColor(node.loop_type)) == 36);
-    try std.testing.expect(dib.count(project_rows.meta, 0x008C8989) > 0);
+    try std.testing.expect(dib.count(project_rows.meta, 0x00979595) > 0);
     const project_pill_pixels = dib.count(project_rows.pill, presentation.fill);
     fill(dib.dc, rect(0, 0, 2200, 500), 0);
     drawOverview(dib.dc, allocator, &model, viewport, &state);
@@ -3599,7 +3600,7 @@ test "loop card parity both production renderers paint named pill and mono meta 
     try std.testing.expect(c.GdiFlush() != 0);
     try std.testing.expectEqual(project_pill_pixels, dib.count(overview_rows.pill, presentation.fill));
     try std.testing.expect(dib.count(overview_rows.meta, loopTypeColor(node.loop_type)) == 36);
-    try std.testing.expect(dib.count(overview_rows.meta, 0x008C8989) > 0);
+    try std.testing.expect(dib.count(overview_rows.meta, 0x00979595) > 0);
     try std.testing.expect(dib.count(overview_rows.detail, 0x000A9FFF) == 0);
 }
 
