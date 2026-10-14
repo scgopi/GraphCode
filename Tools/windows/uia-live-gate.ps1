@@ -7990,7 +7990,7 @@ try {
     if ($_.Separator) { "<separator>" } else { [string]$_.Text }
   })
   Require (($nodeCanvasMenuOrder -join "|") -ceq
-           "Open Terminal|Edit Details...|Save as Template...|Rename...`tF2|Delete Loop...`tDelete") `
+           "Open Terminal|Rename...`tF2|Save as Template...|<separator>|Edit Details...|<separator>|Delete Loop...`tDelete") `
     "canvas node context menu had unexpected ordered items for UIA loop A at screen ($($nodeCanvasMenu.ScreenX),$($nodeCanvasMenu.ScreenY)) client ($($nodeCanvasMenu.ClientX),$($nodeCanvasMenu.ClientY)) bounds $nodeBounds : $($nodeCanvasMenu.Description)"
   Require (@($nodeCanvasMenu.Items | Where-Object {
     -not $_.Separator -and (-not $_.Enabled -or $_.Checked)
@@ -10484,9 +10484,11 @@ try {
     $rootHandle = [GraphCodeUiaGateState]::PopupMenuHandle($menu.popup)
     $subHandle = [GraphCodeUiaGateState]::NativeSubMenu($rootHandle, [int]$parent[0].Position)
     $subItems = @(Get-NativeMenuItems $subHandle)
-    Require ($subHandle -ne [IntPtr]::Zero -and $subItems.Count -eq 3 -and
-      (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "5116,5117,5118" -and
-      @($subItems | Where-Object { -not $_.Enabled }).Count -eq 0) `
+    Require ($subHandle -ne [IntPtr]::Zero -and $subItems.Count -eq 4 -and
+      (($subItems | ForEach-Object { $_.Id }) -join ',') -ceq "0,5116,5117,5118" -and
+      (($subItems | ForEach-Object { [string]$_.Text }) -join '|') -ceq "Keep the session, add a shape|Goal — asks for a done check|Turn — asks where to pause|Timed — asks for a cadence" -and
+      (-not $subItems[0].Enabled) -and $subItems[0].Text -ceq "Keep the session, add a shape" -and
+      @($subItems | Select-Object -Skip 1 | Where-Object { -not $_.Enabled }).Count -eq 0) `
       "sketch '$title' real HMENU submenu differs: $(Format-PopupMenuItems $subItems)"
     $submenuKeyboardReveal = $false
     $submenuRevealed = [GraphCodeUiaGateState]::HoverPopupMenuItem(
