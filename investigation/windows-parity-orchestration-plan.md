@@ -151,7 +151,7 @@ spots.
 
 | Role | Model, effort, context | Fallback | Why |
 | --- | --- | --- | --- |
-| Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-6.1-sol`, high | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
+| Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-5.6-luna`, high (operator-chosen fallback if `gpt-6-luna` underperforms) | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
 | Lane implementation (#768, #764, #765, #767, #769, #778, #722, #771, #772) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Same price tier as Sonnet 5.5, with a 1.05M-token window for `App.zig`-scale files. Long context is only needed here. |
 | Polish (P3) | `mai-code-1.1-flash`, medium, default | `claude-haiku-5.5`, medium | The cheapest model with a published coding score and a screenshot-to-code benchmark. |
 | Rubber-duck review (code and evidence) | `claude-sonnet-5.5`, high, default | `grok-4.7`, high | A different vendor from the OpenAI implementers. If an Anthropic model implemented the change, review it with `grok-4.7` or `gpt-6.1-sol`. |
@@ -202,9 +202,9 @@ from the implementer at every step):
 | Step | Small, well-scoped fixes | Lane implementation and polish |
 | --- | --- | --- |
 | Start | `gpt-6-luna`, high | `gpt-6.1-sol`, high, long_context (polish: `mai-code-1.1-flash`, medium) |
-| 1st escalation | `gpt-6.1-sol`, high | `claude-sonnet-5.5`, xhigh, long_context |
-| 2nd escalation | `claude-sonnet-5.5`, xhigh | `claude-opus-5.5`, max, long_context |
-| 3rd escalation | `claude-opus-5.5`, max | `gpt-5.6-sol`, max, long_context (or `claude-opus-4.8` when the work is mainly visual) |
+| 1st escalation | `gpt-5.6-luna`, high (operator-chosen fallback) | `claude-sonnet-5.5`, xhigh, long_context |
+| 2nd escalation | `gpt-6.1-sol`, high | `claude-opus-5.5`, max, long_context |
+| 3rd escalation | `claude-sonnet-5.5`, xhigh | `gpt-5.6-sol`, max, long_context (or `claude-opus-4.8` when the work is mainly visual) |
 | After that | Stop. The coordinator escalates the issue to the operator, with all the handoff notes. It is probably mis-specified or needs a design decision. | Same |
 
 **Reviewer for each step.** When the implementer is an Anthropic model, review
