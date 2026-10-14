@@ -235,9 +235,11 @@ silently.
    nothing still exits 0.
 4. **Full validation**, run by a test-runner agent:
    `Tools\windows\validate.ps1 -Task windows-shell -SkipTrayLive`, plus
-   `-Task packaging` when packaging changes, plus `-Task windows-spikes` when
-   `DesignTokens.zig`, palette, font or contract files change. That task runs
-   contracts the shell suites don't, such as `PaletteParity.Tests.ps1`. Report
+   `-Task packaging` when packaging changes, plus `-Task visual-baseline` when
+   `DesignTokens.zig`, palette, font or visual-contract files change. That task
+   runs `VisualBaseline.Tests.ps1` and `PaletteParity.Tests.ps1`, which the shell
+   suites don't. `windows-spikes` is a CI workflow job, not a `validate.ps1`
+   task, and every exact-head workflow must be green before merge. Report
    every failure, including
    flakes, with the rerun result next to it. Never replace a failing log with a
    passing one.
