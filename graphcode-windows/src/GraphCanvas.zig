@@ -1381,14 +1381,16 @@ fn attentionRail(
         std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
     const rail = attentionRailBounds(width);
     fill(hdc, rail, 0x002D2418);
-    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A, rail.right - 18);
+    const review_left = Tokens.sidebar_width + 210;
+    const age_left = Tokens.sidebar_width + 274;
+    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A, review_left - 12);
     var age_buffer: [96]u8 = undefined;
     const oldest = if (model.attention_entries.items.len != 0)
         attentionAgeLabel(&age_buffer, model.attention_entries.items[0].node)
     else
         "none";
-    drawText(hdc, allocator, "Review", Tokens.sidebar_width + 210, Tokens.header_height + 21, 11, 0x00E6E6E6, rail.right - 18);
-    drawText(hdc, allocator, oldest, Tokens.sidebar_width + 274, Tokens.header_height + 21, 10, 0x00B8B8B8, rail.right - 18);
+    drawText(hdc, allocator, "Review", review_left, Tokens.header_height + 21, 11, 0x00E6E6E6, age_left - 12);
+    drawText(hdc, allocator, oldest, age_left, Tokens.header_height + 21, 10, 0x00B8B8B8, rail.right - 18);
 }
 
 fn attentionAgeLabel(buffer: []u8, node: GraphModel.Node) []const u8 {
@@ -1405,11 +1407,13 @@ fn activityStrip(
     bounds: c.RECT,
 ) void {
     fill(hdc, bounds, 0x001D1D21);
-    drawText(hdc, allocator, "ACTIVITY", bounds.left + 16, bounds.top + 10, 10, 0x007A7A7A, bounds.right - 12);
+    const summary_left = bounds.left + 76;
+    const card_left = bounds.left + 142;
+    drawText(hdc, allocator, "ACTIVITY", bounds.left + 16, bounds.top + 10, 10, 0x007A7A7A, summary_left - 12);
     var count_buffer: [32]u8 = undefined;
     const summary = std.fmt.bufPrint(&count_buffer, "{d} recent", .{model.activity.items.len}) catch "recent";
-    drawText(hdc, allocator, summary, bounds.left + 76, bounds.top + 10, 10, 0x00909098, bounds.right - 12);
-    var x = bounds.left + 142;
+    drawText(hdc, allocator, summary, summary_left, bounds.top + 10, 10, 0x00909098, card_left - 12);
+    var x = card_left;
     const visible_count = @min(model.activity.items.len, 4);
     const start = model.activity.items.len - visible_count;
     for (model.activity.items[start..]) |event| {
@@ -2096,6 +2100,8 @@ pub fn paintLoopDetailRail(
         if (firstRelatedNode(graph, node.id, true)) |related| {
             fill(hdc, rect(incoming_block.left, incoming_block.top, incoming_block.left + 4, incoming_block.bottom), loopTypeColor(related.loop_type));
             drawTextRect(hdc, allocator, related.title, rect(incoming_block.left + 8, incoming_block.top + 2, incoming_block.right - 8, incoming_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+        } else {
+            drawTextRect(hdc, allocator, "—", incoming_block, 9, 0x007A7A82, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         }
     }
     if (map_layout.outgoing) |outgoing_block| {
@@ -2104,6 +2110,8 @@ pub fn paintLoopDetailRail(
         if (firstRelatedNode(graph, node.id, false)) |related| {
             fill(hdc, rect(outgoing_block.left, outgoing_block.top, outgoing_block.left + 4, outgoing_block.bottom), loopTypeColor(related.loop_type));
             drawTextRect(hdc, allocator, related.title, rect(outgoing_block.left + 8, outgoing_block.top + 2, outgoing_block.right - 8, outgoing_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+        } else {
+            drawTextRect(hdc, allocator, "—", outgoing_block, 9, 0x007A7A82, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         }
     }
 
@@ -2113,9 +2121,10 @@ pub fn paintLoopDetailRail(
     var handoff_count: usize = 0;
     for (graph.edges.items) |edge| {
         if (!std.mem.eql(u8, edge.from, node.id)) continue;
-        handoff_count += 1;
-        paintRelationRow(hdc, allocator, graph, edge.to, edge.condition, edge.fired, left, client_right, y);
-        y += 42;
+        if (paintRelationRow(hdc, allocator, graph, edge.to, edge.condition, edge.fired, left, client_right, y)) {
+            handoff_count += 1;
+            y += 42;
+        }
         if (handoff_count == 3) break;
     }
     if (handoff_count == 0) {
@@ -2278,8 +2287,8 @@ fn paintRelationRow(
     left: i32,
     client_right: i32,
     y: i32,
-) void {
-    const related = nodeById(graph, node_id) orelse return;
+) bool {
+    const related = nodeById(graph, node_id) orelse return false;
     const layout = loopDetailRowLayout(left, y, client_right, condition);
     roundedCard(hdc, layout.row, 0x00303035, false);
     fill(hdc, layout.type_bar, loopTypeColor(related.loop_type));
@@ -2293,6 +2302,7 @@ fn paintRelationRow(
         if (fired) 0x0058C878 else 0x00686870,
         4,
     );
+    return true;
 }
 
 fn nodeById(graph: *const GraphModel.GraphSummary, id: []const u8) ?GraphModel.Node {
