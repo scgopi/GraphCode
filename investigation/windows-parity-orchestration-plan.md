@@ -71,7 +71,7 @@ truth for status. The issues carry the acceptance criteria and the priority.
 Every worker uses `investigation/windows-parity-lane-kickoff.md`. Each issue goes
 through four steps:
 
-1. **Plan.** A planning worker (`gpt-6.1-sol`, xhigh) investigates the issue and
+1. **Plan.** A planning worker (`gpt-6.1-sol`, high) investigates the issue and
    publishes `Implementation plan (wave 2)` on it. It doesn't edit product code or
    use the desktop.
 2. **Approve.** The coordinator checks the plan against the macOS source,
@@ -220,14 +220,14 @@ spots.
 
 | Role | Model, effort, context | Fallback | Why |
 | --- | --- | --- | --- |
-| **Investigation and planning (every issue, before implementation)** | `gpt-6.1-sol`, **xhigh**, long_context | `gpt-6-sol`, xhigh, long_context | Operator decision (2026-10-14): a separate high-reasoning worker investigates each issue and writes the implementation plan (see `investigation/windows-parity-lane-kickoff.md`), so the implementer executes a reviewed design instead of discovering it under the per-PR gate. |
+| **Investigation and planning (every issue, before implementation)** | `gpt-6.1-sol`, high, long_context | `gpt-6-sol`, high, long_context | Operator decision (2026-10-14): a separate high-reasoning worker investigates each issue and writes the implementation plan (see `investigation/windows-parity-lane-kickoff.md`), so the implementer executes a reviewed design instead of discovering it under the per-PR gate. |
 | Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-5.6-luna`, high (operator-chosen fallback if `gpt-6-luna` underperforms) | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
 | Lane implementation (#768, #764, #765, #767, #769, #778, #722, #771, #772) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Same price tier as Sonnet 5.5, with a 1.05M-token window for `App.zig`-scale files. Long context is only needed here. |
 | Polish (P3) | `mai-code-1.1-flash`, medium, default | `claude-haiku-5.5`, medium | The cheapest model with a published coding score and a screenshot-to-code benchmark. |
 | Rubber-duck review (code and evidence) | `claude-sonnet-5.5`, high, default | `grok-4.7`, high | A different vendor from the OpenAI implementers. If an Anthropic model implemented the change, review it with `grok-4.7` or `gpt-6.1-sol`. |
 | Visual sign-off (paired screenshots) | `claude-sonnet-5.5`, high, default | `claude-opus-4.8`, high, only if Sonnet's verdict is disputed | Must open every image it cites. Opus 4.8 has the best-documented vision, but costs more. |
 | Test runs and reporting | `claude-haiku-5.5`, low (medium when results are contested) | `gpt-5-mini`, low | Mechanical execution with very large logs. It must quote raw output, not summarise success. |
-| Coordinator | the current coordinator session | — | Owns the ledger, merges, file leases and the Sandbox queue. |
+| Coordinator | `gpt-6.1-sol`, high, long_context | — | Operator decision (2026-10-14). Owns the ledger, merges, file leases, plan approvals and the desktop queue. |
 
 **Calibrate before scaling.** Run one P1 issue per implementation model first,
 and measure:

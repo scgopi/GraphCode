@@ -8,7 +8,7 @@ anything else.
 Each issue gets two workers, in order (operator decision, 2026-10-14):
 
 1. **A planning worker** investigates the issue fully and writes the implementation plan.
-   It doesn't change product code. Model: `gpt-6.1-sol`, xhigh, long_context.
+   It doesn't change product code. Model: `gpt-6.1-sol`, high, long_context.
 2. **The coordinator reviews the plan**, approves or corrects its file scope, and records the
    approval on the issue.
 3. **An implementation worker** then executes the approved plan.
