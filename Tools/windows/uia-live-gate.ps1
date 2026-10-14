@@ -7168,7 +7168,7 @@ try {
   $jumpSearchLabel = $jumpPalette.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Search loops"
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Jump to loop"
     ))
   )
   Require (($null -ne $jumpSearch) -and ($null -ne $jumpSearchLabel)) `
@@ -7191,9 +7191,9 @@ try {
   )
   $jumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
   Require ($jumpNames.Count -ge 2) "jump palette did not expose at least two ranked results"
-  Require (($jumpNames -match 'UIA loop A.*UIA project.*Goal.*succeeded').Count -ge 1) `
+  Require (($jumpNames -match '(?s)^UIA loop A\nGoal · DONE · UIA project$').Count -ge 1) `
     "jump palette omitted project, loop type, or state context for UIA loop A"
-  Require (($jumpNames -match 'UIA loop C.*Jump fixture.*Timed.*awaitingInput').Count -ge 1) `
+  Require (($jumpNames -match '(?s)^UIA loop C\nTimed · NEEDS YOU · Jump fixture$').Count -ge 1) `
     "jump palette did not expose a contextual cross-project result"
   $jumpWindow = [IntPtr]$jumpPalette.Current.NativeWindowHandle
   Require ([GraphCodeUiaGateState]::SetFirstEditText($jumpWindow, "UIA loop B")) `
@@ -7203,7 +7203,7 @@ try {
   Start-Sleep -Milliseconds 100
   $filteredJumpNames = @([GraphCodeUiaGateState]::GetListItems($jumpListHandle))
   Require (($filteredJumpNames.Count -eq 1) -and
-           ($filteredJumpNames[0] -match 'UIA loop B.*UIA project.*Proactive.*running')) `
+           ($filteredJumpNames[0] -match '(?s)^UIA loop B\nComposite · RUNNING · UIA project$')) `
     "jump palette did not live-filter to the ranked keyboard destination ($($filteredJumpNames -join '|'))"
   Require ([GraphCodeUiaGateState]::PostKeyboard($jumpWindow, 0x0D)) `
     "jump palette rejected Return activation"
