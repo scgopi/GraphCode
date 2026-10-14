@@ -30,10 +30,10 @@ truth for status. The issues carry the acceptance criteria and the priority.
 
 | Lane | Issue | Model |
 | --- | --- | --- |
-| A | #768 | `gpt-6.1-sol`, high, long_context |
-| B | #773 | `gpt-5.4-mini`, high |
+| A | #768 | `gpt-6.1-sol`, high, long_context; STUCK at 23:27 (the capture harness failed 4 times), escalated to `claude-sonnet-5.5`, xhigh, long_context |
+| B | #773 | `gpt-5.4-mini`, high; escalated at 22:50 to `gpt-6.1-sol`, high, long_context |
 | C | #767 | `gpt-6.1-sol`, high, long_context |
-| D | #774 | `gpt-5.4-mini`, high |
+| D | #774 | `gpt-5.4-mini`, high; switched at 23:25 to `gpt-6-luna`, high (operator decision) |
 | E | #776 | `gpt-6.1-sol`, high, long_context |
 
 **Desktop lease.** Integration validation (the UIA live gate), Windows Sandbox
@@ -43,9 +43,27 @@ holds it at a time, and the coordinator hands it out. Unit validation and
 
 **Short validation root.** The UIA live-gate preflight refuses sandbox paths
 longer than 81 UTF-16 characters, and `validate.ps1` appends
-`<GUID>\temp\gu-<GUID>` to the root. For the integration part, pass
-`-ShellValidationRoot C:\gc-<lane>`, where `C:\gc-<lane>` is a junction
-pointing at the lane's own `C:\gcs\<lane>\v`. Remove the junction afterwards.
+`<GUID>\temp\gu-<GUID>` to the root. Pass `-ShellValidationRoot C:\gc-<lane>`,
+where `C:\gc-<lane>` is a **real** short directory owned by the lane. Do **not**
+use a junction. A junction makes fixture paths differ between the alias and the
+resolved path. That breaks the `WorktreeGitProcess` unit fixtures, and very
+probably caused local `ScrubbedShellStartup` `registered-project` failures that
+exact-head CI did not reproduce.
+
+**Desktop for unit tests too.** Some App and WindowsNativeDialogs unit roots
+call `ShowWindow`, `SetForegroundWindow` or `SetFocus`. So the **full unit
+part** also runs inside the desktop lease. Only focused hidden-window
+`zig test` runs freely.
+
+**Captures.**
+- Seed `onboarding-seen` in the fixture's `GRAPHCODE_SUPPORT_DIR`;
+  `WindowsOnboarding.Store` reads it there, not from `LOCALAPPDATA`.
+- Windows Sandbox clamps the guest screen to about 1520x823 and failed
+  `EnumDisplaySettings` with vGPU disabled. Use it for clean-install and
+  first-run flows, not for 1440x900 visual captures.
+
+**Creating PRs.** Use `gh pr create` as `coneilen`. The app's PR tool tries a
+fork push and fails.
 
 **Provider checkouts.** Seed `winghostty` and `zmx` under the lane's
 `-ProviderRoot` from the read-only local mirrors in `C:\gc-cache\git\*.git`.
@@ -133,7 +151,7 @@ spots.
 
 | Role | Model, effort, context | Fallback | Why |
 | --- | --- | --- | --- |
-| Small, well-scoped fixes (one function or dialog: #773, #774, #779, #758) | `gpt-5.4-mini`, high, default | `mai-code-1.1-flash`, high | Mini-tier price with near-flagship agentic scores. These fixes need precision, not depth. |
+| Small, well-scoped fixes (one function or dialog: #774, #779, #758) | `gpt-6-luna`, high, default | `gpt-6.1-sol`, high | Operator decision (2026-10-13), replacing `gpt-5.4-mini`. In wave 1, `gpt-5.4-mini` was escalated on #773 (no visual evidence or review after more than 2 hours) and struck on #774 (a self-caused CI failure and an unproven "unrelated" claim). The survey found no published agentic-coding benchmark for `gpt-6-luna`, so calibrate it on its first issue. |
 | Lane implementation (#768, #764, #765, #767, #769, #778, #722, #771, #772) | `gpt-6.1-sol`, high, **long_context** | `claude-sonnet-5.5`, high, long_context | Same price tier as Sonnet 5.5, with a 1.05M-token window for `App.zig`-scale files. Long context is only needed here. |
 | Polish (P3) | `mai-code-1.1-flash`, medium, default | `claude-haiku-5.5`, medium | The cheapest model with a published coding score and a screenshot-to-code benchmark. |
 | Rubber-duck review (code and evidence) | `claude-sonnet-5.5`, high, default | `grok-4.7`, high | A different vendor from the OpenAI implementers. If an Anthropic model implemented the change, review it with `grok-4.7` or `gpt-6.1-sol`. |
@@ -183,7 +201,7 @@ from the implementer at every step):
 
 | Step | Small, well-scoped fixes | Lane implementation and polish |
 | --- | --- | --- |
-| Start | `gpt-5.4-mini`, high | `gpt-6.1-sol`, high, long_context (polish: `mai-code-1.1-flash`, medium) |
+| Start | `gpt-6-luna`, high | `gpt-6.1-sol`, high, long_context (polish: `mai-code-1.1-flash`, medium) |
 | 1st escalation | `gpt-6.1-sol`, high | `claude-sonnet-5.5`, xhigh, long_context |
 | 2nd escalation | `claude-sonnet-5.5`, xhigh | `claude-opus-5.5`, max, long_context |
 | 3rd escalation | `claude-opus-5.5`, max | `gpt-5.6-sol`, max, long_context (or `claude-opus-4.8` when the work is mainly visual) |
