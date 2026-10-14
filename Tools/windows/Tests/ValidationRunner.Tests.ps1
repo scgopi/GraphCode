@@ -3330,6 +3330,7 @@ try {
       throw "RED: Sidebar navigation oracle failed to preserve the owner order evidence"
     }
   }
+  Write-Host "SIDEBAR_NAVIGATION_FIXTURES=7 (5 positive, 2 negative; includes temporary fixture restoration)"
   foreach ($helperName in @(
       "Protect-UiaStartupDiagnosticText",
       "Get-UiaStartupDiagnosticValue",
