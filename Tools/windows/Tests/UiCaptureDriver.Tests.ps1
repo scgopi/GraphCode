@@ -360,6 +360,27 @@ try {
                 $receipt.StdoutEof -and $receipt.StderrEof -and @(Get-CapPendingLaunches).Count -eq 0) 'Real guarded rollback was incomplete.'
             return $receipt
         }
+        Invoke-CapTest 'guarded stop recognizes a genuinely exited held target generation' {
+            $run = Start-CapManagedProcess -FilePath $target.executable -ArgumentList @() `
+                -WorkingDirectory (Split-Path -Parent $target.executable) -Role 'held-exited-target-component' -CloseStdin `
+                -Environment @{ CAP_REHEARSAL_BEHAVIOR = 'normal' }
+            try {
+                $wait = Wait-CapManagedProcess -Run $run -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(5))
+                Assert-CapTest ($wait.State -ceq 'Exited' -and $wait.ExitCode -eq 0) 'Harmless held target did not exit.'
+                $terminated = [CapNative]::Terminate($run.Identity.Process.Handle, $run.Identity.Pid, 125, 1000)
+                $stop = Stop-CapManagedProcess -Identity $run.Identity
+                Assert-CapTest (-not $terminated -and $stop.Result -ceq 'SKIP_GENUINELY_EXITED_KERNEL' -and
+                    $run.StdoutTask.Wait(2000) -and $run.StderrTask.Wait(2000)) 'Held exited generation was not distinguished from termination.'
+                return [ordered]@{ pid = $run.Identity.Pid; creationFileTimeUtc = $run.Identity.CreationFileTimeUtc
+                    result = $stop.Result; forcedTermination = $terminated
+                    accessDeniedExitRace = 'Not forced; native code now waits on the retained kernel before refusing' }
+            } finally {
+                if (-not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) {
+                    $null = Stop-CapManagedProcess -Identity $run.Identity
+                }
+                $run.Identity.Process.Dispose()
+            }
+        }
         Invoke-CapTest 'current metadata and saved parent lifetime refuse unknown generations' {
             $identity = [pscustomobject]@{ Pid = 123; CreationFileTimeUtc = 100; ExpectedImagePath = 'C:\owned\target.exe'; ParentPid = 1; SessionId = 1 }
             $null = Assert-CapRejects { Assert-CapMetadataRecord -Identity $identity -Metadata $null } 'missing for live PID'
@@ -379,9 +400,13 @@ try {
                 [ordered]@{ project = [ordered]@{ name = $_; path = (Join-Path $originalRoot $_) }
                     nodes = @(1..5 | ForEach-Object { [ordered]@{ id = "node-$_" } }) }
             } }
+            $source.graphs[0].nodes[0].worktreeBinding = @{ path = (Join-Path $originalRoot 'Alpha\card-tree') }
+            $source.graphs[0].nodes[1].worktreeBinding = @{ path = (Join-Path $originalRoot 'Alpha\long-tree') }
+            $source.graphs[1].nodes[0].worktreeBinding = @{ path = (Join-Path $originalRoot 'Beta\card-tree') }
             $source | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $sourcePath -Encoding utf8NoBOM
-            $mapped = Get-Content -LiteralPath $sourcePath -Raw | ConvertFrom-Json
-            foreach ($graph in $mapped.graphs) { $graph.project.path = Join-Path (Join-Path $owned 'fixtures\projects') $graph.project.name }
+            $originalEscaped = ($originalRoot | ConvertTo-Json -Compress).Trim('"')
+            $ownedEscaped = ((Join-Path $owned 'fixtures\projects') | ConvertTo-Json -Compress).Trim('"')
+            $mapped = [IO.File]::ReadAllText($sourcePath).Replace($originalEscaped, $ownedEscaped) | ConvertFrom-Json
             $mapped | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
             $mapping = [ordered]@{
                 sourcePath = (Join-Path $originalRoot 'fixture.json')
@@ -412,6 +437,14 @@ try {
             $parameters.ExpectedMappingSha256 = (Get-FileHash -LiteralPath $mappingPath -Algorithm SHA256).Hash
             $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'exact source and rewritten'
             $mapping.pathPrefixMap.to = Join-Path $owned 'fixtures\projects'
+            $validWorktreePath = $mapped.graphs[0].nodes[0].worktreeBinding.path
+            $mapped.graphs[0].nodes[0].worktreeBinding.path = Join-Path $originalRoot 'Alpha\card-tree'
+            $mapped | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
+            $mapping.rewrittenFixtureSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+            $mapping | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $mappingPath -Encoding utf8NoBOM
+            $parameters.ExpectedMappingSha256 = (Get-FileHash -LiteralPath $mappingPath -Algorithm SHA256).Hash
+            $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'embedded path'
+            $mapped.graphs[0].nodes[0].worktreeBinding.path = $validWorktreePath
             $mapped.graphs[0].project.path = Join-Path $originalRoot 'Alpha'
             $mapped | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
             $mapping.rewrittenFixtureSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
@@ -443,6 +476,38 @@ try {
             $preflight.controls.workerSha256 = '0' * 64
             $null = Assert-CapRejects { Assert-CapPreflightReport } 'exact-source offline rehearsal'
             return 'Actual completed command-case data accepted; stale worker hash refused. Report-data validation only, no native preflight.'
+        }
+        Invoke-CapTest 'actual release data guard refuses unproved or omitted worker cleanup' {
+            $ast = [Management.Automation.Language.Parser]::ParseInput(
+                [IO.File]::ReadAllText($supervisorPath), [ref]$null, [ref]$null)
+            $guard = $ast.Find({ param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses[0].Item1.Extent.Text.Contains('$manifest.ownedProcessSurvivors') -and
+                    $node.Extent.Text.Contains('Worker final kernel-cleanup evidence is absent or has survivors.')
+            }, $true)
+            Assert-CapTest ($null -ne $guard) 'Actual supervisor cleanup guard was not found.'
+            foreach ($mutation in @('pending', 'cleanup-failure', 'survivor', 'missing-pending', 'missing-cleanup', 'missing-survivors', 'null-pending', 'scalar-cleanup')) {
+                $workerRun = $true
+                $manifest = [pscustomobject]@{ ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @() }
+                switch ($mutation) {
+                    'pending' { $manifest.pendingLaunchesRemaining = @([pscustomobject]@{ pid = 123; role = 'unreturned-child'; state = 'UNPROVEN' }) }
+                    'cleanup-failure' { $manifest.cleanupFailures = @('Guarded rollback refused unknown live metadata.') }
+                    'survivor' { $manifest.ownedProcessSurvivors = @([pscustomobject]@{ pid = 123 }) }
+                    'missing-pending' { $manifest.PSObject.Properties.Remove('pendingLaunchesRemaining') }
+                    'missing-cleanup' { $manifest.PSObject.Properties.Remove('cleanupFailures') }
+                    'missing-survivors' { $manifest.PSObject.Properties.Remove('ownedProcessSurvivors') }
+                    'null-pending' { $manifest.pendingLaunchesRemaining = $null }
+                    'scalar-cleanup' { $manifest.cleanupFailures = 0 }
+                }
+                $cleanupFailures = [Collections.Generic.List[string]]::new()
+                & ([scriptblock]::Create($guard.Extent.Text))
+                Assert-CapTest ($cleanupFailures.Count -eq 1) "Actual release guard falsely accepted $mutation cleanup data."
+            }
+            $manifest = [pscustomobject]@{ ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @() }
+            $cleanupFailures.Clear()
+            & ([scriptblock]::Create($guard.Extent.Text))
+            Assert-CapTest ($cleanupFailures.Count -eq 0) 'Actual guard refused complete empty cleanup arrays.'
+            return 'Actual release predicate, eight negative data controls and one complete empty-array control; no unsafe child or process/lease/worker mock was executed.'
         }
         # Same frozen five-scene/two-phase mocks: component regression only, never launch/UI proof.
         # Test-CapCaptureOffline.ps1 SHA256 6C08A2029D9256405552BBA9B82B15A8A19359544433FD0E5928B4A7EA6C2592.

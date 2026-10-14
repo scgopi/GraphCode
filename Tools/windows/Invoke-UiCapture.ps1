@@ -901,7 +901,15 @@ try {
                     break
                 }
             }
-            if ($workerRun -and (-not $manifest -or $manifest.ownedProcessSurvivors.Count -ne 0)) {
+            if ($workerRun -and (-not $manifest -or
+                -not $manifest.PSObject.Properties['ownedProcessSurvivors'] -or
+                -not $manifest.PSObject.Properties['pendingLaunchesRemaining'] -or
+                -not $manifest.PSObject.Properties['cleanupFailures'] -or
+                $manifest.ownedProcessSurvivors -isnot [array] -or
+                $manifest.pendingLaunchesRemaining -isnot [array] -or
+                $manifest.cleanupFailures -isnot [array] -or
+                $manifest.ownedProcessSurvivors.Count -ne 0 -or
+                $manifest.pendingLaunchesRemaining.Count -ne 0 -or $manifest.cleanupFailures.Count -ne 0)) {
                 $cleanupFailures.Add('Worker final kernel-cleanup evidence is absent or has survivors.')
             }
             $primaryText = Get-CapSupervisorFailureText $primaryFailure
@@ -943,6 +951,9 @@ try {
             traceFailures = @($traceFailures)
             primaryFailure = $primaryText
             workerPrimaryFailure = if ($manifest) { ,@($manifest.failures) } else { ,@() }
+            workerCleanupFailures = if ($manifest -and $manifest.PSObject.Properties['cleanupFailures'] -and $manifest.cleanupFailures -is [array]) { ,@($manifest.cleanupFailures) } else { $null }
+            workerPendingLaunchesRemaining = if ($manifest -and $manifest.PSObject.Properties['pendingLaunchesRemaining'] -and $manifest.pendingLaunchesRemaining -is [array]) { ,@($manifest.pendingLaunchesRemaining) } else { $null }
+            workerOwnedProcessSurvivors = if ($manifest -and $manifest.PSObject.Properties['ownedProcessSurvivors'] -and $manifest.ownedProcessSurvivors -is [array]) { ,@($manifest.ownedProcessSurvivors) } else { $null }
             captures = if ($manifest) { $manifest.images.Count } else { 0 }
             sourceHashesBeforeImport = [ordered]@{ module = $moduleHash; worker = $workerHash; supervisor = $supervisorHash }
             }

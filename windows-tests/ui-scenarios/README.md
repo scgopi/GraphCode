@@ -295,3 +295,23 @@ fixture, perform native compatibility checks, or establish approval. Those
 obligations remain with the separately authorized capture admission and
 WinApp/native-compatibility work. Existing hosted runner-contract step budgets
 are unchanged; the full runner plus child must fit those limits.
+
+The frozen B fixture's prefix must be rewritten at **every** JSON position,
+including node `worktreeBinding.path` values, not only the two project paths.
+Admission checks every drive-qualified string against the owned project root
+and compares the whole fixture with the source's complete prefix substitution.
+A partially rewritten witness is refused even if its mapping hash was supplied.
+
+Worker manifests and release receipts preserve separate cleanup failures and
+unreturned launch records (PID, creation time, executable, role and rollback
+errors). Missing, null, scalar, or nonempty worker cleanup/pending arrays make
+release `CLEANUP_UNPROVEN`; an empty returned-run list cannot prove zero
+survivors while an unreturned launch remains. The regression executes the
+actual release data guard, without creating an unsafe child or mocking the
+real launch path.
+
+A guarded termination waits on the retained kernel handle even when
+`TerminateProcess` fails because a process is already exiting. A positively
+signalled handle is distinguished from a requested termination. Normal guarded
+termination and genuinely exited handles run in the offline suite; the exact
+access-denied exit race is not forced and is not claimed as runtime-proven.

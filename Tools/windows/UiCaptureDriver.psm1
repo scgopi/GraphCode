@@ -159,13 +159,14 @@ public static class CapNative {
     throw new InvalidOperationException("Kernel wait failed for PID " + pid + ": " + Marshal.GetLastWin32Error());
   }
 
-  public static void Terminate(IntPtr handle, int pid, uint exitCode, int timeoutMilliseconds) {
-    if (IsExited(handle, pid)) return;
-    if (!TerminateProcess(handle, exitCode))
-      throw new InvalidOperationException("TerminateProcess failed for guarded PID " + pid + ": " + Marshal.GetLastWin32Error());
+  public static bool Terminate(IntPtr handle, int pid, uint exitCode, int timeoutMilliseconds) {
+    if (IsExited(handle, pid)) return false;
+    bool terminated = TerminateProcess(handle, exitCode);
+    int terminateError = terminated ? 0 : Marshal.GetLastWin32Error();
     uint wait = WaitForSingleObject(handle, (uint)timeoutMilliseconds);
-    if (wait != WAIT_OBJECT_0)
-      throw new InvalidOperationException("Guarded process did not exit within " + timeoutMilliseconds + " ms; wait=" + wait);
+    if (wait == WAIT_OBJECT_0) return terminated;
+    throw new InvalidOperationException("Guarded process did not exit within " + timeoutMilliseconds +
+      " ms; TerminateProcess=" + terminated + " error=" + terminateError + " wait=" + wait);
   }
 
   public static bool SetWindowPosition(IntPtr window, int x, int y, int width, int height) {
@@ -400,6 +401,32 @@ function Assert-CapFixtureMapping {
             $fixture.graphs[$index].nodes.Count -ne $source.graphs[$index].nodes.Count) {
             throw "Fixture mapping changed graph identity, owned project path, or node count at index $index."
         }
+    }
+    $projectsRoot = Join-Path $Root 'fixtures\projects'
+    $visit = {
+        param($Value)
+        if ($Value -is [string]) {
+            if ($Value -match '^[A-Za-z]:[\\/]') {
+                $path = [IO.Path]::GetFullPath($Value)
+                if ($path -ine $projectsRoot -and
+                    -not $path.StartsWith($projectsRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'Fixture contains a foreign or unrewritten embedded path.'
+                }
+                $null = Assert-CapArtifactPath -Root $Root -Path $Value
+            }
+        } elseif ($Value -is [array]) {
+            foreach ($item in $Value) { & $visit $item }
+        } elseif ($Value -is [pscustomobject]) {
+            foreach ($property in $Value.PSObject.Properties) { & $visit $property.Value }
+        }
+    }
+    & $visit $fixture
+    $originalEscaped = ($OriginalRoot | ConvertTo-Json -Compress).Trim('"')
+    $ownedEscaped = ($projectsRoot | ConvertTo-Json -Compress).Trim('"')
+    $expectedFixture = [IO.File]::ReadAllText($SourcePath).Replace($originalEscaped, $ownedEscaped) |
+        ConvertFrom-Json -DateKind String | ConvertTo-Json -Depth 40 -Compress
+    if (($fixture | ConvertTo-Json -Depth 40 -Compress) -cne $expectedFixture) {
+        throw 'Rewritten fixture differs from the source beyond the complete owned-prefix substitution.'
     }
     return [pscustomobject]@{ FixtureSha256 = $fixtureHash; SourceSha256 = $sourceHash; MappingSha256 = $mappingHash }
 }
@@ -954,9 +981,10 @@ function Stop-CapManagedProcess {
     if ($verified.State -eq 'Exited') {
         return [pscustomobject]@{ Pid = $Identity.Pid; Role = $Identity.Role; Result = 'SKIP_GENUINELY_EXITED_KERNEL' }
     }
-    [CapNative]::Terminate($Identity.Process.Handle, $Identity.Pid, $ExitCode, $TimeoutMilliseconds)
+    $terminated = [CapNative]::Terminate($Identity.Process.Handle, $Identity.Pid, $ExitCode, $TimeoutMilliseconds)
     if (-not [CapNative]::IsExited($Identity.Process.Handle, $Identity.Pid)) { throw "Owned process PID $($Identity.Pid) remains live after guarded termination." }
-    return [pscustomobject]@{ Pid = $Identity.Pid; Role = $Identity.Role; Result = 'TERMINATED_GUARDED_HANDLE' }
+    return [pscustomobject]@{ Pid = $Identity.Pid; Role = $Identity.Role
+        Result = if ($terminated) { 'TERMINATED_GUARDED_HANDLE' } else { 'EXITED_DURING_GUARDED_STOP' } }
 }
 
 function Wait-CapManagedProcess {
@@ -1238,15 +1266,22 @@ function Get-CapPendingLaunches {
 
 
     return @($script:CapPendingLaunches | ForEach-Object {
+        $record = $_
+        $kernelExited = $null
+        $kernelProbeFailure = $null
+        try { $kernelExited = [CapNative]::IsExited($record.Process.Handle, $record.Process.Id) }
+        catch [InvalidOperationException], [ComponentModel.Win32Exception] { $kernelProbeFailure = $_.Exception.ToString() }
         [pscustomobject]@{
-            Pid = $_.Process.Id
-            Role = $_.Role
-            ExpectedPath = $_.ExpectedImagePath
-            CreationFileTimeUtc = if ($_.Snapshot) { $_.Snapshot.CreationFileTimeUtc } else { $null }
-            ExpectedParentPid = $_.ExpectedParentPid
-            ExpectedSessionId = $_.ExpectedSessionId
-            StartFailure = $_.StartFailure
-            RollbackFailure = $_.RollbackFailure
+            Pid = $record.Process.Id
+            Role = $record.Role
+            ExpectedPath = $record.ExpectedImagePath
+            CreationFileTimeUtc = if ($record.Snapshot) { $record.Snapshot.CreationFileTimeUtc } else { $null }
+            ExpectedParentPid = $record.ExpectedParentPid
+            ExpectedSessionId = $record.ExpectedSessionId
+            StartFailure = $record.StartFailure
+            RollbackFailure = $record.RollbackFailure
+            KernelExited = $kernelExited
+            KernelProbeFailure = $kernelProbeFailure
         }
     })
 }

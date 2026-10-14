@@ -41,6 +41,7 @@ $leaseHash = $null
 $fixtureSourceHash = $null
 $fixtureMappingHash = $null
 $ownedProcessSurvivors = @()
+$pendingLaunchesRemaining = @()
 $mockSceneRun = $false
 $outputBase = $null
 $runBase = $null
@@ -555,6 +556,8 @@ function New-CapManifest {
         zmxSeeds = @($zmxSeedReceipts)
         images = @($images)
         cleanup = @($cleanupReceipts)
+        cleanupFailures = @($cleanupFailures)
+        pendingLaunchesRemaining = @($pendingLaunchesRemaining)
         failures = @($cleanupFailures)
         ownedProcessSurvivors = @($ownedProcessSurvivors)
         privacyRequirement = 'Every image requires an individual privacy check before reviewer handoff.'
@@ -1119,6 +1122,11 @@ try {
             foreach ($receipt in @(Resolve-CapPendingLaunches)) { $cleanupReceipts.Add($receipt) }
             if (@(Get-CapPendingLaunches).Count -gt 0) { throw 'Pending real launches remain unresolved.' }
         } catch { $cleanupFailures.Add("Pending launch cleanup failed: $($_.Exception.Message)") }
+        try { $pendingLaunchesRemaining = @(Get-CapPendingLaunches) }
+        catch {
+            $cleanupFailures.Add("Pending launch evidence failed: $($_.Exception.Message)")
+            $pendingLaunchesRemaining = @([pscustomobject]@{ State = 'UNKNOWN'; Failure = $_.Exception.ToString() })
+        }
     }
     foreach ($appRun in @($applicationRuns | Sort-Object { $_.Run.StartedUtc } -Descending)) {
         try { Close-CapGraphCodeApp -AppRun $appRun }
@@ -1156,7 +1164,10 @@ try {
         @($runs | Where-Object { -not [CapNative]::IsExited($_.Identity.Process.Handle, $_.Identity.Pid) } |
             ForEach-Object { [pscustomobject]@{ role = $_.Identity.Role; pid = $_.Identity.Pid } }) +
         @($descendantIdentities | Where-Object { -not [CapNative]::IsExited($_.Process.Handle, $_.Pid) } |
-            ForEach-Object { [pscustomobject]@{ role = $_.Role; pid = $_.Pid } })
+            ForEach-Object { [pscustomobject]@{ role = $_.Role; pid = $_.Pid } }) +
+        @($pendingLaunchesRemaining | Where-Object { $_.PSObject.Properties['KernelExited'] -and $_.KernelExited -eq $false } |
+            ForEach-Object { [pscustomobject]@{ role = $_.Role; pid = $_.Pid
+                creationFileTimeUtc = $_.CreationFileTimeUtc; expectedImagePath = $_.ExpectedPath; state = 'KERNEL_LIVE_UNRETURNED_LAUNCH' } })
     )
     if ($journalPath -and $auth) {
         try {
@@ -1164,12 +1175,9 @@ try {
                 schemaVersion = 1; leaseId = $auth.leaseId; jobSha256 = $jobHash
                 workerSha256 = $workerHash; moduleSha256 = $moduleHash
                 updatedUtc = [DateTime]::UtcNow.ToString('o'); entries = @($journalEntries)
-                ownedProcessSurvivors = @(
-                    @($runs | Where-Object { -not [CapNative]::IsExited($_.Identity.Process.Handle, $_.Identity.Pid) } |
-                        ForEach-Object { [pscustomobject]@{ role = $_.Identity.Role; pid = $_.Identity.Pid } }) +
-                    @($descendantIdentities | Where-Object { -not [CapNative]::IsExited($_.Process.Handle, $_.Pid) } |
-                        ForEach-Object { [pscustomobject]@{ role = $_.Role; pid = $_.Pid } })
-                )
+                ownedProcessSurvivors = @($ownedProcessSurvivors)
+                pendingLaunchesRemaining = @($pendingLaunchesRemaining)
+                cleanupFailures = @($cleanupFailures)
             })
         } catch { $cleanupFailures.Add("Final process journal update failed: $($_.Exception.Message)") }
     }
