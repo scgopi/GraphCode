@@ -3224,6 +3224,23 @@ function Test-MultiProjectFragmentRoster($actual, $expected, [int] $processId) {
   return $true
 }
 
+function Get-MultiProjectSidebarSelection($selectedRows) {
+  $navigation = @()
+  $extras = @()
+  foreach ($row in $selectedRows) {
+    if ($row.automationId -cin @("overview-destination", "quick-chats-destination") -or
+        $row.automationId -cmatch '^(open-project|loop-row|quick-chat-row|quick-chats-header)-[0-9]+$') {
+      $navigation += $row
+    } else {
+      $extras += $row
+    }
+  }
+  if ($extras.Count -gt 0) {
+    Write-Host ("UIA_SIDEBAR_EXTRA_SELECTIONS=" + ($extras | ConvertTo-Json -Compress))
+  }
+  return [ordered]@{ navigation = $navigation; extras = $extras }
+}
+
 function Get-MultiProjectExpectedCanvasRoster([string] $surface, $owners, $selectedOwner) {
   if ($surface -ceq "overview") {
     return ,@($owners | ForEach-Object {
@@ -4496,6 +4513,18 @@ function Invoke-MultiProjectRenamePhase {
     $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   }
   function Get-MultiProjectObservation([string] $surface, $selectedOwner = $null) {
+    function Read-MultiProjectSelectedName(
+      $element, $before, [int] $processId, [scriptblock] $cacheReader = $null
+    ) {
+      $selectionCache = if ($cacheReader) { & $cacheReader $element $true } else { Read-MultiProjectElementCache $element $true }
+      $cachedOwner = Read-MultiProjectOwnershipSnapshot $element { param($ignored, $includeContent) $selectionCache }
+      Confirm-MultiProjectOwnedSnapshot $before $cachedOwner $processId "sidebar-selected/cached"
+      $name = $selectionCache.GetCachedPropertyValue([System.Windows.Automation.AutomationElement]::NameProperty, $true)
+      if ($name -isnot [string]) { throw "MULTIPROJECT_METADATA: selected sidebar name unavailable" }
+      $after = Read-MultiProjectOwnershipSnapshot $element $cacheReader
+      Confirm-MultiProjectOwnedSnapshot $before $after $processId "sidebar-selected/after"
+      return $name
+    }
     $capturedSnapshots = [Collections.Generic.List[object]]::new()
     $multiProcess.Refresh()
     Require (-not $multiProcess.HasExited) "multi-project shell exited during observation"
@@ -4617,7 +4646,7 @@ function Invoke-MultiProjectRenamePhase {
       throw "MULTIPROJECT_METADATA: loops container ownership unavailable before child capture"
     }
     $capturedSnapshots.Add([ordered]@{ element = $loopContainer; snapshot = $loopOwner; phase = "$surface/loops-container" })
-    $selectedSidebarIds = @(
+    $selectedSidebarRows = @(
       $sidebarElements = @($projectElements) + @(Get-DirectChildren $loopContainer $rawWalker)
       foreach ($element in $sidebarElements) {
         $sidebarOwner = Read-MultiProjectOwnershipSnapshot $element
@@ -4631,17 +4660,25 @@ function Invoke-MultiProjectRenamePhase {
         $capturedSnapshots.Add([ordered]@{ element = $element; snapshot = $sidebarOwner; phase = "$surface/sidebar-selection" })
         $selectionPattern = $null
         if ($element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selectionPattern) -and
-            $selectionPattern.Current.IsSelected) { $sidebarOwner.automationId }
+            $selectionPattern.Current.IsSelected) {
+          $selectedName = Read-MultiProjectSelectedName $element $sidebarOwner $multiProcess.Id
+          [ordered]@{ automationId = $sidebarOwner.automationId; name = $selectedName }
+        }
       }
     )
-    $expectedSidebarId = if ($surface -ceq "overview") { "overview-destination" }
+    $sidebarSelection = Get-MultiProjectSidebarSelection $selectedSidebarRows
+    $selectedSidebarIds = @($sidebarSelection.navigation | ForEach-Object { $_.automationId })
+    $expectedSidebarId = if ($surface -ceq "overview") { $null }
       elseif ($null -ne $selectedOwner -and $surface -ceq "workspace") {
         Get-MultiProjectAutomationId "loop" $selectedOwner.path $selectedOwner.node
       } elseif ($null -ne $selectedOwner -and $surface -ceq "project") {
         Get-MultiProjectAutomationId "open-project" $selectedOwner.path
       } else { $null }
-    $matches = $matches -and $selectedSidebarIds.Count -eq 1 -and
-      $selectedSidebarIds[0] -ceq $expectedSidebarId
+    # Native static-destination SelectionItem is deferred to #801.
+    if ($surface -cne "overview") {
+      $matches = $matches -and $selectedSidebarIds.Count -eq 1 -and
+        $selectedSidebarIds[0] -ceq $expectedSidebarId
+    }
     $canvasEvidence = if ($graph) { Get-MultiProjectElementEvidence $graph $multiProcess.Id $null "$surface/graph-container-bounds" $null $capturedSnapshots } else { $null }
     $canvas = if ($canvasEvidence) { $canvasEvidence.bounds } else { @() }
     $fragmentProjection = [ordered]@{
@@ -4691,6 +4728,7 @@ function Invoke-MultiProjectRenamePhase {
       })
       matched = $matches; observedOwnerCount = $allProjectRows.Count
       selectedSidebarIds = $selectedSidebarIds; expectedSidebarId = $expectedSidebarId
+      extraSidebarSelections = $sidebarSelection.extras
       expectedMatchedOwners = @($observed | Where-Object { $null -ne $_.projectName }).Count
       totalObservedProjectRowCount = $allProjectRows.Count; totalObservedCardCount = $allCards.Count
       observedCardCount = $allCards.Count; expectedMatchedCardCount = $cards.Count; owners = $observed.ToArray()
@@ -7293,14 +7331,19 @@ try {
   ).Current.IsSelected
   # TODO(#799): restore loop-row selection when jump opens the workspace.
   Require (-not $selectedAfterJump) "project-canvas jump incorrectly selected the sidebar loop"
-  $selectedSidebarAfterJump = @($sidebarAfterJump | Where-Object {
+  $selectedSidebarElementsAfterJump = @($sidebarAfterJump | Where-Object {
     $selectionPattern = $null
     $_.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selectionPattern) -and
       $selectionPattern.Current.IsSelected
   })
+  $sidebarSelectionAfterJump = Get-MultiProjectSidebarSelection @($selectedSidebarElementsAfterJump | ForEach-Object {
+    Require ($_.Current.ProcessId -eq $process.Id) "jump sidebar selection belongs to another process"
+    [ordered]@{ automationId = [string]$_.Current.AutomationId; name = [string]$_.Current.Name }
+  })
+  $selectedSidebarAfterJump = $sidebarSelectionAfterJump.navigation
   Require (($selectedSidebarAfterJump.Count -eq 1) -and
-           ($selectedSidebarAfterJump[0].Current.AutomationId -match '^open-project-') -and
-           ($selectedSidebarAfterJump[0].Current.Name -eq "UIA project")) `
+           ($selectedSidebarAfterJump[0].automationId -match '^open-project-') -and
+           ($selectedSidebarAfterJump[0].name -eq "UIA project")) `
     "project-canvas jump did not select exactly its owning sidebar project"
   $graphAfterJump = Find-FragmentById $root "graph" $rawWalker
   $cardsAfterJump = @(Get-DirectChildren $graphAfterJump $rawWalker |
@@ -7319,7 +7362,8 @@ try {
     results = @($jumpNames | ForEach-Object { [string]$_ })
     filteredResults = @($filteredJumpNames | ForEach-Object { [string]$_ })
     destination = [string]$loopBAfterJump.Current.Name
-    sidebarSelection = [string]$selectedSidebarAfterJump[0].Current.Name
+    sidebarSelection = [string]$selectedSidebarAfterJump[0].name
+    extraSidebarSelections = $sidebarSelectionAfterJump.extras
     canvasSelection = [string]$selectedCardsAfterJump[0].Current.Name
   }
   Write-Host ("UIA_JUMP_PALETTE_EVIDENCE=" + ($jumpPaletteEvidence | ConvertTo-Json -Compress))

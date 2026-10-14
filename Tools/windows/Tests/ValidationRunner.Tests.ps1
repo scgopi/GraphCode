@@ -88,6 +88,35 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       return "Source-derived count/identity predicate; no live UIA claim."
     }
   }
+  $projectSelection = [ordered]@{ automationId = "open-project-1"; name = "Selected project" }
+  $loopSelection = [ordered]@{ automationId = "loop-row-2"; name = "Wrong loop" }
+  $attentionSelection = [ordered]@{ automationId = "needs-you-row-3"; name = "Selected attention alias" }
+  foreach ($case in @(
+      @{ rows = @($projectSelection); accepted = $true; extras = 0 },
+      @{ rows = @($projectSelection, $attentionSelection); accepted = $true; extras = 1 },
+      @{ rows = @(); accepted = $false; extras = 0 },
+      @{ rows = @($loopSelection); accepted = $false; extras = 0 },
+      @{ rows = @($projectSelection, $loopSelection); accepted = $false; extras = 0 },
+      @{ rows = @($attentionSelection); accepted = $false; extras = 1 }
+    )) {
+    Invoke-MultiCase ("navigation selection excludes logged extras " + ($case | ConvertTo-Json -Compress)) -Negative:(-not $case.accepted) {
+      $output = @(Get-MultiProjectSidebarSelection $case.rows 6>&1)
+      $selection = @($output | Where-Object { $_ -is [Collections.IDictionary] })
+      $logs = @($output | Where-Object { $_ -is [Management.Automation.InformationRecord] })
+      Assert-MultiCase ($selection.Count -eq 1) "navigation classification omitted its result"
+      $selectedSidebarIds = @($selection[0].navigation | ForEach-Object { $_.automationId })
+      $expectedSidebarId = $projectSelection.automationId; $matches = $true
+      . $sidebarSelectionPredicate
+      Assert-MultiCase ($matches -eq $case.accepted -and $selection[0].extras.Count -eq $case.extras) `
+        "navigation cardinality counted a retained alias or accepted wrong/missing navigation"
+      Assert-MultiCase ($logs.Count -eq $case.extras) "retained alias was not logged exactly once"
+      if ($case.extras -gt 0) {
+        Assert-MultiCase ($logs[0].ToString().Contains($attentionSelection.automationId) -and
+          $logs[0].ToString().Contains($attentionSelection.name)) "alias log omitted exact ID or name"
+      }
+      return "Source-derived navigation predicate; retained extras logged, native static selection deferred to #801."
+    }
+  }
   $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
   $eventEnd = $eventStart.AddSeconds(1)
   $eventProcess = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }
@@ -1222,6 +1251,42 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
   $captureReader = { param($element, [bool] $includeContent) $element.Capture($includeContent) }
   $capturePrior = @{ ownership = "owned"; finalPID = @{ value = 4242 }
     automationID = @{ value = "canvas-card-1983941480823304696" } }
+  foreach ($clipped in @("empty", "zero")) {
+    Invoke-MultiCase ("selected alias name tolerates " + $clipped + " bounds") {
+      $states = @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+      $states[1].rect = if ($clipped -ceq "empty") { [System.Windows.Rect]::Empty } else { [System.Windows.Rect]::new(0,0,0,0) }
+      $mock = New-MultiCaptureMock $states
+      $before = Read-MultiProjectOwnershipSnapshot $mock $captureReader
+      $name = Read-MultiProjectSelectedName $mock $before 4242 $captureReader
+      Assert-MultiCase ($name -ceq "Alpha loop" -and $mock.calls -eq 3 -and
+        -not ($mock.order -contains "BOUNDS")) "clipped alias rejected or bounds read for name-only logging"
+      return "Owned cached ID/runtime verified before name and after; no geometry or live UIA claim."
+    }
+  }
+  foreach ($mutation in @("foreign", "zero", "identity", "runtime", "name-type", "name-unsupported", "after-foreign", "after-runtime")) {
+    Invoke-MultiCase ("selected alias name rejects " + $mutation) -Negative {
+      $states = @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
+      switch ($mutation) {
+        "foreign" { $states[1].pid = 7777 }
+        "zero" { $states[1].pid = 0 }
+        "identity" { $states[1].id = "different-row" }
+        "runtime" { $states[1].runtime = @(3,42,99) }
+        "name-type" { $states[1].name = 7 }
+        "name-unsupported" { $states[1].name = [System.Windows.Automation.AutomationElement]::NotSupported }
+        "after-foreign" { $states[2].pid = 7777 }
+        "after-runtime" { $states[2].runtime = @(3,42,99) }
+      }
+      $mock = New-MultiCaptureMock $states
+      $before = Read-MultiProjectOwnershipSnapshot $mock $captureReader
+      $prefix = if ($mutation -cin @("foreign", "after-foreign")) { "MULTIPROJECT_PRIVACY:" } else { "MULTIPROJECT_METADATA:" }
+      $rejection = Reject-MultiCase { Read-MultiProjectSelectedName $mock $before 4242 $captureReader } $prefix
+      Assert-MultiCase (-not ($mock.order -contains "BOUNDS")) "name-only logging read bounds"
+      if ($mutation -cin @("foreign", "zero", "identity", "runtime")) {
+        Assert-MultiCase (-not ($mock.order -contains "NAME")) "selected alias name read before cached ownership guard"
+      }
+      return $rejection
+    }
+  }
   Invoke-MultiCase "fresh cached capture verifies owned metadata before and after content" {
     $mock = New-MultiCaptureMock @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
     $evidence = Get-MultiProjectElementEvidence $mock 4242 $capturePrior "functional/owned" $captureReader
