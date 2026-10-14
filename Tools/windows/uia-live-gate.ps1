@@ -5366,6 +5366,15 @@ try {
     "global sidebar destination did not expose the pinned Graph identity"
   Require ($projectRows.Count -eq 1) "Projects did not expose grouped recent rows"
   Require ($openProjectRows.Count -eq 1) "Projects did not expose the separate open-project row"
+  $workspaceFooters = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^workspace-footer-'
+  })
+  Require ($workspaceFooters.Count -eq 1) "sidebar did not expose exactly one workspace footer"
+  Require (($workspaceFooters[0].Current.ControlType -eq [System.Windows.Automation.ControlType]::Button) -and
+           ($workspaceFooters[0].Current.Name.Length -gt 0) -and
+           ($workspaceFooters[0].Current.BoundingRectangle.Width -gt 0) -and
+           ($workspaceFooters[0].Current.BoundingRectangle.Height -gt 0)) `
+    "workspace footer omitted its Button role name or visible bounds"
   Require ((@($projectRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "Fixture remote") "recent project row names were not synchronized"
   Require ($openProjectRows[0].Current.Name -eq "UIA project") "open project row name was not synchronized"
   foreach ($projectRow in $projectRows) {
@@ -5446,11 +5455,12 @@ try {
   $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^loop-row-'
   })
-  Require (($loopRows.Count -eq 1) -and ($loopRows[0].Current.Name -eq "UIA loop A")) `
-    "nested loop tree did not start collapsed at its root"
+  Require (($loopRows.Count -eq 2) -and
+           ((@($loopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
+    "nested loop tree did not start expanded with both named loops"
   $loopDisclosure = @(Get-DirectChildren $loops $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^loop-disclosure-' -and
-    $_.Current.Name -eq "Expand loop children"
+    $_.Current.Name -eq "Collapse loop children"
   }) | Select-Object -First 1
   Require ($null -ne $loopDisclosure) "nested root omitted its disclosure action"
   $rootLoopId = $loopRows[0].Current.AutomationId
@@ -5459,10 +5469,23 @@ try {
   $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^loop-row-'
   })
+  Require (($loopRows.Count -eq 1) -and ($loopRows[0].Current.Name -eq "UIA loop A") -and
+           ($loopRows[0].Current.AutomationId -eq $rootLoopId)) `
+    "nested disclosure did not hide its child while preserving root identity"
+  $loopDisclosure = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-disclosure-' -and
+    $_.Current.Name -eq "Expand loop children"
+  }) | Select-Object -First 1
+  Require ($null -ne $loopDisclosure) "collapsed root omitted its expand action"
+  $loopDisclosure.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  Start-Sleep -Milliseconds 150
+  $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^loop-row-'
+  })
   Require (($loopRows.Count -eq 2) -and
            ((@($loopRows | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            ($loopRows[0].Current.AutomationId -eq $rootLoopId)) `
-    "nested disclosure did not reveal its child while preserving root identity"
+    "nested disclosure did not restore both named loops with the same root identity"
   $projectDisclosure = @(Get-DirectChildren $projects $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^project-disclosure-' -and
     $_.Current.Name -eq "Collapse project"

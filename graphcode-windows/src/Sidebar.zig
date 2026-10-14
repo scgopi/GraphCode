@@ -13,8 +13,10 @@ pub const State = struct {
     activity_attention_only: bool = false,
     activity_scroll: usize = 0,
     collapsed_projects: std.StringHashMapUnmanaged(void) = .empty,
-    expanded_nodes: std.StringHashMapUnmanaged(void) = .empty,
+    collapsed_nodes: std.StringHashMapUnmanaged(void) = .empty,
     root_order: std.ArrayListUnmanaged([]u8) = .empty,
+    selection: Selection = .none,
+    workspace_name: []const u8 = "",
 
     pub fn init(allocator: std.mem.Allocator) State {
         return .{ .allocator = allocator };
@@ -22,7 +24,7 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         freeSet(self.allocator, &self.collapsed_projects);
-        freeSet(self.allocator, &self.expanded_nodes);
+        freeSet(self.allocator, &self.collapsed_nodes);
         for (self.root_order.items) |id| self.allocator.free(id);
         self.root_order.deinit(self.allocator);
         self.* = undefined;
@@ -33,7 +35,7 @@ pub const State = struct {
     }
 
     pub fn toggleNode(self: *State, id: []const u8) !void {
-        try toggleSet(self.allocator, &self.expanded_nodes, id);
+        try toggleSet(self.allocator, &self.collapsed_nodes, id);
     }
 
     pub fn isProjectCollapsed(self: *const State, path: []const u8) bool {
@@ -41,12 +43,12 @@ pub const State = struct {
     }
 
     pub fn isNodeExpanded(self: *const State, id: []const u8) bool {
-        return self.expanded_nodes.contains(id);
+        return !self.collapsed_nodes.contains(id);
     }
 
     pub fn clearExpandedNodes(self: *State) void {
-        freeSet(self.allocator, &self.expanded_nodes);
-        self.expanded_nodes = .empty;
+        freeSet(self.allocator, &self.collapsed_nodes);
+        self.collapsed_nodes = .empty;
     }
 
     pub fn reorderRoots(self: *State, roots: []const []const u8) !void {
@@ -70,8 +72,8 @@ pub const State = struct {
     pub fn encode(self: *const State, allocator: std.mem.Allocator) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
-        var iterator = self.expanded_nodes.keyIterator();
-        while (iterator.next()) |id| try result.writer(allocator).print("expanded\t{s}\n", .{id.*});
+        var iterator = self.collapsed_nodes.keyIterator();
+        while (iterator.next()) |id| try result.writer(allocator).print("collapsed\t{s}\n", .{id.*});
         for (self.root_order.items) |id| try result.writer(allocator).print("root\t{s}\n", .{id});
         return result.toOwnedSlice(allocator);
     }
@@ -79,10 +81,11 @@ pub const State = struct {
     pub fn decode(self: *State, data: []const u8) !void {
         var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| {
-            if (!std.mem.startsWith(u8, line, "expanded\t")) continue;
-            const id = line["expanded\t".len..];
-            if (id.len != 0 and !self.expanded_nodes.contains(id))
-                try self.expanded_nodes.put(self.allocator, try self.allocator.dupe(u8, id), {});
+            // Legacy files only recorded expanded nodes; unrecorded nodes now start expanded.
+            if (!std.mem.startsWith(u8, line, "collapsed\t")) continue;
+            const id = line["collapsed\t".len..];
+            if (id.len != 0 and !self.collapsed_nodes.contains(id))
+                try self.collapsed_nodes.put(self.allocator, try self.allocator.dupe(u8, id), {});
         }
         var roots = std.mem.splitScalar(u8, data, '\n');
         while (roots.next()) |line| {
@@ -178,10 +181,9 @@ pub fn draw(
     hover_y: i32,
     allocator: std.mem.Allocator,
 ) void {
-    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
+    _ = status;
+    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, viewport_bottom);
     fill(hdc, sidebar, Tokens.workspace_rail);
-    drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
-    drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
     const footer = effectiveFooter(viewport_bottom, update_version.len != 0, ingress_error.len != 0);
     const has_update = footer.update;
     const has_error = footer.ingress;
@@ -199,55 +201,56 @@ pub fn draw(
     };
     defer rows.deinit(allocator);
     for (rows.items) |row| {
+        const ink: u32 = 0x00E6E6E6;
+        const selected = rowSelected(row, model, state.selection);
+        if (selected) roundedFill(hdc, rowBounds(row.top), selection_blue, 8);
         switch (row.kind) {
             .local_heading => {
-                drawText(hdc, allocator, if (state.local_collapsed) ">  LOCAL" else "v  LOCAL", 18, row.top, 10, 0x007A7A7A);
+                drawTextRect(hdc, allocator, "Local Projects", rect(18, row.top, Tokens.sidebar_width - 14, row.top + row_height), 11, 0x00909090, loop_text_format | c.DT_VCENTER);
+                if (hover_y >= row.top and hover_y < row.top + row_height)
+                    drawChevron(hdc, 207, row.top + 16, !state.local_collapsed, 0x00909090);
             },
             .remote_heading => {
-                drawText(hdc, allocator, if (state.remote_collapsed) ">  REMOTE" else "v  REMOTE", 18, row.top, 10, 0x007A7A7A);
+                drawTextRect(hdc, allocator, "Remote Repositories", rect(18, row.top, Tokens.sidebar_width - 14, row.top + row_height), 11, 0x00909090, loop_text_format | c.DT_VCENTER);
+                if (hover_y >= row.top and hover_y < row.top + row_height)
+                    drawChevron(hdc, 207, row.top + 16, !state.remote_collapsed, 0x00909090);
             },
             .project => {
                 const project = model.recent_projects.items[row.index];
-                drawText(hdc, allocator, if (project.isRemote()) "R" else "L", 18, row.top + 1, 9, 0x007A7A7A);
-                drawText(hdc, allocator, project.name, 34, row.top, 13, 0x00E6E6E6);
+                drawIcon(hdc, if (project.isRemote()) .network else .folder, 18, row.top + 9, ink);
+                drawTextRect(hdc, allocator, project.name, projectTitleRect(row.top), 13, ink, loop_text_format | c.DT_VCENTER);
             },
             .overview => {
-                drawText(hdc, allocator, "G", 18, row.top, 11, 0x007AB8FF);
-                drawText(hdc, allocator, "Graph", 34, row.top, 13, 0x00E6E6E6);
+                drawIcon(hdc, .graph, 18, row.top + 9, ink);
+                drawTextRect(hdc, allocator, "Graph", projectTitleRect(row.top), 13, ink, loop_text_format | c.DT_VCENTER);
             },
-            .open_project => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
-                const selected = if (model.selected_project_path) |selected_path|
-                    std.mem.eql(u8, selected_path, path)
-                else
-                    false;
-                drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 18, row.top, 9, 0x007A7A7A);
-                drawText(hdc, allocator, if (summary.project.isRemote()) "R" else "L", 31, row.top + 1, 9, 0x007A7A7A);
-                drawText(hdc, allocator, summary.project.name, 44, row.top, 13, if (selected) 0x00FFFFFF else 0x00D0D0D0);
-                if (hover_y >= row.top and hover_y < row.top + 24) {
-                    drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
-                    if (row.has_children) drawText(hdc, allocator, if (state.isProjectCollapsed(path)) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
+            .open_project => if (row.project_path) |path| {
+                const project = projectForRow(model, path) orelse continue;
+                drawIcon(hdc, if (project.isRemote()) .network else .folder, 18, row.top + 9, ink);
+                drawTextRect(hdc, allocator, project.name, projectTitleRect(row.top), 13, ink, loop_text_format | c.DT_VCENTER);
+                if (hover_y >= row.top and hover_y < row.top + row_height) {
+                    drawPlus(hdc, 184, row.top + 16, ink);
+                    if (row.has_children) drawChevron(hdc, 207, row.top + 16, !state.isProjectCollapsed(path), ink);
                 }
             },
             .loop => if (row.project_path) |path| if (model.graphFor(path)) |summary| {
                 if (row.index < summary.nodes.items.len) {
                     const node = summary.nodes.items[row.index];
-                    const indent = @as(i32, @intCast(row.depth * 12));
-                    if (row.depth != 0) drawText(hdc, allocator, ">", 28 + indent, row.top, 9, 0x006A6A6A);
-                    fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
+                    const indent = @as(i32, @intCast(@min(row.depth, max_visual_depth))) * 16;
+                    roundedFill(hdc, rect(34 + indent, row.top + 9, 37 + indent, row.top + 23), loopAccent(node.loop_type), 3);
                     const text = loopRowTextRects(row.top, row.depth);
-                    drawTextRect(hdc, allocator, node.title, text.title, 11, 0x00E6E6E6, loop_text_format);
-                    drawTextRect(hdc, allocator, compactState(node.state), text.state, 9, stateColor(node.state), loop_text_format);
+                    drawTextRect(hdc, allocator, node.title, text.title, 13, ink, loop_text_format | c.DT_VCENTER);
+                    drawStateDot(hdc, text.state, displayState(node));
                     const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch null;
                     defer if (elapsed) |value| allocator.free(value);
-                    if (elapsed) |value| drawTextRect(hdc, allocator, value, text.age, 9, 0x008E8E93, loop_text_format | c.DT_RIGHT);
-                    if (row.has_children and hover_y >= row.top and hover_y < row.top + 24)
-                        drawText(hdc, allocator, if (state.isNodeExpanded(node.id)) "v" else ">", 204, row.top, 9, 0x00B8B8B8);
+                    if (elapsed) |value| drawTextRect(hdc, allocator, value, text.age, 10, 0x008E8E93, loop_text_format | c.DT_RIGHT | c.DT_VCENTER);
+                    if (row.has_children) drawChevron(hdc, 207, row.top + 16, state.isNodeExpanded(node.id), 0x007A7A7A);
                 }
             },
             .worktree => if (inspection) |value| {
                 const entry = value.entries.items[row.index];
-                const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
-                if (selected and WorktreeStatus.decision(entry) == .reclaimable)
+                const worktree_selected = std.mem.eql(u8, entry.path, selected_worktree_path);
+                if (worktree_selected and WorktreeStatus.decision(entry) == .reclaimable)
                     fill(hdc, rect(12, row.top - 3, Tokens.sidebar_width - 12, row.top + 25), 0x003A3A44);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
                 const size = WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage()) catch null;
@@ -260,23 +263,18 @@ pub fn draw(
                 drawText(hdc, allocator, detail orelse reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
-                drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 18, row.top, 9, 0x007A7A7A);
-                drawText(hdc, allocator, "Quick Chats", 32, row.top, 13, 0x00E6E6E6);
-                if (hover_y >= row.top and hover_y < row.top + 24) {
-                    drawText(hdc, allocator, "+", 181, row.top, 13, 0x00B8B8B8);
+                drawIcon(hdc, .chats, 18, row.top + 9, ink);
+                drawTextRect(hdc, allocator, "Quick Chats", projectTitleRect(row.top), 13, ink, loop_text_format | c.DT_VCENTER);
+                if (hover_y >= row.top and hover_y < row.top + row_height) {
+                    drawPlus(hdc, 184, row.top + 16, ink);
                     if (model.quick_chats.items.len != 0)
-                        drawText(hdc, allocator, if (state.chats_collapsed) ">" else "v", 204, row.top, 9, 0x00B8B8B8);
+                        drawChevron(hdc, 207, row.top + 16, !state.chats_collapsed, ink);
                 }
             },
             .quick_chat => if (row.index < model.quick_chats.items.len)
-                drawText(hdc, allocator, model.quick_chats.items[row.index].title, 24, row.top, 11, 0x00E6E6E6),
+                drawTextRect(hdc, allocator, model.quick_chats.items[row.index].title, rect(34, row.top, Tokens.sidebar_width - 14, row.top + row_height), 13, ink, loop_text_format | c.DT_VCENTER),
         }
     }
-    for (rows.items) |row| if (row.kind == .quick_chat_overview) {
-        const label = chatsLabelRect(row.top);
-        drawText(hdc, allocator, "CHATS", label.left, label.top, 10, 0x007A7A7A);
-        break;
-    };
 
     const section_y = sidebarSectionBottom(model, inspection, state) - scroll_offset;
     if (model.attentionCount() != 0) {
@@ -344,42 +342,52 @@ pub fn draw(
         defer if (detail) |value| allocator.free(value);
         drawText(hdc, allocator, detail orelse update_version, bounds.left + 30, bounds.top + 24, 10, 0x00909090);
     }
-    drawTextRect(
-        hdc,
-        allocator,
-        status,
-        statusTextRect(viewport_bottom, has_update, has_error),
-        11,
-        0x00909090,
-        c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX,
-    );
+    if (state.workspace_name.len != 0) {
+        const workspace = workspaceFooterRect(viewport_bottom);
+        fill(hdc, workspace, 0x00282624);
+        fill(hdc, rect(workspace.left, workspace.top, workspace.right, workspace.top + 1), 0x00454341);
+        drawIcon(hdc, .workspace, 18, workspace.top + 9, 0x00909090);
+        drawTextRect(hdc, allocator, state.workspace_name, rect(40, workspace.top, Tokens.sidebar_width - 28, workspace.bottom), 13, 0x00D0D0D0, loop_text_format | c.DT_VCENTER);
+        const x = Tokens.sidebar_width - 16;
+        stroke(hdc, &.{ .{ .x = x - 3, .y = workspace.top + 14 }, .{ .x = x, .y = workspace.top + 11 }, .{ .x = x + 3, .y = workspace.top + 14 } }, 0x00909090);
+        drawChevron(hdc, x, workspace.top + 20, true, 0x00909090);
+    }
 }
 
 const loop_text_format: c.UINT = c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
-const loop_age_right: i32 = 198;
-const loop_age_width: i32 = 28;
-const loop_state_width: i32 = 44;
+pub const row_height: i32 = 32;
+const max_visual_depth: usize = 3;
+pub const selection_blue: u32 = 0x00D15900;
+pub const Selection = union(enum) { none, overview, quick_chats, project: []const u8, loop: []const u8, chat: []const u8 };
+
+pub fn selectionForSurface(model: *const GraphModel.Model, surface: anytype, quick_chat: bool, chat_index: ?usize, worktree_project: ?[]const u8) Selection {
+    return switch (surface) {
+        .overview => if (worktree_project) |path| .{ .project = path } else .overview,
+        .quick_chats => .quick_chats,
+        .project => if (model.selected_project_path) |path| .{ .project = path } else .none,
+        .workspace => if (quick_chat) blk: {
+            const index = chat_index orelse break :blk .none;
+            break :blk if (index < model.quick_chats.items.len) .{ .chat = model.quick_chats.items[index].id } else .none;
+        } else if (model.selected_node_id) |id| .{ .loop = id } else .none,
+    };
+}
+
+const loop_age_right: i32 = 188;
+const loop_age_width: i32 = 24;
 const loop_text_gap: i32 = 4;
 
 pub const LoopRowText = struct { title: c.RECT, state: c.RECT, age: c.RECT };
 
-/// Disjoint columns for a loop row's title, status label, and age. The age is right-aligned
-/// against the hover disclosure's hit zone (x >= 198), the status sits left of it, and the
-/// title takes the rest, so each label elides inside its own column instead of overlapping
-/// its neighbour at the default sidebar width.
+/// Reserve age, state dot, and disclosure before giving the rest to the indented title.
 pub fn loopRowTextRects(row_top: i32, depth: usize) LoopRowText {
-    const indent = @as(i32, @intCast(depth * 12));
-    const age = rect(loop_age_right - loop_age_width, row_top, loop_age_right, row_top + 17);
-    const state = rect(age.left - loop_text_gap - loop_state_width, row_top, age.left - loop_text_gap, row_top + 17);
-    const title_left = 39 + indent;
-    const title_right = @max(state.left - loop_text_gap, title_left);
-    return .{ .title = rect(title_left, row_top, title_right, row_top + 19), .state = state, .age = age };
+    const indent = @as(i32, @intCast(@min(depth, max_visual_depth))) * 16;
+    const age = rect(loop_age_right - loop_age_width, row_top, loop_age_right, row_top + row_height);
+    const state = rect(190, row_top + 12, 197, row_top + 19);
+    const title_left = 44 + indent;
+    return .{ .title = rect(title_left, row_top, age.left - loop_text_gap, row_top + row_height), .state = state, .age = age };
 }
 
-/// Top edge of the scrollable sidebar content, 3 px above the first row's top so a row's
-/// selection fill is never cut at rest. The GRAPH / Projects header above it is fixed, so rows,
-/// labels, hit targets, and UIA bounds all start here and never overlap it.
-pub const content_top: i32 = Tokens.header_height + 78 - 3;
+pub const content_top: i32 = Tokens.header_height + 12;
 
 const footer_status_extent: i32 = 58;
 const footer_error_extent: i32 = 50;
@@ -432,8 +440,33 @@ pub fn statusTextRect(viewport_bottom: i32, has_update: bool, has_error: bool) c
     return rect(18, top, Tokens.sidebar_width - 10, top + status_line_height);
 }
 
-pub fn chatsLabelRect(row_top: i32) c.RECT {
-    return rect(18, row_top - 32, Tokens.sidebar_width - 10, row_top - 32 + 18);
+pub fn rowBounds(top: i32) c.RECT {
+    return rect(10, top, Tokens.sidebar_width - 8, top + row_height);
+}
+
+pub fn workspaceFooterRect(viewport_bottom: i32) c.RECT {
+    return rect(0, @max(Tokens.header_height, viewport_bottom - 34), Tokens.sidebar_width, viewport_bottom);
+}
+
+pub fn workspaceName(path: []const u8) []const u8 {
+    const base = std.fs.path.basenameWindows(path);
+    if (std.mem.startsWith(u8, base, ".graphcode-")) return base[".graphcode-".len..];
+    if (base.len == 0 or std.mem.eql(u8, base, ".graphcode")) return "Default";
+    return base;
+}
+
+pub fn workspaceWorthShowing(path: []const u8, known_count: usize) bool {
+    const base = std.fs.path.basenameWindows(path);
+    return (base.len != 0 and !std.mem.eql(u8, base, ".graphcode")) or known_count > 1;
+}
+
+pub fn workspaceFooterAt(x: i32, y: i32, viewport_bottom: i32) bool {
+    const bounds = workspaceFooterRect(viewport_bottom);
+    return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
+}
+
+fn projectTitleRect(top: i32) c.RECT {
+    return rect(42, top, 174, top + row_height);
 }
 
 pub fn needsYouLabelRect(section_bottom: i32, scroll_offset: i32) c.RECT {
@@ -483,10 +516,11 @@ pub const ActivityViewport = struct {
 };
 
 fn loopAccent(loop_type: []const u8) u32 {
-    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
-    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
-    if (std.mem.eql(u8, loop_type, "composite")) return 0x00C77DFF;
-    return 0x007AB8FF;
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x00709E19;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x000085C9;
+    if (std.mem.eql(u8, loop_type, "turnBased")) return 0x008151D5;
+    if (std.mem.eql(u8, loop_type, "composite") or std.mem.eql(u8, loop_type, "proactive")) return 0x00E98590;
+    return 0x00E3DAD3;
 }
 
 fn compactState(state: []const u8) []const u8 {
@@ -538,11 +572,24 @@ pub fn loopRowTop(project_count: usize, index: usize) i32 {
     return layout.loopTop(index);
 }
 
-pub fn loopRowTopForModel(model: *const GraphModel.Model, index: usize) i32 {
-    const layout = layoutFor(model, null);
-    const graph = model.currentGraph() orelse return layout.loopTop(index);
-    const position = hierarchyPosition(std.heap.page_allocator, graph.nodes.items, graph.edges.items, index) catch index;
-    return layout.loopTop(position);
+pub fn loopRowTopForModel(model: *const GraphModel.Model, index: usize, inspection: ?*const WorktreeStatus.Inspection, state: *const State) !?i32 {
+    const graph = model.currentGraph() orelse return null;
+    var rows = try appendRows(model.allocator, model, inspection, 0, state);
+    defer rows.deinit(model.allocator);
+    var parent_top: ?i32 = null;
+    for (rows.items) |row| {
+        if (row.kind == .loop and row.index == index and row.project_path != null and std.mem.eql(u8, row.project_path.?, graph.project.path)) return row.top;
+        if (row.kind == .open_project and row.project_path != null and std.mem.eql(u8, row.project_path.?, graph.project.path)) {
+            parent_top = row.top;
+        } else if (parent_top == null and
+            (row.kind == .overview and graph.project.isGlobal() or
+                row.kind == .local_heading and !graph.project.isRemote() or
+                row.kind == .remote_heading and graph.project.isRemote()))
+        {
+            parent_top = row.top;
+        }
+    }
+    return parent_top;
 }
 
 pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32 {
@@ -550,15 +597,11 @@ pub fn worktreeRowTop(project_count: usize, loop_count: usize, index: usize) i32
     return layout.worktreeTop(index);
 }
 
-pub fn worktreeRowTopForModel(model: *const GraphModel.Model, loop_count: usize, index: usize) i32 {
-    const layout = Layout{
-        .base = Tokens.header_height + 78,
-        .project_count = visibleProjectCount(model),
-        .project_heading_count = projectHeadingCount(model),
-        .loop_count = loop_count,
-        .worktree_count = 0,
-    };
-    return layout.worktreeTop(index);
+pub fn worktreeRowTopForModel(model: *const GraphModel.Model, inspection: *const WorktreeStatus.Inspection, index: usize, state: *const State) !?i32 {
+    var rows = try appendRows(model.allocator, model, inspection, 0, state);
+    defer rows.deinit(model.allocator);
+    for (rows.items) |row| if (row.kind == .worktree and row.index == index) return row.top;
+    return null;
 }
 
 pub const RowKind = enum { local_heading, remote_heading, project, open_project, overview, loop, worktree, quick_chat_overview, quick_chat };
@@ -586,11 +629,10 @@ pub const Layout = struct {
         return self.base + @as(i32, @intCast(index * 24));
     }
     pub fn overviewTop(self: Layout) i32 {
-        return self.base + self.projectSectionHeight() + 24;
+        return self.base;
     }
     pub fn loopTop(self: Layout, index: usize) i32 {
-        return self.base + self.projectSectionHeight() + 86 +
-            @as(i32, @intCast(index * 24));
+        return self.base + 12 + @as(i32, @intCast(3 + self.quick_chat_count + self.project_count + self.project_heading_count + index)) * row_height;
     }
     pub fn worktreeTop(self: Layout, index: usize) i32 {
         return self.base + self.projectSectionHeight() + 140 +
@@ -598,16 +640,10 @@ pub const Layout = struct {
             @as(i32, @intCast(index * 34));
     }
     pub fn quickChatHeadingTop(self: Layout) i32 {
-        return self.quickChatRowTop(0) - 32;
+        return self.quickChatRowTop(0);
     }
     pub fn quickChatRowTop(self: Layout, index: usize) i32 {
-        const project_bottom = self.base + self.projectSectionHeight();
-        const worktree_height: i32 = if (self.inspection_present)
-            24 + @as(i32, @intCast(self.worktree_count * 34))
-        else
-            0;
-        const section_bottom = project_bottom + self.graph_section_height + worktree_height;
-        return section_bottom + 42 + @as(i32, @intCast(index * 24));
+        return self.base + @as(i32, @intCast(1 + index)) * row_height;
     }
     fn projectSectionHeight(self: Layout) i32 {
         return @as(i32, @intCast((self.project_count + self.project_heading_count) * 24));
@@ -622,68 +658,25 @@ pub fn appendRows(
     state: ?*const State,
 ) !std.ArrayList(Row) {
     var rows: std.ArrayList(Row) = .empty;
-    var top: i32 = Tokens.header_height + 78 - scroll_offset;
+    errdefer rows.deinit(allocator);
+    var top: i32 = content_top - scroll_offset;
     const local_collapsed = if (state) |value| value.local_collapsed else false;
     const remote_collapsed = if (state) |value| value.remote_collapsed else false;
     const chats_collapsed = if (state) |value| value.chats_collapsed else false;
-    if (hasLocalProjects(model)) {
-        try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top });
-        top += 24;
-    }
-    if (!local_collapsed) {
-        for (model.recent_projects.items, 0..) |project, index| {
-            if (!projectIsVisibleInSection(model, project, .local)) continue;
-            try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
-            top += 24;
+    try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top });
+    top += row_height;
+    if (model.graphFor("graphcode://global")) |graph|
+        try appendLoopRows(allocator, &rows, graph, &top, state);
+    try rows.append(allocator, .{ .kind = .quick_chat_overview, .index = 0, .top = top });
+    top += row_height;
+    if (!chats_collapsed) {
+        for (model.quick_chats.items, 0..) |_, index| {
+            try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
+            top += row_height;
         }
     }
-    if (hasRemoteProjects(model)) {
-        try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top });
-        top += 24;
-    }
-    if (!remote_collapsed) {
-        for (model.recent_projects.items, 0..) |project, index| {
-            if (!projectIsVisibleInSection(model, project, .remote)) continue;
-            try rows.append(allocator, .{ .kind = .project, .index = index, .top = top, .project_path = project.path });
-            top += 24;
-        }
-    }
-    try rows.append(allocator, .{ .kind = .overview, .index = 0, .top = top + 24 });
-    top += 62;
-    for (model.open_projects.items, 0..) |project, index| {
-        if (hasGraphForProject(model, project.path)) continue;
-        try rows.append(allocator, .{ .kind = .open_project, .index = index, .top = top, .project_path = project.path });
-        top += 62;
-    }
-    if (model.graphs.items.len != 0 or model.graph != null) {
-        if (model.graphs.items.len != 0) {
-            for (model.graphs.items, 0..) |summary, graph_index| {
-                try rows.append(allocator, .{ .kind = .open_project, .index = graph_index, .top = top, .project_path = summary.project.path, .has_children = summary.nodes.items.len != 0 });
-                top += 24;
-                if (state == null or !state.?.isProjectCollapsed(summary.project.path)) {
-                    var hierarchy = try hierarchyItems(allocator, summary.nodes.items, summary.edges.items, state);
-                    defer hierarchy.deinit(allocator);
-                    for (hierarchy.items) |item| {
-                        try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = summary.project.path, .depth = item.depth, .has_children = item.has_children });
-                        top += 24;
-                    }
-                }
-                top += 38;
-            }
-        } else if (model.graph) |graph| {
-            try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top, .project_path = graph.project.path, .has_children = graph.nodes.items.len != 0 });
-            top += 24;
-            if (state == null or !state.?.isProjectCollapsed(graph.project.path)) {
-                var hierarchy = try hierarchyItems(allocator, graph.nodes.items, graph.edges.items, state);
-                defer hierarchy.deinit(allocator);
-                for (hierarchy.items) |item| {
-                    try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top, .project_path = graph.project.path, .depth = item.depth, .has_children = item.has_children });
-                    top += 24;
-                }
-            }
-            top += 38;
-        }
-    }
+    if (hasLocalProjects(model)) try appendProjectSection(allocator, &rows, model, &top, state, .local, local_collapsed);
+    if (hasRemoteProjects(model)) try appendProjectSection(allocator, &rows, model, &top, state, .remote, remote_collapsed);
     if (inspection) |value| {
         top += 24;
         for (value.entries.items, 0..) |_, index| {
@@ -691,16 +684,47 @@ pub fn appendRows(
             top += 34;
         }
     }
-    top += 42;
-    try rows.append(allocator, .{ .kind = .quick_chat_overview, .index = 0, .top = top });
-    top += 24;
-    if (!chats_collapsed) {
-        for (model.quick_chats.items, 0..) |_, index| {
-            try rows.append(allocator, .{ .kind = .quick_chat, .index = index, .top = top });
-            top += 24;
-        }
-    }
     return rows;
+}
+
+fn appendProjectSection(allocator: std.mem.Allocator, rows: *std.ArrayList(Row), model: *const GraphModel.Model, top: *i32, state: ?*const State, section: ProjectSection, collapsed: bool) !void {
+    top.* += 12;
+    try rows.append(allocator, .{ .kind = if (section == .local) .local_heading else .remote_heading, .index = 0, .top = top.* });
+    top.* += row_height;
+    if (collapsed) return;
+    for (model.recent_projects.items, 0..) |project, index| {
+        if (!projectIsVisibleInSection(model, project, section) or project.isGlobal()) continue;
+        try rows.append(allocator, .{ .kind = .project, .index = index, .top = top.*, .project_path = project.path });
+        top.* += row_height;
+    }
+    for (model.open_projects.items, 0..) |project, index| {
+        if (hasGraphForProject(model, project.path) or project.isGlobal() or project.isRemote() != (section == .remote)) continue;
+        try rows.append(allocator, .{ .kind = .open_project, .index = index, .top = top.*, .project_path = project.path });
+        top.* += row_height;
+    }
+    if (model.graphs.items.len != 0) {
+        for (model.graphs.items, 0..) |graph, index| {
+            if (graph.project.isGlobal() or graph.project.isRemote() != (section == .remote)) continue;
+            try rows.append(allocator, .{ .kind = .open_project, .index = index, .top = top.*, .project_path = graph.project.path, .has_children = graph.nodes.items.len != 0 });
+            top.* += row_height;
+            try appendLoopRows(allocator, rows, graph, top, state);
+        }
+    } else if (model.graph) |graph| {
+        if (graph.project.isGlobal() or graph.project.isRemote() != (section == .remote)) return;
+        try rows.append(allocator, .{ .kind = .open_project, .index = 0, .top = top.*, .project_path = graph.project.path, .has_children = graph.nodes.items.len != 0 });
+        top.* += row_height;
+        try appendLoopRows(allocator, rows, graph, top, state);
+    }
+}
+
+fn appendLoopRows(allocator: std.mem.Allocator, rows: *std.ArrayList(Row), graph: anytype, top: *i32, state: ?*const State) !void {
+    if (state) |value| if (value.isProjectCollapsed(graph.project.path)) return;
+    var hierarchy = try hierarchyItems(allocator, graph.nodes.items, graph.edges.items, state);
+    defer hierarchy.deinit(allocator);
+    for (hierarchy.items) |item| {
+        try rows.append(allocator, .{ .kind = .loop, .index = item.index, .top = top.*, .project_path = graph.project.path, .depth = item.depth, .has_children = item.has_children });
+        top.* += row_height;
+    }
 }
 
 pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeStatus.Inspection) Layout {
@@ -717,7 +741,7 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
     }
 
     return .{
-        .base = Tokens.header_height + 78,
+        .base = content_top,
         .project_count = visibleProjectCount(model),
         .project_heading_count = projectHeadingCount(model),
         .loop_count = loop_count,
@@ -730,20 +754,23 @@ pub fn layoutFor(model: *const GraphModel.Model, inspection: ?*const WorktreeSta
 }
 
 pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
-    var top = Tokens.header_height + 78 +
-        @as(i32, @intCast((visibleProjectCount(model) + projectHeadingCount(model)) * 24)) +
-        @as(i32, @intCast(openProjectPlaceholderCount(model) * 62)) + 36;
-    for (model.graphs.items[0..@min(graph_index, model.graphs.items.len)]) |summary| {
-        top += 62 + @as(i32, @intCast(summary.nodes.items.len * 24));
-    }
-    return top;
+    if (graph_index >= model.graphs.items.len) return content_top;
+    return generatedRowTop(model, .open_project, model.graphs.items[graph_index].project.path, 0);
 }
 
 pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_index: usize) i32 {
-    if (graph_index >= model.graphs.items.len) return sharedGraphTop(model, graph_index) + 48;
+    if (graph_index >= model.graphs.items.len) return content_top;
     const graph = model.graphs.items[graph_index];
-    const position = hierarchyPosition(std.heap.page_allocator, graph.nodes.items, graph.edges.items, node_index) catch node_index;
-    return sharedGraphTop(model, graph_index) + 48 + @as(i32, @intCast(position * 24));
+    return generatedRowTop(model, .loop, graph.project.path, node_index);
+}
+
+fn generatedRowTop(model: *const GraphModel.Model, kind: RowKind, path: []const u8, index: usize) i32 {
+    var rows = appendRows(std.heap.page_allocator, model, null, 0, null) catch return content_top;
+    defer rows.deinit(std.heap.page_allocator);
+    for (rows.items) |row| {
+        if (row.kind == kind and (kind != .loop or row.index == index) and row.project_path != null and std.mem.eql(u8, row.project_path.?, path)) return row.top;
+    }
+    return content_top;
 }
 
 pub fn sharedWorktreeTop(model: *const GraphModel.Model, index: usize) i32 {
@@ -770,7 +797,7 @@ pub fn rowAt(
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         const height: i32 = switch (row.kind) {
-            .local_heading, .remote_heading, .project, .open_project, .overview, .loop, .quick_chat_overview, .quick_chat => 24,
+            .local_heading, .remote_heading, .project, .open_project, .overview, .loop, .quick_chat_overview, .quick_chat => row_height,
             .worktree => 34,
         };
         if (y >= row.top and y < row.top + height) return row;
@@ -779,16 +806,18 @@ pub fn rowAt(
 }
 
 fn hasLocalProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| {
-        if (projectIsVisibleInSection(model, project, .local)) return true;
-    }
-    return false;
+    return hasProjectsInSection(model, .local);
 }
 
 fn hasRemoteProjects(model: *const GraphModel.Model) bool {
-    for (model.recent_projects.items) |project| {
-        if (projectIsVisibleInSection(model, project, .remote)) return true;
-    }
+    return hasProjectsInSection(model, .remote);
+}
+
+fn hasProjectsInSection(model: *const GraphModel.Model, section: ProjectSection) bool {
+    for (model.recent_projects.items) |project| if (!project.isGlobal() and project.isRemote() == (section == .remote)) return true;
+    for (model.open_projects.items) |project| if (!project.isGlobal() and project.isRemote() == (section == .remote)) return true;
+    for (model.graphs.items) |graph| if (!graph.project.isGlobal() and graph.project.isRemote() == (section == .remote)) return true;
+    if (model.graph) |graph| if (!graph.project.isGlobal() and graph.project.isRemote() == (section == .remote)) return true;
     return false;
 }
 
@@ -854,12 +883,23 @@ fn hierarchyItems(
     const visited = try allocator.alloc(bool, nodes.len);
     defer allocator.free(visited);
     @memset(visited, false);
+    const reachable = try allocator.alloc(bool, nodes.len);
+    defer allocator.free(reachable);
+    @memset(reachable, false);
     var roots = try collectRootIndices(allocator, nodes, edges, state, false, visited);
     defer roots.deinit(allocator);
-    for (roots.items) |index| try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
-    var unresolved = try collectRootIndices(allocator, nodes, edges, state, true, visited);
+    for (roots.items) |index| {
+        reachable[index] = true;
+        markDescendantsVisited(reachable, nodes, edges, index);
+        try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    }
+    var unresolved = try collectRootIndices(allocator, nodes, edges, state, true, reachable);
     defer unresolved.deinit(allocator);
-    for (unresolved.items) |index| if (!visited[index]) try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    for (unresolved.items) |index| if (!reachable[index]) {
+        reachable[index] = true;
+        markDescendantsVisited(reachable, nodes, edges, index);
+        try appendHierarchy(allocator, &result, visited, nodes, edges, index, 0, state);
+    };
     return result;
 }
 
@@ -880,7 +920,7 @@ fn collectRootIndices(
         }
         var incoming = false;
         for (edges) |edge| {
-            if (std.mem.eql(u8, edge.kind, "handoff") and std.mem.eql(u8, edge.to, node.id)) {
+            if (std.mem.eql(u8, edge.to, node.id) and GraphModel.findNodeIndexByID(nodes, edge.from) != null) {
                 incoming = true;
                 break;
             }
@@ -926,8 +966,7 @@ fn appendHierarchy(
     visited[index] = true;
     var has_children = false;
     for (edges) |edge| {
-        if (std.mem.eql(u8, edge.kind, "handoff") and
-            std.mem.eql(u8, edge.from, nodes[index].id) and
+        if (std.mem.eql(u8, edge.from, nodes[index].id) and
             GraphModel.findNodeIndexByID(nodes, edge.to) != null)
         {
             has_children = true;
@@ -936,14 +975,10 @@ fn appendHierarchy(
     }
     try result.append(allocator, .{ .index = index, .depth = depth, .has_children = has_children });
     if (depth != 0 or has_children) {
-        if (state) |value| if (!value.isNodeExpanded(nodes[index].id)) {
-            markDescendantsVisited(visited, nodes, edges, index);
-            return;
-        };
+        if (state) |value| if (!value.isNodeExpanded(nodes[index].id)) return;
     }
     for (edges) |edge| {
-        if (!std.mem.eql(u8, edge.kind, "handoff") or
-            !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
+        if (!std.mem.eql(u8, edge.from, nodes[index].id)) continue;
         const child = GraphModel.findNodeIndexByID(nodes, edge.to) orelse continue;
         try appendHierarchy(allocator, result, visited, nodes, edges, child, depth + 1, state);
     }
@@ -957,8 +992,7 @@ fn markDescendantsVisited(
 ) void {
     if (index >= nodes.len) return;
     for (edges) |edge| {
-        if (!std.mem.eql(u8, edge.kind, "handoff") or
-            !std.mem.eql(u8, edge.from, nodes[index].id)) continue;
+        if (!std.mem.eql(u8, edge.from, nodes[index].id)) continue;
         const child = GraphModel.findNodeIndexByID(nodes, edge.to) orelse continue;
         if (visited[child]) continue;
         visited[child] = true;
@@ -1013,7 +1047,7 @@ pub fn sidebarSectionBottom(model: *const GraphModel.Model, inspection: ?*const 
     defer rows.deinit(std.heap.page_allocator);
     if (rows.items.len == 0) return Tokens.header_height;
     const last = rows.items[rows.items.len - 1];
-    return last.top + (if (last.kind == .worktree) @as(i32, 34) else 24);
+    return last.top + (if (last.kind == .worktree) @as(i32, 34) else row_height);
 }
 
 pub fn needsYouStopBounds(
@@ -1283,6 +1317,154 @@ fn reason(entry: WorktreeStatus.Entry) []const u8 {
     return if (WorktreeStatus.decision(entry) == .reclaimable) "safe to reclaim" else "unsafe to reclaim";
 }
 
+test "parity sidebar pins Graph and Quick Chats above captioned open folders" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\fixture","name":"Fixture"},"nodes":[{"id":"root","title":"Root","state":"idle"}],"edges":[]}}}
+    );
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = @constCast("main"),
+        .project_path = @constCast("C:\\fixture"),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{ .path = @constCast("C:\\fixture\\wt"), .branch = @constCast("topic") });
+    var rows = try appendRows(allocator, &model, &inspection, 0, null);
+    defer rows.deinit(allocator);
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.quick_chat_overview, rows.items[1].kind);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[2].kind);
+    try std.testing.expectEqual(RowKind.open_project, rows.items[3].kind);
+    try std.testing.expectEqual(@as(usize, 1), countRows(rows.items, .worktree));
+}
+
+test "parity sidebar expands the whole mixed-edge tree by default without duplicating a cycle" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\fixture","name":"Fixture"},"nodes":[{"id":"root","title":"Main","state":"idle"},{"id":"goal","title":"Goal","state":"awaitingInput"},{"id":"turn","title":"Turn","state":"idle"},{"id":"timed","title":"Timed","state":"stopped"}],"edges":[{"id":"a","from":"root","to":"goal","kind":"spawn"},{"id":"b","from":"goal","to":"turn","kind":"handoff"},{"id":"c","from":"turn","to":"timed","kind":"message"},{"id":"d","from":"turn","to":"goal","kind":"handoff"}]}}}
+    );
+    var state = State.init(allocator);
+    defer state.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4), countRows(rows.items, .loop));
+    var depth: usize = 0;
+    for (rows.items) |row| if (row.kind == .loop) {
+        try std.testing.expectEqual(depth, row.depth);
+        depth += 1;
+    };
+}
+
+test "parity sidebar type stripes use macOS RGB converted to COLORREF" {
+    try std.testing.expectEqual(@as(u32, 0x00E3DAD3), loopAccent("sketch"));
+    try std.testing.expectEqual(@as(u32, 0x00709E19), loopAccent("goalBased"));
+    try std.testing.expectEqual(@as(u32, 0x008151D5), loopAccent("turnBased"));
+    try std.testing.expectEqual(@as(u32, 0x000085C9), loopAccent("timeBased"));
+    try std.testing.expectEqual(@as(u32, 0x00E98590), loopAccent("composite"));
+    try std.testing.expectEqual(@as(u32, 0x00E98590), loopAccent("proactive"));
+}
+
+test "parity sidebar diamond child remains visible under its expanded parent" {
+    const nodes = [_]GraphModel.Node{
+        .{ .id = @constCast("a"), .title = @constCast("A"), .loop_type = @constCast("sketch"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("b"), .title = @constCast("B"), .loop_type = @constCast("sketch"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("c"), .title = @constCast("Shared"), .loop_type = @constCast("sketch"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+        .{ .id = @constCast("d"), .title = @constCast("Hidden"), .loop_type = @constCast("sketch"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
+    };
+    const edges = [_]GraphModel.Edge{
+        .{ .from = @constCast("a"), .to = @constCast("c"), .kind = @constCast("spawn") },
+        .{ .from = @constCast("b"), .to = @constCast("c"), .kind = @constCast("message") },
+        .{ .from = @constCast("a"), .to = @constCast("d"), .kind = @constCast("handoff") },
+    };
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    try state.toggleNode("a");
+    var hierarchy = try hierarchyItems(std.testing.allocator, &nodes, &edges, &state);
+    defer hierarchy.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), hierarchy.items.len);
+    try std.testing.expectEqual(@as(usize, 2), hierarchy.items[2].index);
+    try std.testing.expectEqual(@as(usize, 1), hierarchy.items[2].depth);
+    for (hierarchy.items) |row| try std.testing.expect(row.index != 3);
+}
+
+test "parity jump scroll target follows expanded rows and falls back to the folded project" {
+    const allocator = std.testing.allocator;
+    var model = try manyLoopModel(allocator, 30);
+    defer model.deinit();
+    var state = State.init(allocator);
+    defer state.deinit();
+    for ([_]bool{ false, true }) |folded| {
+        if (folded) try state.toggleProject("C:\\many-loops");
+        var rows = try appendRows(allocator, &model, null, 0, &state);
+        defer rows.deinit(allocator);
+        const expected = for (rows.items) |row| {
+            if ((!folded and row.kind == .loop and row.index == 29) or (folded and row.kind == .open_project)) break row.top;
+        } else return error.TestExpectedJumpTarget;
+        const target = try loopRowTopForModel(&model, 29, null, &state) orelse return error.TestExpectedJumpTarget;
+        try std.testing.expectEqual(expected, target);
+        const bottom = contentViewportBottom(400, false, false);
+        const scroll = clampScroll(target - content_top, maxScroll(&model, null, bottom, &state));
+        try std.testing.expect(target - scroll >= content_top);
+        try std.testing.expect(target - scroll + row_height <= bottom);
+    }
+}
+
+test "parity sidebar deeply indented titles keep useful space alongside age and state dot" {
+    const text = loopRowTextRects(100, 3);
+    try std.testing.expect(text.title.right - text.title.left >= 64);
+    try std.testing.expect(text.title.right <= text.age.left);
+    try std.testing.expect(text.age.right <= 198);
+}
+
+test "parity sidebar selection is a rounded blue pill and the workspace footer never overlaps content" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var state = State.init(allocator);
+    defer state.deinit();
+    state.selection = .quick_chats;
+    state.workspace_name = workspaceName("C:\\fixture\\.graphcode-parityref");
+    try std.testing.expectEqualStrings("parityref", state.workspace_name);
+    const screen = c.GetDC(null) orelse return error.SkipZigTest;
+    defer _ = c.ReleaseDC(null, screen);
+    const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteDC(hdc);
+    const bitmap = c.CreateCompatibleBitmap(screen, Tokens.sidebar_width, 700) orelse return error.TestUnexpectedResult;
+    defer _ = c.DeleteObject(bitmap);
+    const previous = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, previous);
+    draw(hdc, &model, null, "", 0, "Status must not cover the footer", 700, "", "", &state, -1, allocator);
+    const top = content_top + row_height;
+    try std.testing.expectEqual(selection_blue, c.GetPixel(hdc, 60, top + 2));
+    try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(hdc, rowBounds(top).left, top));
+    try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(hdc, 60, content_top + 2));
+    const footer = workspaceFooterRect(700);
+    try std.testing.expect(contentViewportBottom(700, false, false) <= footer.top);
+    try std.testing.expect(workspaceFooterAt(18, footer.top + 12, 700));
+    try std.testing.expect(!workspaceFooterAt(18, footer.top - 1, 700));
+    try std.testing.expect(rowAt(18, footer.top + 12, &model, null, 0, contentViewportBottom(700, false, false), &state) == null);
+}
+
+test "parity sidebar state dots distinguish presence and hollow stopped blocked waiting states" {
+    const node = GraphModel.Node{ .id = @constCast("a"), .title = @constCast("A"), .loop_type = @constCast("goalBased"), .state = @constCast("running"), .activity = @constCast(""), .presence = @constCast("awaitingInput") };
+    try std.testing.expectEqualStrings("awaitingInput", displayState(node));
+    try std.testing.expectEqual(@as(u32, 0x000A9FFF), dotColor(displayState(node)));
+    try std.testing.expectEqual(@as(u32, 0x0058D130), dotColor("succeeded"));
+    for ([_][]const u8{ "blocked", "stopped", "waiting" }) |value| try std.testing.expect(dotHollow(value));
+    for ([_][]const u8{ "idle", "running", "awaitingInput", "succeeded", "failed", "stalled" }) |value| try std.testing.expect(!dotHollow(value));
+}
+
+test "parity sidebar workspace switcher only shows when it disambiguates the workspace" {
+    try std.testing.expect(!workspaceWorthShowing("C:\\fixture\\.graphcode", 1));
+    try std.testing.expect(workspaceWorthShowing("C:\\fixture\\.graphcode", 2));
+    try std.testing.expect(workspaceWorthShowing("C:\\fixture\\.graphcode-parityref", 1));
+    try std.testing.expectEqualStrings("Default", workspaceName("C:\\fixture\\.graphcode"));
+}
+
 test "worktree row hit testing selects only visible rows" {
     const top = worktreeRowTop(2, 0, 0);
     try std.testing.expectEqual(@as(?usize, 0), hitTestWorktree(24, top + 4, 2, 2, 0, 700));
@@ -1431,10 +1613,7 @@ test "multi-project rows share render and hit-test offsets with project identity
     const remote_row = rowAt(24, remote_top + 4, &model, null, 0, 700, null) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("C:\\work\\local", local_row.project_path.?);
     try std.testing.expectEqualStrings("ssh://build/remote", remote_row.project_path.?);
-    try std.testing.expectEqual(
-        layoutFor(&model, null).quickChatRowTop(model.quick_chats.items.len + 1),
-        sidebarSectionBottom(&model, null, null),
-    );
+    try std.testing.expectEqual(remote_top + row_height, sidebarSectionBottom(&model, null, null));
 }
 
 test "scroll-adjusted generated rows hit titles loops and worktrees" {
@@ -1570,8 +1749,8 @@ test "sidebar without graph counts only static rendered content" {
         .name = try std.testing.allocator.dupe(u8, "Project"),
     });
     const no_graph_max = maxScroll(&model, null, 100, null);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 78 + 24 + 24 + 62 + 42 + 24 - 100), no_graph_max);
-    try std.testing.expectEqual(@as(i32, 180), clampScroll(180, no_graph_max));
+    try std.testing.expectEqual(@as(i32, content_top + 4 * row_height + 12 - 100), no_graph_max);
+    try std.testing.expectEqual(no_graph_max, clampScroll(180, no_graph_max));
 }
 
 test "global Graph row remains pinned without an open project" {
@@ -1598,11 +1777,13 @@ test "recent projects are grouped into local and remote sections" {
     });
     var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
     defer rows.deinit(std.testing.allocator);
-    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
-    try std.testing.expectEqual(RowKind.project, rows.items[1].kind);
-    try std.testing.expectEqual(@as(usize, 1), rows.items[1].index);
-    try std.testing.expectEqual(RowKind.remote_heading, rows.items[2].kind);
-    try std.testing.expectEqual(@as(usize, 0), rows.items[3].index);
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.quick_chat_overview, rows.items[1].kind);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[2].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[3].kind);
+    try std.testing.expectEqual(@as(usize, 1), rows.items[3].index);
+    try std.testing.expectEqual(RowKind.remote_heading, rows.items[4].kind);
+    try std.testing.expectEqual(@as(usize, 0), rows.items[5].index);
 }
 
 test "recent project rows exclude folders already open in the projects list" {
@@ -1622,12 +1803,13 @@ test "recent project rows exclude folders already open in the projects list" {
     });
     var rows = try appendRows(std.testing.allocator, &model, null, 0, null);
     defer rows.deinit(std.testing.allocator);
-    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
-    try std.testing.expectEqual(RowKind.project, rows.items[1].kind);
-    try std.testing.expectEqualStrings("C:\\recent", rows.items[1].project_path.?);
-    try std.testing.expectEqual(RowKind.overview, rows.items[2].kind);
-    try std.testing.expectEqual(RowKind.open_project, rows.items[3].kind);
-    try std.testing.expectEqualStrings("C:\\open", rows.items[3].project_path.?);
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    try std.testing.expectEqual(RowKind.quick_chat_overview, rows.items[1].kind);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[2].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[3].kind);
+    try std.testing.expectEqualStrings("C:\\recent", rows.items[3].project_path.?);
+    try std.testing.expectEqual(RowKind.open_project, rows.items[4].kind);
+    try std.testing.expectEqualStrings("C:\\open", rows.items[4].project_path.?);
 }
 
 test "handoff edges derive stable nested loop order and depth" {
@@ -1648,7 +1830,7 @@ test "handoff edges derive stable nested loop order and depth" {
     try std.testing.expectEqual(@as(usize, 1), hierarchy.items[1].depth);
 }
 
-test "message and spawn edges do not define sidebar hierarchy" {
+test "message and spawn edges define sidebar hierarchy as on macOS" {
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("first"), .title = @constCast("First"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
         .{ .id = @constCast("second"), .title = @constCast("Second"), .loop_type = @constCast("turnBased"), .state = @constCast("idle"), .activity = @constCast(""), .presence = @constCast("idle") },
@@ -1661,9 +1843,9 @@ test "message and spawn edges do not define sidebar hierarchy" {
     defer hierarchy.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), hierarchy.items.len);
     try std.testing.expectEqual(@as(usize, 0), hierarchy.items[0].depth);
-    try std.testing.expect(!hierarchy.items[0].has_children);
-    try std.testing.expectEqual(@as(usize, 0), hierarchy.items[1].depth);
-    try std.testing.expect(!hierarchy.items[1].has_children);
+    try std.testing.expect(hierarchy.items[0].has_children);
+    try std.testing.expectEqual(@as(usize, 1), hierarchy.items[1].depth);
+    try std.testing.expect(hierarchy.items[1].has_children);
 }
 
 test "sidebar groups and nested disclosures collapse independently and persist expansion" {
@@ -1682,10 +1864,10 @@ test "sidebar groups and nested disclosures collapse independently and persist e
     state.local_collapsed = true;
     var rows = try appendRows(std.testing.allocator, &model, null, 0, &state);
     defer rows.deinit(std.testing.allocator);
-    try std.testing.expectEqual(RowKind.local_heading, rows.items[0].kind);
-    try std.testing.expectEqual(RowKind.remote_heading, rows.items[1].kind);
-    try std.testing.expectEqual(RowKind.project, rows.items[2].kind);
-    try std.testing.expectEqual(@as(usize, 1), rows.items[2].index);
+    try std.testing.expectEqual(RowKind.local_heading, rows.items[2].kind);
+    try std.testing.expectEqual(RowKind.remote_heading, rows.items[3].kind);
+    try std.testing.expectEqual(RowKind.project, rows.items[4].kind);
+    try std.testing.expectEqual(@as(usize, 1), rows.items[4].index);
 
     try state.toggleNode("root");
     const encoded = try state.encode(std.testing.allocator);
@@ -1693,12 +1875,12 @@ test "sidebar groups and nested disclosures collapse independently and persist e
     var restored = State.init(std.testing.allocator);
     defer restored.deinit();
     try restored.decode(encoded);
-    try std.testing.expect(restored.isNodeExpanded("root"));
-    try restored.toggleNode("root");
     try std.testing.expect(!restored.isNodeExpanded("root"));
+    try restored.toggleNode("root");
+    try std.testing.expect(restored.isNodeExpanded("root"));
 }
 
-test "daemon hierarchy starts with only roots visible and reveals children by stable id" {
+test "daemon hierarchy starts expanded and hides children by stable id on request" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
     const frame =
@@ -1709,11 +1891,11 @@ test "daemon hierarchy starts with only roots visible and reveals children by st
     defer state.deinit();
     var collapsed = try appendRows(std.testing.allocator, &model, null, 0, &state);
     defer collapsed.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), countRows(collapsed.items, .loop));
+    try std.testing.expectEqual(@as(usize, 2), countRows(collapsed.items, .loop));
     try state.toggleNode("root");
     var expanded = try appendRows(std.testing.allocator, &model, null, 0, &state);
     defer expanded.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), countRows(expanded.items, .loop));
+    try std.testing.expectEqual(@as(usize, 1), countRows(expanded.items, .loop));
 }
 
 fn countRows(rows: []const Row, kind: RowKind) usize {
@@ -1733,7 +1915,7 @@ test "quick chats remain selectable without an open graph or inspection" {
         .backend = try std.testing.allocator.dupe(u8, "claudeCode"),
     });
     const layout = layoutFor(&model, null);
-    try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
+    try std.testing.expectEqual(layout.quickChatHeadingTop(), layout.quickChatRowTop(0));
     const overview = rowAt(24, layout.quickChatRowTop(0) + 4, &model, null, 0, 700, null) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(RowKind.quick_chat_overview, overview.kind);
@@ -1742,10 +1924,10 @@ test "quick chats remain selectable without an open graph or inspection" {
     try std.testing.expectEqual(RowKind.quick_chat, row.kind);
     try std.testing.expectEqual(@as(usize, 0), row.index);
     try std.testing.expectEqual(
-        @as(i32, Tokens.header_height + 78 + 62 + 42),
+        @as(i32, content_top + row_height),
         layout.quickChatRowTop(0),
     );
-    try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700, null) == null);
+    try std.testing.expect(rowAt(24, layout.quickChatHeadingTop() + 4, &model, null, 0, 700, null).?.kind == .quick_chat_overview);
     try std.testing.expectEqual(layout.quickChatRowTop(2), sidebarSectionBottom(&model, null, null));
 }
 
@@ -1756,13 +1938,13 @@ test "quick chat heading and rows stay distinct across graph layouts" {
         .{ .base = 100, .project_count = 2, .loop_count = 3, .worktree_count = 4, .inspection_present = true },
     };
     for (layouts) |layout| {
-        try std.testing.expect(layout.quickChatHeadingTop() + 11 < layout.quickChatRowTop(0));
-        try std.testing.expectEqual(@as(i32, 24), layout.quickChatRowTop(1) - layout.quickChatRowTop(0));
+        try std.testing.expectEqual(layout.quickChatHeadingTop(), layout.quickChatRowTop(0));
+        try std.testing.expectEqual(row_height, layout.quickChatRowTop(1) - layout.quickChatRowTop(0));
     }
 }
 
 test "sidebar loop presentation preserves type and terminal states" {
-    try std.testing.expectEqual(@as(u32, 0x0048C78E), loopAccent("goalBased"));
+    try std.testing.expectEqual(@as(u32, 0x00709E19), loopAccent("goalBased"));
     try std.testing.expectEqualStrings("done", compactState("succeeded"));
     try std.testing.expectEqualStrings("running", compactState("running"));
     try std.testing.expectEqual(@as(u32, 0x005F5FFF), stateColor("failed"));
@@ -1837,21 +2019,22 @@ test "elapsedText renders a compact age and its unit boundaries honestly" {
     try std.testing.expectEqualStrings("10d", ten_days);
 }
 
-test "sidebar footer reserve keeps content, status text, banner, and error footer disjoint" {
+test "sidebar footer reserve keeps content workspace bar banner and error footer disjoint" {
     for ([_]bool{ false, true }) |has_update| for ([_]bool{ false, true }) |has_error| for ([_]i32{ 420, 522, 772 }) |viewport_bottom| {
         const content_bottom = contentViewportBottom(viewport_bottom, has_update, has_error);
-        const status = statusTextRect(viewport_bottom, has_update, has_error);
-        try std.testing.expect(content_bottom <= status.top);
-        try std.testing.expect(status.right <= Tokens.sidebar_width and status.bottom <= viewport_bottom);
+        const workspace = workspaceFooterRect(viewport_bottom);
+        try std.testing.expect(content_bottom <= workspace.top);
+        try std.testing.expectEqual(rect(0, viewport_bottom - 34, Tokens.sidebar_width, viewport_bottom), workspace);
         if (has_update) {
             const banner = updateBannerRect(viewport_bottom, has_error);
             try std.testing.expect(content_bottom <= banner.top);
-            try std.testing.expect(status.bottom <= banner.top);
+            try std.testing.expect(banner.bottom <= workspace.top);
         }
         if (has_error) {
             const footer = errorFooterRect(viewport_bottom);
             try std.testing.expect(content_bottom <= footer.top);
-            try std.testing.expect(status.bottom <= footer.top);
+            try std.testing.expect(footer.bottom <= workspace.top);
+            if (has_update) try std.testing.expect(updateBannerRect(viewport_bottom, true).bottom <= footer.top);
         }
     };
     // A viewport too short for the footer still leaves a well-formed, header-anchored content rect.
@@ -1993,8 +2176,8 @@ test "sidebar draw clips rows to the content viewport and keeps status text insi
             const background = pixel == Tokens.workspace_rail;
             if (y < content_bottom) {
                 if (!background) painted_in_content += 1;
-            } else if (y >= status.bottom or x >= status.right) {
-                // Below the status line, and right of it, only the rail background may show.
+            } else if (y < workspaceFooterRect(viewport_bottom).top and (y >= status.bottom or x >= status.right)) {
+                // No scrolling content is painted in the gap above the workspace footer.
                 try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), pixel);
             }
         }
@@ -2060,7 +2243,7 @@ test "scrolled rows beneath the fixed GRAPH/Projects header are not hit" {
             try std.testing.expect(rowAt(24, y, &model, null, scroll, content_bottom, &state) == null);
         }
     }
-    try std.testing.expect(under_header >= 2);
+    try std.testing.expect(under_header >= 1);
 }
 
 test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
@@ -2086,7 +2269,7 @@ test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
     draw(hdc, &model, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     // The goalBased accent bar is only ever painted by loop rows.
-    const accent: u32 = 0x0048C78E;
+    const accent: u32 = 0x00709E19;
     var accent_in_header: usize = 0;
     var accent_in_content: usize = 0;
     var y: i32 = Tokens.header_height;
@@ -2101,12 +2284,13 @@ test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
     try std.testing.expect(accent_in_content > 30);
 }
 
-test "loop row title, status, and age occupy disjoint columns that each label fits" {
+test "loop row title age state dot and disclosure occupy disjoint columns" {
     for (0..5) |depth| {
         const text = loopRowTextRects(100, depth);
         try std.testing.expect(text.title.left < text.title.right);
-        try std.testing.expect(text.title.right <= text.state.left);
-        try std.testing.expect(text.state.right <= text.age.left);
+        try std.testing.expect(text.title.right <= text.age.left);
+        try std.testing.expect(text.age.right <= text.state.left);
+        try std.testing.expect(text.state.right <= 198);
         // Clear of the hover disclosure's hit zone and the sidebar rail edge.
         try std.testing.expect(text.age.right <= 198 and text.age.right <= Tokens.sidebar_width);
     }
@@ -2114,15 +2298,9 @@ test "loop row title, status, and age occupy disjoint columns that each label fi
     defer _ = c.ReleaseDC(null, screen);
     const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
     defer _ = c.DeleteDC(hdc);
-    const previous = AppFont.select(hdc, 9, false);
+    const previous = AppFont.select(hdc, 10, false);
     defer _ = c.SelectObject(hdc, previous);
     const text = loopRowTextRects(100, 0);
-    var widest_state: i32 = 0;
-    for ([_][]const u8{ "idle", "running", "stopped", "blocked", "failed", "stalled", "waiting", "done", "needs" }) |label| {
-        const width = try measuredWidth(hdc, label);
-        widest_state = @max(widest_state, width);
-        try std.testing.expect(width <= text.state.right - text.state.left);
-    }
     var widest_age: i32 = 0;
     for ([_][]const u8{ "-", "59s", "59m", "23h", "99d", "365d", "999d" }) |label| {
         const width = try measuredWidth(hdc, label);
@@ -2130,7 +2308,7 @@ test "loop row title, status, and age occupy disjoint columns that each label fi
         try std.testing.expect(width <= text.age.right - text.age.left);
     }
     // Guard against vacuous measurements.
-    try std.testing.expect(widest_state > 20 and widest_age > 10);
+    try std.testing.expect(widest_age > 10);
 }
 
 fn measuredWidth(hdc: c.HDC, label: []const u8) !i32 {
@@ -2143,6 +2321,123 @@ fn measuredWidth(hdc: c.HDC, label: []const u8) !i32 {
 
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
+}
+
+fn projectForRow(model: *const GraphModel.Model, path: []const u8) ?GraphModel.Project {
+    if (model.graphFor(path)) |graph| return graph.project;
+    for (model.open_projects.items) |project| if (std.mem.eql(u8, project.path, path)) return project;
+    return null;
+}
+
+pub fn rowSelected(row: Row, model: *const GraphModel.Model, selection: Selection) bool {
+    return switch (selection) {
+        .none => false,
+        .overview => row.kind == .overview,
+        .quick_chats => row.kind == .quick_chat_overview,
+        .project => |path| row.kind == .open_project and row.project_path != null and std.mem.eql(u8, row.project_path.?, path),
+        .loop => |id| blk: {
+            if (row.kind != .loop) break :blk false;
+            const graph = model.graphFor(row.project_path orelse break :blk false) orelse break :blk false;
+            break :blk row.index < graph.nodes.items.len and std.mem.eql(u8, graph.nodes.items[row.index].id, id);
+        },
+        .chat => |id| row.kind == .quick_chat and row.index < model.quick_chats.items.len and std.mem.eql(u8, model.quick_chats.items[row.index].id, id),
+    };
+}
+
+fn displayState(node: GraphModel.Node) []const u8 {
+    if (std.mem.eql(u8, node.presence, "busy")) return "running";
+    if (std.mem.eql(u8, node.presence, "awaitingInput")) return "awaitingInput";
+    if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "idle")) return "idle";
+    return node.state;
+}
+
+fn dotColor(state: []const u8) u32 {
+    if (std.mem.eql(u8, state, "running") or std.mem.eql(u8, state, "waiting")) return 0x00FF840A;
+    if (std.mem.eql(u8, state, "awaitingInput") or std.mem.eql(u8, state, "blocked")) return 0x000A9FFF;
+    if (std.mem.eql(u8, state, "succeeded")) return 0x0058D130;
+    if (std.mem.eql(u8, state, "failed")) return 0x003A45FF;
+    if (std.mem.eql(u8, state, "stalled")) return 0x00F25ABF;
+    return 0x00636363;
+}
+
+fn dotHollow(state: []const u8) bool {
+    return std.mem.eql(u8, state, "blocked") or std.mem.eql(u8, state, "stopped") or std.mem.eql(u8, state, "waiting");
+}
+
+fn drawStateDot(hdc: c.HDC, bounds: c.RECT, state: []const u8) void {
+    const pen = c.CreatePen(c.PS_SOLID, 1, dotColor(state));
+    defer _ = c.DeleteObject(pen);
+    const brush = c.CreateSolidBrush(dotColor(state));
+    defer _ = c.DeleteObject(brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    const old_brush = c.SelectObject(hdc, if (dotHollow(state)) c.GetStockObject(c.HOLLOW_BRUSH) else brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    _ = c.Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+}
+
+fn roundedFill(hdc: c.HDC, bounds: c.RECT, color: u32, radius: i32) void {
+    const brush = c.CreateSolidBrush(color);
+    defer _ = c.DeleteObject(brush);
+    const old_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const old_pen = c.SelectObject(hdc, c.GetStockObject(c.NULL_PEN));
+    defer _ = c.SelectObject(hdc, old_pen);
+    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, radius * 2, radius * 2);
+}
+
+fn stroke(hdc: c.HDC, points: []const c.POINT, color: u32) void {
+    const pen = c.CreatePen(c.PS_SOLID, 1, color);
+    defer _ = c.DeleteObject(pen);
+    const previous = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, previous);
+    _ = c.Polyline(hdc, points.ptr, @intCast(points.len));
+}
+
+fn drawChevron(hdc: c.HDC, x: i32, y: i32, expanded: bool, color: u32) void {
+    const points = if (expanded)
+        [_]c.POINT{ .{ .x = x - 3, .y = y - 2 }, .{ .x = x, .y = y + 1 }, .{ .x = x + 3, .y = y - 2 } }
+    else
+        [_]c.POINT{ .{ .x = x - 2, .y = y - 3 }, .{ .x = x + 1, .y = y }, .{ .x = x - 2, .y = y + 3 } };
+    stroke(hdc, &points, color);
+}
+
+fn drawPlus(hdc: c.HDC, x: i32, y: i32, color: u32) void {
+    stroke(hdc, &.{ .{ .x = x - 4, .y = y }, .{ .x = x + 5, .y = y } }, color);
+    stroke(hdc, &.{ .{ .x = x, .y = y - 4 }, .{ .x = x, .y = y + 5 } }, color);
+}
+
+const Icon = enum { folder, graph, chats, network, workspace };
+
+fn drawIcon(hdc: c.HDC, icon: Icon, x: i32, y: i32, color: u32) void {
+    switch (icon) {
+        .folder => {
+            stroke(hdc, &.{
+                .{ .x = x, .y = y + 2 },      .{ .x = x + 6, .y = y + 2 },   .{ .x = x + 8, .y = y + 4 },
+                .{ .x = x + 15, .y = y + 4 }, .{ .x = x + 15, .y = y + 14 }, .{ .x = x, .y = y + 14 },
+                .{ .x = x, .y = y + 2 },
+            }, color);
+            stroke(hdc, &.{ .{ .x = x, .y = y + 6 }, .{ .x = x + 15, .y = y + 6 } }, color);
+        },
+        .graph, .network => {
+            stroke(hdc, &.{ .{ .x = x + 3, .y = y + 3 }, .{ .x = x + 13, .y = y + 3 }, .{ .x = x + 8, .y = y + 13 }, .{ .x = x + 3, .y = y + 3 } }, color);
+            roundedFill(hdc, rect(x, y, x + 5, y + 5), color, 2);
+            roundedFill(hdc, rect(x + 11, y, x + 16, y + 5), color, 2);
+            roundedFill(hdc, rect(x + 6, y + 11, x + 11, y + 16), color, 2);
+        },
+        .chats => {
+            stroke(hdc, &.{
+                .{ .x = x, .y = y },         .{ .x = x + 11, .y = y },     .{ .x = x + 11, .y = y + 9 },
+                .{ .x = x + 5, .y = y + 9 }, .{ .x = x + 2, .y = y + 12 }, .{ .x = x + 2, .y = y + 9 },
+                .{ .x = x, .y = y + 9 },     .{ .x = x, .y = y },
+            }, color);
+            stroke(hdc, &.{ .{ .x = x + 12, .y = y + 4 }, .{ .x = x + 18, .y = y + 4 }, .{ .x = x + 18, .y = y + 13 }, .{ .x = x + 16, .y = y + 13 }, .{ .x = x + 16, .y = y + 16 }, .{ .x = x + 13, .y = y + 13 }, .{ .x = x + 7, .y = y + 13 }, .{ .x = x + 7, .y = y + 10 } }, color);
+        },
+        .workspace => {
+            stroke(hdc, &.{ .{ .x = x, .y = y + 4 }, .{ .x = x + 6, .y = y }, .{ .x = x + 12, .y = y + 4 }, .{ .x = x + 6, .y = y + 8 }, .{ .x = x, .y = y + 4 } }, color);
+            stroke(hdc, &.{ .{ .x = x, .y = y + 7 }, .{ .x = x + 6, .y = y + 11 }, .{ .x = x + 12, .y = y + 7 } }, color);
+        },
+    }
 }
 
 fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {

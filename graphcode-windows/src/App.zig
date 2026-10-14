@@ -1075,10 +1075,9 @@ const AccessibilityBounds = union(enum) {
     }
 };
 
-/// Smallest client height at which the sidebar keeps `Sidebar.min_content_region` of rows under
-/// the fixed header with the Workspace panel, Activity strip, and status line stacked below it.
-const min_client_height: i32 = Sidebar.content_top + Sidebar.min_content_region +
-    Sidebar.footerReserve(false, false) + Tokens.workspace_height + Tokens.activity_strip_height;
+/// Preserve the existing height floor while matching macOS's observed minimum content width.
+const min_client_height: i32 = 517;
+const min_client_width: i32 = 452;
 
 extern "user32" fn AdjustWindowRectExForDpi(
     rect: *c.RECT,
@@ -1096,6 +1095,15 @@ fn minimumWindowHeight(hwnd: c.HWND, dpi: u32) i32 {
     const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
     if (AdjustWindowRectExForDpi(&frame, style, has_menu, ex_style, Dpi.normalize(dpi)) == 0) return 0;
     return frame.bottom - frame.top;
+}
+
+fn minimumWindowWidth(hwnd: c.HWND, dpi: u32) i32 {
+    var frame = c.RECT{ .left = 0, .top = 0, .right = physicalCoordinate(min_client_width, dpi), .bottom = 0 };
+    const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+    const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
+    if (AdjustWindowRectExForDpi(&frame, style, has_menu, ex_style, Dpi.normalize(dpi)) == 0) return 0;
+    return frame.right - frame.left;
 }
 
 fn clipSidebarAccessibilityBounds(bounds: c.RECT, viewport_bottom: i32) c.RECT {
@@ -4226,9 +4234,15 @@ pub const App = struct {
         self.workspace_controls.panel_visible = false;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
-        self.sidebar_scroll = Sidebar.clampScroll(
-            Sidebar.loopRowTopForModel(&self.model, node_index) - 24,
-            Sidebar.maxScroll(&self.model, if (self.worktree_inspection) |*value| value else null, 700, &self.sidebar_state),
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        const inspection = self.currentWorktreeInspection();
+        const target_top = Sidebar.loopRowTopForModel(&self.model, node_index, inspection, &self.sidebar_state) catch {
+            self.setStatus("Unable to locate the matching sidebar row");
+            return;
+        };
+        if (target_top) |top| self.sidebar_scroll = Sidebar.clampScroll(
+            top - Sidebar.content_top,
+            Sidebar.maxScroll(&self.model, inspection, self.sidebarContentBottom(client.bottom), &self.sidebar_state),
         );
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -6528,8 +6542,18 @@ pub const App = struct {
 
     fn ensureWorktreeVisible(self: *App, index: usize) void {
         const client = logicalClientRect(self.window.hwnd, self.dpi);
-        const loop_count = if (self.model.graph) |graph| graph.nodes.items.len else 0;
-        const top = Sidebar.worktreeRowTopForModel(&self.model, loop_count, index) - self.sidebar_scroll;
+        const inspection = self.currentWorktreeInspection() orelse {
+            self.setStatus("Selected worktree is no longer available");
+            return;
+        };
+        const row_top = Sidebar.worktreeRowTopForModel(&self.model, inspection, index, &self.sidebar_state) catch {
+            self.setStatus("Unable to locate the selected worktree row");
+            return;
+        } orelse {
+            self.setStatus("Selected worktree is no longer available");
+            return;
+        };
+        const top = row_top - self.sidebar_scroll;
         const bottom = top + 34;
         const viewport_top = Sidebar.content_top;
         const viewport_bottom = self.sidebarContentBottom(client.bottom);
@@ -7523,7 +7547,8 @@ pub const App = struct {
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
-        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
+        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
+        const current_inspection = self.currentWorktreeInspection();
         // The scroll sink is optional so test sinks that only record elements need not declare it.
         if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
             provider.syncSidebarScroll(
@@ -7540,6 +7565,7 @@ pub const App = struct {
             &self.sidebar_state,
         ) catch return;
         defer sidebar_rows.deinit(self.allocator);
+        const sidebar_selection = Sidebar.selectionForSurface(&self.model, self.surface, self.workspace_is_quick_chat, self.selected_quick_chat, if (self.worktree_dialog != null and current_inspection != null) current_inspection.?.project_path else null);
         const header = self.headerPresentation();
         const header_layout = header.layout(client.right);
         for (GraphCanvas.header_actions) |action| {
@@ -7590,7 +7616,10 @@ pub const App = struct {
 
         for (sidebar_rows.items) |row| {
             const bounds = clipSidebarAccessibilityBounds(
-                .{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 },
+                if (row.kind == .worktree)
+                    c.RECT{ .left = 12, .top = row.top - 3, .right = 232, .bottom = row.top + 23 }
+                else
+                    Sidebar.rowBounds(row.top),
                 sidebar_bottom,
             );
             switch (row.kind) {
@@ -7601,15 +7630,15 @@ pub const App = struct {
                     self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, .{ .logical = bounds }, false, false) catch return;
                 },
                 .open_project => if (row.project_path) |path| if (self.model.graphFor(path)) |graph| {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, .{ .logical = bounds }, self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path), false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "open-project", path, graph.project.name, 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return;
                     const new_bounds = clipSidebarAccessibilityBounds(
-                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
+                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + Sidebar.row_height },
                         sidebar_bottom,
                     );
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", path, "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (row.has_children) {
                         const disclosure_bounds = clipSidebarAccessibilityBounds(
-                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + Sidebar.row_height },
                             sidebar_bottom,
                         );
                         self.appendAccessibilityElement(
@@ -7630,10 +7659,10 @@ pub const App = struct {
                         const node = graph.nodes.items[row.index];
                         const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ path, node.id }) catch return;
                         defer self.allocator.free(key);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, self.model.selected_node_id != null and std.mem.eql(u8, self.model.selected_node_id.?, node.id), false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "loop", key, node.title, 2, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return;
                         if (row.has_children) {
                             const disclosure_bounds = clipSidebarAccessibilityBounds(
-                                .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                                .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + Sidebar.row_height },
                                 sidebar_bottom,
                             );
                             self.appendAccessibilityElement(
@@ -7665,18 +7694,18 @@ pub const App = struct {
                         };
                     }
                 },
-                .overview => self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, self.surface == .overview, false) catch return,
+                .overview => self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return,
                 .quick_chat_overview => {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-destination", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-destination", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return;
                     const new_bounds = clipSidebarAccessibilityBounds(
-                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + 24 },
+                        .{ .left = 174, .top = row.top, .right = 198, .bottom = row.top + Sidebar.row_height },
                         sidebar_bottom,
                     );
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (self.model.quick_chats.items.len != 0) {
                         const disclosure_bounds = clipSidebarAccessibilityBounds(
-                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + 24 },
+                            .{ .left = 198, .top = row.top, .right = 220, .bottom = row.top + Sidebar.row_height },
                             sidebar_bottom,
                         );
                         self.appendAccessibilityElement(
@@ -7694,11 +7723,13 @@ pub const App = struct {
                 },
                 .quick_chat => if (row.index < self.model.quick_chats.items.len) {
                     const chat = self.model.quick_chats.items[row.index];
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, .{ .logical = bounds }, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-row", chat.id, chat.title, 1, .{ .logical = bounds }, Sidebar.rowSelected(row, &self.model, sidebar_selection), false) catch return;
                 },
             }
         }
         const footer = Sidebar.effectiveFooter(footer_viewport_bottom, self.updateBannerShown(), self.ingress_error.len != 0);
+        if (self.workspace_controls.rail_visible and Sidebar.workspaceWorthShowing(self.workspace_path, if (self.workspace_list) |list| list.items.len else 0))
+            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-footer", "switcher", Sidebar.workspaceName(self.workspace_path), 1, .{ .logical = Sidebar.workspaceFooterRect(footer_viewport_bottom) }, false, self.workspace_identity_valid) catch return;
         if (footer.update) {
             const banner = Sidebar.updateBannerRect(footer_viewport_bottom, footer.ingress);
             self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-update-banner", "update", "Update available", 1, .{ .logical = banner }, false, false) catch return;
@@ -8877,11 +8908,11 @@ fn onWindowMessage(
     }
     switch (message) {
         c.WM_GETMINMAXINFO => {
-            // Below this the sidebar cannot keep two rows visible beneath the fixed header with the
-            // Workspace panel, Activity strip, and status line stacked under it. Only the height is
-            // constrained; width keeps the system minimum.
             const info = Win32.messagePointer(*c.MINMAXINFO, lparam);
             const minimum = minimumWindowHeight(hwnd, app.dpi);
+            const minimum_width = minimumWindowWidth(hwnd, app.dpi);
+            if (minimum_width == 0) app.setStatus("Unable to calculate the window minimum width");
+            if (minimum_width > info.ptMinTrackSize.x) info.ptMinTrackSize.x = minimum_width;
             if (minimum > info.ptMinTrackSize.y) info.ptMinTrackSize.y = minimum;
             result.* = 0;
             return true;
@@ -8903,6 +8934,18 @@ fn onWindowMessage(
         },
         c.WM_COMMAND => {
             if ((wparam & Accessibility.uia_dynamic_invoke_mask) == Accessibility.uia_dynamic_invoke_tag) {
+                if ((wparam & Accessibility.uia_row_payload_mask) == Accessibility.worktreeIdentityPayload("workspace-footer:switcher")) {
+                    if (!app.workspace_controls.rail_visible) {
+                        app.setStatus("Workspace switcher unavailable while the sidebar is hidden");
+                        result.* = 0;
+                        return true;
+                    }
+                    const client = logicalClientRect(hwnd, app.dpi);
+                    const footer = Sidebar.workspaceFooterRect(GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface));
+                    const x: u16 = @intCast(physicalCoordinate(18, app.dpi));
+                    const y: u16 = @intCast(physicalCoordinate(footer.top + 12, app.dpi));
+                    return onWindowMessage(context, hwnd, c.WM_LBUTTONDOWN, 0, @intCast(@as(u32, x) | (@as(u32, y) << 16)), result);
+                }
                 _ = app.applyUiaDynamicInvoke(wparam & Accessibility.uia_row_payload_mask);
                 result.* = 0;
                 return true;
@@ -9120,10 +9163,17 @@ fn onWindowMessage(
             }
             const header = app.headerPresentation();
             const inspection = app.currentWorktreeInspection();
+            app.sidebar_state.selection = Sidebar.selectionForSurface(&app.model, app.surface, app.workspace_is_quick_chat, app.selected_quick_chat, if (app.worktree_dialog != null and inspection != null) inspection.?.project_path else null);
+            app.sidebar_state.workspace_name = if (Sidebar.workspaceWorthShowing(app.workspace_path, if (app.workspace_list) |list| list.items.len else 0))
+                Sidebar.workspaceName(app.workspace_path)
+            else
+                "";
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
             GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
+            app.sidebar_state.selection = .none;
+            app.sidebar_state.workspace_name = "";
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
@@ -9643,6 +9693,25 @@ fn onWindowMessage(
             }
             if (app.workspace_controls.rail_visible) {
                 if (app.completeSidebarRootDrag(y)) {
+                    result.* = 0;
+                    return true;
+                }
+                if (Sidebar.workspaceFooterAt(x, y, sidebar_bottom) and Sidebar.workspaceWorthShowing(app.workspace_path, if (app.workspace_list) |list| list.items.len else 0)) {
+                    app.clearSidebarRootDrag();
+                    if (app.refreshWorkspaceList()) {
+                        app.updateNativeChrome(.popup_open);
+                        if (c.GetSubMenu(c.GetMenu(hwnd), 3)) |menu| {
+                            const footer = Sidebar.workspaceFooterRect(sidebar_bottom);
+                            var anchor = c.POINT{ .x = physicalCoordinate(footer.left, app.dpi), .y = physicalCoordinate(footer.top, app.dpi) };
+                            if (c.ClientToScreen(hwnd, &anchor) != 0) {
+                                if (builtin.is_test and workspace_menu_observer != null) {
+                                    workspace_menu_observer.?(menu, anchor);
+                                } else {
+                                    _ = c.TrackPopupMenuEx(menu, c.TPM_LEFTALIGN | c.TPM_BOTTOMALIGN | c.TPM_LEFTBUTTON, anchor.x, anchor.y, hwnd, null);
+                                }
+                            } else app.setStatus("Unable to position the workspace switcher");
+                        } else app.setStatus("Workspace menu unavailable");
+                    }
                     result.* = 0;
                     return true;
                 }
@@ -11433,10 +11502,10 @@ test "sidebar UIA bounds clip hidden rows instead of sharing visible hit rectang
             400,
         ),
     );
-    // A row scrolled under the fixed GRAPH/Projects header is not published at all.
+    // A row entirely above the scrolling content is not published.
     try std.testing.expectEqualDeep(
         c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-        clipSidebarAccessibilityBounds(.{ .left = 12, .top = Tokens.header_height + 10, .right = 232, .bottom = Tokens.header_height + 34 }, 400),
+        clipSidebarAccessibilityBounds(.{ .left = 12, .top = Sidebar.content_top - 20, .right = 232, .bottom = Sidebar.content_top }, 400),
     );
     try std.testing.expectEqualDeep(
         c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -11466,6 +11535,7 @@ const sidebar_uia_prefixes = [_][]const u8{
     "activity-control:",
     "sidebar-error-footer:",
     "sidebar-update-banner:",
+    "workspace-footer:",
     "overview-destination:",
     "quick-chats-destination:",
 };
@@ -11476,6 +11546,7 @@ const SidebarUiaSink = struct {
     names: [192][160]u8 = undefined,
     name_lens: [192]usize = undefined,
     invokable: [192]bool = undefined,
+    selected: [192]bool = undefined,
     scrolls: [192]bool = undefined,
     labels: [192][40]u8 = undefined,
     label_lens: [192]usize = undefined,
@@ -11502,6 +11573,7 @@ const SidebarUiaSink = struct {
             @memcpy(self.labels[self.count][0..label_len], element.name[0..label_len]);
             self.label_lens[self.count] = label_len;
             self.invokable[self.count] = element.invokable;
+            self.selected[self.count] = element.selected;
             self.scrolls[self.count] = element.sidebar_scroll;
             self.count += 1;
         }
@@ -11766,7 +11838,7 @@ fn expectReachable(content_top: i32, content_bottom: i32, viewport_bottom: i32, 
     try std.testing.expect(lowest <= highest);
 }
 
-test "sidebar status text, CHATS label, and Needs you stay separate and reachable at 960px and 1280x820, 96 and 144 DPI" {
+test "sidebar reserved footer Quick Chats row and Needs you stay separate and reachable at 960px and 1280x820, 96 and 144 DPI" {
     const footers = [_]struct { update: bool, ingress: bool }{
         .{ .update = false, .ingress = false },
         .{ .update = true, .ingress = false },
@@ -11783,12 +11855,12 @@ test "sidebar status text, CHATS label, and Needs you stay separate and reachabl
 
         // Footer parts that do not leave two rows of room collapse; only the rest are laid out.
         const effective = Sidebar.effectiveFooter(sidebar_bottom, footer.update, footer.ingress);
-        const status = Sidebar.statusTextRect(sidebar_bottom, effective.update, effective.ingress);
-        try std.testing.expect(status.top >= content_bottom);
-        try std.testing.expect(status.bottom <= sidebar_bottom);
-        try std.testing.expect(status.left >= 0 and status.right <= Tokens.sidebar_width);
-        if (effective.update) try std.testing.expect(!rectsIntersect(status, Sidebar.updateBannerRect(sidebar_bottom, effective.ingress)));
-        if (effective.ingress) try std.testing.expect(!rectsIntersect(status, Sidebar.errorFooterRect(sidebar_bottom)));
+        const workspace_footer = Sidebar.workspaceFooterRect(sidebar_bottom);
+        try std.testing.expect(workspace_footer.top >= content_bottom);
+        try std.testing.expect(workspace_footer.bottom <= sidebar_bottom);
+        try std.testing.expect(workspace_footer.left >= 0 and workspace_footer.right <= Tokens.sidebar_width);
+        if (effective.update) try std.testing.expect(!rectsIntersect(workspace_footer, Sidebar.updateBannerRect(sidebar_bottom, effective.ingress)));
+        if (effective.ingress) try std.testing.expect(!rectsIntersect(workspace_footer, Sidebar.errorFooterRect(sidebar_bottom)));
 
         // The production clamp must agree with the content viewport, so the last row is reachable.
         const max_scroll = Sidebar.maxScroll(&app.model, inspection, content_bottom, &app.sidebar_state);
@@ -11805,8 +11877,8 @@ test "sidebar status text, CHATS label, and Needs you stay separate and reachabl
         var rows = try Sidebar.appendRows(app.allocator, &app.model, inspection, 0, &app.sidebar_state);
         defer rows.deinit(app.allocator);
         const chats = for (rows.items) |row| {
-            if (row.kind == .quick_chat_overview) break Sidebar.chatsLabelRect(row.top);
-        } else return error.TestExpectedChatsLabel;
+            if (row.kind == .quick_chat_overview) break c.RECT{ .left = 10, .top = row.top, .right = 212, .bottom = row.top + 32 };
+        } else return error.TestExpectedChatsRow;
         try expectReachable(chats.top, chats.bottom, content_bottom, max_scroll);
 
         const needs_you = Sidebar.needsYouLabelRect(section, 0);
@@ -11882,10 +11954,10 @@ fn loadManySidebarLoops(app: *App, count: usize) !void {
 /// The vertical extent a sidebar row is drawn and published over, clipped to the scroll
 /// region, or an empty rect when the row is scrolled out of it.
 fn expectedSidebarRowRect(row_top: i32, region_top: i32, region_bottom: i32) c.RECT {
-    const top = @max(row_top - 3, region_top);
-    const bottom = @min(row_top + 23, region_bottom);
+    const top = @max(row_top, region_top);
+    const bottom = @min(row_top + 32, region_bottom);
     if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    return .{ .left = 12, .top = top, .right = 232, .bottom = bottom };
+    return .{ .left = 10, .top = top, .right = 212, .bottom = bottom };
 }
 
 test "sidebar UIA bounds are the drawn rect clipped to the scroll region at short heights, 96 and 144 DPI" {
@@ -12273,6 +12345,161 @@ test "sidebar footer collapses the error footer then the banner to keep a 52 px 
     try std.testing.expect(reachable >= 48);
 }
 
+test "parity sidebar UIA selection matches the destination rather than a stale canvas loop" {
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    try loadActivationTestFixture(&app);
+    try std.testing.expect(app.selectNodeIndex(1));
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    for ([_]GraphCanvas.Surface{ .overview, .project, .quick_chats, .workspace }) |surface| {
+        app.surface = surface;
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        const graph = sink.indexOfName("overview-destination:graph") orelse return error.TestExpectedGraph;
+        const project = sink.indexOfName("open-project:C:\\activation-fixture") orelse return error.TestExpectedProject;
+        const loop = sink.indexOfName("loop:C:\\activation-fixture:target-loop") orelse return error.TestExpectedLoop;
+        const chats = sink.indexOfName("quick-chats-destination:quick-chats") orelse return error.TestExpectedChats;
+        try std.testing.expectEqual(surface == .overview, sink.selected[graph]);
+        try std.testing.expectEqual(surface == .project, sink.selected[project]);
+        try std.testing.expectEqual(surface == .workspace, sink.selected[loop]);
+        try std.testing.expectEqual(surface == .quick_chats, sink.selected[chats]);
+    }
+}
+
+test "parity keyboard worktree selection scrolls to the generated row across project folds" {
+    for ([_]bool{ false, true }) |folded| {
+        var app = try footerLayoutApp(.{ .dpi = 96, .width = 960, .height = 400 }, footer_layout_controls[0], false, false);
+        defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 30);
+        if (folded) try app.sidebar_state.toggleProject("C:\\activation-fixture");
+        const action = InputRouter.keyAction(c.VK_DOWN, false, false);
+        try std.testing.expectEqual(InputRouter.Action.worktree_next, action);
+        app.handleAction(action);
+        const inspection = app.currentWorktreeInspection() orelse return error.TestExpectedInspection;
+        const index = for (inspection.entries.items, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.path, app.selected_worktree_path)) break i;
+        } else return error.TestExpectedSelectedWorktree;
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        var rows = try Sidebar.appendRows(app.allocator, &app.model, inspection, app.sidebar_scroll, &app.sidebar_state);
+        defer rows.deinit(app.allocator);
+        const row = for (rows.items) |candidate| {
+            if (candidate.kind == .worktree and candidate.index == index) break candidate;
+        } else return error.TestExpectedWorktreeRow;
+        try std.testing.expect(row.top >= Sidebar.content_top);
+        try std.testing.expect(row.top + 34 <= app.sidebarContentBottom(client.bottom));
+        try std.testing.expect(Sidebar.rowAt(24, row.top + 4, &app.model, inspection, app.sidebar_scroll, app.sidebarContentBottom(client.bottom), &app.sidebar_state).?.index == index);
+    }
+}
+
+var workspace_menu_observer: ?*const fn (c.HMENU, c.POINT) void = null;
+
+const WorkspaceFooterMenuProbe = struct {
+    var count: usize = 0;
+    var menu: c.HMENU = null;
+    var anchor: c.POINT = .{ .x = 0, .y = 0 };
+
+    fn observe(value: c.HMENU, point: c.POINT) void {
+        count += 1;
+        menu = value;
+        anchor = point;
+    }
+};
+
+test "parity workspace footer pointer and UIA invoke request the same existing Workspace menu" {
+    const allocator = std.testing.allocator;
+    const support_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_SUPPORT_DIR");
+    var environment = try std.process.getEnvMap(allocator);
+    defer environment.deinit();
+    defer setWorkspaceTestEnvironment(support_key, environment.get("GRAPHCODE_SUPPORT_DIR")) catch @panic("support restore failed");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makePath(".graphcode-footer-fixture");
+    const support = try temporary.dir.realpathAlloc(allocator, ".graphcode-footer-fixture");
+    defer allocator.free(support);
+    try setWorkspaceTestEnvironment(support_key, support);
+    workspace_menu_observer = WorkspaceFooterMenuProbe.observe;
+    defer workspace_menu_observer = null;
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        try MainWindow.installMenu(app.window.hwnd);
+        try app.acquireSingleInstance();
+        defer app.workspace_reservation.deinit();
+        defer allocator.free(app.workspace_path);
+        defer allocator.free(app.workspace_identity);
+        defer if (app.workspace_list) |*list| list.deinit(allocator);
+        const client = logicalClientRect(app.window.hwnd, dpi);
+        const footer = Sidebar.workspaceFooterRect(GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface));
+        const x: u16 = @intCast(physicalCoordinate(18, dpi));
+        const y: u16 = @intCast(physicalCoordinate(footer.top + 12, dpi));
+        const click: c.LPARAM = @intCast(@as(u32, x) | (@as(u32, y) << 16));
+        var result: c.LRESULT = 0;
+        WorkspaceFooterMenuProbe.count = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, click, &result));
+        try std.testing.expectEqual(@as(usize, 1), WorkspaceFooterMenuProbe.count);
+        const pointer_menu = WorkspaceFooterMenuProbe.menu;
+        const pointer_anchor = WorkspaceFooterMenuProbe.anchor;
+        try std.testing.expect(pointer_menu == c.GetSubMenu(c.GetMenu(app.window.hwnd), 3));
+        try std.testing.expect(c.GetMenuItemCount(pointer_menu) > 0);
+        const command = Accessibility.uia_dynamic_invoke_tag | Accessibility.worktreeIdentityPayload("workspace-footer:switcher");
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_COMMAND, command, 0, &result));
+        try std.testing.expectEqual(@as(usize, 2), WorkspaceFooterMenuProbe.count);
+        try std.testing.expect(pointer_menu == WorkspaceFooterMenuProbe.menu);
+        try std.testing.expectEqualDeep(pointer_anchor, WorkspaceFooterMenuProbe.anchor);
+        var sink: SidebarUiaSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        const index = sink.indexOfName("workspace-footer:switcher") orelse return error.TestExpectedFooter;
+        try std.testing.expectEqualStrings("footer-fixture", sink.label(index));
+        try std.testing.expectEqualDeep((AccessibilityBounds{ .logical = footer }).physicalRect(dpi), sink.rects[index]);
+        try std.testing.expect(sink.rects[index].right <= physicalCoordinate(Tokens.sidebar_width, dpi));
+    }
+}
+
+test "parity minimum window width is 452 logical points at 96 144 and 192 DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        var info = std.mem.zeroes(c.MINMAXINFO);
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        try std.testing.expectEqual(physicalCoordinate(452, dpi), info.ptMinTrackSize.x);
+        info.ptMinTrackSize.x += 50;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        try std.testing.expectEqual(physicalCoordinate(452, dpi) + 50, info.ptMinTrackSize.x);
+    }
+}
+
+test "parity minimum width preserves 452 client points in a framed native window with a menu" {
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    const framed = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC"),
+        std.unicode.utf8ToUtf16LeStringLiteral("Never shown minimum-width frame"),
+        c.WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        960,
+        820,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    _ = c.DestroyWindow(app.window.hwnd);
+    app.window.hwnd = framed;
+    app.dpi = Dpi.normalize(Win32.dpiForWindow(framed));
+    try MainWindow.installMenu(framed);
+    var info = std.mem.zeroes(c.MINMAXINFO);
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&app, framed, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+    try std.testing.expect(info.ptMinTrackSize.x > physicalCoordinate(452, app.dpi));
+    try std.testing.expect(c.MoveWindow(framed, 0, 0, info.ptMinTrackSize.x, info.ptMinTrackSize.y, 0) != 0);
+    var client: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(framed, &client) != 0);
+    try std.testing.expectEqual(physicalCoordinate(452, app.dpi), client.right);
+}
+
 test "the minimum window height keeps a 52 px sidebar scroll region and at least one published row with the panel, strip, banner and error footer" {
     for ([_]u32{ 96, 144 }) |dpi| {
         var app = try overviewTestApp(dpi);
@@ -12382,8 +12609,24 @@ test "banner click and the UIA dynamic invoke command open the same update offer
         try std.testing.expectEqual(@as(usize, 2), OfferProbe.count);
         offers += 1;
     };
-    try std.testing.expectEqual(@as(usize, 14), offers);
-    try std.testing.expectEqual(@as(usize, 2), collapsed);
+    // Removing the fixed headings lets all 16 original viewport cases fit the banner.
+    try std.testing.expectEqual(@as(usize, 16), offers);
+    const short_case = FooterLayoutCase{
+        .dpi = 96,
+        .width = 960,
+        .height = Sidebar.content_top + Sidebar.min_content_region + Sidebar.footerReserve(false, false) + Tokens.activity_strip_height,
+    };
+    var short_app = try footerLayoutApp(short_case, footer_layout_controls[0], true, false);
+    defer deinitFooterLayoutApp(&short_app);
+    const short_client = logicalClientRect(short_app.window.hwnd, short_app.dpi);
+    const short_bottom = GraphCanvas.sidebarBottom(short_client.bottom, short_app.workspace_controls, short_app.surface);
+    try std.testing.expect(!Sidebar.effectiveFooter(short_bottom, true, false).update);
+    const hidden_banner = Sidebar.updateBannerRect(short_bottom, false);
+    OfferProbe.reset();
+    try nativeClick(&short_app, hidden_banner.left + 4, hidden_banner.top + 4);
+    try std.testing.expectEqual(@as(usize, 0), OfferProbe.count);
+    collapsed += 1;
+    try std.testing.expectEqual(@as(usize, 1), collapsed);
 }
 
 test "every scrolling sidebar element advertises scroll-into-view and the fixed footer and header do not" {
@@ -19659,7 +19902,7 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 288, 5, 400, 29 }, .{ 432, 8, 600, 44 }, .{ 576, 10, 800, 58 } } },
         .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
         .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
-        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 109, 232, 135 }, .{ 18, 164, 348, 203 }, .{ 24, 218, 464, 270 } } },
+        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 10, 154, 212, 186 }, .{ 15, 231, 318, 279 }, .{ 20, 308, 424, 372 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
     // The footer is anchored to the sidebar's visible bottom, which the workspace panel

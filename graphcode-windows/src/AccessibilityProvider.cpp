@@ -1255,6 +1255,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("workspace-split-right:", 0) == 0 ? L"workspace-split-right-" :
           row.identity.rfind("workspace-split-down:", 0) == 0 ? L"workspace-split-down-" :
           row.identity.rfind("workspace-switch:", 0) == 0 ? L"workspace-switch-" :
+          row.identity.rfind("workspace-footer:", 0) == 0 ? L"workspace-footer-" :
           row.identity.rfind("sidebar-error-footer:", 0) == 0 ? L"sidebar-error-footer-" :
           row.identity.rfind("sidebar-update-banner:", 0) == 0 ? L"sidebar-update-banner-" :
           row.identity.rfind("worktree-loading:", 0) == 0 ? L"worktree-loading-" :
@@ -1299,6 +1300,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("project-disclosure:", 0) == 0 ||
           row.identity.rfind("quick-chats-header:", 0) == 0 ||
           row.identity.rfind("sidebar-update-banner:", 0) == 0 ||
+          row.identity.rfind("workspace-footer:", 0) == 0 ||
           row.identity.rfind("quick-chat-new:", 0) == 0 ||
           row.identity.rfind("quick-chats-disclosure:", 0) == 0 ||
           row.identity.rfind("loop-disclosure:", 0) == 0;
