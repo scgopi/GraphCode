@@ -1246,6 +1246,15 @@ fn workspaceLoopBar(controls: WorkspaceControls.State, client_right: i32, resolv
     );
 }
 
+fn workspaceQuickChatBar(controls: WorkspaceControls.State, client_right: i32) LoopBarLayout.Layout {
+    return TerminalWorkspace.loopBarLayout(
+        if (controls.rail_visible) Tokens.sidebar_width else 0,
+        client_right,
+        true,
+        false,
+    );
+}
+
 fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
     if (model.currentGraph()) |graph| if (graph.nodes.items.len != 0) return graph;
     if (model.selected_project_path) |path| {
@@ -3042,7 +3051,7 @@ pub const App = struct {
             self.selected_quick_chat = index;
             self.workspace_is_quick_chat = true;
             self.surface = .workspace;
-            self.workspace_controls.panel_visible = true;
+            self.workspace_controls.panel_visible = false;
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
             if (self.workspace) |workspace| {
@@ -6970,6 +6979,10 @@ pub const App = struct {
     }
 
     fn toggleWorkspacePanelState(self: *App) void {
+        if (self.workspace_is_quick_chat) {
+            self.workspace_controls.panel_visible = false;
+            return;
+        }
         self.workspace_controls.apply(.toggle_panel);
         if (self.workspace_controls.panel_visible) {
             self.workspace_is_quick_chat = false;
@@ -6980,6 +6993,10 @@ pub const App = struct {
     }
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
+        if (self.workspace_is_quick_chat) {
+            self.workspace_controls.panel_visible = false;
+            return;
+        }
         self.workspace_controls.panel_visible = !self.workspace_controls.panel_visible;
         if (self.workspace_controls.panel_visible) self.surface = .workspace;
     }
@@ -7093,19 +7110,22 @@ pub const App = struct {
             );
         }
         if (self.empty_global_overview_button != null) {
-            const label = if (is_quick_chats) "New Chat" else "New Loop";
+            const label = if (is_quick_chats) "+ New Chat" else "New Loop";
             if (!childTextEquals(self.empty_global_overview_button, label)) setButtonText(self.empty_global_overview_button, label);
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
-            const primary_x = if (is_empty) x else content_right - 140;
-            const primary_y = if (is_empty)
+            const primary_x = if (is_quick_chats) content_right - 140 else if (is_empty) x else content_right - 140;
+            const primary_y = if (is_quick_chats)
+                Tokens.header_height + 14
+            else if (is_empty)
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
             else
                 Tokens.header_height + 14;
+            const primary_width: i32 = if (is_quick_chats) 120 else if (is_empty) 220 else 120;
             placeChildControl(self.empty_global_overview_button, show_primary, .{
                 .left = physicalCoordinate(primary_x, self.dpi),
                 .top = physicalCoordinate(primary_y, self.dpi),
-                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
+                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(primary_width, self.dpi),
                 .bottom = physicalCoordinate(primary_y, self.dpi) + physicalCoordinate(32, self.dpi),
             });
         }
@@ -7859,40 +7879,47 @@ pub const App = struct {
                 }
                 if (self.surface == .workspace) {
                     if (self.workspace) |workspace| {
-                        const selected_index = self.model.selectedIndex() orelse 0;
-                        const loop_bar = workspaceLoopBar(
-                            self.workspace_controls,
-                            client.right,
-                            selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
-                        );
                         if (!self.workspace_is_quick_chat) {
+                            const selected_index = self.model.selectedIndex() orelse 0;
+                            const loop_bar = workspaceLoopBar(
+                                self.workspace_controls,
+                                client.right,
+                                selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
+                            );
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, header.title, 4, .{ .logical = header_layout.identity }, false, false) catch return;
                             elements.items[elements.items.len - 1].invokable = false;
-                        }
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
-                        if (loop_bar.stop) |stop| {
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
-                        }
-                        const panel_toggle = if (loop_bar.panel_toggle) |expand|
-                            loopBarRect(expand)
-                        else
-                            GraphCanvas.loopDetailCollapseBounds(client.right);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
-                        if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
-                            const detail_left = client.right - Tokens.loop_detail_width;
-                            const selected_node = graph.nodes.items[selected_index];
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 } }, false, false) catch return;
-                            if (selected_node.created_at != null) {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 } }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
+                            if (loop_bar.stop) |stop| {
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
                             }
-                            if (selected_node.token_usage) |tokens| {
-                                const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
-                                owned_identities.append(usage_name) catch {
-                                    self.allocator.free(usage_name);
-                                    return;
-                                };
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 } }, false, false) catch return;
+                            const panel_toggle = if (loop_bar.panel_toggle) |expand|
+                                loopBarRect(expand)
+                            else
+                                GraphCanvas.loopDetailCollapseBounds(client.right);
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
+                            if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
+                                const detail_left = client.right - Tokens.loop_detail_width;
+                                const selected_node = graph.nodes.items[selected_index];
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 } }, false, false) catch return;
+                                if (selected_node.created_at != null) {
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 } }, false, false) catch return;
+                                }
+                                if (selected_node.token_usage) |tokens| {
+                                    const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
+                                    owned_identities.append(usage_name) catch {
+                                        self.allocator.free(usage_name);
+                                        return;
+                                    };
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 } }, false, false) catch return;
+                                }
+                            }
+                        } else if (self.selected_quick_chat) |chat_index| {
+                            if (chat_index < self.model.quick_chats.items.len) {
+                                const chat = self.model.quick_chats.items[chat_index];
+                                const loop_bar = workspaceQuickChatBar(self.workspace_controls, client.right);
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", chat.id, chat.title, 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
                             }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
@@ -8343,7 +8370,7 @@ pub const App = struct {
                         self.selected_quick_chat = index;
                         self.workspace_is_quick_chat = true;
                         self.surface = .workspace;
-                        self.workspace_controls.panel_visible = true;
+                        self.workspace_controls.panel_visible = false;
                         self.layoutWorkspace();
                         self.layoutEmptyStateControls();
                         self.syncAccessibility();
@@ -9125,8 +9152,31 @@ fn onWindowMessage(
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
-                    if (workspaceGraph(&app.model)) |graph| {
-                        const workspace_right = logical_right - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
+                    const workspace_right = logical_right - (if (app.workspace_controls.panel_visible and !app.workspace_is_quick_chat) Tokens.loop_detail_width else 0);
+                    if (app.workspace_is_quick_chat) {
+                        if (app.selected_quick_chat) |chat_index| {
+                            if (chat_index < app.model.quick_chats.items.len) {
+                                const chat = app.model.quick_chats.items[chat_index];
+                                TerminalWorkspace.Workspace.paintLoopBar(
+                                    hdc,
+                                    app.allocator,
+                                    if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                                    workspace_right,
+                                    "Chat",
+                                    chat.title,
+                                    "composite",
+                                    "IDLE",
+                                    if (chat.activity.len != 0) chat.activity else "Not piloted",
+                                    if (chat.backend.len != 0) chat.backend else "claudeCode",
+                                    null,
+                                    0,
+                                    null,
+                                    true,
+                                    false,
+                                );
+                            }
+                        }
+                    } else if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse 0;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
@@ -9157,7 +9207,7 @@ fn onWindowMessage(
                     workspace.paintChrome(hdc);
                     _ = c.RestoreDC(hdc, saved_mapping);
                 }
-                if (app.surface == .workspace and app.workspace_controls.panel_visible) {
+                if (app.surface == .workspace and app.workspace_controls.panel_visible and !app.workspace_is_quick_chat) {
                     if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         GraphCanvas.paintLoopDetailRail(
@@ -9497,13 +9547,26 @@ fn onWindowMessage(
             }
             if ((app.workspace_controls.panel_visible or app.surface == .workspace) and x >= rail_left and y >= workspace_top) {
                 if (app.surface == .workspace) {
-                    if (GraphCanvas.hitTestLoopDetailCollapse(x, y, client.right, app.workspace_controls.panel_visible)) {
+                    if (!app.workspace_is_quick_chat and GraphCanvas.hitTestLoopDetailCollapse(x, y, client.right, app.workspace_controls.panel_visible)) {
                         app.toggleWorkspaceDetailPanel();
                         _ = c.InvalidateRect(hwnd, null, 0);
                         result.* = 0;
                         return true;
                     }
-                    if (workspaceGraph(&app.model)) |graph| {
+                    if (app.workspace_is_quick_chat) {
+                        if (app.selected_quick_chat) |chat_index| {
+                            if (chat_index < app.model.quick_chats.items.len) {
+                                const chat = app.model.quick_chats.items[chat_index];
+                                if (workspaceQuickChatBar(app.workspace_controls, client.right).actionAt(x, y)) |_| {
+                                    _ = chat;
+                                    app.handleAction(.show_graph);
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
+                                }
+                            }
+                        }
+                    } else if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
@@ -17758,6 +17821,17 @@ fn expectNewLoopAtTopRight(app: *App) !void {
     try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
 }
 
+fn expectNewChatAtTopRight(app: *App) !void {
+    const button = emptyStateButton(app, app.empty_global_overview_button);
+    try std.testing.expect(button.visible);
+    try std.testing.expect(App.childTextEquals(app.empty_global_overview_button, "+ New Chat"));
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    try std.testing.expectEqual(physicalCoordinate(client.right - 140, app.dpi), button.rect.left);
+    try std.testing.expectEqual(physicalCoordinate(Tokens.header_height + 14, app.dpi), button.rect.top);
+    try std.testing.expectEqual(physicalCoordinate(120, app.dpi), button.rect.right - button.rect.left);
+    try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
+}
+
 fn clickSidebarProjectRow(app: *App, path: []const u8) !void {
     var rows = try Sidebar.appendRows(app.allocator, &app.model, app.currentWorktreeInspection(), app.sidebar_scroll, &app.sidebar_state);
     defer rows.deinit(app.allocator);
@@ -17804,6 +17878,65 @@ test "workspace surface: canvas New Loop and Open Folder buttons follow the proj
     try clickSidebarProjectRow(&app, "C:\\core-fixture");
     try std.testing.expectEqualStrings("C:\\core-fixture", app.model.graph.?.project.path);
     try expectNewLoopAtTopRight(&app);
+}
+
+test "workspace surface: Quick Chats empty canvas button stays at the top right and says + New Chat" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+    app.surface = .quick_chats;
+    app.createEmptyStateControls();
+    defer {
+        _ = c.DestroyWindow(app.empty_open_folder_button);
+        _ = c.DestroyWindow(app.empty_global_overview_button);
+    }
+    try std.testing.expect(app.empty_open_folder_button != null and app.empty_global_overview_button != null);
+    try expectNewChatAtTopRight(&app);
+}
+
+test "opening quick chat resets the workspace chrome to the chat and hides the loop panel" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\loop-fixture","name":"Loop fixture"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat-1"),
+        .title = try allocator.dupe(u8, "Chat 1"),
+        .backend = try allocator.dupe(u8, "claudeCode"),
+    });
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, "C:\\loop-fixture"),
+        .layout_path = &.{},
+        .project_key = &.{},
+    };
+    defer workspace.deinit();
+    try workspace.layout.addTab("agent", true);
+    try workspace.layout.addTab("shell", false);
+    app.workspace = &workspace;
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
+    app.surface = .project;
+    app.openQuickChat("chat-1");
+    try std.testing.expect(app.workspace_is_quick_chat);
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    const header = app.headerPresentation();
+    try std.testing.expectEqualStrings("Chat 1", header.title);
+    try std.testing.expectEqualStrings("Quick Chat workspace", header.context);
+    LoopBarProbe.publish(&app);
+    try std.testing.expect(LoopBarProbe.has_bar);
+    try std.testing.expectEqualStrings("chat-1", LoopBarProbe.barLoop());
+    try std.testing.expect(LoopBarProbe.stop == null);
+    try std.testing.expect(LoopBarProbe.panel_toggle == null);
 }
 
 test "selection routes with a loop workspace open: Ctrl+Tab review moves the loop bar and pane together" {
