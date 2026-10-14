@@ -635,6 +635,8 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             move(dialog.edit, layout.edit);
             move(dialog.hint, layout.hint);
             move(dialog.list, .{ .left = 0, .top = Dpi.scale(field_height, dialog.dpi), .right = client.right, .bottom = client.bottom });
+            // The list is filled while still zero-height, which leaves it scrolled by a row.
+            _ = c.SendMessageW(dialog.list, c.LB_SETTOPINDEX, 0, 0);
             move(dialog.empty_label, .{ .left = Dpi.scale(14, dialog.dpi), .top = Dpi.scale(56, dialog.dpi), .right = client.right - Dpi.scale(14, dialog.dpi), .bottom = client.bottom - Dpi.scale(14, dialog.dpi) });
             return 0;
         },
@@ -1767,6 +1769,22 @@ test "palette residual wheel the list declines does not recurse through the pale
     _ = c.SendMessageW(dialog.list, c.WM_MOUSEWHEEL, wheel, 0);
     _ = c.SendMessageW(dialog.edit, c.WM_MOUSEWHEEL, wheel, 0);
     try std.testing.expect(!dialog.closed and dialog.failure == null);
+}
+
+test "palette residual overflow opens scrolled to the first result" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    try std.testing.expectEqual(@as(c.LRESULT, 12), c.SendMessageW(dialog.list, c.LB_GETCOUNT, 0, 0));
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETCURSEL, 0, 0));
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0));
 }
 
 test "palette residual owner region is installed before the overflow list moves and the decoration follows" {
