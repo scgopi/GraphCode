@@ -73,7 +73,7 @@ Read also:
 - `AGENTS.md`;
 - `investigation/windows-parity-orchestration-plan.md`, for the per-PR gate and the escalation rule;
 - `investigation/ui-parity-matrix.md`, the ledger;
-- the issue: `gh issue view <n> -R scgopi/GraphCode --comments`, with `$env:GH_TOKEN = gh auth token --user coneilen`.
+- the issue and its comments: `gh issue view <n> -R scgopi/GraphCode --comments`.
 
 ## Ground truth
 
@@ -132,12 +132,10 @@ Replace `<id>` with your lane id, for example `c4`.
    - Register new Zig test roots in `Tools/windows/Tests/WindowsShell.Tests.ps1`.
    - The native UIA provider suite (`Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1`)
      runs hidden and needs no desktop.
-6. **GitHub, as `coneilen`, done by you:**
-   - Set `$t = gh auth token --user coneilen` and `$env:GH_TOKEN = $t`.
-   - Push with `git -c http.https://github.com/.extraheader="AUTHORIZATION: basic <base64 of x-access-token:$t>" push origin HEAD:<branch>`.
-     If your PR's head lives in a fork, push to that fork.
-   - Create your PR with `gh pr create --draft`, and edit its body with
-     `gh pr edit <n> --body-file <file>`. The app's PR tools fail here, so don't use them.
+6. **GitHub, done by you.** Use the GitHub access described in your issue block. Account and credential details are
+   deliberately not kept in this repository.
+   - Push your branch, create your PR as a draft, edit its body and mark it ready yourself. The app's PR tools fail on
+   this repository, so don't use them.
    - Sign off every commit (`git commit -s`) and add the trailer
      `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
 7. **Rebase hygiene:**

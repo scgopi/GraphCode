@@ -51,7 +51,7 @@ truth for status. The issues carry the acceptance criteria and the priority.
 | Escalation thresholds of 2 or 3 restarted sessions, which lost bootstrap, builds and context. Every lane escalated at least once. | Escalate only after 5 failed iterations (operator decision; see "Abandon and escalate"). |
 | Kickoffs were hand-copied per lane, and drifted: an 8-character validation root that failed the 81-character preflight, a wrong `Refs` line, the wrong reviewer model. | One canonical kickoff, `investigation/windows-parity-lane-kickoff.md`. The coordinator sends only an issue block. |
 | Environment traps were rediscovered lane by lane: a junction root, the root length, a stale profile log, `onboarding-seen`, `CopyFromScreen` capturing the wrong app, the `ActivateWindow` Alt tap (#797), `zmx` daemons left running, `vcvars`, the PR tool failing on forks. | They are listed once, in the kickoff's "Environment" section. |
-| The coordinator relayed every PR creation and body edit. | Lanes create and edit their own PRs with gh as `coneilen`. |
+| The coordinator relayed every PR creation and body edit. | Lanes create and edit their own PRs, using the access details in their issue block (not kept in the repository). |
 | A rebase conflict resolution silently reverted #789's geometry helpers. | After each rebase, the lane and its reviewer read `git diff origin/main...HEAD`. |
 | Broad new assertions in `uia-live-gate.ps1` (counting every canvas card) failed CI twice. | Gate edits assert on named elements, with local `ValidationRunner.Tests.ps1` cases. |
 | Screenshots were taken before review, then retaken after each fix. | Code review first; screenshots once, on the final head; then an image-only review. |
@@ -131,8 +131,9 @@ dominated elapsed time: three product PRs merged in about ten hours. So:
   `EnumDisplaySettings` with vGPU disabled. Use it for clean-install and
   first-run flows, not for 1440x900 visual captures.
 
-**Creating PRs.** Use `gh pr create` as `coneilen`. The app's PR tool tries a
-fork push and fails.
+**Creating PRs.** Workers create and edit their own PRs. The GitHub access details
+come with the issue block and are not kept in the repository. The app's PR tool
+tries a fork push and fails.
 
 **Provider checkouts.** Seed `winghostty` and `zmx` under the lane's
 `-ProviderRoot` from the read-only local mirrors in `C:\gc-cache\git\*.git`.
