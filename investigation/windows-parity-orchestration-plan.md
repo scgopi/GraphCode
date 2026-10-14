@@ -235,7 +235,10 @@ silently.
    nothing still exits 0.
 4. **Full validation**, run by a test-runner agent:
    `Tools\windows\validate.ps1 -Task windows-shell -SkipTrayLive`, plus
-   `-Task packaging` when packaging changes. Report every failure, including
+   `-Task packaging` when packaging changes, plus `-Task windows-spikes` when
+   `DesignTokens.zig`, palette, font or contract files change. That task runs
+   contracts the shell suites don't, such as `PaletteParity.Tests.ps1`. Report
+   every failure, including
    flakes, with the rerun result next to it. Never replace a failing log with a
    passing one.
 5. **Visual evidence (local).** Build in the session's own worktree, run the
