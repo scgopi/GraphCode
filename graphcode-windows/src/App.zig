@@ -1415,6 +1415,7 @@ pub const App = struct {
     dpi: u32 = Dpi.base_dpi,
     surface: GraphCanvas.Surface = .project,
     workspace_is_quick_chat: bool = false,
+    quick_chat_workspace_dismissed: bool = false,
     header_focus: ?GraphCanvas.HeaderAction = null,
     header_return_focus: c.HWND = null,
     header_focus_transition: bool = false,
@@ -2573,6 +2574,7 @@ pub const App = struct {
 
     fn openProjectWithLayout(self: *App, path: []const u8, comptime layout: fn (*App) void) void {
         if (path.len == 0) return;
+        self.quick_chat_workspace_dismissed = false;
         self.surface = .project;
         self.workspace_controls.panel_visible = false;
         layout(self);
@@ -2666,6 +2668,7 @@ pub const App = struct {
     }
 
     pub fn openGlobalOverview(self: *App) void {
+        self.quick_chat_workspace_dismissed = false;
         self.surface = .overview;
         self.workspace_controls.panel_visible = false;
         self.layoutWorkspace();
@@ -2680,6 +2683,7 @@ pub const App = struct {
                 if (action == .inspect_worktrees) {
                     if (self.selectProject(self.model.graphs.items[graph_index].project.path)) self.inspectWorktrees();
                 } else if (self.selectProject(self.model.graphs.items[graph_index].project.path)) {
+                    self.quick_chat_workspace_dismissed = false;
                     self.surface = .project;
                     self.workspace_controls.panel_visible = false;
                     self.layoutWorkspace();
@@ -2750,6 +2754,7 @@ pub const App = struct {
             true;
         const selected = self.model.selectProject(path);
         if (selected) {
+            self.quick_chat_workspace_dismissed = false;
             self.client.setSubgraphAddress(null);
             if (changed) {
                 const cancelled_inspection = self.worktree_inspection_thread != null or self.worktree_inspection_pending != null;
@@ -2939,6 +2944,7 @@ pub const App = struct {
         if (index >= graph.nodes.items.len) return false;
         if (!self.replaceSelectionID(&self.selected_node_id, graph.nodes.items[index].id)) return false;
         if (!self.model.setSelectedIndex(index)) return false;
+        self.quick_chat_workspace_dismissed = false;
         self.selection_initialized = true;
         self.clearEdgeSelection();
         return true;
@@ -3078,6 +3084,7 @@ pub const App = struct {
         for (self.model.quick_chats.items, 0..) |chat, index| {
             if (!std.mem.eql(u8, chat.id, id)) continue;
             self.selected_quick_chat = index;
+            self.quick_chat_workspace_dismissed = false;
             self.workspace_is_quick_chat = true;
             self.surface = .workspace;
             self.workspace_controls.panel_visible = false;
@@ -4323,6 +4330,7 @@ pub const App = struct {
             return false;
         }
         self.workspace_is_quick_chat = false;
+        self.quick_chat_workspace_dismissed = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
@@ -6871,11 +6879,31 @@ pub const App = struct {
     }
 
     fn showInGraph(self: *App, comptime finish_native: fn (*App) void, comptime publish: fn (*App) void) void {
+        self.dismissQuickChatWorkspace();
         self.surface = .project;
         self.workspace_controls.panel_visible = false;
         self.workspace_controls.apply(.show_graph);
         finish_native(self);
         publish(self);
+    }
+
+    fn dismissQuickChatWorkspace(self: *App) void {
+        if (!self.workspace_is_quick_chat) return;
+        self.quick_chat_workspace_dismissed = true;
+        if (self.workspace) |workspace| {
+            if (self.model.currentGraph()) |graph| {
+                const project = graph.project.path;
+                _ = workspace.rebindProject(project) catch {
+                    self.setStatus("Unable to reset Quick Chat workspace");
+                    return;
+                };
+            }
+            workspace.unbindLoop() catch {
+                self.setStatus("Unable to reset Quick Chat workspace");
+                return;
+            };
+        }
+        self.workspace_is_quick_chat = false;
     }
 
     fn finishShowGraphNative(self: *App) void {
@@ -7014,7 +7042,7 @@ pub const App = struct {
     }
 
     fn toggleWorkspacePanelState(self: *App) void {
-        if (self.surface == .workspace and self.workspace_is_quick_chat) {
+        if (self.workspace_is_quick_chat or self.quick_chat_workspace_dismissed) {
             self.workspace_controls.panel_visible = false;
             return;
         }
@@ -7028,7 +7056,7 @@ pub const App = struct {
     }
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
-        if (self.surface == .workspace and self.workspace_is_quick_chat) {
+        if (self.workspace_is_quick_chat or self.quick_chat_workspace_dismissed) {
             self.workspace_controls.panel_visible = false;
             return;
         }
@@ -8410,6 +8438,7 @@ pub const App = struct {
                     for (self.model.quick_chats.items, 0..) |chat, index| {
                         if (!std.mem.eql(u8, chat.id, id)) continue;
                         self.selected_quick_chat = index;
+                        self.quick_chat_workspace_dismissed = false;
                         self.workspace_is_quick_chat = true;
                         self.surface = .workspace;
                         self.workspace_controls.panel_visible = false;
@@ -17902,17 +17931,22 @@ test "workspace surface: canvas New Loop and Open Folder buttons follow the proj
     try expectNewLoopAtTopRight(&app);
 }
 
-test "opening quick chat resets the workspace chrome to the chat and hides the loop panel" {
+test "quick chat workspace stays hidden after Show in Graph and workspace toggles" {
     const allocator = std.testing.allocator;
     const user_profile_key = std.unicode.utf8ToUtf16LeStringLiteral("USERPROFILE");
+    const workspace_layout_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_WORKSPACE_LAYOUT");
     var original_environment = try std.process.getEnvMap(allocator);
     defer original_environment.deinit();
     defer setWorkspaceTestEnvironment(user_profile_key, original_environment.get("USERPROFILE")) catch @panic("USERPROFILE restore failed");
+    defer setWorkspaceTestEnvironment(workspace_layout_key, original_environment.get("GRAPHCODE_WORKSPACE_LAYOUT")) catch @panic("workspace layout restore failed");
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
     const home = try temporary.dir.realpathAlloc(allocator, ".");
     defer allocator.free(home);
     try setWorkspaceTestEnvironment(user_profile_key, home);
+    const workspace_layout = try std.fs.path.join(allocator, &.{ home, "workspace-layout.json" });
+    defer allocator.free(workspace_layout);
+    try setWorkspaceTestEnvironment(workspace_layout_key, workspace_layout);
 
     const Probe = struct {
         canvas: ?c.RECT = null,
@@ -18002,10 +18036,72 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     };
     app.showInGraph(ShowGraphCallbacks.finish, ShowGraphCallbacks.publish);
     try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
-    app.toggleWorkspacePanelState();
-    try std.testing.expectEqual(true, app.workspace_controls.panel_visible);
-    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
     try std.testing.expect(!app.workspace_is_quick_chat);
+    try std.testing.expect(app.quick_chat_workspace_dismissed);
+    try std.testing.expectEqualStrings("C:\\loop-fixture", workspace.projectPath());
+    try std.testing.expectEqual(@as(usize, 0), workspace.loop_id.len);
+    for (workspace.layout.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            try std.testing.expect(!std.mem.eql(u8, "chat-1", pane.id));
+        }
+    }
+    LoopBarProbe.publish(&app);
+    try std.testing.expect(!LoopBarProbe.has_bar);
+
+    app.toggleWorkspacePanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(!app.workspace_is_quick_chat);
+    try std.testing.expect(app.quick_chat_workspace_dismissed);
+    try std.testing.expectEqualStrings("C:\\loop-fixture", workspace.projectPath());
+    try std.testing.expectEqual(@as(usize, 0), workspace.loop_id.len);
+    LoopBarProbe.publish(&app);
+    try std.testing.expect(!LoopBarProbe.has_bar);
+    try std.testing.expect(LoopBarProbe.stop == null);
+    try std.testing.expect(LoopBarProbe.panel_toggle == null);
+
+    app.toggleWorkspaceDetailPanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(!app.workspace_is_quick_chat);
+    try std.testing.expect(app.quick_chat_workspace_dismissed);
+    try std.testing.expectEqualStrings("C:\\loop-fixture", workspace.projectPath());
+    try std.testing.expectEqual(@as(usize, 0), workspace.loop_id.len);
+    LoopBarProbe.publish(&app);
+    try std.testing.expect(!LoopBarProbe.has_bar);
+    try std.testing.expect(LoopBarProbe.stop == null);
+    try std.testing.expect(LoopBarProbe.panel_toggle == null);
+
+    const quoted_home = try std.json.Stringify.valueAlloc(allocator, home, .{});
+    defer allocator.free(quoted_home);
+    const home_graph_template =
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":__HOME__,"name":"Loop fixture"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+    ;
+    const home_graph = try std.mem.replaceOwned(u8, allocator, home_graph_template, "__HOME__", quoted_home);
+    defer allocator.free(home_graph);
+    _ = try app.model.updateFromFrame(home_graph);
+    try std.testing.expect(app.selectProject(home));
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    try std.testing.expectEqualStrings(home, app.currentProject().?);
+    app.openQuickChat("chat-1");
+    try std.testing.expectEqualStrings("chat-1", workspace.loop_id);
+    app.showInGraph(ShowGraphCallbacks.finish, ShowGraphCallbacks.publish);
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_is_quick_chat);
+    try std.testing.expect(app.quick_chat_workspace_dismissed);
+    try std.testing.expectEqualStrings(home, workspace.projectPath());
+    try std.testing.expectEqual(@as(usize, 0), workspace.loop_id.len);
+    for (workspace.layout.tabs.items) |tab| {
+        for (tab.panes.items) |pane| {
+            try std.testing.expect(!std.mem.eql(u8, "chat-1", pane.id));
+        }
+    }
+    try std.testing.expect(app.selectNodeIndex(0));
+    try std.testing.expect(!app.quick_chat_workspace_dismissed);
+    app.toggleWorkspacePanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(app.workspace_controls.panel_visible);
 }
 
 test "quick chat workspace publishes its bar controls without a project graph" {
@@ -18043,6 +18139,26 @@ test "quick chat workspace publishes its bar controls without a project graph" {
     try std.testing.expectEqual(true, probe.bar);
     try std.testing.expectEqual(true, probe.show_graph);
     try std.testing.expectEqual(true, probe.restart_session);
+}
+
+test "workspace toggles do not resurface a chat-bound workspace after dismissal failure" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    app.surface = .project;
+    app.workspace_is_quick_chat = true;
+    app.workspace_controls.panel_visible = true;
+
+    app.toggleWorkspacePanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(app.workspace_is_quick_chat);
+
+    app.workspace_controls.panel_visible = true;
+    app.toggleWorkspaceDetailPanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(app.workspace_is_quick_chat);
 }
 
 test "quick chat titles include the creation date" {

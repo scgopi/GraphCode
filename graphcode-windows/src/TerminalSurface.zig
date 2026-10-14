@@ -808,6 +808,31 @@ pub const Workspace = struct {
         return true;
     }
 
+    pub fn unbindLoop(self: *Workspace) !void {
+        if (self.loop_id.len == 0) return;
+        const new_layout_path = try self.layoutPathForProject(self.project_key);
+        errdefer self.allocator.free(new_layout_path);
+        var new_layout = try WorkspaceLayout.Layout.init(self.allocator, self.project_key);
+        errdefer new_layout.deinit();
+        if (try loadSavedLayout(self.allocator, new_layout_path, self.project_key)) |restored| {
+            new_layout.deinit();
+            new_layout = restored;
+        }
+
+        var old_layout = self.layout;
+        const old_layout_path = self.layout_path;
+        self.layout = new_layout;
+        self.layout_path = new_layout_path;
+        for (self.surfaces, 0..) |_, index| self.destroySurface(index);
+        self.clearAllRecreateState();
+        old_layout.deinit();
+        self.allocator.free(old_layout_path);
+        self.clearLoopScope();
+        for (&self.recreate_due_ms) |*due| due.* = 0;
+        for (&self.recreate_delay_ms) |*delay| delay.* = 100;
+        self.restorePersistedSurfaces("", 0);
+    }
+
     fn clearLoopScope(self: *Workspace) void {
         if (self.loop_id.len != 0) self.allocator.free(self.loop_id);
         self.loop_id = &.{};
