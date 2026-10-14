@@ -60,14 +60,34 @@ function Invoke-ThemeContractValidator {
   return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($captured | Out-String) }
 }
 
+function ConvertTo-ComparableDiagnostic([string] $Text) {
+  # Undo ConciseView wrapping ("<newline>     | " gutters) and collapse whitespace, so a
+  # phrase split across wrapped lines still compares as one contiguous phrase.
+  return (($Text -replace '\r?\n[ \t]*\|[ \t]?', ' ') -replace '\s+', ' ').Trim()
+}
+
 function Assert-Fails([object] $Result, [string] $ExpectedSubstring, [string] $ScenarioName) {
   if ($Result.ExitCode -eq 0) {
     throw "RED ($ScenarioName): expected a nonzero exit code but got 0. Output: $($Result.Text)"
   }
-  if ($Result.Text -notlike "*$ExpectedSubstring*") {
+  $comparableText = ConvertTo-ComparableDiagnostic $Result.Text
+  $comparableExpected = ConvertTo-ComparableDiagnostic $ExpectedSubstring
+  if (-not $comparableText.Contains($comparableExpected, [StringComparison]::Ordinal)) {
     throw "RED ($ScenarioName): expected diagnostic containing '$ExpectedSubstring', got: $($Result.Text)"
   }
 }
+
+# Self-check: PowerShell ConciseView wraps a child process's error text at the
+# inherited console width, inserting a newline plus a "     | " gutter mid-sentence.
+# Assert-Fails must still require a nonzero exit and the full expected phrase.
+Assert-Fails ([pscustomobject]@{ ExitCode = 1; Text = "Theme.swift (C:\x) no longer" + [Environment]::NewLine + "     | matches the approved blob hash: recorded 0" }) `
+  "no longer matches the approved blob hash" "self-check: wrapped diagnostic"
+$selfCheckRejected = $false
+try { Assert-Fails ([pscustomobject]@{ ExitCode = 1; Text = "unrelated failure" }) "no longer matches" "self-check: wrong diagnostic" } catch { $selfCheckRejected = $true }
+if (-not $selfCheckRejected) { throw "RED (self-check): Assert-Fails accepted a diagnostic without the expected phrase" }
+$selfCheckRejected = $false
+try { Assert-Fails ([pscustomobject]@{ ExitCode = 0; Text = "no longer matches" }) "no longer matches" "self-check: zero exit" } catch { $selfCheckRejected = $true }
+if (-not $selfCheckRejected) { throw "RED (self-check): Assert-Fails accepted a zero exit code" }
 
 function Assert-Passes([object] $Result, [string] $ScenarioName) {
   if ($Result.ExitCode -ne 0) {
