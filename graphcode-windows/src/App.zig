@@ -7014,7 +7014,7 @@ pub const App = struct {
     }
 
     fn toggleWorkspacePanelState(self: *App) void {
-        if (self.workspace_is_quick_chat) {
+        if (self.surface == .workspace and self.workspace_is_quick_chat) {
             self.workspace_controls.panel_visible = false;
             return;
         }
@@ -7028,7 +7028,7 @@ pub const App = struct {
     }
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
-        if (self.workspace_is_quick_chat) {
+        if (self.surface == .workspace and self.workspace_is_quick_chat) {
             self.workspace_controls.panel_visible = false;
             return;
         }
@@ -17994,6 +17994,17 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     try std.testing.expectEqualDeep([4]i32{ 220, 34, 1200, 900 }, [4]i32{ canvas.left, canvas.top, canvas.right, canvas.bottom });
     const workspace_element = accessibility.workspace orelse return error.MissingQuickChatWorkspace;
     try std.testing.expectEqualDeep([4]i32{ 220, 34, 1200, 900 }, [4]i32{ workspace_element.left, workspace_element.top, workspace_element.right, workspace_element.bottom });
+
+    const ShowGraphCallbacks = struct {
+        fn finish(_: *App) void {}
+        fn publish(_: *App) void {}
+    };
+    app.showInGraph(ShowGraphCallbacks.finish, ShowGraphCallbacks.publish);
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    app.toggleWorkspacePanelState();
+    try std.testing.expectEqual(true, app.workspace_controls.panel_visible);
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(!app.workspace_is_quick_chat);
 }
 
 test "quick chat titles include the creation date" {
