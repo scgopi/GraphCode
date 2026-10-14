@@ -11766,8 +11766,8 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
-                            sink.name(index), bounds.left,        bounds.top,   bounds.right,  bounds.bottom,
-                            banner.left,      banner.top,         banner.right, banner.bottom, case.dpi,
+                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
                             case.width,       app.sidebar_scroll,
                         },
                     );
@@ -13847,6 +13847,7 @@ const LiveTerminalFixture = struct {
         _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
     }
 
+
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
         self.revision += 1;
@@ -14373,7 +14374,7 @@ const ClipboardRouteProbe = struct {
 
 test "live terminal keyboard: clipboard chords reach the workspace and never leak control characters to the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14529,7 +14530,7 @@ fn feedMouseFixture(fixture: *LiveTerminalFixture, index: usize) !void {
 
 test "live terminal mouse: dragging selects and copies exactly the selected text" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14566,7 +14567,7 @@ test "live terminal mouse: dragging selects and copies exactly the selected text
 
 test "live terminal mouse: double click selects a word, triple click a whole logical line, shift extends" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14601,7 +14602,7 @@ test "live terminal mouse: double click selects a word, triple click a whole log
 
 test "live terminal mouse: selection is highlighted, copied once through the shared route, and never interrupts the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14742,7 +14743,7 @@ fn expectSentToProgram(keyboard: *LiveKeyboard, expected: []const u8) !void {
 
 test "live terminal mouse: a program that asks for mouse tracking receives presses, releases, motion and wheel, not a selection" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14817,7 +14818,7 @@ test "live terminal mouse: a program that asks for mouse tracking receives press
 
 test "live terminal mouse: Shift keeps selecting locally while the program tracks the mouse" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14848,7 +14849,7 @@ test "live terminal mouse: Shift keeps selecting locally while the program track
 
 test "live terminal mouse: a gesture follows the route it started on and the right button opens the menu only for the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14898,7 +14899,7 @@ test "live terminal mouse: a gesture follows the route it started on and the rig
 
 test "live terminal mouse: a high-resolution wheel reports one step per full notch" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14924,7 +14925,7 @@ test "live terminal mouse: a high-resolution wheel reports one step per full not
 
 test "live terminal mouse: a forwarded gesture that loses its release is closed and later clicks work" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -14976,7 +14977,7 @@ test "live terminal mouse: a forwarded gesture that loses its release is closed 
 
 test "live terminal mouse: Shift pressed during a forwarded gesture is not reported, and leaving the surface resets hover" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15007,7 +15008,7 @@ test "live terminal mouse: Shift pressed during a forwarded gesture is not repor
 
 test "live terminal mouse: tearing a surface down releases a button the program still holds, once" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15050,7 +15051,7 @@ test "live terminal mouse: tearing a surface down releases a button the program 
 
 test "live terminal mouse: the release of a cancelled program gesture neither reaches the program nor opens the menu" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15097,7 +15098,7 @@ test "live terminal mouse: the release of a cancelled program gesture neither re
 
 test "live terminal mouse: a press still queued when the surface is torn down leaves no orphan release" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15146,7 +15147,7 @@ const TeardownCapture = struct {
 
 test "live terminal mouse: a delivered press is released at teardown though keys and motion are still queued behind it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15174,7 +15175,7 @@ test "live terminal mouse: a delivered press is released at teardown though keys
 
 test "live terminal mouse: a release still queued when the surface is torn down is not lost" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15199,7 +15200,7 @@ test "live terminal mouse: a release still queued when the surface is torn down 
 
 test "live terminal mouse: a press that could not be queued is not released at teardown" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15228,7 +15229,7 @@ test "live terminal mouse: a press that could not be queued is not released at t
 /// reaching the shell only through `feedTerminalOutput` and with no mouse event after it.
 fn expectTrackingResetForgetsPress(output: []const []const u8) !void {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15261,7 +15262,7 @@ test "live terminal mouse: tracking switched off by a sequence split across outp
 
 test "live terminal mouse: the teardown release is not written when the attach pipe is not non-blocking" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15301,7 +15302,7 @@ const KeyTableCase = struct {
 
 test "live terminal copy: a clipboard that refuses the text keeps the selection and reports it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15332,7 +15333,7 @@ test "live terminal copy: a clipboard that refuses the text keeps the selection 
 
 test "live terminal paste: the provider's own paste entry point puts nothing raw on the pty" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15355,7 +15356,7 @@ test "live terminal paste: the provider's own paste entry point puts nothing raw
 
 test "live terminal keyboard: AltGr characters reach the shell and never run a shell shortcut" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15406,7 +15407,7 @@ fn expectKeyTable(keyboard: *LiveKeyboard, cases: []const KeyTableCase) !void {
 
 test "live terminal keyboard: key table of editing, cursor, function, and Ctrl/Alt keys" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15481,7 +15482,7 @@ test "live terminal keyboard: key table of editing, cursor, function, and Ctrl/A
 
 test "live terminal keyboard: application cursor keys mode and key repeat reach the program" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15512,7 +15513,7 @@ test "live terminal keyboard: application cursor keys mode and key repeat reach 
 
 test "live terminal keyboard: dead keys and AltGr still commit text instead of being encoded as chords" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15544,7 +15545,7 @@ test "live terminal keyboard: dead keys and AltGr still commit text instead of b
 
 test "live terminal keyboard: Ctrl+Shift+W and the Windows system keys become shell commands" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     try fixture.setLive(&.{"loop-a"});
     try clickSidebarLoopRow(&fixture.app, fixture.project, "loop-a");
@@ -15758,7 +15759,7 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
 test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -15799,7 +15800,7 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
 
 test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{.{ .id = "loop-a" }});
+    try fixture.init(&.{ .{ .id = "loop-a" } });
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");

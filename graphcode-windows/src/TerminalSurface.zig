@@ -834,7 +834,7 @@ pub const Workspace = struct {
             defer self.allocator.free(configured);
             const suffix = WorkspaceLayout.projectSuffix(project);
             return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
-                configured[0..if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
+                configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
                 suffix,
             });
         } else |_| {}
@@ -2322,6 +2322,7 @@ pub const Workspace = struct {
             if (slot.surface) |surface| {
                 _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
+
         }
         self.persistFocusedSurface(index);
     }
@@ -5259,7 +5260,7 @@ test "every function key F1 to F12 reaches a focused terminal exactly once throu
         .target_enabled = true,
     };
     const expected = [_][]const u8{
-        "\x1bOP",   "\x1bOQ",   "\x1bOR",   "\x1bOS",
+        "\x1bOP",  "\x1bOQ",  "\x1bOR",  "\x1bOS",
         "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
         "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
     };
