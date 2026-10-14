@@ -123,6 +123,8 @@ case-insensitive Windows duplicate detection. Absolute, empty-segment,
 traversal, device, alternate-stream, trailing-dot/space, invalid Windows
 character, missing, directory-as-file, and reparse-point paths fail. No
 reparse-point ancestor is accepted, including for authority or scenario paths.
+Caller paths also reject UNC/device/alternate-stream syntax after normalization,
+and mapped network drives before reading their contents.
 The caller must supply owned, privacy-safe packaged data and keep it stable
 during validation. Static path checks and hashes are not protection against a
 concurrent hostile filesystem mutation, filesystem attestation, or proof that

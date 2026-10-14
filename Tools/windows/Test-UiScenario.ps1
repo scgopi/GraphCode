@@ -19,10 +19,17 @@ function Stop-UiScenario([string] $code) {
   throw $error
 }
 
+function Get-UiScenarioDriveType([string] $root) {
+  return [IO.DriveInfo]::new($root).DriveType
+}
+
 function Assert-UiScenarioPath([string] $path) {
   try {
     $full = [IO.Path]::GetFullPath($path)
     if ($full.StartsWith("\\") -or $full.IndexOf(":", 2) -ge 0) {
+      Stop-UiScenario "UnsafePath"
+    }
+    if ((Get-UiScenarioDriveType ([IO.Path]::GetPathRoot($full))) -eq [IO.DriveType]::Network) {
       Stop-UiScenario "UnsafePath"
     }
     $current = $full

@@ -86,7 +86,7 @@ function Test-Contract([string] $name, [scriptblock] $body) {
   $results.Add(@{ name = $name; passed = $true })
   Write-Host "PASS: $name"
 }
-function Assert-PathRefusedBeforeRead([string] $path) {
+function Assert-PathRefusedBeforeRead([string] $path, [IO.DriveType] $driveType = [IO.DriveType]::Fixed) {
   $errors = $null
   $ast = [Management.Automation.Language.Parser]::ParseFile($validator, [ref]$null, [ref]$errors)
   Assert-Contract ($errors.Count -eq 0) "validator does not parse"
@@ -96,6 +96,10 @@ function Assert-PathRefusedBeforeRead([string] $path) {
         $node.Name -cin @("Stop-UiScenario", "Assert-UiScenarioPath")
     }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   $script:pathGuardReads = 0
+  function Get-UiScenarioDriveType {
+    param([string] $root)
+    return $driveType
+  }
   function Get-Item {
     param([string] $LiteralPath, [switch] $Force)
     $script:pathGuardReads++
@@ -165,6 +169,9 @@ try {
         Refuse "UnsafePath" @{ $parameter = $path }
       }
     }
+  }
+  Test-Contract "mapped network drive refuses before filesystem access" {
+    Assert-PathRefusedBeforeRead 'Z:\owned\scenario' ([IO.DriveType]::Network)
   }
   Test-Contract "authority reparse ancestor refused" {
     $directory = Join-Path $scratch "authority-copy"
