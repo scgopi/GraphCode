@@ -2097,6 +2097,9 @@ pub fn paintLoopDetailRail(
     var handoff_count: usize = 0;
     for (graph.edges.items) |edge| {
         if (!std.mem.eql(u8, edge.from, node.id) or nodeById(graph, edge.to) == null) continue;
+        const row_y = y + if (handoff_count == 0) @as(i32, 24) else 0;
+        const row = loopDetailRowLayout(left, row_y, client_right, edge.condition).row;
+        if (!loopDetailRowFits(row, node, client_right, client_bottom)) break;
         if (handoff_count == 0) {
             drawText(hdc, allocator, "HANDS OFF TO", left + 12, y, 11, 0x007A7777, client_right - 12);
             y += 24;
@@ -2173,6 +2176,14 @@ pub fn loopDetailSparklineBounds(client_right: i32, client_bottom: i32) c.RECT {
     return rect(@max(0, client_right - Tokens.loop_detail_width) + 12, client_bottom - 102, client_right - 12, client_bottom - 70);
 }
 
+fn loopDetailRowFits(row: c.RECT, node: GraphModel.Node, client_right: i32, client_bottom: i32) bool {
+    const lower_section_top = if (node.metric_sample_count >= 2)
+        loopDetailSparklineBounds(client_right, client_bottom).top - 24
+    else
+        loopDetailFooterBounds(client_right, client_bottom).top - if (node.worktree_branch.len != 0) @as(i32, 18) else 0;
+    return row.bottom <= lower_section_top - 10;
+}
+
 fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
     var stream = std.io.fixedBufferStream(buffer);
     const writer = stream.writer();
@@ -2205,11 +2216,20 @@ fn startTimeLabel(buffer: []u8, created_at: u64) []const u8 {
 }
 
 fn formatClockTime(buffer: []u8, hour: u16, minute: u16) []const u8 {
-    return std.fmt.bufPrint(buffer, "{d}:{d:0>2} {s}", .{
-        if (hour % 12 == 0) @as(u16, 12) else hour % 12,
-        minute,
-        if (hour < 12) "AM" else "PM",
-    }) catch "unknown time";
+    var time = std.mem.zeroes(c.SYSTEMTIME);
+    time.wHour = hour;
+    time.wMinute = minute;
+    var wide: [80]u16 = undefined;
+    const length = c.GetTimeFormatEx(null, c.TIME_NOSECONDS, &time, null, &wide, wide.len);
+    if (length == 0) {
+        std.log.warn("Unable to format local loop start time: Win32 error {d}", .{c.GetLastError()});
+        return "unknown time";
+    }
+    const bytes = std.unicode.utf16LeToUtf8(buffer, wide[0..@intCast(length - 1)]) catch |err| {
+        std.log.warn("Unable to encode local loop start time: {s}", .{@errorName(err)});
+        return "unknown time";
+    };
+    return buffer[0..bytes];
 }
 
 fn paintMetricSparkline(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT) void {
@@ -2317,13 +2337,7 @@ fn paintRelationRow(
     var condition_buffer: [96]u8 = undefined;
     if (layout.condition) |condition_bounds|
         drawTextRect(hdc, allocator, handoffConditionLabel(&condition_buffer, condition, fired), condition_bounds, 10, 0x00858282, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
-    drawDot(
-        hdc,
-        @divTrunc(layout.status_dot.left + layout.status_dot.right, 2),
-        @divTrunc(layout.status_dot.top + layout.status_dot.bottom, 2),
-        panelStateColor(related),
-        3,
-    );
+    drawPanelStatusDot(hdc, layout.status_dot, related);
     return true;
 }
 
@@ -2346,7 +2360,30 @@ fn panelStateColor(node: GraphModel.Node) u32 {
 fn panelWantsHuman(node: GraphModel.Node) bool {
     return std.mem.eql(u8, node.state, "awaitingInput") or
         std.mem.eql(u8, node.state, "blocked") or
-        std.mem.eql(u8, node.presence, "awaitingInput");
+        (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "awaitingInput"));
+}
+
+fn panelStateHollow(state: []const u8) bool {
+    return std.mem.eql(u8, state, "blocked") or std.mem.eql(u8, state, "stopped") or std.mem.eql(u8, state, "waiting");
+}
+
+fn drawPanelStatusDot(hdc: c.HDC, bounds: c.RECT, node: GraphModel.Node) void {
+    const color = panelStateColor(node);
+    const background = if (panelWantsHuman(node)) @as(u32, 0x00202334) else Tokens.workspace_rail;
+    const brush = c.CreateSolidBrush(if (panelStateHollow(node.state)) background else color);
+    const pen = c.CreatePen(c.PS_SOLID, 1, color);
+    if (brush == null or pen == null) {
+        if (brush != null) _ = c.DeleteObject(brush);
+        if (pen != null) _ = c.DeleteObject(pen);
+        return;
+    }
+    const old_brush = c.SelectObject(hdc, brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    _ = c.Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    _ = c.SelectObject(hdc, old_pen);
+    _ = c.SelectObject(hdc, old_brush);
+    _ = c.DeleteObject(pen);
+    _ = c.DeleteObject(brush);
 }
 
 fn nodeById(graph: *const GraphModel.GraphSummary, id: []const u8) ?GraphModel.Node {
@@ -2896,6 +2933,53 @@ test "bounded text rectangles stop at the owning container" {
     try std.testing.expect(textRect(narrow.left + 18, narrow.top + 16, 11, narrow.left + 30) == null);
 }
 
+test "canvas text raster stays within its owner beyond x1200" {
+    const width = 1920;
+    const height = 80;
+    const hdc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(hdc);
+    var info = std.mem.zeroes(c.BITMAPINFO);
+    info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = c.BI_RGB;
+    var bits: ?*anyopaque = null;
+    const bitmap = c.CreateDIBSection(hdc, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse
+        return error.TestBitmapCreationFailed;
+    defer _ = c.DeleteObject(bitmap);
+    const old_bitmap = c.SelectObject(hdc, bitmap);
+    defer _ = c.SelectObject(hdc, old_bitmap);
+    const pixels = @as([*]u32, @ptrCast(@alignCast(bits.?)))[0 .. width * height];
+    @memset(pixels, 0);
+    // Run the same raster contract against main's seven-argument helper and its replacement.
+    if (comptime @typeInfo(@TypeOf(drawText)).@"fn".params.len == 7) {
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 100, 8, 14, 0x00FFFFFF);
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 1496, 8, 14, 0x00FFFFFF);
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 100, 44, 14, 0x00FFFFFF);
+    } else {
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 100, 8, 14, 0x00FFFFFF, 354);
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 1496, 8, 14, 0x00FFFFFF, 1750);
+        drawText(hdc, std.testing.allocator, "Readable loop heading", 100, 44, 14, 0x00FFFFFF, 160);
+    }
+    try std.testing.expect(c.GdiFlush() != 0);
+    var reference_ink: usize = 0;
+    var wide_ink: usize = 0;
+    for (0..36) |y| {
+        for (0..200) |x| {
+            if (pixels[y * width + 100 + x] & 0x00FFFFFF != 0) reference_ink += 1;
+            if (pixels[y * width + 1496 + x] & 0x00FFFFFF != 0) wide_ink += 1;
+        }
+    }
+    try std.testing.expect(reference_ink > 0);
+    std.debug.print("CANVAS_TEXT_RASTER referenceInk={d} wideInk={d}\n", .{ reference_ink, wide_ink });
+    try std.testing.expectEqual(reference_ink, wide_ink);
+    for (40..height) |y| {
+        for (160..354) |x| try std.testing.expectEqual(@as(u32, 0), pixels[y * width + x] & 0x00FFFFFF);
+    }
+}
+
 test "loop detail rows keep type, title, condition, and status apart" {
     const client_right = 1780;
     const left = client_right - Tokens.loop_detail_width;
@@ -2950,11 +3034,19 @@ test "loop detail conditions use display names and preserve fired information" {
     try std.testing.expectEqualStrings("on failure · fired", handoffConditionLabel(&buffer, "onFailure", true));
 }
 
-test "loop detail footer uses clock time without a backend placeholder" {
+test "loop detail footer uses locale time without a backend placeholder" {
     var buffer: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("12:05 AM", formatClockTime(&buffer, 0, 5));
-    try std.testing.expectEqualStrings("12:30 PM", formatClockTime(&buffer, 12, 30));
-    try std.testing.expectEqualStrings("3:47 PM", formatClockTime(&buffer, 15, 47));
+    for ([_][2]u16{ .{ 0, 5 }, .{ 12, 30 }, .{ 15, 47 } }) |clock| {
+        var time = std.mem.zeroes(c.SYSTEMTIME);
+        time.wHour = clock[0];
+        time.wMinute = clock[1];
+        var wide: [80]u16 = undefined;
+        const length = c.GetTimeFormatEx(null, c.TIME_NOSECONDS, &time, null, &wide, wide.len);
+        try std.testing.expect(length > 1);
+        var expected: [160]u8 = undefined;
+        const bytes = try std.unicode.utf16LeToUtf8(&expected, wide[0..@intCast(length - 1)]);
+        try std.testing.expectEqualStrings(expected[0..bytes], formatClockTime(&buffer, clock[0], clock[1]));
+    }
     const node = GraphModel.Node{
         .id = @constCast("loop"),
         .title = @constCast("Loop"),
@@ -2965,6 +3057,35 @@ test "loop detail footer uses clock time without a backend placeholder" {
         .backend = @constCast("copilotCLI"),
     };
     try std.testing.expectEqualStrings("", loopDetailFooter(&buffer, node));
+}
+
+test "loop detail handoff rows stay above lower sections at minimum height" {
+    var node = GraphModel.Node{
+        .id = @constCast("loop"),
+        .title = @constCast("Loop"),
+        .loop_type = @constCast("sketch"),
+        .state = @constCast("idle"),
+        .activity = @constCast(""),
+        .presence = @constCast("idle"),
+        .worktree_branch = @constCast("feature/parity"),
+    };
+    for ([_]u8{ 0, 2 }) |samples| {
+        node.metric_sample_count = samples;
+        var visible: usize = 0;
+        for (0..12) |index| {
+            const row = loopDetailRowLayout(960 - Tokens.loop_detail_width, 230 + @as(i32, @intCast(index)) * 40, 960, "always").row;
+            if (!loopDetailRowFits(row, node, 960, 517)) break;
+            visible += 1;
+            try std.testing.expect(row.bottom < loopDetailFooterBounds(960, 517).top - 18);
+            if (samples >= 2) try std.testing.expect(row.bottom < loopDetailSparklineBounds(960, 517).top - 24);
+        }
+        try std.testing.expectEqual(if (samples >= 2) @as(usize, 3) else 5, visible);
+    }
+}
+
+test "loop detail status rings distinguish stopped blocked and waiting" {
+    for ([_][]const u8{ "stopped", "blocked", "waiting" }) |state| try std.testing.expect(panelStateHollow(state));
+    for ([_][]const u8{ "idle", "running", "awaitingInput", "succeeded", "failed", "stalled" }) |state| try std.testing.expect(!panelStateHollow(state));
 }
 
 test "loop detail status includes explicit and presence-based requests for input" {
@@ -2983,7 +3104,6 @@ test "loop detail status includes explicit and presence-based requests for input
     try std.testing.expect(panelWantsHuman(node));
     try std.testing.expectEqual(@as(u32, 0x000A9FFF), panelStateColor(node));
     node.state = @constCast("succeeded");
-    node.presence = @constCast("idle");
     try std.testing.expect(!panelWantsHuman(node));
     try std.testing.expectEqual(@as(u32, 0x0058D130), panelStateColor(node));
 }
@@ -3047,7 +3167,8 @@ test "loop age labels show a just-created daemon loop as recent" {
     try std.testing.expectEqualStrings("0m", nodeMetadata(&buffer, node));
     const footer = loopDetailFooter(&buffer, node);
     try std.testing.expect(std.mem.startsWith(u8, footer, "started "));
-    try std.testing.expect(std.mem.endsWith(u8, footer, "AM") or std.mem.endsWith(u8, footer, "PM"));
+    try std.testing.expect(footer.len > "started ".len);
+    try std.testing.expect(std.mem.indexOf(u8, footer, "unknown time") == null);
     try std.testing.expectEqualStrings("oldest 0m: Loop", attentionAgeLabel(&buffer, node));
 }
 

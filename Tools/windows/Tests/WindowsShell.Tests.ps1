@@ -1029,7 +1029,7 @@ Invoke-Native "Graph canvas executable tests" {
   }
   Push-Location $shellRoot
   try {
-    & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc "-I$include"
+    & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 
