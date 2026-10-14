@@ -384,23 +384,42 @@ silently.
 
 ## macOS ground truth
 
-The next macOS run uses the ground-truth prompt template:
-- the agent records what macOS does;
-- statuses are `Recorded`, `Differs from request`, `Absent on macOS` and
-  `Exists, not recorded`;
-- inventory is checked against source first;
-- the fixture is corrected (spaced titles via UI rename, `--check` on turn
-  loops, a cycle-only component, and a UI-created guarded edge);
-- menus are read in the same selection state on both platforms;
-- the privacy scan covers archive contents.
+The local ground-truth recording from source
+`2ccf303a04f995184aae1d4b738a9eca0f71b79e` has returned. It is the primary
+reference ahead of Run A, not a conformance verdict or a committed image bundle.
+Its 354 items are 244 `Recorded`, 4 `Differs from request`, 3 `Absent on macOS`
+and 103 `Exists, not recorded`. An unrecorded updater, workspace, input or
+type/state combination is not an absent feature. Source-confirm an absence's
+precise scope before narrowing an issue or planning a Windows-extra removal.
 
-It must cover the 30 rows the side-by-side review could not assess, plus:
-- the edge sheet;
-- Project Settings;
-- the update dialogs;
-- populated Quick Chats;
-- the RUNNING and BLOCKED card states;
-- whether macOS shows a sidebar Needs-you section.
+The bounded different-vendor intake opened 12 primary and 3 comparison images
+and checked 5 status controls; it did not visually clear all 784 images.
+Observe the local publication-hold notice referenced by the canonical worker
+kickoff. Every image needs its own privacy clearance before upload; hashes,
+OCR and correctly black mask rectangles do not prove that adjacent content is
+safe. Never commit the bundle, its hold notice or a wholesale copy.
+
+Use the `@1x-srgb` copies after reading the privacy report, item notes and
+capture metadata. Distinguish native backing scale, copy scale and canvas zoom.
+The `764-final-fixtures-fitted` images show the **ParityRef project canvas at
+90%**, not the global graph claimed by stale metadata. They remain useful for
+the recorded cards, not global-graph, overview-start or lane-caption evidence.
+Use the separately recorded global overview for that context. Likewise, a
+disabled global menu command is not evidence that a similarly named workspace
+bar button is disabled.
+
+The ledger's dated intake recovers all 30 previously unassessed row identities.
+Pair only exact states that were actually recorded. The retained Windows
+bundle is **Windows beta26 (pre-wave-1)**; a historical pair is not a verdict
+on current main. Missing current pairs are qualification gaps, not invented
+product failures, and do not satisfy the ledger's `Validated` gate.
+
+Keep this reference intake separate from final A-E reconciliation on merged
+heads. Existing approved slices are not reopened unless the source or recording
+contradicts them. Partial slices, source/UIA checks and new macOS images do not
+close whole claims. Any extra removal needs its own bounded approval and an
+audit of reachable equivalent actions. No screenshot, golden-image or pixel
+baseline CI lane is revived by this intake.
 
 ## Cadence
 

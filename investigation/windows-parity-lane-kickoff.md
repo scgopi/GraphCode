@@ -86,9 +86,22 @@ the macOS path to the same result exists on Windows; if it doesn't, keep the act
 record it as a deliberate extra.
 
 References on this machine:
-- **macOS captures:** `%USERPROFILE%\Downloads\GraphCode-macOS-Reference-RunA\GraphCode-macOS-Reference-RunA\`.
-  Use the `@1x-srgb.png` files and `README.md`.
+- **Primary macOS reference:** the coordinator-provided, read-only ground-truth
+  bundle from source `2ccf303a04f995184aae1d4b738a9eca0f71b79e`. Read its
+  `README.md`, item index and complete privacy report before opening the applicable
+  `@1x-srgb.png` images. `Recorded` is an observation, not a conformance verdict;
+  `Exists, not recorded` is not absence. Match the actual selection and state.
+  Fitted canvas pixels are not authored card dimensions or 100% zoom.
+- **Publication hold:** consult the local notice
+  `C:\gc-ref\macos-groundtruth-2ccf303a.DO-NOT-PUBLISH.txt` by path only; do not
+  copy the notice or held images. Every other image needs individual visual privacy
+  clearance before upload. A sample review, correct masks or matching hashes do not
+  clear unreviewed images, especially masked terminal captures.
+- **Historical macOS fallback:** Run A is secondary, only for a state the primary
+  lacks. Keep its source, fixture and evidence limits distinct.
 - **Windows beta26 "before" captures:** `C:\GraphCode-DevBox-Return\media\`.
+  Label them **Windows beta26 (pre-wave-1)**, not current main or a wave-2 head.
+  They can support a historical pair; current behavior requires current evidence.
 - **Side-by-side review:** `C:\gc-logs\visual-parity-review.md`.
 - **macOS source audit:** `C:\gc-logs\parity-extras-audit.md`.
 - **Privacy:** never upload or quote `734/*.zip` contents or `721-needs-you-chip-clicked`.
