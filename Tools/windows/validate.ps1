@@ -1185,6 +1185,13 @@ function Invoke-Task([string] $name) {
         if ($LASTEXITCODE -ne 0) {
           throw "Windows shell scaffold contract failed with exit code $LASTEXITCODE"
         }
+        # The native UIA provider suite is not sharded; shard 0 runs it once.
+        if ($ShellTestShard -eq 0) {
+          Invoke-Native "Native accessibility provider tests" {
+            & pwsh -NoProfile -File `
+              (Join-Path $repoRoot "Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1")
+          }
+        }
       }
       # The unit part ends here; `break` leaves this switch clause only.
       if (-not $runShellIntegration) { break }
