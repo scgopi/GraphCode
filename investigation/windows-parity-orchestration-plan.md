@@ -31,8 +31,8 @@ truth for status. The issues carry the acceptance criteria and the priority.
 | Lane | Issue | Model |
 | --- | --- | --- |
 | A | #768 | `gpt-6.1-sol`, high, long_context; STUCK at 23:27 (the capture harness failed 4 times), escalated to `claude-sonnet-5.5`, xhigh, long_context; 2nd escalation on 2026-10-14 at 02:45 (2 substantive rubber-duck rejections) to `claude-opus-5.5`, max, long_context |
-| B | #773 | `gpt-5.4-mini`, high; escalated at 22:50 to `gpt-6.1-sol`, high, long_context (#789 merged; now on #764) |
-| C | #767 | `gpt-6.1-sol`, high, long_context |
+| B | #773 | `gpt-5.4-mini`, high; escalated at 22:50 to `gpt-6.1-sol`, high, long_context (#789 merged; now on #764); #764 escalated on 2026-10-14 at 04:45 (2 substantive code-review rejections) to `claude-sonnet-5.5`, xhigh, long_context |
+| C | #767 | `gpt-6.1-sol`, high, long_context; PR #800 escalated on 2026-10-14 at 04:53 (2 session-caused exact-head CI failures) to `claude-sonnet-5.5`, xhigh, long_context |
 | D | #774 | `gpt-5.4-mini`, high; switched at 23:25 to `gpt-6-luna`, high (operator decision) |
 | E | #776 | `gpt-6.1-sol`, high, long_context (#788 merged); follow-up PR #792 escalated on 2026-10-14 at 02:50 (2 substantive source-review rejections of the scrollbar hover fix) to `claude-sonnet-5.5`, xhigh, long_context |
 
