@@ -207,6 +207,7 @@ const Dialog = struct {
     scrollbar_timer_armed: bool = false,
     scrollbar_disabled: bool = false,
     scrollbar_syncing: bool = false,
+    wheel_forwarding: bool = false,
     empty_label: c.HWND = null,
     background: c.HBRUSH = null,
     mono_font: c.HFONT = null,
@@ -636,6 +637,14 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             move(dialog.list, .{ .left = 0, .top = Dpi.scale(field_height, dialog.dpi), .right = client.right, .bottom = client.bottom });
             move(dialog.empty_label, .{ .left = Dpi.scale(14, dialog.dpi), .top = Dpi.scale(56, dialog.dpi), .right = client.right - Dpi.scale(14, dialog.dpi), .bottom = client.bottom - Dpi.scale(14, dialog.dpi) });
             return 0;
+        },
+        // The focused search field and every non-list child pass the wheel up to
+        // here; scrolling belongs to the results list.
+        c.WM_MOUSEWHEEL => {
+            if (dialog.wheel_forwarding) return 0;
+            dialog.wheel_forwarding = true;
+            defer dialog.wheel_forwarding = false;
+            return c.SendMessageW(dialog.list, message, wparam, lparam);
         },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
@@ -1679,6 +1688,85 @@ test "palette residual native nonclient painting is clipped around an opaque sib
     try std.testing.expect(covers_list);
     // Input still reaches the native list because the decoration declines hit testing.
     try std.testing.expectEqual(@as(c.LRESULT, c.HTTRANSPARENT), c.SendMessageW(dialog.scrollbar, c.WM_NCHITTEST, 0, 0));
+}
+
+test "palette residual wheel over the decoration scrolls the native list" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    _ = c.SendMessageW(dialog.list, c.LB_SETTOPINDEX, 0, 0);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0));
+    const delta: u16 = @bitCast(@as(i16, -120));
+    _ = c.SendMessageW(dialog.scrollbar, c.WM_MOUSEWHEEL, @as(c.WPARAM, delta) << 16, 0);
+    try std.testing.expect(c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0) > 0);
+}
+
+test "palette residual posted wheel reaches the native list through the message queue" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    _ = c.SendMessageW(dialog.list, c.LB_SETTOPINDEX, 0, 0);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0));
+    const delta: u16 = @bitCast(@as(i16, -120));
+    try std.testing.expect(c.PostMessageW(dialog.list, c.WM_MOUSEWHEEL, @as(c.WPARAM, delta) << 16, 0) != 0);
+    var message: c.MSG = undefined;
+    while (c.PeekMessageW(&message, dialog.list, 0, 0, c.PM_REMOVE) != 0) {
+        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
+        _ = c.TranslateMessage(&message);
+        _ = c.DispatchMessageW(&message);
+    }
+    try std.testing.expect(c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0) > 0);
+}
+
+test "palette residual wheel delivered to the focused search field scrolls the results" {
+    try registerClass();
+    var entries = overflowTestEntries();
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    _ = c.SendMessageW(dialog.list, c.LB_SETTOPINDEX, 0, 0);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0));
+    const delta: u16 = @bitCast(@as(i16, -120));
+    _ = c.SendMessageW(dialog.edit, c.WM_MOUSEWHEEL, @as(c.WPARAM, delta) << 16, 0);
+    try std.testing.expect(c.SendMessageW(dialog.list, c.LB_GETTOPINDEX, 0, 0) > 0);
+}
+
+test "palette residual wheel the list declines does not recurse through the palette" {
+    try registerClass();
+    var entries = [_]Entry{.{ .project_path = "A", .project_name = "Alpha", .node_id = "one", .title = "One", .loop_type = "sketch", .state = "idle" }};
+    var dialog = Dialog{ .state = State.init(std.testing.allocator, &entries) };
+    defer dialog.state.deinit();
+    defer releaseDrawingResources(&dialog);
+    try dialog.state.filter("");
+    active = &dialog;
+    defer active = null;
+    const hwnd = c.CreateWindowExW(0, class_name.ptr, null, c.WS_POPUP | c.WS_CLIPCHILDREN, 0, 0, 460, 380, null, null, c.GetModuleHandleW(null), null) orelse return error.PaletteCreationFailed;
+    defer _ = c.DestroyWindow(hwnd);
+    const delta: u16 = @bitCast(@as(i16, -120));
+    const wheel = @as(c.WPARAM, delta) << 16;
+    _ = c.SendMessageW(dialog.list, c.WM_MOUSEWHEEL, wheel | c.MK_CONTROL, 0);
+    _ = c.SendMessageW(dialog.list, c.WM_MOUSEWHEEL, wheel, 0);
+    _ = c.SendMessageW(dialog.edit, c.WM_MOUSEWHEEL, wheel, 0);
+    try std.testing.expect(!dialog.closed and dialog.failure == null);
 }
 
 test "palette residual owner region is installed before the overflow list moves and the decoration follows" {
