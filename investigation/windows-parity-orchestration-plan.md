@@ -26,6 +26,26 @@ truth for status. The issues carry the acceptance criteria and the priority.
   screens that use them).
 - **One session = one issue = one PR.**
 
+## Wave 1 (started 2026-10-13)
+
+| Lane | Issue | Model |
+| --- | --- | --- |
+| A | #768 | `gpt-6.1-sol`, high, long_context |
+| B | #773 | `gpt-5.4-mini`, high |
+| C | #767 | `gpt-6.1-sol`, high, long_context |
+| D | #774 | `gpt-5.4-mini`, high |
+| E | #776 | `gpt-6.1-sol`, high, long_context |
+
+**Desktop lease.** Integration validation (the UIA live gate), Windows Sandbox
+runs and screenshots of a running shell all take the desktop. One session
+holds it at a time, and the coordinator hands it out. Unit validation and
+`zig test` run in parallel, each in its own scratch roots.
+
+**Toolchain.** Each session bootstraps its own tool, provider and scratch
+roots: `C:\gct\<lane>`, `C:\gcp\<lane>` and `C:\gcs\<lane>`. To skip the
+slow Zig download, seed the tool root from the checksum-verified, read-only
+cache in `C:\gc-cache\zig`.
+
 ## Work queue
 
 ### P1 layout (wave 1)
@@ -37,7 +57,7 @@ truth for status. The issues carry the acceptance criteria and the priority.
 | 3 | [#774](https://github.com/scgopi/GraphCode/issues/774) | Quick Chat workspace shows the previous loop's bar and panel | D |
 | 4 | [#764](https://github.com/scgopi/GraphCode/issues/764) | Canvas loop cards: layout, pills, roles, colours, flow layout | B |
 | 5 | [#765](https://github.com/scgopi/GraphCode/issues/765) | Edges quiet at rest, never over cards (absorbs #759) | B |
-| 6 | [#766](https://github.com/scgopi/GraphCode/issues/766) | Attention rail, toolbar chips, status line (absorbs #761) | C |
+| 6 | [#766](https://github.com/scgopi/GraphCode/issues/766) | Attention rail, toolbar chips, status line (absorbs #761) | B (the rail draws in `GraphCanvas.zig`) |
 | 7 | [#767](https://github.com/scgopi/GraphCode/issues/767) | Sidebar tree and window layout, 452 pt minimum width | C |
 | 8 | [#776](https://github.com/scgopi/GraphCode/issues/776) | Jump palette in-window and dark | E |
 | 9 | [#777](https://github.com/scgopi/GraphCode/issues/777) | Worktrees sheet grouped layout, no clipping | A |
@@ -82,8 +102,8 @@ PR.
 | Lane | Owns | Notes |
 | --- | --- | --- |
 | A: Forms and dialogs | `NativeForms.zig`, `Forms.zig`, `WindowsNativeDialogs.zig`, `WindowsProductSettings.zig` | #768 first; every later form builds on it |
-| B: Canvas | `GraphCanvas.zig`, `DesignTokens.zig` | #773, then #764, then #765, then #781 |
-| C: Sidebar and window | `Sidebar.zig`; the window procedure and min-size handling in `App.zig` | #766, then #767 |
+| B: Canvas | `GraphCanvas.zig`, `DesignTokens.zig` | #773, then #764, then #765, then #766, then #781 |
+| C: Sidebar and window | `Sidebar.zig`; the window procedure and min-size handling in `App.zig` | #767; the toolbar-chip part of #766 needs a narrow, coordinator-approved edit |
 | D: Workspace and terminal chrome | `TerminalSurface.zig`; workspace layout code in `App.zig` | #774, then #772, then #775 |
 | E: Menus and commands | `GraphContextMenu.zig`, `JumpPalette.zig`, `WindowsOnboarding.zig`; menu construction in `App.zig` | #776, then #778, then #722, then #779, then #780 |
 | F: Verification | no product files | Sandbox runs, testing gaps and candidate qualification |
