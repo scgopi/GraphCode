@@ -7936,11 +7936,13 @@ pub const App = struct {
                                 GraphCanvas.loopDetailCollapseBounds(client.right);
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
                             if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
-                                const detail_left = client.right - Tokens.loop_detail_width;
                                 const selected_node = graph.nodes.items[selected_index];
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 } }, false, false) catch return;
+                                if (selected_node.metric_sample_count >= 2) {
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = GraphCanvas.loopDetailSparklineBounds(client.right, client.bottom) }, false, false) catch return;
+                                }
+                                const detail_footer = GraphCanvas.loopDetailFooterBounds(client.right, client.bottom);
                                 if (selected_node.created_at != null) {
-                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 } }, false, false) catch return;
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = detail_footer }, false, false) catch return;
                                 }
                                 if (selected_node.token_usage) |tokens| {
                                     const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
@@ -7948,7 +7950,7 @@ pub const App = struct {
                                         self.allocator.free(usage_name);
                                         return;
                                     };
-                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 } }, false, false) catch return;
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = detail_footer }, false, false) catch return;
                                 }
                             }
                         } else if (self.selected_quick_chat) |chat_index| {
@@ -17934,11 +17936,10 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
         \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\loop-fixture","name":"Loop fixture"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
     );
     try std.testing.expect(app.model.setSelectedIndex(0));
-    try app.model.quick_chats.append(.{
-        .id = try allocator.dupe(u8, "chat-1"),
-        .title = try allocator.dupe(u8, "Chat 1"),
-        .backend = try allocator.dupe(u8, "claudeCode"),
-    });
+    const listed =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"chat-1","title":"Chat 1","backend":"claudeCode","createdAt":0,"activity":null}]}}
+    ;
+    app.onFrameWithAccessibilityPublish(listed, LoopBarProbe.publish);
     const layout_path = try std.fs.path.join(allocator, &.{ home, "layout.json" });
     var workspace: TerminalWorkspace.Workspace = .{
         .parent = null,
@@ -18008,6 +18009,76 @@ test "quick chat titles include the creation date" {
         .wMilliseconds = 0,
     };
     try std.testing.expectEqualStrings("Chat — Jan 1", try App.quickChatTitleFromSystemTime(&title_buffer, local_time));
+}
+
+test "opening a quick chat after a loop workspace selects the chat bar through its UIA item" {
+    const allocator = std.testing.allocator;
+    const user_profile_key = std.unicode.utf8ToUtf16LeStringLiteral("USERPROFILE");
+    const uia_gate_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_GATE");
+    var original_environment = try std.process.getEnvMap(allocator);
+    defer original_environment.deinit();
+    defer setWorkspaceTestEnvironment(user_profile_key, original_environment.get("USERPROFILE")) catch @panic("USERPROFILE restore failed");
+    defer setWorkspaceTestEnvironment(uia_gate_key, original_environment.get("GRAPHCODE_UIA_GATE")) catch @panic("GRAPHCODE_UIA_GATE restore failed");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    try setWorkspaceTestEnvironment(user_profile_key, home);
+    try setWorkspaceTestEnvironment(uia_gate_key, null);
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\loop-fixture","name":"Loop fixture"},"nodes":[{"id":"loop-a","title":"Loop A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    const listed =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"chat-1","title":"Chat 1","backend":"claudeCode","createdAt":0,"activity":null}]}}
+    ;
+    app.onFrameWithAccessibilityPublish(listed, LoopBarProbe.publish);
+    const layout_path = try std.fs.path.join(allocator, &.{ home, "layout.json" });
+    var workspace: TerminalWorkspace.Workspace = .{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, home),
+        .layout_path = layout_path,
+        .project_key = try allocator.dupe(u8, home),
+        .project_path = try allocator.dupe(u8, home),
+        .legacy_directory = try allocator.dupe(u8, home),
+    };
+    defer workspace.deinit();
+    try workspace.layout.addTab("loop-a", true);
+    try workspace.layout.addTab("shell", false);
+    app.workspace = &workspace;
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
+    app.surface = .workspace;
+    app.workspace_is_quick_chat = false;
+
+    LoopBarProbe.publish(&app);
+    try std.testing.expect(LoopBarProbe.has_bar);
+    try std.testing.expectEqualStrings("loop-a", LoopBarProbe.barLoop());
+
+    const outbound_before = app.client.outbound_count;
+    try std.testing.expect(app.applyUiaDynamicInvoke(
+        Accessibility.worktreeIdentityPayload("quick-chat-row:chat-1"),
+    ));
+    try std.testing.expectEqual(outbound_before + 1, app.client.outbound_count);
+    const opened =
+        \\{"version":2,"kind":"event","sequence":3,"event":{"quickChatChanged":{"id":"chat-1","title":"Chat 1","backend":"claudeCode","createdAt":0,"activity":null}}}
+    ;
+    app.onFrameWithAccessibilityPublish(opened, LoopBarProbe.publish);
+    LoopBarProbe.publish(&app);
+
+    try std.testing.expect(app.workspace_is_quick_chat);
+    try std.testing.expectEqual(@as(?usize, 0), app.selected_quick_chat);
+    try std.testing.expect(LoopBarProbe.has_bar);
+    try std.testing.expectEqualStrings("chat-1", LoopBarProbe.barLoop());
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
 }
 
 test "creating a quick chat uses the default backend and a date-stamped title" {
