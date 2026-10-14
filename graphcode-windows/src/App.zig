@@ -12459,11 +12459,20 @@ fn loadManySidebarLoops(app: *App, count: usize) !void {
 
 /// The vertical extent a sidebar row is drawn and published over, clipped to the scroll
 /// region, or an empty rect when the row is scrolled out of it.
-fn expectedSidebarRowRect(row_top: i32, region_top: i32, region_bottom: i32) c.RECT {
-    const top = @max(row_top - 3, region_top);
-    const bottom = @min(row_top + 23, region_bottom);
+fn expectedSidebarRowRect(row: Sidebar.Row, region_top: i32, region_bottom: i32) c.RECT {
+    const top_offset: i32 = if (row.kind == .loop) -2 else -3;
+    const bottom_offset: i32 = switch (row.kind) {
+        .loop => 22,
+        .local_heading, .remote_heading => 21,
+        .worktree => 31,
+        else => 29,
+    };
+    const row_top = row.top + top_offset;
+    const row_bottom = row.top + bottom_offset;
+    const top = @max(row_top, region_top);
+    const bottom = @min(row_bottom, region_bottom);
     if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    return .{ .left = 12, .top = top, .right = 232, .bottom = bottom };
+    return .{ .left = 12, .top = top, .right = Tokens.sidebar_width, .bottom = bottom };
 }
 
 test "sidebar UIA bounds are the drawn rect clipped to the scroll region at short heights, 96 and 144 DPI" {
@@ -12506,7 +12515,7 @@ test "sidebar UIA bounds are the drawn rect clipped to the scroll region at shor
             var rows = try Sidebar.appendRows(app.allocator, &app.model, inspection, app.sidebar_scroll, &app.sidebar_state);
             defer rows.deinit(app.allocator);
             for (rows.items) |row| {
-                const expected = (AccessibilityBounds{ .logical = expectedSidebarRowRect(row.top, region_top, region_bottom) }).physicalRect(app.dpi);
+                const expected = (AccessibilityBounds{ .logical = expectedSidebarRowRect(row, region_top, region_bottom) }).physicalRect(app.dpi);
                 var identity_buffer: [64]u8 = undefined;
                 const identity: []const u8 = switch (row.kind) {
                     .loop => blk: {
@@ -20295,7 +20304,7 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 288, 5, 400, 29 }, .{ 432, 8, 600, 44 }, .{ 576, 10, 800, 58 } } },
         .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
         .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
-        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 109, 232, 135 }, .{ 18, 164, 348, 203 }, .{ 24, 218, 464, 270 } } },
+        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 229, 220, 253 }, .{ 18, 344, 330, 380 }, .{ 24, 458, 440, 506 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
     // The footer is anchored to the sidebar's visible bottom, which the workspace panel
