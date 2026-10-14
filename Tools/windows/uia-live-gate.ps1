@@ -6084,7 +6084,7 @@ try {
     $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
   })
   Require ($overviewCards.Count -eq 2) "overview did not restore synchronized cards before the Worktrees lane check"
-  $laneWorktreesScreenX = [int]$graph.Current.BoundingRectangle.Right - 69
+  $laneWorktreesScreenX = [int]$graph.Current.BoundingRectangle.Left + 24 + [Math]::Max(806, [int]$graph.Current.BoundingRectangle.Width - 48) - 45
   $laneWorktreesScreenY = [int]$overviewCards[0].Current.BoundingRectangle.Top - 26
   $worktrees = Find-FragmentById $root "worktrees" $rawWalker
   Require ($null -ne $worktrees) "missing Worktrees fragment before the overview lane Worktrees check"

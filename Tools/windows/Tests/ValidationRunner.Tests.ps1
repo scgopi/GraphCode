@@ -63,6 +63,39 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       ($geometry.open -join ",") -cne "872,82,928,102") "old 760-pixel action geometry was accepted"
     return "New source geometry rejects the old narrow-window lane/action coordinates"
   }
+  Invoke-MultiCase "actual early Worktrees click assignment uses current narrow and wide lane geometry" {
+    $gateAst = [Management.Automation.Language.Parser]::ParseInput($gateSource, [ref]$null, [ref]$null)
+    $assignments = @($gateAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -ceq "laneWorktreesScreenX"
+    }, $true))
+    Assert-MultiCase ($assignments.Count -eq 1) "actual Worktrees click assignment missing or ambiguous"
+    $evaluate = [scriptblock]::Create('param($graph) ' + $assignments[0].Extent.Text + '; return $laneWorktreesScreenX')
+    foreach ($case in @(
+      @{ left = 220; right = 1028; expected = 1005; minimum = 978; maximum = 1032 },
+      @{ left = 220; right = 1200; expected = 1131; minimum = 1104; maximum = 1158 },
+      @{ left = 228; right = 1036; expected = 1013; minimum = 986; maximum = 1040 }
+    )) {
+      $graph = [pscustomobject]@{ Current = [pscustomobject]@{ BoundingRectangle = [pscustomobject]@{
+        Left = $case.left; Right = $case.right; Width = $case.right - $case.left
+      } } }
+      $actual = & $evaluate $graph
+      Assert-MultiCase ($actual -eq $case.expected -and $actual -ge $case.minimum -and $actual -lt $case.maximum) `
+        "actual production Worktrees point expected $($case.expected), found $actual"
+      $geometry = Get-MultiProjectLaneGeometry @($case.left,34,$case.right,900) @(($case.left+42),118,($case.left+292),214)
+      $control = @(($geometry.band[2]-72),82,($geometry.band[2]-18),102)
+      $visible = Get-MultiProjectClippedRectangle $control @($case.left,34,$case.right,900)
+      Assert-MultiCase ($actual -ge $visible[0] -and $actual -lt $visible[2]) "actual Worktrees point misses its visible clipped control"
+      if ($case.right - $case.left -eq 808) {
+        $obsolete = $case.right - 69
+        Assert-MultiCase ($obsolete -ge $geometry.open[0] -and $obsolete -lt $geometry.open[2] -and
+          ($obsolete -lt $control[0] -or $obsolete -ge $control[2])) "obsolete narrow point was not rejected as Open rather than Worktrees"
+      }
+    }
+    return "Executed the production assignment AST at 1028-client, wide and translated bounds; no desktop invocation"
+  }
   $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
   $eventEnd = $eventStart.AddSeconds(1)
   $eventProcess = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }
