@@ -25,6 +25,7 @@ const Sidebar = @import("Sidebar.zig");
 const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
+const TerminalSurface = @import("TerminalSurface.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
 const Clipboard = @import("Clipboard.zig");
@@ -1246,6 +1247,13 @@ fn workspaceLoopBar(controls: WorkspaceControls.State, client_right: i32, resolv
     );
 }
 
+fn quickChatByID(model: *const GraphModel.Model, id: []const u8) ?*const GraphModel.QuickChat {
+    for (model.quick_chats.items) |*chat| {
+        if (std.mem.eql(u8, chat.id, id)) return chat;
+    }
+    return null;
+}
+
 fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
     if (model.currentGraph()) |graph| if (graph.nodes.items.len != 0) return graph;
     if (model.selected_project_path) |path| {
@@ -1342,6 +1350,7 @@ const UiaDynamicTarget = union(enum) {
     workspace_tab: usize,
     workspace_tab_close: usize,
     workspace_switch: usize,
+    workspace_restart_session: []const u8,
     header_attention,
     header_worktree,
     header_jump,
@@ -1405,7 +1414,6 @@ pub const App = struct {
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
     dpi: u32 = Dpi.base_dpi,
     surface: GraphCanvas.Surface = .project,
-    workspace_is_quick_chat: bool = false,
     header_focus: ?GraphCanvas.HeaderAction = null,
     header_return_focus: c.HWND = null,
     header_focus_transition: bool = false,
@@ -1998,11 +2006,20 @@ pub const App = struct {
                 if (event == .quick_chat_changed) {
                     if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
                 }
+                var deleted_bound_chat = false;
                 if (event == .quick_chat_deleted and !self.smoke) {
                     if (Wire.jsonString(frame, "quickChatDeleted")) |id| {
+                        if (self.workspaceQuickChatID()) |bound_id| {
+                            deleted_bound_chat = std.mem.eql(u8, bound_id, id);
+                        }
                         if (self.workspace) |workspace|
                             _ = workspace.retireLoop(id, TerminalWorkspace.quick_chat_scope_project);
                     }
+                }
+                if (deleted_bound_chat) {
+                    self.routeQuickChatWorkspaceAway("Quick Chat is no longer available");
+                } else {
+                    self.routeUnavailableQuickChatWorkspace();
                 }
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
@@ -2483,13 +2500,59 @@ pub const App = struct {
     fn refreshWorkspace(self: *App) void {
         const workspace = if (self.workspace) |value| value else return;
         if (self.smoke) return self.refreshSmokeTerminals(workspace);
-        if (self.workspace_is_quick_chat) return;
+        if (self.workspaceQuickChatID() != null) return;
         const project = self.currentProject() orelse return;
         if (!std.mem.eql(u8, workspace.projectPath(), project)) return;
         if (workspace.hasSurface(0) or workspace.hasAttach(0) or workspace.isAwaitingLaunch(0)) return;
         if (!workspace.loopPaneDetached(self.selected_node_id)) return;
         workspace.openLaunchedNode(0, self.selected_node_id, 0) catch
             self.setStatus("Unable to attach selected loop");
+    }
+
+    fn workspaceQuickChatID(self: *const App) ?[]const u8 {
+        if (self.surface != .workspace) return null;
+        const workspace = self.workspace orelse return null;
+        return workspace.boundQuickChatID();
+    }
+
+    fn isQuickChatWorkspace(self: *const App) bool {
+        return self.workspaceQuickChatID() != null;
+    }
+
+    fn hasQuickChatWorkspaceScope(self: *const App) bool {
+        const workspace = self.workspace orelse return false;
+        return std.mem.eql(u8, workspace.layout.project_key, TerminalWorkspace.quick_chat_scope_project);
+    }
+
+    fn boundQuickChat(self: *const App) ?*const GraphModel.QuickChat {
+        const id = self.workspaceQuickChatID() orelse return null;
+        return quickChatByID(&self.model, id);
+    }
+
+    fn routeQuickChatWorkspaceAway(self: *App, status_text: []const u8) void {
+        self.surface = .quick_chats;
+        self.workspace_controls.panel_visible = false;
+        self.selected_quick_chat = null;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        self.setStatus(status_text);
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+    }
+
+    fn routeUnavailableQuickChatWorkspace(self: *App) void {
+        const id = self.workspaceQuickChatID() orelse return;
+        if (quickChatByID(&self.model, id) != null) return;
+        self.routeQuickChatWorkspaceAway("Quick Chat is no longer available");
+    }
+
+    fn routeFromFailedQuickChatOpen(self: *App) void {
+        self.surface = .quick_chats;
+        self.workspace_controls.panel_visible = false;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
     /// The smoke gate's two-terminal contract: terminals A and B show the graph's first two
@@ -3039,24 +3102,36 @@ pub const App = struct {
     fn openQuickChat(self: *App, id: []const u8) void {
         for (self.model.quick_chats.items, 0..) |chat, index| {
             if (!std.mem.eql(u8, chat.id, id)) continue;
+            const workspace = self.workspace orelse {
+                self.setStatus("Quick Chat workspace is unavailable");
+                self.routeFromFailedQuickChatOpen();
+                return;
+            };
             self.selected_quick_chat = index;
-            self.workspace_is_quick_chat = true;
             self.surface = .workspace;
-            self.workspace_controls.panel_visible = true;
+            self.workspace_controls.panel_visible = false;
             self.layoutWorkspace();
             self.layoutEmptyStateControls();
-            if (self.workspace) |workspace| {
-                if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
-                    defer self.allocator.free(home);
-                    _ = workspace.rebindProject(home) catch {};
-                } else |_| {}
-                workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, false) catch {
-                    self.setStatus("Unable to open quick chat workspace");
-                };
-                workspace.openNode(0, chat.id) catch {
-                    self.setStatus("Unable to open quick chat workspace");
-                };
+            if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
+                defer self.allocator.free(home);
+                _ = workspace.rebindProject(home) catch {};
+            } else |_| {}
+            workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, false) catch {
+                self.setStatus("Unable to open quick chat workspace");
+                self.routeFromFailedQuickChatOpen();
+                return;
+            };
+            const bound_id = workspace.boundQuickChatID() orelse {
+                self.setStatus("Unable to bind quick chat workspace");
+                self.routeFromFailedQuickChatOpen();
+                return;
+            };
+            if (!std.mem.eql(u8, bound_id, chat.id)) {
+                self.setStatus("Unable to bind quick chat workspace");
+                self.routeFromFailedQuickChatOpen();
+                return;
             }
+            workspace.openNode(0, chat.id) catch self.setStatus("Unable to open quick chat workspace");
             self.syncAccessibility();
             return;
         }
@@ -4279,7 +4354,6 @@ pub const App = struct {
             self.setStatus("Composite templates have no terminal until the group is piloted");
             return false;
         }
-        self.workspace_is_quick_chat = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = true;
         self.layoutWorkspace();
@@ -6847,7 +6921,10 @@ pub const App = struct {
     }
 
     fn showInGraph(self: *App, comptime finish_native: fn (*App) void, comptime publish: fn (*App) void) void {
-        self.surface = .project;
+        self.surface = if (self.isQuickChatWorkspace() and self.model.currentGraph() == null)
+            .quick_chats
+        else
+            .project;
         self.workspace_controls.panel_visible = false;
         self.workspace_controls.apply(.show_graph);
         finish_native(self);
@@ -6990,9 +7067,9 @@ pub const App = struct {
     }
 
     fn toggleWorkspacePanelState(self: *App) void {
+        if (self.hasQuickChatWorkspaceScope()) return;
         self.workspace_controls.apply(.toggle_panel);
         if (self.workspace_controls.panel_visible) {
-            self.workspace_is_quick_chat = false;
             self.surface = .workspace;
         } else if (self.surface == .workspace) {
             self.surface = .project;
@@ -7000,11 +7077,13 @@ pub const App = struct {
     }
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
+        if (self.hasQuickChatWorkspaceScope()) return;
         self.workspace_controls.panel_visible = !self.workspace_controls.panel_visible;
         if (self.workspace_controls.panel_visible) self.surface = .workspace;
     }
 
     fn toggleWorkspaceDetailPanel(self: *App) void {
+        if (self.hasQuickChatWorkspaceScope()) return;
         self.toggleWorkspaceDetailPanelState();
         self.layoutWorkspace();
         self.syncAccessibility();
@@ -7330,11 +7409,9 @@ pub const App = struct {
 
     fn headerPresentation(self: *const App) GraphCanvas.Header {
         var header = GraphCanvas.Header{ .attention_count = self.model.attentionCount() };
-        if (self.surface == .workspace and self.workspace_is_quick_chat) {
+        if (self.isQuickChatWorkspace()) {
             header.context = "Quick Chat workspace";
-            if (self.selected_quick_chat) |index| if (index < self.model.quick_chats.items.len) {
-                header.title = self.model.quick_chats.items[index].title;
-            };
+            header.title = if (self.boundQuickChat()) |chat| chat.title else "Quick Chat unavailable";
         } else if (self.surface == .overview) {
             header.title = "Graph";
             header.context = "All projects";
@@ -7347,7 +7424,7 @@ pub const App = struct {
             else
                 (if (graph.project.isRemote()) "Remote" else if (graph.project.isGlobal()) "Global" else "Local folder");
         }
-        if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.workspace_is_quick_chat)) {
+        if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.isQuickChatWorkspace())) {
             header.panel_visible = self.workspace_controls.panel_visible;
         }
         if (self.worktreeHeaderOwner()) |owner| {
@@ -7543,7 +7620,8 @@ pub const App = struct {
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
-        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));        const current_inspection = self.currentWorktreeInspection();
+        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
+        const current_inspection = self.currentWorktreeInspection();
         // The scroll sink is optional so test sinks that only record elements need not declare it.
         if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
             provider.syncSidebarScroll(
@@ -7723,34 +7801,31 @@ pub const App = struct {
             const banner = Sidebar.updateBannerRect(footer_viewport_bottom, footer.ingress);
             self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-update-banner", "update", "Update available", 1, .{ .logical = banner }, false, false) catch return;
         }
-        if (self.surface == .workspace and self.workspace_is_quick_chat) if (self.selected_quick_chat) |chat_index| {
-            if (chat_index < self.model.quick_chats.items.len) {
-                const chat = self.model.quick_chats.items[chat_index];
-                const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat.id}) catch return;
-                owned_identities.append(identity) catch {
-                    self.allocator.free(identity);
-                    return;
-                };
-                const workspace_bounds = (AccessibilityBounds{ .logical = .{
-                    .left = canvas_rect.left,
-                    .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
-                    .right = canvas_rect.right,
-                    .bottom = client.bottom,
-                } }).physicalRect(self.dpi);
-                elements.append(.{
-                    .identity = identity,
-                    .name = "Quick Chat terminal workspace",
-                    .parent = 4,
-                    .selected = true,
-                    .eligible = false,
-                    .invokable = false,
-                    .left = workspace_bounds.left,
-                    .top = workspace_bounds.top,
-                    .right = workspace_bounds.right,
-                    .bottom = workspace_bounds.bottom,
-                }) catch return;
-            }
-        };
+        if (self.workspaceQuickChatID()) |chat_id| {
+            const identity = std.fmt.allocPrint(self.allocator, "quick-chat-workspace:{s}", .{chat_id}) catch return;
+            owned_identities.append(identity) catch {
+                self.allocator.free(identity);
+                return;
+            };
+            const workspace_bounds = (AccessibilityBounds{ .logical = .{
+                .left = canvas_rect.left,
+                .top = Tokens.header_height + Tokens.loop_bar_height,
+                .right = canvas_rect.right,
+                .bottom = client.bottom,
+            } }).physicalRect(self.dpi);
+            elements.append(.{
+                .identity = identity,
+                .name = "Quick Chat terminal workspace",
+                .parent = 4,
+                .selected = true,
+                .eligible = false,
+                .invokable = false,
+                .left = workspace_bounds.left,
+                .top = workspace_bounds.top,
+                .right = workspace_bounds.right,
+                .bottom = workspace_bounds.bottom,
+            }) catch return;
+        }
         if (self.model.attention_entries.items.len != 0) {
             const section = Sidebar.sidebarSectionBottom(&self.model, current_inspection, &self.sidebar_state) - self.sidebar_scroll;
             self.appendAccessibilityElement(&elements, &owned_identities, "needs-you-header", "needs-you", "Needs you", 1, .{ .logical = clipSidebarAccessibilityBounds(.{ .left = 12, .top = section + 4, .right = 232, .bottom = section + 28 }, sidebar_bottom) }, false, true) catch return;
@@ -7878,58 +7953,44 @@ pub const App = struct {
                     }
                 }
                 if (self.surface == .workspace) {
-                    if (self.workspace) |workspace| {
-                        const selected_index = self.model.selectedIndex() orelse 0;
-                        const loop_bar = workspaceLoopBar(
-                            self.workspace_controls,
-                            client.right,
-                            selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
-                        );
-                        if (!self.workspace_is_quick_chat) {
+                    if (self.workspace != null) {
+                        if (!self.isQuickChatWorkspace()) {
+                            const selected_index = self.model.selectedIndex() orelse 0;
+                            const loop_bar = workspaceLoopBar(
+                                self.workspace_controls,
+                                client.right,
+                                selected_index >= graph.nodes.items.len or isResolvedLoopState(graph.nodes.items[selected_index].state),
+                            );
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, header.title, 4, .{ .logical = header_layout.identity }, false, false) catch return;
                             elements.items[elements.items.len - 1].invokable = false;
-                        }
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
-                        if (loop_bar.stop) |stop| {
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
-                        }
-                        const panel_toggle = if (loop_bar.panel_toggle) |expand|
-                            loopBarRect(expand)
-                        else
-                            GraphCanvas.loopDetailCollapseBounds(client.right);
-                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
-                        if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
-                            const selected_node = graph.nodes.items[selected_index];
-                            if (selected_node.metric_sample_count >= 2) {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = GraphCanvas.loopDetailSparklineBounds(client.right, client.bottom) }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, true) catch return;
+                            if (loop_bar.stop) |stop| {
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, true) catch return;
                             }
-                            const detail_footer = GraphCanvas.loopDetailFooterBounds(client.right, client.bottom);
-                            if (selected_node.created_at != null) {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = detail_footer }, false, false) catch return;
+                            const panel_toggle = if (loop_bar.panel_toggle) |expand|
+                                loopBarRect(expand)
+                            else
+                                GraphCanvas.loopDetailCollapseBounds(client.right);
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
+                            if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
+                                const selected_node = graph.nodes.items[selected_index];
+                                if (selected_node.metric_sample_count >= 2) {
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = GraphCanvas.loopDetailSparklineBounds(client.right, client.bottom) }, false, false) catch return;
+                                }
+                                const detail_footer = GraphCanvas.loopDetailFooterBounds(client.right, client.bottom);
+                                if (selected_node.created_at != null) {
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = detail_footer }, false, false) catch return;
+                                }
+                                if (selected_node.token_usage) |tokens| {
+                                    const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
+                                    owned_identities.append(usage_name) catch {
+                                        self.allocator.free(usage_name);
+                                        return;
+                                    };
+                                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = detail_footer }, false, false) catch return;
+                                }
                             }
-                            if (selected_node.token_usage) |tokens| {
-                                const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
-                                owned_identities.append(usage_name) catch {
-                                    self.allocator.free(usage_name);
-                                    return;
-                                };
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = detail_footer }, false, false) catch return;
-                            }
-                        }
-                        for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
-                            const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
-                            defer self.allocator.free(tab_key);
-                            const tab_bounds = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, tab_index);
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, if (tab.panes.items.len > 1) "Split tab" else if (tab_index == 0) "Agent tab" else "Shell tab", 4, .{ .physical = tab_bounds }, tab_index == workspace.layout.selected_tab, true) catch return;
-                            const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
-                            defer self.allocator.free(close_key);
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom } }, false, workspace.canCloseTab()) catch return;
-                        }
-                        for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
-                            const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
-                            const kind = if (control_index == 0) "workspace-new-tab" else if (control_index == 1) "workspace-split-right" else "workspace-split-down";
-                            self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .physical = control_bounds }, false, true) catch return;
                         }
                     }
                 }
@@ -7954,6 +8015,47 @@ pub const App = struct {
             .quick_chats => for (self.model.quick_chats.items, 0..) |chat, index| {
                 self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-card", chat.id, chat.title, 4, .{ .logical = GraphCanvas.quickChatCardBounds(index, canvas_rect, &self.canvas) }, false, false) catch return;
             },
+        }
+        if (self.surface == .workspace) {
+            if (self.workspace) |workspace| {
+                if (self.workspaceQuickChatID()) |chat_id| {
+                    const chat = quickChatByID(&self.model, chat_id) orelse return;
+                    const bar = TerminalSurface.quickChatBarLayout(
+                        if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                        client.right,
+                    );
+                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-quick-chat-bar", chat_id, chat.title, 4, .{ .logical = loopBarRect(bar.bar) }, false, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", chat_id, "Restart session", 4, .{ .logical = loopBarRect(bar.restart_session) }, false, true) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(bar.show_graph) }, false, true) catch return;
+                }
+                for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
+                    const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
+                    defer self.allocator.free(tab_key);
+                    const tab_bounds = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, tab_index);
+                    var launches_agent = false;
+                    for (tab.panes.items) |pane| {
+                        if (pane.launches_agent) {
+                            launches_agent = true;
+                            break;
+                        }
+                    }
+                    const tab_name = if (tab.panes.items.len > 1)
+                        "Split tab"
+                    else if (launches_agent)
+                        "Agent tab"
+                    else
+                        "Shell tab";
+                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, tab_name, 4, .{ .physical = tab_bounds }, tab_index == workspace.layout.selected_tab, true) catch return;
+                    const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
+                    defer self.allocator.free(close_key);
+                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom } }, false, workspace.canCloseTab()) catch return;
+                }
+                for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
+                    const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
+                    const kind = if (control_index == 0) "workspace-new-tab" else if (control_index == 1) "workspace-split-right" else "workspace-split-down";
+                    self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .physical = control_bounds }, false, true) catch return;
+                }
+            }
         }
         const canvas_alert = if (self.ingress_error.len != 0)
             self.ingress_error
@@ -8216,7 +8318,16 @@ pub const App = struct {
             }
         }
         if (self.surface == .workspace) {
-            if (self.model.selectedNodeID()) |node_id| {
+            if (self.workspaceQuickChatID()) |chat_id| {
+                if (quickChatByID(&self.model, chat_id) != null) {
+                    const identity = std.fmt.allocPrint(self.allocator, "workspace-restart-session:{s}", .{chat_id}) catch return false;
+                    defer self.allocator.free(identity);
+                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .workspace_restart_session = chat_id };
+                    }
+                }
+            } else if (self.model.selectedNodeID()) |node_id| {
                 const identity = std.fmt.allocPrint(self.allocator, "workspace-stop:{s}", .{node_id}) catch return false;
                 defer self.allocator.free(identity);
                 if (Accessibility.worktreeIdentityPayload(identity) == payload) {
@@ -8360,17 +8471,7 @@ pub const App = struct {
             .quick_chat => |id| {
                 self.setStatus("Opening quick chat...");
                 if (envFlag("GRAPHCODE_UIA_GATE")) {
-                    for (self.model.quick_chats.items, 0..) |chat, index| {
-                        if (!std.mem.eql(u8, chat.id, id)) continue;
-                        self.selected_quick_chat = index;
-                        self.workspace_is_quick_chat = true;
-                        self.surface = .workspace;
-                        self.workspace_controls.panel_visible = true;
-                        self.layoutWorkspace();
-                        self.layoutEmptyStateControls();
-                        self.syncAccessibility();
-                        break;
-                    }
+                    self.openQuickChat(id);
                 } else {
                     self.client.sendOpenQuickChat(id);
                 }
@@ -8381,6 +8482,13 @@ pub const App = struct {
             .workspace_split_right => self.handleAction(.split_horizontal),
             .workspace_split_down => self.handleAction(.split_vertical),
             .workspace_toggle_panel => self.toggleWorkspaceDetailPanel(),
+            .workspace_restart_session => |chat_id| {
+                if (!std.mem.eql(u8, self.workspaceQuickChatID() orelse return false, chat_id) or
+                    quickChatByID(&self.model, chat_id) == null)
+                {
+                    return false;
+                }
+            },
             .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
             .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
             .workspace_switch => |index| {
@@ -9147,7 +9255,24 @@ fn onWindowMessage(
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
-                    if (workspaceGraph(&app.model)) |graph| {
+                    if (app.workspaceQuickChatID()) |chat_id| {
+                        if (quickChatByID(&app.model, chat_id)) |chat| {
+                            var age_buffer: [32]u8 = undefined;
+                            const now_timestamp = @max(std.time.timestamp(), @as(i64, 0));
+                            const presentation = TerminalWorkspace.quickChatBarPresentation(
+                                chat.title,
+                                chat.created_at,
+                                @intCast(now_timestamp),
+                                &age_buffer,
+                            );
+                            TerminalWorkspace.Workspace.paintQuickChatBar(
+                                hdc,
+                                if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                                logical_right,
+                                presentation,
+                            );
+                        }
+                    } else if (workspaceGraph(&app.model)) |graph| {
                         const workspace_right = logical_right - (if (app.workspace_controls.panel_visible) Tokens.loop_detail_width else 0);
                         const index = app.model.selectedIndex() orelse 0;
                         if (index < graph.nodes.items.len) {
@@ -9179,7 +9304,7 @@ fn onWindowMessage(
                     workspace.paintChrome(hdc);
                     _ = c.RestoreDC(hdc, saved_mapping);
                 }
-                if (app.surface == .workspace and app.workspace_controls.panel_visible) {
+                if (app.surface == .workspace and app.workspace_controls.panel_visible and !app.isQuickChatWorkspace()) {
                     if (workspaceGraph(&app.model)) |graph| {
                         const index = app.model.selectedIndex() orelse graph.nodes.items.len;
                         GraphCanvas.paintLoopDetailRail(
@@ -9519,24 +9644,37 @@ fn onWindowMessage(
             }
             if ((app.workspace_controls.panel_visible or app.surface == .workspace) and x >= rail_left and y >= workspace_top) {
                 if (app.surface == .workspace) {
-                    if (GraphCanvas.hitTestLoopDetailCollapse(x, y, client.right, app.workspace_controls.panel_visible)) {
-                        app.toggleWorkspaceDetailPanel();
-                        _ = c.InvalidateRect(hwnd, null, 0);
-                        result.* = 0;
-                        return true;
-                    }
-                    if (workspaceGraph(&app.model)) |graph| {
-                        const index = app.model.selectedIndex() orelse graph.nodes.items.len;
-                        if (index < graph.nodes.items.len) {
-                            const node = graph.nodes.items[index];
-                            if (workspaceLoopBar(app.workspace_controls, client.right, isResolvedLoopState(node.state)).actionAt(x, y)) |action| {
-                                switch (action) {
-                                    .stop => app.stopSelectedNode(),
-                                    .show_graph => app.handleAction(.show_graph),
+                    if (app.isQuickChatWorkspace()) {
+                        const bar = TerminalSurface.quickChatBarLayout(rail_left, client.right);
+                        if (bar.actionAt(x, y)) |action| {
+                            switch (action) {
+                                .restart_session => {},
+                                .show_graph => app.handleAction(.show_graph),
+                            }
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                            result.* = 0;
+                            return true;
+                        }
+                    } else {
+                        if (GraphCanvas.hitTestLoopDetailCollapse(x, y, client.right, app.workspace_controls.panel_visible)) {
+                            app.toggleWorkspaceDetailPanel();
+                            _ = c.InvalidateRect(hwnd, null, 0);
+                            result.* = 0;
+                            return true;
+                        }
+                        if (workspaceGraph(&app.model)) |graph| {
+                            const index = app.model.selectedIndex() orelse graph.nodes.items.len;
+                            if (index < graph.nodes.items.len) {
+                                const node = graph.nodes.items[index];
+                                if (workspaceLoopBar(app.workspace_controls, client.right, isResolvedLoopState(node.state)).actionAt(x, y)) |action| {
+                                    switch (action) {
+                                        .stop => app.stopSelectedNode(),
+                                        .show_graph => app.handleAction(.show_graph),
+                                    }
+                                    _ = c.InvalidateRect(hwnd, null, 0);
+                                    result.* = 0;
+                                    return true;
                                 }
-                                _ = c.InvalidateRect(hwnd, null, 0);
-                                result.* = 0;
-                                return true;
                             }
                         }
                     }
@@ -11628,8 +11766,8 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
-                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
-                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
+                            sink.name(index), bounds.left,        bounds.top,   bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,         banner.right, banner.bottom, case.dpi,
                             case.width,       app.sidebar_scroll,
                         },
                     );
@@ -13709,7 +13847,6 @@ const LiveTerminalFixture = struct {
         _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
     }
 
-
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
         self.revision += 1;
@@ -15621,7 +15758,7 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
 test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -15662,7 +15799,7 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
 
 test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -15747,7 +15884,7 @@ test "workspace layout: restore keeps a pane whose session zmx could not reach, 
 
 test "workspace layout: a loop's shells are neither ended nor forgotten while zmx cannot reach their session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -15769,7 +15906,7 @@ test "workspace layout: a loop's shells are neither ended nor forgotten while zm
 
 test "workspace layout: a shell whose daemon refused the connection is gone: its record is forgotten and nothing is killed" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -15784,7 +15921,7 @@ test "workspace layout: a shell whose daemon refused the connection is gone: its
 
 test "live terminal: opening a loop whose session zmx could not reach waits and attaches only once it answers" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -15940,7 +16077,7 @@ const nodes_full = node_loop_a ++ "," ++
 
 test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once the daemon's own answer agrees, and only those" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const other_project = "C:\\another-project";
     const alias_project = try std.mem.replaceOwned(u8, std.testing.allocator, fixture.project, "\\", "/");
@@ -15983,7 +16120,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
 
 test "workspace layout: an empty or partial first snapshot sweeps nothing that the full snapshot still holds" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-a", &.{ .{ .id = "loop-a", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_two } });
@@ -16018,7 +16155,7 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
 
 test "workspace layout: a layout saved after this shell started is another shell's and is never swept" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Written while this shell runs, as a second shell sharing the support directory would.
     try fixture.saveLoopLayout(fixture.project, "other-shells-loop", &.{ .{ .id = "other-shells-loop", .agent = true }, .{ .id = shell_uuid_one } });
@@ -16625,7 +16762,7 @@ test "workspace layout: a stale or revisionless frame that names the loop again 
 /// A layout older than this shell, with a recorded live shell session, for a loop the project's
 /// first usable snapshot will not name; the shell saw only an empty graph of the project before.
 fn emptyFirstGraphWithOldLayout(fixture: *LiveTerminalFixture) !i128 {
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
@@ -16671,7 +16808,7 @@ test "workspace layout: after a reconnect a project the shell holds no snapshot 
 
 test "workspace layout: a project first opened after a reconnect is left alone too" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16694,7 +16831,7 @@ test "workspace layout: a project first opened after a reconnect is left alone t
 
 test "workspace layout: a reconnect before the shell's first poll or snapshot still ends the age sweep" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16719,7 +16856,7 @@ test "workspace layout: a reconnect before the shell's first poll or snapshot st
 
 test "workspace layout: a snapshot queued before the transport failed arms nothing while the client is not connected" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -16749,7 +16886,7 @@ test "workspace layout: a snapshot queued before the transport failed arms nothi
 
 test "workspace layout: a look the age sweep started for a layout the shell never held does not outlive the connection" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -17122,7 +17259,7 @@ test "workspace layout: an empty graph, and a project the shell does not hold, a
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Node ids are uuids; the daemon names a loop's session after the uppercase one.
     const node_uuid = shell_uuid_seven;
@@ -17147,7 +17284,7 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
 
 test "workspace layout: a layout that cannot be attributed to the deleted loop ends nothing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17170,7 +17307,7 @@ test "workspace layout: a layout that cannot be attributed to the deleted loop e
 
 test "workspace layout: deleting a loop ends only recorded, live, shell-shaped sessions nothing else names" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const foreign = "other-" ++ shell_uuid_two;
     // A layout from an earlier shell, a stale copy or a hand edit can record anything as a
@@ -17200,7 +17337,7 @@ test "workspace layout: deleting a loop ends only recorded, live, shell-shaped s
 
 test "workspace layout: a loop's shells are ended only after a successful session listing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17324,7 +17461,7 @@ test "workspace layout: a corrupt, foreign or newer-schema loop layout is kept a
 
 test "workspace layout: a live session that only a layout names is never ended without proof the shell made it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // A foreign session that happens to look like a shell's: lowercase uuid, live, no node's
     // id, named by no other layout. The name shape is not provenance.
@@ -17344,7 +17481,7 @@ test "workspace layout: a live session that only a layout names is never ended w
 
 test "workspace layout: a tab's session is recorded as the shell's own when minted and forgotten once ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const workspace = &fixture.workspace;
@@ -17375,7 +17512,7 @@ test "workspace layout: a tab's session is recorded as the shell's own when mint
 
 test "workspace layout: a layout scan cut short by its cap refuses the kill instead of assuming nothing claims it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17397,7 +17534,7 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
 
 test "workspace layout: a session another loop's record names is never ended by a different loop's retirement" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // The window in a second shell sharing this layout directory: it has recorded a fresh
     // session for its own loop-a, while a stale layout of the deleted gone-loop names the uuid.
@@ -17417,7 +17554,7 @@ test "workspace layout: a session another loop's record names is never ended by 
 /// sequence waits for each attach to finish before the next save.
 fn expectClaimAndRecordSeenByAttach(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -17500,7 +17637,7 @@ fn attachStartCount(dir: std.fs.Dir) !usize {
 
 test "workspace layout: New Tab and Split with no free surface slot fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -17540,7 +17677,7 @@ test "workspace layout: New Tab and Split with no free surface slot fail before 
 
 test "workspace layout: New Tab and Split with every free slot reserved by a pending restore fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -17622,7 +17759,7 @@ test "workspace layout: a failed rollback save leaves the claim on disk, never a
 
 test "workspace layout: restore drops a loop layout's claimed pane whose session was never started" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17649,7 +17786,7 @@ test "workspace layout: restore drops a loop layout's claimed pane whose session
 
 test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17673,7 +17810,7 @@ test "workspace layout: an unreadable unrelated layout defers the cleanup, and t
 
 test "workspace layout: a corrupt layout that cannot be set aside is left as it is and its loop is not opened" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const truncated = "{\"schemaVersion\":2,\"project\":\"";
@@ -18048,6 +18185,7 @@ const DpiExpectedElement = struct {
 const DpiAccessibilitySink = struct {
     expected: []const DpiExpectedElement,
     dpi_index: usize,
+    client_bounds: ?c.RECT = null,
     canvas: ?c.RECT = null,
     checked: bool = false,
     failure: ?anyerror = null,
@@ -18066,15 +18204,21 @@ const DpiAccessibilitySink = struct {
     fn checkElements(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
         for (self.expected) |expected| {
             var found = false;
+            var matches: usize = 0;
             const required = expected.present orelse (expected.bounds != null);
             for (elements) |element| {
                 if (!std.mem.eql(u8, expected.identity, element.identity)) continue;
                 found = true;
+                matches += 1;
                 if (!required) {
                     std.debug.print("Unexpected UIA element: {s}\n", .{expected.identity});
                     return error.UnexpectedAccessibilityElement;
                 }
                 const actual = [4]i32{ element.left, element.top, element.right, element.bottom };
+                if (self.client_bounds) |client| {
+                    try std.testing.expect(element.left >= client.left and element.top >= client.top);
+                    try std.testing.expect(element.right <= client.right and element.bottom <= client.bottom);
+                }
                 if (expected.bounds) |bounds| {
                     std.testing.expectEqualDeep(bounds[self.dpi_index], actual) catch |err| {
                         std.debug.print("UIA bounds mismatch: {s}, DPI index {d}\n", .{ expected.identity, self.dpi_index });
@@ -18087,6 +18231,7 @@ const DpiAccessibilitySink = struct {
             }
             if (!found and required) std.debug.print("Missing UIA element: {s}\n", .{expected.identity});
             try std.testing.expectEqual(required, found);
+            try std.testing.expectEqual(if (required) @as(usize, 1) else 0, matches);
         }
     }
 };
@@ -19633,11 +19778,11 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
     try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, GraphCanvas.overviewWorktreeNotice(app.model.graphFor("C:\\notice-b").?).?.state);
 }
 
-fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool) !void {
-    try expectDpiAccessibilityWithMetrics(surface, canvas, expected, quick_chat, 2);
+fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement) !void {
+    try expectDpiAccessibilityWithMetrics(surface, canvas, expected, 2);
 }
 
-fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool, metric_samples: u8) !void {
+fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, metric_samples: u8) !void {
     const allocator = std.testing.allocator;
     var app: App = .{
         .allocator = allocator,
@@ -19651,7 +19796,6 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
         .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
         .surface = surface,
-        .workspace_is_quick_chat = quick_chat,
         .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
     };
     defer app.client.deinit();
@@ -19722,7 +19866,7 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
 }
 
 test "DPI UIA fixed graph uses physical client bounds" {
-    try expectDpiAccessibility(.project, .{ .{ 220, 34, 1200, 650 }, .{ 330, 51, 1800, 975 }, .{ 440, 68, 2400, 1300 } }, &.{}, false);
+    try expectDpiAccessibility(.project, .{ .{ 220, 34, 1200, 650 }, .{ 330, 51, 1800, 975 }, .{ 440, 68, 2400, 1300 } }, &.{});
 }
 
 test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
@@ -19745,22 +19889,22 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
     };
     for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
         const footer = if (surface == .workspace) footer_full_height else footer_above_panel;
-        try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{footer}), false);
+        try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{footer}));
         if (surface != .workspace) try expectDpiAccessibility(surface, null, &.{
             .{ .identity = "header-toggle-panel:control" },
             .{ .identity = "workspace-toolbar:A" },
-        }, false);
+        });
     }
     try expectDpiAccessibility(.project, null, &.{
         .{ .identity = "project-card:A:loop", .bounds = .{ .{ 252, 84, 502, 180 }, .{ 378, 126, 753, 270 }, .{ 504, 168, 1004, 360 } } },
         .{ .identity = "canvas-alert:ingress", .bounds = .{ .{ 244, 556, 1176, 612 }, .{ 366, 834, 1764, 918 }, .{ 488, 1112, 2352, 1224 } } },
-    }, false);
+    });
     try expectDpiAccessibility(.overview, null, &.{
         .{ .identity = "overview-card:A:loop", .bounds = .{ .{ 262, 118, 512, 214 }, .{ 393, 177, 768, 321 }, .{ 524, 236, 1024, 428 } } },
-    }, false);
+    });
     try expectDpiAccessibility(.quick_chats, null, &.{
         .{ .identity = "quick-chat-card:chat", .bounds = .{ .{ 262, 88, 482, 152 }, .{ 393, 132, 723, 228 }, .{ 524, 176, 964, 304 } } },
-    }, false);
+    });
     try expectDpiAccessibility(.workspace, null, &.{
         .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 768, 5, 904, 29 }, .{ 1152, 8, 1356, 44 }, .{ 1536, 10, 1808, 58 } } },
         .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 8, 1, 280, 33 }, .{ 12, 2, 420, 50 }, .{ 16, 2, 560, 66 } } },
@@ -19772,12 +19916,7 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
         .{ .identity = "workspace-detail-usage:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
         .{ .identity = "quick-chat-workspace:chat" },
-    }, false);
-    try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "quick-chat-workspace:chat", .bounds = .{ .{ 220, 650, 1200, 900 }, .{ 330, 975, 1800, 1350 }, .{ 440, 1300, 2400, 1800 } } },
-        .{ .identity = "header-toggle-panel:control" },
-        .{ .identity = "workspace-toolbar:A" },
-    }, true);
+    });
 }
 
 test "loop detail UIA rectangles equal painted bounds and omit empty sparklines" {
@@ -19791,20 +19930,21 @@ test "loop detail UIA rectangles equal painted bounds and omit empty sparklines"
         usage.bounds.?[index] = start.bounds.?[index];
         sparkline.bounds.?[index] = .{ metric.left, metric.top, metric.right, metric.bottom };
     }
-    try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, sparkline }, false, 2);
+    try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, sparkline }, 2);
     for ([_]u8{ 0, 1 }) |count| {
-        try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, .{ .identity = sparkline.identity } }, false, count);
+        try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, .{ .identity = sparkline.identity } }, count);
     }
 }
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "workspace-tab:1", .bounds = .{ .{ 340, 84, 452, 106 }, .{ 450, 124, 562, 146 }, .{ 560, 164, 672, 186 } } },
+        .{ .identity = "workspace-tab:0", .name = "Agent tab", .bounds = .{ .{ 220, 84, 332, 106 }, .{ 330, 124, 442, 146 }, .{ 440, 164, 552, 186 } } },
+        .{ .identity = "workspace-tab:1", .name = "Shell tab", .bounds = .{ .{ 340, 84, 452, 106 }, .{ 450, 124, 562, 146 }, .{ 560, 164, 672, 186 } } },
         .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 428, 84, 452, 106 }, .{ 538, 124, 562, 146 }, .{ 648, 164, 672, 186 } } },
         .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
         .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
         .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
-    }, false);
+    });
 }
 
 const OverviewAccessibilitySink = struct {
@@ -22241,9 +22381,218 @@ test "header presentation follows destinations and keeps sidebar independent" {
             }
         }
     }
-    app.workspace_is_quick_chat = true;
-    try std.testing.expect(!app.headerPresentation().contains(.toggle_panel));
+}
+
+test "Quick Chat parity bound identity ignores previous loop and chat list order" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\quick-chat-parity","name":"Previous project"},"nodes":[{"id":"loop-a","title":"Previous loop","state":{"idle":{}}}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    for ([_][]const u8{ "chat-a", "chat-b" }, 0..) |id, index| {
+        try app.model.quick_chats.append(.{
+            .id = try allocator.dupe(u8, id),
+            .title = try allocator.dupe(u8, if (index == 0) "Chat A" else "Chat B"),
+            .backend = try allocator.dupe(u8, "copilot"),
+        });
+    }
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("chat-b", TerminalWorkspace.quick_chat_scope_project, false);
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    app.selected_quick_chat = 1;
+    try std.testing.expectEqualStrings("chat-b", app.workspaceQuickChatID().?);
+    try std.testing.expectEqualStrings("Chat B", app.headerPresentation().title);
     try std.testing.expectEqualStrings("Quick Chat workspace", app.headerPresentation().context);
+    try std.testing.expect(!app.headerPresentation().contains(.toggle_panel));
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+
+    std.mem.swap(GraphModel.QuickChat, &app.model.quick_chats.items[0], &app.model.quick_chats.items[1]);
+    allocator.free(app.model.quick_chats.items[0].title);
+    app.model.quick_chats.items[0].title = try allocator.dupe(u8, "Renamed chat B");
+    try std.testing.expectEqualStrings("Renamed chat B", app.headerPresentation().title);
+    try std.testing.expectEqualStrings("loop-a", app.model.selected().?.id);
+    const expected = [_]DpiExpectedElement{
+        .{ .identity = "workspace-quick-chat-bar:chat-b", .present = true, .name = "Renamed chat B" },
+        .{ .identity = "workspace-restart-session:chat-b", .present = true, .name = "Restart session", .invokable = true },
+        .{ .identity = "workspace-show-graph:show-graph", .present = true, .name = "Show in Graph", .invokable = true },
+        .{ .identity = "workspace-loop-bar:loop-a", .present = false },
+        .{ .identity = "workspace-stop:loop-a", .present = false },
+        .{ .identity = "workspace-toggle-panel:control", .present = false },
+        .{ .identity = "header-toggle-panel:control", .present = false },
+    };
+    var sink = DpiAccessibilitySink{
+        .expected = &expected,
+        .dpi_index = 0,
+        .client_bounds = .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 },
+    };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
+}
+
+test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actions" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat-b"),
+        .title = try allocator.dupe(u8, "Chat B"),
+        .backend = try allocator.dupe(u8, "copilot"),
+        .created_at = 1_791_219_880,
+    });
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("chat-b", TerminalWorkspace.quick_chat_scope_project, false);
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    try workspace.layout.addTab("chat-shell", false);
+    try workspace.layout.addTab("chat-agent", true);
+    try workspace.layout.addTab("chat-split-agent", true);
+    try workspace.layout.splitFocused(.horizontal, "chat-split-shell");
+
+    const expected = [_]DpiExpectedElement{
+        .{
+            .identity = "quick-chat-workspace:chat-b",
+            .present = true,
+            .name = "Quick Chat terminal workspace",
+            .bounds = .{ .{ 220, 80, 1200, 900 }, .{ 330, 120, 1800, 1350 }, .{ 440, 160, 2400, 1800 } },
+        },
+        .{
+            .identity = "workspace-quick-chat-bar:chat-b",
+            .present = true,
+            .name = "Chat B",
+            .bounds = .{ .{ 220, 34, 1200, 80 }, .{ 330, 51, 1800, 120 }, .{ 440, 68, 2400, 160 } },
+        },
+        .{
+            .identity = "workspace-tab:0",
+            .present = true,
+            .name = "Shell tab",
+            .bounds = .{ .{ 0, 4, 112, 26 }, .{ 0, 4, 112, 26 }, .{ 0, 4, 112, 26 } },
+        },
+        .{
+            .identity = "workspace-tab:1",
+            .present = true,
+            .name = "Agent tab",
+            .bounds = .{ .{ 120, 4, 232, 26 }, .{ 120, 4, 232, 26 }, .{ 120, 4, 232, 26 } },
+        },
+        .{
+            .identity = "workspace-tab:2",
+            .present = true,
+            .name = "Split tab",
+            .bounds = .{ .{ 240, 4, 352, 26 }, .{ 240, 4, 352, 26 }, .{ 240, 4, 352, 26 } },
+        },
+        .{
+            .identity = "workspace-restart-session:chat-b",
+            .present = true,
+            .name = "Restart session",
+            .bounds = .{ .{ 976, 44, 1088, 70 }, .{ 1464, 66, 1632, 105 }, .{ 1952, 88, 2176, 140 } },
+            .invokable = true,
+        },
+        .{
+            .identity = "workspace-show-graph:show-graph",
+            .present = true,
+            .name = "Show in Graph",
+            .bounds = .{ .{ 1096, 44, 1188, 70 }, .{ 1644, 66, 1782, 105 }, .{ 2192, 88, 2376, 140 } },
+            .invokable = true,
+        },
+        .{ .identity = "workspace-loop-bar:loop-a", .present = false },
+        .{ .identity = "workspace-stop:loop-a", .present = false },
+        .{ .identity = "workspace-toggle-panel:control", .present = false },
+        .{ .identity = "workspace-detail-sparkline:loop-a", .present = false },
+        .{ .identity = "workspace-detail-start:loop-a", .present = false },
+        .{ .identity = "workspace-detail-usage:loop-a", .present = false },
+        .{ .identity = "workspace-toolbar:C:\\quick-chat-parity", .present = false },
+        .{ .identity = "header-toggle-panel:control", .present = false },
+    };
+    for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
+        app.dpi = dpi;
+        var sink = DpiAccessibilitySink{
+            .expected = &expected,
+            .dpi_index = index,
+            .client_bounds = .{
+                .left = 0,
+                .top = 0,
+                .right = physicalCoordinate(1200, dpi),
+                .bottom = physicalCoordinate(900, dpi),
+            },
+        };
+        app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+        try std.testing.expect(sink.checked);
+        if (sink.failure) |err| return err;
+    }
+    const restart_payload = Accessibility.worktreeIdentityPayload("workspace-restart-session:chat-b");
+    try std.testing.expect(app.applyUiaDynamicInvoke(restart_payload));
+    try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-show-graph:show-graph")));
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+    app.toggleWorkspacePanelState();
+    app.toggleWorkspaceDetailPanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"graph","project":{"path":"C:\\quick-chat-project","name":"Project"},"nodes":[{"id":"loop","title":"Loop","state":"running"}],"edges":[]}}}
+    );
+    app.surface = .workspace;
+    app.showInGraph(App.finishShowGraphNative, App.publishAccessibility);
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    app.toggleWorkspacePanelState();
+    app.toggleWorkspaceDetailPanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+}
+
+test "Quick Chat workspace routes away when its bound chat is deleted" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat-b"),
+        .title = try allocator.dupe(u8, "Chat B"),
+        .backend = try allocator.dupe(u8, "copilot"),
+    });
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("chat-b", TerminalWorkspace.quick_chat_scope_project, false);
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    try std.testing.expectEqualStrings("chat-b", workspace.boundQuickChatID().?);
+
+    const deleted_frame =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatDeleted":"chat-b"}}
+    ;
+    app.onFrameWithAccessibilityPublish(deleted_frame, App.publishAccessibility);
+
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(app.workspaceQuickChatID() == null);
 }
 
 test "header UIA identities hash to distinct payloads" {

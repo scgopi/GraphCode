@@ -165,6 +165,31 @@ const max_surfaces: usize = 32;
 pub const ChromeAction = enum { new_tab, split_right, split_down };
 pub const TabAction = enum { select, close };
 pub const LoopBarAction = LoopBarLayout.Action;
+pub const QuickChatBarAction = LoopBarLayout.QuickChatAction;
+
+pub const QuickChatBarPresentation = struct {
+    title: []const u8,
+    state: []const u8 = "IDLE",
+    subtitle: []const u8 = "Not piloted",
+    age: ?[]const u8,
+    accent: u32 = 0x00E98590,
+};
+
+pub fn quickChatBarPresentation(
+    title: []const u8,
+    created_at: ?u64,
+    now_seconds: u64,
+    age_buffer: []u8,
+) QuickChatBarPresentation {
+    return .{
+        .title = title,
+        .age = quickChatAgeLabel(created_at, now_seconds, age_buffer),
+    };
+}
+
+pub fn quickChatBarLayout(left: i32, right: i32) LoopBarLayout.QuickChatLayout {
+    return LoopBarLayout.computeQuickChat(left, Tokens.header_height, right);
+}
 
 pub fn loopBarLayout(left: i32, right: i32, resolved: bool, panel_toggle: bool) LoopBarLayout.Layout {
     return LoopBarLayout.compute(left, Tokens.header_height, right, resolved, panel_toggle);
@@ -564,14 +589,12 @@ pub const Workspace = struct {
             .input_queue = .{ .allocator = allocator_ },
             .layout = try WorkspaceLayout.Layout.init(
                 allocator_,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
             .layout_path = &.{},
             .project_key = try allocator_.dupe(
                 u8,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
         };
         for (&workspace.surfaces) |*surface| {
@@ -811,7 +834,7 @@ pub const Workspace = struct {
             defer self.allocator.free(configured);
             const suffix = WorkspaceLayout.projectSuffix(project);
             return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
-                configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
+                configured[0..if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
                 suffix,
             });
         } else |_| {}
@@ -863,6 +886,11 @@ pub const Workspace = struct {
         self.loop_id = new_loop;
         self.persistLayout() catch {};
         self.restorePersistedSurfaces(loop, 1);
+    }
+
+    pub fn boundQuickChatID(self: *const Workspace) ?[]const u8 {
+        if (!std.mem.eql(u8, self.layout.project_key, quick_chat_scope_project) or self.loop_id.len == 0) return null;
+        return self.loop_id;
     }
 
     /// The saved layout of a loop, else one adopted from the legacy project-wide file, else
@@ -2076,7 +2104,7 @@ pub const Workspace = struct {
             // unintentional blue that did not correspond to any Theme.swift value.
             fillRect(hdc, bounds, if (index == self.layout.selected_tab) Tokens.tab_selected_background else 0x00262626);
             fillRect(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 9, .right = bounds.left + 14, .bottom = bounds.top + 15 }, tabIndicatorColor(self, tab));
-            drawUtf8(hdc, tabLabel(tab, index), bounds.left + 19, bounds.top + 4, 10, 0x00E6E6E6);
+            drawUtf8(hdc, tabLabel(tab), bounds.left + 19, bounds.top + 4, 10, 0x00E6E6E6);
             var shortcut: [16]u8 = undefined;
             const shortcut_text = std.fmt.bufPrint(&shortcut, "Ctrl+{d}", .{index + 1}) catch "";
             drawUtf8(hdc, shortcut_text, bounds.left + 19, bounds.top + 14, 8, 0x008A8A8A);
@@ -2171,6 +2199,51 @@ pub const Workspace = struct {
         _ = allocator;
     }
 
+    pub fn paintQuickChatBar(
+        hdc: c.HDC,
+        left: i32,
+        right: i32,
+        presentation: QuickChatBarPresentation,
+    ) void {
+        const top = Tokens.header_height;
+        const layout = quickChatBarLayout(left, right);
+        GdiGradient.fillVertical(
+            hdc,
+            .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height },
+            Tokens.loop_bar_top,
+            Tokens.loop_bar_bottom,
+        );
+        if (layout.stripe) |stripe| {
+            fillRect(hdc, .{ .left = stripe.left, .top = stripe.top, .right = stripe.right, .bottom = stripe.bottom }, presentation.accent);
+        }
+        if (layout.title) |bounds| drawUtf8Bounded(hdc, presentation.title, bounds, 13, 0x00F2F2F7);
+        if (layout.state) |bounds| {
+            fillRect(hdc, .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom }, 0x00303035);
+            drawUtf8Bounded(hdc, presentation.state, bounds, 10, 0x00D8D8DC);
+        }
+        if (layout.subtitle) |bounds| drawUtf8Bounded(hdc, presentation.subtitle, bounds, 10, 0x008E8E93);
+        if (presentation.age) |age| {
+            if (layout.age) |bounds| drawUtf8Bounded(hdc, age, bounds, 10, 0x008E8E93);
+        }
+        fillRect(
+            hdc,
+            .{
+                .left = layout.restart_session.left,
+                .top = layout.restart_session.top,
+                .right = layout.restart_session.right,
+                .bottom = layout.restart_session.bottom,
+            },
+            0x00303035,
+        );
+        drawUtf8Bounded(hdc, "Restart session", layout.restart_session, 10, 0x00D8D8DC);
+        drawUtf8Bounded(hdc, "Show in graph", layout.show_graph, 10, 0x008E8E93);
+        fillRect(
+            hdc,
+            .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height },
+            Tokens.tab_bar_shadow_line,
+        );
+    }
+
     pub fn paintWorkspaceToolbar(
         hdc: c.HDC,
         allocator: std.mem.Allocator,
@@ -2249,7 +2322,6 @@ pub const Workspace = struct {
             if (slot.surface) |surface| {
                 _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
-
         }
         self.persistFocusedSurface(index);
     }
@@ -5187,7 +5259,7 @@ test "every function key F1 to F12 reaches a focused terminal exactly once throu
         .target_enabled = true,
     };
     const expected = [_][]const u8{
-        "\x1bOP",  "\x1bOQ",  "\x1bOR",  "\x1bOS",
+        "\x1bOP",   "\x1bOQ",   "\x1bOR",   "\x1bOS",
         "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
         "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
     };
@@ -7138,9 +7210,9 @@ fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, siz
     _ = c.SelectObject(hdc, old_font);
 }
 
-fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {
+fn tabLabel(tab: WorkspaceLayout.Tab) []const u8 {
     if (tab.panes.items.len > 1) return "split";
-    if (index == 0) return "agent";
+    if (tab.panes.items.len != 0 and tab.panes.items[0].launches_agent) return "agent";
     return "shell";
 }
 
@@ -7164,6 +7236,23 @@ fn elapsedLabel(created_at: u64) []const u8 {
     if (seconds < 60) return "elapsed <1m";
     if (seconds < 3600) return "elapsed <1h";
     return "elapsed >1h";
+}
+
+fn quickChatAgeLabel(created_at: ?u64, now_seconds: u64, age_buffer: []u8) ?[]const u8 {
+    const created = created_at orelse return null;
+    const elapsed = now_seconds -| created;
+    if (elapsed < 60) return std.fmt.bufPrint(age_buffer, "{d}s", .{elapsed}) catch unreachable;
+    if (elapsed < 3600) return std.fmt.bufPrint(age_buffer, "{d}m", .{elapsed / 60}) catch unreachable;
+    if (elapsed < 86_400) {
+        return std.fmt.bufPrint(age_buffer, "{d}h {d}m", .{
+            elapsed / 3600,
+            (elapsed % 3600) / 60,
+        }) catch unreachable;
+    }
+    return std.fmt.bufPrint(age_buffer, "{d}d {d}h", .{
+        elapsed / 86_400,
+        (elapsed % 86_400) / 3600,
+    }) catch unreachable;
 }
 
 fn loopTypeAccent(loop_type: []const u8) u32 {
@@ -7587,6 +7676,65 @@ test "loop bar actions expose stop only for active loops" {
     // With the panel collapsed its expand control owns the trailing slot.
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 50, false, true) == null);
     try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1050, 50, false, true).?);
+}
+
+test "Quick Chat parity presentation has chat-only identity and age" {
+    var age_buffer: [32]u8 = undefined;
+    const now: u64 = 1_800_000_000;
+    const presentation = quickChatBarPresentation("Chat — Oct 14", now - 59, now, &age_buffer);
+    try std.testing.expectEqualStrings("Chat — Oct 14", presentation.title);
+    try std.testing.expectEqualStrings("IDLE", presentation.state);
+    try std.testing.expectEqualStrings("Not piloted", presentation.subtitle);
+    try std.testing.expectEqual(@as(u32, 0x00E98590), presentation.accent);
+    try std.testing.expectEqualStrings("59s", presentation.age.?);
+
+    for ([_]struct { age: u64, expected: []const u8 }{
+        .{ .age = 0, .expected = "0s" },
+        .{ .age = 59, .expected = "59s" },
+        .{ .age = 60, .expected = "1m" },
+        .{ .age = 3660, .expected = "1h 1m" },
+        .{ .age = 90000, .expected = "1d 1h" },
+        .{ .age = 1, .expected = "0s" },
+    }) |case| {
+        const formatted = quickChatBarPresentation(
+            "Renamed chat",
+            if (case.age == 1) now + 1 else now - case.age,
+            now,
+            &age_buffer,
+        );
+        try std.testing.expectEqualStrings(case.expected, formatted.age.?);
+    }
+    const unknown = quickChatBarPresentation("Chat", null, now, &age_buffer);
+    try std.testing.expect(unknown.age == null);
+}
+
+test "Quick Chat tab labels preserve saved pane role metadata" {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.initForLoop(
+            allocator,
+            quick_chat_scope_project,
+            "chat-1",
+        ),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .loop_id = try allocator.dupe(u8, "chat-1"),
+    };
+    defer workspace.layout.deinit();
+    defer allocator.free(workspace.loop_id);
+    try workspace.layout.addTab("chat-shell", false);
+    try workspace.layout.addTab("chat-agent", true);
+    try workspace.layout.addTab("chat-split-agent", true);
+    try workspace.layout.splitFocused(.horizontal, "chat-split-shell");
+
+    try std.testing.expectEqualStrings("shell", tabLabel(workspace.layout.tabs.items[0]));
+    try std.testing.expectEqualStrings("agent", tabLabel(workspace.layout.tabs.items[1]));
+    try std.testing.expectEqualStrings("split", tabLabel(workspace.layout.tabs.items[2]));
 }
 
 const AttachOutputProbe = struct {

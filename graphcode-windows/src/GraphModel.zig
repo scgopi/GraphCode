@@ -46,6 +46,7 @@ pub const QuickChat = struct {
     id: []u8,
     title: []u8,
     backend: []u8,
+    created_at: ?u64 = null,
     activity: []u8 = &.{},
     activity_sequence: u64 = 0,
 };
@@ -951,10 +952,15 @@ pub const Model = struct {
     fn upsertQuickChat(self: *Model, object: []const u8) !void {
         const id = duplicateJsonString(self.allocator, object, "id") catch return;
         errdefer self.allocator.free(id);
+        var fields = try JsonFields.init(self.allocator, object);
+        defer fields.deinit();
         for (self.quick_chats.items) |*existing| {
             if (std.mem.eql(u8, existing.id, id)) {
                 self.allocator.free(existing.title);
                 existing.title = try duplicateJsonString(self.allocator, object, "title");
+                if (fields.has("createdAt")) {
+                    existing.created_at = unixSecondsFromReferenceDate(fields.get("createdAt"));
+                }
                 self.allocator.free(id);
                 return;
             }
@@ -963,6 +969,7 @@ pub const Model = struct {
             .id = id,
             .title = try duplicateJsonString(self.allocator, object, "title"),
             .backend = try duplicateJsonStringOr(self.allocator, object, "backend", "claudeCode"),
+            .created_at = unixSecondsFromReferenceDate(fields.get("createdAt")),
         };
         if (std.mem.indexOf(u8, object, "\"activity\"")) |activity_key| {
             if (indexOfByte(object, activity_key, '{')) |activity_open| {
@@ -2893,6 +2900,44 @@ test "quick chat fixture preserves stable identity and activity ordering" {
     try std.testing.expectEqual(@as(usize, 2), model.quick_chats.items.len);
     try std.testing.expectEqualStrings("Scratch", model.quick_chats.items[0].title);
     try std.testing.expectEqual(@as(u64, 2), model.quick_chats.items[0].activity_sequence);
+}
+
+test "Quick Chat parity creation date survives list changed rename and reorder" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatsListed":[{"id":"chat-a","title":"A","backend":"claudeCode"},{"id":"chat-b","title":"Chat — Oct 14","backend":"copilot","createdAt":812912680.0330639}]}}
+    );
+    try std.testing.expectEqual(@as(usize, 2), model.quick_chats.items.len);
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), model.quick_chats.items[1].created_at);
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatChanged":{"id":"chat-b","title":"Renamed chat","backend":"copilot"}}}
+    );
+    try std.testing.expectEqualStrings("Renamed chat", model.quick_chats.items[1].title);
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), model.quick_chats.items[1].created_at);
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"quickChatsListed":[{"id":"chat-b","title":"Renamed chat","backend":"copilot","createdAt":812912680.0330639},{"id":"chat-a","title":"A","backend":"claudeCode"}]}}
+    );
+    try std.testing.expectEqualStrings("chat-b", model.quick_chats.items[0].id);
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), model.quick_chats.items[0].created_at);
+}
+
+test "Quick Chat parity creation date rejects nested and invalid values" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatsListed":[{"id":"valid","title":"Valid","createdAt":812912680.0330639},{"id":"nested","title":"Nested","activity":{"createdAt":812912680.0330639}},{"id":"missing","title":"Missing"},{"id":"null","title":"Null","createdAt":null},{"id":"zero","title":"Zero","createdAt":0},{"id":"negative","title":"Negative","createdAt":-978307200},{"id":"overflow","title":"Overflow","createdAt":1e300},{"id":"string","title":"String","createdAt":"812912680"}]}}
+    );
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), model.quick_chats.items[0].created_at);
+    for (model.quick_chats.items[1..]) |chat| {
+        try std.testing.expectEqual(@as(?u64, null), chat.created_at);
+    }
 }
 
 test "project identity derives remote and global from Codable paths" {

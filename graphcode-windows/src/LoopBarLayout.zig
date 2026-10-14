@@ -25,6 +25,25 @@ pub const Rect = struct {
 };
 
 pub const Action = enum { stop, show_graph };
+pub const QuickChatAction = enum { restart_session, show_graph };
+
+pub const QuickChatLayout = struct {
+    bar: Rect,
+    stripe: ?Rect,
+    title: ?Rect,
+    state: ?Rect,
+    subtitle: ?Rect,
+    age: ?Rect,
+    restart_session: Rect,
+    show_graph: Rect,
+
+    pub fn actionAt(self: QuickChatLayout, x: i32, y: i32) ?QuickChatAction {
+        if (!self.bar.contains(x, y)) return null;
+        if (self.restart_session.contains(x, y)) return .restart_session;
+        if (self.show_graph.contains(x, y)) return .show_graph;
+        return null;
+    }
+};
 
 // Every text run in the bar is drawn into a fixed 220px-wide rect when it has room.
 pub const natural_text_width: i32 = 220;
@@ -89,6 +108,44 @@ pub fn compute(left: i32, top: i32, right: i32, resolved: bool, panel_toggle: bo
         .stop = stop,
         .show_graph = show_graph,
         .panel_toggle = toggle,
+    };
+}
+
+pub fn computeQuickChat(left: i32, top: i32, right: i32) QuickChatLayout {
+    const show_graph = Rect{
+        .left = right - trailing_inset - show_graph_width,
+        .top = top + 10,
+        .right = right - trailing_inset,
+        .bottom = top + 36,
+    };
+    const restart_session = Rect{
+        .left = show_graph.left - button_gap - 112,
+        .top = top + 10,
+        .right = show_graph.left - button_gap,
+        .bottom = top + 36,
+    };
+    const text_limit = restart_session.left - button_gap;
+    const state_rect = Rect{
+        .left = left + 255,
+        .top = top + 7,
+        .right = left + 303,
+        .bottom = top + 27,
+    };
+    const show_state = state_rect.right <= text_limit;
+    return .{
+        .bar = .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height },
+        .stripe = if (left + 18 <= text_limit) .{
+            .left = left + 14,
+            .top = top + 11,
+            .right = left + 18,
+            .bottom = top + 35,
+        } else null,
+        .title = textRect(left + 27, top + 5, 13, if (show_state) state_rect.left - button_gap else text_limit),
+        .state = if (show_state) state_rect else null,
+        .subtitle = textRect(left + 27, top + 24, 10, @min(left + 155, text_limit)),
+        .age = textRect(left + 163, top + 24, 10, text_limit),
+        .restart_session = restart_session,
+        .show_graph = show_graph,
     };
 }
 
@@ -203,4 +260,51 @@ test "loop bar actions hit exactly the button rects" {
     try std.testing.expect(layout.actionAt(1120, 90) == null);
     try std.testing.expect(layout.actionAt(layout.stop.?.right, 50) == null);
     try std.testing.expect(compute(220, 34, 1200, true, false).actionAt(1010, 50) == null);
+}
+
+test "Quick Chat parity bar geometry has restart and no panel slot" {
+    const top = Tokens.header_height;
+    for ([_]i32{ 1440, 1200, 960, 480 }) |client_right| {
+        for ([_]bool{ false, true }) |sidebar_visible| {
+            const left = if (sidebar_visible) Tokens.sidebar_width else 0;
+            const layout = computeQuickChat(left, top, client_right);
+            try std.testing.expectEqual(left, layout.bar.left);
+            try std.testing.expectEqual(client_right, layout.bar.right);
+            try std.testing.expect(layout.restart_session.width() >= 112);
+            try std.testing.expect(layout.restart_session.left >= left);
+            try std.testing.expect(layout.restart_session.right <= client_right);
+            try std.testing.expect(layout.show_graph.width() > 0);
+            try std.testing.expect(layout.show_graph.left >= left);
+            try std.testing.expect(layout.show_graph.right <= client_right);
+            try std.testing.expect(!layout.restart_session.intersects(layout.show_graph));
+            if (layout.title) |title| {
+                try std.testing.expect(title.left >= left);
+                try std.testing.expect(title.right <= layout.bar.right);
+                if (layout.state) |state| try std.testing.expect(!title.intersects(state));
+                try std.testing.expect(!title.intersects(layout.restart_session));
+                try std.testing.expect(!title.intersects(layout.show_graph));
+            }
+            if (layout.state) |state| {
+                try std.testing.expect(!state.intersects(layout.restart_session));
+                try std.testing.expect(!state.intersects(layout.show_graph));
+            }
+            if (layout.subtitle) |subtitle| {
+                try std.testing.expect(!subtitle.intersects(layout.restart_session));
+                try std.testing.expect(!subtitle.intersects(layout.show_graph));
+                if (layout.age) |age| try std.testing.expect(!subtitle.intersects(age));
+            }
+            try std.testing.expectEqual(
+                QuickChatAction.restart_session,
+                layout.actionAt(layout.restart_session.left + 1, top + 20).?,
+            );
+            try std.testing.expectEqual(
+                QuickChatAction.show_graph,
+                layout.actionAt(layout.show_graph.left + 1, top + 20).?,
+            );
+            try std.testing.expect(layout.actionAt(left -| 1, top + 20) == null);
+            try std.testing.expect(layout.actionAt(client_right, top + 20) == null);
+            try std.testing.expect(layout.actionAt(layout.restart_session.left - 1, top + 20) == null);
+            try std.testing.expect(layout.actionAt(layout.show_graph.left - 1, top + 20) == null);
+        }
+    }
 }

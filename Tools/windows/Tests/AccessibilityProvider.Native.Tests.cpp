@@ -369,6 +369,65 @@ static void nativeBannerInvokeChecks(IRawElementProviderSimple *provider, HWND h
   if (projects) projects->Release();
 }
 
+static void nativeQuickChatRestartChecks(IRawElementProviderSimple *provider, HWND hwnd,
+                                          IRawElementProviderFragment *root) {
+  check(!IsWindowVisible(hwnd), "Quick Chat restart is tested against a hidden provider window");
+  const char *identities[] = {"workspace-restart-session:chat-b"};
+  const char *names[] = {"Restart session"};
+  const int parents[] = {4};
+  const int none[] = {0};
+  const int actions[] = {1};
+  const int bounds[] = {732, 44, 864, 70};
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  check(update(provider, "Quick Chat", identities, names, parents, none, none, actions, bounds,
+               1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "Quick Chat restart publication succeeds");
+
+  auto *projects = child(root, NavigateDirection_FirstChild);
+  auto *loops = child(projects, NavigateDirection_NextSibling);
+  auto *worktrees = child(loops, NavigateDirection_NextSibling);
+  auto *graph = child(worktrees, NavigateDirection_NextSibling);
+  auto *restart = child(graph, NavigateDirection_FirstChild);
+  const std::wstring automation_id = stringProperty(restart, UIA_AutomationIdPropertyId);
+  check(automation_id.rfind(L"workspace-restart-session-", 0) == 0,
+        "Quick Chat restart uses its distinct AutomationId prefix");
+  checkName(restart, L"Restart session");
+  POINT origin{0, 0};
+  ClientToScreen(hwnd, &origin);
+  checkRect(restart, origin, 732, 44, 132, 26,
+            "Quick Chat restart bounds match the published rectangle");
+  auto *invoke = static_cast<IInvokeProvider *>(pattern(restart, UIA_InvokePatternId));
+  check(invoke != nullptr, "Quick Chat restart exposes IInvokeProvider");
+  posted_commands.clear();
+  if (invoke) {
+    check(invoke->Invoke() == S_OK, "Quick Chat restart Invoke succeeds");
+    check(posted_commands.empty(), "Quick Chat restart posts outside the UIA call");
+    drainMessages(hwnd);
+    const uint64_t expected = 0x8000000000000000ULL |
+        identityPayload("workspace-restart-session:chat-b");
+    check(posted_commands.size() == 1 && posted_commands[0] == expected,
+          "Quick Chat restart posts its exact hashed identity once");
+  }
+
+  const char *replacement_identities[] = {"workspace-restart-session:chat-c"};
+  const char *replacement_names[] = {"Replacement restart"};
+  check(update(provider, "Replacement", replacement_identities, replacement_names, parents,
+               none, none, actions, bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "replacement Quick Chat restart publication succeeds");
+  posted_commands.clear();
+  if (invoke) {
+    check(invoke->Invoke() != S_OK, "a retained restart fragment is disabled after replacement");
+    drainMessages(hwnd);
+    check(posted_commands.empty(), "a stale restart fragment cannot invoke the replacement row");
+    invoke->Release();
+  }
+  if (restart) restart->Release();
+  if (graph) graph->Release();
+  if (worktrees) worktrees->Release();
+  if (loops) loops->Release();
+  if (projects) projects->Release();
+}
+
 // The sidebar lists scroll as one viewport, and every row that scrolls with it can be brought
 // into view through UIA, so keyboard and assistive clients can reach rows that are offscreen.
 static void nativeScrollChecks(IRawElementProviderSimple *provider, HWND hwnd,
@@ -512,6 +571,7 @@ static void nativeCommandAndScrollChecks() {
     check(provider->QueryInterface(IID_PPV_ARGS(&root)) == S_OK, "capture root fragment exists");
     if (root) {
       nativeBannerInvokeChecks(provider, capture, root);
+      nativeQuickChatRestartChecks(provider, capture, root);
       nativeScrollChecks(provider, capture, root);
       root->Release();
     }
