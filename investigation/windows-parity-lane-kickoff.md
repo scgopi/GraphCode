@@ -185,10 +185,18 @@ Report each step's result, or NotExecuted with the reason.
    - end the shell with File > Exit, stop by PID every process you own, including `zmx.exe`
      daemons, and verify that none remain;
    - send `LEASE RELEASED`.
-7. **Image review.**
-   - Upload privacy-safe fixture images with the github-pr-media skill.
-   - Add a table: macOS capture, Windows before, Windows after, and the boxes each row shows.
-   - The reviewer opens every image and confirms or rejects each box.
+7. **Visual review: a local agent review, not CI.** Screenshot verification is a judgement made by an agent. It
+   isn't a CI pipeline and it isn't a pixel baseline (operator decision, 2026-10-14).
+   - Start a vision-capable reviewer from a different vendor than you. Give it the screenshots, the PR description,
+     the diff and the paired macOS captures.
+   - It opens every image and decides whether each one shows what the PR claims was built and matches the macOS
+     reference. It confirms or rejects each acceptance box, citing what it saw.
+   - **Neighbouring screens:** when your change touches shared paint or layout code (`GraphCanvas.zig`,
+     `DesignTokens.zig`, `AppFont.zig`, `Sidebar.zig`, or the paint and layout paths in `App.zig`), the same desktop
+     slot also captures the sidebar, the Graph overview, a project canvas and a loop workspace. The reviewer checks
+     them for unintended changes against the last accepted captures on the issue.
+   - Upload privacy-safe fixture images with the github-pr-media skill, and add a table to the PR: macOS capture,
+     Windows before, Windows after, and the boxes each row shows.
 8. **Hand over.**
    - Fill in `.github/PULL_REQUEST_TEMPLATE.md`, add a **Not verified** list, and use `Refs #<n>`,
      never `Fixes`.
