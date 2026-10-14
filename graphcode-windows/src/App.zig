@@ -3003,8 +3003,40 @@ pub const App = struct {
         }
     }
 
+    fn quickChatMonthName(month: u8) []const u8 {
+        return switch (month) {
+            1 => "Jan",
+            2 => "Feb",
+            3 => "Mar",
+            4 => "Apr",
+            5 => "May",
+            6 => "Jun",
+            7 => "Jul",
+            8 => "Aug",
+            9 => "Sep",
+            10 => "Oct",
+            11 => "Nov",
+            else => "Dec",
+        };
+    }
+
+    fn quickChatTitle(buffer: *[32]u8, unix_seconds: i64) ![]const u8 {
+        const secs: u64 = @intCast(if (unix_seconds < 0) 0 else unix_seconds);
+        const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = secs };
+        const epoch_day = epoch_seconds.getEpochDay();
+        const year_day = epoch_day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        return std.fmt.bufPrint(buffer, "Chat — {s} {d}", .{
+            quickChatMonthName(month_day.month.numeric()),
+            month_day.day_index + 1,
+        });
+    }
+
     fn createQuickChat(self: *App) void {
-        self.client.sendCreateQuickChat("Chat", "claudeCode");
+        var title_buffer: [32]u8 = undefined;
+        const quick_chat_title = quickChatTitle(&title_buffer, std.time.timestamp()) catch "Chat";
+        const backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
+        self.client.sendCreateQuickChat(quick_chat_title, backend);
         self.setStatus("Creating quick chat...");
     }
 
@@ -17938,6 +17970,27 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     try std.testing.expectEqualStrings("chat-1", LoopBarProbe.barLoop());
     try std.testing.expect(LoopBarProbe.stop == null);
     try std.testing.expect(LoopBarProbe.panel_toggle == null);
+}
+
+test "quick chat titles include the creation date" {
+    var title_buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Chat — Jan 1", try App.quickChatTitle(&title_buffer, 0));
+}
+
+test "creating a quick chat uses the default backend and a date-stamped title" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    defer app.allocator.free(app.pending_project_path);
+    app.product_settings = try ProductSettings.Settings.init(std.testing.allocator);
+    std.testing.allocator.free(app.product_settings.?.default_backend);
+    app.product_settings.?.default_backend = try std.testing.allocator.dupe(u8, "copilotCLI");
+    defer app.product_settings.?.deinit();
+    const before = app.client.outbound_count;
+    app.createQuickChat();
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    const command = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"title\":\"Chat — ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"backend\":\"copilotCLI\"") != null);
 }
 
 test "selection routes with a loop workspace open: Ctrl+Tab review moves the loop bar and pane together" {
