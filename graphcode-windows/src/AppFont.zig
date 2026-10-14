@@ -17,26 +17,30 @@ const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const Dpi = @import("Dpi.zig");
 
-const CacheEntry = struct { size: i32, bold: bool, font: c.HFONT };
+pub const Style = enum { regular, semibold, card_title, card_mono, card_state };
+const Face = enum { segoe, consolas };
+const CacheEntry = struct { size: i32, face: Face, weight: i32, font: c.HFONT };
 
-// Small fixed cache: the app only ever requests a handful of distinct
-// (size, bold) pairs across all surfaces, so a linear scan over a short
-// array is simpler and cheaper than a hash map, and every font lives for
-// the process lifetime exactly like the other cached GDI fonts/brushes
-// already in this codebase (e.g. NativeForms.zig's `cachedTileFont`).
-var cache: [32]CacheEntry = undefined;
+// Rounded card zoom/DPI sizes share this cache with native controls. Handles
+// remain process-owned, including while a control has one selected.
+var cache: [512]CacheEntry = undefined;
 var cache_len: usize = 0;
 
-fn getScaled(scaled_size: i32, bold: bool) c.HFONT {
+fn getScaled(scaled_size: i32, face: Face, weight: i32) c.HFONT {
     for (cache[0..cache_len]) |entry| {
-        if (entry.size == scaled_size and entry.bold == bold) return entry.font;
+        if (entry.size == scaled_size and entry.face == face and entry.weight == weight) return entry.font;
+    }
+    // Controls borrow these handles for their lifetime; never evict a cached font.
+    if (cache_len == cache.len) {
+        std.log.warn("UI font cache exhausted (size={d}, face={s}, weight={d})", .{ scaled_size, @tagName(face), weight });
+        return null;
     }
     const font = c.CreateFontW(
         -scaled_size,
         0,
         0,
         0,
-        if (bold) c.FW_SEMIBOLD else c.FW_NORMAL,
+        weight,
         0,
         0,
         0,
@@ -45,11 +49,13 @@ fn getScaled(scaled_size: i32, bold: bool) c.HFONT {
         c.CLIP_DEFAULT_PRECIS,
         c.CLEARTYPE_QUALITY,
         c.DEFAULT_PITCH | c.FF_DONTCARE,
-        std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
+        if (face == .consolas) std.unicode.utf8ToUtf16LeStringLiteral("Consolas").ptr else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI").ptr,
     );
-    if (font != null and cache_len < cache.len) {
-        cache[cache_len] = .{ .size = scaled_size, .bold = bold, .font = font };
+    if (font != null) {
+        cache[cache_len] = .{ .size = scaled_size, .face = face, .weight = weight, .font = font };
         cache_len += 1;
+    } else {
+        std.log.warn("UI font creation failed (size={d}, face={s}, weight={d})", .{ scaled_size, @tagName(face), weight });
     }
     return font;
 }
@@ -62,7 +68,23 @@ pub fn get(size: i32, bold: bool) c.HFONT {
 }
 
 pub fn getForDpi(size: i32, bold: bool, dpi: u32) c.HFONT {
-    return getScaled(Dpi.scale(size, dpi), bold);
+    return getScaled(Dpi.scale(size, dpi), .segoe, if (bold) c.FW_SEMIBOLD else c.FW_NORMAL);
+}
+
+pub fn styleHeight(size: f32, dpi: u32) i32 {
+    return @max(1, @as(i32, @intFromFloat(@round(size * @as(f32, @floatFromInt(dpi)) / 96.0))));
+}
+
+pub fn getStyle(size: f32, style: Style) c.HFONT {
+    return getStyleForDpi(size, style, Dpi.base_dpi);
+}
+
+pub fn getStyleForDpi(size: f32, style: Style, dpi: u32) c.HFONT {
+    return getScaled(styleHeight(size, dpi), if (style == .card_mono) .consolas else .segoe, switch (style) {
+        .regular, .card_mono => c.FW_NORMAL,
+        .semibold, .card_title => c.FW_SEMIBOLD,
+        .card_state => c.FW_BOLD,
+    });
 }
 
 /// The standard body-text size used for plain dialog controls (EDIT,
@@ -113,4 +135,51 @@ test "get caches distinct fonts per (size, bold) and reuses the same handle" {
     // handle rather than creating a new GDI font object each time.
     try std.testing.expectEqual(regular_14, get(14, false));
     try std.testing.expectEqual(bold_14, get(14, true));
+}
+
+test "loop card parity font faces weights and cache growth" {
+    _ = get(14, false);
+    _ = get(14, true);
+    try std.testing.expectEqual(get(15, true), getStyle(14.5, .card_title));
+    const starting_count = cache_len;
+    const styles = [_]Style{ .card_title, .card_mono, .card_state };
+    const sizes = [_]f32{ 14.5, 10.5, 10 };
+    var handles: [3 * 26 * 4]c.HFONT = undefined;
+    var key_count: usize = 0;
+    for (0..2) |sweep| {
+        var index: usize = 0;
+        for (0..26) |step| {
+            const zoom = 0.55 + @as(f32, @floatFromInt(step)) * 0.05;
+            for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+                for (styles, sizes) |style, size| {
+                    const font = getStyleForDpi(size * zoom, style, dpi);
+                    try std.testing.expect(font != null);
+                    var info = std.mem.zeroes(c.LOGFONTW);
+                    try std.testing.expect(c.GetObjectW(font, @sizeOf(c.LOGFONTW), &info) != 0);
+                    try std.testing.expectEqual(-styleHeight(size * zoom, dpi), info.lfHeight);
+                    try std.testing.expectEqual(@as(i32, if (style == .card_title) c.FW_SEMIBOLD else if (style == .card_state) c.FW_BOLD else c.FW_NORMAL), info.lfWeight);
+                    const family = if (style == .card_mono) std.unicode.utf8ToUtf16LeStringLiteral("Consolas") else std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI");
+                    try std.testing.expectEqualSlices(u16, family, std.mem.sliceTo(&info.lfFaceName, 0));
+                    if (sweep == 0) handles[index] = font else try std.testing.expectEqual(handles[index], font);
+                    index += 1;
+                }
+            }
+        }
+        if (sweep == 0) {
+            try std.testing.expect(cache_len > starting_count);
+            try std.testing.expect(cache_len - starting_count <= handles.len);
+            key_count = cache_len;
+        } else try std.testing.expectEqual(key_count, cache_len);
+    }
+    try std.testing.expectEqual(@as(i32, 15), styleHeight(14.5, 96));
+    try std.testing.expectEqual(@as(i32, 11), styleHeight(10.5, 96));
+}
+
+test "loop card parity full cache refuses without creating uncached handles" {
+    const font = get(14, false);
+    const saved_len = cache_len;
+    defer cache_len = saved_len;
+    while (cache_len < cache.len) : (cache_len += 1) cache[cache_len] = cache[0];
+    try std.testing.expectEqual(font, get(14, false));
+    try std.testing.expect(getStyle(123, .card_mono) == null);
 }

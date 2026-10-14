@@ -387,11 +387,11 @@ fn nodeKey(id: []const u8) u64 {
 }
 
 pub const CardTextLayout = struct {
-    title_y: i32,
-    state_y: i32,
-    show_entry: bool,
-    show_activity: bool,
-    show_attention: bool,
+    title: c.RECT,
+    pill: c.RECT,
+    live: c.RECT,
+    detail: c.RECT,
+    meta: c.RECT,
 };
 
 pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 };
@@ -848,8 +848,9 @@ fn drawOverview(
             const card = overviewCardBounds(model, graph_index, index, bounds, state);
             roundedCard(hdc, card, Tokens.loop_card_bottom, false);
             fill(hdc, rect(card.left, card.top, card.left + scaledValue(4, state.zoom), card.bottom), loopTypeColor(graph.nodes.items[index].loop_type));
-            drawText(hdc, allocator, graph.nodes.items[index].title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(16, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF, card.right - scaledValue(14, state.zoom));
-            drawText(hdc, allocator, graph.nodes.items[index].state, card.left + scaledValue(14, state.zoom), card.top + scaledValue(46, state.zoom), scaledValue(10, state.zoom), 0x00B8B8B8, card.right - scaledValue(14, state.zoom));
+            drawCardBody(hdc, allocator, graph.nodes.items[index], card, state.zoom, .interior, false, false) catch |err| {
+                std.log.warn("Overview card {s} presentation failed: {s}", .{ graph.nodes.items[index].id, @errorName(err) });
+            };
         }
     }
 }
@@ -897,7 +898,7 @@ fn overviewLaneBounds(
         overviewLaneHeight(model.graphs.items[graph_index].nodes.items.len)
     else
         0;
-    return transformedRect(bounds, state, 24, top, @max(760, bounds.right - bounds.left - 48), height);
+    return transformedRect(bounds, state, 24, top, @max(838, bounds.right - bounds.left - 48), height);
 }
 
 pub fn overviewCardBounds(
@@ -911,10 +912,10 @@ pub fn overviewCardBounds(
     const column = @as(i32, @intCast(node_index % 3));
     const row = @as(i32, @intCast(node_index / 3));
     return rect(
-        lane.left + scaledValue(18 + column * 246, state.zoom),
+        lane.left + scaledValue(18 + column * 276, state.zoom),
         lane.top + scaledValue(46 + row * 122, state.zoom),
-        lane.left + scaledValue(238 + column * 246, state.zoom),
-        lane.top + scaledValue(132 + row * 122, state.zoom),
+        lane.left + scaledValue(18 + column * 276, state.zoom) + scaledValue(Tokens.loop_card_width, state.zoom),
+        lane.top + scaledValue(46 + row * 122, state.zoom) + scaledValue(Tokens.loop_card_height, state.zoom),
     );
 }
 
@@ -1022,7 +1023,7 @@ pub fn contentSize(model: *const GraphModel.Model, surface: Surface) struct { wi
         .overview => blk: {
             var height: i32 = 38;
             for (model.graphs.items) |graph| height += overviewLaneHeight(graph.nodes.items.len) + 20;
-            break :blk .{ .width = 808, .height = @max(1, height) };
+            break :blk .{ .width = 886, .height = @max(1, height) };
         },
         .quick_chats => .{
             .width = 808,
@@ -1679,28 +1680,12 @@ fn drawNode(
     fill(hdc, rect(x, y, x + scaled(Tokens.loop_card_stripe, state), y + bounds.bottom - y), stripe);
     const role = nodeRole(edges, node.id, declared_entries);
     const reclaim_offer = hasReclaimOffer(node, inspection, kept_worktrees);
-    const layout = cardTextLayout(state.zoom, role == .entry, attention);
-    if (layout.show_entry) drawText(hdc, allocator, "START", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x008A8A8A, bounds.right - scaled(14, state));
-    if (role == .unwired) drawText(hdc, allocator, "UNWIRED", x + scaled(14, state), y + layout.title_y - scaled(10, state), scaled(9, state), 0x00FFCD7A, bounds.right - scaled(14, state));
-    drawText(hdc, allocator, node.title, x + scaled(14, state), y + layout.title_y, scaled(14, state), 0x00FFFFFF, bounds.right - scaled(14, state));
-    drawText(hdc, allocator, node.state, x + scaled(14, state), y + layout.state_y, scaled(11, state), if (attention) 0x00FFB340 else 0x00B8B8B8, bounds.right - scaled(14, state));
-    if (layout.show_activity) {
-        const primary = nodePrimaryDetail(node);
-        if (primary.len != 0)
-            drawText(hdc, allocator, primary, x + scaled(14, state), y + layout.state_y + scaled(20, state), scaled(9, state), 0x00A8A8A8, bounds.right - scaled(14, state));
-        if (node.activity.len != 0 and !std.mem.eql(u8, node.activity, primary))
-            drawText(hdc, allocator, node.activity, x + scaled(14, state), y + layout.state_y + scaled(35, state), scaled(9, state), 0x008A8A8A, bounds.right - scaled(14, state));
-        var metadata_buffer: [128]u8 = undefined;
-        const metadata = nodeMetadata(&metadata_buffer, node);
-        if (metadata.len != 0 and (role != .unwired or reclaim_offer))
-            drawText(hdc, allocator, metadata, x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x007A7A7A, bounds.right - scaled(14, state));
-        if (role == .unwired and !reclaim_offer)
-            drawText(hdc, allocator, "No connections · right-click to recover", x + scaled(14, state), y + layout.state_y + scaled(43, state), scaled(8, state), 0x00FFCD7A, bounds.right - scaled(14, state));
-    }
-    if (layout.show_attention) {
-        drawText(hdc, allocator, "NEEDS YOU", bounds.right - scaled(88, state), y + scaled(8, state), scaled(9, state), 0x00FFB340, bounds.right - scaled(18, state));
+    drawCardBody(hdc, allocator, node, bounds, state.zoom, role, attention, reclaim_offer) catch |err| {
+        std.log.warn("Project card {s} presentation failed: {s}", .{ node.id, @errorName(err) });
+    };
+    if (attentionActionVisible(node, nodes, edges)) {
         const action = attentionActionBounds(bounds, state);
-        fill(hdc, action, 0x00FF9F0A);
+        fill(hdc, action, 0x000A9FFF);
         drawTextRect(hdc, allocator, attentionActionLabel(node), action, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
     }
     if (state.hovered_connector == index) {
@@ -1730,7 +1715,11 @@ pub fn attentionActionForNode(node: GraphModel.Node) AttentionAction {
 }
 
 pub fn attentionActionBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
-    return rect(bounds.right - scaled(78, state), bounds.bottom - scaled(28, state), bounds.right - scaled(12, state), bounds.bottom - scaled(8, state));
+    return rect(bounds.right - scaled(77, state), bounds.top + scaled(51, state), bounds.right - scaled(11, state), bounds.top + scaled(68, state));
+}
+
+pub fn attentionActionVisible(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) bool {
+    return needsAttention(node, nodes, edges);
 }
 
 pub fn hitTestAttentionAction(
@@ -1743,7 +1732,7 @@ pub fn hitTestAttentionAction(
     var index = nodes.len;
     while (index > 0) {
         index -= 1;
-        if (!needsAttention(nodes[index], nodes, edges)) continue;
+        if (!attentionActionVisible(nodes[index], nodes, edges)) continue;
         if (insideGraph(x, y, attentionActionBounds(nodeBounds(index, state), state))) return index;
     }
     return null;
@@ -1752,9 +1741,10 @@ pub fn hitTestAttentionAction(
 const ReclaimOfferBounds = struct { reclaim: c.RECT, keep: c.RECT };
 
 pub fn reclaimOfferBounds(bounds: c.RECT) ReclaimOfferBounds {
+    const zoom = @as(f32, @floatFromInt(bounds.right - bounds.left)) / @as(f32, @floatFromInt(Tokens.loop_card_width));
     return .{
-        .reclaim = rect(bounds.left + 12, bounds.bottom - 24, bounds.left + 78, bounds.bottom - 5),
-        .keep = rect(bounds.left + 84, bounds.bottom - 24, bounds.left + 126, bounds.bottom - 5),
+        .reclaim = rect(bounds.left + scaledValue(11, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(77, zoom), bounds.top + scaledValue(68, zoom)),
+        .keep = rect(bounds.left + scaledValue(83, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(119, zoom), bounds.top + scaledValue(68, zoom)),
     };
 }
 
@@ -1793,65 +1783,125 @@ pub fn hitTestReclaimOffer(
 }
 
 fn nodePrimaryDetail(node: GraphModel.Node) []const u8 {
-    if (node.goal_summary.len != 0) return node.goal_summary;
-    if (node.trigger_prompt.len != 0) return node.trigger_prompt;
-    if (node.check_description.len != 0) return node.check_description;
-    return node.activity;
+    if (std.mem.trim(u8, node.activity, " \t\r\n").len != 0) return node.activity;
+    if (std.mem.eql(u8, node.loop_type, "goalBased")) return node.goal_summary;
+    if (std.mem.eql(u8, node.loop_type, "timeBased")) return node.trigger_prompt;
+    if (std.mem.eql(u8, node.loop_type, "turnBased")) return node.check_description;
+    if (std.mem.eql(u8, node.loop_type, "composite") or std.mem.eql(u8, node.loop_type, "proactive")) return node.pilot_state;
+    return node.first_instruction;
 }
 
-fn nodeMetadata(buffer: []u8, node: GraphModel.Node) []const u8 {
-    var stream = std.io.fixedBufferStream(buffer);
-    const writer = stream.writer();
-    var wrote = false;
-    if (node.metric_passes != 0) {
-        writer.print("pass {d}", .{node.metric_passes}) catch return buffer[0..stream.pos];
-        wrote = true;
+fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    if (std.mem.trim(u8, node.activity, " \t\r\n").len == 0 and
+        (std.mem.eql(u8, node.loop_type, "composite") or std.mem.eql(u8, node.loop_type, "proactive")))
+    {
+        const pilot = cardPilotName(node.pilot_state);
+        if (node.subgraph_json.len == 0) return allocator.dupe(u8, pilot);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, node.subgraph_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidCardSubgraph;
+        const nodes = parsed.value.object.get("nodes") orelse return error.InvalidCardSubgraph;
+        if (nodes != .array) return error.InvalidCardSubgraph;
+        try result.writer().print("{d} {s} · {s}", .{ nodes.array.items.len, if (nodes.array.items.len == 1) "loop" else "loops", pilot });
+        return result.toOwnedSlice();
     }
-    if (node.metric_sample_count >= 2) {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writeMetricChange(writer, node) catch return buffer[0..stream.pos];
-        wrote = true;
+    const source = nodePrimaryDetail(node);
+    if (std.mem.eql(u8, source, node.activity) and std.mem.trim(u8, source, " \t\r\n").len != 0 and node.metric_passes != 0)
+        try result.writer().print("pass {d} · ", .{node.metric_passes});
+    var iterator = (try std.unicode.Utf8View.init(source)).iterator();
+    var pending_space = false;
+    while (iterator.nextCodepointSlice()) |bytes| {
+        const cp = try std.unicode.utf8Decode(bytes);
+        const whitespace = cp == ' ' or (cp >= 9 and cp <= 13) or cp == 0x85 or cp == 0xa0 or cp == 0x1680 or
+            (cp >= 0x2000 and cp <= 0x200a) or cp == 0x2028 or cp == 0x2029 or cp == 0x202f or cp == 0x205f or cp == 0x3000;
+        if (whitespace) {
+            pending_space = result.items.len != 0;
+        } else {
+            if (pending_space and result.items.len != 0 and result.items[result.items.len - 1] != ' ') try result.append(' ');
+            try result.appendSlice(bytes);
+            pending_space = false;
+        }
     }
-    if (node.backend.len != 0) {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writer.writeAll(node.backend) catch return buffer[0..stream.pos];
-        wrote = true;
-    }
+    return result.toOwnedSlice();
+}
 
+fn cardPilotName(pilot: []const u8) []const u8 {
+    if (std.mem.eql(u8, pilot, "notPiloted")) return "Not piloted";
+    if (std.mem.eql(u8, pilot, "piloting")) return "Piloting";
+    if (std.mem.eql(u8, pilot, "piloted")) return "Piloted";
+    if (std.mem.eql(u8, pilot, "armed")) return "Armed";
+    return pilot;
+}
+
+fn cardTypeName(loop_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, loop_type, "goalBased")) return "Goal";
+    if (std.mem.eql(u8, loop_type, "timeBased")) return "Timed";
+    if (std.mem.eql(u8, loop_type, "turnBased")) return "Turn";
+    if (std.mem.eql(u8, loop_type, "composite") or std.mem.eql(u8, loop_type, "proactive")) return "Composite";
+    return "Main";
+}
+
+fn cardBackendName(backend: []const u8) []const u8 {
+    if (std.mem.eql(u8, backend, "claudeCode") or backend.len == 0) return "";
+    if (std.mem.eql(u8, backend, "copilotCLI")) return "Copilot CLI";
+    if (std.mem.eql(u8, backend, "codex")) return "Codex";
+    if (std.mem.eql(u8, backend, "openCode")) return "OpenCode";
+    if (std.mem.eql(u8, backend, "pi")) return "Pi";
+    if (std.mem.eql(u8, backend, "nod")) return "Nod";
+    return backend;
+}
+
+fn writeCardAge(writer: anytype, seconds: u64) !void {
+    const days = seconds / 86400;
+    const hours = seconds / 3600 % 24;
+    const minutes = seconds / 60 % 60;
+    if (days > 0) {
+        try writer.print("{d}d", .{days});
+        if (hours > 0) try writer.print(" {d}h", .{hours});
+    } else if (hours > 0) {
+        try writer.print("{d}h", .{hours});
+        if (minutes > 0) try writer.print(" {d}m", .{minutes});
+    } else if (minutes > 0) {
+        try writer.print("{d}m", .{minutes});
+    } else try writer.print("{d}s", .{seconds});
+}
+
+fn nodeMetadata(allocator: std.mem.Allocator, node: GraphModel.Node, branch: []const u8, now: u64) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    const writer = result.writer();
+    try writer.writeAll(cardTypeName(node.loop_type));
+    if (branch.len != 0) try writer.print(" · {s}", .{branch});
+    const backend = cardBackendName(node.backend);
+    if (backend.len != 0) try writer.print(" · {s}", .{backend});
     if (node.created_at) |created| {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writer.writeAll(elapsedLabel(created)) catch return buffer[0..stream.pos];
-        wrote = true;
+        try writer.writeAll(" · ");
+        try writeCardAge(writer, now -| created);
     }
-    if (node.token_usage) |tokens| {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        formatTokenUsage(writer, tokens) catch return buffer[0..stream.pos];
-        wrote = true;
-    }
-    if (node.worktree_branch.len != 0) {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writer.writeAll(node.worktree_branch) catch return buffer[0..stream.pos];
-        wrote = true;
-    }
-    if (node.model_tier.len != 0) {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writer.writeAll(node.model_tier) catch return buffer[0..stream.pos];
-        wrote = true;
-    }
-    if (node.metric_command.len != 0)
-        if (!wrote) return std.fmt.bufPrint(buffer, "metric · {s}", .{if (node.metric_direction.len != 0) node.metric_direction else "configured"}) catch "metric";
-    return buffer[0..stream.pos];
+    return result.toOwnedSlice();
 }
 
 fn writeMetricChange(writer: anytype, node: GraphModel.Node) !void {
     const first = node.metric_samples[0];
     const last = node.metric_samples[@as(usize, node.metric_sample_count) - 1];
-    const gain = if (std.mem.eql(u8, node.metric_direction, "minimize")) first - last else last - first;
-    try writer.writeAll("metric ");
-    try writeMetricNumber(writer, first);
-    try writer.writeAll(" -> ");
-    try writeMetricNumber(writer, last);
-    try writer.writeAll(if (gain > 0) " better" else if (gain < 0) " worse" else " flat");
+    if (!std.math.isFinite(first) or !std.math.isFinite(last)) return error.InvalidCardMetric;
+    const whole = first == @round(first) and last == @round(last);
+    if (whole) try writeMetricNumber(writer, first) else try writer.print("{d:.2}", .{first});
+    try writer.writeAll(" → ");
+    if (whole) try writeMetricNumber(writer, last) else try writer.print("{d:.2}", .{last});
+    const ratio = cardMetricRatio(node);
+    const percent: u32 = @intFromFloat(@round(@abs(ratio) * 100));
+    if (percent == 0) try writer.writeAll(" · flat") else try writer.print(" · {d}% {s}", .{ percent, if (ratio > 0) "better" else "worse" });
+}
+
+fn cardMetricRatio(node: GraphModel.Node) f64 {
+    const first = node.metric_samples[0];
+    const last = node.metric_samples[@as(usize, node.metric_sample_count) - 1];
+    const scale = @max(@abs(first), @abs(last));
+    if (scale == 0) return 0;
+    return if (std.mem.eql(u8, node.metric_direction, "minimize")) first / scale - last / scale else last / scale - first / scale;
 }
 
 fn writeMetricNumber(writer: anytype, value: f64) !void {
@@ -1876,6 +1926,241 @@ fn formatTokenUsage(writer: anytype, tokens: u32) !void {
     if (tokens >= 1_000_000) return writer.print("{d}M tok", .{tokens / 1_000_000});
     if (tokens >= 1000) return writer.print("{d}k tok", .{tokens / 1000});
     return writer.print("{d} tok", .{tokens});
+}
+
+const CardState = struct {
+    word: []const u8,
+    tint: u32,
+    ink: u32,
+    fill: u32,
+    hollow: bool = false,
+    stroke: ?u32 = null,
+};
+
+fn blendCardColor(foreground: u32, background: u32, opacity: u32) u32 {
+    var result: u32 = 0;
+    inline for ([_]u5{ 0, 8, 16 }) |shift| {
+        const front = (foreground >> shift) & 255;
+        const back = (background >> shift) & 255;
+        result |= ((front * opacity + back * (100 - opacity) + 50) / 100) << shift;
+    }
+    return result;
+}
+
+fn cardState(node: GraphModel.Node) CardState {
+    const state = if (std.mem.eql(u8, node.presence, "awaitingInput"))
+        "awaitingInput"
+    else if (std.mem.eql(u8, node.presence, "busy"))
+        "running"
+    else if (std.mem.eql(u8, node.state, "running") and std.mem.eql(u8, node.presence, "idle"))
+        "idle"
+    else
+        node.state;
+    const base = Tokens.loop_card_bottom;
+    if (std.mem.eql(u8, state, "running") or std.mem.eql(u8, state, "waiting")) return .{
+        .word = if (std.mem.eql(u8, state, "waiting")) "WAITING" else "RUNNING",
+        .tint = 0x00FF840A,
+        .ink = 0x00FFC58C,
+        .fill = blendCardColor(0x00FF840A, base, if (std.mem.eql(u8, state, "waiting")) 10 else 16),
+        .hollow = std.mem.eql(u8, state, "waiting"),
+    };
+    if (std.mem.eql(u8, state, "awaitingInput") or std.mem.eql(u8, state, "blocked")) return .{
+        .word = if (std.mem.eql(u8, state, "blocked")) "BLOCKED" else "NEEDS YOU",
+        .tint = 0x000A9FFF,
+        .ink = 0x007ACDFF,
+        .fill = blendCardColor(0x000A9FFF, base, if (std.mem.eql(u8, state, "blocked")) 14 else 22),
+        .hollow = std.mem.eql(u8, state, "blocked"),
+        .stroke = if (std.mem.eql(u8, state, "blocked")) blendCardColor(0x000A9FFF, base, 40) else null,
+    };
+    if (std.mem.eql(u8, state, "succeeded")) return .{ .word = "DONE", .tint = 0x0058D130, .ink = 0x009BE47E, .fill = blendCardColor(0x0058D130, base, 16) };
+    if (std.mem.eql(u8, state, "failed")) return .{ .word = "FAILED", .tint = 0x003A45FF, .ink = 0x00808AFF, .fill = blendCardColor(0x003A45FF, base, 16) };
+    if (std.mem.eql(u8, state, "stalled")) return .{ .word = "STALLED", .tint = 0x00F25ABF, .ink = 0x00F7A2D9, .fill = blendCardColor(0x00F25ABF, base, 16) };
+    const neutral_fill = blendCardColor(0x00FFFFFF, base, 7);
+    return .{
+        .word = if (std.mem.eql(u8, state, "stopped")) "STOPPED" else if (std.mem.eql(u8, node.loop_type, "timeBased")) "SCHEDULED" else "IDLE",
+        .tint = blendCardColor(0x00FFFFFF, neutral_fill, 35),
+        .ink = blendCardColor(0x00FFFFFF, neutral_fill, 50),
+        .fill = neutral_fill,
+        .hollow = std.mem.eql(u8, state, "stopped"),
+    };
+}
+
+fn selectCardFont(hdc: c.HDC, size: f32, style: AppFont.Style) !c.HGDIOBJ {
+    const font = AppFont.getStyle(size, style) orelse return error.CardFontUnavailable;
+    return c.SelectObject(hdc, font) orelse error.CardFontSelectionFailed;
+}
+
+fn measuredWide(hdc: c.HDC, text: []const u16) !i32 {
+    if (text.len == 0) return 0;
+    var size: c.SIZE = undefined;
+    const length = std.math.cast(i32, text.len) orelse return error.CardTextTooLong;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, length, &size) == 0) return error.CardTextMeasurementFailed;
+    return size.cx;
+}
+
+fn measuredText(hdc: c.HDC, allocator: std.mem.Allocator, text: []const u8) !i32 {
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, text);
+    defer allocator.free(wide);
+    return measuredWide(hdc, wide);
+}
+
+fn middleElide(hdc: c.HDC, allocator: std.mem.Allocator, text: []const u16, width: i32) ![]u16 {
+    if (try measuredWide(hdc, text) <= width) return allocator.dupe(u16, text);
+    var boundaries = std.array_list.Managed(usize).init(allocator);
+    defer boundaries.deinit();
+    try boundaries.append(0);
+    var index: usize = 0;
+    while (index < text.len) {
+        index += if (std.unicode.utf16IsHighSurrogate(text[index])) @as(usize, 2) else 1;
+        try boundaries.append(index);
+    }
+    const count = boundaries.items.len - 1;
+    if (count < 3) return error.CardMetadataTooWide;
+    const scratch = try allocator.alloc(u16, text.len + 1);
+    defer allocator.free(scratch);
+    var low: usize = 2;
+    var high: usize = count - 1;
+    var best: ?usize = null;
+    while (low <= high) {
+        const keep = low + (high - low) / 2;
+        const candidate = elidedCandidate(scratch, text, boundaries.items, keep);
+        if (try measuredWide(hdc, candidate) <= width) {
+            best = keep;
+            low = keep + 1;
+        } else high = keep - 1;
+    }
+    const keep = best orelse return error.CardMetadataTooWide;
+    return allocator.dupe(u16, elidedCandidate(scratch, text, boundaries.items, keep));
+}
+
+fn elidedCandidate(scratch: []u16, text: []const u16, boundaries: []const usize, keep: usize) []u16 {
+    const head = boundaries[(keep + 1) / 2];
+    const tail = boundaries[boundaries.len - 1 - keep / 2];
+    @memcpy(scratch[0..head], text[0..head]);
+    scratch[head] = 0x2026;
+    @memcpy(scratch[head + 1 ..][0 .. text.len - tail], text[tail..]);
+    return scratch[0 .. head + 1 + text.len - tail];
+}
+
+fn cardMetaForWidth(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node, now: u64, width: i32) ![]u8 {
+    const full = try nodeMetadata(allocator, node, node.worktree_branch, now);
+    errdefer allocator.free(full);
+    if (try measuredText(hdc, allocator, full) <= width) return full;
+    const fixed = try nodeMetadata(allocator, node, "", now);
+    defer allocator.free(fixed);
+    const fixed_width = try measuredText(hdc, allocator, fixed);
+    if (fixed_width > width or node.worktree_branch.len == 0) return error.CardMetadataTooWide;
+    var branch_width = width - fixed_width - try measuredText(hdc, allocator, " · ");
+    const branch = try std.unicode.utf8ToUtf16LeAlloc(allocator, node.worktree_branch);
+    defer allocator.free(branch);
+    while (branch_width > 0) {
+        const shortened = try middleElide(hdc, allocator, branch, branch_width);
+        defer allocator.free(shortened);
+        const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, shortened);
+        defer allocator.free(utf8);
+        const result = try nodeMetadata(allocator, node, utf8, now);
+        errdefer allocator.free(result);
+        const measured = try measuredText(hdc, allocator, result);
+        if (measured <= width) {
+            allocator.free(full);
+            return result;
+        }
+        allocator.free(result);
+        // A mapped DC rounds each measured run, so verify the assembled line too.
+        branch_width -= @max(1, measured - width);
+    }
+    return error.CardMetadataTooWide;
+}
+
+fn drawCardText(hdc: c.HDC, allocator: std.mem.Allocator, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, ellipsis: bool) !void {
+    if (text.len == 0 or bounds.right <= bounds.left) return;
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, text);
+    defer allocator.free(wide);
+    const old_font = try selectCardFont(hdc, size, style);
+    defer _ = c.SelectObject(hdc, old_font);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var target = bounds;
+    const format: c.UINT = @intCast(c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_NOPREFIX | @as(c.INT, if (ellipsis) c.DT_END_ELLIPSIS else 0));
+    if (c.DrawTextW(hdc, wide.ptr, std.math.cast(i32, wide.len) orelse return error.CardTextTooLong, &target, format) == 0)
+        return error.CardTextPaintFailed;
+}
+
+fn cardMetricDetail(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    if (node.metric_sample_count >= 2 and node.metric_direction.len != 0)
+        try writeMetricChange(result.writer(), node);
+    return result.toOwnedSlice();
+}
+
+fn drawCardPill(hdc: c.HDC, allocator: std.mem.Allocator, presentation: CardState, bounds: c.RECT, zoom: f32) !void {
+    const brush = c.CreateSolidBrush(presentation.fill) orelse return error.CardBrushCreationFailed;
+    defer _ = c.DeleteObject(brush);
+    const pen = c.CreatePen(c.PS_SOLID, 1, presentation.stroke orelse presentation.fill) orelse return error.CardPenCreationFailed;
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, scaledValue(10, zoom), scaledValue(10, zoom));
+    const diameter = scaledValue(6, zoom);
+    const dot_left = bounds.left + scaledValue(5, zoom);
+    const dot_top = @divTrunc(bounds.top + bounds.bottom - diameter, 2);
+    const dot = c.CreateSolidBrush(if (presentation.hollow) presentation.fill else presentation.tint) orelse return error.CardBrushCreationFailed;
+    defer _ = c.DeleteObject(dot);
+    const dot_pen = c.CreatePen(c.PS_SOLID, scaledValue(1, zoom), presentation.tint) orelse return error.CardPenCreationFailed;
+    defer _ = c.DeleteObject(dot_pen);
+    _ = c.SelectObject(hdc, dot);
+    _ = c.SelectObject(hdc, dot_pen);
+    _ = c.Ellipse(hdc, dot_left, dot_top, dot_left + diameter, dot_top + diameter);
+    _ = c.SelectObject(hdc, brush);
+    _ = c.SelectObject(hdc, pen);
+    try drawCardText(hdc, allocator, presentation.word, rect(dot_left + diameter + scaledValue(4, zoom), bounds.top, bounds.right - scaledValue(7, zoom), bounds.bottom), 10 * zoom, .card_state, presentation.ink, false);
+}
+
+fn drawCardBody(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node, bounds: c.RECT, zoom: f32, role: NodeRole, attention: bool, reclaim: bool) !void {
+    const presentation = cardState(node);
+    const pill_width = blk: {
+        const old = try selectCardFont(hdc, 10 * zoom, .card_state);
+        defer _ = c.SelectObject(hdc, old);
+        break :blk (try measuredText(hdc, allocator, presentation.word)) + scaledValue(22, zoom);
+    };
+    const layout = cardTextLayout(bounds, zoom, pill_width);
+    const live = try cardLiveLine(allocator, node);
+    defer allocator.free(live);
+    const metric = try cardMetricDetail(allocator, node);
+    defer allocator.free(metric);
+    const meta = blk: {
+        const old = try selectCardFont(hdc, 10.5 * zoom, .card_mono);
+        defer _ = c.SelectObject(hdc, old);
+        break :blk try cardMetaForWidth(hdc, allocator, node, @intCast(@max(0, std.time.timestamp())), layout.meta.right - layout.meta.left - scaledValue(10, zoom));
+    };
+    defer allocator.free(meta);
+    try drawCardText(hdc, allocator, node.title, layout.title, 14.5 * zoom, .card_title, 0x00F4F4F4, true);
+    try drawCardPill(hdc, allocator, presentation, layout.pill, zoom);
+    try drawCardText(hdc, allocator, live, layout.live, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+    if (!attention and !reclaim) {
+        const entry_detail = if (role == .entry and metric.len != 0) try std.fmt.allocPrint(allocator, "START · {s}", .{metric}) else null;
+        defer if (entry_detail) |text| allocator.free(text);
+        const detail = if (role == .unwired) "UNWIRED · No connections · right-click to recover" else if (role == .entry) entry_detail orelse "START" else metric;
+        var detail_bounds = layout.detail;
+        if (metric.len != 0 and role != .unwired) detail_bounds.bottom -= scaledValue(4, zoom);
+        try drawCardText(hdc, allocator, detail, detail_bounds, 10.5 * zoom, .card_mono, if (role == .unwired) 0x007ACDFF else 0x009F9C9C, true);
+        if (metric.len != 0 and role != .unwired) {
+            const track = rect(layout.detail.left, layout.detail.bottom - scaledValue(2, zoom), layout.detail.right, layout.detail.bottom);
+            fill(hdc, track, 0x00444141);
+            const fraction = std.math.clamp(cardMetricRatio(node), 0, 1);
+            const end = track.left + @as(i32, @intFromFloat(@as(f64, @floatFromInt(track.right - track.left)) * fraction));
+            if (end > track.left) fill(hdc, rect(track.left, track.top, end, track.bottom), loopTypeColor(node.loop_type));
+        }
+    } else if (role != .interior) {
+        const role_bounds = rect(if (reclaim) reclaimOfferBounds(bounds).keep.right + scaledValue(6, zoom) else layout.live.left, layout.detail.top, if (attention) attentionActionBounds(bounds, &.{ .zoom = zoom }).left - scaledValue(6, zoom) else layout.detail.right, layout.detail.bottom);
+        try drawCardText(hdc, allocator, if (role == .entry) "START" else "UNWIRED", role_bounds, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+    }
+    const square_top = @divTrunc(layout.meta.top + layout.meta.bottom - scaledValue(6, zoom), 2);
+    fill(hdc, rect(layout.meta.left, square_top, layout.meta.left + scaledValue(6, zoom), square_top + scaledValue(6, zoom)), loopTypeColor(node.loop_type));
+    try drawCardText(hdc, allocator, meta, rect(layout.meta.left + scaledValue(10, zoom), layout.meta.top, layout.meta.right, layout.meta.bottom), 10.5 * zoom, .card_mono, 0x008C8989, false);
 }
 
 pub fn nodeBounds(index: usize, state: *const CanvasState) c.RECT {
@@ -2047,20 +2332,16 @@ fn segmentDistanceSquared(a: Connector, b: Connector, x: i32, y: i32) i32 {
     return @intFromFloat(ex * ex + ey * ey);
 }
 
-fn cardTextLayout(zoom: f32, entry: bool, attention: bool) CardTextLayout {
-    if (zoom < 0.75) return .{
-        .title_y = scaledValue(14, zoom),
-        .state_y = scaledValue(40, zoom),
-        .show_entry = false,
-        .show_activity = false,
-        .show_attention = false,
-    };
+fn cardTextLayout(bounds: c.RECT, zoom: f32, pill_width: i32) CardTextLayout {
+    const left = bounds.left + scaledValue(11, zoom);
+    const right = bounds.right - scaledValue(11, zoom);
+    const pill_left = right - pill_width;
     return .{
-        .title_y = scaledValue(if (entry) 20 else 14, zoom),
-        .state_y = scaledValue(if (entry) 47 else 43, zoom),
-        .show_entry = entry,
-        .show_activity = true,
-        .show_attention = attention,
+        .title = rect(left, bounds.top + scaledValue(8, zoom), @max(left, pill_left - scaledValue(6, zoom)), bounds.top + scaledValue(26, zoom)),
+        .pill = rect(pill_left, bounds.top + scaledValue(9, zoom), right, bounds.top + scaledValue(25, zoom)),
+        .live = rect(left, bounds.top + scaledValue(32, zoom), right, bounds.top + scaledValue(45, zoom)),
+        .detail = rect(left, bounds.top + scaledValue(51, zoom), right, bounds.top + scaledValue(68, zoom)),
+        .meta = rect(left, bounds.bottom - scaledValue(21, zoom), right, bounds.bottom - scaledValue(8, zoom)),
     };
 }
 
@@ -2823,8 +3104,8 @@ test "cross-project overview stacks every open folder as its own lane" {
     const identity = CanvasState{};
     try std.testing.expectEqualDeep(rect(244, 72, 1176, 376), overviewLaneBounds(&model, 0, bounds, &identity));
     try std.testing.expectEqualDeep(rect(244, 396, 1176, 572), overviewLaneBounds(&model, 1, bounds, &identity));
-    try std.testing.expectEqualDeep(rect(262, 240, 482, 326), overviewCardBounds(&model, 0, 3, bounds, &identity));
-    try std.testing.expectEqualDeep(rect(262, 442, 482, 528), overviewCardBounds(&model, 1, 0, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 240, 512, 336), overviewCardBounds(&model, 0, 3, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(262, 442, 512, 538), overviewCardBounds(&model, 1, 0, bounds, &identity));
 
     for ([_]CanvasState{
         .{},
@@ -2910,12 +3191,402 @@ test "zoom controls expose every action and fit content" {
     try std.testing.expect(state.zoom < 1);
 }
 
-test "minimum zoom hides overflow-prone card content" {
-    const layout = cardTextLayout(0.55, true, true);
-    try std.testing.expect(!layout.show_entry);
-    try std.testing.expect(!layout.show_activity);
-    try std.testing.expect(!layout.show_attention);
-    try std.testing.expect(layout.state_y < @as(i32, @intFromFloat(106 * 0.55)));
+test "loop card parity project metrics match the shipping card" {
+    const bounds = nodeBounds(0, &.{});
+    try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
+    try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
+}
+
+test "loop card parity overview metrics match the project card" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    const bounds = overviewCardBounds(&model, 0, 0, rect(220, 34, 1200, 900), &.{});
+    try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
+    try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
+}
+
+test "loop card parity activity outranks a populated goal" {
+    const node = GraphModel.Node{
+        .id = @constCast("card"),
+        .title = @constCast("Card"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("running"),
+        .presence = @constCast("busy"),
+        .activity = @constCast("checking tests"),
+        .goal_summary = @constCast("All tests pass"),
+    };
+    try std.testing.expectEqualStrings("checking tests", nodePrimaryDetail(node));
+}
+
+test "loop card parity meta uses type and backend display name without tokens" {
+    const node = GraphModel.Node{
+        .id = @constCast("card"),
+        .title = @constCast("Card"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("running"),
+        .presence = @constCast("busy"),
+        .activity = @constCast(""),
+        .backend = @constCast("copilotCLI"),
+        .model_tier = @constCast("capable"),
+        .token_usage = 12_345,
+    };
+    const meta = try nodeMetadata(std.testing.allocator, node, node.worktree_branch, 0);
+    defer std.testing.allocator.free(meta);
+    try std.testing.expectEqualStrings("Goal · Copilot CLI", meta);
+}
+
+test "loop card parity existing actions stay above the bottom meta row" {
+    for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
+        const state = CanvasState{ .zoom = zoom, .pan_x = 1200, .pan_y = -20 };
+        const bounds = nodeBounds(0, &state);
+        const meta_top = bounds.bottom - scaledValue(21, zoom);
+        const action = attentionActionBounds(bounds, &state);
+        const offer = reclaimOfferBounds(bounds);
+        try std.testing.expect(action.bottom <= meta_top);
+        try std.testing.expect(offer.reclaim.bottom <= meta_top);
+        try std.testing.expect(offer.keep.bottom <= meta_top);
+        try std.testing.expect(offer.reclaim.right < offer.keep.left);
+        try std.testing.expect(offer.keep.right < action.left);
+    }
+}
+
+fn parityTestNode() GraphModel.Node {
+    return .{
+        .id = @constCast("parity-card"),
+        .title = @constCast("A long title that must yield to the state pill"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("running"),
+        .presence = @constCast("busy"),
+        .activity = @constCast("checking tests"),
+        .backend = @constCast("copilotCLI"),
+        .created_at = 0,
+    };
+}
+
+test "loop card parity metrics and rows fit the owning card" {
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(dc);
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
+        const state = CanvasState{ .zoom = zoom, .pan_x = 1300, .pan_y = -17 };
+        const project = nodeBounds(0, &state);
+        const overview = overviewCardBounds(&model, 0, 0, rect(220, 34, 1200, 900), &state);
+        for ([_][]const u8{ "NEEDS YOU", "SCHEDULED" }) |word| {
+            const old = try selectCardFont(dc, 10 * zoom, .card_state);
+            defer _ = c.SelectObject(dc, old);
+            const pill_width = try measuredText(dc, std.testing.allocator, word) + scaledValue(22, zoom);
+            for ([_]c.RECT{ project, overview }) |bounds| {
+                const rows = cardTextLayout(bounds, zoom, pill_width);
+                for ([_]c.RECT{ rows.title, rows.pill, rows.live, rows.detail, rows.meta }) |row| {
+                    try std.testing.expect(row.left >= bounds.left + scaledValue(11, zoom));
+                    try std.testing.expect(row.right <= bounds.right - scaledValue(11, zoom));
+                    try std.testing.expect(row.top >= bounds.top + scaledValue(8, zoom));
+                    try std.testing.expect(row.bottom <= bounds.bottom - scaledValue(8, zoom));
+                    try std.testing.expect(row.right > row.left and row.bottom > row.top);
+                }
+                try std.testing.expect(rows.title.right < rows.pill.left);
+                try std.testing.expect(rows.title.bottom < rows.live.top);
+                try std.testing.expect(rows.live.bottom < rows.detail.top);
+                try std.testing.expect(rows.detail.bottom < rows.meta.top);
+            }
+        }
+        const adjacent = overviewCardBounds(&model, 0, 1, rect(220, 34, 1200, 900), &state);
+        const next_row = overviewCardBounds(&model, 0, 3, rect(220, 34, 1200, 900), &state);
+        try std.testing.expect(overview.right < adjacent.left);
+        try std.testing.expect(overview.bottom < next_row.top);
+    }
+}
+
+test "loop card parity live and meta content and duration boundaries" {
+    const allocator = std.testing.allocator;
+    var node = parityTestNode();
+    node.activity = @constCast(" \tchecking \r\n tests  ");
+    node.goal_summary = @constCast("ignored goal");
+    node.metric_passes = 4;
+    const live = try cardLiveLine(allocator, node);
+    defer allocator.free(live);
+    try std.testing.expectEqualStrings("pass 4 · checking tests", live);
+    node.activity = @constCast("");
+    node.created_at = null;
+    node.backend = @constCast("claudeCode");
+    for ([_][2][]const u8{
+        .{ "sketch", "Main" },    .{ "goalBased", "Goal" },      .{ "timeBased", "Timed" },
+        .{ "turnBased", "Turn" }, .{ "composite", "Composite" },
+    }) |kind| {
+        node.loop_type = @constCast(kind[0]);
+        const meta = try nodeMetadata(allocator, node, "", 0);
+        defer allocator.free(meta);
+        try std.testing.expectEqualStrings(kind[1], meta);
+    }
+    for ([_]struct { kind: []const u8, expected: []const u8 }{
+        .{ .kind = "goalBased", .expected = "ignored goal" },
+        .{ .kind = "timeBased", .expected = "Run on schedule" },
+        .{ .kind = "turnBased", .expected = "Pause for approval" },
+        .{ .kind = "composite", .expected = "Piloted" },
+    }) |sample| {
+        node.loop_type = @constCast(sample.kind);
+        node.trigger_prompt = @constCast("Run on schedule");
+        node.check_description = @constCast("Pause for approval");
+        node.pilot_state = @constCast("piloted");
+        const fallback = try cardLiveLine(allocator, node);
+        defer allocator.free(fallback);
+        try std.testing.expectEqualStrings(sample.expected, fallback);
+    }
+    node.subgraph_json = @constCast("{\"nodes\":[{},{}]}");
+    const composite = try cardLiveLine(allocator, node);
+    defer allocator.free(composite);
+    try std.testing.expectEqualStrings("2 loops · Piloted", composite);
+    node.subgraph_json = @constCast("");
+    node.loop_type = @constCast("sketch");
+    node.first_instruction = @constCast(" First\ninstruction ");
+    const handed = try cardLiveLine(allocator, node);
+    defer allocator.free(handed);
+    try std.testing.expectEqualStrings("First instruction", handed);
+    node.created_at = 1000;
+    for ([_]struct { age: u64, text: []const u8 }{
+        .{ .age = 0, .text = "Main · 0s" },     .{ .age = 59, .text = "Main · 59s" },
+        .{ .age = 60, .text = "Main · 1m" },    .{ .age = 3599, .text = "Main · 59m" },
+        .{ .age = 3600, .text = "Main · 1h" },  .{ .age = 3660, .text = "Main · 1h 1m" },
+        .{ .age = 86400, .text = "Main · 1d" }, .{ .age = 93600, .text = "Main · 1d 2h" },
+    }) |sample| {
+        const meta = try nodeMetadata(allocator, node, "", 1000 + sample.age);
+        defer allocator.free(meta);
+        try std.testing.expectEqualStrings(sample.text, meta);
+    }
+    node.created_at = null;
+    for ([_][2][]const u8{
+        .{ "copilotCLI", "Copilot CLI" }, .{ "codex", "Codex" }, .{ "openCode", "OpenCode" },
+        .{ "pi", "Pi" },                  .{ "nod", "Nod" },     .{ "futureBackend", "futureBackend" },
+    }) |backend| {
+        try std.testing.expectEqualStrings(backend[1], cardBackendName(backend[0]));
+    }
+    node.metric_sample_count = 2;
+    node.metric_samples[0] = 1;
+    node.metric_samples[1] = 3;
+    node.metric_direction = @constCast("maximize");
+    const rising = try cardMetricDetail(allocator, node);
+    defer allocator.free(rising);
+    try std.testing.expectEqualStrings("1 → 3 · 67% better", rising);
+    node.metric_samples[0] = 3;
+    node.metric_samples[1] = 1;
+    node.metric_direction = @constCast("minimize");
+    const falling = try cardMetricDetail(allocator, node);
+    defer allocator.free(falling);
+    try std.testing.expectEqualStrings("3 → 1 · 67% better", falling);
+    node.metric_sample_count = 0;
+    const absent = try cardMetricDetail(allocator, node);
+    defer allocator.free(absent);
+    try std.testing.expectEqual(@as(usize, 0), absent.len);
+}
+
+test "loop card parity pill words indicators and source colors" {
+    var node = parityTestNode();
+    node.presence = @constCast("");
+    for ([_]struct { state: []const u8, word: []const u8, hollow: bool, tint: u32 }{
+        .{ .state = "idle", .word = "IDLE", .hollow = false, .tint = 0 },
+        .{ .state = "running", .word = "RUNNING", .hollow = false, .tint = 0x00FF840A },
+        .{ .state = "waiting", .word = "WAITING", .hollow = true, .tint = 0x00FF840A },
+        .{ .state = "awaitingInput", .word = "NEEDS YOU", .hollow = false, .tint = 0x000A9FFF },
+        .{ .state = "blocked", .word = "BLOCKED", .hollow = true, .tint = 0x000A9FFF },
+        .{ .state = "succeeded", .word = "DONE", .hollow = false, .tint = 0x0058D130 },
+        .{ .state = "failed", .word = "FAILED", .hollow = false, .tint = 0x003A45FF },
+        .{ .state = "stalled", .word = "STALLED", .hollow = false, .tint = 0x00F25ABF },
+        .{ .state = "stopped", .word = "STOPPED", .hollow = true, .tint = 0 },
+    }) |sample| {
+        node.state = @constCast(sample.state);
+        const presentation = cardState(node);
+        try std.testing.expectEqualStrings(sample.word, presentation.word);
+        try std.testing.expectEqual(sample.hollow, presentation.hollow);
+        if (sample.tint != 0) try std.testing.expectEqual(sample.tint, presentation.tint);
+        try std.testing.expect(presentation.fill != presentation.ink);
+        try std.testing.expect(presentation.fill != presentation.tint);
+        try std.testing.expectEqual(std.mem.eql(u8, sample.state, "blocked"), presentation.stroke != null);
+    }
+    for ([_][]const u8{ "succeeded", "blocked", "running" }) |stored| {
+        node.state = @constCast(stored);
+        node.presence = @constCast("awaitingInput");
+        try std.testing.expectEqualStrings("NEEDS YOU", cardState(node).word);
+    }
+    node.state = @constCast("running");
+    node.presence = @constCast("idle");
+    try std.testing.expectEqualStrings("IDLE", cardState(node).word);
+    node.loop_type = @constCast("timeBased");
+    try std.testing.expectEqualStrings("SCHEDULED", cardState(node).word);
+    node.presence = @constCast("busy");
+    try std.testing.expectEqualStrings("RUNNING", cardState(node).word);
+}
+
+fn parityOwnedTextExercise(allocator: std.mem.Allocator, dc: c.HDC) !void {
+    var node = parityTestNode();
+    const long_activity = try std.mem.join(allocator, " ", &.{ "工具 🧪 activity" ** 30, "tail" });
+    defer allocator.free(long_activity);
+    node.activity = long_activity;
+    node.metric_passes = 4;
+    const live = try cardLiveLine(allocator, node);
+    defer allocator.free(live);
+    try std.testing.expect(live.len > 256 and std.mem.endsWith(u8, live, "tail"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(live));
+    const branch = try std.mem.concat(allocator, u8, &.{ "feature/工具/", "long/" ** 40, "🧪/tail" });
+    defer allocator.free(branch);
+    node.worktree_branch = branch;
+    const full = try nodeMetadata(allocator, node, node.worktree_branch, 93600);
+    defer allocator.free(full);
+    try std.testing.expect(std.mem.indexOf(u8, full, branch) != null);
+    try std.testing.expect(full.len > 128);
+    const meta = try cardMetaForWidth(dc, allocator, node, 93600, 218);
+    defer allocator.free(meta);
+    try std.testing.expect(std.mem.startsWith(u8, meta, "Goal · f"));
+    try std.testing.expect(std.mem.endsWith(u8, meta, "tail · Copilot CLI · 1d 2h") or std.mem.endsWith(u8, meta, "l · Copilot CLI · 1d 2h"));
+    try std.testing.expect(std.mem.indexOf(u8, meta, "…") != null);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(meta));
+    try std.testing.expect(try measuredText(dc, allocator, meta) <= 218);
+    node.metric_sample_count = 2;
+    node.metric_direction = @constCast("maximize");
+    node.metric_samples[0] = 0.125;
+    node.metric_samples[1] = 1e150;
+    const metric = try cardMetricDetail(allocator, node);
+    defer allocator.free(metric);
+    try std.testing.expect(metric.len > 128);
+    try std.testing.expect(std.mem.endsWith(u8, metric, "100% better"));
+}
+
+test "loop card parity long Unicode text measured middle elision and allocation cleanup" {
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(dc);
+    const old = try selectCardFont(dc, 10.5, .card_mono);
+    defer _ = c.SelectObject(dc, old);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parityOwnedTextExercise, .{dc});
+    var node = parityTestNode();
+    node.backend = @constCast("a backend identifier too wide to fit without lying");
+    try std.testing.expectError(error.CardMetadataTooWide, cardMetaForWidth(dc, std.testing.allocator, node, 93600, 218));
+}
+
+const ParityDib = struct {
+    dc: c.HDC,
+    bitmap: c.HBITMAP,
+    old_bitmap: c.HGDIOBJ,
+
+    fn init(width: i32, height: i32) !ParityDib {
+        const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+        errdefer _ = c.DeleteDC(dc);
+        var info = std.mem.zeroes(c.BITMAPINFO);
+        info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = c.BI_RGB;
+        var bits: ?*anyopaque = null;
+        const bitmap = c.CreateDIBSection(dc, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.TestBitmapCreationFailed;
+        return .{ .dc = dc, .bitmap = bitmap, .old_bitmap = c.SelectObject(dc, bitmap) };
+    }
+
+    fn deinit(self: ParityDib) void {
+        _ = c.SelectObject(self.dc, self.old_bitmap);
+        _ = c.DeleteObject(self.bitmap);
+        _ = c.DeleteDC(self.dc);
+    }
+
+    fn count(self: ParityDib, bounds: c.RECT, color: u32) usize {
+        var result: usize = 0;
+        var y = bounds.top;
+        while (y < bounds.bottom) : (y += 1) {
+            var x = bounds.left;
+            while (x < bounds.right) : (x += 1) {
+                if (c.GetPixel(self.dc, x, y) == color) result += 1;
+            }
+        }
+        return result;
+    }
+};
+
+test "loop card parity both production renderers paint named pill and mono meta regions" {
+    const allocator = std.testing.allocator;
+    const dib = try ParityDib.init(2200, 500);
+    defer dib.deinit();
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"parity","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"parity-card","title":"A long title must yield to NEEDS YOU","loopType":"goalBased","state":"succeeded","presence":"awaitingInput","activity":"reading tools","backend":"copilotCLI","createdAt":0}],"edges":[]}}}
+    );
+    const node = model.graphs.items[0].nodes.items[0];
+    const state = CanvasState{ .pan_x = 1200 };
+    const viewport = rect(220, 34, 2200, 500);
+    fill(dib.dc, rect(0, 0, 2200, 500), 0);
+    drawNode(dib.dc, allocator, node, 0, null, &.{node}, &.{}, null, &.{}, &.{}, &state);
+    const project = nodeBounds(0, &state);
+    const presentation = cardState(node);
+    const old = try selectCardFont(dib.dc, 10, .card_state);
+    const pill_width = try measuredText(dib.dc, allocator, presentation.word) + 22;
+    _ = c.SelectObject(dib.dc, old);
+    const project_rows = cardTextLayout(project, 1, pill_width);
+    try std.testing.expect(c.GdiFlush() != 0);
+    try std.testing.expect(dib.count(project_rows.pill, presentation.fill) > 20);
+    try std.testing.expect(dib.count(project_rows.pill, presentation.tint) > 0);
+    try std.testing.expect(dib.count(project_rows.title, 0x00F4F4F4) > 0);
+    try std.testing.expect(dib.count(project_rows.live, 0x009F9C9C) > 0);
+    try std.testing.expect(dib.count(project_rows.meta, loopTypeColor(node.loop_type)) == 36);
+    try std.testing.expect(dib.count(project_rows.meta, 0x008C8989) > 0);
+    const project_pill_pixels = dib.count(project_rows.pill, presentation.fill);
+    fill(dib.dc, rect(0, 0, 2200, 500), 0);
+    drawOverview(dib.dc, allocator, &model, viewport, &state);
+    const overview = overviewCardBounds(&model, 0, 0, viewport, &state);
+    const overview_rows = cardTextLayout(overview, 1, pill_width);
+    try std.testing.expect(c.GdiFlush() != 0);
+    try std.testing.expectEqual(project_pill_pixels, dib.count(overview_rows.pill, presentation.fill));
+    try std.testing.expect(dib.count(overview_rows.meta, loopTypeColor(node.loop_type)) == 36);
+    try std.testing.expect(dib.count(overview_rows.meta, 0x008C8989) > 0);
+    try std.testing.expect(dib.count(overview_rows.detail, 0x000A9FFF) == 0);
+}
+
+test "loop card parity production long text and hollow pills paint across zoom and mapped DPI" {
+    const allocator = std.testing.allocator;
+    const dib = try ParityDib.init(2400, 1000);
+    defer dib.deinit();
+    var node = parityTestNode();
+    const activity = try std.mem.concat(allocator, u8, &.{ "工具 🧪 " ** 50, "complete activity tail" });
+    defer allocator.free(activity);
+    const branch = try std.mem.concat(allocator, u8, &.{ "feature/", "branch/工具/" ** 30, "🧪/tail" });
+    defer allocator.free(branch);
+    node.activity = activity;
+    node.worktree_branch = branch;
+    node.created_at = @intCast(@max(0, std.time.timestamp() - 93600));
+    node.state = @constCast("stopped");
+    node.presence = @constCast("");
+    for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
+        const saved = c.SaveDC(dib.dc);
+        defer _ = c.RestoreDC(dib.dc, saved);
+        _ = c.SetMapMode(dib.dc, c.MM_ANISOTROPIC);
+        _ = c.SetWindowExtEx(dib.dc, 96, 96, null);
+        _ = c.SetViewportExtEx(dib.dc, @intCast(dpi), @intCast(dpi), null);
+        for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
+            const state = CanvasState{ .zoom = zoom, .pan_x = 25, .pan_y = 19 };
+            const bounds = nodeBounds(0, &state);
+            fill(dib.dc, rect(0, 0, 1000, 450), 0);
+            roundedCard(dib.dc, bounds, Tokens.loop_card_bottom, false);
+            try drawCardBody(dib.dc, allocator, node, bounds, zoom, .interior, false, false);
+            const old = try selectCardFont(dib.dc, 10 * zoom, .card_state);
+            const pill_width = try measuredText(dib.dc, allocator, "STOPPED") + scaledValue(22, zoom);
+            _ = c.SelectObject(dib.dc, old);
+            const rows = cardTextLayout(bounds, zoom, pill_width);
+            try std.testing.expect(c.GdiFlush() != 0);
+            try std.testing.expect(dib.count(rows.pill, cardState(node).fill) > 0);
+            try std.testing.expect(dib.count(rows.meta, loopTypeColor(node.loop_type)) > 0);
+            const center_x = rows.pill.left + scaledValue(5, zoom) + @divTrunc(scaledValue(6, zoom), 2);
+            const center_y = @divTrunc(rows.pill.top + rows.pill.bottom, 2);
+            try std.testing.expectEqual(cardState(node).fill, c.GetPixel(dib.dc, center_x, center_y));
+        }
+    }
+}
+
+test "minimum zoom keeps compact rows separated inside a 96 point card" {
+    const bounds = nodeBounds(0, &.{ .zoom = 0.55 });
+    const layout = cardTextLayout(bounds, 0.55, 48);
+    try std.testing.expect(layout.title.bottom <= layout.live.top);
+    try std.testing.expect(layout.live.bottom <= layout.detail.top);
+    try std.testing.expect(layout.detail.bottom <= layout.meta.top);
+    try std.testing.expect(layout.meta.bottom < bounds.bottom);
 }
 
 test "bounded text rectangles stop at the owning container" {
@@ -3108,7 +3779,7 @@ test "loop detail status includes explicit and presence-based requests for input
     try std.testing.expectEqual(@as(u32, 0x0058D130), panelStateColor(node));
 }
 
-test "loop card detail prioritizes goal and preserves metadata" {
+test "loop card detail prioritizes activity and keeps metadata card-specific" {
     const node = GraphModel.Node{
         .id = @constCast("node"),
         .title = @constCast("Goal"),
@@ -3120,12 +3791,13 @@ test "loop card detail prioritizes goal and preserves metadata" {
         .model_tier = @constCast("capable"),
         .worktree_branch = @constCast("feature/parity"),
     };
-    try std.testing.expectEqualStrings("All tests pass", nodePrimaryDetail(node));
-    var buffer: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("feature/parity · capable", nodeMetadata(&buffer, node));
+    try std.testing.expectEqualStrings("checking tests", nodePrimaryDetail(node));
+    const meta = try nodeMetadata(std.testing.allocator, node, node.worktree_branch, 0);
+    defer std.testing.allocator.free(meta);
+    try std.testing.expectEqualStrings("Goal · feature/parity", meta);
 }
 
-test "loop card metadata includes backend elapsed and token usage when reported" {
+test "loop card metadata excludes progress and token usage but keeps backend and real age" {
     const node = GraphModel.Node{
         .id = @constCast("node"),
         .title = @constCast("Live"),
@@ -3141,12 +3813,12 @@ test "loop card metadata includes backend elapsed and token usage when reported"
         .metric_direction = @constCast("maximize"),
         .token_usage = 12_345,
     };
-    var buffer: [128]u8 = undefined;
-    const metadata = nodeMetadata(&buffer, node);
-    try std.testing.expect(std.mem.indexOf(u8, metadata, "pass 3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metadata, "metric 1 -> 3 better") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metadata, "copilotCLI") != null);
-    try std.testing.expect(std.mem.indexOf(u8, metadata, "12k tok") != null);
+    const metadata = try nodeMetadata(std.testing.allocator, node, node.worktree_branch, 93600);
+    defer std.testing.allocator.free(metadata);
+    try std.testing.expectEqualStrings("Goal · Copilot CLI · 1d 2h", metadata);
+    const detail = try cardMetricDetail(std.testing.allocator, node);
+    defer std.testing.allocator.free(detail);
+    try std.testing.expectEqualStrings("1 → 3 · 67% better", detail);
 }
 
 test "loop age labels show a just-created daemon loop as recent" {
@@ -3164,7 +3836,9 @@ test "loop age labels show a just-created daemon loop as recent" {
     _ = try model.updateFromFrame(frame);
     const node = model.currentGraph().?.nodes.items[0];
     var buffer: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("0m", nodeMetadata(&buffer, node));
+    const meta = try nodeMetadata(allocator, node, node.worktree_branch, node.created_at.?);
+    defer allocator.free(meta);
+    try std.testing.expectEqualStrings("Turn · 0s", meta);
     const footer = loopDetailFooter(&buffer, node);
     try std.testing.expect(std.mem.startsWith(u8, footer, "started "));
     try std.testing.expect(footer.len > "started ".len);

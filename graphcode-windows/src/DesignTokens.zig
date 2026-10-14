@@ -100,7 +100,7 @@ pub const onboarding_sheet: Color = 0x00262323;
 pub const folder_glyph: Color = 0x00EFA55D;
 
 pub const loop_card_width: i32 = 250;
-pub const loop_card_height: i32 = 106;
+pub const loop_card_height: i32 = 96;
 pub const loop_card_radius: i32 = 11;
 pub const loop_card_stripe: i32 = 4;
 pub const workspace_rail_width: i32 = 212;
