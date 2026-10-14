@@ -3020,21 +3020,18 @@ pub const App = struct {
         };
     }
 
-    fn quickChatTitle(buffer: *[32]u8, unix_seconds: i64) ![]const u8 {
-        const secs: u64 = @intCast(if (unix_seconds < 0) 0 else unix_seconds);
-        const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = secs };
-        const epoch_day = epoch_seconds.getEpochDay();
-        const year_day = epoch_day.calculateYearDay();
-        const month_day = year_day.calculateMonthDay();
+    fn quickChatTitleFromSystemTime(buffer: *[32]u8, local_time: c.SYSTEMTIME) ![]const u8 {
         return std.fmt.bufPrint(buffer, "Chat — {s} {d}", .{
-            quickChatMonthName(month_day.month.numeric()),
-            month_day.day_index + 1,
+            quickChatMonthName(@intCast(local_time.wMonth)),
+            local_time.wDay,
         });
     }
 
     fn createQuickChat(self: *App) void {
         var title_buffer: [32]u8 = undefined;
-        const quick_chat_title = quickChatTitle(&title_buffer, std.time.timestamp()) catch "Chat";
+        var local_time: c.SYSTEMTIME = undefined;
+        c.GetLocalTime(&local_time);
+        const quick_chat_title = quickChatTitleFromSystemTime(&title_buffer, local_time) catch "Chat";
         const backend = if (self.product_settings) |settings| settings.default_backend else "claudeCode";
         self.client.sendCreateQuickChat(quick_chat_title, backend);
         self.setStatus("Creating quick chat...");
@@ -17974,7 +17971,17 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
 
 test "quick chat titles include the creation date" {
     var title_buffer: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("Chat — Jan 1", try App.quickChatTitle(&title_buffer, 0));
+    const local_time = c.SYSTEMTIME{
+        .wYear = 2026,
+        .wMonth = 1,
+        .wDayOfWeek = 0,
+        .wDay = 1,
+        .wHour = 0,
+        .wMinute = 0,
+        .wSecond = 0,
+        .wMilliseconds = 0,
+    };
+    try std.testing.expectEqualStrings("Chat — Jan 1", try App.quickChatTitleFromSystemTime(&title_buffer, local_time));
 }
 
 test "creating a quick chat uses the default backend and a date-stamped title" {
