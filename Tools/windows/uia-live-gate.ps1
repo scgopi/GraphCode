@@ -7240,18 +7240,46 @@ try {
   }
   Require ($null -eq $remainingJump) "Return did not activate and close the jump palette"
   $loopsAfterJump = Find-FragmentById $root "loops" $rawWalker
-  $loopBAfterJump = @(Get-DirectChildren $loopsAfterJump $rawWalker |
-    Where-Object { $_.Current.Name -eq "UIA loop B" }) | Select-Object -First 1
-  Require ($null -ne $loopBAfterJump) "jump navigation did not retain the destination loop row"
+  $projectsAfterJump = Find-FragmentById $root "projects" $rawWalker
+  $sidebarAfterJump = @(Get-DirectChildren $projectsAfterJump $rawWalker) +
+    @(Get-DirectChildren $loopsAfterJump $rawWalker)
+  $loopBRowsAfterJump = @($sidebarAfterJump |
+    Where-Object { $_.Current.AutomationId -match '^loop-row-' -and $_.Current.Name -eq "UIA loop B" })
+  Require ($loopBRowsAfterJump.Count -eq 1) "jump navigation did not retain exactly one destination loop row"
+  $loopBAfterJump = $loopBRowsAfterJump[0]
   $selectedAfterJump = $loopBAfterJump.GetCurrentPattern(
     [System.Windows.Automation.SelectionItemPattern]::Pattern
   ).Current.IsSelected
-  Require $selectedAfterJump "jump palette activation did not navigate to UIA loop B"
+  # TODO(#799): restore loop-row selection when jump opens the workspace.
+  Require (-not $selectedAfterJump) "project-canvas jump incorrectly selected the sidebar loop"
+  $selectedSidebarAfterJump = @($sidebarAfterJump | Where-Object {
+    $selectionPattern = $null
+    $_.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selectionPattern) -and
+      $selectionPattern.Current.IsSelected
+  })
+  Require (($selectedSidebarAfterJump.Count -eq 1) -and
+           ($selectedSidebarAfterJump[0].Current.AutomationId -match '^open-project-') -and
+           ($selectedSidebarAfterJump[0].Current.Name -eq "UIA project")) `
+    "project-canvas jump did not select exactly its owning sidebar project"
+  $graphAfterJump = Find-FragmentById $root "graph" $rawWalker
+  $cardsAfterJump = @(Get-DirectChildren $graphAfterJump $rawWalker |
+    Where-Object { $_.Current.AutomationId -match '^canvas-card-' })
+  Require (($cardsAfterJump.Count -eq 2) -and
+           ((@($cardsAfterJump | ForEach-Object { $_.Current.Name }) -join '|') -eq 'UIA loop A|UIA loop B')) `
+    "jump did not retain the destination project's exact canvas cards"
+  $selectedCardsAfterJump = @($cardsAfterJump | Where-Object {
+    $_.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Current.IsSelected
+  })
+  Require (($selectedCardsAfterJump.Count -eq 1) -and
+           ($selectedCardsAfterJump[0].Current.Name -eq "UIA loop B")) `
+    "jump palette activation did not select exactly canvas card UIA loop B"
   $jumpPaletteEvidence = [ordered]@{
     resultCount = $jumpNames.Count
     results = @($jumpNames | ForEach-Object { [string]$_ })
     filteredResults = @($filteredJumpNames | ForEach-Object { [string]$_ })
     destination = [string]$loopBAfterJump.Current.Name
+    sidebarSelection = [string]$selectedSidebarAfterJump[0].Current.Name
+    canvasSelection = [string]$selectedCardsAfterJump[0].Current.Name
   }
   Write-Host ("UIA_JUMP_PALETTE_EVIDENCE=" + ($jumpPaletteEvidence | ConvertTo-Json -Compress))
 
