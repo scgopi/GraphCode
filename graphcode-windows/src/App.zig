@@ -9259,7 +9259,7 @@ fn onWindowMessage(
                         if (quickChatByID(&app.model, chat_id)) |chat| {
                             var age_buffer: [32]u8 = undefined;
                             const now_timestamp = @max(std.time.timestamp(), @as(i64, 0));
-                            const presentation = TerminalWorkspace.quickChatBarPresentation(
+                            const presentation = TerminalSurface.quickChatBarPresentation(
                                 chat.title,
                                 chat.created_at,
                                 @intCast(now_timestamp),
