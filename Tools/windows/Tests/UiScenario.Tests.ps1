@@ -43,7 +43,12 @@ function Invoke-Validator([hashtable] $arguments = @{}) {
   } finally { $process.Dispose() }
 }
 function Reset-Inputs {
-  if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+  $script:root = Join-Path $scratch ("case-" + $results.Count)
+  $script:fixtureRoot = Join-Path $root "fixtures\synthetic"
+  $script:scenarioPath = Join-Path $root "818-C1.json"
+  $script:dataPath = Join-Path $fixtureRoot "data.txt"
+  $script:manifestPath = Join-Path $fixtureRoot "manifest.json"
+  $script:authorityPath = Join-Path $scratch ("authority-" + $results.Count + ".json")
   $null = New-Item -ItemType Directory -Path $fixtureRoot
   [IO.File]::WriteAllText($dataPath, $baseData, $utf8)
   $script:authority = ConvertFrom-Json $baseAuthority -AsHashtable -DateKind String
@@ -80,6 +85,26 @@ function Test-Contract([string] $name, [scriptblock] $body) {
   & $body
   $results.Add(@{ name = $name; passed = $true })
   Write-Host "PASS: $name"
+}
+function Assert-PathRefusedBeforeRead([string] $path) {
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseFile($validator, [ref]$null, [ref]$errors)
+  Assert-Contract ($errors.Count -eq 0) "validator does not parse"
+  foreach ($definition in $ast.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -cin @("Stop-UiScenario", "Assert-UiScenarioPath")
+    }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
+  $script:pathGuardReads = 0
+  function Get-Item {
+    param([string] $LiteralPath, [switch] $Force)
+    $script:pathGuardReads++
+    throw "Filesystem access forbidden in path guard probe"
+  }
+  $code = $null
+  try { $null = Assert-UiScenarioPath $path } catch { $code = $_.Exception.Data["UiScenarioCode"] }
+  Assert-Contract ($code -ceq "UnsafePath" -and $script:pathGuardReads -eq 0) `
+    "unsafe caller path reached filesystem before refusal"
 }
 
 try {
@@ -132,6 +157,24 @@ try {
     $scenario.authoritySha256 = "a" * 64
     Write-Json $scenarioPath $scenario
     Refuse "ClaimAuthorityMismatch"
+  }
+  foreach ($parameter in @("ScenarioRoot", "AuthorityPath")) {
+    foreach ($path in @('\\server\share\root', '//server/share/root', '\\?\C:\root', 'C:\owned\file.json:stream')) {
+      Test-Contract "$parameter refuses UNC device or ADS before filesystem access: $path" {
+        Assert-PathRefusedBeforeRead $path
+        Refuse "UnsafePath" @{ $parameter = $path }
+      }
+    }
+  }
+  Test-Contract "authority reparse ancestor refused" {
+    $directory = Join-Path $scratch "authority-copy"
+    $null = New-Item -ItemType Directory -Path $directory -Force
+    Copy-Item -LiteralPath $authorityPath -Destination (Join-Path $directory "external-authority.json")
+    $link = Join-Path $scratch "authority-link"
+    $null = New-Item -ItemType Junction -Path $link -Target $directory
+    try {
+      Refuse "UnsafePath" @{ AuthorityPath = (Join-Path $link "external-authority.json") }
+    } finally { Remove-Item -LiteralPath $link -Force }
   }
   Test-Contract "wrong caller hash" { Refuse "ClaimAuthorityMismatch" @{ AuthoritySha256 = "a" * 64 } }
   Test-Contract "missing authority" { Refuse "UnsafePath" @{ AuthorityPath = (Join-Path $scratch "missing.json") } }
@@ -299,6 +342,10 @@ try {
       $authority.claims[0].proofClass = $proof; Save-Inputs; Refuse "ProofClassMismatch"
     }
   }
+  Test-Contract "pure visual claim rejects component scenarios too" {
+    $authority.claims[0].proofClass = "visual"; $scenario.coverage = "component"
+    Save-Inputs; Refuse "ProofClassMismatch"
+  }
   Test-Contract "complete semantic requires every applicable state" {
     $authority.claims[0].states.error.required = $true; Save-Inputs; Refuse "IncompleteSemanticCoverage"
   }
@@ -352,6 +399,10 @@ try {
   }
   Test-Contract "absence anchor must be owned top-level Window" {
     $scenario.cases[0].expected = @(@{ kind = "absent"; target = $target; healthyRoot = $target })
+    Save-Inputs; Refuse "HealthyRootRequired"
+  }
+  Test-Contract "absence cannot use its own target as healthy Window anchor" {
+    $scenario.cases[0].expected = @(@{ kind = "absent"; target = $anchor; healthyRoot = $anchor })
     Save-Inputs; Refuse "HealthyRootRequired"
   }
   Test-Contract "absence with explicit healthy root accepted" {

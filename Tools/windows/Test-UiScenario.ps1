@@ -21,10 +21,10 @@ function Stop-UiScenario([string] $code) {
 
 function Assert-UiScenarioPath([string] $path) {
   try {
-    if ($path.StartsWith("\\") -or $path.Contains(":") -and $path.Substring(2).Contains(":")) {
+    $full = [IO.Path]::GetFullPath($path)
+    if ($full.StartsWith("\\") -or $full.IndexOf(":", 2) -ge 0) {
       Stop-UiScenario "UnsafePath"
     }
-    $full = [IO.Path]::GetFullPath($path)
     $current = $full
     while ($current) {
       $item = Get-Item -LiteralPath $current -Force

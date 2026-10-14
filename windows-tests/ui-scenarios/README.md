@@ -142,6 +142,17 @@ pwsh -NoProfile -File Tools\windows\Test-UiScenario.ps1 `
   -AuthoritySha256 $trustedHash -ClaimId 818-C1
 ```
 
+`pwsh -File` supports a single claim argument here; it does not turn a
+comma-separated native argument into an array. To select multiple claims,
+invoke the script from PowerShell with an actual array:
+
+```powershell
+& .\Tools\windows\Test-UiScenario.ps1 `
+  -ScenarioRoot windows-tests\ui-scenarios `
+  -AuthorityPath C:\trusted-authority\818.json `
+  -AuthoritySha256 $trustedHash -ClaimId @("818-C1", "818-C2")
+```
+
 This repository currently has **zero** real scenarios, so that production
 discovery cannot pass. Do not use synthetic functional fixtures as UI evidence.
 Run the offline contracts instead:
@@ -163,7 +174,7 @@ with a bounded refusal code, without echoing input contents.
 Refusal codes identify parsing (`InvalidJson`, `DocumentRoot`, `DocumentSize`,
 `DuplicateProperty`), schema (`SchemaInvalid`, `UnsafeSchemaReference`),
 binding (`ClaimAuthorityMismatch`, `DuplicateClaim`), discovery/selection
-(`EmptySelection`, `UnknownClaim`, `DuplicateRequest`, `MissingScenario`,
+(`ScenarioRoot`, `EmptySelection`, `UnknownClaim`, `DuplicateRequest`, `MissingScenario`,
 `ScenarioFileIdentity`, `DuplicateClaimFile`), fixtures (`UnsafePath`,
 `UnsafeFixturePath`, `DuplicateFixtureFile`, `FixtureMismatch`,
 `FixtureFileMismatch`), coverage (`ProofClassMismatch`, `StateNotApplicable`,
