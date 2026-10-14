@@ -2574,6 +2574,12 @@ pub const App = struct {
         const workspace = self.workspace orelse return;
         self.bindLoopShellDirectory(workspace, project_path, node_id);
         workspace.scopeToLoop(node_id, project_path, true) catch {
+            if (workspace.boundQuickChatID() != null) {
+                self.surface = .project;
+                self.workspace_controls.panel_visible = false;
+                self.layoutWorkspace();
+                self.layoutEmptyStateControls();
+            }
             self.setStatus("Unable to open selected loop");
             return;
         };
@@ -6875,7 +6881,7 @@ pub const App = struct {
                 self.setStatus(if (self.workspace_controls.rail_visible) "Workspace rail shown" else "Workspace rail hidden");
             },
             .toggle_panel => {
-                self.toggleWorkspacePanelState();
+                if (!self.toggleWorkspacePanelState()) return;
                 self.layoutWorkspace();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
                 self.setStatus(if (self.workspace_controls.panel_visible) "Workspace panel shown" else "Workspace panel hidden");
@@ -7066,14 +7072,15 @@ pub const App = struct {
         };
     }
 
-    fn toggleWorkspacePanelState(self: *App) void {
-        if (self.hasQuickChatWorkspaceScope()) return;
+    fn toggleWorkspacePanelState(self: *App) bool {
+        if (self.hasQuickChatWorkspaceScope()) return false;
         self.workspace_controls.apply(.toggle_panel);
         if (self.workspace_controls.panel_visible) {
             self.surface = .workspace;
         } else if (self.surface == .workspace) {
             self.surface = .project;
         }
+        return true;
     }
 
     fn toggleWorkspaceDetailPanelState(self: *App) void {
@@ -7963,9 +7970,9 @@ pub const App = struct {
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toolbar", graph.project.path, header.title, 4, .{ .logical = header_layout.identity }, false, false) catch return;
                             elements.items[elements.items.len - 1].invokable = false;
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, true) catch return;
+                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
                             if (loop_bar.stop) |stop| {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, true) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
                             }
                             const panel_toggle = if (loop_bar.panel_toggle) |expand|
                                 loopBarRect(expand)
@@ -8018,14 +8025,15 @@ pub const App = struct {
         if (self.surface == .workspace) {
             if (self.workspace) |workspace| {
                 if (self.workspaceQuickChatID()) |chat_id| {
-                    const chat = quickChatByID(&self.model, chat_id) orelse return;
-                    const bar = TerminalSurface.quickChatBarLayout(
-                        if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
-                        client.right,
-                    );
-                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-quick-chat-bar", chat_id, chat.title, 4, .{ .logical = loopBarRect(bar.bar) }, false, false) catch return;
-                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", chat_id, "Restart session", 4, .{ .logical = loopBarRect(bar.restart_session) }, false, true) catch return;
-                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(bar.show_graph) }, false, true) catch return;
+                    if (quickChatByID(&self.model, chat_id)) |chat| {
+                        const bar = TerminalSurface.quickChatBarLayout(
+                            if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                            client.right,
+                        );
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-quick-chat-bar", chat_id, chat.title, 4, .{ .logical = loopBarRect(bar.bar) }, false, false) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", chat_id, "Restart session", 4, .{ .logical = loopBarRect(bar.restart_session) }, false, true) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(bar.show_graph) }, false, true) catch return;
+                    }
                 }
                 for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
                     const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
@@ -19909,8 +19917,8 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 768, 5, 904, 29 }, .{ 1152, 8, 1356, 44 }, .{ 1536, 10, 1808, 58 } } },
         .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 8, 1, 280, 33 }, .{ 12, 2, 420, 50 }, .{ 16, 2, 560, 66 } } },
         .{ .identity = "workspace-loop-bar:loop", .bounds = .{ .{ 220, 34, 928, 80 }, .{ 330, 51, 1392, 120 }, .{ 440, 68, 1856, 160 } } },
-        .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } } },
-        .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } } },
+        .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } }, .eligible = false },
+        .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } }, .eligible = false },
         .{ .identity = "workspace-toggle-panel:control", .bounds = .{ .{ 1100, 46, 1182, 68 }, .{ 1650, 69, 1773, 102 }, .{ 2200, 92, 2364, 136 } } },
         .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 940, 798, 1188, 830 }, .{ 1410, 1197, 1782, 1245 }, .{ 1880, 1596, 2376, 1660 } } },
         .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
@@ -22257,7 +22265,7 @@ test "header detail toggle preserves workspace instead of generic panel navigati
         try std.testing.expect(app.workspace_controls.panel_visible);
         try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
 
-        app.toggleWorkspacePanelState();
+        try std.testing.expect(app.toggleWorkspacePanelState());
         try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
         try std.testing.expect(!app.workspace_controls.panel_visible);
         try std.testing.expectEqual(sidebar_visible, app.workspace_controls.rail_visible);
@@ -22545,7 +22553,7 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
     try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
     try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-show-graph:show-graph")));
     try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
-    app.toggleWorkspacePanelState();
+    try std.testing.expect(!app.toggleWorkspacePanelState());
     app.toggleWorkspaceDetailPanelState();
     try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
     try std.testing.expect(!app.workspace_controls.panel_visible);
@@ -22556,8 +22564,14 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
     app.surface = .workspace;
     app.showInGraph(App.finishShowGraphNative, App.publishAccessibility);
     try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
-    app.toggleWorkspacePanelState();
+    try std.testing.expect(app.hasQuickChatWorkspaceScope());
+    try std.testing.expect(!app.toggleWorkspacePanelState());
     app.toggleWorkspaceDetailPanelState();
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    app.setStatus("Show in Graph remains the current status");
+    app.handleAction(.toggle_panel);
+    try std.testing.expectEqualStrings("Show in Graph remains the current status", app.status_override);
     try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
     try std.testing.expect(!app.workspace_controls.panel_visible);
 }
@@ -22593,6 +22607,80 @@ test "Quick Chat workspace routes away when its bound chat is deleted" {
     try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
     try std.testing.expect(!app.workspace_controls.panel_visible);
     try std.testing.expect(app.workspaceQuickChatID() == null);
+}
+
+test "failed loop rescope routes away from Quick Chat workspace chrome" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat-b"),
+        .title = try allocator.dupe(u8, "Chat B"),
+        .backend = try allocator.dupe(u8, "copilot"),
+    });
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("chat-b", TerminalWorkspace.quick_chat_scope_project, false);
+    try workspace.layout.addTab("chat-shell", false);
+    try temporary.dir.makePath("loop.json");
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    try std.testing.expect(app.isQuickChatWorkspace());
+
+    app.openGraphLoop("C:\\quick-chat-project", "loop");
+
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+    try std.testing.expect(workspace.boundQuickChatID() != null);
+    try std.testing.expect(app.workspaceQuickChatID() == null);
+
+    const expected = [_]DpiExpectedElement{
+        .{ .identity = "workspace-quick-chat-bar:chat-b", .present = false },
+        .{ .identity = "workspace-restart-session:chat-b", .present = false },
+        .{ .identity = "workspace-tab:0", .present = false },
+    };
+    var sink = DpiAccessibilitySink{ .expected = &expected, .dpi_index = 0 };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
+}
+
+test "missing bound Quick Chat does not suppress remaining workspace UIA" {
+    const allocator = std.testing.allocator;
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("deleted-chat", TerminalWorkspace.quick_chat_scope_project, false);
+    try workspace.layout.addTab("chat-shell", false);
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    try std.testing.expectEqualStrings("deleted-chat", app.workspaceQuickChatID().?);
+
+    const expected = [_]DpiExpectedElement{
+        .{ .identity = "workspace-quick-chat-bar:deleted-chat", .present = false },
+        .{ .identity = "workspace-restart-session:deleted-chat", .present = false },
+        .{ .identity = "workspace-show-graph:show-graph", .present = false },
+        .{ .identity = "workspace-tab:0", .present = true, .name = "Shell tab" },
+    };
+    var sink = DpiAccessibilitySink{ .expected = &expected, .dpi_index = 0 };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
 }
 
 test "header UIA identities hash to distinct payloads" {
