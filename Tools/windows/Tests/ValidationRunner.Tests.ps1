@@ -36,6 +36,58 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     throw "RED: multi-project expected actual $prefix rejection"
   }
+  $selectionAst = [Management.Automation.Language.Parser]::ParseInput($gateSource, [ref]$null, [ref]$null)
+  $observer = $selectionAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Get-MultiProjectObservation"
+  }, $true)
+  $selectionCheck = @($observer.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Extent.Text.Contains('$projectSelected -eq') -and $node.Extent.Text.Contains('$loopSelected -eq')
+  }, $true))
+  Assert-MultiCase ($selectionCheck.Count -eq 1) "owner selection predicate is not uniquely source-derived"
+  $ownerSelectionPredicate = [scriptblock]::Create($selectionCheck[0].Extent.Text)
+  foreach ($case in @(
+      @{ surface = "project"; selected = $true; project = $true; loop = $false; accepted = $true },
+      @{ surface = "workspace"; selected = $true; project = $false; loop = $true; accepted = $true },
+      @{ surface = "project"; selected = $true; project = $true; loop = $true; accepted = $false },
+      @{ surface = "workspace"; selected = $true; project = $true; loop = $true; accepted = $false },
+      @{ surface = "project"; selected = $true; project = $false; loop = $true; accepted = $false },
+      @{ surface = "workspace"; selected = $true; project = $true; loop = $false; accepted = $false },
+      @{ surface = "project"; selected = $false; project = $true; loop = $false; accepted = $false },
+      @{ surface = "workspace"; selected = $false; project = $false; loop = $true; accepted = $false },
+      @{ surface = "project"; selected = $false; project = $false; loop = $false; accepted = $true }
+    )) {
+    Invoke-MultiCase ("destination-scoped sidebar owner " + ($case | ConvertTo-Json -Compress)) -Negative:(-not $case.accepted) {
+      $surface = $case.surface; $selected = $case.selected
+      $projectSelected = $case.project; $loopSelected = $case.loop; $matches = $true
+      . $ownerSelectionPredicate
+      Assert-MultiCase ($matches -eq $case.accepted) "sidebar owner selection contradicts its destination"
+      return "Source-derived owner predicate only; exactly-one roster and native UIA remain runtime evidence."
+    }
+  }
+  $selectionCountCheck = @($observer.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Extent.Text.Contains('$selectedSidebarIds.Count -eq 1')
+  }, $true))
+  Assert-MultiCase ($selectionCountCheck.Count -eq 1) "sidebar cardinality predicate is not uniquely source-derived"
+  $sidebarSelectionPredicate = [scriptblock]::Create($selectionCountCheck[0].Extent.Text)
+  foreach ($case in @(
+      @{ ids = @("expected"); accepted = $true },
+      @{ ids = @(); accepted = $false },
+      @{ ids = @("wrong"); accepted = $false },
+      @{ ids = @("expected", "wrong"); accepted = $false },
+      @{ ids = @("expected", "expected"); accepted = $false }
+    )) {
+    Invoke-MultiCase ("exact sidebar selection " + ($case | ConvertTo-Json -Compress)) -Negative:(-not $case.accepted) {
+      $selectedSidebarIds = $case.ids; $expectedSidebarId = "expected"; $matches = $true
+      . $sidebarSelectionPredicate
+      Assert-MultiCase ($matches -eq $case.accepted) "sidebar accepts an absent, wrong or duplicate selection"
+      return "Source-derived count/identity predicate; no live UIA claim."
+    }
+  }
   $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
   $eventEnd = $eventStart.AddSeconds(1)
   $eventProcess = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }

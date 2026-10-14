@@ -4578,7 +4578,11 @@ function Invoke-MultiProjectRenamePhase {
         $matches = $matches -and $projectEvidence.bounds[2] -gt $projectEvidence.bounds[0] -and
           $projectEvidence.bounds[3] -gt $projectEvidence.bounds[1] -and
           $loopEvidence.bounds[2] -gt $loopEvidence.bounds[0] -and $loopEvidence.bounds[3] -gt $loopEvidence.bounds[1]
-        if ($null -ne $selectedOwner) { $matches = $matches -and $projectSelected -eq $selected -and $loopSelected -eq $selected }
+        if ($null -ne $selectedOwner) {
+          $matches = $matches -and
+            $projectSelected -eq ($selected -and $surface -cne "workspace") -and
+            $loopSelected -eq ($selected -and $surface -ceq "workspace")
+        }
       }
       $cardEvidence = $null
       if ($cardRequired) {
@@ -4602,6 +4606,42 @@ function Invoke-MultiProjectRenamePhase {
         sidebarBounds = if ($loopEvidence) { $loopEvidence.bounds } else { @() }
         projectSelected = $projectSelected; loopSelected = $loopSelected; card = $cardEvidence })
     }
+    $loopContainer = Find-FragmentByIdWithRetry $multiRoot "loops" $rawWalker
+    if ($null -eq $loopContainer) { throw "MULTIPROJECT_METADATA: loops container unavailable for sidebar selection" }
+    $loopOwner = Read-MultiProjectOwnershipSnapshot $loopContainer
+    if (($loopOwner.processId -is [int] -or $loopOwner.processId -is [long]) -and
+        $loopOwner.processId -gt 0 -and $loopOwner.processId -ne $multiProcess.Id) {
+      throw "MULTIPROJECT_PRIVACY: loops container has positive foreign PID"
+    }
+    if ($loopOwner.state -cne "available" -or $loopOwner.processId -ne $multiProcess.Id -or $loopOwner.automationId -cne "loops") {
+      throw "MULTIPROJECT_METADATA: loops container ownership unavailable before child capture"
+    }
+    $capturedSnapshots.Add([ordered]@{ element = $loopContainer; snapshot = $loopOwner; phase = "$surface/loops-container" })
+    $selectedSidebarIds = @(
+      $sidebarElements = @($projectElements) + @(Get-DirectChildren $loopContainer $rawWalker)
+      foreach ($element in $sidebarElements) {
+        $sidebarOwner = Read-MultiProjectOwnershipSnapshot $element
+        if (($sidebarOwner.processId -is [int] -or $sidebarOwner.processId -is [long]) -and
+            $sidebarOwner.processId -gt 0 -and $sidebarOwner.processId -ne $multiProcess.Id) {
+          throw "MULTIPROJECT_PRIVACY: sidebar selection has positive foreign PID"
+        }
+        if ($sidebarOwner.state -cne "available" -or $sidebarOwner.processId -ne $multiProcess.Id) {
+          throw "MULTIPROJECT_METADATA: sidebar selection ownership unavailable"
+        }
+        $capturedSnapshots.Add([ordered]@{ element = $element; snapshot = $sidebarOwner; phase = "$surface/sidebar-selection" })
+        $selectionPattern = $null
+        if ($element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$selectionPattern) -and
+            $selectionPattern.Current.IsSelected) { $sidebarOwner.automationId }
+      }
+    )
+    $expectedSidebarId = if ($surface -ceq "overview") { "overview-destination" }
+      elseif ($null -ne $selectedOwner -and $surface -ceq "workspace") {
+        Get-MultiProjectAutomationId "loop" $selectedOwner.path $selectedOwner.node
+      } elseif ($null -ne $selectedOwner -and $surface -ceq "project") {
+        Get-MultiProjectAutomationId "open-project" $selectedOwner.path
+      } else { $null }
+    $matches = $matches -and $selectedSidebarIds.Count -eq 1 -and
+      $selectedSidebarIds[0] -ceq $expectedSidebarId
     $canvasEvidence = if ($graph) { Get-MultiProjectElementEvidence $graph $multiProcess.Id $null "$surface/graph-container-bounds" $null $capturedSnapshots } else { $null }
     $canvas = if ($canvasEvidence) { $canvasEvidence.bounds } else { @() }
     $fragmentProjection = [ordered]@{
@@ -4650,6 +4690,7 @@ function Invoke-MultiProjectRenamePhase {
           ownership = $_.ownership; family = $_.family; observationReady = $_.observationReady; proofLimit = $_.proofLimit }
       })
       matched = $matches; observedOwnerCount = $allProjectRows.Count
+      selectedSidebarIds = $selectedSidebarIds; expectedSidebarId = $expectedSidebarId
       expectedMatchedOwners = @($observed | Where-Object { $null -ne $_.projectName }).Count
       totalObservedProjectRowCount = $allProjectRows.Count; totalObservedCardCount = $allCards.Count
       observedCardCount = $allCards.Count; expectedMatchedCardCount = $cards.Count; owners = $observed.ToArray()
