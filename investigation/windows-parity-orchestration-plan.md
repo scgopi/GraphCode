@@ -41,6 +41,17 @@ runs and screenshots of a running shell all take the desktop. One session
 holds it at a time, and the coordinator hands it out. Unit validation and
 `zig test` run in parallel, each in its own scratch roots.
 
+**Short validation root.** The UIA live-gate preflight refuses sandbox paths
+longer than 81 UTF-16 characters, and `validate.ps1` appends
+`<GUID>\temp\gu-<GUID>` to the root. For the integration part, pass
+`-ShellValidationRoot C:\gc-<lane>`, where `C:\gc-<lane>` is a junction
+pointing at the lane's own `C:\gcs\<lane>\v`. Remove the junction afterwards.
+
+**Provider checkouts.** Seed `winghostty` and `zmx` under the lane's
+`-ProviderRoot` from the read-only local mirrors in `C:\gc-cache\git\*.git`.
+Check out the pinned commit, point `origin` back at GitHub, then run
+bootstrap: it verifies the pin.
+
 **Toolchain.** Each session bootstraps its own tool, provider and scratch
 roots: `C:\gct\<lane>`, `C:\gcp\<lane>` and `C:\gcs\<lane>`. To skip the
 slow Zig download, seed the tool root from the checksum-verified, read-only
