@@ -7762,9 +7762,13 @@ pub const App = struct {
                     self.allocator.free(identity);
                     return;
                 };
+                const workspace_top = if (self.workspace_controls.panel_visible)
+                    inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top
+                else
+                    canvas_rect.top;
                 const workspace_bounds = (AccessibilityBounds{ .logical = .{
                     .left = canvas_rect.left,
-                    .top = inputBounds(client.right, client.bottom, self.workspace_controls).workspace_top,
+                    .top = workspace_top,
                     .right = canvas_rect.right,
                     .bottom = client.bottom,
                 } }).physicalRect(self.dpi);
@@ -17927,6 +17931,22 @@ test "workspace surface: Quick Chats empty canvas button stays at the top right 
 
 test "opening quick chat resets the workspace chrome to the chat and hides the loop panel" {
     const allocator = std.testing.allocator;
+    const Probe = struct {
+        canvas: ?c.RECT = null,
+        workspace: ?Accessibility.DynamicElement = null,
+        checked: bool = false,
+
+        fn syncCanvasBounds(self: *@This(), bounds: c.RECT) void {
+            self.canvas = bounds;
+        }
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.checked = true;
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "quick-chat-workspace:chat-1")) self.workspace = element;
+            }
+        }
+    };
     var app = try overviewTestApp(Dpi.base_dpi);
     defer deinitOverviewTestApp(&app);
     defer app.allocator.free(app.pending_project_path);
@@ -17967,6 +17987,13 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     try std.testing.expectEqualStrings("chat-1", LoopBarProbe.barLoop());
     try std.testing.expect(LoopBarProbe.stop == null);
     try std.testing.expect(LoopBarProbe.panel_toggle == null);
+    var accessibility: Probe = .{};
+    app.syncAccessibilityTo(&accessibility, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(accessibility.checked);
+    const canvas = accessibility.canvas orelse return error.MissingCanvasBounds;
+    try std.testing.expectEqualDeep([4]i32{ 220, 34, 1200, 900 }, [4]i32{ canvas.left, canvas.top, canvas.right, canvas.bottom });
+    const workspace_element = accessibility.workspace orelse return error.MissingQuickChatWorkspace;
+    try std.testing.expectEqualDeep([4]i32{ 220, 34, 1200, 900 }, [4]i32{ workspace_element.left, workspace_element.top, workspace_element.right, workspace_element.bottom });
 }
 
 test "quick chat titles include the creation date" {
