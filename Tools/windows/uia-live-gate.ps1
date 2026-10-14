@@ -5465,7 +5465,7 @@ try {
   Require ($sidebarNavigation.recentRowIds.Count -eq 0) `
     "unopened recent folders were projected as sidebar destinations"
   Assert-Ids $sidebarNavigation.ownerNames @("UIA project", "Temporary remote") "open sidebar owner order"
-  Assert-Ids $sidebarNavigation.sectionNames @("Open local folders", "Open remote repositories") "open sidebar sections"
+  Assert-Ids $sidebarNavigation.sectionNames @("Local Projects", "Remote Repositories") "open sidebar sections"
   Require ($sidebarNavigation.rowBoundsValid) "sidebar destinations, sections, or open owners had empty bounds"
   Require ($sidebarNavigation.controlsValid -and $sidebarNavigation.controlsChecked -gt 0) `
     "sidebar row controls were missing or outside their owner row"
@@ -5521,28 +5521,28 @@ try {
   $null = Assert-FragmentLinks $projects $rawWalker $projectChildIds "RawView Projects"
   $null = Assert-FragmentLinks $projects $controlWalker $projectChildIds "ControlView Projects"
   $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Open local folders"
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
   }) | Select-Object -First 1
-  Require ($null -ne $localSection) "Open local folders section did not expose its section action"
+  Require ($null -ne $localSection) "Local Projects section did not expose its section action"
   $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
   $afterLocalCollapse = Get-SidebarNavigationSnapshot @(Get-DirectChildren $projects $rawWalker)
   Assert-Ids $afterLocalCollapse.ownerNames @("Temporary remote") "owners after local-section collapse"
   $localSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Open local folders"
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Local Projects"
   }) | Select-Object -First 1
   $localSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
   $remoteSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Open remote repositories"
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Remote Repositories"
   }) | Select-Object -First 1
-  Require ($null -ne $remoteSection) "Open remote repositories section did not expose its section action"
+  Require ($null -ne $remoteSection) "Remote Repositories section did not expose its section action"
   $remoteSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
   $afterRemoteCollapse = Get-SidebarNavigationSnapshot @(Get-DirectChildren $projects $rawWalker)
   Assert-Ids $afterRemoteCollapse.ownerNames @("UIA project") "owners after remote-section collapse"
   $remoteSection = @(Get-DirectChildren $projects $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Open remote repositories"
+    $_.Current.AutomationId -match '^sidebar-section-' -and $_.Current.Name -eq "Remote Repositories"
   }) | Select-Object -First 1
   $remoteSection.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   Start-Sleep -Milliseconds 150
@@ -5551,7 +5551,7 @@ try {
   Start-Sleep -Milliseconds 150
   $restoredSidebar = Get-SidebarNavigationSnapshot @(Get-DirectChildren $projects $rawWalker)
   Assert-Ids $restoredSidebar.ownerNames @("UIA project") "restored open sidebar owners"
-  Assert-Ids $restoredSidebar.sectionNames @("Open local folders") "restored sidebar sections"
+  Assert-Ids $restoredSidebar.sectionNames @("Local Projects") "restored sidebar sections"
   Require ($restoredSidebar.recentRowIds.Count -eq 0) "restored sidebar fixture retained unopened recent rows"
 
   $loopRows = @(Get-DirectChildren $loops $rawWalker | Where-Object {

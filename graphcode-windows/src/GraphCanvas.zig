@@ -395,7 +395,7 @@ pub const CardTextLayout = struct {
 };
 
 pub const RenderBounds = struct { left: i32, top: i32, right: i32, bottom: i32 };
-pub const Surface = enum { project, overview, quick_chats, workspace };
+pub const Surface = Sidebar.Surface;
 pub const OverviewHit = struct { graph_index: usize, node_index: usize };
 pub const OverviewLaneAction = enum { open_project, inspect_worktrees };
 pub const overview_worktree_notice_kind = "overview-worktree-notice";
@@ -667,6 +667,7 @@ pub fn paint(
         Sidebar.draw(
             hdc,
             model,
+            surface,
             visible_inspection,
             selected_worktree_path,
             sidebar_scroll,

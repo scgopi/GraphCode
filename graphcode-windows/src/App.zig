@@ -4893,6 +4893,28 @@ pub const App = struct {
         self.presentWorktreeSweep();
     }
 
+    fn sidebarProjectContextTarget(self: *const App, row: Sidebar.Row) ?GraphContextMenu.Target {
+        var project_path: ?[]const u8 = null;
+        var remote = false;
+        switch (row.kind) {
+            .project => if (row.index < self.model.recent_projects.items.len) {
+                const project = self.model.recent_projects.items[row.index];
+                project_path = project.path;
+                remote = project.isRemote();
+            },
+            .open_project => if (row.project_path) |path| {
+                project_path = path;
+                remote = if (Sidebar.graphForProject(&self.model, path)) |graph|
+                    graph.project().isRemote()
+                else
+                    std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
+            },
+            else => {},
+        }
+        const path = project_path orelse return null;
+        return .{ .project = self.projectContextMenuTarget(path, remote) };
+    }
+
     fn handleContextAction(self: *App, action: GraphContextMenu.Action, target: GraphContextMenu.Target) void {
         switch (target) {
             .project => |stable| {
@@ -7793,8 +7815,8 @@ pub const App = struct {
         for (sidebar_rows.items) |row| {
             const bounds = clipSidebarAccessibilityBounds(Sidebar.rowBounds(row), sidebar_bottom);
             switch (row.kind) {
-                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", row.project_name orelse "Open local folders", 1, .{ .logical = bounds }, false, false) catch return,
-                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", row.project_name orelse "Open remote repositories", 1, .{ .logical = bounds }, false, false) catch return,
+                .local_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "local", row.project_name orelse "Local Projects", 1, .{ .logical = bounds }, false, false) catch return,
+                .remote_heading => self.appendAccessibilityElement(&elements, &owned_identities, "sidebar-section", "remote", row.project_name orelse "Remote Repositories", 1, .{ .logical = bounds }, false, false) catch return,
                 .project => {
                     const project = self.model.recent_projects.items[row.index];
                     self.appendAccessibilityElement(&elements, &owned_identities, "project", project.path, project.name, 1, .{ .logical = bounds }, false, false) catch return;
@@ -7808,7 +7830,7 @@ pub const App = struct {
                         row.project_name orelse path,
                         1,
                         .{ .logical = bounds },
-                        self.model.selected_project_path != null and std.mem.eql(u8, self.model.selected_project_path.?, path),
+                        Sidebar.navigationRowSelected(row, self.surface, self.model.selected_project_path),
                         false,
                     ) catch return;
                     if (Sidebar.graphForProject(&self.model, path) != null) {
@@ -7869,7 +7891,7 @@ pub const App = struct {
                     }
                 },
                 .overview => {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, self.surface == .overview, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "overview-destination", "graph", "Graph", 1, .{ .logical = bounds }, Sidebar.navigationRowSelected(row, self.surface, self.model.selected_project_path), false) catch return;
                     if (Sidebar.graphForProject(&self.model, "graphcode://global") != null) {
                         const new_bounds = clipSidebarAccessibilityBounds(Sidebar.newLoopBounds(row), sidebar_bottom);
                         self.appendAccessibilityElement(&elements, &owned_identities, "project-new-loop", "graphcode://global", "New Loop", 1, .{ .logical = new_bounds }, false, false) catch return;
@@ -7890,8 +7912,8 @@ pub const App = struct {
                     }
                 },
                 .quick_chat_overview => {
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-destination", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
-                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, self.surface == .quick_chats, false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-destination", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, Sidebar.navigationRowSelected(row, self.surface, self.model.selected_project_path), false) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, "quick-chats-header", "quick-chats", "Quick Chats", 1, .{ .logical = bounds }, Sidebar.navigationRowSelected(row, self.surface, self.model.selected_project_path), false) catch return;
                     const new_bounds = clipSidebarAccessibilityBounds(Sidebar.newChatBounds(row), sidebar_bottom);
                     self.appendAccessibilityElement(&elements, &owned_identities, "quick-chat-new", "quick-chats", "New Chat", 1, .{ .logical = new_bounds }, false, false) catch return;
                     if (self.model.quick_chats.items.len != 0) {
@@ -10144,32 +10166,12 @@ fn onWindowMessage(
                     app.sidebarContentBottom(client.bottom),
                     &app.sidebar_state,
                 )) |row| {
-                    var project_path: ?[]const u8 = null;
-                    var remote = false;
-                    switch (row.kind) {
-                        .project => if (row.index < app.model.recent_projects.items.len) {
-                            const project = app.model.recent_projects.items[row.index];
-                            project_path = project.path;
-                            remote = project.isRemote();
-                        },
-                        .open_project => if (row.project_path) |path| {
-                            project_path = path;
-                            remote = if (Sidebar.graphForProject(&app.model, path)) |graph|
-                                graph.project().isRemote()
-                            else
-                                std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
-                        },
-                        .overview => {
-                            project_path = "graphcode://global";
-                        },
-                        else => {},
-                    }
-                    if (project_path) |path| {
+                    if (app.sidebarProjectContextTarget(row)) |target| {
                         var screen = c.POINT{ .x = physical_point.x, .y = physical_point.y };
                         _ = c.ClientToScreen(hwnd, &screen);
                         GraphContextMenu.show(
                             hwnd,
-                            .{ .project = app.projectContextMenuTarget(path, remote) },
+                            target,
                             screen.x,
                             screen.y,
                             app,
@@ -11788,6 +11790,7 @@ const SidebarUiaSink = struct {
     rects: [192]c.RECT = undefined,
     names: [192][160]u8 = undefined,
     name_lens: [192]usize = undefined,
+    selected: [192]bool = undefined,
     invokable: [192]bool = undefined,
     scrolls: [192]bool = undefined,
     labels: [192][40]u8 = undefined,
@@ -11811,6 +11814,7 @@ const SidebarUiaSink = struct {
             const len = @min(element.identity.len, self.names[self.count].len);
             @memcpy(self.names[self.count][0..len], element.identity[0..len]);
             self.name_lens[self.count] = len;
+            self.selected[self.count] = element.selected;
             const label_len = @min(element.name.len, self.labels[self.count].len);
             @memcpy(self.labels[self.count][0..label_len], element.name[0..label_len]);
             self.label_lens[self.count] = label_len;
@@ -11840,6 +11844,11 @@ fn countSidebarUiaIdentity(sink: *const SidebarUiaSink, identity: []const u8) us
         count += 1;
     };
     return count;
+}
+
+fn expectSidebarNavigationSelection(sink: *const SidebarUiaSink, identity: []const u8, selected: bool) !void {
+    const index = sink.indexOfName(identity) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(selected, sink.selected[index]);
 }
 
 fn navigationRowForProject(rows: []const Sidebar.Row, kind: Sidebar.RowKind, path: []const u8) ?Sidebar.Row {
@@ -11939,6 +11948,7 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
         const quick_chats_row = for (rows.items) |row| {
             if (row.kind == .quick_chat_overview) break row;
         } else return error.TestUnexpectedResult;
+        try std.testing.expect(app.model.selectProject("C:\\local"));
         var sink: SidebarUiaSink = .{};
         app.syncAccessibilityTo(&sink, client);
         const graph_bounds = try expectSidebarNavigationElement(&sink, "overview-destination:graph", "Graph", graph_row, dpi);
@@ -11946,6 +11956,50 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
         const local_bounds = try expectSidebarNavigationElement(&sink, "open-project:C:\\local", "Local", local_row, dpi);
         const remote_bounds = try expectSidebarNavigationElement(&sink, "open-project:ssh://host/remote", "Remote", remote_row, dpi);
         const loading_bounds = try expectSidebarNavigationElement(&sink, "open-project:codespace://fixture/loading", "Loading remote", loading_row, dpi);
+        const route_cases = [_]struct {
+            surface: GraphCanvas.Surface,
+            quick_chat_workspace: bool,
+            graph: bool,
+            quick_chats: bool,
+            local: bool,
+        }{
+            .{ .surface = .overview, .quick_chat_workspace = false, .graph = true, .quick_chats = false, .local = false },
+            .{ .surface = .quick_chats, .quick_chat_workspace = false, .graph = false, .quick_chats = true, .local = false },
+            .{ .surface = .project, .quick_chat_workspace = false, .graph = false, .quick_chats = false, .local = true },
+            .{ .surface = .workspace, .quick_chat_workspace = false, .graph = false, .quick_chats = false, .local = false },
+            .{ .surface = .workspace, .quick_chat_workspace = true, .graph = false, .quick_chats = false, .local = false },
+        };
+        for (route_cases) |case| {
+            app.surface = case.surface;
+            app.workspace_is_quick_chat = case.quick_chat_workspace;
+            var route_sink: SidebarUiaSink = .{};
+            app.syncAccessibilityTo(&route_sink, client);
+            try expectSidebarNavigationSelection(&route_sink, "overview-destination:graph", case.graph);
+            try expectSidebarNavigationSelection(&route_sink, "quick-chats-destination:quick-chats", case.quick_chats);
+            try expectSidebarNavigationSelection(&route_sink, "open-project:C:\\local", case.local);
+            try expectSidebarNavigationSelection(&route_sink, "open-project:ssh://host/remote", false);
+            try expectSidebarNavigationSelection(&route_sink, "open-project:codespace://fixture/loading", false);
+
+            {
+                var bitmap = try paintSidebarBitmap(&app, client.bottom, false, 0);
+                defer bitmap.deinit();
+                const row_selections = [_]struct { row: Sidebar.Row, selected: bool }{
+                    .{ .row = graph_row, .selected = case.graph },
+                    .{ .row = quick_chats_row, .selected = case.quick_chats },
+                    .{ .row = local_row, .selected = case.local },
+                };
+                for (row_selections) |selection| {
+                    const expected_fill = dibColor(if (selection.selected) 0x003A3A44 else Tokens.workspace_rail);
+                    try std.testing.expectEqual(expected_fill, bitmap.pixel(190, selection.row.top + 10));
+                }
+            }
+        }
+        app.surface = .overview;
+        app.workspace_is_quick_chat = false;
+        const local_section_index = sink.indexOfName("sidebar-section:local") orelse return error.TestUnexpectedResult;
+        const remote_section_index = sink.indexOfName("sidebar-section:remote") orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("Local Projects", sink.label(local_section_index));
+        try std.testing.expectEqualStrings("Remote Repositories", sink.label(remote_section_index));
         for ([_]c.RECT{ graph_bounds, quick_bounds, local_bounds, remote_bounds, loading_bounds }) |bounds| {
             try std.testing.expect(bounds.left >= 0 and bounds.right <= physicalCoordinate(Tokens.sidebar_width, dpi));
             try std.testing.expect(bounds.top >= physicalCoordinate(Sidebar.content_top, dpi));
@@ -11985,6 +12039,18 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
         try std.testing.expect(sink.indexOfName("project-new-loop:C:\\local") != null);
         try std.testing.expect(sink.indexOfName("quick-chat-new:quick-chats") != null);
     }
+}
+
+test "parity sidebar Graph row has no project context menu target" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    var rows = try Sidebar.appendRows(app.allocator, &app.model, null, 0, &app.sidebar_state);
+    defer rows.deinit(app.allocator);
+    const graph_row = for (rows.items) |row| {
+        if (row.kind == .overview) break row;
+    } else return error.TestUnexpectedResult;
+
+    try std.testing.expect(app.sidebarProjectContextTarget(graph_row) == null);
 }
 
 test "parity sidebar navigation Jump and worktree tail scrolling preserve folds" {
@@ -12097,6 +12163,84 @@ test "parity sidebar navigation temporary remote fixture is bounded and idempote
     try std.testing.expectEqual(@as(usize, 2), countSidebarRows(rows.items, .open_project));
     try std.testing.expect(navigationRowForProject(rows.items, .open_project, "C:\\fixture") != null);
     try std.testing.expect(navigationRowForProject(rows.items, .open_project, "ssh://sidebar-fixture.invalid/remote") != null);
+}
+
+test "parity sidebar navigation restores the actual UIA fixture after mutation 22 then 20" {
+    const allocator = std.testing.allocator;
+    const gate_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_GATE");
+    const cwd_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_GATE_CWD");
+    const reset_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_RESET_SIDEBAR");
+    const update_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_UPDATE_AVAILABLE");
+    const ingress_key = std.unicode.utf8ToUtf16LeStringLiteral("GRAPHCODE_UIA_INGRESS_ERROR");
+    var original_environment = try std.process.getEnvMap(allocator);
+    defer original_environment.deinit();
+    defer setWorkspaceTestEnvironment(gate_key, original_environment.get("GRAPHCODE_UIA_GATE")) catch @panic("UIA gate environment restore failed");
+    defer setWorkspaceTestEnvironment(cwd_key, original_environment.get("GRAPHCODE_GATE_CWD")) catch @panic("UIA fixture path environment restore failed");
+    defer setWorkspaceTestEnvironment(reset_key, original_environment.get("GRAPHCODE_UIA_RESET_SIDEBAR")) catch @panic("UIA sidebar reset environment restore failed");
+    defer setWorkspaceTestEnvironment(update_key, original_environment.get("GRAPHCODE_UIA_UPDATE_AVAILABLE")) catch @panic("UIA update environment restore failed");
+    defer setWorkspaceTestEnvironment(ingress_key, original_environment.get("GRAPHCODE_UIA_INGRESS_ERROR")) catch @panic("UIA ingress environment restore failed");
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const fixture_path = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(fixture_path);
+    try setWorkspaceTestEnvironment(gate_key, "1");
+    try setWorkspaceTestEnvironment(cwd_key, fixture_path);
+    try setWorkspaceTestEnvironment(reset_key, null);
+    try setWorkspaceTestEnvironment(update_key, null);
+    try setWorkspaceTestEnvironment(ingress_key, null);
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(app.installUiaFixture(true));
+    const FixtureOwner = struct { path: []u8, name: []u8 };
+    var baseline_owners = std.array_list.Managed(FixtureOwner).init(allocator);
+    defer {
+        for (baseline_owners.items) |owner| {
+            allocator.free(owner.path);
+            allocator.free(owner.name);
+        }
+        baseline_owners.deinit();
+    }
+    for (app.model.open_projects.items) |owner| {
+        const path = try allocator.dupe(u8, owner.path);
+        const name = allocator.dupe(u8, owner.name) catch |err| {
+            allocator.free(path);
+            return err;
+        };
+        baseline_owners.append(.{ .path = path, .name = name }) catch |err| {
+            allocator.free(path);
+            allocator.free(name);
+            return err;
+        };
+    }
+
+    app.mutateUiaFixture(22);
+    try std.testing.expectEqual(baseline_owners.items.len + 1, app.model.open_projects.items.len);
+    var temporary_owner_count: usize = 0;
+    for (app.model.open_projects.items) |owner| {
+        if (!std.mem.eql(u8, owner.path, "ssh://sidebar-fixture.invalid/remote")) continue;
+        temporary_owner_count += 1;
+        try std.testing.expectEqualStrings("Temporary remote", owner.name);
+    }
+    try std.testing.expectEqual(@as(usize, 1), temporary_owner_count);
+    var temporary_sink: SidebarUiaSink = .{};
+    app.syncAccessibilityTo(&temporary_sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(temporary_sink.indexOfName("open-project:ssh://sidebar-fixture.invalid/remote") != null);
+
+    app.mutateUiaFixture(20);
+    try std.testing.expectEqual(Sidebar.Surface.project, app.surface);
+    try std.testing.expectEqual(baseline_owners.items.len, app.model.open_projects.items.len);
+    for (baseline_owners.items, app.model.open_projects.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected.path, actual.path);
+        try std.testing.expectEqualStrings(expected.name, actual.name);
+    }
+    try std.testing.expectEqualStrings(app.uia_fixture_project_path, app.model.graph.?.project.path);
+    try std.testing.expectEqual(@as(usize, 2), app.model.quick_chats.items.len);
+    try std.testing.expectEqual(@as(usize, 2), app.model.recent_projects.items.len);
+    var restored_sink: SidebarUiaSink = .{};
+    app.syncAccessibilityTo(&restored_sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    try std.testing.expect(restored_sink.indexOfName("open-project:ssh://sidebar-fixture.invalid/remote") == null);
 }
 
 fn rectIsEmpty(bounds: c.RECT) bool {
@@ -12240,6 +12384,7 @@ fn paintedIngressFooter(app: *App, sidebar_bottom: i32, update: bool) !?c.RECT {
     Sidebar.draw(
         hdc,
         &app.model,
+        app.surface,
         app.currentWorktreeInspection(),
         "",
         0,
@@ -12603,6 +12748,7 @@ fn paintSidebarBitmap(app: *App, viewport_bottom: i32, update: bool, scroll: i32
     Sidebar.draw(
         dc,
         &app.model,
+        app.surface,
         app.currentWorktreeInspection(),
         "",
         scroll,
@@ -20577,7 +20723,9 @@ fn deinitOverviewTestApp(app: *App) void {
     app.client.deinit();
     app.freeLoopProbes();
     app.freeLoopHeld();
+    if (app.uia_fixture_project_path.len != 0) app.allocator.free(app.uia_fixture_project_path);
     app.model.deinit();
+    app.releaseUiaFixtureModelArena();
     app.sidebar_state.deinit();
     app.declared_entry_ids.deinit();
     app.kept_worktree_paths.deinit();

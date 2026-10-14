@@ -365,13 +365,16 @@ the workspace identity region remains separate from the terminal's physical tabs
 
 ### Sidebar scrolling and short windows
 
-Graph and Quick Chats stay first, followed by the open local-folder and remote-
-repository groups. Unopened recent folders remain available from File > Add
-Folder > Recent Folders rather than appearing as sidebar destinations. Sidebar
-rows, Needs you, and Activity scroll beneath the fixed window header and above
-the footer (status line, update banner, inline error footer). What is painted,
-what UIA publishes, and what a click hits are the same rect, clipped to that
-scroll region; the right-hand Activity control sits inside the 220-DIP rail.
+Graph and Quick Chats stay first, followed by the “Local Projects” and “Remote
+Repositories” groups. Unopened recent folders remain available from File > Add
+Folder > Recent Folders rather than appearing as sidebar destinations. The
+normal-sidebar parity claim covers these navigation destinations only; the
+existing Needs-you and Worktrees sections are supplementary Windows content.
+The recorded Activity bottom strip is present, not absent. Sidebar rows, Needs
+you, and Activity scroll beneath the fixed window header and above the footer
+(status line, update banner, inline error footer). What is painted, what UIA
+publishes, and what a click hits are the same rect, clipped to that scroll
+region; the right-hand Activity control sits inside the 220-DIP rail.
 
 Keyboard and assistive clients reach offscreen rows through UIA, not a hidden
 shortcut: each sidebar list (Projects, Loops, Worktrees) exposes a vertical-only

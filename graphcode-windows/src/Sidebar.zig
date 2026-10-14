@@ -172,6 +172,7 @@ fn toggleSet(allocator: std.mem.Allocator, set: *std.StringHashMapUnmanaged(void
 pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
+    surface: Surface,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
     scroll_offset: i32,
@@ -208,11 +209,11 @@ pub fn draw(
         switch (row.kind) {
             .local_heading => {
                 drawDisclosureIcon(hdc, rect(18, row.top + 6, 30, row.top + 18), state.local_collapsed, 0x007A7A7A);
-                drawTextRect(hdc, allocator, "OPEN LOCAL", rect(36, row.top, 168, row.top + 20), 10, 0x007A7A7A, loop_text_format);
+                drawTextRect(hdc, allocator, row.project_name orelse "Local Projects", rect(36, row.top, 198, row.top + 20), 10, 0x007A7A7A, loop_text_format);
             },
             .remote_heading => {
                 drawDisclosureIcon(hdc, rect(18, row.top + 6, 30, row.top + 18), state.remote_collapsed, 0x007A7A7A);
-                drawTextRect(hdc, allocator, "OPEN REMOTE", rect(36, row.top, 168, row.top + 20), 10, 0x007A7A7A, loop_text_format);
+                drawTextRect(hdc, allocator, row.project_name orelse "Remote Repositories", rect(36, row.top, 198, row.top + 20), 10, 0x007A7A7A, loop_text_format);
             },
             .project => {
                 const project = model.recent_projects.items[row.index];
@@ -220,11 +221,8 @@ pub fn draw(
                 drawText(hdc, allocator, project.name, 34, row.top, 13, 0x00E6E6E6);
             },
             .overview => {
-                const selected = if (model.selected_project_path) |selected_path|
-                    std.mem.eql(u8, selected_path, global_project_path)
-                else
-                    false;
-                if (selected) fill(hdc, bounds, 0x003A3A44);
+                if (navigationRowSelected(row, surface, model.selected_project_path))
+                    fill(hdc, bounds, 0x003A3A44);
                 drawOutlineIcon(hdc, .graph, rect(18, row.top + 8, 32, row.top + 22), 0x007AB8FF);
                 drawTextRect(hdc, allocator, "Graph", rect(40, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom and row.has_graph) {
@@ -233,10 +231,7 @@ pub fn draw(
                 }
             },
             .open_project => if (row.project_path) |path| {
-                const selected = if (model.selected_project_path) |selected_path|
-                    std.mem.eql(u8, selected_path, path)
-                else
-                    false;
+                const selected = navigationRowSelected(row, surface, model.selected_project_path);
                 if (selected) fill(hdc, bounds, 0x003A3A44);
                 const graph = graphForProject(model, path);
                 const remote = if (graph) |value| value.project().isRemote() else std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
@@ -288,11 +283,13 @@ pub fn draw(
                 drawText(hdc, allocator, detail orelse reason(entry), 24, row.top + 14, 10, if (WorktreeStatus.decision(entry) == .reclaimable) 0x0078D7A8 else 0x00FFCD7A);
             },
             .quick_chat_overview => {
+                const selected = navigationRowSelected(row, surface, model.selected_project_path);
+                if (selected) fill(hdc, bounds, 0x003A3A44);
                 if (state.chats_collapsed) {
                     drawDisclosureIcon(hdc, rect(18, row.top + 9, 30, row.top + 21), true, 0x007A7A7A);
                 }
                 drawOutlineIcon(hdc, .chat, rect(34, row.top + 8, 48, row.top + 22), 0x007A7A7A);
-                drawTextRect(hdc, allocator, "Quick Chats", rect(54, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
+                drawTextRect(hdc, allocator, "Quick Chats", rect(54, row.top + 5, 172, row.top + 27), 13, if (selected) 0x00FFFFFF else 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom) {
                     drawPlusIcon(hdc, newChatBounds(row), 0x00B8B8B8);
                     if (row.has_children) drawDisclosureIcon(hdc, chatsDisclosureBounds(row), state.chats_collapsed, 0x00B8B8B8);
@@ -558,6 +555,7 @@ fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
     return std.fmt.allocPrint(allocator, "{d}d", .{@divTrunc(seconds, 86400)});
 }
 
+pub const Surface = enum { project, overview, quick_chats, workspace };
 pub const RowKind = enum { local_heading, remote_heading, project, open_project, overview, loop, worktree, quick_chat_overview, quick_chat };
 pub const Row = struct {
     kind: RowKind,
@@ -599,6 +597,18 @@ pub const RowControl = enum { add_loop, disclosure, new_chat, chats_disclosure }
 const navigation_row_height: i32 = 32;
 const section_gap: i32 = 12;
 const global_project_path = "graphcode://global";
+
+pub fn navigationRowSelected(row: Row, surface: Surface, selected_project_path: ?[]const u8) bool {
+    return switch (row.kind) {
+        .overview => surface == .overview,
+        .quick_chat_overview => surface == .quick_chats,
+        .open_project => surface == .project and
+            row.project_path != null and
+            selected_project_path != null and
+            std.mem.eql(u8, row.project_path.?, selected_project_path.?),
+        else => false,
+    };
+}
 
 pub fn graphForProject(model: *const GraphModel.Model, path: []const u8) ?ProjectGraph {
     if (model.graphFor(path)) |graph| return .{ .summary = graph };
@@ -713,13 +723,13 @@ pub fn appendRows(
     top += section_gap;
 
     if (hasOpenOwnerInSection(model, .local)) {
-        try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top, .project_name = "Open local folders" });
+        try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top, .project_name = "Local Projects" });
         top += 24;
         if (!local_collapsed) top = try appendOpenOwners(allocator, &rows, model, .local, top, state);
         top += section_gap;
     }
     if (hasOpenOwnerInSection(model, .remote)) {
-        try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top, .project_name = "Open remote repositories" });
+        try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top, .project_name = "Remote Repositories" });
         top += 24;
         if (!remote_collapsed) top = try appendOpenOwners(allocator, &rows, model, .remote, top, state);
         top += section_gap;
@@ -2292,7 +2302,7 @@ test "sidebar draw clips rows to the content viewport and keeps status text insi
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
     const long_status = "S" ** 120;
-    draw(hdc, &model, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     const content_bottom = contentViewportBottom(viewport_bottom, false, false);
     const status = statusTextRect(viewport_bottom, false, false);
@@ -2339,7 +2349,7 @@ test "sidebar paints an open project whose daemon name is empty" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
 }
 
 fn manyLoopModel(allocator: std.mem.Allocator, loops: usize) !GraphModel.Model {
@@ -2399,7 +2409,7 @@ test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     // The goalBased accent bar is only ever painted by loop rows.
     const accent: u32 = 0x0048C78E;

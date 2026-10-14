@@ -3227,6 +3227,9 @@ try {
   }
   . ([scriptblock]::Create($sidebarOracleHelper.Extent.Text))
   & {
+    $sidebarFixtureCount = 0
+    $sidebarPositiveCount = 0
+    $sidebarNegativeCount = 0
     function New-SidebarNavigationElement(
       [string] $automationId,
       [string] $name,
@@ -3249,9 +3252,9 @@ try {
     $sidebarFixture = @(
       (New-SidebarNavigationElement "overview-destination:graph" "Graph" 12 20 220 52),
       (New-SidebarNavigationElement "quick-chats-destination:quick-chats" "Quick Chats" 12 56 220 88),
-      (New-SidebarNavigationElement "sidebar-section-1" "Open local folders" 12 100 220 121),
+      (New-SidebarNavigationElement "sidebar-section-1" "Local Projects" 12 100 220 121),
       (New-SidebarNavigationElement "open-project-1" "UIA project" 12 121 220 153),
-      (New-SidebarNavigationElement "sidebar-section-2" "Open remote repositories" 12 168 220 189),
+      (New-SidebarNavigationElement "sidebar-section-2" "Remote Repositories" 12 168 220 189),
       (New-SidebarNavigationElement "open-project-2" "Temporary remote" 12 192 220 224),
       (New-SidebarNavigationElement "overview-destination" "Graph" 12 17 220 49),
       (New-SidebarNavigationElement "quick-chats-destination" "Quick Chats" 12 53 220 85),
@@ -3267,12 +3270,14 @@ try {
         ($initial.destinationNames -join "|") -cne "Graph|Quick Chats" -or
         $initial.ownerNames.Count -ne 2 -or
         ($initial.ownerNames -join "|") -cne "UIA project|Temporary remote" -or
-        ($initial.sectionNames -join "|") -cne "Open local folders|Open remote repositories" -or
+        ($initial.sectionNames -join "|") -cne "Local Projects|Remote Repositories" -or
         $initial.recentRowIds.Count -ne 0 -or
         -not $initial.rowBoundsValid -or -not $initial.controlsValid -or
         $initial.controlsChecked -ne 6) {
       throw "RED: Sidebar navigation oracle missed destination order, open owners, section names, or contained controls"
     }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
     $localCollapsed = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -notin @(
         "open-project-1",
@@ -3284,6 +3289,8 @@ try {
     if (($afterLocalCollapse.ownerNames -join "|") -cne "Temporary remote") {
       throw "RED: Sidebar navigation oracle did not isolate local owner collapse"
     }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
     $remoteCollapsed = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -ne "open-project-2"
     })
@@ -3291,6 +3298,8 @@ try {
     if (($afterRemoteCollapse.ownerNames -join "|") -cne "UIA project") {
       throw "RED: Sidebar navigation oracle did not isolate remote owner collapse"
     }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
     $restoredFixture = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -notin @(
         "sidebar-section-2",
@@ -3299,16 +3308,20 @@ try {
     })
     $restored = Get-SidebarNavigationSnapshot $restoredFixture
     if (($restored.ownerNames -join "|") -cne "UIA project" -or
-        ($restored.sectionNames -join "|") -cne "Open local folders" -or
+        ($restored.sectionNames -join "|") -cne "Local Projects" -or
         $restored.recentRowIds.Count -ne 0) {
       throw "RED: Sidebar navigation oracle accepted a temporary remote owner after fixture restore"
     }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
     $recentMutation = Get-SidebarNavigationSnapshot @(
       $sidebarFixture + (New-SidebarNavigationElement "project-row-recent" "Recent folder" 12 228 220 260)
     )
     if ($recentMutation.recentRowIds.Count -ne 1) {
       throw "RED: Sidebar navigation oracle failed to detect a projected unopened recent folder"
     }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
     $clippedMutation = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -ne "project-new-loop-5"
     }) + (New-SidebarNavigationElement "project-new-loop-5" "New Loop" 174 121 228 153)
@@ -3316,6 +3329,8 @@ try {
     if ($clipped.controlsValid) {
       throw "RED: Sidebar navigation oracle accepted a row control extending beyond its owner"
     }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
     $reorderedOwners = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -notin @(
         "open-project-1",
@@ -3329,8 +3344,14 @@ try {
     if (($reordered.ownerNames -join "|") -cne "Temporary remote|UIA project") {
       throw "RED: Sidebar navigation oracle failed to preserve the owner order evidence"
     }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
+    if ($sidebarFixtureCount -ne 7 -or $sidebarPositiveCount -ne 5 -or $sidebarNegativeCount -ne 2) {
+      throw "RED: Sidebar navigation fixture execution count changed unexpectedly"
+    }
+    Write-Host ("SIDEBAR_NAVIGATION_FIXTURES={0} ({1} positive, {2} negative; App 22->20 restoration has a separate hidden test)" -f `
+      $sidebarFixtureCount, $sidebarPositiveCount, $sidebarNegativeCount)
   }
-  Write-Host "SIDEBAR_NAVIGATION_FIXTURES=7 (5 positive, 2 negative; includes temporary fixture restoration)"
   foreach ($helperName in @(
       "Protect-UiaStartupDiagnosticText",
       "Get-UiaStartupDiagnosticValue",
