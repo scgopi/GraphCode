@@ -68,6 +68,7 @@ function Assert-CapWorkerDeadline {
     param([Parameter(Mandatory)][string]$Stage)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if (@(Get-CapTraceFailures).Count -gt 0) { throw 'Capture tracing failed; worker must stop and clean up.' }
     if ([DateTime]::UtcNow -ge $leaseDeadlineUtc) { throw "Reserved worker deadline reached at stage '$Stage'." }
 }
 
@@ -146,8 +147,13 @@ function Assert-CapAcceptedInputs {
         throw 'The copied job does not carry the exact-head green CI, focused-runner, and accepted narrow-review evidence.'
     }
     $equivalenceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\g1-rebase-equivalence.json')).Hash
+    $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath $fixturePath `
+        -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
+        -ExpectedMappingSha256 $auth.fixtureMappingSha256 `
+        -ExpectedSourceSha256 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA' `
+        -OriginalRoot 'C:\gcs\ib\captures'
     $expectedHashes = @{
-        fixture = '18C88296DDADE327DB0E461EFAC15394A8905E767E30F32307F26AE120220F0D'
+        fixture = $mappingProof.FixtureSha256
         fixtureSource = 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA'
         fixtureMapping = $auth.fixtureMappingSha256
         peer = '1331A36866E3B90BE7156A83AFFB65AAB1112DEC4425E9C9176399199ED91F11'
@@ -174,30 +180,6 @@ function Assert-CapAcceptedInputs {
     }
     foreach ($key in $expectedHashes.Keys) {
         if ($actual[$key] -ne $expectedHashes[$key]) { throw "Cap-owned $key input hash changed: $($actual[$key])." }
-    }
-    $mapping = Get-Content -LiteralPath (Join-Path $root 'reports\fixture-mapping.json') -Raw | ConvertFrom-Json
-    if ($mapping.sourcePath -cne 'C:\gcs\ib\captures\fixture.json' -or
-        $mapping.sourceSha256 -ne $expectedHashes.fixtureSource -or
-        $mapping.copiedSourcePath -cne (Join-Path $root 'inputs\fixture-source.json') -or
-        $mapping.rewrittenFixturePath -cne $fixturePath -or
-        $mapping.rewrittenFixtureSha256 -ne $expectedHashes.fixture -or
-        $mapping.pathPrefixMap.from -cne 'C:\gcs\ib\captures' -or
-        $mapping.pathPrefixMap.to -cne (Join-Path $root 'fixtures\projects') -or
-        $mapping.graphs -ne 2 -or $mapping.topLevelNodes -ne 10 -or -not $mapping.pathsRewritten) {
-        throw 'B fixture source-to-cap path mapping does not match the recorded read-only input provenance.'
-    }
-    $sourceFixture = Get-Content -LiteralPath (Join-Path $root 'inputs\fixture-source.json') -Raw | ConvertFrom-Json
-    $mappedFixture = Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json
-    foreach ($index in 0..1) {
-        $sourceProject = $sourceFixture.graphs[$index].project
-        $mappedProject = $mappedFixture.graphs[$index].project
-        $expectedSourcePath = Join-Path 'C:\gcs\ib\captures' $sourceProject.name
-        $expectedMappedPath = Join-Path (Join-Path $root 'fixtures\projects') $sourceProject.name
-        if ($sourceProject.path -cne $expectedSourcePath -or $mappedProject.name -cne $sourceProject.name -or
-            $mappedProject.path -cne $expectedMappedPath -or
-            $mappedFixture.graphs[$index].nodes.Count -ne $sourceFixture.graphs[$index].nodes.Count) {
-            throw "B fixture mapping changed graph identity, owned project path, or node count at index $index."
-        }
     }
     $script:fixtureSourceHash = $actual.fixtureSource
     $script:fixtureMappingHash = $actual.fixtureMapping
@@ -625,7 +607,7 @@ function Start-CapGraphCodeApp {
     if ($rehearsal) { $role = 'rehearsal-target' }
     $workingDirectory = if ($rehearsal) { $Roots.Peer } else { Join-Path $root 'fixtures\projects\Alpha' }
     $run = Start-CapManagedProcess -FilePath $binaryPath -ArgumentList ([string[]]@($arguments)) `
-        -WorkingDirectory $workingDirectory -Role $role -Environment $envMap
+        -WorkingDirectory $workingDirectory -Role $role -Environment $envMap -CloseStdin:$rehearsal
     $runs.Add($run)
     $appRun = New-CapAppRunRecord -Run $run -Phase $Phase -SessionPrefix $SessionPrefix
     $applicationRuns.Add($appRun)
@@ -956,6 +938,7 @@ function Invoke-CapActionsScene {
 function Invoke-CapRealLaunchRehearsal {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    Assert-CapWorkerDeadline 'starting offline real launch rehearsal'
     $roots = Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory 'rehearsal-target')
     $app = Start-CapGraphCodeApp -Roots $roots -Phase 'before' -PipeName 'NOT_USED_NO_DESKTOP' `
         -SessionPrefix 'NOT_USED_NO_DESKTOP'
@@ -1164,6 +1147,9 @@ try {
     foreach ($identity in $descendantIdentities) {
         if (-not [CapNative]::IsExited($identity.Process.Handle, $identity.Pid)) {
             $cleanupFailures.Add("Owned descendant survived final cleanup: role=$($identity.Role) pid=$($identity.Pid).")
+        }
+        if (Get-Command Get-CapTraceFailures -ErrorAction SilentlyContinue) {
+            foreach ($failure in @(Get-CapTraceFailures)) { $cleanupFailures.Add("Call tracing failed: $($failure.failure)") }
         }
     }
     $ownedProcessSurvivors = @(

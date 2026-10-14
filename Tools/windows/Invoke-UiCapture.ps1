@@ -25,6 +25,7 @@ $equivalenceHashExpected = '0D3C236B736DC38DCFDB36166F7593313F10A27A716DAD39664E
 $preflight08HashExpected = '5B3F075635007C70D7D82C5759A144B56E2D5B37074525943F6B12354776B349'
 $fixtureMappingHashExpected = if ($FixtureMappingSha256) { $FixtureMappingSha256.ToUpperInvariant() }
     else { '962A8C7F98025FD3C523DF842E0E6E5E372CE3E37A81B3977A3039B3CD420E1F' }
+$fixtureHashExpected = $null
 $tracked = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
 $untrackedJournalEntries = [Collections.Generic.List[object]]::new()
 $workerRun = $null
@@ -65,7 +66,10 @@ $startedUtc = [DateTime]::UtcNow
 
 function Write-CapSupervisorLog {
     param([Parameter(Mandatory)][string]$Message)
-    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) {
+        try { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+        catch { $cleanupFailures.Add("Supervisor log trace failed: $($_.Exception.ToString())") }
+    }
 
     Write-Output ('{0:o} {1}' -f [DateTime]::UtcNow, $Message)
 }
@@ -168,8 +172,14 @@ function Assert-CapGreenJob {
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $equivalencePath).Hash -ne $equivalenceHashExpected) {
         throw 'G1 source/binary equivalence proof changed.'
     }
+    $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath (Join-Path $root 'fixtures\fixture.json') `
+        -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
+        -ExpectedMappingSha256 $fixtureMappingHashExpected `
+        -ExpectedSourceSha256 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA' `
+        -OriginalRoot 'C:\gcs\ib\captures'
+    $script:fixtureHashExpected = $mappingProof.FixtureSha256
     $inputHashes = @{
-        fixture = @((Join-Path $root 'fixtures\fixture.json'), '18C88296DDADE327DB0E461EFAC15394A8905E767E30F32307F26AE120220F0D')
+        fixture = @((Join-Path $root 'fixtures\fixture.json'), $fixtureHashExpected)
         fixtureSource = @((Join-Path $root 'inputs\fixture-source.json'), 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA')
         fixtureMapping = @((Join-Path $root 'reports\fixture-mapping.json'), $fixtureMappingHashExpected)
         peer = @((Join-Path $root 'inputs\offline-peer-source.ps1'), '1331A36866E3B90BE7156A83AFFB65AAB1112DEC4425E9C9176399199ED91F11')
@@ -180,16 +190,6 @@ function Assert-CapGreenJob {
     foreach ($key in $inputHashes.Keys) {
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputHashes[$key][0]).Hash
         if ($actual -ne $inputHashes[$key][1]) { throw "Cap-owned $key input hash mismatch: $actual" }
-    }
-    $mapping = Get-Content -LiteralPath $inputHashes.fixtureMapping[0] -Raw | ConvertFrom-Json
-    if ($mapping.sourceSha256 -ne $inputHashes.fixtureSource[1] -or
-        $mapping.copiedSourcePath -cne $inputHashes.fixtureSource[0] -or
-        $mapping.rewrittenFixturePath -cne $inputHashes.fixture[0] -or
-        $mapping.rewrittenFixtureSha256 -ne $inputHashes.fixture[1] -or
-        $mapping.pathPrefixMap.from -cne 'C:\gcs\ib\captures' -or
-        $mapping.pathPrefixMap.to -cne (Join-Path $root 'fixtures\projects') -or
-        $mapping.graphs -ne 2 -or $mapping.topLevelNodes -ne 10 -or -not $mapping.pathsRewritten) {
-        throw 'B fixture source-to-cap mapping proof changed.'
     }
     if ($job.fixture.sha256 -ne $inputHashes.fixtureSource[1] -or
         $job.binaries.before.sha256 -ne $inputHashes.before[1] -or
@@ -363,6 +363,7 @@ function Assert-CapLease {
     $leasePath = Assert-CapSupervisorPath $LeaseReceiptPath
     if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) { throw "Coordinator lease receipt is missing: $leasePath" }
     $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
+    $script:leaseHash = $leaseHash
     if ($leaseHash -ne $LeaseReceiptSha256.ToUpperInvariant()) { throw 'Coordinator lease receipt hash mismatch.' }
     $lease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json -DateKind String
     $expectedStatus = if ($rehearsal) { 'REHEARSAL_ONLY' } else { 'GRANTED' }
@@ -627,7 +628,7 @@ function Assert-CapWorkerManifest {
         $manifest.supervisorSha256 -ne $supervisorHash -or
         $manifest.preflightReceiptSha256 -ne $preflightHash -or
         $manifest.fixtureSourceSha256 -ne $job.fixture.sha256 -or
-        $manifest.fixtureSha256 -ne '18C88296DDADE327DB0E461EFAC15394A8905E767E30F32307F26AE120220F0D' -or
+        $manifest.fixtureSha256 -ne $fixtureHashExpected -or
         $manifest.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or
         $manifest.zmxSeeds.Count -ne 2 -or $invalidSeeds.Count -ne 0 -or
         ($seedPhases -join ',') -cne 'after,before' -or
@@ -727,7 +728,7 @@ try {
     if ($rehearsal) {
         if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -ne $false -or
             $job.rehearsalTarget.arguments -isnot [array] -or
-            $job.rehearsalTarget.behavior -notin @('normal', 'nonzero', 'timeout', 'primary-cleanup', 'receipt-block')) {
+            $job.rehearsalTarget.behavior -notin @('normal', 'nonzero', 'timeout', 'primary-cleanup', 'receipt-block', 'trace-readonly')) {
             throw 'Expected an explicitly no-desktop rehearsal job with an exact target argument vector.'
         }
         $targetPath = Assert-CapSupervisorPath $job.rehearsalTarget.path
@@ -799,6 +800,7 @@ try {
     Write-CapSupervisorLog "LEASE_ACCEPTED lease=$($lease.leaseId) head=$($job.head) remaining=$([Math]::Round(($leaseExpiresUtc - [DateTime]::UtcNow).TotalSeconds, 1))s reserve=90s"
     Write-CapSupervisorLog "STARTING_WORKER path=$workerPath sha256=$workerHash authorization=$authorizationHash"
 
+    if (@(Get-CapTraceFailures).Count -gt 0) { throw 'Capture tracing failed before worker launch.' }
     $pwshPath = Join-Path $PSHOME 'pwsh.exe'
     $workerLaunchAttempted = $true
     $workerRun = Start-CapManagedProcess -FilePath $pwshPath -ArgumentList @(
@@ -808,6 +810,7 @@ try {
     ) -WorkingDirectory $runDirectory -Role 'b-capture-worker'
     $lastJournalRead = [DateTime]::MinValue
     while ([DateTime]::UtcNow -lt $deadlineUtc) {
+        if (@(Get-CapTraceFailures).Count -gt 0) { throw 'Capture tracing failed; supervisor is beginning guarded cleanup.' }
         $workerWait = Wait-CapManagedProcess -Run $workerRun `
             -DeadlineUtc ([DateTime]::UtcNow.AddMilliseconds(200)) -PollMilliseconds 50
         if ($workerWait.State -eq 'Exited') { break }
@@ -874,6 +877,14 @@ try {
         }
         $cleanupProven = $cleanupFailures.Count -eq 0
     }
+    foreach ($record in $tracked.Values) {
+        try { $record.Identity.Process.Dispose() }
+        catch { $cleanupFailures.Add("Handle disposal failed: $(Get-CapSupervisorFailureText $_)") }
+    }
+    if ($workerRun) {
+        try { $workerRun.Identity.Process.Dispose() }
+        catch { $cleanupFailures.Add("Worker handle disposal failed: $(Get-CapSupervisorFailureText $_)") }
+    }
     try {
         if ($safeOutputInitialized) {
             # Construction, parsing, serialization and the actual write are all protected.
@@ -893,6 +904,9 @@ try {
             if ($workerRun -and (-not $manifest -or $manifest.ownedProcessSurvivors.Count -ne 0)) {
                 $cleanupFailures.Add('Worker final kernel-cleanup evidence is absent or has survivors.')
             }
+            $primaryText = Get-CapSupervisorFailureText $primaryFailure
+            $traceFailures = if (Get-Command Get-CapTraceFailures -ErrorAction SilentlyContinue) { @(Get-CapTraceFailures) } else { @() }
+            foreach ($failure in $traceFailures) { $cleanupFailures.Add("Call tracing failed: $($failure.failure)") }
             $cleanupProven = $workerRun -and $cleanupProven -and $cleanupFailures.Count -eq 0
             $release = [ordered]@{
             schemaVersion = 1
@@ -926,7 +940,8 @@ try {
             kernelVerifiedSurvivors = @($survivors)
             recovery = @($recoveryReceipts)
             cleanupFailures = @($cleanupFailures)
-            primaryFailure = Get-CapSupervisorFailureText $primaryFailure
+            traceFailures = @($traceFailures)
+            primaryFailure = $primaryText
             workerPrimaryFailure = if ($manifest) { ,@($manifest.failures) } else { ,@() }
             captures = if ($manifest) { $manifest.images.Count } else { 0 }
             sourceHashesBeforeImport = [ordered]@{ module = $moduleHash; worker = $workerHash; supervisor = $supervisorHash }
@@ -937,15 +952,6 @@ try {
     } catch {
         $releaseFailure = $_
         [Console]::Error.WriteLine("LEASE_RELEASE_WRITE_FAILED: $(Get-CapSupervisorFailureText $_)")
-    } finally {
-        foreach ($record in $tracked.Values) {
-            try { $record.Identity.Process.Dispose() }
-            catch { $cleanupFailures.Add("Handle disposal failed: $(Get-CapSupervisorFailureText $_)") }
-        }
-        if ($workerRun) {
-            try { $workerRun.Identity.Process.Dispose() }
-            catch { $cleanupFailures.Add("Worker handle disposal failed: $(Get-CapSupervisorFailureText $_)") }
-        }
     }
 }
 
@@ -953,4 +959,4 @@ if ($cleanupFailures.Count -or $releaseFailure -or -not $releaseWritten) {
     throw "Capture supervisor failed. Primary=$(Get-CapSupervisorFailureText $primaryFailure); cleanup=$($cleanupFailures -join '; '); release=$(Get-CapSupervisorFailureText $releaseFailure); releaseWritten=$releaseWritten"
 }
 if ($primaryFailure) { throw $primaryFailure }
-Write-CapSupervisorLog "CAPTURE_COMPLETE output=$outputDirectory release=$releaseReceiptPath"
+Write-Output ('{0:o} CAPTURE_COMPLETE output={1} release={2}' -f [DateTime]::UtcNow, $outputDirectory, $releaseReceiptPath)

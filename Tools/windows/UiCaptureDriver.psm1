@@ -8,6 +8,7 @@ $script:CapPendingLaunches = [Collections.Generic.List[object]]::new()
 $script:CapExcludedDescendants = [Collections.Generic.List[object]]::new()
 $script:CapLastRollbackReceipt = $null
 $script:CapTracePath = $null
+$script:CapTraceFailures = [Collections.Generic.List[object]]::new()
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 
@@ -275,7 +276,22 @@ function Write-CapTrace {
     })
     $line = [ordered]@{ utc = [DateTime]::UtcNow.ToString('o'); callerPid = $PID; callsites = $stack
         command = $Command; parameters = $values } | ConvertTo-Json -Depth 8 -Compress
-    [IO.File]::AppendAllText($script:CapTracePath, $line + "`n", [Text.UTF8Encoding]::new($false))
+    try {
+        [IO.File]::AppendAllText($script:CapTracePath, $line + "`n", [Text.UTF8Encoding]::new($false))
+    } catch [IO.IOException], [UnauthorizedAccessException] {
+        if (-not @($script:CapTraceFailures | Where-Object command -CEQ $Command).Count) {
+            $script:CapTraceFailures.Add([pscustomobject]@{
+                command = $Command; path = $script:CapTracePath; failure = $_.Exception.ToString()
+            })
+            [Console]::Error.WriteLine("CAP_TRACE_FAILURE command=$Command path=$($script:CapTracePath): $($_.Exception.Message)")
+        }
+    }
+}
+
+function Get-CapTraceFailures {
+    [CmdletBinding()]
+    param()
+    return @($script:CapTraceFailures.ToArray())
 }
 
 function Assert-CapArtifactPath {
@@ -335,6 +351,57 @@ function Get-CapActionSpec {
         }
         'file-exit' { return [pscustomobject]@{ AutomationId = $null; AutomationIdPrefix = $null; Name = $null; CommandId = 4104 } }
     }
+}
+
+function Assert-CapFixtureMapping {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$FixturePath,
+        [Parameter(Mandatory)][string]$SourcePath,
+        [Parameter(Mandatory)][string]$MappingPath,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedMappingSha256,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSourceSha256,
+        [Parameter(Mandatory)][string]$OriginalRoot
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $FixturePath = Assert-CapArtifactPath -Root $Root -Path $FixturePath
+    $SourcePath = Assert-CapArtifactPath -Root $Root -Path $SourcePath
+    $MappingPath = Assert-CapArtifactPath -Root $Root -Path $MappingPath
+    $mappingHash = (Get-FileHash -LiteralPath $MappingPath -Algorithm SHA256).Hash
+    $sourceHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
+    $fixtureHash = (Get-FileHash -LiteralPath $FixturePath -Algorithm SHA256).Hash
+    if ($mappingHash -ne $ExpectedMappingSha256 -or $sourceHash -ne $ExpectedSourceSha256) {
+        throw 'Fixture mapping/source does not match its exact trusted hashes.'
+    }
+    $mapping = Get-Content -LiteralPath $MappingPath -Raw | ConvertFrom-Json -DateKind String
+    if ($mapping.sourcePath -cne (Join-Path $OriginalRoot 'fixture.json') -or
+        $mapping.sourceSha256 -ne $ExpectedSourceSha256 -or
+        $mapping.copiedSourcePath -cne $SourcePath -or $mapping.rewrittenFixturePath -cne $FixturePath -or
+        $mapping.rewrittenFixtureSha256 -ne $fixtureHash -or
+        $mapping.pathPrefixMap.from -cne $OriginalRoot -or
+        $mapping.pathPrefixMap.to -cne (Join-Path $Root 'fixtures\projects') -or
+        $mapping.graphs -ne 2 -or $mapping.topLevelNodes -ne 10 -or $mapping.pathsRewritten -ne $true) {
+        throw 'Fixture mapping does not bind the exact source and rewritten owned-root fixture.'
+    }
+    $source = Get-Content -LiteralPath $SourcePath -Raw | ConvertFrom-Json -DateKind String
+    $fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json -DateKind String
+    if ($source.graphs.Count -ne 2 -or $fixture.graphs.Count -ne 2 -or
+        ($source.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne 10 -or
+        ($fixture.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne 10) {
+        throw 'Fixture mapping changed the two-graph/ten-node capture contract.'
+    }
+    foreach ($index in 0..1) {
+        $sourceProject = $source.graphs[$index].project
+        $mappedProject = $fixture.graphs[$index].project
+        if ($sourceProject.path -cne (Join-Path $OriginalRoot $sourceProject.name) -or
+            $mappedProject.name -cne $sourceProject.name -or
+            $mappedProject.path -cne (Join-Path (Join-Path $Root 'fixtures\projects') $sourceProject.name) -or
+            $fixture.graphs[$index].nodes.Count -ne $source.graphs[$index].nodes.Count) {
+            throw "Fixture mapping changed graph identity, owned project path, or node count at index $index."
+        }
+    }
+    return [pscustomobject]@{ FixtureSha256 = $fixtureHash; SourceSha256 = $sourceHash; MappingSha256 = $mappingHash }
 }
 
 function Assert-CapUiaProcessIds {
@@ -1000,6 +1067,7 @@ function Start-CapManagedProcessCore {
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [Parameter(Mandatory)][string]$Role,
         [hashtable]$Environment = @{},
+        [switch]$CloseStdin,
         [scriptblock]$AttestationOverride
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -1016,7 +1084,7 @@ function Start-CapManagedProcessCore {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardInput = [bool]$CloseStdin
     foreach ($argument in $ArgumentList) { $startInfo.ArgumentList.Add($argument) }
     foreach ($key in @($startInfo.Environment.Keys)) {
         if ([string]$key -like 'GRAPHCODE_*' -or [string]$key -like 'ZMX_*') {
@@ -1071,7 +1139,7 @@ function Start-CapManagedProcessCore {
             $null = Assert-CapProcessIdentity -Identity $identity
         }
         $launchRecord.Identity = $identity
-        $process.StandardInput.Close()
+        if ($CloseStdin) { $process.StandardInput.Close() }
         $null = $script:CapPendingLaunches.Remove($launchRecord)
     } catch {
         $startFailure = $_.Exception
@@ -1101,7 +1169,7 @@ function Start-CapManagedProcessCore {
         StdoutTask = $launchRecord.StdoutTask
         StderrTask = $launchRecord.StderrTask
         StartInfo = $startInfo
-        StdinClosed = $true
+        StdinClosed = [bool]$CloseStdin
         StartedUtc = [DateTime]::UtcNow
     }
 }
@@ -1113,10 +1181,12 @@ function Start-CapManagedProcess {
         [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$ArgumentList,
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [Parameter(Mandatory)][string]$Role,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$CloseStdin
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($script:CapTraceFailures.Count -gt 0) { throw 'Capture tracing failed; refusing a new process launch.' }
 
     return Start-CapManagedProcessCore @PSBoundParameters
 }
@@ -1524,7 +1594,9 @@ function Get-CapAuthorizedWorkerDeadline {
 Export-ModuleMember -Function @(
     'Set-CapTracePath',
     'Write-CapTrace',
+    'Get-CapTraceFailures',
     'Assert-CapArtifactPath',
+    'Assert-CapFixtureMapping',
     'Assert-CapDescendantLifetime',
     'Test-CapGraphAppRootRole',
     'Resolve-CapAutomationCandidate',

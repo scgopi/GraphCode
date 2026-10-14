@@ -60,6 +60,7 @@ function Invoke-CapBoundedChild {
             exitCode = $wait.ExitCode; stdout = [string]$run.StdoutTask.Result; stderr = [string]$run.StderrTask.Result
             pid = $run.Identity.Pid; creationFileTimeUtc = $run.Identity.CreationFileTimeUtc
             executable = $run.Identity.ExpectedImagePath; kernelExited = [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)
+            stdinRedirected = $run.StartInfo.RedirectStandardInput
         }
     } finally {
         if (-not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) {
@@ -96,6 +97,12 @@ int wmain(int argc, wchar_t **argv) {
     puts("CAP_STDIN_EOF");
     fputs("CAP_STDERR_EOF\n", stderr);
     fflush(stdout); fflush(stderr);
+    if (strcmp(behavior, "trace-readonly") == 0) {
+        if (GetEnvironmentVariableW(L"CAP_REHEARSAL_OUTPUT", output, 32768) == 0) return 96;
+        if (swprintf_s(path, 32768, L"%ls\\supervisor-calls.jsonl", output) < 0) return 97;
+        if (!SetFileAttributesW(path, FILE_ATTRIBUTE_READONLY)) return 98;
+        return 23;
+    }
     if (strcmp(behavior, "primary-cleanup") == 0 || strcmp(behavior, "receipt-block") == 0) {
         if (GetEnvironmentVariableW(L"CAP_REHEARSAL_OUTPUT", output, 32768) == 0) return 93;
         if (swprintf_s(path, 32768, L"%ls\\%ls", output,
@@ -207,12 +214,13 @@ function Invoke-CapCaptureCommand {
         name = $Name; child = $child; owned = $owned; output = $output; receipt = $receipt
         receiptPath = $receiptPath; commandArguments = $argumentsToSupervisor
         receiptSha256 = if ($receipt) { (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash } else { $null }
+        leaseSha256 = $leaseHash
     }
 }
 
 function Assert-CapRehearsalSuccess {
     param($Run, [AllowEmptyCollection()][AllowEmptyString()][string[]]$Arguments)
-    Assert-CapTest ($Run.child.exitCode -eq 0) "Capture command failed: $($Run.child.stderr)"
+    Assert-CapTest ($Run.child.exitCode -eq 0 -and -not $Run.child.stdinRedirected) "Capture command failed or changed default stdin inheritance: $($Run.child.stderr)"
     Assert-CapTest ($null -ne $Run.receipt -and $Run.receipt.status -ceq 'RELEASED_ZERO_SURVIVORS' -and
         $Run.receipt.workerStarted -and $Run.receipt.workerStdoutEof -and $Run.receipt.workerStderrEof -and
         $Run.receipt.captures -eq 0 -and $Run.receipt.kernelVerifiedSurvivors.Count -eq 0 -and
@@ -311,12 +319,13 @@ try {
                 Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
                     $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and -not $run.receipt.workerStarted -and
                     -not [string]::IsNullOrWhiteSpace($run.receipt.primaryFailure) -and
+                    $run.receipt.leaseReceiptSha256 -ceq $run.leaseSha256 -and
                     $run.receipt.cleanupState -ceq 'NO_WORKER_STARTED') 'Invalid lease did not fail closed with an actual release file.'
                 return [ordered]@{ exit = $run.child.exitCode; release = $run.receiptPath
                     sha256 = $run.receiptSha256; status = $run.receipt.status; primary = $run.receipt.primaryFailure }
             }
         }
-        foreach ($behavior in @('nonzero', 'timeout', 'primary-cleanup', 'receipt-block')) {
+        foreach ($behavior in @('nonzero', 'timeout', 'primary-cleanup', 'receipt-block', 'trace-readonly')) {
             Invoke-CapTest "same capture command handles target $behavior" {
                 $run = Invoke-CapCaptureCommand -Name $behavior -Behavior $behavior
                 Assert-CapTest ($run.child.exitCode -ne 0) 'Target failure became successful capture.'
@@ -325,12 +334,15 @@ try {
                         $run.child.stderr.Contains('Capture worker exited with code')) 'Receipt write failure or original worker failure was lost.'
                 } else {
                     Assert-CapTest ($null -ne $run.receipt -and $null -ne $run.receipt.primaryFailure -and
-                        $run.receipt.workerPrimaryFailure.Count -gt 0 -and
+                        ($behavior -eq 'trace-readonly' -or $run.receipt.workerPrimaryFailure.Count -gt 0) -and
                         $run.receipt.kernelVerifiedSurvivors.Count -eq 0 -and $run.receipt.workerStderrEof) 'Failure/release/EOF evidence missing.'
-                    $expected = if ($behavior -eq 'primary-cleanup') { 'CLEANUP_UNPROVEN' } else { 'FAILED_ZERO_SURVIVORS' }
+                    $expected = if ($behavior -in @('primary-cleanup', 'trace-readonly')) { 'CLEANUP_UNPROVEN' } else { 'FAILED_ZERO_SURVIVORS' }
                     Assert-CapTest ($run.receipt.status -ceq $expected) "Wrong failure release state: $($run.receipt.status)"
-                    if ($behavior -eq 'primary-cleanup') {
+                    if ($behavior -in @('primary-cleanup', 'trace-readonly')) {
                         Assert-CapTest ($run.receipt.cleanupFailures.Count -gt 0) 'Primary failure replaced cleanup log-write failure.'
+                    }
+                    if ($behavior -eq 'trace-readonly') {
+                        Assert-CapTest ($run.receipt.traceFailures.Count -gt 0) 'Trace I/O failure was not preserved in the actual release.'
                     }
                     if ($behavior -eq 'timeout') {
                         $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.partial.json') -Raw | ConvertFrom-Json
@@ -355,6 +367,58 @@ try {
                 Assert-CapDescendantLifetime -ParentCreationFileTimeUtc 100 -ParentExitFileTimeUtc 200 -ChildCreationFileTimeUtc 201
             } 'outside parent lifetime'
             return 'Pure negative controls; no foreign process is opened or stopped.'
+        }
+        Invoke-CapTest 'shared live-admission fixture predicates accept an owned relocation and refuse stale or foreign mapping' {
+            $owned = Join-Path $scratch 'relocated-fixture'
+            $originalRoot = Join-Path $owned 'original'
+            $null = New-Item -ItemType Directory -Path (Join-Path $owned 'inputs'), (Join-Path $owned 'fixtures'), (Join-Path $owned 'reports')
+            $sourcePath = Join-Path $owned 'inputs\fixture-source.json'
+            $fixturePath = Join-Path $owned 'fixtures\fixture.json'
+            $mappingPath = Join-Path $owned 'reports\fixture-mapping.json'
+            $source = [ordered]@{ graphs = @('Alpha', 'Beta') | ForEach-Object {
+                [ordered]@{ project = [ordered]@{ name = $_; path = (Join-Path $originalRoot $_) }
+                    nodes = @(1..5 | ForEach-Object { [ordered]@{ id = "node-$_" } }) }
+            } }
+            $source | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $sourcePath -Encoding utf8NoBOM
+            $mapped = Get-Content -LiteralPath $sourcePath -Raw | ConvertFrom-Json
+            foreach ($graph in $mapped.graphs) { $graph.project.path = Join-Path (Join-Path $owned 'fixtures\projects') $graph.project.name }
+            $mapped | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
+            $mapping = [ordered]@{
+                sourcePath = (Join-Path $originalRoot 'fixture.json')
+                sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+                copiedSourcePath = $sourcePath; rewrittenFixturePath = $fixturePath
+                rewrittenFixtureSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+                pathPrefixMap = [ordered]@{ from = $originalRoot; to = (Join-Path $owned 'fixtures\projects') }
+                graphs = 2; topLevelNodes = 10; pathsRewritten = $true
+            }
+            $mapping | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $mappingPath -Encoding utf8NoBOM
+            $parameters = @{ Root = $owned; FixturePath = $fixturePath; SourcePath = $sourcePath; MappingPath = $mappingPath
+                ExpectedMappingSha256 = (Get-FileHash -LiteralPath $mappingPath -Algorithm SHA256).Hash
+                ExpectedSourceSha256 = $mapping.sourceSha256; OriginalRoot = $originalRoot }
+            $proof = Assert-CapFixtureMapping @parameters
+            Assert-CapTest ($proof.FixtureSha256 -ceq $mapping.rewrittenFixtureSha256) 'Relocated fixture hash was not obtained from the bound mapping.'
+            $staleParameters = $parameters.Clone()
+            $staleParameters.ExpectedMappingSha256 = '0' * 64
+            $null = Assert-CapRejects { Assert-CapFixtureMapping @staleParameters } 'trusted hashes'
+            $null = Assert-CapRejects {
+                Assert-CapArtifactPath -Root 'C:\gcs\cap' -Path 'C:\gcs\cap\never-created.json'
+            } 'dedicated caller-owned root'
+            $validFixture = [IO.File]::ReadAllText($fixturePath)
+            [IO.File]::AppendAllText($fixturePath, "`n")
+            $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'exact source and rewritten'
+            [IO.File]::WriteAllText($fixturePath, $validFixture, [Text.UTF8Encoding]::new($false))
+            $mapping.pathPrefixMap.to = $originalRoot
+            $mapping | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $mappingPath -Encoding utf8NoBOM
+            $parameters.ExpectedMappingSha256 = (Get-FileHash -LiteralPath $mappingPath -Algorithm SHA256).Hash
+            $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'exact source and rewritten'
+            $mapping.pathPrefixMap.to = Join-Path $owned 'fixtures\projects'
+            $mapped.graphs[0].project.path = Join-Path $originalRoot 'Alpha'
+            $mapped | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $fixturePath -Encoding utf8NoBOM
+            $mapping.rewrittenFixtureSha256 = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash
+            $mapping | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $mappingPath -Encoding utf8NoBOM
+            $parameters.ExpectedMappingSha256 = (Get-FileHash -LiteralPath $mappingPath -Algorithm SHA256).Hash
+            $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'owned project path'
+            return 'Actual shared root/source/mapping predicates only; no product binary, HWND, native compatibility, or live capture was executed.'
         }
         Invoke-CapTest 'actual rehearsal data satisfies the repaired report gate and refuses stale proof' {
             $source = [IO.File]::ReadAllText($supervisorPath)

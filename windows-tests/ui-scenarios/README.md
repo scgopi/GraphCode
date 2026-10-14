@@ -270,3 +270,28 @@ scenario, or issue closure. Those paths are `NotExecuted` in the rehearsal.
 The existing live B capture guards remain separately lease/preflight-gated;
 these offline receipts grant no capture permission. Actual desktop use,
 broader G2 verification, and G3 replay remain separately approved work.
+
+The shared fixture-admission predicate derives the rewritten fixture hash from
+the exact lease-bound mapping and hashes the actual rewritten file. Both live
+callers retain the source hash, two-graph/ten-node contract, and per-graph owned
+project-path checks; copying the old fixture bytes to another root is not a
+relocation. Offline positive and negative data tests cover a fresh owned root,
+stale mapping hashes, mismatched fixture bytes, wrong mapping destinations,
+foreign embedded project paths, and refusal of preserved cap/lane roots.
+This does not create or approve a canonical production root.
+
+Only the harmless rehearsal target opts into redirected/closed stdin; live
+GraphCode, zmx seed, and peer launches keep their inherited stdin behavior.
+Trace-write I/O failures are retained as explicit errors, never successful
+evidence, and cannot bypass guarded cleanup or the final release attempt.
+
+The supervisor's real lease-deadline/worker-kill branch, its standalone
+`-TimeoutProbe`, and `Test-CapNativeBindings` (16 declared export bindings)
+remain `NotExecuted` by this offline suite. The target-timeout case proves a
+guarded target stop, not that distinct worker-deadline branch. The repaired
+report gate checks control hashes, case identities, and positive counts in
+lease-bound **report data**; it does not independently bind a product head or
+fixture, perform native compatibility checks, or establish approval. Those
+obligations remain with the separately authorized capture admission and
+WinApp/native-compatibility work. Existing hosted runner-contract step budgets
+are unchanged; the full runner plus child must fit those limits.
