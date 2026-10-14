@@ -33,8 +33,11 @@ Statuses:
 - `Divergent`: Windows exposes a different product concept in the place where the macOS
   surface belongs; it must be separated or redesigned before parity.
 - `Out of scope`: removed from the parity requirement by a product decision. The row
-  is kept for history and is tracked as an enhancement issue. It is not counted as a
-  parity surface.
+  is kept for history and is not counted as a parity surface. This includes
+  source-confirmed extras under the 2026-10-13 policy: a row may remain in its
+  historical section, with its parity issue narrowed and any removal separately
+  approved. Optional additions use enhancement tracking; an unwanted extra's
+  removal is not a request to add an enhancement.
 
 ## 2026-10-14 reference intake
 
@@ -42,7 +45,7 @@ The primary local macOS recording is source
 `2ccf303a04f995184aae1d4b738a9eca0f71b79e`: 354 items, comprising 244
 Recorded, 4 Differs from request, 3 Absent on macOS and 103 Exists, not recorded.
 It records observations, not conformance. The bounded different-vendor intake
-opened 12 primary and 3 comparison images and checked 5 status controls; it
+opened 12 primary and 3 comparison images and checked 5 metadata negative controls; it
 did not visually review all 784 images. Follow the canonical worker kickoff's
 publication-hold notice and individual image privacy-clearance rule. Neither
 reference bundle is committed here.
@@ -114,11 +117,11 @@ the bounded #808 geometry fix; its six whole claims remain open.
 
 The [Windows preview-readiness plan](windows-preview-release-plan.md) separates
 release-critical functional bugs/core qualification, optional functionality,
-polish, and evidence gaps. It maps every current Partial surface to a delivery
+polish, and evidence gaps. It maps the pre-intake Partial set to a delivery
 lane and alpha disposition without changing this ledger's macOS-equivalence
-rule, row names or existing evidence. The reference-only qualification gaps
-above do not assert new release-blocking product defects or change that plan's
-functional priorities. A scoped tester preview need
+rule, row names or existing evidence. The 30 reference-only qualification rows
+above are not yet mapped by that plan; they do not assert new release-blocking
+product defects or change its functional priorities. A scoped tester preview need
 not wait for full parity, but unreadable terminals, lost input, unreachable
 controls and unsafe mutations are not cosmetic work.
 
@@ -225,7 +228,7 @@ native keyboard/accelerator/window proof; the workspace row remains Partial.
 | Add Folder menu | Open Folder, Clone, Add Remote, recents | File now groups Open Folder, Clone Repository, Add Remote Repository, and Add Codespace under Add Folder and adds a dedicated Recent Folders submenu with its own command range; that submenu is now located rather than positionally indexed, so a new ingress entry can no longer silently retarget the rebuild. Focused MainWindow coverage validates the native menu structure and recent-folder command wiring. The live UIA gate now reads the Add Folder submenu directly off the live `HMENU` (`GetMenu`/`GetSubMenu`, not `TrackPopupMenu`, since this is the persistent menu bar) and asserts all four action labels plus the Recent Folders submenu; see the Recent projects row above for the live Recent Folders walkthrough this shares | Partial |
 | Sidebar update banner | Available version and click-to-install action | A persistent footer banner now shows the retained offered version and reopens the native update offer when clicked. The banner now also has its own UIA element (`sidebar-update-banner-*`, name "Update available", invokable button, bounds equal to the drawn rect, opening the same update offer as a click); App tests cover that bounds/name/invoke routing, but the live gate has not been changed to use it, so the next sentence still describes the gate's pixel-click path. On a viewport too short to leave two rows of sidebar content beside it, the banner (like the inline error footer, which collapses first) is not painted, published, or clickable; only the status line remains. A native provider test shows COM `IInvokeProvider::Invoke` posts exactly the dynamic-invoke command for the banner identity, and an App test shows that command and a banner click open the same offer (version and release URL); these are two linked tests, not one test spanning COM to the dialog, and the real dialog is still only opened by the live gate's click path. The live UIA gate now drives this through the real click path rather than the `GRAPHCODE_UIA_SHOW_UPDATE` bypass: the gate computes the banner's live pixel geometry from the shell's real client height (matching the same viewport-bottom formula the paint code uses) and posts a genuine synthetic `WM_LBUTTONDOWN`/`WM_LBUTTONUP` at that point, then verifies the real `GraphCode Update Available` dialog opens with the offered `GraphCode 9.9.9-test` version text, dismisses it via the live Later command, and confirms the shell survives. **In-app install remains deliberately Blocked** — the offer still hands installation off to the verified release page, and this row's evidence does not claim otherwise | Partial |
 | Sidebar error footer | Persistent, scoped project-ingress error | Folder, clone, remote, and daemon-open failures now persist in a dedicated red sidebar footer independently of transient status. Successful project ingress clears it, wrapped layout preserves long messages, and the deterministic UIA gate verifies the dedicated footer identity plus multi-line bounds below the update offer. | Partial |
-| Needs-you section | No normal-sidebar attention list is required by the pinned macOS source | Windows exposes up to four entries with reason/project, navigation and Stop; the existing focused/runtime evidence is retained as Windows functionality. **Reopened (visual) 2026-10-13:** the prior review found footer overlap. **Reference intake 2026-10-14:** `AppSidebarView.swift:334` comments out the normal sidebar attention section; `AppSidebarMonitor.swift` is not evidence that it is mounted there. This sidebar-only Windows extra is outside parity. Toolbar/canvas attention remains in scope; removal needs a separate bounded approval and reachable equivalent actions, not an expansion of the current navigation slice. **Tracked in [#767](https://github.com/scgopi/GraphCode/issues/767).** | Out of scope |
+| Needs-you section | No normal-sidebar attention list is required by the pinned macOS source | Windows exposes up to four entries with reason/project, navigation and Stop; the existing focused/runtime evidence is retained as Windows functionality. **Reopened (visual) 2026-10-13:** the prior review found footer overlap. **Reference intake 2026-10-14:** `AppSidebarView.swift:334` comments out the normal sidebar attention section; `AppSidebarMonitor.swift` is not evidence that it is mounted there. This is the 2026-10-13 extras-are-not-parity classification, confirmed by the returned source/reference, not a claim that removal has landed. Toolbar/canvas attention remains in scope. [#767](https://github.com/scgopi/GraphCode/issues/767) is narrowed to that source-based distinction; implementation of the sidebar-extra removal needs a separate bounded approval and reachable equivalent actions, not an expansion of the current navigation slice. | Out of scope |
 | Activity strip | Optional bottom strip, summary, attention-only filter, horizontally scrolling actionable events | Activity events retain project/node identity and timestamps, render timestamped cards, expose stable UIA rows plus scroll controls, and now keep a real horizontal viewport with an attention-only filter. Focused Sidebar coverage and the deterministic UIA gate verify scroll-state changes, attention-only filtering, and card navigation into the selected loop workspace. | Partial |
 
 ## Graph overview and project canvas
@@ -402,7 +405,10 @@ changes, and no row status depends on them.
 These surfaces were removed from the macOS/Windows parity requirement by a product
 decision. They are not counted in the Validated/Partial totals. Each one keeps its
 evidence and is tracked as an optional `enhancement` issue, for anyone who later wants
-to test it or add support.
+to test it or add support. Source-confirmed extras may also retain their historical
+row location under the legend's carve-out, with a narrowed parity issue and separately
+approved removal rather than an optional enhancement. The sidebar-only Needs-you row
+above is such a classification.
 
 | macOS surface | Required visible behavior | Windows evidence | Status |
 |---|---|---|---|

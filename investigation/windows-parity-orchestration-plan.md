@@ -393,7 +393,7 @@ type/state combination is not an absent feature. Source-confirm an absence's
 precise scope before narrowing an issue or planning a Windows-extra removal.
 
 The bounded different-vendor intake opened 12 primary and 3 comparison images
-and checked 5 status controls; it did not visually clear all 784 images.
+and checked 5 metadata negative controls; it did not visually clear all 784 images.
 Observe the local publication-hold notice referenced by the canonical worker
 kickoff. Every image needs its own privacy clearance before upload; hashes,
 OCR and correctly black mask rectangles do not prove that adjacent content is
