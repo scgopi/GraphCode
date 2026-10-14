@@ -1,0 +1,173 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Offline UI scenario data v1 (not runtime evidence)",
+  "$comment": "Identifier/hash patterns use an absolute end lookahead: $ alone also accepts a final newline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "claimId", "authoritySha256", "coverage", "fixture", "cases"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "claimId": { "type": "string", "pattern": "^[1-9][0-9]*-C[1-9][0-9]*(?![\\s\\S])" },
+    "authoritySha256": { "type": "string", "pattern": "^[a-f0-9]{64}(?![\\s\\S])" },
+    "coverage": { "enum": ["component", "complete-semantic"] },
+    "fixture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "manifestSha256"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}(?![\\s\\S])" },
+        "version": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "manifestSha256": { "type": "string", "pattern": "^[a-f0-9]{64}(?![\\s\\S])" }
+      }
+    },
+    "cases": {
+      "type": "array", "minItems": 1, "maxItems": 16,
+      "items": { "$ref": "#/definitions/case" }
+    }
+  },
+  "definitions": {
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["automationId", "controlType", "scope", "matchCount"],
+      "properties": {
+        "automationId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*(?![\\s\\S])" },
+        "controlType": { "enum": ["Button", "Calendar", "CheckBox", "ComboBox", "Edit", "Hyperlink", "Image", "ListItem", "List", "Menu", "MenuBar", "MenuItem", "ProgressBar", "RadioButton", "ScrollBar", "Slider", "Spinner", "StatusBar", "Tab", "TabItem", "Text", "ToolBar", "ToolTip", "Tree", "TreeItem", "Custom", "Group", "Thumb", "DataGrid", "DataItem", "Document", "SplitButton", "Window", "Pane", "Header", "HeaderItem", "Table", "TitleBar", "Separator", "SemanticZoom", "AppBar"] },
+        "scope": { "enum": ["owned-root", "owned-modal"] },
+        "matchCount": { "type": "integer", "const": 1 }
+      }
+    },
+    "timeout": { "type": "integer", "minimum": 1, "maximum": 10000 },
+    "assertion": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "target", "property", "value"],
+          "properties": {
+            "kind": { "const": "property" },
+            "target": { "$ref": "#/definitions/target" },
+            "property": { "enum": ["IsEnabled", "IsSelected", "HasKeyboardFocus"] },
+            "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "target", "property", "value"],
+          "properties": {
+            "kind": { "const": "property" },
+            "target": { "$ref": "#/definitions/target" },
+            "property": { "enum": ["Name", "Value"] },
+            "value": { "type": "string", "maxLength": 8192 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "target", "pattern", "value"],
+          "properties": {
+            "kind": { "const": "pattern" },
+            "target": { "$ref": "#/definitions/target" },
+            "pattern": { "const": "Toggle" },
+            "value": { "enum": ["On", "Off", "Indeterminate"] }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "target", "healthyRoot"],
+          "properties": {
+            "kind": { "const": "absent" },
+            "target": { "$ref": "#/definitions/target" },
+            "healthyRoot": { "$ref": "#/definitions/target" }
+          }
+        }
+      ]
+    },
+    "assertions": {
+      "type": "array", "minItems": 1, "maxItems": 128,
+      "items": { "$ref": "#/definitions/assertion" }
+    },
+    "step": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "target", "timeoutMs"],
+          "properties": {
+            "operation": { "enum": ["invoke", "toggle", "select", "focus"] },
+            "target": { "$ref": "#/definitions/target" },
+            "timeoutMs": { "$ref": "#/definitions/timeout" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "target", "value", "timeoutMs"],
+          "properties": {
+            "operation": { "const": "set-value" },
+            "target": { "$ref": "#/definitions/target" },
+            "value": { "type": "string", "maxLength": 8192 },
+            "timeoutMs": { "$ref": "#/definitions/timeout" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "expected", "timeoutMs"],
+          "properties": {
+            "operation": { "const": "wait-for" },
+            "expected": { "$ref": "#/definitions/assertion" },
+            "timeoutMs": { "$ref": "#/definitions/timeout" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "readyRoot", "timeoutMs"],
+          "properties": {
+            "operation": { "const": "relaunch" },
+            "readyRoot": { "$ref": "#/definitions/target" },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 30000 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["operation", "target", "keys", "transport", "timeoutMs"],
+          "properties": {
+            "operation": { "const": "send-keys" },
+            "target": { "$ref": "#/definitions/target" },
+            "keys": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "\\S" },
+            "transport": { "enum": ["post-message", "send-input"] },
+            "timeoutMs": { "$ref": "#/definitions/timeout" }
+          }
+        }
+      ]
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "state", "tier", "preconditions", "steps", "expected", "timeoutMs", "cleanup"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}(?![\\s\\S])" },
+        "state": { "enum": ["success", "empty", "error", "disabled", "persistence-after-relaunch", "keyboard"] },
+        "tier": { "enum": ["uia", "interactive"] },
+        "preconditions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["profile", "process", "readyRoot", "initial", "timeoutMs"],
+          "properties": {
+            "profile": { "const": "owned-isolated" },
+            "process": { "const": "owned-production" },
+            "readyRoot": { "$ref": "#/definitions/target" },
+            "initial": { "$ref": "#/definitions/assertions" },
+            "timeoutMs": { "$ref": "#/definitions/timeout" }
+          }
+        },
+        "steps": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": { "$ref": "#/definitions/step" }
+        },
+        "expected": { "$ref": "#/definitions/assertions" },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "cleanup": {
+          "type": "object", "additionalProperties": false,
+          "required": ["intent", "timeoutMs"],
+          "properties": {
+            "intent": { "const": "owned-processes-and-fixture" },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 15000 }
+          }
+        }
+      }
+    }
+  }
+}

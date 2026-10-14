@@ -53,6 +53,12 @@ expect "Windows validation tooling" true false false \
   Tools/windows/validate.ps1
 expect "Windows production tests" true false false \
   windows-tests/WindowsDaemonTests.swift
+expect "UI scenario schema" true false false \
+  windows-tests/ui-scenarios/scenario.schema.json
+expect "UI claim scenario path" true false false \
+  windows-tests/ui-scenarios/818-C1.json
+expect "offline UI scenario validator" true false false \
+  Tools/windows/Test-UiScenario.ps1
 expect "Windows spike package" true false false \
   investigation/spikes/swift-contracts/Package.swift
 expect "TDD evidence tooling validated by Windows suite" true false false \

@@ -4213,5 +4213,17 @@ try {
   }
 }
 
+$uiScenarioOutput = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "UiScenario.Tests.ps1"))
+if ($LASTEXITCODE -ne 0) { throw "RED: offline UI scenario contract child failed" }
+$uiScenarioSummaries = @($uiScenarioOutput | Where-Object { $_ -is [string] -and $_.StartsWith('{"suite":"UiScenario",') })
+if ($uiScenarioSummaries.Count -ne 1) { throw "RED: offline UI scenario structured count missing or duplicated" }
+$uiScenarioSummary = ConvertFrom-Json $uiScenarioSummaries[0]
+if ($uiScenarioSummary.executed -isnot [long] -or $uiScenarioSummary.executed -le 0 -or
+    $uiScenarioSummary.passed -isnot [long] -or $uiScenarioSummary.passed -ne $uiScenarioSummary.executed -or
+    $uiScenarioSummary.failed -isnot [long] -or $uiScenarioSummary.failed -ne 0) {
+  throw "RED: offline UI scenario child has no positive executed/passed contract count"
+}
+$uiScenarioOutput | ForEach-Object { Write-Host $_ }
+
 Write-Host "ValidationRunner.Tests.ps1: PASS"
 exit 0
