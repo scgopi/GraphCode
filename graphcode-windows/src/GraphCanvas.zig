@@ -2161,7 +2161,7 @@ fn paintMiniMapChip(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT, selected:
     }
     if (!GdiplusAA.drawRoundedRect(hdc, bounds, 3, blended, if (selected) Tokens.pane_focus_tint else blended, if (selected) 1.5 else 0))
         fill(hdc, bounds, blended);
-    if (std.mem.eql(u8, node.state, "blocked") or std.mem.eql(u8, node.presence, "awaitingInput"))
+    if (panelWantsHuman(node))
         drawDot(hdc, bounds.right, bounds.top, 0x000A9FFF, 2);
 }
 
@@ -2195,9 +2195,9 @@ fn startTimeLabel(buffer: []u8, created_at: u64) []const u8 {
     const seconds = if (created_at < 1_000_000_000_000) created_at else created_at / 1000;
     const ticks = (seconds +| 11_644_473_600) *| 10_000_000;
     const utc = c.FILETIME{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
-    var local: c.FILETIME = undefined;
+    var utc_time: c.SYSTEMTIME = undefined;
     var time: c.SYSTEMTIME = undefined;
-    if (c.FileTimeToLocalFileTime(&utc, &local) == 0 or c.FileTimeToSystemTime(&local, &time) == 0) {
+    if (c.FileTimeToSystemTime(&utc, &utc_time) == 0 or c.SystemTimeToTzSpecificLocalTime(null, &utc_time, &time) == 0) {
         std.log.warn("Unable to format loop start time: Win32 error {d}", .{c.GetLastError()});
         return "unknown time";
     }
@@ -2310,7 +2310,7 @@ fn paintRelationRow(
 ) bool {
     const related = nodeById(graph, node_id) orelse return false;
     const layout = loopDetailRowLayout(left, y, client_right, condition);
-    if (std.mem.eql(u8, related.state, "blocked") or std.mem.eql(u8, related.presence, "awaitingInput"))
+    if (panelWantsHuman(related))
         roundedCard(hdc, layout.row, 0x00202334, false);
     fill(hdc, layout.type_bar, panelLoopTypeColor(related.loop_type));
     if (layout.title) |title| drawTextRect(hdc, allocator, related.title, title, 12, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
@@ -2335,12 +2335,18 @@ fn handoffConditionLabel(buffer: []u8, condition: []const u8, fired: bool) []con
 }
 
 fn panelStateColor(node: GraphModel.Node) u32 {
-    if (std.mem.eql(u8, node.presence, "awaitingInput") or std.mem.eql(u8, node.state, "blocked")) return 0x000A9FFF;
+    if (panelWantsHuman(node)) return 0x000A9FFF;
     if (std.mem.eql(u8, node.state, "running") or std.mem.eql(u8, node.state, "waiting")) return 0x00FF840A;
     if (std.mem.eql(u8, node.state, "succeeded")) return 0x0058D130;
     if (std.mem.eql(u8, node.state, "failed")) return 0x003A45FF;
     if (std.mem.eql(u8, node.state, "stalled")) return 0x00F25ABF;
     return 0x006E6C6C;
+}
+
+fn panelWantsHuman(node: GraphModel.Node) bool {
+    return std.mem.eql(u8, node.state, "awaitingInput") or
+        std.mem.eql(u8, node.state, "blocked") or
+        std.mem.eql(u8, node.presence, "awaitingInput");
 }
 
 fn nodeById(graph: *const GraphModel.GraphSummary, id: []const u8) ?GraphModel.Node {
@@ -2959,6 +2965,27 @@ test "loop detail footer uses clock time without a backend placeholder" {
         .backend = @constCast("copilotCLI"),
     };
     try std.testing.expectEqualStrings("", loopDetailFooter(&buffer, node));
+}
+
+test "loop detail status includes explicit and presence-based requests for input" {
+    var node = GraphModel.Node{
+        .id = @constCast("loop"),
+        .title = @constCast("Loop"),
+        .loop_type = @constCast("sketch"),
+        .state = @constCast("awaitingInput"),
+        .activity = @constCast(""),
+        .presence = @constCast("idle"),
+    };
+    try std.testing.expect(panelWantsHuman(node));
+    try std.testing.expectEqual(@as(u32, 0x000A9FFF), panelStateColor(node));
+    node.state = @constCast("running");
+    node.presence = @constCast("awaitingInput");
+    try std.testing.expect(panelWantsHuman(node));
+    try std.testing.expectEqual(@as(u32, 0x000A9FFF), panelStateColor(node));
+    node.state = @constCast("succeeded");
+    node.presence = @constCast("idle");
+    try std.testing.expect(!panelWantsHuman(node));
+    try std.testing.expectEqual(@as(u32, 0x0058D130), panelStateColor(node));
 }
 
 test "loop card detail prioritizes goal and preserves metadata" {
