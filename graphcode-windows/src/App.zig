@@ -18724,6 +18724,9 @@ const GraphPublicationTest = struct {
     var loop_bars: usize = 0;
     var toolbars: usize = 0;
     var selected_beta_projects: usize = 0;
+    var selected_sidebar_rows: usize = 0;
+    var selected_beta_loops: usize = 0;
+    var selected_graph_destinations: usize = 0;
     var selected_beta_cards: usize = 0;
 
     fn init(mode: Wire.ProtocolMode) !App {
@@ -18785,6 +18788,9 @@ const GraphPublicationTest = struct {
         loop_bars = 0;
         toolbars = 0;
         selected_beta_projects = 0;
+        selected_sidebar_rows = 0;
+        selected_beta_loops = 0;
+        selected_graph_destinations = 0;
         selected_beta_cards = 0;
     }
 
@@ -18815,8 +18821,14 @@ const GraphPublicationTest = struct {
         loop_bars = 0;
         toolbars = 0;
         selected_beta_projects = 0;
+        selected_sidebar_rows = 0;
+        selected_beta_loops = 0;
+        selected_graph_destinations = 0;
         selected_beta_cards = 0;
         for (elements) |element| {
+            if (element.selected and (std.mem.startsWith(u8, element.identity, "open-project:") or std.mem.startsWith(u8, element.identity, "loop:") or std.mem.startsWith(u8, element.identity, "overview-destination:"))) selected_sidebar_rows += 1;
+            if (std.mem.eql(u8, element.identity, "loop:B:loop") and element.selected) selected_beta_loops += 1;
+            if (std.mem.eql(u8, element.identity, "overview-destination:graph") and element.selected) selected_graph_destinations += 1;
             if (std.mem.eql(u8, element.identity, "workspace-loop-bar:loop")) loop_bars += 1;
             if (std.mem.eql(u8, element.identity, "workspace-toolbar:B")) toolbars += 1;
             if (std.mem.eql(u8, element.identity, "open-project:B") and element.selected) selected_beta_projects += 1;
@@ -18923,7 +18935,10 @@ fn expectSettledGraphPublication(surface: GraphCanvas.Surface, owner: []const u8
     try std.testing.expectEqualDeep(original_canvas, F.sink.canvas.?);
     try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.loop_bars);
     try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.toolbars);
-    try std.testing.expectEqual(@as(usize, 1), F.selected_beta_projects);
+    try std.testing.expectEqual(@as(usize, 0), F.selected_beta_projects);
+    try std.testing.expectEqual(@as(usize, 1), F.selected_sidebar_rows);
+    try std.testing.expectEqual(@as(usize, if (surface == .workspace) 1 else 0), F.selected_beta_loops);
+    try std.testing.expectEqual(@as(usize, if (surface == .overview) 1 else 0), F.selected_graph_destinations);
     try std.testing.expectEqual(@as(usize, if (surface == .overview) 0 else 1), F.selected_beta_cards);
 }
 
@@ -20001,11 +20016,14 @@ const OverviewAccessibilitySink = struct {
 
     fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
         var cards: usize = 0;
+        var selected_sidebar: usize = 0;
         for (elements) |element| {
             if (std.mem.startsWith(u8, element.identity, "overview-card:") or
                 std.mem.startsWith(u8, element.identity, "project-card:")) cards += 1;
+            if (element.selected and (std.mem.startsWith(u8, element.identity, "open-project:") or std.mem.startsWith(u8, element.identity, "loop:") or std.mem.startsWith(u8, element.identity, "overview-destination:"))) selected_sidebar += 1;
         }
         try std.testing.expectEqual(self.card_count, cards);
+        try std.testing.expectEqual(@as(usize, 1), selected_sidebar);
         for (self.expected) |expected| {
             var matches: usize = 0;
             for (elements) |element| {
@@ -20229,7 +20247,8 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
             else => .{ 524, 884, 964, 1056 },
         };
         var overview = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
-            .{ .identity = "open-project:A", .selected = true },
+            .{ .identity = "overview-destination:graph", .selected = true },
+            .{ .identity = "open-project:A" },
             .{ .identity = "open-project:B" },
             .{ .identity = "overview-card:A:a1" },
             .{ .identity = "overview-card:A:a2" },
@@ -20309,8 +20328,9 @@ test "cross-project overview refresh emits both projects without changing the se
     );
     try expectOverviewSelection(&app, .overview, "B", "b2");
     var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
+        .{ .identity = "overview-destination:graph", .selected = true },
         .{ .identity = "open-project:A" },
-        .{ .identity = "open-project:B", .selected = true },
+        .{ .identity = "open-project:B" },
         .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 262, 118, 482, 204 } },
         .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 508, 118, 728, 204 } },
         .{ .identity = "overview-card:A:a2" },

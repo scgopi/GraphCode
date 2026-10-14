@@ -2337,6 +2337,8 @@ pub fn rowSelected(row: Row, model: *const GraphModel.Model, selection: Selectio
         .project => |path| row.kind == .open_project and row.project_path != null and std.mem.eql(u8, row.project_path.?, path),
         .loop => |id| blk: {
             if (row.kind != .loop) break :blk false;
+            const selected_project = model.selected_project_path orelse break :blk false;
+            if (row.project_path == null or !std.mem.eql(u8, row.project_path.?, selected_project)) break :blk false;
             const graph = model.graphFor(row.project_path orelse break :blk false) orelse break :blk false;
             break :blk row.index < graph.nodes.items.len and std.mem.eql(u8, graph.nodes.items[row.index].id, id);
         },
