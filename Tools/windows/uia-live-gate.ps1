@@ -3275,8 +3275,8 @@ function Test-MultiProjectObservedRoster([string] $surface, $projection, $expect
       $summaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $owner.path
       $node = @($projection.cards | Where-Object { $_.automationId -ceq $nodeId })[0]
       $summary = @($projection.cards | Where-Object { $_.automationId -ceq $summaryId })[0]
-      $scale = ($node.bounds[2] - $node.bounds[0]) / 220
-      if ([Math]::Abs(($node.bounds[3] - $node.bounds[1]) / $scale - 86) -gt 1) { return $false }
+      $scale = ($node.bounds[2] - $node.bounds[0]) / 250
+      if ([Math]::Abs(($node.bounds[3] - $node.bounds[1]) / $scale - 96) -gt 1) { return $false }
       $geometry = Get-MultiProjectLaneGeometry $projection.canvasBounds $node.bounds
       for ($index = 0; $index -lt 4; $index++) {
         if ([Math]::Abs($summary.bounds[$index] - $geometry.summary[$index]) -gt 1) { return $false }
@@ -4181,13 +4181,13 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card) {
       $canvas[3] -le $canvas[1] -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
     throw "MULTIPROJECT_BOUNDS: positive live canvas/card rectangles required"
   }
-  $scale = ($card[2] - $card[0]) / 220
-  if ([Math]::Abs(($card[3] - $card[1]) / $scale - 86) -gt 1) {
+  $scale = ($card[2] - $card[0]) / 250
+  if ([Math]::Abs(($card[3] - $card[1]) / $scale - 96) -gt 1) {
     throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
   }
   $laneLeft = $canvas[0] + 24 * $scale
   $laneTop = $card[1] - 46 * $scale
-  $laneRight = $laneLeft + [Math]::Max(760, ($canvas[2] - $canvas[0]) / $scale - 48) * $scale
+  $laneRight = $laneLeft + [Math]::Max(806, ($canvas[2] - $canvas[0]) / $scale - 48) * $scale
   return [ordered]@{
     provenance = "GraphCanvas source-derived one-root lane; not a native UIA caption fragment"
     scale = $scale
@@ -6010,7 +6010,7 @@ try {
   # Folder lanes/bands: the lane's Open and Worktrees actions have no dedicated UIA
   # elements (GraphCanvas.overviewLaneActionAt is a pure hit test painted by GDI), so
   # this derives their real screen position from GraphCanvas.overviewLaneBounds'
-  # actual formula (lane.left = graph.Left + 24, lane width = max(760,
+  # actual formula (lane.left = graph.Left + 24, lane width = max(806,
   # graph.Width - 48)) and posts real WM_LBUTTONDOWN/UP client-coordinate clicks at
   # those points, exercising the exact App.zig click routing a physical mouse would
   # drive. A genuine surface transition (not merely re-invoking the same overview
@@ -6019,7 +6019,7 @@ try {
   # the free-form project-canvas layout.
   #
   # An earlier version of this block instead tried to force the shell window wide
-  # enough that graph.Width - 48 would exceed the 760 floor, first via SW_MAXIMIZE,
+  # enough that graph.Width - 48 would exceed the then-current 760 floor, first via SW_MAXIMIZE,
   # then via a growing SetWindowPos request -- but on a CI runner with a small
   # virtual desktop, requesting an ever-larger window rect does not produce an
   # ever-larger client rect: repeated attempts up to a 6000x2687 request all landed
@@ -6050,7 +6050,7 @@ try {
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) `
     "Overview did not expose synchronized cards after resetting zoom/pan to actual size"
   $graphBounds = $graph.Current.BoundingRectangle
-  $laneWidth = [Math]::Max(760, [int]$graphBounds.Width - 48)
+  $laneWidth = [Math]::Max(806, [int]$graphBounds.Width - 48)
   $laneRight = [int]$graphBounds.Left + 24 + $laneWidth
   $laneGridCardTop = $overviewCards[0].Current.BoundingRectangle.Top
   $laneOpenScreenX = $laneRight - 104

@@ -36,6 +36,33 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     throw "RED: multi-project expected actual $prefix rejection"
   }
+  Invoke-MultiCase "compact overview narrow client uses the 806 lane floor" {
+    $geometry = Get-MultiProjectLaneGeometry @(220,34,1028,900) @(262,118,512,214)
+    Assert-MultiCase (($geometry.band -join ",") -ceq "244,72,1050,248" -and
+      ($geometry.open -join ",") -ceq "918,82,974,102") "250x96 card or 806-pixel floor differs"
+    $worktrees = @(($geometry.band[2] - 72),82,($geometry.band[2] - 18),102)
+    $clipped = Get-MultiProjectClippedRectangle $worktrees @(220,34,1028,900)
+    Assert-MultiCase (($worktrees -join ",") -ceq "978,82,1032,102" -and
+      ($clipped -join ",") -ceq "978,82,1028,102") "narrow Worktrees clipping was hidden"
+    return "1028-client boundary: Open fully visible, Worktrees has 50 of 54 pixels visible; not whole-button visibility proof"
+  }
+  Invoke-MultiCase "compact overview wide client and DPI preserve exact geometry" {
+    $geometry = Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,512,214)
+    Assert-MultiCase (($geometry.band -join ",") -ceq "244,72,1176,248") "wide lane changed its viewport-derived width"
+    $scaled = Get-MultiProjectLaneGeometry @(330,51,1542,1350) @(393,177,768,321)
+    Assert-MultiCase (($scaled.band -join ",") -ceq "366,108,1575,372" -and
+      ($scaled.open -join ",") -ceq "1377,123,1461,153") "144-DPI narrow geometry was scaled more than once"
+    return "Literal narrow/wide and once-only 144-DPI source geometry"
+  }
+  Invoke-MultiCase "compact overview rejects obsolete 220x86 card geometry" -Negative {
+    return Reject-MultiCase { Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204) } "MULTIPROJECT_BOUNDS"
+  }
+  Invoke-MultiCase "compact overview rejects the obsolete 760-pixel lane floor" -Negative {
+    $geometry = Get-MultiProjectLaneGeometry @(220,34,1028,900) @(262,118,512,214)
+    Assert-MultiCase (($geometry.band -join ",") -cne "244,72,1004,248" -and
+      ($geometry.open -join ",") -cne "872,82,928,102") "old 760-pixel action geometry was accepted"
+    return "New source geometry rejects the old narrow-window lane/action coordinates"
+  }
   $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
   $eventEnd = $eventStart.AddSeconds(1)
   $eventProcess = [pscustomobject]@{ Id = 5832; StartTime = $eventStart }
@@ -1456,10 +1483,17 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
     canvasBounds = @(228,85,1036,780)
   }
-  Invoke-MultiCase "retained hosted four-fragment source-supported overview" {
-    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $retainedProjection $retainedOwners $null 3140) `
-      "retained hosted 716 overview rejected legitimate two-node/two-summary complete roster"
-    return "Exact hosted identities/names/node bounds; summary rectangles independently source-derived, not a native bounds measurement"
+  Invoke-MultiCase "retained hosted identities with current compact geometry" {
+    Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $retainedProjection $retainedOwners $null 3140)) `
+      "historical 220x86 hosted geometry passed the current compact-card predicate"
+    $compactProjection = Copy-MultiProjectValue $retainedProjection
+    $compactProjection.cards[0].bounds = @(632,133,918,153)
+    $compactProjection.cards[1].bounds = @(270,169,520,265)
+    $compactProjection.cards[2].bounds = @(632,329,918,349)
+    $compactProjection.cards[3].bounds = @(270,365,520,461)
+    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $compactProjection $retainedOwners $null 3140) `
+      "compact geometry rejected the same exact two-node/two-summary identities and names"
+    return "Original hosted bounds remain unchanged and are rejected; synthetic current-geometry projection of the same four identities is accepted, not a new native capture"
   }
   Invoke-MultiCase "source summary identity independent fixture and hosted goldens" {
     Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "A") -ceq
@@ -1545,9 +1579,9 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       )
       cards = @(
         [ordered]@{ automationId = "canvas-card-1294898434078301384"; name = "Worktrees not inspected"; processId = 4242; bounds = @(750,82,1036,102) },
-        [ordered]@{ automationId = "canvas-card-1929002346198335884"; name = "Alpha loop"; processId = 4242; bounds = @(262,118,482,204) },
+        [ordered]@{ automationId = "canvas-card-1929002346198335884"; name = "Alpha loop"; processId = 4242; bounds = @(262,118,512,214) },
         [ordered]@{ automationId = "canvas-card-1294901732613186017"; name = "Worktrees not inspected"; processId = 4242; bounds = @(750,278,1036,298) },
-        [ordered]@{ automationId = "canvas-card-1616358459734844849"; name = "Beta loop"; processId = 4242; bounds = @(262,314,482,400) }
+        [ordered]@{ automationId = "canvas-card-1616358459734844849"; name = "Beta loop"; processId = 4242; bounds = @(262,314,512,410) }
       )
       foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
       canvasBounds = @(220,34,1200,900)
@@ -1557,6 +1591,26 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" (New-MultiRosterProjection) $rosterOwners $null 4242) `
       "literal two-owner/two-node plus two-summary whole roster rejected"
     return "Historical two-card case counts NODE cards: complete owned canvas roster is four (two nodes plus two summaries); no live app claim"
+  }
+  Invoke-MultiCase "compact overview roster rejects obsolete card dimensions" -Negative {
+    $projection = New-MultiRosterProjection
+    $projection.cards[1].bounds = @(262,118,482,204)
+    Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
+      "old 220x86 card passed the actual complete-roster predicate"
+    return "Named Alpha node geometry rejected; no broad canvas count"
+  }
+  Invoke-MultiCase "compact overview roster rejects obsolete narrow summary position" -Negative {
+    $projection = New-MultiRosterProjection
+    $projection.canvasBounds = @(220,34,1028,900)
+    $projection.cards[0].bounds = @(578,82,864,102)
+    $projection.cards[2].bounds = @(578,278,864,298)
+    Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
+      "old 760-pixel floor summary positions passed the actual complete-roster predicate"
+    $projection.cards[0].bounds = @(624,82,910,102)
+    $projection.cards[2].bounds = @(624,278,910,298)
+    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242) `
+      "corrected 806-pixel floor summary positions were rejected"
+    return "Same exact four named fragments: old floor rejected, current narrow geometry accepted"
   }
   Invoke-MultiCase "fresh owned content cannot bless an overview missing its peer card" -Negative {
     $mock = New-MultiCaptureMock @((New-MultiCaptureState),(New-MultiCaptureState),(New-MultiCaptureState))
@@ -1613,9 +1667,9 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     return "Full roster four, node two, per-owner summary two"
   }
   Invoke-MultiCase "source summary geometry is separate from node Open geometry" {
-    $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(270,169,490,255)
-    Assert-MultiCase (($geometry.summary -join ",") -ceq "586,133,872,153" -and
-      ($geometry.open -join ",") -ceq "880,133,936,153") "actual-canvas source summary/Open rectangles differ"
+    $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(270,169,520,265)
+    Assert-MultiCase (($geometry.summary -join ",") -ceq "632,133,918,153" -and
+      ($geometry.open -join ",") -ceq "926,133,982,153") "actual-canvas source summary/Open rectangles differ"
     return "Derived from actual NODE bounds and canvas; not summary-as-node geometry"
   }
   foreach ($mutation in @("two-nodes-unknown", "unknown-summary", "duplicate-summary", "wrong-summary-owner",
@@ -1642,10 +1696,10 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
   }
   Invoke-MultiCase "literal lane geometry and DPI scaling" {
-    $geometry = Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204)
+    $geometry = Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,512,214)
     Assert-MultiCase (($geometry.band -join ",") -ceq "244,72,1176,248" -and
       ($geometry.open -join ",") -ceq "1044,82,1100,102") "96-DPI literal source-derived bounds differ"
-    $scaled = Get-MultiProjectLaneGeometry @(330,51,1800,1350) @(393,177,723,306)
+    $scaled = Get-MultiProjectLaneGeometry @(330,51,1800,1350) @(393,177,768,321)
     Assert-MultiCase (($scaled.open -join ",") -ceq "1566,123,1650,153") "144-DPI source-derived bounds differ"
     return "literal band/Open bounds; not UIA caption evidence"
   }

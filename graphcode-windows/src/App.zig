@@ -20219,7 +20219,7 @@ test "cross-project overview refresh emits both projects without changing the se
         .{ .identity = "open-project:A" },
         .{ .identity = "open-project:B", .selected = true },
         .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 262, 118, 512, 214 } },
-        .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 538, 118, 788, 214 } },
+        .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 522, 118, 772, 214 } },
         .{ .identity = "overview-card:A:a2" },
         .{ .identity = "overview-card:A:a3" },
         .{ .identity = "overview-card:B:b1", .bounds = .{ 262, 442, 512, 538 } },

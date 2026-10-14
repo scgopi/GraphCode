@@ -898,7 +898,7 @@ fn overviewLaneBounds(
         overviewLaneHeight(model.graphs.items[graph_index].nodes.items.len)
     else
         0;
-    return transformedRect(bounds, state, 24, top, @max(838, bounds.right - bounds.left - 48), height);
+    return transformedRect(bounds, state, 24, top, @max(806, bounds.right - bounds.left - 48), height);
 }
 
 pub fn overviewCardBounds(
@@ -912,9 +912,9 @@ pub fn overviewCardBounds(
     const column = @as(i32, @intCast(node_index % 3));
     const row = @as(i32, @intCast(node_index / 3));
     return rect(
-        lane.left + scaledValue(18 + column * 276, state.zoom),
+        lane.left + scaledValue(18 + column * 260, state.zoom),
         lane.top + scaledValue(46 + row * 122, state.zoom),
-        lane.left + scaledValue(18 + column * 276, state.zoom) + scaledValue(Tokens.loop_card_width, state.zoom),
+        lane.left + scaledValue(18 + column * 260, state.zoom) + scaledValue(Tokens.loop_card_width, state.zoom),
         lane.top + scaledValue(46 + row * 122, state.zoom) + scaledValue(Tokens.loop_card_height, state.zoom),
     );
 }
@@ -1023,7 +1023,7 @@ pub fn contentSize(model: *const GraphModel.Model, surface: Surface) struct { wi
         .overview => blk: {
             var height: i32 = 38;
             for (model.graphs.items) |graph| height += overviewLaneHeight(graph.nodes.items.len) + 20;
-            break :blk .{ .width = 886, .height = @max(1, height) };
+            break :blk .{ .width = 854, .height = @max(1, height) };
         },
         .quick_chats => .{
             .width = 808,
@@ -1799,12 +1799,8 @@ fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
     {
         const pilot = cardPilotName(node.pilot_state);
         if (node.subgraph_json.len == 0) return allocator.dupe(u8, pilot);
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, node.subgraph_json, .{});
-        defer parsed.deinit();
-        if (parsed.value != .object) return error.InvalidCardSubgraph;
-        const nodes = parsed.value.object.get("nodes") orelse return error.InvalidCardSubgraph;
-        if (nodes != .array) return error.InvalidCardSubgraph;
-        try result.writer().print("{d} {s} · {s}", .{ nodes.array.items.len, if (nodes.array.items.len == 1) "loop" else "loops", pilot });
+        const count = GraphModel.subgraphNodeCount(node.subgraph_json);
+        try result.writer().print("{d} {s} · {s}", .{ count, if (count == 1) "loop" else "loops", pilot });
         return result.toOwnedSlice();
     }
     const source = nodePrimaryDetail(node);
@@ -2042,6 +2038,15 @@ fn elidedCandidate(scratch: []u16, text: []const u16, boundaries: []const usize,
     return scratch[0 .. head + 1 + text.len - tail];
 }
 
+fn cardBranchForWidth(hdc: c.HDC, allocator: std.mem.Allocator, branch: []const u16, width: i32) !?[]u16 {
+    const ellipsis = [_]u16{0x2026};
+    if (try measuredWide(hdc, &ellipsis) > width) return null;
+    return middleElide(hdc, allocator, branch, width) catch |err| switch (err) {
+        error.CardMetadataTooWide => try allocator.dupe(u16, &ellipsis),
+        else => return err,
+    };
+}
+
 fn cardMetaForWidth(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node, now: u64, width: i32) ![]u8 {
     const full = try nodeMetadata(allocator, node, node.worktree_branch, now);
     errdefer allocator.free(full);
@@ -2054,7 +2059,7 @@ fn cardMetaForWidth(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.N
     const branch = try std.unicode.utf8ToUtf16LeAlloc(allocator, node.worktree_branch);
     defer allocator.free(branch);
     while (branch_width > 0) {
-        const shortened = try middleElide(hdc, allocator, branch, branch_width);
+        const shortened = try cardBranchForWidth(hdc, allocator, branch, branch_width) orelse break;
         defer allocator.free(shortened);
         const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, shortened);
         defer allocator.free(utf8);
@@ -2069,7 +2074,10 @@ fn cardMetaForWidth(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.N
         // A mapped DC rounds each measured run, so verify the assembled line too.
         branch_width -= @max(1, measured - width);
     }
-    return error.CardMetadataTooWide;
+    // Complete visual elision of the branch is preferable to clipping backend/age.
+    const result = try allocator.dupe(u8, fixed);
+    allocator.free(full);
+    return result;
 }
 
 fn drawCardText(hdc: c.HDC, allocator: std.mem.Allocator, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, ellipsis: bool) !void {
@@ -2127,19 +2135,13 @@ fn drawCardBody(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node,
         break :blk (try measuredText(hdc, allocator, presentation.word)) + scaledValue(22, zoom);
     };
     const layout = cardTextLayout(bounds, zoom, pill_width);
-    const live = try cardLiveLine(allocator, node);
-    defer allocator.free(live);
-    const metric = try cardMetricDetail(allocator, node);
-    defer allocator.free(metric);
-    const meta = blk: {
-        const old = try selectCardFont(hdc, 10.5 * zoom, .card_mono);
-        defer _ = c.SelectObject(hdc, old);
-        break :blk try cardMetaForWidth(hdc, allocator, node, @intCast(@max(0, std.time.timestamp())), layout.meta.right - layout.meta.left - scaledValue(10, zoom));
-    };
-    defer allocator.free(meta);
     try drawCardText(hdc, allocator, node.title, layout.title, 14.5 * zoom, .card_title, 0x00F4F4F4, true);
     try drawCardPill(hdc, allocator, presentation, layout.pill, zoom);
+    const live = try cardLiveLine(allocator, node);
+    defer allocator.free(live);
     try drawCardText(hdc, allocator, live, layout.live, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+    const metric = try cardMetricDetail(allocator, node);
+    defer allocator.free(metric);
     if (!attention and !reclaim) {
         const entry_detail = if (role == .entry and metric.len != 0) try std.fmt.allocPrint(allocator, "START · {s}", .{metric}) else null;
         defer if (entry_detail) |text| allocator.free(text);
@@ -2158,6 +2160,19 @@ fn drawCardBody(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node,
         const role_bounds = rect(if (reclaim) reclaimOfferBounds(bounds).keep.right + scaledValue(6, zoom) else layout.live.left, layout.detail.top, if (attention) attentionActionBounds(bounds, &.{ .zoom = zoom }).left - scaledValue(6, zoom) else layout.detail.right, layout.detail.bottom);
         try drawCardText(hdc, allocator, if (role == .entry) "START" else "UNWIRED", role_bounds, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
     }
+    const meta = blk: {
+        const old = try selectCardFont(hdc, 10.5 * zoom, .card_mono);
+        defer _ = c.SelectObject(hdc, old);
+        break :blk cardMetaForWidth(hdc, allocator, node, @intCast(@max(0, std.time.timestamp())), layout.meta.right - layout.meta.left - scaledValue(10, zoom)) catch |err| switch (err) {
+            error.CardMetadataTooWide => {
+                std.log.warn("Card {s} fixed metadata does not fit: {s}", .{ node.id, @errorName(err) });
+                try drawCardText(hdc, allocator, "Metadata unavailable", layout.meta, 10.5 * zoom, .card_mono, Tokens.dialog_error_text, true);
+                return;
+            },
+            else => return err,
+        };
+    };
+    defer allocator.free(meta);
     const square_top = @divTrunc(layout.meta.top + layout.meta.bottom - scaledValue(6, zoom), 2);
     fill(hdc, rect(layout.meta.left, square_top, layout.meta.left + scaledValue(6, zoom), square_top + scaledValue(6, zoom)), loopTypeColor(node.loop_type));
     try drawCardText(hdc, allocator, meta, rect(layout.meta.left + scaledValue(10, zoom), layout.meta.top, layout.meta.right, layout.meta.bottom), 10.5 * zoom, .card_mono, 0x008C8989, false);
@@ -3298,6 +3313,45 @@ test "loop card parity metrics and rows fit the owning card" {
     }
 }
 
+test "loop card parity overview narrow client retains action hits and pannable card extents" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"a","title":"A"},{"id":"b","title":"B"},{"id":"c","title":"C"},{"id":"d","title":"D"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"e","title":"E"}],"edges":[]}}}
+    );
+    try std.testing.expectEqual(@as(i32, 854), contentSize(&model, .overview).width);
+    for ([_]i32{ 1028, 1440 }) |right| {
+        const viewport = rect(220, 34, right, 900);
+        for ([_]CanvasState{ .{}, .{ .zoom = 0.75, .pan_x = 15, .pan_y = -12 }, .{ .zoom = 1.25, .pan_x = -120, .pan_y = 20 } }) |state| {
+            const lane = overviewLaneBounds(&model, 0, viewport, &state);
+            const next_lane = overviewLaneBounds(&model, 1, viewport, &state);
+            const first = overviewCardBounds(&model, 0, 0, viewport, &state);
+            const second = overviewCardBounds(&model, 0, 1, viewport, &state);
+            const third = overviewCardBounds(&model, 0, 2, viewport, &state);
+            const fourth = overviewCardBounds(&model, 0, 3, viewport, &state);
+            try std.testing.expect(first.right < second.left and second.right < third.left);
+            try std.testing.expect(first.bottom < fourth.top and fourth.bottom < lane.bottom);
+            try std.testing.expect(third.right < lane.right and lane.bottom < next_lane.top);
+        }
+    }
+    const narrow = rect(220, 34, 1028, 900);
+    const caption = overviewLaneCaption(&model, 0, narrow, &.{});
+    try std.testing.expectEqualDeep(rect(918, 82, 974, 102), caption.open);
+    try std.testing.expectEqualDeep(rect(978, 82, 1032, 102), caption.worktrees);
+    try std.testing.expect(caption.worktrees.left < narrow.right and caption.worktrees.right > narrow.right);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1005, 92, narrow, &.{}).?);
+    const panned = CanvasState{ .pan_x = -30 };
+    const shifted = overviewLaneCaption(&model, 0, narrow, &panned);
+    const third = overviewCardBounds(&model, 0, 2, narrow, &panned);
+    try std.testing.expect(shifted.worktrees.right <= narrow.right);
+    try std.testing.expect(third.right <= narrow.right);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, shifted.worktrees.left + 1, shifted.worktrees.top + 1, narrow, &panned).?);
+}
+
 test "loop card parity live and meta content and duration boundaries" {
     const allocator = std.testing.allocator;
     var node = parityTestNode();
@@ -3449,6 +3503,15 @@ fn parityOwnedTextExercise(allocator: std.mem.Allocator, dc: c.HDC) !void {
     defer allocator.free(metric);
     try std.testing.expect(metric.len > 128);
     try std.testing.expect(std.mem.endsWith(u8, metric, "100% better"));
+    var compact = parityTestNode();
+    compact.loop_type = @constCast("composite");
+    compact.worktree_branch = @constCast("main");
+    for ([_]i32{ 218, 200 }) |width| {
+        const short = try cardMetaForWidth(dc, allocator, compact, 3900, width);
+        defer allocator.free(short);
+        try std.testing.expect(try measuredText(dc, allocator, short) <= width);
+        try std.testing.expect(std.mem.endsWith(u8, short, "Copilot CLI · 1h 5m"));
+    }
 }
 
 test "loop card parity long Unicode text measured middle elision and allocation cleanup" {
@@ -3576,6 +3639,100 @@ test "loop card parity production long text and hollow pills paint across zoom a
             const center_x = rows.pill.left + scaledValue(5, zoom) + @divTrunc(scaledValue(6, zoom), 2);
             const center_y = @divTrunc(rows.pill.top + rows.pill.bottom, 2);
             try std.testing.expectEqual(cardState(node).fill, c.GetPixel(dib.dc, center_x, center_y));
+        }
+    }
+}
+
+test "loop card parity compact composite metadata never blanks title or state" {
+    const allocator = std.testing.allocator;
+    const dib = try ParityDib.init(600, 240);
+    defer dib.deinit();
+    var node = parityTestNode();
+    node.loop_type = @constCast("composite");
+    node.worktree_branch = @constCast("main");
+    node.created_at = @intCast(@max(0, std.time.timestamp() - 3900));
+    const bounds = rect(20, 20, 270, 116);
+    fill(dib.dc, rect(0, 0, 600, 240), 0);
+    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, false);
+    try std.testing.expect(c.GdiFlush() != 0);
+    try std.testing.expect(dib.count(rect(31, 28, 170, 46), 0x00F4F4F4) > 0);
+    try std.testing.expect(dib.count(rect(170, 28, 259, 46), cardState(node).fill) > 0);
+    const old = try selectCardFont(dib.dc, 10.5, .card_mono);
+    defer _ = c.SelectObject(dib.dc, old);
+    const metadata = try cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, 218);
+    defer allocator.free(metadata);
+    try std.testing.expectEqualStrings("Composite · … · Copilot CLI · 1h 5m", metadata);
+    const minimum = try measuredText(dib.dc, allocator, metadata);
+    const exact = try cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, minimum);
+    defer allocator.free(exact);
+    try std.testing.expectEqualStrings(metadata, exact);
+    const below = try cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, minimum - 1);
+    defer allocator.free(below);
+    try std.testing.expectEqualStrings("Composite · Copilot CLI · 1h 5m", below);
+    const fixed_width = try measuredText(dib.dc, allocator, below);
+    const exact_fixed = try cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, fixed_width);
+    defer allocator.free(exact_fixed);
+    try std.testing.expectEqualStrings(below, exact_fixed);
+    try std.testing.expectError(error.CardMetadataTooWide, cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, fixed_width - 1));
+    node.backend = @constCast("a backend identifier too wide to fit without lying");
+    fill(dib.dc, rect(0, 0, 600, 240), 0);
+    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, false);
+    try std.testing.expect(c.GdiFlush() != 0);
+    try std.testing.expect(dib.count(rect(31, 28, 170, 46), 0x00F4F4F4) > 0);
+    try std.testing.expect(dib.count(rect(31, 52, 259, 65), 0x009F9C9C) > 0);
+    try std.testing.expect(dib.count(rect(31, 95, 259, 108), Tokens.dialog_error_text) > 0);
+}
+
+test "loop card parity middle elision cuts only between complete surrogate pairs" {
+    const allocator = std.testing.allocator;
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(dc);
+    const old = try selectCardFont(dc, 10.5, .card_mono);
+    defer _ = c.SelectObject(dc, old);
+    const source = try std.unicode.utf8ToUtf16LeAlloc(allocator, "🧪abcdefghijkl🧪");
+    defer allocator.free(source);
+    const expected = try std.unicode.utf8ToUtf16LeAlloc(allocator, "🧪…🧪");
+    defer allocator.free(expected);
+    const result = try middleElide(dc, allocator, source, try measuredWide(dc, expected));
+    defer allocator.free(result);
+    try std.testing.expectEqualSlices(u16, expected, result);
+    const utf8 = try std.unicode.utf16LeToUtf8Alloc(allocator, result);
+    defer allocator.free(utf8);
+    try std.testing.expectEqualStrings("🧪…🧪", utf8);
+}
+
+test "loop card parity existing action fills use hit bounds and never paint over meta" {
+    const allocator = std.testing.allocator;
+    const dib = try ParityDib.init(1200, 500);
+    defer dib.deinit();
+    var nodes = [_]GraphModel.Node{ parityTestNode(), parityTestNode() };
+    nodes[0].presence = @constCast("awaitingInput");
+    nodes[1].id = @constCast("resolved");
+    nodes[1].state = @constCast("succeeded");
+    nodes[1].presence = @constCast("idle");
+    nodes[1].worktree_path = @constCast("fixture-safe");
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = @constCast("main"),
+        .project_path = @constCast("fixture"),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{ .path = @constCast("fixture-safe"), .branch = @constCast("main"), .pushed = true, .landed = true });
+    for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
+        const state = CanvasState{ .zoom = zoom };
+        fill(dib.dc, rect(0, 0, 1200, 500), 0);
+        for (nodes, 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &.{}, &inspection, &.{}, &.{}, &state);
+        const attention = attentionActionBounds(nodeBounds(0, &state), &state);
+        const offer = reclaimOfferBounds(nodeBounds(1, &state));
+        try std.testing.expect(c.GdiFlush() != 0);
+        try std.testing.expect(dib.count(attention, 0x000A9FFF) > 0);
+        try std.testing.expect(dib.count(offer.reclaim, 0x003A3A44) > 0);
+        try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &.{}, attention.left + 1, attention.top + 1, &state));
+        try std.testing.expectEqual(ReclaimAction.reclaim, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state).?.action);
+        for (0..2) |index| {
+            const meta = cardTextLayout(nodeBounds(index, &state), zoom, scaledValue(80, zoom)).meta;
+            try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x000A9FFF));
+            try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x003A3A44));
         }
     }
 }
