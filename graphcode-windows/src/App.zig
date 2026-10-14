@@ -7880,11 +7880,13 @@ pub const App = struct {
                             GraphCanvas.loopDetailCollapseBounds(client.right);
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-toggle-panel", "control", if (self.workspace_controls.panel_visible) "Collapse loop panel" else "Expand loop panel", 4, .{ .logical = panel_toggle }, false, true) catch return;
                         if (self.workspace_controls.panel_visible and selected_index < graph.nodes.items.len) {
-                            const detail_left = client.right - Tokens.loop_detail_width;
                             const selected_node = graph.nodes.items[selected_index];
-                            self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 102, .right = client.right - 18, .bottom = client.bottom - 70 } }, false, false) catch return;
+                            if (selected_node.metric_sample_count >= 2) {
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-sparkline", selected_node.id, "Metric sparkline", 4, .{ .logical = GraphCanvas.loopDetailSparklineBounds(client.right, client.bottom) }, false, false) catch return;
+                            }
+                            const detail_footer = GraphCanvas.loopDetailFooterBounds(client.right, client.bottom);
                             if (selected_node.created_at != null) {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 64, .right = client.right - 18, .bottom = client.bottom - 44 } }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-start", selected_node.id, "Start time", 4, .{ .logical = detail_footer }, false, false) catch return;
                             }
                             if (selected_node.token_usage) |tokens| {
                                 const usage_name = std.fmt.allocPrint(self.allocator, "{d} tokens", .{tokens}) catch return;
@@ -7892,7 +7894,7 @@ pub const App = struct {
                                     self.allocator.free(usage_name);
                                     return;
                                 };
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = .{ .left = detail_left + 18, .top = client.bottom - 44, .right = client.right - 18, .bottom = client.bottom - 24 } }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-detail-usage", selected_node.id, usage_name, 4, .{ .logical = detail_footer }, false, false) catch return;
                             }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
@@ -19561,6 +19563,10 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
 }
 
 fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool) !void {
+    try expectDpiAccessibilityWithMetrics(surface, canvas, expected, quick_chat, 2);
+}
+
+fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement, quick_chat: bool, metric_samples: u8) !void {
     const allocator = std.testing.allocator;
     var app: App = .{
         .allocator = allocator,
@@ -19587,6 +19593,7 @@ fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expe
     _ = try app.model.updateFromFrame(
         \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"g","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"loop","title":"Loop","state":"running","createdAt":1,"inputTokens":100,"metricHistory":[{"value":1},{"value":2}],"presence":{"presence":"awaitingInput","confidence":"reported"}}],"edges":[]}}}
     );
+    app.model.graph.?.nodes.items[0].metric_sample_count = metric_samples;
     try app.model.recent_projects.append(.{ .path = try allocator.dupe(u8, "C"), .name = try allocator.dupe(u8, "Recent") });
     try app.model.quick_chats.append(.{
         .id = try allocator.dupe(u8, "chat"),
@@ -19690,9 +19697,9 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } } },
         .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } } },
         .{ .identity = "workspace-toggle-panel:control", .bounds = .{ .{ 1100, 46, 1182, 68 }, .{ 1650, 69, 1773, 102 }, .{ 2200, 92, 2364, 136 } } },
-        .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 946, 798, 1182, 830 }, .{ 1419, 1197, 1773, 1245 }, .{ 1892, 1596, 2364, 1660 } } },
-        .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 946, 836, 1182, 856 }, .{ 1419, 1254, 1773, 1284 }, .{ 1892, 1672, 2364, 1712 } } },
-        .{ .identity = "workspace-detail-usage:loop", .bounds = .{ .{ 946, 856, 1182, 876 }, .{ 1419, 1284, 1773, 1314 }, .{ 1892, 1712, 2364, 1752 } } },
+        .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 940, 798, 1188, 830 }, .{ 1410, 1197, 1782, 1245 }, .{ 1880, 1596, 2376, 1660 } } },
+        .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
+        .{ .identity = "workspace-detail-usage:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
         .{ .identity = "quick-chat-workspace:chat" },
     }, false);
     try expectDpiAccessibility(.workspace, null, &.{
@@ -19700,6 +19707,23 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-toggle-panel:control" },
         .{ .identity = "workspace-toolbar:A" },
     }, true);
+}
+
+test "loop detail UIA rectangles equal painted bounds and omit empty sparklines" {
+    var start = DpiExpectedElement{ .identity = "workspace-detail-start:loop", .bounds = @as([3][4]i32, undefined) };
+    var usage = DpiExpectedElement{ .identity = "workspace-detail-usage:loop", .bounds = @as([3][4]i32, undefined) };
+    var sparkline = DpiExpectedElement{ .identity = "workspace-detail-sparkline:loop", .bounds = @as([3][4]i32, undefined) };
+    for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
+        const footer = (AccessibilityBounds{ .logical = GraphCanvas.loopDetailFooterBounds(1200, 900) }).physicalRect(dpi);
+        const metric = (AccessibilityBounds{ .logical = GraphCanvas.loopDetailSparklineBounds(1200, 900) }).physicalRect(dpi);
+        start.bounds.?[index] = .{ footer.left, footer.top, footer.right, footer.bottom };
+        usage.bounds.?[index] = start.bounds.?[index];
+        sparkline.bounds.?[index] = .{ metric.left, metric.top, metric.right, metric.bottom };
+    }
+    try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, sparkline }, false, 2);
+    for ([_]u8{ 0, 1 }) |count| {
+        try expectDpiAccessibilityWithMetrics(.workspace, null, &.{ start, usage, .{ .identity = sparkline.identity } }, false, count);
+    }
 }
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {

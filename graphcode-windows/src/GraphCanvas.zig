@@ -2080,79 +2080,97 @@ pub fn paintLoopDetailRail(
     const left = @max(0, client_right - Tokens.loop_detail_width);
     const top = Tokens.header_height;
     const node = graph.nodes.items[selected_index];
-    fill(hdc, rect(left, top, client_right, client_bottom), 0x0028282C);
-    fill(hdc, rect(left, top, left + 1, client_bottom), 0x0045454B);
-    drawText(hdc, allocator, "THIS LOOP", left + 18, top + 16, 11, 0x009898A0, client_right - 18);
+    fill(hdc, rect(left, top, client_right, client_bottom), Tokens.workspace_rail);
+    fill(hdc, rect(left, top, left + 1, client_bottom), 0x00312D2D);
     const collapse = loopDetailCollapseBounds(client_right);
+    drawText(hdc, allocator, "THIS LOOP", left + 12, top + 16, 11, 0x007A7777, collapse.left - 8);
     fill(hdc, collapse, 0x00303035);
     drawTextRect(hdc, allocator, "Collapse", collapse, 10, 0x00D8D8DE, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
 
     const map_layout = loopDetailMiniMapLayout(left, top, client_right);
-    roundedCard(hdc, map_layout.frame, 0x00303035, false);
-    const center_block = map_layout.center;
-    roundedCard(hdc, center_block, Tokens.loop_card_bottom, false);
-    fill(hdc, rect(center_block.left, center_block.top, center_block.left + 4, center_block.bottom), loopTypeColor(node.loop_type));
-    drawTextRect(hdc, allocator, node.title, rect(center_block.left + 10, center_block.top + 5, center_block.right - 10, center_block.top + 22), 10, 0x00FFFFFF, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
-    drawTextRect(hdc, allocator, node.state, rect(center_block.left + 10, center_block.top + 19, center_block.right - 10, center_block.top + 32), 8, 0x00B8B8B8, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
-    if (map_layout.incoming) |incoming_block| {
-        roundedCard(hdc, incoming_block, Tokens.loop_card_bottom, false);
-        fill(hdc, rect(incoming_block.left, incoming_block.top, incoming_block.left + 4, incoming_block.bottom), 0x00606068);
-        if (firstRelatedNode(graph, node.id, true)) |related| {
-            fill(hdc, rect(incoming_block.left, incoming_block.top, incoming_block.left + 4, incoming_block.bottom), loopTypeColor(related.loop_type));
-            drawTextRect(hdc, allocator, related.title, rect(incoming_block.left + 8, incoming_block.top + 2, incoming_block.right - 8, incoming_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
-        } else {
-            drawTextRect(hdc, allocator, "—", incoming_block, 9, 0x007A7A82, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-        }
-    }
-    if (map_layout.outgoing) |outgoing_block| {
-        roundedCard(hdc, outgoing_block, Tokens.loop_card_bottom, false);
-        fill(hdc, rect(outgoing_block.left, outgoing_block.top, outgoing_block.left + 4, outgoing_block.bottom), 0x00606068);
-        if (firstRelatedNode(graph, node.id, false)) |related| {
-            fill(hdc, rect(outgoing_block.left, outgoing_block.top, outgoing_block.left + 4, outgoing_block.bottom), loopTypeColor(related.loop_type));
-            drawTextRect(hdc, allocator, related.title, rect(outgoing_block.left + 8, outgoing_block.top + 2, outgoing_block.right - 8, outgoing_block.bottom - 2), 8, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
-        } else {
-            drawTextRect(hdc, allocator, "—", outgoing_block, 9, 0x007A7A82, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-        }
-    }
+    roundedCard(hdc, map_layout.frame, Tokens.loop_minimap_surface, false);
+    paintMiniMapChip(hdc, node, map_layout.center, true);
+    paintMiniMapRow(hdc, allocator, graph, node.id, true, map_layout.incoming.?);
+    paintMiniMapRow(hdc, allocator, graph, node.id, false, map_layout.outgoing.?);
 
-    var y = map_layout.frame.bottom + 18;
-    drawText(hdc, allocator, "HANDS OFF TO", left + 18, y, 11, 0x009898A0, client_right - 18);
-    y += 24;
+    var y = map_layout.frame.bottom + 10;
     var handoff_count: usize = 0;
     for (graph.edges.items) |edge| {
-        if (!std.mem.eql(u8, edge.from, node.id)) continue;
+        if (!std.mem.eql(u8, edge.from, node.id) or nodeById(graph, edge.to) == null) continue;
+        if (handoff_count == 0) {
+            drawText(hdc, allocator, "HANDS OFF TO", left + 12, y, 11, 0x007A7777, client_right - 12);
+            y += 24;
+        }
         if (paintRelationRow(hdc, allocator, graph, edge.to, edge.condition, edge.fired, left, client_right, y)) {
             handoff_count += 1;
-            y += 42;
+            y += 40;
         }
-        if (handoff_count == 3) break;
-    }
-    if (handoff_count == 0) {
-        drawText(hdc, allocator, "No outgoing loops", left + 28, y, 12, 0x007A7A82, client_right - 18);
-        y += 34;
     }
 
-    const footer_top = @max(y + 18, client_bottom - 188);
-    fill(hdc, rect(left + 18, footer_top, client_right - 18, footer_top + 1), 0x0045454B);
+    if (node.metric_sample_count >= 2) {
+        const sparkline = loopDetailSparklineBounds(client_right, client_bottom);
+        drawText(hdc, allocator, "RECENT PASSES", sparkline.left, sparkline.top - 24, 11, 0x007A7777, sparkline.right);
+        paintMetricSparkline(hdc, node, sparkline);
+    }
+    const footer = loopDetailFooterBounds(client_right, client_bottom);
+    if (node.worktree_branch.len != 0)
+        drawText(hdc, allocator, node.worktree_branch, footer.left, footer.top - 18, 10, 0x007A7777, footer.right);
     var footer_buffer: [160]u8 = undefined;
     const footer_text = loopDetailFooter(&footer_buffer, node);
-    drawText(hdc, allocator, footer_text, left + 18, footer_top + 14, 11, 0x009898A0, client_right - 18);
-    const branch = if (node.worktree_branch.len != 0) node.worktree_branch else if (node.worktree_path.len != 0) node.worktree_path else "Primary checkout";
-    drawText(hdc, allocator, branch, left + 18, footer_top + 38, 12, 0x00D8D8DE, client_right - 18);
-    const metric = if (node.metric_command.len != 0) node.metric_command else if (node.goal_summary.len != 0) node.goal_summary else "No metric configured";
-    drawText(hdc, allocator, metric, left + 18, footer_top + 62, 12, 0x009898A0, client_right - 18);
-    paintMetricSparkline(hdc, node, rect(left + 18, footer_top + 86, client_right - 18, footer_top + 118));
-    if (node.model_tier.len != 0) drawText(hdc, allocator, node.model_tier, left + 18, footer_top + 148, 12, 0x007AB8FF, client_right - 18);
+    drawTextRect(hdc, allocator, footer_text, footer, 10, 0x007A7777, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
 }
 
-fn firstRelatedNode(graph: *const GraphModel.GraphSummary, node_id: []const u8, incoming: bool) ?GraphModel.Node {
+fn paintMiniMapRow(hdc: c.HDC, allocator: std.mem.Allocator, graph: *const GraphModel.GraphSummary, node_id: []const u8, incoming: bool, bounds: c.RECT) void {
+    var nodes: [4]GraphModel.Node = undefined;
+    var count: usize = 0;
     for (graph.edges.items) |edge| {
         if (incoming and !std.mem.eql(u8, edge.to, node_id)) continue;
         if (!incoming and !std.mem.eql(u8, edge.from, node_id)) continue;
-        const related_id = if (incoming) edge.from else edge.to;
-        return nodeById(graph, related_id);
+        nodes[count] = nodeById(graph, if (incoming) edge.from else edge.to) orelse continue;
+        count += 1;
+        if (count == nodes.len) break;
     }
-    return null;
+    if (count == 0) {
+        drawTextRect(hdc, allocator, "—", bounds, 10, 0x00545151, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        return;
+    }
+    const row_width = @as(i32, @intCast(count)) * 31 - 5;
+    const start = @divTrunc(bounds.left + bounds.right - row_width, 2);
+    for (nodes[0..count], 0..) |related, index| {
+        const x = start + @as(i32, @intCast(index)) * 31;
+        paintMiniMapChip(hdc, related, rect(x, bounds.top, x + 26, bounds.bottom), false);
+    }
+}
+
+fn panelLoopTypeColor(loop_type: []const u8) u32 {
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x00709E19;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x000085C9;
+    if (std.mem.eql(u8, loop_type, "turnBased")) return 0x008151D5;
+    if (std.mem.eql(u8, loop_type, "composite") or std.mem.eql(u8, loop_type, "proactive")) return 0x00E98590;
+    return 0x00E3DAD3;
+}
+
+fn paintMiniMapChip(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT, selected: bool) void {
+    const color = panelLoopTypeColor(node.loop_type);
+    const opacity: u32 = if (selected) 90 else 50;
+    var blended: u32 = 0;
+    inline for (.{ 0, 8, 16 }) |shift| {
+        const channel = (((color >> shift) & 255) * opacity +
+            ((Tokens.loop_minimap_surface >> shift) & 255) * (100 - opacity)) / 100;
+        blended |= channel << shift;
+    }
+    if (!GdiplusAA.drawRoundedRect(hdc, bounds, 3, blended, if (selected) Tokens.pane_focus_tint else blended, if (selected) 1.5 else 0))
+        fill(hdc, bounds, blended);
+    if (std.mem.eql(u8, node.state, "blocked") or std.mem.eql(u8, node.presence, "awaitingInput"))
+        drawDot(hdc, bounds.right, bounds.top, 0x000A9FFF, 2);
+}
+
+pub fn loopDetailFooterBounds(client_right: i32, client_bottom: i32) c.RECT {
+    return rect(@max(0, client_right - Tokens.loop_detail_width) + 12, client_bottom - 28, client_right - 12, client_bottom - 10);
+}
+
+pub fn loopDetailSparklineBounds(client_right: i32, client_bottom: i32) c.RECT {
+    return rect(@max(0, client_right - Tokens.loop_detail_width) + 12, client_bottom - 102, client_right - 12, client_bottom - 70);
 }
 
 fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
@@ -2160,8 +2178,9 @@ fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
     const writer = stream.writer();
     var wrote = false;
     if (node.created_at) |created| {
+        var time_buffer: [32]u8 = undefined;
         writer.writeAll("started ") catch return buffer[0..stream.pos];
-        writer.writeAll(startTimeLabel(created)) catch return buffer[0..stream.pos];
+        writer.writeAll(startTimeLabel(&time_buffer, created)) catch return buffer[0..stream.pos];
         wrote = true;
     }
     if (node.token_usage) |tokens| {
@@ -2169,23 +2188,28 @@ fn loopDetailFooter(buffer: []u8, node: GraphModel.Node) []const u8 {
         formatTokenUsage(writer, tokens) catch return buffer[0..stream.pos];
         wrote = true;
     }
-    if (node.backend.len != 0) {
-        if (wrote) writer.writeAll(" · ") catch return buffer[0..stream.pos];
-        writer.writeAll(node.backend) catch return buffer[0..stream.pos];
-    }
     return buffer[0..stream.pos];
 }
 
-fn startTimeLabel(created_at: u64) []const u8 {
-    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
-    const now = std.time.milliTimestamp();
-    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
-    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
-    const minutes = elapsed_ms / 1000 / 60;
-    if (minutes < 1) return "just now";
-    if (minutes < 60) return "<1h ago";
-    if (minutes < 1440) return "today";
-    return "earlier";
+fn startTimeLabel(buffer: []u8, created_at: u64) []const u8 {
+    const seconds = if (created_at < 1_000_000_000_000) created_at else created_at / 1000;
+    const ticks = (seconds +| 11_644_473_600) *| 10_000_000;
+    const utc = c.FILETIME{ .dwLowDateTime = @truncate(ticks), .dwHighDateTime = @truncate(ticks >> 32) };
+    var local: c.FILETIME = undefined;
+    var time: c.SYSTEMTIME = undefined;
+    if (c.FileTimeToLocalFileTime(&utc, &local) == 0 or c.FileTimeToSystemTime(&local, &time) == 0) {
+        std.log.warn("Unable to format loop start time: Win32 error {d}", .{c.GetLastError()});
+        return "unknown time";
+    }
+    return formatClockTime(buffer, time.wHour, time.wMinute);
+}
+
+fn formatClockTime(buffer: []u8, hour: u16, minute: u16) []const u8 {
+    return std.fmt.bufPrint(buffer, "{d}:{d:0>2} {s}", .{
+        if (hour % 12 == 0) @as(u16, 12) else hour % 12,
+        minute,
+        if (hour < 12) "AM" else "PM",
+    }) catch "unknown time";
 }
 
 fn paintMetricSparkline(hdc: c.HDC, node: GraphModel.Node, bounds: c.RECT) void {
@@ -2245,10 +2269,11 @@ fn loopDetailMiniMapLayout(left: i32, top: i32, client_right: i32) struct {
     center: c.RECT,
     outgoing: ?c.RECT,
 } {
-    const frame = rect(left + 18, top + 44, client_right - 18, top + 116);
-    const center = rect(@divTrunc(frame.left + frame.right - 100, 2), frame.top + 20, @divTrunc(frame.left + frame.right + 100, 2), frame.top + 56);
-    const incoming = rect(frame.left + 10, frame.top + 26, frame.left + 58, frame.top + 44);
-    const outgoing = rect(frame.right - 58, frame.top + 26, frame.right - 10, frame.top + 44);
+    const frame = rect(left + 12, top + 44, client_right - 12, top + 162);
+    const mid = @divTrunc(frame.left + frame.right, 2);
+    const center = rect(mid - 18, frame.top + 51, mid + 18, frame.top + 67);
+    const incoming = rect(frame.left + 10, frame.top + 29, frame.right - 10, frame.top + 41);
+    const outgoing = rect(frame.left + 10, frame.top + 77, frame.right - 10, frame.top + 89);
     return .{
         .frame = frame,
         .incoming = incoming,
@@ -2257,17 +2282,12 @@ fn loopDetailMiniMapLayout(left: i32, top: i32, client_right: i32) struct {
     };
 }
 
-fn loopDetailRowLayout(left: i32, y: i32, client_right: i32, condition: []const u8) LoopDetailRowLayout {
-    const row = rect(left + 18, y, client_right - 18, y + 34);
-    const type_bar = rect(row.left + 12, row.top + 6, row.left + 16, row.bottom - 6);
-    const status_dot = rect(row.right - 16, row.top + 13, row.right - 8, row.top + 21);
-    const show_condition = !std.mem.eql(u8, condition, "always");
-    const condition_bounds = if (show_condition)
-        textRect(row.right - 92, row.top + 7, 10, status_dot.left - 8)
-    else
-        null;
-    const title_limit = if (condition_bounds) |value| value.left - 8 else status_dot.left - 8;
-    const title = textRect(row.left + 44, row.top + 7, 12, title_limit);
+fn loopDetailRowLayout(left: i32, y: i32, client_right: i32, _: []const u8) LoopDetailRowLayout {
+    const row = rect(left + 12, y, client_right - 12, y + 36);
+    const type_bar = rect(row.left + 5, row.top + 8, row.left + 8, row.top + 28);
+    const status_dot = rect(row.right - 10, row.top + 15, row.right - 4, row.top + 21);
+    const title = rect(row.left + 15, row.top + 3, status_dot.left - 8, row.top + 20);
+    const condition_bounds = rect(row.left + 15, row.top + 21, status_dot.left - 8, row.top + 34);
     return .{
         .row = row,
         .type_bar = type_bar,
@@ -2290,19 +2310,37 @@ fn paintRelationRow(
 ) bool {
     const related = nodeById(graph, node_id) orelse return false;
     const layout = loopDetailRowLayout(left, y, client_right, condition);
-    roundedCard(hdc, layout.row, 0x00303035, false);
-    fill(hdc, layout.type_bar, loopTypeColor(related.loop_type));
-    if (layout.title) |title| drawText(hdc, allocator, related.title, title.left, title.top, 12, 0x00E0E0E5, title.right);
+    if (std.mem.eql(u8, related.state, "blocked") or std.mem.eql(u8, related.presence, "awaitingInput"))
+        roundedCard(hdc, layout.row, 0x00202334, false);
+    fill(hdc, layout.type_bar, panelLoopTypeColor(related.loop_type));
+    if (layout.title) |title| drawTextRect(hdc, allocator, related.title, title, 12, 0x00E0E0E5, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    var condition_buffer: [96]u8 = undefined;
     if (layout.condition) |condition_bounds|
-        drawText(hdc, allocator, condition, condition_bounds.left, condition_bounds.top, 10, 0x009898A0, condition_bounds.right);
+        drawTextRect(hdc, allocator, handoffConditionLabel(&condition_buffer, condition, fired), condition_bounds, 10, 0x00858282, c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
     drawDot(
         hdc,
         @divTrunc(layout.status_dot.left + layout.status_dot.right, 2),
         @divTrunc(layout.status_dot.top + layout.status_dot.bottom, 2),
-        if (fired) 0x0058C878 else 0x00686870,
-        4,
+        panelStateColor(related),
+        3,
     );
     return true;
+}
+
+fn handoffConditionLabel(buffer: []u8, condition: []const u8, fired: bool) []const u8 {
+    const label = if (std.mem.eql(u8, condition, "always")) "Always" else if (std.mem.eql(u8, condition, "onSuccess")) "On success" else if (std.mem.eql(u8, condition, "onFailure")) "On failure" else condition;
+    if (!fired) return label;
+    const lower = if (std.mem.eql(u8, condition, "always")) "always" else if (std.mem.eql(u8, condition, "onSuccess")) "on success" else if (std.mem.eql(u8, condition, "onFailure")) "on failure" else condition;
+    return std.fmt.bufPrint(buffer, "{s} · fired", .{lower}) catch label;
+}
+
+fn panelStateColor(node: GraphModel.Node) u32 {
+    if (std.mem.eql(u8, node.presence, "awaitingInput") or std.mem.eql(u8, node.state, "blocked")) return 0x000A9FFF;
+    if (std.mem.eql(u8, node.state, "running") or std.mem.eql(u8, node.state, "waiting")) return 0x00FF840A;
+    if (std.mem.eql(u8, node.state, "succeeded")) return 0x0058D130;
+    if (std.mem.eql(u8, node.state, "failed")) return 0x003A45FF;
+    if (std.mem.eql(u8, node.state, "stalled")) return 0x00F25ABF;
+    return 0x006E6C6C;
 }
 
 fn nodeById(graph: *const GraphModel.GraphSummary, id: []const u8) ?GraphModel.Node {
@@ -2857,24 +2895,70 @@ test "loop detail rows keep type, title, condition, and status apart" {
     const left = client_right - Tokens.loop_detail_width;
     const layout = loopDetailRowLayout(left, 244, client_right, "onSuccess");
     const title = layout.title orelse return error.TestExpectedRect;
-    try std.testing.expect(layout.row.left >= left + 18);
-    try std.testing.expectEqual(client_right - 18, layout.row.right);
+    try std.testing.expect(layout.row.left >= left + 12);
+    try std.testing.expectEqual(client_right - 12, layout.row.right);
     try std.testing.expect(layout.type_bar.right <= title.left);
     const condition = layout.condition orelse return error.TestExpectedRect;
-    try std.testing.expect(title.right <= condition.left);
+    try std.testing.expect(title.bottom <= condition.top);
     try std.testing.expect(condition.right <= layout.status_dot.left);
     try std.testing.expect(layout.status_dot.right <= layout.row.right);
 }
 
 test "loop detail minimap blocks do not overlap" {
     const layout = loopDetailMiniMapLayout(1496, 34, 1780);
-    try std.testing.expect(layout.frame.right <= 1780 - 18);
+    try std.testing.expect(layout.frame.right <= 1780 - 12);
     if (layout.incoming) |incoming| {
-        try std.testing.expect(incoming.right <= layout.center.left);
+        try std.testing.expect(incoming.bottom < layout.center.top);
     }
     if (layout.outgoing) |outgoing| {
-        try std.testing.expect(layout.center.right <= outgoing.left);
+        try std.testing.expect(layout.center.bottom < outgoing.top);
     }
+}
+
+test "loop detail handoff titles have full width with conditions below at 960 pixels" {
+    for ([_]i32{ 960, 1280, 2560 }) |width| {
+        const layout = loopDetailRowLayout(width - Tokens.loop_detail_width, 244, width, "always");
+        const title = layout.title orelse return error.TestExpectedRect;
+        const condition = layout.condition orelse return error.TestExpectedRect;
+        try std.testing.expect(title.right - title.left >= 180);
+        try std.testing.expectEqual(title.left, condition.left);
+        try std.testing.expect(title.bottom <= condition.top);
+        try std.testing.expect(condition.bottom <= layout.row.bottom);
+        try std.testing.expect(title.right < layout.status_dot.left);
+    }
+}
+
+test "loop detail minimap stacks incoming self and outgoing like macOS" {
+    const layout = loopDetailMiniMapLayout(1496, 34, 1768);
+    const incoming = layout.incoming orelse return error.TestExpectedRect;
+    const outgoing = layout.outgoing orelse return error.TestExpectedRect;
+    try std.testing.expectEqual(@as(i32, 118), layout.frame.bottom - layout.frame.top);
+    try std.testing.expect(incoming.bottom < layout.center.top);
+    try std.testing.expect(layout.center.bottom < outgoing.top);
+}
+
+test "loop detail conditions use display names and preserve fired information" {
+    var buffer: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Always", handoffConditionLabel(&buffer, "always", false));
+    try std.testing.expectEqualStrings("On success", handoffConditionLabel(&buffer, "onSuccess", false));
+    try std.testing.expectEqualStrings("on failure · fired", handoffConditionLabel(&buffer, "onFailure", true));
+}
+
+test "loop detail footer uses clock time without a backend placeholder" {
+    var buffer: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("12:05 AM", formatClockTime(&buffer, 0, 5));
+    try std.testing.expectEqualStrings("12:30 PM", formatClockTime(&buffer, 12, 30));
+    try std.testing.expectEqualStrings("3:47 PM", formatClockTime(&buffer, 15, 47));
+    const node = GraphModel.Node{
+        .id = @constCast("loop"),
+        .title = @constCast("Loop"),
+        .loop_type = @constCast("sketch"),
+        .state = @constCast("idle"),
+        .activity = @constCast(""),
+        .presence = @constCast("idle"),
+        .backend = @constCast("copilotCLI"),
+    };
+    try std.testing.expectEqualStrings("", loopDetailFooter(&buffer, node));
 }
 
 test "loop card detail prioritizes goal and preserves metadata" {
@@ -2934,7 +3018,9 @@ test "loop age labels show a just-created daemon loop as recent" {
     const node = model.currentGraph().?.nodes.items[0];
     var buffer: [128]u8 = undefined;
     try std.testing.expectEqualStrings("0m", nodeMetadata(&buffer, node));
-    try std.testing.expectEqualStrings("started just now", loopDetailFooter(&buffer, node));
+    const footer = loopDetailFooter(&buffer, node);
+    try std.testing.expect(std.mem.startsWith(u8, footer, "started "));
+    try std.testing.expect(std.mem.endsWith(u8, footer, "AM") or std.mem.endsWith(u8, footer, "PM"));
     try std.testing.expectEqualStrings("oldest 0m: Loop", attentionAgeLabel(&buffer, node));
 }
 

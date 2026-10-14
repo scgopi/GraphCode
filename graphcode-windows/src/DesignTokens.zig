@@ -31,6 +31,7 @@ pub const terminal_background_opacity: f32 = 0.80;
 // to R=0x21,G=0x1D,B=0x1D instead of R=0x1D,G=0x1D,B=0x21) -- a genuine color bug, not
 // just quantization, fixed here to match the mac literal exactly.
 pub const workspace_rail: Color = 0x00211D1D;
+pub const loop_minimap_surface: Color = 0x001A1616; // RailMinimap.surface = #16161a
 pub const pane_focus_tint: Color = 0x00FF840A; // Theme.paneFocusTint = #0a84ff
 
 // --- Chrome gloss / gradient surfaces -------------------------------------------
