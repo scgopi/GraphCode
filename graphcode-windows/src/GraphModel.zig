@@ -46,6 +46,7 @@ pub const QuickChat = struct {
     id: []u8,
     title: []u8,
     backend: []u8,
+    created_at: ?u64 = null,
     activity: []u8 = &.{},
     activity_sequence: u64 = 0,
 };
@@ -951,10 +952,14 @@ pub const Model = struct {
     fn upsertQuickChat(self: *Model, object: []const u8) !void {
         const id = duplicateJsonString(self.allocator, object, "id") catch return;
         errdefer self.allocator.free(id);
+        var fields = try JsonFields.init(self.allocator, object);
+        defer fields.deinit();
+        const created_at = unixSecondsFromReferenceDate(fields.get("createdAt"));
         for (self.quick_chats.items) |*existing| {
             if (std.mem.eql(u8, existing.id, id)) {
                 self.allocator.free(existing.title);
                 existing.title = try duplicateJsonString(self.allocator, object, "title");
+                if (created_at) |timestamp| existing.created_at = timestamp;
                 self.allocator.free(id);
                 return;
             }
@@ -963,6 +968,7 @@ pub const Model = struct {
             .id = id,
             .title = try duplicateJsonString(self.allocator, object, "title"),
             .backend = try duplicateJsonStringOr(self.allocator, object, "backend", "claudeCode"),
+            .created_at = created_at,
         };
         if (std.mem.indexOf(u8, object, "\"activity\"")) |activity_key| {
             if (indexOfByte(object, activity_key, '{')) |activity_open| {
@@ -1884,10 +1890,14 @@ const reference_date_unix_offset: u64 = 978_307_200;
 // as a placeholder, so it and anything earlier stay unknown rather than becoming
 // a decades-old age; results stay below the label helpers' 1e12 millisecond cutoff.
 fn unixSecondsFromReferenceDate(value: JsonValue) ?u64 {
+    return unixSecondsFromReferenceSeconds(value.float());
+}
+
+fn unixSecondsFromReferenceSeconds(seconds: ?f64) ?u64 {
     const max_reference_seconds: f64 = 1_000_000_000_000 - @as(f64, @floatFromInt(reference_date_unix_offset));
-    const seconds = value.float() orelse return null;
-    if (!(seconds > 0) or seconds >= max_reference_seconds) return null;
-    return @as(u64, @intFromFloat(@floor(seconds))) + reference_date_unix_offset;
+    const seconds_value = seconds orelse return null;
+    if (!(seconds_value > 0) or seconds_value >= max_reference_seconds) return null;
+    return @as(u64, @intFromFloat(@floor(seconds_value))) + reference_date_unix_offset;
 }
 
 fn decodeNodes(
@@ -2893,6 +2903,58 @@ test "quick chat fixture preserves stable identity and activity ordering" {
     try std.testing.expectEqual(@as(usize, 2), model.quick_chats.items.len);
     try std.testing.expectEqualStrings("Scratch", model.quick_chats.items[0].title);
     try std.testing.expectEqual(@as(u64, 2), model.quick_chats.items[0].activity_sequence);
+}
+
+test "quick chats retain creation timestamps for the workspace age" {
+    try std.testing.expect(@hasField(QuickChat, "created_at"));
+}
+
+test "quick chat timestamps decode valid dates and tolerate missing or malformed values" {
+    const cases = [_]struct {
+        frame: []const u8,
+        expected: ?u64,
+    }{
+        .{
+            .frame = "{\"version\":2,\"kind\":\"event\",\"sequence\":1,\"event\":{\"quickChatsListed\":[{\"id\":\"chat-1\",\"title\":\"Chat\",\"createdAt\":812912680.03}]}}",
+            .expected = 1_791_219_880,
+        },
+        .{
+            .frame = "{\"version\":2,\"kind\":\"event\",\"sequence\":2,\"event\":{\"quickChatsListed\":[{\"id\":\"chat-1\",\"title\":\"Chat\"}]}}",
+            .expected = null,
+        },
+        .{
+            .frame = "{\"version\":2,\"kind\":\"event\",\"sequence\":3,\"event\":{\"quickChatsListed\":[{\"id\":\"chat-1\",\"title\":\"Chat\",\"createdAt\":\"not-a-date\"}]}}",
+            .expected = null,
+        },
+    };
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    for (cases) |case| {
+        try std.testing.expectEqual(Wire.EventKind.quick_chats, try model.updateFromFrame(case.frame));
+        try std.testing.expectEqual(case.expected, model.quick_chats.items[0].created_at);
+    }
+}
+
+test "quick chat upsert refreshes creation timestamp and retains it on malformed updates" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    const first =
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatChanged":{"id":"chat-1","title":"Chat","createdAt":812912680.03}}}
+    ;
+    const renamed =
+        \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatChanged":{"id":"chat-1","title":"Renamed","createdAt":812913000}}}
+    ;
+    const malformed =
+        \\{"version":2,"kind":"event","sequence":3,"event":{"quickChatChanged":{"id":"chat-1","title":"Renamed again","createdAt":"invalid"}}}
+    ;
+    try std.testing.expectEqual(Wire.EventKind.quick_chat_changed, try model.updateFromFrame(first));
+    try std.testing.expectEqual(@as(?u64, 1_791_219_880), model.quick_chats.items[0].created_at);
+    try std.testing.expectEqual(Wire.EventKind.quick_chat_changed, try model.updateFromFrame(renamed));
+    try std.testing.expectEqualStrings("Renamed", model.quick_chats.items[0].title);
+    try std.testing.expectEqual(@as(?u64, 1_791_220_200), model.quick_chats.items[0].created_at);
+    try std.testing.expectEqual(Wire.EventKind.quick_chat_changed, try model.updateFromFrame(malformed));
+    try std.testing.expectEqualStrings("Renamed again", model.quick_chats.items[0].title);
+    try std.testing.expectEqual(@as(?u64, 1_791_220_200), model.quick_chats.items[0].created_at);
 }
 
 test "project identity derives remote and global from Codable paths" {

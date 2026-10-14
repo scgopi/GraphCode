@@ -26,6 +26,7 @@ const GraphModel = @import("GraphModel.zig");
 const InputRouter = @import("InputRouter.zig");
 const MainWindow = @import("MainWindow.zig");
 const TerminalWorkspace = @import("TerminalWorkspace.zig");
+const TerminalSurface = @import("TerminalSurface.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
 const Clipboard = @import("Clipboard.zig");
 const TerminalKeys = @import("TerminalKeys.zig");
@@ -1246,12 +1247,10 @@ fn workspaceLoopBar(controls: WorkspaceControls.State, client_right: i32, resolv
     );
 }
 
-fn workspaceQuickChatBar(controls: WorkspaceControls.State, client_right: i32) LoopBarLayout.Layout {
-    return TerminalWorkspace.loopBarLayout(
+fn workspaceQuickChatBar(controls: WorkspaceControls.State, client_right: i32) TerminalSurface.QuickChatBarLayout {
+    return TerminalSurface.quickChatBarLayout(
         if (controls.rail_visible) Tokens.sidebar_width else 0,
         client_right,
-        true,
-        false,
     );
 }
 
@@ -1343,6 +1342,7 @@ const UiaDynamicTarget = union(enum) {
     },
     quick_chat: []const u8,
     workspace_show_graph,
+    workspace_restart_session,
     workspace_stop,
     workspace_new_tab,
     workspace_split_right,
@@ -3086,13 +3086,18 @@ pub const App = struct {
             if (self.workspace) |workspace| {
                 if (std.process.getEnvVarOwned(self.allocator, "USERPROFILE")) |home| {
                     defer self.allocator.free(home);
-                    _ = workspace.rebindProject(home) catch {};
+                    _ = workspace.rebindProject(home) catch {
+                        self.setStatus("Unable to open quick chat workspace");
+                        return;
+                    };
                 } else |_| {}
-                workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, false) catch {
+                workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, true) catch {
                     self.setStatus("Unable to open quick chat workspace");
+                    return;
                 };
-                workspace.openNode(0, chat.id) catch {
+                workspace.openLaunchedNode(0, chat.id, 0) catch {
                     self.setStatus("Unable to open quick chat workspace");
+                    return;
                 };
             }
             self.syncAccessibility();
@@ -7140,22 +7145,19 @@ pub const App = struct {
             );
         }
         if (self.empty_global_overview_button != null) {
-            const label = if (is_quick_chats) "+ New Chat" else "New Loop";
+            const label = if (is_quick_chats) "New Chat" else "New Loop";
             if (!childTextEquals(self.empty_global_overview_button, label)) setButtonText(self.empty_global_overview_button, label);
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
-            const primary_x = if (is_quick_chats) content_right - 140 else if (is_empty) x else content_right - 140;
-            const primary_y = if (is_quick_chats)
-                Tokens.header_height + 14
-            else if (is_empty)
+            const primary_x = if (is_empty) x else content_right - 140;
+            const primary_y = if (is_empty)
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
             else
                 Tokens.header_height + 14;
-            const primary_width: i32 = if (is_quick_chats) 120 else if (is_empty) 220 else 120;
             placeChildControl(self.empty_global_overview_button, show_primary, .{
                 .left = physicalCoordinate(primary_x, self.dpi),
                 .top = physicalCoordinate(primary_y, self.dpi),
-                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(primary_width, self.dpi),
+                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
                 .bottom = physicalCoordinate(primary_y, self.dpi) + physicalCoordinate(32, self.dpi),
             });
         }
@@ -7955,6 +7957,7 @@ pub const App = struct {
                                 const loop_bar = workspaceQuickChatBar(self.workspace_controls, client.right);
                                 self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", chat.id, chat.title, 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
                                 self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", "control", "Restart session", 4, .{ .logical = loopBarRect(loop_bar.restart_session) }, false, false) catch return;
                             }
                         }
                         for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
@@ -8244,6 +8247,7 @@ pub const App = struct {
         }
         const workspace_static = [_]struct { identity: []const u8, target: UiaDynamicTarget }{
             .{ .identity = "workspace-show-graph:show-graph", .target = .workspace_show_graph },
+            .{ .identity = "workspace-restart-session:control", .target = .workspace_restart_session },
             .{ .identity = "workspace-new-tab:control", .target = .workspace_new_tab },
             .{ .identity = "workspace-split-right:control", .target = .workspace_split_right },
             .{ .identity = "workspace-split-down:control", .target = .workspace_split_down },
@@ -8416,6 +8420,7 @@ pub const App = struct {
                 }
             },
             .workspace_show_graph => self.handleAction(.show_graph),
+            .workspace_restart_session => {},
             .workspace_stop => self.stopSelectedNode(),
             .workspace_new_tab => self.handleAction(.new_tab),
             .workspace_split_right => self.handleAction(.split_horizontal),
@@ -9192,22 +9197,12 @@ fn onWindowMessage(
                         if (app.selected_quick_chat) |chat_index| {
                             if (chat_index < app.model.quick_chats.items.len) {
                                 const chat = app.model.quick_chats.items[chat_index];
-                                TerminalWorkspace.Workspace.paintLoopBar(
+                                TerminalWorkspace.Workspace.paintQuickChatBar(
                                     hdc,
-                                    app.allocator,
                                     if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
                                     workspace_right,
-                                    "Chat",
                                     chat.title,
-                                    "composite",
-                                    "IDLE",
-                                    if (chat.activity.len != 0) chat.activity else "Not piloted",
-                                    if (chat.backend.len != 0) chat.backend else "claudeCode",
-                                    null,
-                                    0,
-                                    null,
-                                    true,
-                                    false,
+                                    chat.created_at,
                                 );
                             }
                         }
@@ -9591,10 +9586,11 @@ fn onWindowMessage(
                     if (app.workspace_is_quick_chat) {
                         if (app.selected_quick_chat) |chat_index| {
                             if (chat_index < app.model.quick_chats.items.len) {
-                                const chat = app.model.quick_chats.items[chat_index];
-                                if (workspaceQuickChatBar(app.workspace_controls, client.right).actionAt(x, y)) |_| {
-                                    _ = chat;
-                                    app.handleAction(.show_graph);
+                                if (workspaceQuickChatBar(app.workspace_controls, client.right).actionAt(x, y)) |action| {
+                                    switch (action) {
+                                        .restart_session => {},
+                                        .show_graph => app.handleAction(.show_graph),
+                                    }
                                     _ = c.InvalidateRect(hwnd, null, 0);
                                     result.* = 0;
                                     return true;
@@ -17855,17 +17851,6 @@ fn expectNewLoopAtTopRight(app: *App) !void {
     try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
 }
 
-fn expectNewChatAtTopRight(app: *App) !void {
-    const button = emptyStateButton(app, app.empty_global_overview_button);
-    try std.testing.expect(button.visible);
-    try std.testing.expect(App.childTextEquals(app.empty_global_overview_button, "+ New Chat"));
-    const client = logicalClientRect(app.window.hwnd, app.dpi);
-    try std.testing.expectEqual(physicalCoordinate(client.right - 140, app.dpi), button.rect.left);
-    try std.testing.expectEqual(physicalCoordinate(Tokens.header_height + 14, app.dpi), button.rect.top);
-    try std.testing.expectEqual(physicalCoordinate(120, app.dpi), button.rect.right - button.rect.left);
-    try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
-}
-
 fn clickSidebarProjectRow(app: *App, path: []const u8) !void {
     var rows = try Sidebar.appendRows(app.allocator, &app.model, app.currentWorktreeInspection(), app.sidebar_scroll, &app.sidebar_state);
     defer rows.deinit(app.allocator);
@@ -17914,23 +17899,18 @@ test "workspace surface: canvas New Loop and Open Folder buttons follow the proj
     try expectNewLoopAtTopRight(&app);
 }
 
-test "workspace surface: Quick Chats empty canvas button stays at the top right and says + New Chat" {
-    var app = try overviewTestApp(Dpi.base_dpi);
-    defer deinitOverviewTestApp(&app);
-    defer app.allocator.free(app.pending_project_path);
-    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
-    app.surface = .quick_chats;
-    app.createEmptyStateControls();
-    defer {
-        _ = c.DestroyWindow(app.empty_open_folder_button);
-        _ = c.DestroyWindow(app.empty_global_overview_button);
-    }
-    try std.testing.expect(app.empty_open_folder_button != null and app.empty_global_overview_button != null);
-    try expectNewChatAtTopRight(&app);
-}
-
 test "opening quick chat resets the workspace chrome to the chat and hides the loop panel" {
     const allocator = std.testing.allocator;
+    const user_profile_key = std.unicode.utf8ToUtf16LeStringLiteral("USERPROFILE");
+    var original_environment = try std.process.getEnvMap(allocator);
+    defer original_environment.deinit();
+    defer setWorkspaceTestEnvironment(user_profile_key, original_environment.get("USERPROFILE")) catch @panic("USERPROFILE restore failed");
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(home);
+    try setWorkspaceTestEnvironment(user_profile_key, home);
+
     const Probe = struct {
         canvas: ?c.RECT = null,
         workspace: ?Accessibility.DynamicElement = null,
@@ -17959,18 +17939,21 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
         .title = try allocator.dupe(u8, "Chat 1"),
         .backend = try allocator.dupe(u8, "claudeCode"),
     });
+    const layout_path = try std.fs.path.join(allocator, &.{ home, "layout.json" });
     var workspace: TerminalWorkspace.Workspace = .{
         .parent = null,
         .allocator = allocator,
         .zmx_path = &.{},
         .cwd = &.{},
         .input_queue = .{ .allocator = allocator },
-        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, "C:\\loop-fixture"),
-        .layout_path = &.{},
-        .project_key = &.{},
+        .layout = try @import("WorkspaceLayout.zig").Layout.init(allocator, home),
+        .layout_path = layout_path,
+        .project_key = try allocator.dupe(u8, home),
+        .project_path = try allocator.dupe(u8, home),
+        .legacy_directory = try allocator.dupe(u8, home),
     };
     defer workspace.deinit();
-    try workspace.layout.addTab("agent", true);
+    try workspace.layout.addTab("loop-a", true);
     try workspace.layout.addTab("shell", false);
     app.workspace = &workspace;
     app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false };
@@ -17982,6 +17965,22 @@ test "opening quick chat resets the workspace chrome to the chat and hides the l
     const header = app.headerPresentation();
     try std.testing.expectEqualStrings("Chat 1", header.title);
     try std.testing.expectEqualStrings("Quick Chat workspace", header.context);
+    const quick_chat_bar = workspaceQuickChatBar(app.workspace_controls, 1200);
+    try std.testing.expect(quick_chat_bar.title != null);
+    try std.testing.expect(quick_chat_bar.state != null);
+    try std.testing.expect(quick_chat_bar.activity != null);
+    try std.testing.expect(quick_chat_bar.age != null);
+    try std.testing.expectEqual(
+        TerminalSurface.QuickChatBarAction.restart_session,
+        quick_chat_bar.actionAt(
+            @divTrunc(quick_chat_bar.restart_session.left + quick_chat_bar.restart_session.right, 2),
+            @divTrunc(quick_chat_bar.restart_session.top + quick_chat_bar.restart_session.bottom, 2),
+        ).?,
+    );
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items[0].panes.items.len);
+    try std.testing.expectEqualStrings("chat-1", workspace.layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
     LoopBarProbe.publish(&app);
     try std.testing.expect(LoopBarProbe.has_bar);
     try std.testing.expectEqualStrings("chat-1", LoopBarProbe.barLoop());

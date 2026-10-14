@@ -520,12 +520,124 @@ static void nativeCommandAndScrollChecks() {
   DestroyWindow(capture);
 }
 
+static int canvasCardCount(IRawElementProviderFragment *graph) {
+  IRawElementProviderFragment *element = nullptr;
+  check(graph && graph->Navigate(NavigateDirection_FirstChild, &element) == S_OK,
+        "Graph children are available for the canvas-card count");
+  int count = 0;
+  while (element) {
+    if (stringProperty(element, UIA_AutomationIdPropertyId).rfind(L"canvas-card-", 0) == 0)
+      ++count;
+    IRawElementProviderFragment *next = nullptr;
+    check(element->Navigate(NavigateDirection_NextSibling, &next) == S_OK,
+          "Graph child sibling navigation succeeds");
+    element->Release();
+    element = next;
+  }
+  return count;
+}
+
+static void nativeWorkspaceRestartAutomationIdChecks() {
+  HWND capture = createCaptureWindow();
+  check(capture != nullptr, "Quick Chat provider window exists");
+  if (!capture) return;
+  IRawElementProviderSimple *provider = gc_uia_create(capture);
+  check(provider != nullptr, "Quick Chat provider exists");
+  if (!provider) {
+    DestroyWindow(capture);
+    return;
+  }
+
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  const char *baseline_identities[] = {"canvas-card:existing"};
+  const char *baseline_names[] = {"Existing card"};
+  const int baseline_parents[] = {4};
+  const int baseline_flags[] = {0};
+  const int baseline_bounds[] = {0, 0, 0, 0};
+  check(update(provider, "Baseline", baseline_identities, baseline_names, baseline_parents,
+               baseline_flags, baseline_flags, baseline_flags, baseline_bounds,
+               1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "baseline canvas card publication succeeds");
+
+  IRawElementProviderFragment *root = nullptr;
+  check(provider->QueryInterface(IID_PPV_ARGS(&root)) == S_OK && root,
+        "Quick Chat provider exposes its root fragment");
+  if (root) {
+    auto *projects = child(root, NavigateDirection_FirstChild);
+    auto *loops = child(projects, NavigateDirection_NextSibling);
+    auto *worktrees = child(loops, NavigateDirection_NextSibling);
+    auto *graph = child(worktrees, NavigateDirection_NextSibling);
+    const int canvas_cards_before = canvasCardCount(graph);
+    check(canvas_cards_before == 1, "baseline canvas-card count is one");
+
+    const char *identities[] = {"canvas-card:existing", "workspace-restart-session:chat"};
+    const char *names[] = {"Existing card", "Restart session"};
+    const int parents[] = {4, 4};
+    const int none[] = {0, 0};
+    const int actions[] = {0, 1};
+    const int bounds[] = {0, 0, 0, 0, 0, 0, 0, 0};
+    check(update(provider, "Quick Chat", identities, names, parents, none, none, actions,
+                 bounds, 2, 0, 1, 0, 0, 0, 0) == S_OK,
+          "Quick Chat restart publication succeeds");
+
+    IRawElementProviderFragment *element = nullptr;
+    check(graph && graph->Navigate(NavigateDirection_FirstChild, &element) == S_OK,
+          "Quick Chat Graph children are available");
+    IRawElementProviderFragment *restart = nullptr;
+    while (element) {
+      if (stringProperty(element, UIA_NamePropertyId) == L"Restart session") {
+        restart = element;
+        break;
+      }
+      IRawElementProviderFragment *next = nullptr;
+      check(element->Navigate(NavigateDirection_NextSibling, &next) == S_OK,
+            "Quick Chat child sibling navigation succeeds");
+      element->Release();
+      element = next;
+    }
+    check(restart != nullptr, "Restart session is exposed as a Graph child");
+    if (restart) {
+      const std::wstring automation_id = stringProperty(restart, UIA_AutomationIdPropertyId);
+      check(automation_id.rfind(L"workspace-restart-session-", 0) == 0,
+            "Restart session has its stable workspace AutomationId");
+      IRawElementProviderSimple *simple = nullptr;
+      check(restart->QueryInterface(IID_PPV_ARGS(&simple)) == S_OK && simple,
+            "Restart session supports native UIA properties");
+      if (simple) {
+        VARIANT value;
+        VariantInit(&value);
+        const HRESULT result = simple->GetPropertyValue(UIA_ControlTypePropertyId, &value);
+        check(result == S_OK && value.vt == VT_I4 &&
+                  value.lVal == UIA_ButtonControlTypeId,
+              "Restart session is exposed as an action button");
+        VariantClear(&value);
+        simple->Release();
+      }
+      restart->Release();
+    } else if (element) {
+      element->Release();
+    }
+
+    const int canvas_cards_after = canvasCardCount(graph);
+    check(canvas_cards_after == canvas_cards_before,
+          "Restart session does not increase the canvas-card count");
+    if (graph) graph->Release();
+    if (worktrees) worktrees->Release();
+    if (loops) loops->Release();
+    if (projects) projects->Release();
+    root->Release();
+  }
+  gc_uia_release(provider);
+  DestroyWindow(capture);
+}
+
 int main() {
   HWND hwnd = CreateWindowW(L"STATIC", L"UIA native test", WS_OVERLAPPED,
                             137, 211, 300, 300, nullptr, nullptr, nullptr, nullptr);
   check(hwnd != nullptr, "native window exists");
   if (!hwnd) return 1;
   nativeCommandAndScrollChecks();
+  nativeWorkspaceRestartAutomationIdChecks();
 
   auto *provider = gc_uia_create(hwnd);
   check(provider != nullptr, "native provider exists");

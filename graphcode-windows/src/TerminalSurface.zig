@@ -3,6 +3,7 @@ const c = @import("Win32.zig").c;
 const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const Tokens = @import("DesignTokens.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
+const GdiplusAA = @import("GdiplusAA.zig");
 const AppFont = @import("AppFont.zig");
 const GdiGradient = @import("GdiGradient.zig");
 const Dpi = @import("Dpi.zig");
@@ -166,8 +167,76 @@ pub const ChromeAction = enum { new_tab, split_right, split_down };
 pub const TabAction = enum { select, close };
 pub const LoopBarAction = LoopBarLayout.Action;
 
+pub const QuickChatBarAction = enum { restart_session, show_graph };
+
+const quick_chat_bar_accent: u32 = 0x00E98590; // COLORREF for macOS's #9085e9.
+
+pub const QuickChatBarLayout = struct {
+    bar: LoopBarLayout.Rect,
+    stripe: ?LoopBarLayout.Rect,
+    title: ?LoopBarLayout.Rect,
+    state: ?LoopBarLayout.Rect,
+    activity: ?LoopBarLayout.Rect,
+    divider: ?LoopBarLayout.Rect,
+    age: ?LoopBarLayout.Rect,
+    restart_session: LoopBarLayout.Rect,
+    show_graph: LoopBarLayout.Rect,
+
+    pub fn actionAt(self: QuickChatBarLayout, x: i32, y: i32) ?QuickChatBarAction {
+        if (self.restart_session.contains(x, y)) return .restart_session;
+        if (self.show_graph.contains(x, y)) return .show_graph;
+        return null;
+    }
+};
+
 pub fn loopBarLayout(left: i32, right: i32, resolved: bool, panel_toggle: bool) LoopBarLayout.Layout {
     return LoopBarLayout.compute(left, Tokens.header_height, right, resolved, panel_toggle);
+}
+
+fn quickChatBarTextRect(left: i32, top: i32, right: i32, bottom: i32) ?LoopBarLayout.Rect {
+    if (right - left < LoopBarLayout.min_text_width) return null;
+    return .{ .left = left, .top = top, .right = right, .bottom = bottom };
+}
+
+pub fn quickChatBarLayout(left: i32, right: i32) QuickChatBarLayout {
+    const top = Tokens.header_height;
+    const show_graph = LoopBarLayout.Rect{
+        .left = right - 92,
+        .top = top + 10,
+        .right = right - 14,
+        .bottom = top + 36,
+    };
+    const restart_session = LoopBarLayout.Rect{
+        .left = show_graph.left - 10 - 108,
+        .top = top + 10,
+        .right = show_graph.left - 10,
+        .bottom = top + 36,
+    };
+    const text_limit = restart_session.left - 8;
+    const state = LoopBarLayout.Rect{
+        .left = left + 127,
+        .top = top + 6,
+        .right = left + 179,
+        .bottom = top + 25,
+    };
+    const divider_x = left + 460;
+    return .{
+        .bar = .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height },
+        .stripe = if (left + 18 <= text_limit)
+            .{ .left = left + 14, .top = top + 11, .right = left + 18, .bottom = top + 35 }
+        else
+            null,
+        .title = quickChatBarTextRect(left + 27, top + 5, @min(left + 120, text_limit), top + 24),
+        .state = if (state.right <= text_limit) state else null,
+        .activity = quickChatBarTextRect(left + 27, top + 24, @min(left + 447, text_limit), top + 42),
+        .divider = if (divider_x + 1 < text_limit)
+            .{ .left = divider_x, .top = top + 10, .right = divider_x + 1, .bottom = top + 36 }
+        else
+            null,
+        .age = quickChatBarTextRect(left + 474, top + 13, @min(left + 546, text_limit), top + 31),
+        .restart_session = restart_session,
+        .show_graph = show_graph,
+    };
 }
 
 pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved: bool, panel_toggle: bool) ?LoopBarAction {
@@ -564,14 +633,12 @@ pub const Workspace = struct {
             .input_queue = .{ .allocator = allocator_ },
             .layout = try WorkspaceLayout.Layout.init(
                 allocator_,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
             .layout_path = &.{},
             .project_key = try allocator_.dupe(
                 u8,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
         };
         for (&workspace.surfaces) |*surface| {
@@ -811,7 +878,7 @@ pub const Workspace = struct {
             defer self.allocator.free(configured);
             const suffix = WorkspaceLayout.projectSuffix(project);
             return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
-                configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
+                configured[0..if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
                 suffix,
             });
         } else |_| {}
@@ -837,6 +904,7 @@ pub const Workspace = struct {
     pub fn scopeToLoop(self: *Workspace, loop: []const u8, layout_project: []const u8, launches_agent: bool) !void {
         if (loop.len == 0) return;
         if (std.mem.eql(u8, self.loop_id, loop) and std.mem.eql(u8, self.layout.project_key, layout_project)) {
+            if (launches_agent) try ensureAgentPane(&self.layout, loop);
             // Reopening the open loop picks up a saved pane an earlier restore could not attach.
             self.expediteShellRestores();
             self.restorePersistedSurfaces(loop, 1);
@@ -849,7 +917,7 @@ pub const Workspace = struct {
         errdefer self.allocator.free(new_loop);
         var new_layout = try self.loadLoopLayout(new_path, layout_project, loop);
         errdefer new_layout.deinit();
-        if (launches_agent) try new_layout.ensureAgentFirst(loop);
+        if (launches_agent) try ensureAgentPane(&new_layout, loop);
 
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         self.clearAllRecreateState();
@@ -863,6 +931,19 @@ pub const Workspace = struct {
         self.loop_id = new_loop;
         self.persistLayout() catch {};
         self.restorePersistedSurfaces(loop, 1);
+    }
+
+    fn ensureAgentPane(layout: *WorkspaceLayout.Layout, loop: []const u8) !void {
+        try layout.ensureAgentFirst(loop);
+        for (layout.tabs.items) |*tab| {
+            for (tab.panes.items) |*pane| {
+                if (std.mem.eql(u8, pane.id, loop)) {
+                    pane.launches_agent = true;
+                    return;
+                }
+            }
+        }
+        return error.MissingAgentPane;
     }
 
     /// The saved layout of a loop, else one adopted from the legacy project-wide file, else
@@ -2146,10 +2227,10 @@ pub const Workspace = struct {
         if (layout.stripe) |stripe| {
             fillRect(hdc, .{ .left = stripe.left, .top = stripe.top, .right = stripe.right, .bottom = stripe.bottom }, loopTypeAccent(loop_type));
         }
-        if (layout.title) |bounds| drawUtf8Bounded(hdc, title, bounds, 13, 0x00F2F2F7);
-        if (layout.state) |bounds| drawUtf8Bounded(hdc, state, bounds, 10, stateAccent(state));
+        if (layout.title) |bounds| drawUtf8Bounded(hdc, title, bounds, 13, 0x00F2F2F7, false);
+        if (layout.state) |bounds| drawUtf8Bounded(hdc, state, bounds, 10, stateAccent(state), false);
         const live_line = if (activity.len != 0) activity else project_name;
-        if (layout.activity) |bounds| drawUtf8Bounded(hdc, live_line, bounds, 10, 0x008E8E93);
+        if (layout.activity) |bounds| drawUtf8Bounded(hdc, live_line, bounds, 10, 0x008E8E93, false);
         var usage: [32]u8 = undefined;
         const usage_text = if (token_usage) |value| std.fmt.bufPrint(&usage, "{d} tokens", .{value}) catch "usage n/a" else "usage n/a";
         var detail: [256]u8 = undefined;
@@ -2159,7 +2240,7 @@ pub const Workspace = struct {
             metric_passes,
             usage_text,
         }) catch "workspace metadata unavailable";
-        if (layout.detail) |bounds| drawUtf8Bounded(hdc, detail_text, bounds, 9, 0x008E8E93);
+        if (layout.detail) |bounds| drawUtf8Bounded(hdc, detail_text, bounds, 9, 0x008E8E93, false);
         if (layout.stop) |stop| {
             fillRect(hdc, .{ .left = stop.left, .top = stop.top, .right = stop.right, .bottom = stop.bottom }, 0x00303035);
             drawUtf8(hdc, "Stop loop", stop.left + 12, top + 17, 10, 0x00D8D8DC);
@@ -2169,6 +2250,59 @@ pub const Workspace = struct {
         // the edge where the strip's gloss meets the terminal below it.
         fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.tab_bar_shadow_line);
         _ = allocator;
+    }
+
+    pub fn paintQuickChatBar(
+        hdc: c.HDC,
+        left: i32,
+        right: i32,
+        title: []const u8,
+        created_at: ?u64,
+    ) void {
+        const layout = quickChatBarLayout(left, right);
+        const top = Tokens.header_height;
+        GdiGradient.fillVertical(
+            hdc,
+            .{ .left = layout.bar.left, .top = layout.bar.top, .right = layout.bar.right, .bottom = layout.bar.bottom },
+            Tokens.loop_bar_top,
+            Tokens.loop_bar_bottom,
+        );
+        if (layout.stripe) |stripe| {
+            drawQuickChatRoundedRect(
+                hdc,
+                .{ .left = stripe.left, .top = stripe.top, .right = stripe.right, .bottom = stripe.bottom },
+                2,
+                quick_chat_bar_accent,
+                quick_chat_bar_accent,
+            );
+        }
+        if (layout.title) |bounds| drawUtf8Bounded(hdc, title, bounds, 13, 0x00F2F2F7, true);
+        if (layout.state) |bounds| {
+            drawQuickChatRoundedRect(hdc, bounds, 5, 0x00353030, 0x00353030);
+            drawQuickChatStateDot(hdc, bounds.left + 9, @divTrunc(bounds.top + bounds.bottom, 2), 0x007A7878);
+            drawUtf8Bounded(
+                hdc,
+                "IDLE",
+                .{ .left = bounds.left + 16, .top = bounds.top, .right = bounds.right - 7, .bottom = bounds.bottom },
+                9,
+                0x00808080,
+                true,
+            );
+        }
+        if (layout.activity) |bounds| {
+            drawUtf8Bounded(hdc, "Not piloted", bounds, 10, 0x008E8E93, false);
+        }
+        if (layout.divider) |divider| {
+            fillRect(hdc, .{ .left = divider.left, .top = divider.top, .right = divider.right, .bottom = divider.bottom }, 0x002B2B30);
+        }
+        if (layout.age) |bounds| {
+            var age_buffer: [32]u8 = undefined;
+            drawUtf8Bounded(hdc, quickChatAgeLabel(&age_buffer, created_at), bounds, 10, 0x008E8E93, false);
+        }
+        drawQuickChatRoundedRect(hdc, layout.restart_session, 6, 0x00352F2F, 0x00403B3B);
+        drawUtf8Centered(hdc, "Restart session", layout.restart_session, 11, 0x00CCCCCC, true);
+        drawUtf8(hdc, "Show in graph", layout.show_graph.left + 4, top + 17, 10, 0x00737373);
+        fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.tab_bar_shadow_line);
     }
 
     pub fn paintWorkspaceToolbar(
@@ -2249,7 +2383,6 @@ pub const Workspace = struct {
             if (slot.surface) |surface| {
                 _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
-
         }
         self.persistFocusedSurface(index);
     }
@@ -5187,7 +5320,7 @@ test "every function key F1 to F12 reaches a focused terminal exactly once throu
         .target_enabled = true,
     };
     const expected = [_][]const u8{
-        "\x1bOP",  "\x1bOQ",  "\x1bOR",  "\x1bOS",
+        "\x1bOP",   "\x1bOQ",   "\x1bOR",   "\x1bOS",
         "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
         "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
     };
@@ -7111,10 +7244,14 @@ fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 }
 
 fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32) void {
+    drawUtf8WithWeight(hdc, text, x, y, size, color, false);
+}
+
+fn drawUtf8WithWeight(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
     defer std.heap.page_allocator.free(wide);
     if (wide.len == 0) return;
-    const old_font = AppFont.select(hdc, size, false);
+    const old_font = AppFont.select(hdc, size, bold);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = c.RECT{ .left = x, .top = y, .right = x + 220, .bottom = y + size + 8 };
@@ -7124,11 +7261,11 @@ fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32)
 
 // Clipped to `bounds`; a run squeezed narrower than its natural width ends in an
 // ellipsis instead of being cut mid-glyph.
-fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, size: i32, color: u32) void {
+fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
     defer std.heap.page_allocator.free(wide);
     if (wide.len == 0) return;
-    const old_font = AppFont.select(hdc, size, false);
+    const old_font = AppFont.select(hdc, size, bold);
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var rect = c.RECT{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
@@ -7136,6 +7273,66 @@ fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, siz
     const format: c.UINT = @intCast(c.DT_LEFT | c.DT_SINGLELINE | ellipsis);
     _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &rect, format);
     _ = c.SelectObject(hdc, old_font);
+}
+
+fn drawUtf8Centered(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, size: i32, color: u32, bold: bool) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
+    defer std.heap.page_allocator.free(wide);
+    if (wide.len == 0) return;
+    const old_font = AppFont.select(hdc, size, bold);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var rect = c.RECT{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &rect, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    _ = c.SelectObject(hdc, old_font);
+}
+
+fn drawQuickChatRoundedRect(hdc: c.HDC, bounds: LoopBarLayout.Rect, radius: i32, fill: u32, border: u32) void {
+    const rect = c.RECT{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+    if (!GdiplusAA.drawRoundedRect(hdc, rect, radius, fill, border, 1)) {
+        fillRect(hdc, rect, fill);
+    }
+}
+
+fn drawQuickChatStateDot(hdc: c.HDC, x: i32, y: i32, color: u32) void {
+    const brush = c.CreateSolidBrush(color);
+    if (brush == null) return;
+    const pen = c.CreatePen(c.PS_SOLID, 1, color);
+    if (pen == null) {
+        _ = c.DeleteObject(brush);
+        return;
+    }
+    const old_brush = c.SelectObject(hdc, brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    _ = c.Ellipse(hdc, x - 3, y - 3, x + 4, y + 4);
+    _ = c.SelectObject(hdc, old_pen);
+    _ = c.SelectObject(hdc, old_brush);
+    _ = c.DeleteObject(pen);
+    _ = c.DeleteObject(brush);
+}
+
+fn quickChatAgeLabel(buffer: *[32]u8, created_at: ?u64) []const u8 {
+    const created = created_at orelse return "age n/a";
+    const now = std.time.timestamp();
+    const created_seconds: i64 = @intCast(created);
+    const total: u64 = if (now > created_seconds) @intCast(now - created_seconds) else 0;
+    return quickChatDurationLabel(buffer, total);
+}
+
+fn quickChatDurationLabel(buffer: *[32]u8, total: u64) []const u8 {
+    const days = total / 86_400;
+    const hours = total / 3_600 % 24;
+    const minutes = total / 60 % 60;
+    if (days > 0) {
+        if (hours > 0) return std.fmt.bufPrint(buffer, "{d}d {d}h", .{ days, hours }) catch "age n/a";
+        return std.fmt.bufPrint(buffer, "{d}d", .{days}) catch "age n/a";
+    }
+    if (hours > 0) {
+        if (minutes > 0) return std.fmt.bufPrint(buffer, "{d}h {d}m", .{ hours, minutes }) catch "age n/a";
+        return std.fmt.bufPrint(buffer, "{d}h", .{hours}) catch "age n/a";
+    }
+    if (minutes > 0) return std.fmt.bufPrint(buffer, "{d}m", .{minutes}) catch "age n/a";
+    return std.fmt.bufPrint(buffer, "{d}s", .{total}) catch "age n/a";
 }
 
 fn tabLabel(tab: WorkspaceLayout.Tab, index: usize) []const u8 {
@@ -7587,6 +7784,61 @@ test "loop bar actions expose stop only for active loops" {
     // With the panel collapsed its expand control owns the trailing slot.
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 50, false, true) == null);
     try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1050, 50, false, true).?);
+}
+
+test "quick chat bar keeps its actions separate from the chat details" {
+    const layout = quickChatBarLayout(220, 1200);
+    const title = layout.title orelse return error.MissingTitle;
+    const state = layout.state orelse return error.MissingState;
+    const activity = layout.activity orelse return error.MissingActivity;
+    const divider = layout.divider orelse return error.MissingDivider;
+    const age = layout.age orelse return error.MissingAge;
+
+    try std.testing.expect(title.right <= state.left);
+    try std.testing.expect(activity.right <= divider.left);
+    try std.testing.expect(divider.right <= age.left);
+    try std.testing.expect(age.right <= layout.restart_session.left);
+    try std.testing.expect(layout.restart_session.right <= layout.show_graph.left);
+    try std.testing.expectEqual(
+        QuickChatBarAction.restart_session,
+        layout.actionAt(
+            @divTrunc(layout.restart_session.left + layout.restart_session.right, 2),
+            @divTrunc(layout.restart_session.top + layout.restart_session.bottom, 2),
+        ).?,
+    );
+    try std.testing.expectEqual(
+        QuickChatBarAction.show_graph,
+        layout.actionAt(
+            @divTrunc(layout.show_graph.left + layout.show_graph.right, 2),
+            @divTrunc(layout.show_graph.top + layout.show_graph.bottom, 2),
+        ).?,
+    );
+    try std.testing.expect(layout.actionAt(layout.bar.left + 8, layout.bar.top + 8) == null);
+
+    const compact = quickChatBarLayout(220, 960);
+    try std.testing.expect(compact.bar.left <= compact.restart_session.left);
+    try std.testing.expect(compact.restart_session.right <= compact.show_graph.left);
+    try std.testing.expect(compact.show_graph.right <= compact.bar.right);
+    try std.testing.expect(!compact.restart_session.intersects(compact.show_graph));
+    try std.testing.expect(!compact.age.?.intersects(compact.restart_session));
+
+    var duration: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("3d", quickChatDurationLabel(&duration, 3 * 86_400));
+    try std.testing.expectEqualStrings("3d 2h", quickChatDurationLabel(&duration, 3 * 86_400 + 2 * 3_600));
+    try std.testing.expectEqualStrings("2h", quickChatDurationLabel(&duration, 2 * 3_600));
+    try std.testing.expectEqualStrings("2h 5m", quickChatDurationLabel(&duration, 2 * 3_600 + 5 * 60));
+    try std.testing.expectEqualStrings("5m", quickChatDurationLabel(&duration, 5 * 60));
+    try std.testing.expectEqualStrings("42s", quickChatDurationLabel(&duration, 42));
+}
+
+test "ensureAgentPane promotes an existing shell pane to an agent pane" {
+    var layout = try WorkspaceLayout.Layout.init(std.testing.allocator, "project");
+    defer layout.deinit();
+    try layout.addTab("chat-1", false);
+
+    try Workspace.ensureAgentPane(&layout, "chat-1");
+
+    try std.testing.expect(layout.tabs.items[0].panes.items[0].launches_agent);
 }
 
 const AttachOutputProbe = struct {
