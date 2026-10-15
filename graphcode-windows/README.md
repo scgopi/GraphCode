@@ -844,6 +844,163 @@ Keep claims aligned with the
 [Windows UI parity ledger](../investigation/ui-parity-matrix.md) and the
 [preview-readiness plan](../investigation/windows-preview-release-plan.md).
 
+### Offscreen canvas paint artifact
+
+The opt-in `paint export: project-paint-v1` Zig test calls the production
+`GraphCanvas.paint` and `paintHeader` functions into three fresh 1280x720
+memory DIBs, then writes BMP transport files and a paint receipt. It runs only
+when `GRAPHCODE_PAINT_EXPORT_DIR` and `GRAPHCODE_PAINT_SOURCE_COMMIT` are set;
+the export directory must be fresh and empty. From a bootstrapped checkout:
+
+Run the entire procedure from PowerShell 7 (`pwsh`), not Windows PowerShell
+5.1; the converter requires PowerShell 7's JSON and hash APIs.
+
+```powershell
+. .\.graphcode-tools\environment.ps1
+$runRoot = Join-Path $env:TEMP ("graphcode-paint-" + [guid]::NewGuid().ToString("N"))
+$exportRoot = Join-Path $runRoot "export"
+$tempRoot = Join-Path $runRoot "temp"
+if (Test-Path -LiteralPath $runRoot) { throw "Refusing existing paint run root: $runRoot" }
+New-Item -ItemType Directory -Path $runRoot | Out-Null
+New-Item -ItemType Directory -Path $exportRoot, $tempRoot | Out-Null
+$testBinary = Join-Path $runRoot "canvas-paint-tests.exe"
+$nativeLog = Join-Path $runRoot "native.log"
+$runReceiptPath = Join-Path $runRoot "run-receipt.json"
+$environmentFile = (Resolve-Path .\.graphcode-tools\environment.ps1).Path
+$sourcePaths = @(
+  "graphcode-windows\src\GraphCanvas.zig",
+  "graphcode-windows\src\GdiplusAA.zig",
+  "graphcode-windows\fixtures\paint-project-v1.json",
+  "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+  "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+  "Tools\windows\Tests\WindowsShell.Tests.ps1",
+  "graphcode-windows\README.md"
+)
+function Get-PaintSourceHashes {
+  $hashes = [ordered]@{}
+  foreach ($relativePath in $sourcePaths) {
+    $path = Join-Path (Get-Location).Path $relativePath
+    $hashes[$relativePath] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  return $hashes
+}
+function Get-PaintArtifactFact([string] $Path) {
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    return [ordered]@{
+      path = $Path
+      present = $true
+      sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+  }
+  return [ordered]@{ path = $Path; present = $false; sha256 = $null }
+}
+$nativeArtifacts = $null
+$sourceHeadBefore = (git rev-parse HEAD).Trim()
+$sourceHashesBefore = Get-PaintSourceHashes
+$env:GRAPHCODE_PAINT_EXPORT_DIR = $exportRoot
+$env:GRAPHCODE_PAINT_SOURCE_COMMIT = $sourceHeadBefore
+$env:TEMP = $tempRoot
+$env:TMP = $tempRoot
+$command = '& $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" --test-filter "paint export: project-paint-v1" --cache-dir ' +
+  (Join-Path $runRoot "zig-local") + ' --global-cache-dir ' + (Join-Path $runRoot "zig-global") +
+  ' -femit-bin="' + $testBinary + '"'
+$nativeExitCode = $null
+$locationPushed = $false
+Push-Location graphcode-windows
+$locationPushed = $true
+try {
+  & $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig `
+    -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus `
+    "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" `
+    --test-filter "paint export: project-paint-v1" `
+    --cache-dir (Join-Path $runRoot "zig-local") `
+    --global-cache-dir (Join-Path $runRoot "zig-global") `
+    ("-femit-bin=" + $testBinary) *>&1 | Tee-Object -FilePath $nativeLog
+  $nativeExitCode = $LASTEXITCODE
+  $nativeArtifacts = [ordered]@{
+    capturedImmediatelyAfterNativeCommand = $true
+    testBinary = (Get-PaintArtifactFact $testBinary)
+    nativeLog = (Get-PaintArtifactFact $nativeLog)
+    paintReceipt = (Get-PaintArtifactFact (Join-Path $exportRoot "transport\paint-receipt.json"))
+  }
+} finally {
+  if ($locationPushed) { Pop-Location }
+  if ($null -eq $nativeArtifacts) {
+    $nativeArtifacts = [ordered]@{
+      capturedImmediatelyAfterNativeCommand = $true
+      testBinary = (Get-PaintArtifactFact $testBinary)
+      nativeLog = (Get-PaintArtifactFact $nativeLog)
+      paintReceipt = (Get-PaintArtifactFact (Join-Path $exportRoot "transport\paint-receipt.json"))
+    }
+  }
+  $sourceHeadAfter = (git rev-parse HEAD).Trim()
+  $sourceHashesAfter = Get-PaintSourceHashes
+  [ordered]@{
+    runId = Split-Path -Leaf $runRoot
+    command = $command
+    sourceHeadBefore = $sourceHeadBefore
+    sourceHeadAfter = $sourceHeadAfter
+    sourceHashesBefore = $sourceHashesBefore
+    sourceHashesAfter = $sourceHashesAfter
+    nativeExitCode = $nativeExitCode
+    exportDirectory = $exportRoot
+    emittedTestBinary = $testBinary
+    log = $nativeLog
+    nativeArtifacts = $nativeArtifacts
+    environmentFile = $environmentFile
+    completedAt = [DateTimeOffset]::Now.ToString("o")
+  } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $runReceiptPath -Encoding utf8
+}
+if ($nativeExitCode -ne 0) { throw "Offscreen paint test failed: $nativeExitCode" }
+pwsh -NoProfile -File Tools\windows\Convert-CanvasPaintArtifact.ps1 `
+  -InputBmp (Join-Path $exportRoot "transport\project-paint-v1.bmp") `
+  -ReceiptPath (Join-Path $exportRoot "transport\paint-receipt.json") `
+  -RunReceiptPath $runReceiptPath `
+  -TestBinaryPath $testBinary `
+  -OutputDirectory (Join-Path $runRoot "published")
+```
+
+The converter parses and hashes the same frozen run receipt, paint receipt,
+and native log bytes. It requires a successful native exit, the exact named
+1/1 paint-test result, stable hashes for all seven leased files before and
+after the run, and current file hashes matching that native-run snapshot.
+Immediately after the native command, the wrapper records whether the emitted
+test binary, native log, and paint receipt exist and, when present, their
+SHA-256 values. Missing files remain explicitly marked missing; successful
+conversion requires all three hashes to match the exact bytes consumed by the
+converter. `sourceBaseCommit` identifies the run's base HEAD only; the measured
+source hashes bind the seven leased files, not a clean-tree snapshot of other
+imported modules or their dirty/untracked state. A stale run receipt cannot be
+converted after those source or native-artifact bytes change. The converter
+then performs a lossless BMP-to-PNG round trip, verifies decoded RGB against
+the native render, and atomically publishes one PNG with a paint-only
+provenance manifest. Failed staging artifacts remain under the run root for
+diagnosis; they are never exposed at the final output path. The immediate
+hashes establish byte association between the run receipt and conversion
+inputs, not cryptographic proof that the same executable produced the render;
+transport BMP hashes and decoded RGB are checked against the bound native
+paint receipt. GDI+ readiness proves initialization only, not that every
+drawing operation used GDI+ rather than the existing GDI
+fallback. Font evidence samples the card-title, card-state, card-metadata,
+and header-title selections; it is not a census of every text draw. Font-file
+facts are lookup candidates, not proof of the physical font file selected by
+GDI. The converter's eight contract cases use synthetic codec BMPs and
+receipts, not a product paint scene; they include refusal controls for
+post-run test-binary, native-log, and paint-receipt substitutions. The
+codec/write case calls the real PNG encoder with a stream that allows a
+partial staging-file write and then fails; it separately covers final
+publication failure. They run with:
+`pwsh -NoProfile -File Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1
+-ScratchRoot <fresh-private-directory>`. The evidence class is **real paint
+path, offscreen component render**. It can support canvas card, edge, panel,
+and layout review only where those pixels are actually in-frame; this fixture
+hides the right panel and cannot validate its content. It does not prove
+whole-window composition, popups, terminals, native controls, accessibility,
+or per-monitor DPI. The three
+matching RGB hashes establish same-host/build/fixture repeatability only, not
+a cross-machine golden. Artifacts are for local agent visual review; there is
+no screenshot fallback, golden-image baseline, or CI visual gate.
+
 ## Build
 
 From a fresh checkout, bootstrap the exact Zig toolchains, Swift 6.3.3, and

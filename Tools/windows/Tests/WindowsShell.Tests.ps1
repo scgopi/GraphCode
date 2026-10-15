@@ -1029,7 +1029,7 @@ Invoke-Native "Graph canvas executable tests" {
   }
   Push-Location $shellRoot
   try {
-    & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+    & $zig test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$include"
   } finally { Pop-Location }
 }
 
@@ -1159,8 +1159,41 @@ Invoke-Native "GDI+ antialiasing executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\GdiplusAA.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+    & $zig test src\GdiplusAA.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$include"
   } finally { Pop-Location }
+}
+Invoke-Native "Canvas paint artifact codec contracts" {
+  $contractScript = Join-Path $repoRoot "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1"
+  $scratchRoot = Join-Path ([IO.Path]::GetTempPath()) ("graphcode-canvas-paint-contracts-" + [guid]::NewGuid().ToString("N"))
+  $results = @(& $contractScript -ScratchRoot $scratchRoot)
+  $summaries = @($results | Where-Object {
+      $_ -is [pscustomobject] -and
+        $_.PSObject.Properties.Name -contains "Executed" -and
+        $_.PSObject.Properties.Name -contains "CaseNames"
+    })
+  Assert-Contract ($summaries.Count -eq 1) `
+    "canvas paint converter contracts must return exactly one typed summary"
+  $summary = $summaries[0]
+  $expectedNames = @(
+    "valid round-trip",
+    "absent BMP",
+    "truncated BMP",
+    "wrong geometry",
+    "fixture hash mismatch",
+    "existing foreign output",
+    "reparse output",
+    "codec/write failure"
+  )
+  $actualNames = @($summary.CaseNames)
+  $uniqueNames = @($actualNames | Sort-Object -Unique)
+  Assert-Contract ($summary.Executed -is [int] -and $summary.Passed -is [int] -and
+    $summary.Failed -is [int] -and $summary.Skipped -is [int] -and
+    $summary.Executed -eq 8 -and $summary.Passed -eq 8 -and
+    $summary.Failed -eq 0 -and $summary.Skipped -eq 0) `
+    "canvas paint converter contracts must report typed executed=8 passed=8 failed=0 skipped=0"
+  Assert-Contract ($actualNames.Count -eq 8 -and $uniqueNames.Count -eq 8 -and
+    ($actualNames -join "`n") -ceq ($expectedNames -join "`n")) `
+    "canvas paint converter contracts must report the exact eight unique case names"
 }
 Invoke-Native "Update offer dialog executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent

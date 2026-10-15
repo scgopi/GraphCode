@@ -71,6 +71,10 @@ var startup_token: usize = 0;
 var available: bool = false;
 var start_attempted: bool = false;
 var shutdown_requested: bool = false;
+var readiness_test_entered: c.HANDLE = null;
+var readiness_test_release: c.HANDLE = null;
+var readiness_test_finished: c.HANDLE = null;
+const readiness_test_timeout_ms: c.DWORD = 2_000;
 
 const SystemStartup = struct {
     pub fn run() ?usize {
@@ -112,6 +116,12 @@ pub fn initWith(comptime Startup: type) void {
     };
     var worker = std.Thread.spawn(.{}, Worker.run, .{}) catch return;
     worker.detach();
+}
+
+pub fn isReady() bool {
+    startup_mutex.lock();
+    defer startup_mutex.unlock();
+    return available;
 }
 
 /// Prevents new GDI+ sessions and releases a completed process-global startup.
@@ -262,4 +272,66 @@ test "colorrefToArgb preserves channel order" {
     // COLORREF 0x00BBGGRR -> ARGB 0xAARRGGBB with full alpha.
     // 0x007AB8FF is B=0x7A, G=0xB8, R=0xFF, so ARGB is 0xFF (alpha) FF (R) B8 (G) 7A (B).
     try std.testing.expectEqual(@as(u32, 0xFFFFB87A), colorrefToArgb(0x007AB8FF));
+}
+
+const ReadinessGatedStartup = struct {
+    pub fn run() ?usize {
+        defer _ = c.SetEvent(readiness_test_finished);
+        if (c.SetEvent(readiness_test_entered) == 0) return null;
+        if (c.WaitForSingleObject(readiness_test_release, readiness_test_timeout_ms) != c.WAIT_OBJECT_0) {
+            return null;
+        }
+        return SystemStartup.run();
+    }
+};
+
+test "readiness: gated native startup publishes only after release" {
+    const entered = c.CreateEventW(null, 1, 0, null) orelse return error.ReadinessEnteredEventCreationFailed;
+    var release: c.HANDLE = null;
+    var finished: c.HANDLE = null;
+    var handles_published = false;
+    var worker_may_run = false;
+    defer {
+        const worker_quiesced = if (worker_may_run) blk: {
+            _ = c.SetEvent(release);
+            deinit();
+            break :blk c.WaitForSingleObject(finished, readiness_test_timeout_ms) == c.WAIT_OBJECT_0;
+        } else true;
+        if (worker_quiesced) {
+            if (handles_published) {
+                readiness_test_finished = null;
+                readiness_test_release = null;
+                readiness_test_entered = null;
+            }
+            if (finished) |handle| _ = c.CloseHandle(handle);
+            if (release) |handle| _ = c.CloseHandle(handle);
+            _ = c.CloseHandle(entered);
+        }
+    }
+    release = c.CreateEventW(null, 1, 0, null) orelse return error.ReadinessReleaseEventCreationFailed;
+    finished = c.CreateEventW(null, 1, 0, null) orelse return error.ReadinessFinishedEventCreationFailed;
+
+    readiness_test_entered = entered;
+    readiness_test_release = release;
+    readiness_test_finished = finished;
+    handles_published = true;
+    worker_may_run = true;
+    initWith(ReadinessGatedStartup);
+    try std.testing.expectEqual(
+        c.WAIT_OBJECT_0,
+        c.WaitForSingleObject(entered, readiness_test_timeout_ms),
+    );
+    try std.testing.expect(!isReady());
+    if (c.SetEvent(release) == 0) return error.ReadinessReleaseFailed;
+    try std.testing.expectEqual(
+        c.WAIT_OBJECT_0,
+        c.WaitForSingleObject(finished, readiness_test_timeout_ms),
+    );
+
+    const deadline = std.time.nanoTimestamp() + 2_000_000_000;
+    while (!isReady()) {
+        if (std.time.nanoTimestamp() >= deadline) return error.ReadinessNativeStartupTimedOut;
+        std.Thread.sleep(1_000_000);
+    }
+    try std.testing.expect(isReady());
 }

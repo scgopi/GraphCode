@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "kind": "event",
+  "sequence": 2,
+  "event": {
+    "graphChanged": {
+      "id": "project-paint-v1",
+      "project": {
+        "path": "C:\\GraphCodeFixture\\Alpha",
+        "name": "Alpha",
+        "remote": false
+      },
+      "nodes": [
+        {
+          "id": "paint-goal",
+          "title": "Goal",
+          "loopType": "goalBased",
+          "state": {
+            "idle": {}
+          },
+          "backend": "copilotCLI",
+          "goal": {
+            "summary": "Keep README present."
+          }
+        },
+        {
+          "id": "paint-check",
+          "title": "Check",
+          "loopType": "turnBased",
+          "state": {
+            "idle": {}
+          },
+          "backend": "copilotCLI",
+          "checkDescription": "Check formatting."
+        }
+      ],
+      "edges": [
+        {
+          "id": "paint-goal-to-check",
+          "from": "paint-goal",
+          "to": "paint-check",
+          "kind": "handoff",
+          "condition": "always",
+          "fired": false,
+          "fireCount": 0
+        }
+      ]
+    }
+  }
+}

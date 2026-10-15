@@ -3531,8 +3531,21 @@ const ParityDib = struct {
     dc: c.HDC,
     bitmap: c.HBITMAP,
     old_bitmap: c.HGDIOBJ,
+    pixels: [*]u8,
+    width: usize,
+    height: usize,
+    row_bytes: usize,
+    byte_len: usize,
 
     fn init(width: i32, height: i32) !ParityDib {
+        if (width <= 0 or height <= 0) return error.TestBitmapDimensionsInvalid;
+        const width_usize: usize = @intCast(width);
+        const height_usize: usize = @intCast(height);
+        if (width_usize > std.math.maxInt(usize) / 4) return error.TestBitmapDimensionsOverflow;
+        const row_bytes = width_usize * 4;
+        if (height_usize > std.math.maxInt(usize) / row_bytes) return error.TestBitmapDimensionsOverflow;
+        const byte_len = row_bytes * height_usize;
+        if (byte_len > std.math.maxInt(u32)) return error.TestBitmapTooLarge;
         const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
         errdefer _ = c.DeleteDC(dc);
         var info = std.mem.zeroes(c.BITMAPINFO);
@@ -3542,9 +3555,23 @@ const ParityDib = struct {
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 32;
         info.bmiHeader.biCompression = c.BI_RGB;
+        info.bmiHeader.biSizeImage = @intCast(byte_len);
         var bits: ?*anyopaque = null;
         const bitmap = c.CreateDIBSection(dc, &info, c.DIB_RGB_COLORS, &bits, null, 0) orelse return error.TestBitmapCreationFailed;
-        return .{ .dc = dc, .bitmap = bitmap, .old_bitmap = c.SelectObject(dc, bitmap) };
+        errdefer _ = c.DeleteObject(bitmap);
+        const pixel_storage = bits orelse return error.TestBitmapBitsUnavailable;
+        const old_bitmap = c.SelectObject(dc, bitmap) orelse return error.TestBitmapSelectionFailed;
+        if (@intFromPtr(old_bitmap) == std.math.maxInt(usize)) return error.TestBitmapSelectionFailed;
+        return .{
+            .dc = dc,
+            .bitmap = bitmap,
+            .old_bitmap = old_bitmap,
+            .pixels = @ptrCast(@alignCast(pixel_storage)),
+            .width = width_usize,
+            .height = height_usize,
+            .row_bytes = row_bytes,
+            .byte_len = byte_len,
+        };
     }
 
     fn deinit(self: ParityDib) void {
@@ -3564,7 +3591,456 @@ const ParityDib = struct {
         }
         return result;
     }
+
+    fn rgbSha256(self: ParityDib, allocator: std.mem.Allocator) ![32]u8 {
+        if (c.GdiFlush() == 0) return error.PaintFixtureFlushFailed;
+        const pixel_count = self.width * self.height;
+        const rgb_len = pixel_count * 3;
+        const rgb = try allocator.alloc(u8, rgb_len);
+        defer allocator.free(rgb);
+        var destination: usize = 0;
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const source = y * self.row_bytes + x * 4;
+                rgb[destination] = self.pixels[source + 2];
+                rgb[destination + 1] = self.pixels[source + 1];
+                rgb[destination + 2] = self.pixels[source];
+                destination += 3;
+            }
+        }
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(rgb, &digest, .{});
+        return digest;
+    }
+
+    fn nonBackgroundPixels(self: ParityDib, colorref: u32) usize {
+        const red: u8 = @truncate(colorref);
+        const green: u8 = @truncate(colorref >> 8);
+        const blue: u8 = @truncate(colorref >> 16);
+        var result: usize = 0;
+        for (0..self.height) |y| {
+            for (0..self.width) |x| {
+                const offset = y * self.row_bytes + x * 4;
+                if (self.pixels[offset] != blue or self.pixels[offset + 1] != green or self.pixels[offset + 2] != red)
+                    result += 1;
+            }
+        }
+        return result;
+    }
+
+    fn writeBmp(self: ParityDib, allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
+        if (c.GdiFlush() == 0) return error.PaintFixtureFlushFailed;
+        const header_len: usize = 54;
+        const file_len = header_len + self.byte_len;
+        if (file_len > std.math.maxInt(u32)) return error.TestBitmapTooLarge;
+        const bytes = try allocator.alloc(u8, file_len);
+        defer allocator.free(bytes);
+        @memset(bytes, 0);
+        bytes[0] = 'B';
+        bytes[1] = 'M';
+        putU32(bytes, 2, @intCast(file_len));
+        putU32(bytes, 10, @intCast(header_len));
+        putU32(bytes, 14, 40);
+        putU32(bytes, 18, @intCast(self.width));
+        putU32(bytes, 22, @intCast(self.height));
+        putU16(bytes, 26, 1);
+        putU16(bytes, 28, 32);
+        putU32(bytes, 30, c.BI_RGB);
+        putU32(bytes, 34, @intCast(self.byte_len));
+        putU32(bytes, 38, 3780);
+        putU32(bytes, 42, 3780);
+        for (0..self.height) |file_y| {
+            const source_y = self.height - file_y - 1;
+            for (0..self.width) |x| {
+                const source = source_y * self.row_bytes + x * 4;
+                const destination = header_len + file_y * self.row_bytes + x * 4;
+                bytes[destination] = self.pixels[source];
+                bytes[destination + 1] = self.pixels[source + 1];
+                bytes[destination + 2] = self.pixels[source + 2];
+                bytes[destination + 3] = 0xFF;
+            }
+        }
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        var file = try std.fs.cwd().createFile(path, .{ .exclusive = true });
+        defer file.close();
+        try file.writeAll(bytes);
+        return digest;
+    }
 };
+
+fn putU16(bytes: []u8, offset: usize, value: u16) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+}
+
+fn putU32(bytes: []u8, offset: usize, value: u32) void {
+    bytes[offset] = @truncate(value);
+    bytes[offset + 1] = @truncate(value >> 8);
+    bytes[offset + 2] = @truncate(value >> 16);
+    bytes[offset + 3] = @truncate(value >> 24);
+}
+
+const PaintExportFixture = struct {
+    model: GraphModel.Model,
+    sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+};
+
+fn paintExportFixtureModel(allocator: std.mem.Allocator) !PaintExportFixture {
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+    const fixture = try std.fs.cwd().readFileAlloc(allocator, "fixtures\\paint-project-v1.json", 64 * 1024);
+    defer allocator.free(fixture);
+    var fixture_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(fixture, &fixture_digest, .{});
+    _ = try model.updateFromFrame(fixture);
+    if (!model.setSelectedIndex(0)) return error.PaintFixtureSelectionFailed;
+    const graph = model.graph orelse return error.PaintFixtureGraphMissing;
+    if (graph.nodes.items.len != 2 or graph.edges.items.len != 1 or model.activity.items.len != 0)
+        return error.PaintFixtureModelMismatch;
+    for (graph.nodes.items) |node| {
+        if (node.created_at != null) return error.PaintFixtureHasTimestamp;
+        if (!std.mem.eql(u8, node.state, "idle")) return error.PaintFixtureStateMismatch;
+    }
+    if (!std.mem.eql(u8, graph.nodes.items[0].title, "Goal") or
+        !std.mem.eql(u8, graph.nodes.items[1].title, "Check") or
+        !std.mem.eql(u8, graph.nodes.items[0].goal_summary, "Keep README present.") or
+        !std.mem.eql(u8, graph.nodes.items[1].check_description, "Check formatting.") or
+        !std.mem.eql(u8, graph.edges.items[0].condition, "always") or
+        !std.mem.eql(u8, graph.edges.items[0].kind, "handoff"))
+    {
+        return error.PaintFixtureTextMismatch;
+    }
+    return .{ .model = model, .sha256 = fixture_digest };
+}
+
+fn paintExportFixture(dib: ParityDib, model: *const GraphModel.Model, allocator: std.mem.Allocator) !void {
+    if (c.SetMapMode(dib.dc, c.MM_ANISOTROPIC) == 0) return error.PaintFixtureMapModeFailed;
+    if (c.SetWindowExtEx(dib.dc, 96, 96, null) == 0 or c.SetViewportExtEx(dib.dc, 96, 96, null) == 0)
+        return error.PaintFixtureDpiMappingFailed;
+    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    var sidebar_state = Sidebar.State.init(allocator);
+    defer sidebar_state.deinit();
+    const controls = WorkspaceControls.State{
+        .graph_visible = true,
+        .rail_visible = true,
+        .panel_visible = false,
+        .activity_enabled = false,
+    };
+    paint(
+        dib.dc,
+        1280,
+        720,
+        model,
+        null,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        &.{},
+        &.{},
+        allocator,
+        &state,
+        &sidebar_state,
+        -1,
+        controls,
+        .project,
+    );
+    paintHeader(
+        dib.dc,
+        allocator,
+        1280,
+        "",
+        .{ .title = "GraphCode", .context = "Alpha", .panel_visible = false },
+        null,
+    );
+    if (c.GdiFlush() == 0) return error.PaintFixtureFlushFailed;
+}
+
+const PaintFontFact = struct {
+    actual_face: []u8,
+    height: i32,
+    weight: i32,
+};
+
+fn inspectPaintFont(
+    allocator: std.mem.Allocator,
+    dc: c.HDC,
+    font: c.HFONT,
+    expected_face: []const u8,
+    expected_height: i32,
+    expected_weight: i32,
+) !PaintFontFact {
+    const font_handle = font orelse return error.PaintFontCreationFailed;
+    var info = std.mem.zeroes(c.LOGFONTW);
+    if (c.GetObjectW(font_handle, @intCast(@sizeOf(c.LOGFONTW)), &info) != @as(c.INT, @intCast(@sizeOf(c.LOGFONTW))))
+        return error.PaintFontInformationUnavailable;
+    if (info.lfHeight != expected_height or info.lfWeight != expected_weight or info.lfQuality != c.CLEARTYPE_QUALITY)
+        return error.PaintFontConfigurationMismatch;
+
+    const previous = c.SelectObject(dc, font_handle) orelse return error.PaintFontSelectionFailed;
+    if (@intFromPtr(previous) == std.math.maxInt(usize)) return error.PaintFontSelectionFailed;
+    defer _ = c.SelectObject(dc, previous);
+    var face: [32]u16 = [_]u16{0} ** 32;
+    if (c.GetTextFaceW(dc, @intCast(face.len), &face) <= 0) return error.PaintFontFaceUnavailable;
+    const actual_face = try std.unicode.utf16LeToUtf8Alloc(allocator, std.mem.sliceTo(&face, 0));
+    errdefer allocator.free(actual_face);
+    if (!std.mem.eql(u8, actual_face, expected_face)) return error.PaintFontSubstitution;
+    return .{
+        .actual_face = actual_face,
+        .height = info.lfHeight,
+        .weight = info.lfWeight,
+    };
+}
+
+const PaintRenderProof = struct {
+    rgb_sha256: [32]u8,
+    bmp_sha256: [32]u8,
+    dpi_x: i32,
+    dpi_y: i32,
+};
+
+fn verifyPaintContract(dib: ParityDib, fixture: *const PaintExportFixture, allocator: std.mem.Allocator) !void {
+    const model = &fixture.model;
+    const graph = model.graph orelse return error.PaintFixtureGraphMissing;
+    const viewport = renderBounds(1280, 720, .{
+        .rail_visible = true,
+        .panel_visible = false,
+        .activity_enabled = false,
+    });
+    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    for (graph.nodes.items, 0..) |node, index| {
+        const bounds = nodeBounds(index, &state);
+        try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
+        try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
+        try std.testing.expect(bounds.left >= viewport.left and bounds.top >= viewport.top);
+        try std.testing.expect(bounds.right <= viewport.right and bounds.bottom <= viewport.bottom);
+        const presentation = cardState(node);
+        const pill_width = blk: {
+            const old = try selectCardFont(dib.dc, 10, .card_state);
+            defer _ = c.SelectObject(dib.dc, old);
+            break :blk try measuredText(dib.dc, allocator, presentation.word) + 22;
+        };
+        const rows = cardTextLayout(bounds, 1, pill_width);
+        try std.testing.expect(dib.count(rows.pill, presentation.fill) > 20);
+        try std.testing.expect(dib.count(rows.title, 0x00F4F4F4) > 0);
+        try std.testing.expect(dib.count(rows.live, 0x009F9C9C) > 0);
+        try std.testing.expectEqual(@as(usize, 36), dib.count(rows.meta, loopTypeColor(node.loop_type)));
+        try std.testing.expect(dib.count(rows.meta, blendCardColor(0x00FFFFFF, Tokens.loop_card_bottom, 52)) > 0);
+    }
+    try std.testing.expectEqual(@as(?usize, 0), model.selectedIndex());
+    try std.testing.expectEqual(@as(usize, 0), model.activity.items.len);
+    const edge = graph.edges.items[0];
+    const from = connectorPosition(graph.nodes.items, edge.from, true, &state).?;
+    const to = connectorPosition(graph.nodes.items, edge.to, false, &state).?;
+    const label_x = @divTrunc(from.x + to.x, 2);
+    const label_y = @min(from.y, to.y) - 76;
+    const label_bounds = rect(label_x - 74, label_y, label_x + 74, label_y + 20);
+    try std.testing.expect(label_bounds.left >= viewport.left and label_bounds.top >= viewport.top);
+    try std.testing.expect(label_bounds.right <= viewport.right and label_bounds.bottom <= viewport.bottom);
+    const label = try edgeLabel(allocator, edge);
+    defer allocator.free(label);
+    try std.testing.expectEqualStrings("handoff", label);
+    try std.testing.expect(dib.count(label_bounds, edgeKindColor(edge.kind)) > 0);
+    try std.testing.expect(dib.nonBackgroundPixels(Tokens.canvas_tone) > 10_000);
+}
+
+fn renderPaintArtifact(
+    allocator: std.mem.Allocator,
+    fixture: *const PaintExportFixture,
+    path: []const u8,
+) !PaintRenderProof {
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    if (!GdiplusAA.isReady()) return error.PaintExportGdiplusNotReady;
+    try paintExportFixture(dib, &fixture.model, allocator);
+    try verifyPaintContract(dib, fixture, allocator);
+    const rgb_sha256 = try dib.rgbSha256(allocator);
+    const bmp_sha256 = try dib.writeBmp(allocator, path);
+    return .{
+        .rgb_sha256 = rgb_sha256,
+        .bmp_sha256 = bmp_sha256,
+        .dpi_x = c.GetDeviceCaps(dib.dc, c.LOGPIXELSX),
+        .dpi_y = c.GetDeviceCaps(dib.dc, c.LOGPIXELSY),
+    };
+}
+
+fn writePaintReceipt(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    fixture: *const PaintExportFixture,
+    render: PaintRenderProof,
+    font_facts: *const [4]PaintFontFact,
+    hashes: *const [3][32]u8,
+    source_commit: []const u8,
+) !void {
+    const fixture_hex = std.fmt.bytesToHex(fixture.sha256, .lower);
+    const bmp_hex = std.fmt.bytesToHex(render.bmp_sha256, .lower);
+    const rgb_hex = std.fmt.bytesToHex(render.rgb_sha256, .lower);
+    const render0_hex = std.fmt.bytesToHex(hashes[0], .lower);
+    const render1_hex = std.fmt.bytesToHex(hashes[1], .lower);
+    const render2_hex = std.fmt.bytesToHex(hashes[2], .lower);
+    const receipt = try std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "schemaVersion": 1,
+        \\  "evidenceClass": "paint-only",
+        \\  "scene": "project-paint-v1",
+        \\  "fixturePath": "graphcode-windows/fixtures/paint-project-v1.json",
+        \\  "fixtureSha256": "{s}",
+        \\  "sourceCommit": "{s}",
+        \\  "renderer": "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB",
+        \\  "dimensions": {{"width": 1280, "height": 720, "logicalWidth": 1280, "logicalHeight": 720}},
+        \\  "dpiMapping": {{"windowExtX": 96, "windowExtY": 96, "viewportExtX": 96, "viewportExtY": 96, "deviceDpiX": {d}, "deviceDpiY": {d}}},
+        \\  "canvas": {{"zoom": 1, "panX": 0, "panY": 0, "selectedIndex": 0, "railVisible": true, "panelVisible": false, "activityEnabled": false}},
+        \\  "model": {{"nodes": 2, "edges": 1, "activityHistory": 0, "createdAtValues": 0}},
+        \\  "header": {{"title": "GraphCode", "context": "Alpha", "reachabilityClaim": "declared fixture/test value only; not App reachability"}},
+        \\  "gdiPlusReady": true,
+        \\  "colorAssumption": "SDR RGB; unused DIB alpha is normalized to opaque in BMP transport",
+        \\  "fontEvidenceScope": "Sampled card title, state, metadata, and header title font selections only; not a census of every text draw",
+        \\  "fonts": [
+        \\    {{"role": "card-title", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\    {{"role": "card-state", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\    {{"role": "card-mono", "logicalFace": "Consolas", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\    {{"role": "header", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}}
+        \\  ],
+        \\  "transport": [
+        \\    {{"name": "project-paint-v1.bmp", "bmpSha256": "{s}", "rgbSha256": "{s}"}},
+        \\    {{"name": "project-paint-v1-repeat-2.bmp", "rgbSha256": "{s}"}},
+        \\    {{"name": "project-paint-v1-repeat-3.bmp", "rgbSha256": "{s}"}}
+        \\  ],
+        \\  "renderRgbSha256": ["{s}", "{s}", "{s}"],
+        \\  "candidateArtifactCount": 1,
+        \\  "excludedSurfaces": ["whole window", "composition", "popups", "terminals", "per-monitor DPI", "sidebar/right-panel fidelity", "native form controls", "accessibility"]
+        \\}}
+    , .{
+        fixture_hex,
+        source_commit,
+        render.dpi_x,
+        render.dpi_y,
+        font_facts[0].actual_face,
+        font_facts[0].height,
+        font_facts[0].weight,
+        font_facts[1].actual_face,
+        font_facts[1].height,
+        font_facts[1].weight,
+        font_facts[2].actual_face,
+        font_facts[2].height,
+        font_facts[2].weight,
+        font_facts[3].actual_face,
+        font_facts[3].height,
+        font_facts[3].weight,
+        bmp_hex,
+        rgb_hex,
+        rgb_hex,
+        rgb_hex,
+        render0_hex,
+        render1_hex,
+        render2_hex,
+    });
+    defer allocator.free(receipt);
+    var file = try std.fs.cwd().createFile(path, .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(receipt);
+}
+
+test "paint export: project-paint-v1" {
+    const allocator = std.testing.allocator;
+    const export_root = std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_EXPORT_DIR") catch return error.SkipZigTest;
+    defer allocator.free(export_root);
+    if (export_root.len == 0) return error.PaintExportDirectoryEmpty;
+
+    const transport = try std.fs.path.join(allocator, &.{ export_root, "transport" });
+    defer allocator.free(transport);
+    var export_dir = try std.fs.cwd().openDir(export_root, .{ .iterate = true });
+    defer export_dir.close();
+    var iterator = export_dir.iterate();
+    if (try iterator.next() != null) return error.PaintExportRootNotEmpty;
+    try std.fs.cwd().makeDir(transport);
+
+    var fixture = try paintExportFixtureModel(allocator);
+    defer fixture.model.deinit();
+    GdiplusAA.init();
+    defer GdiplusAA.deinit();
+
+    const deadline = std.time.nanoTimestamp() + 2_000_000_000;
+    while (!GdiplusAA.isReady()) {
+        if (std.time.nanoTimestamp() >= deadline) return error.PaintExportGdiplusNotReady;
+        std.Thread.sleep(1_000_000);
+    }
+
+    var font_facts: [4]PaintFontFact = undefined;
+    var font_facts_len: usize = 0;
+    defer for (font_facts[0..font_facts_len]) |fact| allocator.free(fact.actual_face);
+    const font_requests = [_]struct {
+        font: c.HFONT,
+        face: []const u8,
+        height: i32,
+        weight: i32,
+    }{
+        .{ .font = AppFont.getStyle(14.5, .card_title), .face = "Segoe UI", .height = -15, .weight = c.FW_SEMIBOLD },
+        .{ .font = AppFont.getStyle(10, .card_state), .face = "Segoe UI", .height = -10, .weight = c.FW_BOLD },
+        .{ .font = AppFont.getStyle(10.5, .card_mono), .face = "Consolas", .height = -11, .weight = c.FW_NORMAL },
+        .{ .font = AppFont.get(11, false), .face = "Segoe UI", .height = -11, .weight = c.FW_NORMAL },
+    };
+    var rgb_hashes: [3][32]u8 = undefined;
+    var first_proof: PaintRenderProof = undefined;
+    for (0..3) |render_index| {
+        const file_name = switch (render_index) {
+            0 => "project-paint-v1.bmp",
+            1 => "project-paint-v1-repeat-2.bmp",
+            else => "project-paint-v1-repeat-3.bmp",
+        };
+        const artifact_path = try std.fs.path.join(allocator, &.{ transport, file_name });
+        defer allocator.free(artifact_path);
+        const proof = try renderPaintArtifact(allocator, &fixture, artifact_path);
+        if (render_index == 0) {
+            first_proof = proof;
+            const dib = try ParityDib.init(1280, 720);
+            defer dib.deinit();
+            for (font_requests) |request| {
+                font_facts[font_facts_len] = try inspectPaintFont(
+                    allocator,
+                    dib.dc,
+                    request.font,
+                    request.face,
+                    request.height,
+                    request.weight,
+                );
+                font_facts_len += 1;
+            }
+        } else if (proof.dpi_x != first_proof.dpi_x or proof.dpi_y != first_proof.dpi_y) {
+            return error.PaintExportDeviceMetricsChanged;
+        }
+        rgb_hashes[render_index] = proof.rgb_sha256;
+    }
+    try std.testing.expectEqualSlices(u8, &rgb_hashes[0], &rgb_hashes[1]);
+    try std.testing.expectEqualSlices(u8, &rgb_hashes[0], &rgb_hashes[2]);
+    const source_commit = try std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_SOURCE_COMMIT");
+    defer allocator.free(source_commit);
+    if (source_commit.len != 40) return error.PaintExportSourceCommitInvalid;
+    for (source_commit) |character| {
+        if (!std.ascii.isHex(character)) return error.PaintExportSourceCommitInvalid;
+    }
+    const receipt_path = try std.fs.path.join(allocator, &.{ transport, "paint-receipt.json" });
+    defer allocator.free(receipt_path);
+    try writePaintReceipt(allocator, receipt_path, &fixture, first_proof, &font_facts, &rgb_hashes, source_commit);
+
+    const artifact_path = try std.fs.path.join(allocator, &.{ transport, "project-paint-v1.bmp" });
+    defer allocator.free(artifact_path);
+    const canonical_exists = blk: {
+        var file = std.fs.cwd().openFile(artifact_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => break :blk false,
+            else => return err,
+        };
+        file.close();
+        break :blk true;
+    };
+    std.debug.print("paint export artifact contract expected=1 actual={d}; renders=3 matching-rgb-hashes=1\n", .{@intFromBool(canonical_exists)});
+    try std.testing.expectEqual(@as(usize, 1), @as(usize, @intFromBool(canonical_exists)));
+}
 
 test "loop card parity both production renderers paint named pill and mono meta regions" {
     const allocator = std.testing.allocator;
