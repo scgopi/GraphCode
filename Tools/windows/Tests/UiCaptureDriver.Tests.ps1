@@ -79,6 +79,67 @@ function New-CapHarmlessTarget {
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
+static int cap_run_directory(const wchar_t *output, wchar_t *run, size_t capacity) {
+    wchar_t pattern[1040];
+    WIN32_FIND_DATAW data;
+    HANDLE handle;
+    int found = 0;
+    if (swprintf_s(pattern, 1040, L"%ls\\..\\runs\\*", output) < 0) return 0;
+    handle = FindFirstFileW(pattern, &data);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+            wcscmp(data.cFileName, L".") != 0 && wcscmp(data.cFileName, L"..") != 0) {
+            found = swprintf_s(run, capacity, L"%ls\\..\\runs\\%ls", output, data.cFileName) >= 0;
+            break;
+        }
+    } while (FindNextFileW(handle, &data));
+    FindClose(handle);
+    return found;
+}
+static int cap_highest_snapshot(const wchar_t *run) {
+    wchar_t pattern[1040];
+    WIN32_FIND_DATAW data;
+    HANDLE handle;
+    int highest = 0, value = 0;
+    if (swprintf_s(pattern, 1040, L"%ls\\process-journal.*.json", run) < 0) return -1;
+    handle = FindFirstFileW(pattern, &data);
+    if (handle == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (swscanf_s(data.cFileName, L"process-journal.%d.json", &value) == 1 && value > highest) highest = value;
+    } while (FindNextFileW(handle, &data));
+    FindClose(handle);
+    return highest;
+}
+static int cap_plant_file(const wchar_t *path, const char *text) {
+    DWORD written = 0;
+    DWORD length = (DWORD)strlen(text);
+    BOOL ok;
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    ok = WriteFile(file, text, length, &written, NULL);
+    CloseHandle(file);
+    return ok && written == length;
+}
+static int cap_journal_sabotage(const wchar_t *mode) {
+    wchar_t output[1040] = {0}, run[1040] = {0}, journal[1100] = {0};
+    int highest = 0, attempt;
+    if (GetEnvironmentVariableW(L"CAP_REHEARSAL_OUTPUT", output, 1040) == 0) return 90;
+    if (!cap_run_directory(output, run, 1040)) return 91;
+    /* The worker publishes its first snapshot after this process starts; wait for that real event. */
+    for (attempt = 0; attempt < 2000 && highest < 1; ++attempt) {
+        highest = cap_highest_snapshot(run);
+        if (highest < 1) Sleep(10);
+    }
+    if (highest < 1) return 94;
+    if (wcscmp(mode, L"journal-readonly-snapshot") == 0) {
+        if (swprintf_s(journal, 1100, L"%ls\\process-journal.1.json", run) < 0) return 92;
+        return SetFileAttributesW(journal, FILE_ATTRIBUTE_READONLY) ? 0 : 93;
+    }
+    if (swprintf_s(journal, 1100, L"%ls\\process-journal.%d.json", run,
+        wcscmp(mode, L"journal-corrupt-highest") == 0 ? 9999 : highest + 1) < 0) return 95;
+    return cap_plant_file(journal, "{\"corrupt\":") ? 0 : 96;
+}
 int wmain(int argc, wchar_t **argv) {
     char behavior[64] = {0};
     wchar_t output[32768] = {0}, path[32768] = {0};
@@ -97,6 +158,10 @@ int wmain(int argc, wchar_t **argv) {
     puts("CAP_STDIN_EOF");
     fputs("CAP_STDERR_EOF\n", stderr);
     fflush(stdout); fflush(stderr);
+    if (argc > 1 && (wcscmp(argv[1], L"journal-corrupt-highest") == 0 ||
+        wcscmp(argv[1], L"journal-plant-collision") == 0 || wcscmp(argv[1], L"journal-readonly-snapshot") == 0)) {
+        return cap_journal_sabotage(argv[1]);
+    }
     if (strcmp(behavior, "trace-readonly") == 0) {
         if (GetEnvironmentVariableW(L"CAP_REHEARSAL_OUTPUT", output, 32768) == 0) return 96;
         if (swprintf_s(path, 32768, L"%ls\\supervisor-calls.jsonl", output) < 0) return 97;
@@ -407,6 +472,109 @@ function Assert-CapRehearsalSuccess {
     Assert-CapTest (@(Get-ChildItem -LiteralPath $Run.output -Filter '*.png' -File).Count -eq 0) 'Offline rehearsal created image files.'
     return [ordered]@{ commandExit = $Run.child.exitCode; release = $Run.receiptPath; releaseSha256 = $Run.receiptSha256
         targetArguments = @($Arguments); actualTargetLaunches = 1; images = 0; desktop = 'NotExecuted' }
+}
+
+$script:journalSelf = $null
+$script:journalHighestSeen = 0
+$journalSupervisorFunctions = @('Open-CapJournalRead', 'Test-CapFileNotFoundError', 'Get-CapJournalSnapshotList',
+    'Read-CapJournalSnapshotBytes', 'Convert-CapJournalSnapshot', 'Read-CapJournalHighest', 'Refresh-CapJournal',
+    'Assert-CapJournalTerminal', 'Add-CapTrackedIdentity')
+
+function Get-CapActualFunctionText {
+    param([string]$Path, [string[]]$Names)
+    $ast = [Management.Automation.Language.Parser]::ParseInput([IO.File]::ReadAllText($Path), [ref]$null, [ref]$null)
+    $text = foreach ($name in $Names) {
+        $function = $ast.Find({ param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+        }, $true)
+        if ($function) { $function.Extent.Text }
+    }
+    Assert-CapTest (@($text).Count -gt 0) "No actual journal function was found in $Path."
+    return ($text -join [Environment]::NewLine)
+}
+
+function Set-CapJournalReaderContext {
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    if (-not $script:journalSelf) {
+        $script:journalSelf = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName `
+            -Role 'journal-fixture-self'
+    }
+    Set-Variable -Scope 1 -Name lease -Value ([pscustomobject]@{ leaseId = [guid]::NewGuid().ToString() })
+    Set-Variable -Scope 1 -Name jobHash -Value ('A' * 64)
+    Set-Variable -Scope 1 -Name moduleHash -Value $sourceHashesBefore[$modulePath]
+    Set-Variable -Scope 1 -Name workerHash -Value $sourceHashesBefore[$workerPath]
+    Set-Variable -Scope 1 -Name tracked -Value ([Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase))
+    Set-Variable -Scope 1 -Name untrackedJournalEntries -Value ([Collections.Generic.List[object]]::new())
+    $script:journalHighestSeen = 0
+}
+
+function New-CapJournalFixtureDirectory {
+    param([string]$Name)
+    $directory = Join-Path $scratch "journal-fixtures\$Name"
+    $null = New-Item -ItemType Directory -Path $directory
+    return $directory
+}
+
+function Write-CapJournalFixtureSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Directory, [Parameter(Mandatory)][int]$Sequence,
+        [string]$Phase = 'fixture', [string]$PreviousSha256, [switch]$Terminal,
+        [hashtable]$Override = @{}, [string[]]$Remove = @(), [string]$FileName, [string]$RawText
+    )
+    $name = if ($FileName) { $FileName } else { "process-journal.$Sequence.json" }
+    $path = Join-Path $Directory $name
+    if ($PSBoundParameters.ContainsKey('RawText')) {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($RawText)
+    } else {
+        $self = $script:journalSelf
+        $body = [ordered]@{
+            schemaVersion = 1; sequence = $Sequence
+            previousSha256 = $(if ($PreviousSha256) { $PreviousSha256 } else { $null }); terminal = [bool]$Terminal
+            leaseId = $lease.leaseId; jobSha256 = $jobHash; workerSha256 = $workerHash; moduleSha256 = $moduleHash
+            updatedUtc = [DateTime]::UtcNow.ToString('o')
+            entries = @([ordered]@{
+                role = 'journal-fixture-self'; phase = $Phase; pid = [int]$self.Pid
+                creationFileTimeUtc = [long]$self.CreationFileTimeUtc; expectedImagePath = [string]$self.ExpectedImagePath
+                expectedParentPid = [int]$self.ParentPid; expectedSessionId = [int]$self.SessionId
+                windowHandle = 0; registeredUtc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        if ($Terminal) { $body.ownedProcessSurvivors = @(); $body.pendingLaunchesRemaining = @(); $body.cleanupFailures = @() }
+        foreach ($key in $Override.Keys) { $body[$key] = $Override[$key] }
+        foreach ($key in $Remove) { $body.Remove($key) }
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $body -Depth 40))
+    }
+    [IO.File]::WriteAllBytes($path, $bytes)
+    return [pscustomobject]@{ Path = $path; Sequence = $Sequence
+        Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) }
+}
+
+function Write-CapJournalFixtureChain {
+    param([string]$Directory, [int]$Count, [switch]$WithTerminal)
+    $records = [Collections.Generic.List[object]]::new()
+    $previous = $null
+    for ($sequence = 1; $sequence -le $Count; $sequence++) {
+        $record = Write-CapJournalFixtureSnapshot -Directory $Directory -Sequence $sequence -Phase "chain-$sequence" `
+            -PreviousSha256 $previous -Terminal:($WithTerminal -and $sequence -eq $Count)
+        $records.Add($record)
+        $previous = $record.Sha256
+    }
+    return @($records)
+}
+
+function Get-CapUnwrappedException {
+    param([Parameter(Mandatory)]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    while ($exception.InnerException -and $exception -isnot [IO.IOException]) { $exception = $exception.InnerException }
+    return $exception
+}
+
+function Assert-CapJournalReleaseProof {
+    param($Run, [string]$State)
+    Assert-CapTest ($null -ne $Run.receipt -and $Run.receipt.PSObject.Properties['journal'] -and $null -ne $Run.receipt.journal) `
+        'The official release carries no journal snapshot cleanup proof.'
+    Assert-CapTest ($Run.receipt.journal.state -ceq $State) "Journal proof state was '$($Run.receipt.journal.state)', expected '$State'."
+    return $Run.receipt.journal
 }
 
 $target = $null
@@ -761,6 +929,386 @@ try {
             & ([scriptblock]::Create($guard.Extent.Text))
             Assert-CapTest ($cleanupFailures.Count -eq 0) 'Actual guard refused complete empty cleanup arrays.'
             return 'Actual release predicate, eight negative data controls and one complete empty-array control; no unsafe child or process/lease/worker mock was executed.'
+        }
+        Invoke-CapTest 'actual journal reader selects the highest numeric published snapshot and ignores unpublished temporaries' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath $journalSupervisorFunctions)))
+            Set-CapJournalReaderContext
+            $directory = New-CapJournalFixtureDirectory 'numeric-highest'
+            $null = Write-CapJournalFixtureChain -Directory $directory -Count 11
+            $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 12 -RawText '{"unpublished":' `
+                -FileName ('process-journal.pending-{0}.tmp' -f ('a' * 32))
+            try {
+                Refresh-CapJournal -Path (Join-Path $directory 'process-journal.json')
+                $phases = @($tracked.Keys | ForEach-Object { $_.Split(':')[2] })
+                Assert-CapTest ($phases.Count -eq 1 -and $phases[0] -ceq 'chain-11') `
+                    "The reader did not select sequence 11 over 9/10 (lexicographic) or the unpublished temporary: [$($phases -join ',')]"
+                Assert-CapTest ($script:journalHighestSeen -eq 11) 'The highest observed published sequence was not recorded.'
+            } finally { foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() } }
+            return 'Actual supervisor reader over eleven numbered snapshots plus an unpublished temporary; real file listing, open and parse.'
+        }
+        Invoke-CapTest 'actual journal reader refuses a corrupt, foreign or mismatched highest snapshot without falling back' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath $journalSupervisorFunctions)))
+            $mutations = [ordered]@{
+                'truncated-json' = @{ Expected = 'is malformed'; Raw = '{"schemaVersion":1,"sequence":4,' }
+                'invalid-utf8' = @{ Expected = 'is malformed'; Bytes = [byte[]](0x7B, 0xFF, 0xFE, 0x7D) }
+                'missing-sequence' = @{ Expected = 'is malformed'; Remove = @('sequence') }
+                'name-body-sequence' = @{ Expected = 'differs from its published name'; Override = @{ sequence = 3 } }
+                'foreign-lease' = @{ Expected = 'binding differs'; Override = @{ leaseId = [guid]::NewGuid().ToString() } }
+                'foreign-job' = @{ Expected = 'binding differs'; Override = @{ jobSha256 = 'B' * 64 } }
+                'foreign-worker' = @{ Expected = 'binding differs'; Override = @{ workerSha256 = 'B' * 64 } }
+                'foreign-name' = @{ Expected = 'Unexpected file in the worker journal namespace'; Name = 'process-journal.007.json' }
+            }
+            foreach ($mutation in $mutations.Keys) {
+                Set-CapJournalReaderContext
+                $directory = New-CapJournalFixtureDirectory "refuse-$mutation"
+                $chain = Write-CapJournalFixtureChain -Directory $directory -Count 3
+                $spec = $mutations[$mutation]
+                if ($spec.ContainsKey('Bytes')) {
+                    [IO.File]::WriteAllBytes((Join-Path $directory 'process-journal.4.json'), $spec.Bytes)
+                } elseif ($spec.ContainsKey('Raw')) {
+                    $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 4 -RawText $spec.Raw
+                } elseif ($spec.ContainsKey('Name')) {
+                    $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 7 -FileName $spec.Name -PreviousSha256 $chain[2].Sha256
+                } else {
+                    $parameters = @{ Directory = $directory; Sequence = 4; Phase = 'mutated-highest'; PreviousSha256 = $chain[2].Sha256 }
+                    if ($spec.ContainsKey('Override')) { $parameters.Override = $spec.Override }
+                    if ($spec.ContainsKey('Remove')) { $parameters.Remove = $spec.Remove }
+                    $null = Write-CapJournalFixtureSnapshot @parameters
+                }
+                try {
+                    $null = Assert-CapRejects { Refresh-CapJournal -Path (Join-Path $directory 'process-journal.json') } $spec.Expected
+                    Assert-CapTest ($tracked.Count -eq 0) "The reader fell back to an older snapshot after refusing $mutation."
+                } finally { foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() } }
+            }
+            return [ordered]@{ refusedMutations = @($mutations.Keys); data = 'Real files and the actual reader; no fallback to the older valid snapshot 3.' }
+        }
+        Invoke-CapTest 'actual journal reader re-lists only for a just-listed FileNotFoundException within a bounded attempt budget' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath $journalSupervisorFunctions)))
+            Copy-Item -LiteralPath Function:\Open-CapJournalRead -Destination Function:\Open-CapJournalReadActual
+            function Open-CapJournalRead {
+                param([Parameter(Mandatory)][string]$Path)
+                $script:openCalls.Add($Path)
+                & $script:openHook $Path
+                return Open-CapJournalReadActual -Path $Path
+            }
+            $evidence = [ordered]@{}
+            # 1. The just-listed name vanishes and a newer snapshot is published: one bounded re-list succeeds.
+            Set-CapJournalReaderContext
+            $directory = New-CapJournalFixtureDirectory 'relist-supersede'
+            $base = Join-Path $directory 'process-journal.json'
+            $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 1 -Phase 'one'
+            $script:openCalls = [Collections.Generic.List[string]]::new()
+            $script:openHook = { param($Path)
+                if ($script:openCalls.Count -eq 1) {
+                    Remove-Item -LiteralPath $Path -Force
+                    $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 2 -Phase 'two'
+                }
+            }
+            try {
+                Refresh-CapJournal -Path $base
+                $phases = @($tracked.Keys | ForEach-Object { $_.Split(':')[2] })
+                Assert-CapTest ($script:openCalls.Count -eq 2 -and $script:openCalls[0].EndsWith('process-journal.1.json') -and
+                    $script:openCalls[1].EndsWith('process-journal.2.json') -and $phases.Count -eq 1 -and $phases[0] -ceq 'two') `
+                    'A vanished just-listed snapshot was not recovered by exactly one bounded re-list.'
+                $evidence.supersede = @($script:openCalls)
+            } finally { foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() } }
+            # 2. A sharing violation is a real I/O failure, never a missing file, and is not re-listed.
+            Set-CapJournalReaderContext
+            $directory = New-CapJournalFixtureDirectory 'relist-denied'
+            $base = Join-Path $directory 'process-journal.json'
+            $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 1 -Phase 'one'
+            $script:openCalls = [Collections.Generic.List[string]]::new()
+            $script:lockHandle = $null
+            $script:openHook = { param($Path)
+                $script:lockHandle = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            }
+            $thrown = $null
+            try { Refresh-CapJournal -Path $base } catch { $thrown = Get-CapUnwrappedException $_ }
+            finally {
+                if ($script:lockHandle) { $script:lockHandle.Dispose() }
+                foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() }
+            }
+            Assert-CapTest ($thrown -is [IO.IOException] -and $thrown -isnot [IO.FileNotFoundException] -and
+                $script:openCalls.Count -eq 1 -and $tracked.Count -eq 0) `
+                'A non-FileNotFound open failure was swallowed or re-listed as a missing file.'
+            $evidence.sharingViolation = $thrown.GetType().FullName
+            # 3. The highest vanishes with no successor: explicit failure, never an older snapshot.
+            Set-CapJournalReaderContext
+            $directory = New-CapJournalFixtureDirectory 'relist-vanished'
+            $base = Join-Path $directory 'process-journal.json'
+            $null = Write-CapJournalFixtureChain -Directory $directory -Count 2
+            $script:openCalls = [Collections.Generic.List[string]]::new()
+            $script:openHook = { param($Path) Remove-Item -LiteralPath $Path -Force }
+            try {
+                $null = Assert-CapRejects { Refresh-CapJournal -Path $base } 'regressed or vanished'
+                Assert-CapTest ($tracked.Count -eq 0 -and $script:openCalls.Count -eq 1) 'A vanished highest snapshot fell back to an older one.'
+            } finally { foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() } }
+            # 4. Endless supersession exhausts the bounded budget instead of looping.
+            Set-CapJournalReaderContext
+            $directory = New-CapJournalFixtureDirectory 'relist-exhausted'
+            $base = Join-Path $directory 'process-journal.json'
+            $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 1 -Phase 'seed'
+            $script:openCalls = [Collections.Generic.List[string]]::new()
+            $script:openHook = { param($Path)
+                $next = [int](([IO.Path]::GetFileName($Path) -split '\.')[1]) + 1
+                Remove-Item -LiteralPath $Path -Force
+                $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence $next -Phase "again-$next"
+            }
+            try {
+                $null = Assert-CapRejects { Refresh-CapJournal -Path $base } 'budget exhausted'
+                Assert-CapTest ($script:openCalls.Count -ge 2 -and $script:openCalls.Count -le 16) `
+                    "The re-list budget was not bounded: $($script:openCalls.Count) opens."
+                $evidence.exhaustedOpens = $script:openCalls.Count
+            } finally { foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() } }
+            return $evidence
+        }
+        Invoke-CapTest 'actual worker publisher and supervisor reader stay consistent through many concurrent publications with a held old reader' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath $journalSupervisorFunctions)))
+            Set-CapJournalReaderContext
+            $publications = 300
+            $directory = New-CapJournalFixtureDirectory 'concurrent-publications'
+            $base = Join-Path $directory 'process-journal.json'
+            $id = [guid]::NewGuid().ToString('N').Substring(0, 12)
+            $names = @{ ready = "Local\gcj-$id-ready"; go = "Local\gcj-$id-go"; mid = "Local\gcj-$id-mid"; cont = "Local\gcj-$id-cont" }
+            $events = @{}
+            foreach ($key in $names.Keys) {
+                $events[$key] = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $names[$key])
+            }
+            $childScript = @'
+$ErrorActionPreference = 'Stop'
+Import-Module $env:CAP_J_MODULE -Force -WarningAction SilentlyContinue
+. $env:CAP_J_WORKER -OwnedRoot $env:CAP_J_ROOT -DefinitionsOnly
+$script:journalPath = $env:CAP_J_JOURNAL
+$script:auth = [pscustomobject]@{ leaseId = $env:CAP_J_LEASE }
+$script:jobHash = $env:CAP_J_JOB; $script:workerHash = $env:CAP_J_WORKERHASH; $script:moduleHash = $env:CAP_J_MODULEHASH
+$ev = @{}
+foreach ($key in @('ready', 'go', 'mid', 'cont')) {
+    $ev[$key] = [Threading.EventWaitHandle]::OpenExisting([Environment]::GetEnvironmentVariable('CAP_J_EV_' + $key.ToUpperInvariant()))
+}
+$count = [int]$env:CAP_J_COUNT
+$process = [Diagnostics.Process]::GetCurrentProcess()
+$identity = Get-CapProcessIdentity -Process $process -ExpectedImagePath $process.MainModule.FileName -Role 'journal-concurrency-writer'
+Write-CapProcessJournal -Identity $identity -Phase 'p0'
+$null = $ev.ready.Set()
+if (-not $ev.go.WaitOne(60000)) { throw 'go barrier timed out' }
+for ($i = 1; $i -lt $count; $i++) {
+    Write-CapProcessJournal -Identity $identity -Phase ('p{0}' -f ($i % 10))
+    if ($i -eq [int]($count / 2)) {
+        $null = $ev.mid.Set()
+        if (-not $ev.cont.WaitOne(60000)) { throw 'cont barrier timed out' }
+    }
+}
+Write-Output "WRITER_DONE publications=$count"
+'@
+            $run = Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
+                '-NoProfile', '-Command', '. ([scriptblock]::Create($env:CAP_J_CHILD))') `
+                -WorkingDirectory $directory -Role 'journal-concurrency-writer' -Environment @{
+                    CAP_J_CHILD = $childScript; CAP_J_MODULE = $modulePath; CAP_J_WORKER = $workerPath
+                    CAP_J_ROOT = $scratch; CAP_J_JOURNAL = $base; CAP_J_LEASE = $lease.leaseId
+                    CAP_J_JOB = $jobHash; CAP_J_WORKERHASH = $workerHash; CAP_J_MODULEHASH = $moduleHash
+                    CAP_J_COUNT = [string]$publications; CAP_J_EV_READY = $names.ready; CAP_J_EV_GO = $names.go
+                    CAP_J_EV_MID = $names.mid; CAP_J_EV_CONT = $names.cont
+                }
+            $errors = [Collections.Generic.List[string]]::new()
+            $reads = 0; $midRead = $false; $held = $null; $heldBytes = $null; $heldFileName = $null
+            try {
+                $wait = $events.ready.WaitOne(60000)
+                if (-not $wait) {
+                    $null = $run.Identity.Process.WaitForExit(2000)
+                    $null = $run.StdoutTask.Wait(2000); $null = $run.StderrTask.Wait(2000)
+                    throw "The writer process never published its first snapshot: stderr=$($run.StderrTask.Result)"
+                }
+                $firstSnapshot = @(Get-ChildItem -LiteralPath $directory -Filter 'process-journal*.json' -File)[0]
+                $heldFileName = $firstSnapshot.Name
+                $held = Open-CapJournalRead -Path $firstSnapshot.FullName
+                $null = $events.go.Set()
+                while (-not $run.Identity.Process.HasExited) {
+                    try { Refresh-CapJournal -Path $base; $reads++ } catch { $errors.Add($_.Exception.Message) }
+                    if (-not $midRead -and $events.mid.WaitOne(0)) {
+                        try { Refresh-CapJournal -Path $base; $reads++; $midRead = $true } catch { $errors.Add($_.Exception.Message) }
+                        $null = $events.cont.Set()
+                    }
+                }
+                try { Refresh-CapJournal -Path $base; $reads++ } catch { $errors.Add($_.Exception.Message) }
+                $heldReader = [IO.StreamReader]::new($held)
+                try { $heldBytes = $heldReader.ReadToEnd() } finally { $heldReader.Dispose() }
+                Assert-CapTest ($run.StdoutTask.Wait(5000) -and $run.StderrTask.Wait(5000)) 'Writer EOF was incomplete.'
+            } finally {
+                $null = $events.cont.Set()
+                if (-not $run.Identity.Process.HasExited) { $null = Stop-CapManagedProcess -Identity $run.Identity -TimeoutMilliseconds 5000 }
+                if ($held) { $held.Dispose() }
+                foreach ($record in $tracked.Values) { $record.Identity.Process.Dispose() }
+                foreach ($event in $events.Values) { $event.Dispose() }
+                $run.Identity.Process.Dispose()
+            }
+            Assert-CapTest ($errors.Count -eq 0) "The supervisor reader failed $($errors.Count) of $reads reads during concurrent publication; first: $($errors | Select-Object -First 2)"
+            Assert-CapTest ($run.Identity.Process.ExitCode -eq 0 -and ([string]$run.StdoutTask.Result).Contains('WRITER_DONE')) `
+                "The real worker publisher failed: $($run.StderrTask.Result)"
+            Assert-CapTest ($reads -gt 0 -and $midRead) 'No positive concurrent read count or mid-stream checkpoint was observed.'
+            $snapshots = @(Get-ChildItem -LiteralPath $directory -Filter 'process-journal*.json' -File)
+            Assert-CapTest ($snapshots.Count -eq $publications) "Expected $publications immutable snapshots, found $($snapshots.Count)."
+            Assert-CapTest ($script:journalHighestSeen -eq $publications) "The reader's final highest sequence was $($script:journalHighestSeen)."
+            Assert-CapTest ($heldBytes.Contains('"sequence": 1,') -and $heldFileName -ceq 'process-journal.1.json') `
+                'The held old reader did not keep reading its immutable first snapshot.'
+            return [ordered]@{ publications = $publications; reads = $reads; readerErrors = 0; midCheckpoint = $midRead
+                snapshots = $snapshots.Count; highest = $script:journalHighestSeen
+                data = 'Actual worker publisher in a distinct console child and actual supervisor reader here; named-event barriers; no process/lease mocks.' }
+        }
+        Invoke-CapTest 'actual terminal verification binds the exact final journal to the final manifest and refuses stale or incomplete proof' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath $journalSupervisorFunctions)))
+            Set-CapJournalReaderContext
+            $expected = @{ LeaseId = $lease.leaseId; JobSha256 = $jobHash; ModuleSha256 = $moduleHash; WorkerSha256 = $workerHash }
+            $newManifest = {
+                param($Records, [hashtable]$Change = @{})
+                $last = $Records[$Records.Count - 1]
+                $manifest = [ordered]@{
+                    leaseId = $lease.leaseId; jobManifestSha256 = $jobHash; moduleSha256 = $moduleHash; workerSha256 = $workerHash
+                    processJournal = [ordered]@{ terminalSequence = $last.Sequence; terminalSha256 = $last.Sha256; snapshotCount = $Records.Count }
+                    ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
+                }
+                foreach ($key in $Change.Keys) { $manifest[$key] = $Change[$key] }
+                return ([pscustomobject]$manifest | ConvertTo-Json -Depth 10 | ConvertFrom-Json -DateKind String)
+            }
+            $directory = New-CapJournalFixtureDirectory 'terminal-valid'
+            $base = Join-Path $directory 'process-journal.json'
+            $records = Write-CapJournalFixtureChain -Directory $directory -Count 4 -WithTerminal
+            $proof = Assert-CapJournalTerminal -BasePath $base -Manifest (& $newManifest $records) -Expected $expected -TerminalRequired
+            Assert-CapTest ($proof.Inventory.Count -eq 4 -and $proof.TerminalSequence -eq 4 -and $proof.TerminalSha256 -ceq $records[3].Sha256 -and
+                $proof.TerminalPresent -and $proof.TerminalBoundToManifest) 'A complete chained terminal journal was not proven.'
+            $directory = New-CapJournalFixtureDirectory 'terminal-not-required'
+            $base = Join-Path $directory 'process-journal.json'
+            $records = Write-CapJournalFixtureChain -Directory $directory -Count 3
+            $notFinal = Assert-CapJournalTerminal -BasePath $base -Manifest $null -Expected $expected
+            Assert-CapTest ($notFinal.Inventory.Count -eq 3 -and -not $notFinal.TerminalPresent) 'A failed-worker non-terminal chain was not inventoried without a terminal claim.'
+            $negatives = [ordered]@{
+                'stale-final' = @{ Expected = 'terminal snapshot is missing'; Build = { param($d) Write-CapJournalFixtureChain -Directory $d -Count 4 } }
+                'no-snapshots' = @{ Expected = 'has no published snapshot'; Build = { param($d) @() } }
+                'post-terminal-version' = @{ Expected = 'after its terminal snapshot'; Build = { param($d)
+                    $chain = @(Write-CapJournalFixtureChain -Directory $d -Count 4 -WithTerminal)
+                    $chain + (Write-CapJournalFixtureSnapshot -Directory $d -Sequence 5 -Phase 'late' -PreviousSha256 $chain[3].Sha256) } }
+                'null-survivors' = @{ Expected = 'terminal arrays are incomplete'; Build = { param($d)
+                    Write-CapJournalFixtureChain -Directory $d -Count 3
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 4 -Terminal -Override @{ ownedProcessSurvivors = $null } -PreviousSha256 (Get-FileHash (Join-Path $d 'process-journal.3.json')).Hash } }
+                'missing-pending' = @{ Expected = 'terminal arrays are incomplete'; Build = { param($d)
+                    Write-CapJournalFixtureChain -Directory $d -Count 3
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 4 -Terminal -Remove @('pendingLaunchesRemaining') -PreviousSha256 (Get-FileHash (Join-Path $d 'process-journal.3.json')).Hash } }
+                'scalar-cleanup' = @{ Expected = 'terminal arrays are incomplete'; Build = { param($d)
+                    Write-CapJournalFixtureChain -Directory $d -Count 3
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 4 -Terminal -Override @{ cleanupFailures = 0 } -PreviousSha256 (Get-FileHash (Join-Path $d 'process-journal.3.json')).Hash } }
+                'sequence-gap' = @{ Expected = 'sequence gap'; Build = { param($d)
+                    $first = Write-CapJournalFixtureChain -Directory $d -Count 2
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 4 -Terminal -PreviousSha256 $first[1].Sha256 } }
+                'broken-hash-chain' = @{ Expected = 'hash chain is broken'; Build = { param($d)
+                    Write-CapJournalFixtureChain -Directory $d -Count 3
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 4 -Terminal -PreviousSha256 ('0' * 64) } }
+                'foreign-older-snapshot' = @{ Expected = 'binding differs'; Build = { param($d)
+                    $one = Write-CapJournalFixtureSnapshot -Directory $d -Sequence 1
+                    $two = Write-CapJournalFixtureSnapshot -Directory $d -Sequence 2 -PreviousSha256 $one.Sha256 -Override @{ leaseId = [guid]::NewGuid().ToString() }
+                    Write-CapJournalFixtureSnapshot -Directory $d -Sequence 3 -Terminal -PreviousSha256 $two.Sha256 } }
+            }
+            foreach ($name in $negatives.Keys) {
+                $directory = New-CapJournalFixtureDirectory "terminal-$name"
+                $base = Join-Path $directory 'process-journal.json'
+                $built = @(& $negatives[$name].Build $directory)
+                $records = @($built | Where-Object { $_ -and $_.PSObject.Properties['Sha256'] })
+                $manifest = if ($records.Count) { & $newManifest $records } else { $null }
+                try {
+                    $null = Assert-CapRejects { Assert-CapJournalTerminal -BasePath $base -Manifest $manifest -Expected $expected -TerminalRequired } $negatives[$name].Expected
+                } catch { throw "Terminal negative '$name': $($_.Exception.Message)" }
+            }
+            $directory = New-CapJournalFixtureDirectory 'terminal-binding'
+            $base = Join-Path $directory 'process-journal.json'
+            $records = Write-CapJournalFixtureChain -Directory $directory -Count 4 -WithTerminal
+            $bindingMutations = [ordered]@{
+                'wrong-sequence' = @{ processJournal = [ordered]@{ terminalSequence = 3; terminalSha256 = $records[3].Sha256; snapshotCount = 4 } }
+                'wrong-hash' = @{ processJournal = [ordered]@{ terminalSequence = 4; terminalSha256 = ('0' * 64); snapshotCount = 4 } }
+                'wrong-count' = @{ processJournal = [ordered]@{ terminalSequence = 4; terminalSha256 = $records[3].Sha256; snapshotCount = 5 } }
+                'missing-binding' = @{ processJournal = $null }
+                'manifest-cleanup-differs' = @{ cleanupFailures = @('unreported cleanup failure') }
+                'foreign-manifest-lease' = @{ leaseId = [guid]::NewGuid().ToString() }
+            }
+            foreach ($name in $bindingMutations.Keys) {
+                $manifest = & $newManifest $records $bindingMutations[$name]
+                try {
+                    $null = Assert-CapRejects { Assert-CapJournalTerminal -BasePath $base -Manifest $manifest -Expected $expected -TerminalRequired } 'not bound to the final manifest'
+                } catch { throw "Manifest binding negative '$name': $($_.Exception.Message)" }
+            }
+            return [ordered]@{ negatives = @($negatives.Keys); bindingNegatives = @($bindingMutations.Keys)
+                data = 'Actual terminal verifier over real chained files; no worker/process mock.' }
+        }
+        Invoke-CapTest 'real capture command publishes immutable journal snapshots and proves their removal at release' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-release'
+            $null = Assert-CapRehearsalSuccess -Run $run -Arguments @()
+            $journal = Assert-CapJournalReleaseProof -Run $run -State 'SNAPSHOTS_REMOVED_AND_VERIFIED'
+            $inventory = @($journal.preCleanupInventory)
+            Assert-CapTest ($journal.positiveInventoryRequired -and $inventory.Count -ge 2 -and $journal.inventoryCount -eq $inventory.Count -and
+                $journal.removedCount -eq $inventory.Count -and @($journal.removed).Count -eq $inventory.Count -and
+                @($journal.remainingAfterCleanup).Count -eq 0 -and $journal.terminalVerified -and $journal.terminalBoundToManifest -and
+                $journal.terminalSequence -eq $inventory.Count) 'The release lacks a positive pre-cleanup inventory, exact removal and terminal binding.'
+            for ($i = 0; $i -lt $inventory.Count; $i++) {
+                Assert-CapTest ($inventory[$i].sequence -eq ($i + 1) -and $inventory[$i].name -ceq "process-journal.$($i + 1).json" -and
+                    $inventory[$i].sha256 -match '^[A-F0-9]{64}$' -and $journal.removed[$i].name -ceq $inventory[$i].name -and
+                    $journal.removed[$i].sha256 -ceq $inventory[$i].sha256) "Inventory/removal metadata for snapshot $($i + 1) is not exact."
+            }
+            $runDirectories = @(Get-ChildItem -LiteralPath (Join-Path $run.owned 'runs') -Directory)
+            Assert-CapTest ($runDirectories.Count -eq 1 -and @(Get-ChildItem -LiteralPath $runDirectories[0].FullName -Filter 'process-journal*' -Force).Count -eq 0) `
+                'Journal snapshots or temporaries remain in the owned run directory after release.'
+            $record = $journal.inventoryRecord
+            Assert-CapTest ((Test-Path -LiteralPath $record.path -PathType Leaf) -and
+                (Get-FileHash -LiteralPath $record.path -Algorithm SHA256).Hash -ceq $record.sha256) 'The preserved pre-removal inventory record is missing or altered.'
+            $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.json') -Raw | ConvertFrom-Json -DateKind String
+            Assert-CapTest ($manifest.processJournal.terminalSequence -eq $journal.terminalSequence -and
+                $manifest.processJournal.terminalSha256 -ceq $journal.terminalSha256 -and
+                $manifest.processJournal.snapshotCount -eq $inventory.Count) 'The final manifest does not bind the exact terminal journal.'
+            return [ordered]@{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256; snapshots = $inventory.Count
+                terminalSequence = $journal.terminalSequence; inventoryRecord = $record }
+        }
+        Invoke-CapTest 'no-worker refusal reports a distinct journal state instead of a fake cleanup zero' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-no-worker' -LeaseMutation 'hash'
+            Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and $run.receipt.status -ceq 'REFUSED_NO_WORKER') 'Invalid lease did not produce a no-worker release.'
+            $journal = Assert-CapJournalReleaseProof -Run $run -State 'NO_WORKER_STARTED'
+            Assert-CapTest (-not $journal.positiveInventoryRequired -and $journal.inventoryCount -eq 0 -and $journal.removedCount -eq 0 -and
+                -not $journal.terminalVerified) 'A no-worker refusal claimed journal cleanup.'
+            return [ordered]@{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256; state = $journal.state }
+        }
+        Invoke-CapTest 'real capture command refuses a planted corrupt highest journal snapshot and retains it' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-corrupt-highest' -Arguments @('journal-corrupt-highest')
+            Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and $run.receipt.status -ceq 'CLEANUP_UNPROVEN') `
+                "A corrupt highest published journal snapshot was accepted: exit=$($run.child.exitCode) status=$($run.receipt.status)"
+            Assert-CapTest ((@($run.receipt.primaryFailure) + @($run.receipt.cleanupFailures) -join "`n").Contains('Worker process journal')) `
+                'The release does not attribute the failure to the corrupt journal snapshot.'
+            $journal = Assert-CapJournalReleaseProof -Run $run -State 'RETAINED_VERIFICATION_FAILED'
+            Assert-CapTest (-not $journal.terminalVerified -and $journal.removedCount -eq 0) 'Verification failure still claimed terminal proof or removed evidence.'
+            $planted = @(Get-ChildItem -LiteralPath (Join-Path $run.owned 'runs') -Recurse -Filter 'process-journal.9999.json' -File)
+            Assert-CapTest ($planted.Count -eq 1 -and [IO.File]::ReadAllText($planted[0].FullName) -ceq '{"corrupt":') 'The planted corrupt snapshot was not retained unchanged.'
+            return [ordered]@{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256; state = $journal.state }
+        }
+        Invoke-CapTest 'real worker never overwrites a colliding foreign journal snapshot name' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-collision' -Arguments @('journal-plant-collision')
+            Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and $run.receipt.status -ceq 'CLEANUP_UNPROVEN') `
+                "A colliding foreign snapshot name did not fail closed: exit=$($run.child.exitCode) status=$($run.receipt.status)"
+            $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.partial.json') -Raw | ConvertFrom-Json -DateKind String
+            Assert-CapTest ((@($manifest.cleanupFailures) -join "`n").Contains('Final process journal update failed')) `
+                'The worker did not report that its terminal publication collided.'
+            $planted = @(Get-ChildItem -LiteralPath (Join-Path $run.owned 'runs') -Recurse -Filter 'process-journal.*.json' -File |
+                Where-Object { [IO.File]::ReadAllText($_.FullName) -ceq '{"corrupt":' })
+            Assert-CapTest ($planted.Count -eq 1) 'The foreign snapshot at the colliding name was overwritten, replaced or removed.'
+            $journal = Assert-CapJournalReleaseProof -Run $run -State 'RETAINED_VERIFICATION_FAILED'
+            return [ordered]@{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256; state = $journal.state; foreign = $planted[0].Name }
+        }
+        Invoke-CapTest 'real release stays cleanup-unproven when a journal snapshot cannot be removed' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-readonly' -Arguments @('journal-readonly-snapshot')
+            $locked = @(Get-ChildItem -LiteralPath (Join-Path $run.owned 'runs') -Recurse -Filter 'process-journal.1.json' -File)
+            try {
+                Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and $run.receipt.status -ceq 'CLEANUP_UNPROVEN') `
+                    "A snapshot removal failure did not stay cleanup-unproven: exit=$($run.child.exitCode) status=$($run.receipt.status)"
+                $journal = Assert-CapJournalReleaseProof -Run $run -State 'REMOVAL_UNPROVEN'
+                Assert-CapTest ($locked.Count -eq 1 -and @($journal.remainingAfterCleanup) -contains 'process-journal.1.json' -and
+                    -not (@($journal.removed | ForEach-Object name) -contains 'process-journal.1.json') -and
+                    $journal.removedCount -eq ($journal.inventoryCount - 1) -and $journal.terminalVerified) 'The proof overstated the removal of a snapshot that remains on disk.'
+                Assert-CapTest ((@($run.receipt.cleanupFailures) -join "`n").Contains('process-journal.1.json')) 'The removal failure is not in the release cleanup failures.'
+            } finally { foreach ($file in $locked) { Set-ItemProperty -LiteralPath $file.FullName -Name IsReadOnly -Value $false } }
+            return [ordered]@{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256; state = $journal.state }
         }
         # Same frozen five-scene/two-phase mocks: component regression only, never launch/UI proof.
         # Test-CapCaptureOffline.ps1 SHA256 6C08A2029D9256405552BBA9B82B15A8A19359544433FD0E5928B4A7EA6C2592.
