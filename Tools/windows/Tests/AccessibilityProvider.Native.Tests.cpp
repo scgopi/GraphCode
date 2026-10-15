@@ -428,6 +428,36 @@ static void nativeQuickChatRestartChecks(IRawElementProviderSimple *provider, HW
   if (projects) projects->Release();
 }
 
+static void nativeQuickChatWorkspaceBarChecks(IRawElementProviderSimple *provider,
+                                               IRawElementProviderFragment *root) {
+  const char *identities[] = {"workspace-quick-chat-bar:chat-b"};
+  const char *names[] = {"Quick Chat title"};
+  const int parents[] = {4};
+  const int none[] = {0};
+  const int actions[] = {0};
+  const int bounds[] = {0, 0, 0, 0};
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  check(update(provider, "Quick Chat", identities, names, parents, none, none, actions, bounds,
+               1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "Quick Chat workspace bar publication succeeds");
+
+  auto *projects = child(root, NavigateDirection_FirstChild);
+  auto *loops = child(projects, NavigateDirection_NextSibling);
+  auto *worktrees = child(loops, NavigateDirection_NextSibling);
+  auto *graph = child(worktrees, NavigateDirection_NextSibling);
+  auto *bar = child(graph, NavigateDirection_FirstChild);
+  const std::wstring automation_id = stringProperty(bar, UIA_AutomationIdPropertyId);
+  check(automation_id.rfind(L"workspace-quick-chat-bar-", 0) == 0,
+        "Quick Chat workspace bar uses its distinct AutomationId prefix");
+  checkName(bar, L"Quick Chat title");
+  check(!invokable(bar), "Quick Chat workspace bar remains non-invokable");
+  if (bar) bar->Release();
+  if (graph) graph->Release();
+  if (worktrees) worktrees->Release();
+  if (loops) loops->Release();
+  if (projects) projects->Release();
+}
+
 // The sidebar lists scroll as one viewport, and every row that scrolls with it can be brought
 // into view through UIA, so keyboard and assistive clients can reach rows that are offscreen.
 static void nativeScrollChecks(IRawElementProviderSimple *provider, HWND hwnd,
@@ -572,6 +602,7 @@ static void nativeCommandAndScrollChecks() {
     if (root) {
       nativeBannerInvokeChecks(provider, capture, root);
       nativeQuickChatRestartChecks(provider, capture, root);
+      nativeQuickChatWorkspaceBarChecks(provider, root);
       nativeScrollChecks(provider, capture, root);
       root->Release();
     }
