@@ -149,10 +149,13 @@ accessibility, physical input or persistence. Do not rebind old dirty
 `4fafbfb2` pixels with conversion-time current hashes. Sidebar, right-panel and
 NativeForms slices need separate later approvals after the first proves out.
 
-**Selected real-window option 1: UNAPPROVED plan, not available mechanics.**
+**Selected real-window option 1: stock-only route, execution separately gated.**
 The [earlier proposal](https://github.com/scgopi/GraphCode/issues/822#issuecomment-6186605912)
-is under review and needs a shorter stock-only revision. The later operator
-steer prohibits any fork, patch or derivative of WinAppCli or another external
+records route provenance, not execution authority. The selected route requires
+#826 merge, an accepted current plan and separate exact implementation, native,
+install and capture grants. A reviewed plan alone is not an execution lease;
+ungranted execution is **UNAPPROVED**. The operator steer prohibits any fork,
+patch or derivative of WinAppCli or another external
 repository: **stock pinned WinAppCli 0.5.0 only**. Restore/foreground are
 acceptable and must be recorded inside the dedicated **LAST, at most 15-minute**
 desktop slot when explicitly granted; they are not forbidden in that route.

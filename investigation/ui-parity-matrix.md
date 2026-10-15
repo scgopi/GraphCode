@@ -174,8 +174,9 @@ pixels, not a real window/composition, popups, terminal, native controls, input,
 accessibility, physical input or persistence. Never rebind old dirty
 `4fafbfb2` pixels with conversion-time current hashes. Sidebar/right-panel/
 NativeForms slices require separate later approvals after the first proves out.
-The selected real-window option remains an unapproved plan under #822,
-dependent on #826 merge, review and explicit commands; no capture mechanics
+The selected stock-only real-window route under #822 requires #826 merge,
+an accepted current plan and separate exact implementation/native/install/capture
+grants. A reviewed plan alone is not an execution lease; no capture mechanics
 are available by virtue of this ledger. No manual screenshots or
 screenshot/golden/pixel-baseline CI fallback is authorized.
 

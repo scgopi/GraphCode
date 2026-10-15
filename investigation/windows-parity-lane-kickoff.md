@@ -128,7 +128,7 @@ remain open, full B8/C6/D2/E4 criteria stay unchecked and B/C/D/E visual
 acceptance is NotExecuted (#826). Preserve all 98 ledger identities/order and
 **6 Validated / 89 Partial / 3 Out of scope**; thirty demoted rows stay Partial.
 The orchestration plan's current execution/evidence authority governs J5,
-parked adapters and the unapproved stock-only real-window route.
+parked adapters and the separately gated stock-only real-window route.
 
 - **One issue, one PR, one coherent slice.** The first PR fixes the issue's primary
   defect. Leave remaining acceptance boxes unticked and list them. Small PRs merge;
