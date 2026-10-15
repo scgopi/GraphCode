@@ -181,6 +181,27 @@ order and statuses remain **6 Validated / 89 Partial / 3 Out of scope**, includi
 all thirty demoted rows still Partial. No worker may promote rows from code,
 unit/UIA/native-menu/offscreen capability or macOS-only references.
 
+**Combined macOS return (2026-10-15), reference intake only.**
+`C:\gc-ref\macos-groundtruth-2ccf303a-gapfill-combined-20261015` adds the final
+V12 tables, not a replacement primary or a new capture/execution lease.
+Use the ledger's combined-return crosswalk and actual hashes, not older
+same-named tables: all 65 IDs resolve to 46 Recorded / 5 Differs /
+14 macOS reference: accepted unrecorded / 0 Dropped, with all thirty
+qualification rows reconciled and no canonical Windows status changed.
+Accepted SSH/Codespace/updater/physical-pinch omissions are reference
+dispositions, not new missing/dropped/Out of scope findings. The supplemental
+updater banner shares that accepted limitation. Preserve failed attempts,
+source-only reachability, exact project/overview zoom and menu context,
+root-Composite versus worker-aggregate limits, and transient folder startup
+versus persistent deselection. Keep v3's twelve-versus-two-turn deviation
+distinct from v11's separately permitted one response and zero executed tools.
+The parent reviewed only three specific new images plus the prior eleven-image
+v2 sample; combining producer-clearance reports grants no blanket independent
+privacy verdict and never clears held originals. Mac-only references and a
+text/hash intake cannot tick Windows acceptance boxes or authorize product,
+native, renderer or capture work. The kickoff's exact-command retrospective
+also applies to self-added checkers; the permanent executor stop remains.
+
 **Short validation root.** The UIA live-gate preflight refuses sandbox paths
 longer than 81 UTF-16 characters, and `validate.ps1` appends
 `<GUID>\temp\gu-<GUID>` to the root. Pass `-ShellValidationRoot C:\gc<lane>`,

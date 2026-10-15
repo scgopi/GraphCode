@@ -113,6 +113,28 @@ References on this machine:
   Preserve the ledger's dated original intake, with this additive qualification.
 - **Historical macOS fallback:** Run A is secondary, only for a state the primary
   lacks. Keep its source, fixture and evidence limits distinct.
+- **Combined return, 2026-10-15:** use
+  `C:\gc-ref\macos-groundtruth-2ccf303a-gapfill-combined-20261015` and only its
+  `macos-groundtruth-2ccf303a-completed-v12` final 65-gap, qualified-row and
+  correction tables. The ledger's combined-return crosswalk records actual
+  input/metadata hashes and all 65 identities plus all thirty qualification
+  rows, without rewriting the dated primary/companion intake. Latest outcomes
+  are 46 Recorded / 5 Differs / 14 **macOS reference: accepted unrecorded**;
+  the fourteen accepted SSH/Codespace/updater/physical-pinch omissions are
+  not missing, dropped or new Windows Out of scope rows. The separate
+  supplemental updater banner shares that accepted limitation.
+  Apply exact scene/source/copy/routing corrections: root Composite Open
+  Terminal is not worker aggregation; folder fallback is transient startup;
+  primary project 90%, fresh project/overview 100% and actual Fit frames stay
+  distinct. Failed v4/v8 and source-only v7 are not recorded success.
+  V3's twelve turns exceeded its initial two-turn ceiling; V11's separately
+  permitted one response/zero executed tools does not erase that deviation
+  or make the combined return zero-turn. Producer raster reports are not
+  blanket independent clearance: only three specific new images and the
+  earlier eleven-image v2 sample were independently opened by the parent.
+  This docs intake opens no images and adds no privacy verdict. The original
+  publication hold remains; current Windows pairs are still required for
+  every demoted Partial row, with all 98 identities/statuses unchanged.
 - **Windows beta26 "before" captures:** `C:\GraphCode-DevBox-Return\media\`.
   Label them **Windows beta26 (pre-wave-1)**, not current main or a wave-2 head.
   They can support a historical pair; current behavior requires current evidence.
@@ -155,6 +177,10 @@ and escalate to the operator; no owner rotation, root rename or reset without
 an explicit user decision. Routine approval waits use a coordinator message and idle,
 not a blocking `ask_user`. Check live `awaiting_input` before starting a capture
 lease clock: message acceptance is not admitted permission.
+**Command-lease retrospective:** workers may run only granted commands;
+self-added validators or gates are out of lease, and permission to read a checker output does not grant permission to execute it.
+The rp1 ANSI gate and post-conversion parser failures were process deviations, not product defects;
+the permanent executor stop stands. No adjacent checker or retry is implied.
 No manual screenshots, screenshot/golden/pixel-baseline CI or fallback.
 Unrelated-product PRs excluding all four capture-core files may receive at most
 two failed-job reruns per exact head, globally across workflows, citing

@@ -140,6 +140,283 @@ the retained independent spotcheck JSON SHA-256 is
 The canonical kickoff retains the primary publication hold; companion intake
 does not clear held originals or extend the 11-image sample to other files.
 
+### 2026-10-15 combined-return intake
+
+This bounded update supersedes neither dated intake above. The new read-only
+collection is `C:\gc-ref\macos-groundtruth-2ccf303a-gapfill-combined-20261015`,
+source `2ccf303a04f995184aae1d4b738a9eca0f71b79e`. Its **final** tables are
+under `macos-groundtruth-2ccf303a-completed-v12`; earlier same-named tables in
+v2/v3/v5/v6/v8/v9/v11 are historical, not the final authority.
+The collection contains 11 bundles (v1-v9, v11, v12), 1355 files including its
+hash list, 442 PNGs and 699 JSON files. Version 10 was route investigation,
+not a separate bundle. The operator verified all 1354 collection hash entries
+against the downloaded and copied roots. This intake checks referenced
+text/JSON identities, hashes, hash-list membership and path confinement; it
+does not repeat that whole-copy verification or read image bytes.
+
+| Final input (relative to collection root) | SHA-256 |
+| --- | --- |
+| `README.md` | `EB27905FBE4124FCC64E97B590B7A7E17A47A59E2B6E9C8E09D956A8CC625AA1` |
+| `bundle-index.json` | `8068B4F88B7FBFEB513E61519B45A3CA4BBB5511C7A21876FF6376D55D140DCC` |
+| `hashes.sha256` | `2DC9D7A42ADA9AC13758D311D54272196C73292A93D209405A8FC6ED9668CE9B` |
+| `macos-groundtruth-2ccf303a-completed-v12\consolidated-65-gap-index.json` | `BA1F68883B374D9C99F4F90509299A33779A4CE4C1F9D92AEA1D4280B83BDD58` |
+| `macos-groundtruth-2ccf303a-completed-v12\qualified-row-index.json` | `1485C64166B01FD5F2FE1389E0CE378F752178EAE388E6E4812202C1E37BF1FE` |
+| `macos-groundtruth-2ccf303a-completed-v12\correction-index.json` | `B5257F40B2705E7D8715BB42D400289E573D3E775B5A931C952A751E3648C013` |
+| `macos-groundtruth-2ccf303a-completed-v12\final-recording-corrections.json` | `C787CC316608B303D2774E02021BFDE3161FF4EA707960011721D335244159C8` |
+| `macos-groundtruth-2ccf303a-completed-v12\gap-fill-ground-truth.json` | `876301255C38F13BA9332F402BA19CBE2F1F4DCDD95DE930250DC8E425B90172` |
+
+Reconciled outcomes are **46 Recorded / 5 Differs from request / 14 accepted unrecorded / 0 Dropped**
+for the latest 65 and **63 Recorded / 6 Differs from request / 14 accepted unrecorded / 24 Dropped**
+for the original 107. Supplements are **7 recorded / 1 accepted updater limitation**.
+The JSON retains `Exists, not recorded` for the accepted omissions; the reference
+disposition here is **macOS reference: accepted unrecorded**, not missing,
+dropped or newly Windows Out of scope. The fourteen exact IDs are
+`codespace-empty`, `codespace-list`, `codespace-loading`, `pinch-anchor`,
+`remote-info`, `remote-section`, `ssh-lane`, `update-install-error`,
+`update-installed`, `update-offer`, `update-other-workspaces`,
+`update-progress`, `worktree-ssh-7`, `worktree-ssh-8`.
+Only SSH/Codespace, updater and physical-pinch omissions were accepted.
+The supplemental `gap-sidebar-update-banner` is covered by the same updater
+limitation, not a fifteenth latest-65 omission. Complete accepted scope does
+not mean all 65 were recorded.
+
+**Corrections and evidence limits.** The primary fitted frame remains
+**project 90%**, never global or intrinsic 100%; its separate overview is 45%.
+Fresh **project 100%** and **overview 100%** remain separate selections.
+V2's explicit project Fit is 55%, overview Fit 53%, and automatic initial
+project fit 80%; do not infer canvas zoom from copy or backing scale.
+The v3 `overview-complete-fit` metadata has null zoom: do not substitute a
+neighboring frame's number. Node positioning is a native flow/edge/reselection
+sequence, not arbitrary node-drag persistence.
+Fresh menu replacements require Ref Main, Shell tab 2, two horizontal panes,
+right focused, panel collapsed, with actual owned NSMenu popup pairs and
+enablement readbacks. A selected main-window context does not contain or prove
+the global menu overlay. The old preflight "not launched" note inside
+`correction-index.json` is historical; its explicit `fresh_menu_split_replacement`
+mapping, not that note or the held original, identifies the later recordings.
+
+V11's Composite RUNNING/NEEDS YOU cards and menus use the supported **root
+Composite Open Terminal** route, not an unreachable-worker-state inference.
+No worker, pilot or schedule was launched; worker-to-parent presence aggregation
+is not proved. The RUNNING menu partly occludes the pill; the separate
+unobscured card, AX readback and actual provider timestamps establish its
+state, not reconstructed pixels. V9's Select a folder is a **transient startup fallback**,
+not persistent deselection or empty-project evidence.
+V5 records actual PNG drag/drop, visible attachment chip and persisted-byte
+hash match; paste/file-URL text alone is not that outcome. V6 records exact
+edge lighting, blocked tooltip, overview ENTRY plus and Zoom out help only.
+The v4 drop retry and v8 startup attempts remain failed; v7 is source-only,
+not native coverage.
+
+**Metadata provenance exceptions are explicit.** The 65 index appends
+inherited v2 paths to `edge-focus` under v6 (`edge-focus-before`,
+`FAILED-edge-focus-after`, `fresh-guard-menu`) and to `overview-folders`
+under v3 (`mixed-overview-final`, `overview-linked-fit`). Those paths resolve
+under V2, not the record's newer `evidence_bundle`; they are **not current success evidence**.
+Use V6 `edge-focus-native-after-click` and V3 `overview-complete-fit` below
+for the new outcomes. The inherited `prior_metadata_digests` are historical
+v5 fields, not a current v3 seal. Likewise, the qualified-row index's
+`accepted_main_sha`, old line numbers and inherited `new_native_outcome` fields
+are not a current Windows baseline or the final 65-item dispositions: the
+crosswalk reconciles them against the final item index and register.
+
+**Accounting and privacy remain bounded.** v3 used 12 actual turns against the initial two-turn ceiling;
+that historical deviation is not compliant and is not erased. Separately,
+v11 used one permitted response and zero executed tools (1.5407 AI credits);
+v2 used zero backend turns. The combined collection is not a zero-turn run.
+Producer per-bundle raster-clearance reports cover v3 220 / v11 14 / v6 20 /
+v9 4 / v5 4 / v8 2 / v2 178; these are **not 442 independently reviewed**
+images. The parent independently opened only three specific new images
+(v11 root-terminal outcome, v3 final usage, v3 RUNNING menu), in addition to
+the prior eleven-image v2 independent sample. The parent reports the v3
+account/quota area black-masked; this text-only intake supplies no new privacy
+verdict. It opens, decodes, crops, copies, uploads and commits no images.
+The primary `C:\gc-ref\macos-groundtruth-2ccf303a` and its DO-NOT-PUBLISH
+hold remain unchanged: the held issue-722 originals are not in this collection
+and **NEVER open, copy or upload** still applies.
+
+**Windows status is unchanged:** exactly **98 canonical rows / 6 Validated /
+89 Partial / 3 Out of scope**, in the same order; all thirty demoted rows
+remain `Partial` until current Windows evidence pairs. Mac-only recordings
+tick no whole-issue acceptance box and do not establish Windows runtime parity.
+The tables below map reference subcases, not whole-row conformance. The 65
+identities map to 30 distinct canonical rows (23 additional to the qualified
+thirty, 53 distinct rows across both crosswalks); three items have no exact
+row and are explicitly qualified rather than inventing one. Shared rows are
+deduplicated for row counts, never by deleting capture identities.
+
+**Locator convention.** `Vn:capture-id` means the exact metadata path
+`collection-root\bundle-directory\captures\capture-id-metadata.json`; the
+listed SHA-256 hashes that JSON, not its image. Its source/item identity,
+scene, selection, zoom/state and evidence paths constrain the pair. Image
+paths/hashes remain in that metadata and the sealed collection hash list;
+this is not permission to open them. V12 accepted IDs refer to the sealed
+final 65 index above, with no invented success capture.
+
+| Alias | Bundle directory under collection root |
+| --- | --- |
+| V2 | `macos-groundtruth-2ccf303a-gapfill-v2-20261014T194206Z` |
+| V3 | `macos-groundtruth-2ccf303a-backend-v3-20261014T215031Z` |
+| V5 | `macos-groundtruth-2ccf303a-drop-repair-v5-20261015T012624Z` |
+| V6 | `macos-groundtruth-2ccf303a-local-v6-20261015T035440Z` |
+| V9 | `macos-groundtruth-2ccf303a-extended-v9-20261015T151500Z` |
+| V11 | `macos-groundtruth-2ccf303a-composite-v11-20261015T152851Z` |
+| V12 | `macos-groundtruth-2ccf303a-completed-v12` |
+
+#### Combined thirty-row qualification crosswalk
+
+These are the exact thirty qualified-row identities, in their retained order.
+An original-only ID retains the dated primary observation; "no fresh exact
+recording" here does not erase that observation or mean macOS lacks the feature.
+Later 65-item entries override stale companion dispositions only for the exact
+recorded state. Every row below still needs its current Windows pair.
+
+| Qualified row | Latest exact macOS reference or retained limit |
+| --- | --- |
+| Update command | `update-dev-disabled`: retain primary disabled dev command; no fresh exact command capture and no release offer/install proof. |
+| Tray lifecycle | No exact macOS tray item; native-platform qualification, not a missing macOS surface. Retain Windows lifecycle evidence. |
+| Connection failure presentation | `daemon-disconnected`: V3 differs; actual graph remains without the requested banner. |
+| No-project Welcome detail | `welcome`: retain primary fresh Welcome; no fresh exact recording in this return. |
+| Empty global graph | Supplemental `gap-empty-global`, V2 connected empty Graph, 100%; not the populated overview. |
+| Empty project canvas | Supplemental `gap-empty-project`, V2 selected connected empty ParityRef, 100%; not an overview lane. |
+| Project context menu | `sidebar-folder-menu`: retain primary folder popup, not action execution; no fresh exact recording. |
+| Recent projects | `recent-add-folder`: primary Add Folder recents, not normal sidebar rows; no fresh exact recording. |
+| Add Folder menu | Same `recent-add-folder` context, distinct claim; no double-counting or replacement by a neighboring popup. |
+| Sidebar update banner | Supplemental `gap-sidebar-update-banner`: macOS reference: accepted unrecorded, under the updater limitation; no release banner capture. |
+| Sidebar error footer | `clone-error-footer`: V3 differs; inline Clone-sheet failure, not persistent sidebar footer. |
+| Activity strip | `activity-strip`: retain primary optional bottom strip; not sidebar activity and no new exact recording. |
+| Node positioning | Supplemental `gap-node-positioning-sequence`: V2 unlinked/edge-created flow/reselection; no arbitrary drag persistence. |
+| Connector handles | `edge-wire`: V3 differs because Wire it up only arms; actual native drag opens New Edge. Primary `edge-drag` is retained, not every hover/context. |
+| Worktree reclaim offer | Supplemental `gap-reclaim-card-offer`: V2 resolved Home Reclaim entry card, 100%, Reclaim/Keep visible; neither submitted. |
+| Composite card actions | Primary `context-composite-idle`/`context-composite-stopped` remain historical. V3 DONE and V11 RUNNING/NEEDS YOU menus add exact states, not every action outcome or worker aggregation. |
+| Composite breadcrumb | Supplemental `gap-composite-breadcrumb`: V2 actual group open/back, zero/one-loop count and unpiloted Goal child, 100%; not the loop bar. |
+| Quick Chats canvas | `quick-populated`: V2 `two-distinct-quiet-chats`; populated two-chat canvas, no backend execution. |
+| Quick Chat cards | Same V2 two-chat reference plus retained primary `quick-menu`; card identity/menu scope, not backend action proof. |
+| Rename chat | `quick-rename`: retain primary title prompt; no fresh exact recording or submitted rename. |
+| Delete chat | `quick-delete`: retain primary confirmation; no fresh exact recording or deletion. |
+| Chat rename/delete | Both primary prompt IDs, distinct ledger claim; reused evidence is not additional runtime proof. |
+| Open Folder | Supplemental `gap-open-folder-native`: V2 successful native picker registered ParityRef, not saved restoration. V9 `select-folder` is only an adjacent transient startup fallback, not this action's outcome. |
+| Clone Repository sheet | Primary `clone-repository` form plus V3 `clone-error-footer` inline failure; no successful clone established. |
+| Add Remote Repository sheet | `add-remote`: retain primary blank ingress form, no remote dial; accepted SSH omissions do not turn it into connection info. |
+| Remote Connection info | `remote-info`: macOS reference: accepted unrecorded, SSH limitation; not the blank ingress form. |
+| Project Settings sheet | Supplemental `gap-project-settings`: V2 actual project sheet/Ask me selection persisted in owned profile; not General Settings or every policy outcome. |
+| Available update alert | `update-offer`: macOS reference: accepted unrecorded, updater limitation; beta26 functional evidence remains historical. |
+| Project delete loops | `delete-loops`: retain primary project confirmation; fixture not deleted, no fresh exact recording. |
+| Project remove/trash | `delete-project`: retain primary Remove/Trash alternatives; nothing removed, no fresh exact recording. |
+
+The new V2 metadata locators used above (same convention and actual SHA-256):
+
+| Capture metadata | SHA-256 |
+| --- | --- |
+| V2:`gap-empty-global` | `CB202FA264EA01A730514470461482135C92F4BAC77840DA24C33A75C2484240` |
+| V2:`gap-empty-project` | `4C795D7A7AF332C2720B33842DA4982AABF22D4A98E96C7E78B9E826F13AEB9E` |
+| V2:`gap-open-folder-native` | `2DEF3BC8503A9C8C993067A006006D192853CC6C7DADA94A13C1C067B2FA4727` |
+| V2:`gap-project-settings` | `5E5EE23AF25BD47F7815AC3832CC27A67D3217E9F66A7EF3B06067E99784357A` |
+| V2:`project-settings-ask` | `167890355A0F740D5C74133ED9F43872D6CC38FDE41CF24CB5022DFE10DD635B` |
+| V2:`home-reclaim-offer` | `941BFCA862161D6384B82D04942C7AFDE563558A72430874669D13A8C04D7E06` |
+| V2:`gap-composite-breadcrumb` | `738613C72CF139586FE67DC9703AAC245ADE7E07211BA3BDA860F42AEB499897` |
+| V2:`unpiloted-goal-idle` | `9AD521F699B121C830F3C7E7C505B48900B529E48B95FE0E54D282E4A1664929` |
+| V2:`project-100-percent` | `11B36E887D6CF327512213F4034CB559D5ED3C51346A247FB5AFEF53706F3617` |
+| V2:`project-linked-100` | `FBA106F586984C57CBDF1CEB396FE264B3939203AFBDE998247496BD76D7CEE9` |
+| V2:`initial-project-fit` | `83DF2B8F539EF8D8EE2884D1A233D939D0AD6ED3CF191C5A87C5E637FB334488` |
+| V2:`positioning-flow-reselect` | `392225E9FDAA1E0C7FED6D519D22E46D248E6924F9CA18B5135B3DBC07692086` |
+| V2:`two-distinct-quiet-chats` | `210D3281EB0DA74A958F948060148C71C21A834E9EE91802C1AF12329945249E` |
+
+#### Combined 65-item crosswalk
+
+Each identity appears once, including all fourteen accepted omissions. A row
+association covers only the named subcase; **NO EXACT CANONICAL ROW** explicitly
+preserves captures/accepted subcases that the 98-row taxonomy does not name.
+
+| Exact item ID | Final macOS disposition | Canonical row association | State/story limit | Metadata locator; SHA-256 |
+| --- | --- | --- | --- | --- |
+| `card-main-running` | Recorded | Loop card identity | Main RUNNING, project 100%; state pill only | V3:`main-running-live-refresh`; `87544FC898A0336979A6B0626810053E158AE38803A8CEE2A6663CF721F1ED3D` |
+| `card-goal-needs-you` | Recorded | Loop card identity; Loop card attention | Goal NEEDS YOU; actual provider state | V3:`goal-needs-you-1792016870507`; `0E9AEC25FB07812806751A41D39D279AABCA49B51CC858C289D1773B432E0718` |
+| `card-goal-running` | Recorded | Loop card identity | Goal RUNNING; actual provider state | V3:`goal-running-1792016841430`; `A4C574302AF3BFF434BC3C98AA509DB0B28309831A2207F38AAE1A289D661628` |
+| `card-turn-done` | Recorded | Loop card identity | Turn DONE; actual provider state | V3:`turn-done-1792017457416`; `E0220100583F290DE7E69278FDEC39D3C1635837143A8676211D19C967A13936` |
+| `card-turn-needs-you` | Recorded | Loop card identity; Loop card attention | Turn NEEDS YOU; actual provider state | V3:`turn-needs-you-1792016920874`; `9A8667E6D4900D247936F034BAA8AE8993928DEC8D9A3E4C53FED56036BA7B7B` |
+| `card-turn-running` | Recorded | Loop card identity | Turn RUNNING; actual provider state | V3:`turn-running-1792016892510`; `6F48B29CB86BA37614FE99D4B1BFFB62B4D2E5670C9F0110E543C694689D27FA` |
+| `card-timed-idle` | Differs from request | Loop card identity | Raw Timed idle renders SCHEDULED, not literal IDLE | V3:`native-timed-idle-word-scheduled`; `03F063FACEB5EB5F2284927AD4ED3B13C1365F09997A5D9441B558E41C8C3D46` |
+| `card-timed-done` | Recorded | Loop card identity | Timed DONE; actual provider state | V3:`timed-done-1792017444880`; `8809398993FD951959CF85554755200A108CAF93E38488E4FEC7C090AE5E7821` |
+| `card-timed-needs-you` | Recorded | Loop card identity; Loop card attention | Timed NEEDS YOU; actual provider state | V3:`timed-needs-you-1792017063608`; `EDF11516F6B0BABB11BD9DD5FEF656D80D25E9A927523D49C2E9C67E635403F8` |
+| `card-timed-running` | Recorded | Loop card identity | Timed RUNNING; actual provider state | V3:`timed-running-1792017033926`; `FEF214D47768B93C8253DE2117D9D4383B427B49C8102C1CB3590F3A2F148418` |
+| `card-composite-done` | Recorded | Loop card identity | Composite DONE in v3; not worker aggregation | V3:`composite-done-1792018706578`; `D97B30BBAFB069859482423E101E7AABFEC7BD47B9F1F9512A72E6BF2BA5F868` |
+| `card-composite-needs-you` | Recorded | Loop card identity; Loop card attention | Direct root Open Terminal, one v11 response; no worker aggregation | V11:`composite-needs-you-direct-terminal`; `F0F90F0B1F1BA4B99573464E4F05C0ACEBDA0225800E76380D7FB4A89181B14C` |
+| `card-composite-running` | Recorded | Loop card identity | Direct root Open Terminal, one v11 response; no worker aggregation | V11:`composite-running-direct-terminal`; `62423CD3076931F0B90084FF38A447B0CDDFCA3B8AE8ECDDF412D833826CEF36` |
+| `edge-focus` | Recorded | Edge presentation | Clicked edge/source/target lit; scenery dims; failed candidates remain failed | V6:`edge-focus-native-after-click`; `8F912046C0D1D6062118C63A4DD3E8992C5A550338E77675406E8AF15C824776` |
+| `clone-error-footer` | Differs from request | Sidebar error footer; Clone Repository sheet | Actual failure is inline Clone sheet, not persistent sidebar footer | V3:`actual-clone-error-inline`; `0428E851ABBE10B3875273B5CF09D9A2167DF8073AC8933E230832C21CA814BB` |
+| `remote-section` | macOS reference: accepted unrecorded | Local/remote sections | SSH environment accepted; no remote-section recording | V12 accepted IDs; no success capture |
+| `edge-wire` | Differs from request | Connector handles; Edge creation sheet | Wire it up arms source; completed native connector drag opens New Edge | V3:`actual-wire-it-up-drag-sheet`; `CC95F7CD8A3640787634A0B5BFEFCE6506738E55263B7BC7934A08AD6B5F67E8` |
+| `update-offer` | macOS reference: accepted unrecorded | Available update alert | Accepted updater omission | V12 accepted IDs; no success capture |
+| `update-progress` | macOS reference: accepted unrecorded | Install progress | Accepted updater omission | V12 accepted IDs; no success capture |
+| `update-installed` | macOS reference: accepted unrecorded | Relaunch prompt | Accepted updater omission | V12 accepted IDs; no success capture |
+| `update-install-error` | macOS reference: accepted unrecorded | Install failure | Accepted updater omission | V12 accepted IDs; no success capture |
+| `update-other-workspaces` | macOS reference: accepted unrecorded | NO EXACT CANONICAL ROW | Accepted updater confirmation subcase; not a new status row | V12 accepted IDs; no success capture |
+| `remote-info` | macOS reference: accepted unrecorded | Remote Connection info | Accepted SSH environment omission; blank Add Remote form is not its pair | V12 accepted IDs; no success capture |
+| `codespace-path` | Recorded | Add Codespace sheet | Actual discovery error; not loading, empty or populated-list proof | V3:`actual-codespace-discovery-outcome`; `C85BE2E82FCF8E42DB477261B3C00DA8E97898147E98E0198E00C464C21B71E6` |
+| `daemon-disconnected` | Differs from request | Connection failure presentation | Owned daemon disconnected; graph remains, requested banner not observed | V3:`actual-own-daemon-disconnected-after-three-seconds`; `52F4AA64F9796BEFF5F117BD5C61E23FEE8DE3765659BCE325BBF0FCAB33AE0B` |
+| `edge-message-fired` | Recorded | Edge presentation | Actual Goal-to-Turn Message OnSuccess fired; not all edge outcomes | V3:`message-edge-native-fired`; `DA994B0778CC368357EBBDF05910E21F7D3EADA82B72D9A38786C053EC5A793B` |
+| `context-main-done` | Recorded | Loop context menu | Main DONE native menu; not execution of every action | V3:`main-done-1792017427747-menu`; `B1A4BD9CD4238416B47D72DAB7AE8085D0EA3E2F2CC24454D9CD0D8EE9425E67` |
+| `context-main-running` | Recorded | Loop context menu | Main RUNNING native menu; not execution of every action | V3:`main-running-live-menu`; `9CD9CE1F75BCDF2F6C95550D9F300AC328DE565318A52B441304A491F4C632C9` |
+| `loop-bar-goal` | Recorded | Loop bar | Goal bar and actual session; not every workspace action | V3:`goal-healthy-final-1792016878411`; `DAE3BC00A5ED892017FCA154E13007C918048E1F5C748C8F0D8CE83CC081B596` |
+| `context-goal-needs-you` | Recorded | Loop context menu | Goal NEEDS YOU native menu only | V3:`goal-needs-you-1792016870507-menu`; `CD8C69465C16213CC3494C566FE0EE0F46B3BF47953B6985F0BA5F61409F47B2` |
+| `context-goal-running` | Recorded | Loop context menu | Goal RUNNING native menu only | V3:`goal-running-1792016841430-menu`; `04C819C1555F1CBFA2694546A40FD4E89E35CFFDCADC0229167D55BEF155CE36` |
+| `context-turn-done` | Recorded | Loop context menu | Turn DONE native menu only | V3:`turn-done-1792017457416-menu`; `AC6B5AFB2869051B91BA13E9A96ECFC790150CBFA597B9125208B465572FE792` |
+| `context-turn-needs-you` | Recorded | Loop context menu | Turn NEEDS YOU native menu only | V3:`turn-needs-you-1792016920874-menu`; `53DB0E20327A108EF33B7BC52CE6DEAA746B8A0021DFDD29A91BDEE724B52D6F` |
+| `context-turn-running` | Recorded | Loop context menu | Turn RUNNING native menu only | V3:`turn-running-1792016892510-menu`; `EA671BD48DE457A7C971ED6CB3585C5E09F4975255A33D7BB2134FEB83CA879A` |
+| `loop-bar-timed` | Recorded | Loop bar | Timed bar and actual session; not every workspace action | V3:`timed-healthy-final-1792017072029`; `94AB8FDFAC6EDCBCB28FB2E299480B57C1113D2BD6BBB98125F3A44D504B5727` |
+| `context-timed-idle` | Differs from request | Loop context menu | Actual idle Timed menu, visible pill SCHEDULED rather than IDLE | V3:`native-timed-idle-scheduled-menu`; `3981CDD07549FB611FE8F3E0CCF330E13427070045CD7CE5027EBD16B3F3DB9D` |
+| `context-timed-done` | Recorded | Loop context menu | Timed DONE native menu only | V3:`timed-done-1792017444880-menu`; `A13B724F2068BEFB0002B6BE1F9A5E5E90E8663A5AB2D9ACD8BF0C26F2EBC4A0` |
+| `context-timed-needs-you` | Recorded | Loop context menu | Timed NEEDS YOU native menu only | V3:`timed-needs-you-1792017063608-menu`; `9E5438B694AFFB1C409B3E112C76D012AE062D02EDDD1D773263F898519555ED` |
+| `context-timed-running` | Recorded | Loop context menu | Timed RUNNING native menu only | V3:`timed-running-1792017033926-menu`; `8F41AD6520C0C9523D8A415C06416F162513F45214E8708A766FDCE595C42685` |
+| `context-composite-done` | Recorded | Composite card actions | Composite DONE menu only; no worker/pilot outcome | V3:`composite-done-1792018706578-menu`; `A6AFAB9970167E14540A77E89D705A58FE28949B32572C271E919842C8D8849D` |
+| `context-composite-needs-you` | Recorded | Composite card actions | Unobscured NEEDS YOU menu, direct root session only | V11:`composite-needs-you-unobscured-menu`; `AE47B431600BD149C07771E9DD0DB8C7A45B4AFC5375014022BECCC1DEE7B6AB` |
+| `context-composite-running` | Recorded | Composite card actions | Menu occludes pill; separate unobscured card/AX/provider chronology required | V11:`composite-running-direct-terminal-menu`; `2B7B3D8A5D524A7F43BA8D5A88BC415B7735AEEE7F262DC7803F3C21ABB27259` |
+| `codespace-loading` | macOS reference: accepted unrecorded | Add Codespace sheet | Accepted Codespace omission; stale busy AX is not loading proof | V12 accepted IDs; no success capture |
+| `codespace-empty` | macOS reference: accepted unrecorded | Add Codespace sheet | Accepted Codespace omission; HTTP error is not an empty list | V12 accepted IDs; no success capture |
+| `codespace-list` | macOS reference: accepted unrecorded | Add Codespace sheet | Accepted Codespace omission; no approved scoped list fixture | V12 accepted IDs; no success capture |
+| `select-folder` | Recorded | NO EXACT CANONICAL ROW | Transient startup fallback, not empty-project or persistent deselection; Open Folder is only adjacent | V9:`select-folder-stream-02`; `72BEDCDD7612EDFECFED8A8EC65D2A49F23F32A581DB1C99F386DD3DE64E92E8` |
+| `overview-folders` | Recorded | Cross-project global graph; Folder lanes/bands | Multi-folder Graph overview; preserve actual Fit zoom, not project/global substitution | V3:`overview-complete-fit`; `10704FF15361EA92BEBC5317A49DBCD59BDFD5E05E7C7EC0543534285181FEC1` |
+| `overview-entry-hover` | Recorded | Folder lanes/bands | Overview ENTRY origin plus 20 points below origin; not generic New Loop button | V6:`overview-origin-handle-enter-and-hover`; `EFA6068522F8D46DBE0FD64847C80021A244B0ADA84BCCB6417C47E8059233E1` |
+| `lane-caption-running` | Recorded | Folder lanes/bands | Actual busy Main lane caption in Graph, not project canvas | V3:`running-lane-live-refresh`; `F6080F931A48806C704E97F92D216E96B51E9A83F93C4AD95D7E14806D23F827` |
+| `ssh-lane` | macOS reference: accepted unrecorded | Folder lanes/bands | Accepted SSH lane/chip omission | V12 accepted IDs; no success capture |
+| `pinch-anchor` | macOS reference: accepted unrecorded | Pan and anchored zoom | Accepted physical-pinch omission; wheel is not pinch | V12 accepted IDs; no success capture |
+| `blocked-hover` | Recorded | Loop card attention | Blocked waiting-on-Source OS tooltip only | V6:`blocked-hover-local-screen`; `6A665B2712CE814A94DDCD372AE994F49B27213665E8891A2D7FDE912A093C8D` |
+| `image-drop` | Recorded | NO EXACT CANONICAL ROW | Actual PNG drop/attachment chip and persisted-byte hash match; adjacent creation UI is not a whole-row claim | V5:`actual-image-drop-v5-padding`; `BAF40104A7654547E8F66EE632AB6822EE32DF460B48A8F84621C1B1B744CC99` |
+| `suggested-title` | Recorded | Node update/rename | Actual blank-title suggestion outcome; not arbitrary manual rename | V3:`actual-title-suggestion-outcome`; `992A8D231812E4A3548337594FD30679739B0E84228A744C56BF43F02958FA92` |
+| `terminal-autoscroll` | Recorded | Clipboard/selection | Owned plain terminal drag-selection and autoscroll only | V3:`actual-terminal-selection-autoscroll`; `6344457C5BDE434AC44370D27B919E87EDD5BEE8265A9ECF623AB915D2C24AA4` |
+| `post-promotion-goal` | Recorded | Sketch promotion | Same promoted Goal node/session; not all promotion paths | V3:`goal-healthy-final-1792016878411`; `DAE3BC00A5ED892017FCA154E13007C918048E1F5C748C8F0D8CE83CC081B596` |
+| `post-promotion-turn` | Recorded | Sketch promotion | Same promoted Turn node/session; not all promotion paths | V3:`turn-healthy-final-1792016928994`; `02671BC30FAE24DB38FA9EBF50FF776004747A3E4A5DD9E4E12AA04F98573422` |
+| `post-promotion-timed` | Recorded | Sketch promotion | Same promoted Timed node/session; not all promotion paths | V3:`timed-healthy-final-1792017072029`; `94AB8FDFAC6EDCBCB28FB2E299480B57C1113D2BD6BBB98125F3A44D504B5727` |
+| `worktree-ssh-7` | macOS reference: accepted unrecorded | Folder lanes/bands; Folder toolbar identity | Accepted SSH chip/titlebar seven-worktree subcase; no dedicated threshold row | V12 accepted IDs; no success capture |
+| `worktree-ssh-8` | macOS reference: accepted unrecorded | Folder lanes/bands; Folder toolbar identity | Accepted SSH chip/titlebar eight-worktree subcase; no dedicated threshold row | V12 accepted IDs; no success capture |
+| `hover-zoom-controls` | Recorded | Zoom controls | Zoom out tooltip only; approximate file time is not exact capture time | V6:`zoom-help-native`; `6A3F2B3F26EE59BB8D41AAFBA633FA92A9342201DCBA3CB44DA02C10FBF348BB` |
+| `hover-needs-you` | Recorded | Window toolbar | Needs-you control help, not sidebar-only Needs-you section | V3:`hover-needs-you-screen-composited`; `BCAF792621FDDC59A27476EBEA8C02BB26B6ED77AC009A0A1C696BC0A987030C` |
+| `hover-panel-toggle` | Recorded | Window toolbar; Right loop panel | Panel-toggle help only; not full panel layout/action | V3:`hover-panel-edge-aligned`; `1AE0326EA7F06E24F5BFBABB98A82DCFDBF44D8DB2DCD94170214DEC5AC78459` |
+| `hover-attention-rail` | Recorded | Canvas attention rail | Waiting-longest help only | V3:`hover-attention-full-width`; `712CD5A23C93A867BAD2D708442B41F02E155A07E4716461B2C65FD3A7290D92` |
+| `hover-jump-field` | Recorded | Jump palette | Jump field help only; not full palette action | V3:`hover-jump-edge-aligned`; `850147EC26B5D35C0FC7F746EEEB87E16CFFBF5015983383E4561BBD5BE194F3` |
+
+#### Scene and menu correction locators
+
+These additional V2 metadata records anchor the correction mapping, not extra
+65-item identities or additional Windows acceptance. Logical `menu-split-*`
+IDs map one-for-one to `fresh-menu-split-*`; none reuses the held original.
+
+| Exact corrected context | Metadata locator; SHA-256 |
+| --- | --- |
+| Project explicit Fit, 55% | V2:`project-linked-fit`; `E784C69128EA319370ADE29B0EA47438C0BDCA2E13FD90A0A8A61DBDE6356121` |
+| Separate overview, 100% | V2:`overview-linked-100`; `53023E09073BE1CC5E537B082DC22D836C416B3A33F1BCCBD777EA146755996D` |
+| Separate overview Fit, 53% | V2:`overview-linked-fit`; `4EFCEF1E86A6D4BC6FEEE4260FCBCF137183F1F0C3B269C135E9A330F77DA5A0` |
+| Ref Main split context | V2:`fresh-split-context`; `D6124DDF5FB1EA0C41D5D8E3176056B97A1AA03CCAAF1C324AB4C06D7F0FEA41` |
+| App menu | V2:`fresh-menu-split-app`; `93247622D47BDB99E9E93AB6E0A14406120B0898AA577AF9EAAA6ED61F89B339` |
+| File menu | V2:`fresh-menu-split-file`; `ABB8F08E06DC15EC571314CFB4868E67A536BBE0E735152FFA7EB530EBB0C4E3` |
+| Edit menu | V2:`fresh-menu-split-edit`; `A740EBAE032BC3E8769A20785FB7B5AC08BDDC37DE3A5C5AF088CF2B9B098061` |
+| View menu | V2:`fresh-menu-split-view`; `F5E0DF8D0680DE26B37133F9E3659EA86747345443AFFD4EE1E00812D365E065` |
+| Loop menu | V2:`fresh-menu-split-loop`; `0C1BAF97E42FA65922CC2032074B70FECA03E60944448E37475AD97B47EA4551` |
+| Terminal menu | V2:`fresh-menu-split-terminal`; `78483126850C18EA0ED12C94902F85DA926EC7629557685F057E90E4A1032182` |
+| Window menu | V2:`fresh-menu-split-window`; `613B52CCE3A0EEC02F5D53D05C5EF036DD42D5832A25783C725E049E199B55C3` |
+| Help menu | V2:`fresh-menu-split-help`; `97E7340FEE8413B4C5A2575994266293DBA97F0727992F0B85BDB2D97D08B97C` |
+
 ### Merged A-E slices, not whole-issue closure
 
 Reconciliation against accepted main
