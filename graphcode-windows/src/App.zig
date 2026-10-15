@@ -11949,6 +11949,16 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
             if (row.kind == .quick_chat_overview) break row;
         } else return error.TestUnexpectedResult;
         try std.testing.expect(app.model.selectProject("C:\\local"));
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const directory = try temporary.dir.realpathAlloc(app.allocator, ".");
+        defer app.allocator.free(directory);
+        const layout_path = try std.fs.path.join(app.allocator, &.{ directory, "layout.json" });
+        defer app.allocator.free(layout_path);
+        var quick_chat_workspace = try reopenTestWorkspace(app.allocator, layout_path);
+        defer quick_chat_workspace.deinit();
+        try quick_chat_workspace.scopeToLoop("chat", TerminalWorkspace.quick_chat_scope_project, false);
+        defer app.workspace = null;
         var sink: SidebarUiaSink = .{};
         app.syncAccessibilityTo(&sink, client);
         const graph_bounds = try expectSidebarNavigationElement(&sink, "overview-destination:graph", "Graph", graph_row, dpi);
@@ -11971,7 +11981,8 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
         };
         for (route_cases) |case| {
             app.surface = case.surface;
-            app.workspace_is_quick_chat = case.quick_chat_workspace;
+            app.workspace = if (case.quick_chat_workspace) &quick_chat_workspace else null;
+            try std.testing.expectEqual(case.quick_chat_workspace, app.isQuickChatWorkspace());
             var route_sink: SidebarUiaSink = .{};
             app.syncAccessibilityTo(&route_sink, client);
             try expectSidebarNavigationSelection(&route_sink, "overview-destination:graph", case.graph);
@@ -11995,7 +12006,7 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
             }
         }
         app.surface = .overview;
-        app.workspace_is_quick_chat = false;
+        app.workspace = null;
         const local_section_index = sink.indexOfName("sidebar-section:local") orelse return error.TestUnexpectedResult;
         const remote_section_index = sink.indexOfName("sidebar-section:remote") orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("Local Projects", sink.label(local_section_index));
