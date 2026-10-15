@@ -667,6 +667,45 @@ try {
             $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'owned project path'
             return 'Actual shared root/source/mapping predicates only; no product binary, HWND, native compatibility, or live capture was executed.'
         }
+        Invoke-CapTest 'actual journal reader permits worker atomic replacement while retaining its snapshot' {
+            foreach ($definition in @(
+                @($supervisorPath, 'Open-CapJournalRead'),
+                @($workerPath, 'Write-CapJsonAtomic')
+            )) {
+                $ast = [Management.Automation.Language.Parser]::ParseInput(
+                    [IO.File]::ReadAllText($definition[0]), [ref]$null, [ref]$null)
+                $function = $ast.Find({ param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $definition[1]
+                }, $true)
+                Assert-CapTest ($null -ne $function) "Actual journal function missing: $($definition[1])"
+                . ([scriptblock]::Create($function.Extent.Text))
+            }
+            $directory = Join-Path $scratch 'journal-sharing-component'
+            $null = New-Item -ItemType Directory -Path $directory
+            $path = Join-Path $directory 'process-journal.json'
+            Write-CapJsonAtomic -Path $path -Value ([ordered]@{ version = 1; componentOnly = $true; cleanupComplete = $false })
+            $stream = Open-CapJournalRead -Path $path
+            try {
+                Write-CapJsonAtomic -Path $path -Value ([ordered]@{
+                    version = 2; componentOnly = $true; cleanupComplete = $true
+                    ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
+                })
+                $reader = [IO.StreamReader]::new($stream)
+                try { $snapshot = $reader.ReadToEnd() | ConvertFrom-Json }
+                finally { $reader.Dispose() }
+                $freshStream = Open-CapJournalRead -Path $path
+                try {
+                    $freshReader = [IO.StreamReader]::new($freshStream)
+                    try { $current = $freshReader.ReadToEnd() | ConvertFrom-Json }
+                    finally { $freshReader.Dispose() }
+                } finally { $freshStream.Dispose() }
+                Assert-CapTest ($snapshot.version -eq 1 -and -not $snapshot.cleanupComplete -and
+                    $current.version -eq 2 -and $current.cleanupComplete -and $current.ownedProcessSurvivors.Count -eq 0 -and
+                    $current.pendingLaunchesRemaining.Count -eq 0 -and $current.cleanupFailures.Count -eq 0) `
+                    'Atomic replacement lost the held snapshot or a fresh read mistook it for completed cleanup.'
+            } finally { $stream.Dispose() }
+            return 'Actual supervisor reader and actual worker atomic writer; held file I/O only, no process, lease or GUI mock.'
+        }
         Invoke-CapTest 'actual rehearsal data satisfies the repaired report gate and refuses stale proof' {
             $source = [IO.File]::ReadAllText($supervisorPath)
             $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null)

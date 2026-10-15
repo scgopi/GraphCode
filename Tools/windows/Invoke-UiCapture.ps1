@@ -187,7 +187,8 @@ function Assert-CapPreflightReport {
             'lease-bound admission lease-base through actual capture command',
             'lease-bound admission omitted-product-diff through actual capture command',
             'lease-bound admission phase-swap through actual capture command',
-            'lease-bound admission unrelated-base through actual capture command'
+            'lease-bound admission unrelated-base through actual capture command',
+            'actual journal reader permits worker atomic replacement while retaining its snapshot'
         )) {
             if (@($preflight.cases | Where-Object name -CEQ $required).Count -ne 1) {
                 throw "Repaired-core preflight is missing a unique required actual-command case: $required"
@@ -403,12 +404,28 @@ function Add-CapTrackedIdentity {
     }
 }
 
+function Open-CapJournalRead {
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    # A polling reader must not prevent the worker from atomically replacing its journal.
+    return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+}
+
 function Refresh-CapJournal {
     param([Parameter(Mandatory)][string]$Path)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    try { $journal = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
+    try {
+        $stream = Open-CapJournalRead -Path $Path
+        try {
+            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true)
+            try { $journal = $reader.ReadToEnd() | ConvertFrom-Json }
+            finally { $reader.Dispose() }
+        } finally { $stream.Dispose() }
+    }
     catch { throw "Worker process journal is malformed: $($_.Exception.Message)" }
     if ($journal.leaseId -ne $lease.leaseId -or $journal.jobSha256 -ne $jobHash -or
         $journal.moduleSha256 -ne $moduleHash -or $journal.workerSha256 -ne $workerHash) {

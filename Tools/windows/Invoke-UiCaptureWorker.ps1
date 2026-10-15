@@ -62,7 +62,12 @@ function Write-CapJsonAtomic {
 
     $temporary = "$Path.tmp"
     [IO.File]::WriteAllText($temporary, (ConvertTo-Json -InputObject $Value -Depth 40), [Text.UTF8Encoding]::new($false))
-    [IO.File]::Move($temporary, $Path, $true)
+    if ([IO.File]::Exists($Path)) {
+        # ReplaceFile retains old reader snapshots; NullString supplies a true null backup path.
+        [IO.File]::Replace($temporary, $Path, [System.Management.Automation.Language.NullString]::Value)
+    } else {
+        [IO.File]::Move($temporary, $Path)
+    }
 }
 
 function Assert-CapWorkerDeadline {
