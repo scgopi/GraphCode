@@ -292,6 +292,8 @@ function New-CapAdmissionJob {
         [IO.File]::WriteAllText($logPath, 'OFFLINE_TEST_DATA: no product build was performed.')
         $binary = Join-Path $Owned "$phase.exe"
         Copy-Item -LiteralPath $target.executable -Destination $binary
+        [IO.File]::AppendAllText($binary, "OFFLINE_DATA_ONLY_PHASE_$phase")
+        $binaryHash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
         $receipt = [ordered]@{
             schemaVersion = 1; evidenceMode = 'OFFLINE_TEST_DATA_NOT_PRODUCT_BUILD'
             sourceCommit = $commit; sourceTree = [string](Invoke-CapTestGit $repository @('rev-parse', "${commit}:graphcode-windows"))
@@ -299,7 +301,7 @@ function New-CapAdmissionJob {
             binaryBuiltAtSource = $commit
             archive = [ordered]@{ path = $archive; sha256 = (Get-FileHash $archive -Algorithm SHA256).Hash }
             log = [ordered]@{ path = $logPath; sha256 = (Get-FileHash $logPath -Algorithm SHA256).Hash }
-            executablePath = $binary; executableSha256 = $target.executableSha256
+            executablePath = $binary; executableSha256 = $binaryHash
             startedUtc = [DateTime]::UtcNow.AddSeconds(-5).ToString('o')
             finishedUtc = [DateTime]::UtcNow.AddSeconds(-1).ToString('o')
             exitCode = 0; command = 'OFFLINE_TEST_DATA: existing harmless fixture, not a product build'
@@ -313,7 +315,7 @@ function New-CapAdmissionJob {
         if ($phase -eq 'after' -and $Mutation -eq 'null-build') { $receipt.sourceCommit = $null }
         if ($phase -eq 'after' -and $Mutation -eq 'stale-build') { $receipt.binaryBuiltAtSource = $base }
         $Job.binaries[$phase] = [ordered]@{
-            path = $binary; sha256 = $target.executableSha256; source = $commit; binaryBuiltAtSource = $commit
+            path = $binary; sha256 = $binaryHash; source = $commit; binaryBuiltAtSource = $commit
             buildReceipt = Write-CapTestArtifact (Join-Path $Owned "$phase-build.json") $receipt
         }
     }
@@ -362,9 +364,11 @@ function New-CapAdmissionJob {
         $Job.admission.equivalence = Write-CapTestArtifact $proofPath $proof
     }
     if ($Mutation -eq 'phase-swap') {
-        $before = $Job.binaries.before
-        $Job.binaries.before = $Job.binaries.after
-        $Job.binaries.after = $before
+        Assert-CapTest ($Job.binaries.before.sha256 -cne $Job.binaries.after.sha256) 'Phase fixture binary hashes must differ.'
+        $before = [IO.File]::ReadAllBytes($Job.binaries.before.path)
+        $after = [IO.File]::ReadAllBytes($Job.binaries.after.path)
+        [IO.File]::WriteAllBytes($Job.binaries.before.path, $after)
+        [IO.File]::WriteAllBytes($Job.binaries.after.path, $before)
     }
     if ($Mutation -eq 'duplicate-json') {
         $path = $Job.admission.ci.path
@@ -436,7 +440,7 @@ try {
                         'null-build' { "field 'sourceCommit'" }
                         'stale-build' { 'Fresh build provenance must name the exact phase source' }
                         'omitted-product-diff' { 'Equivalence proof does not name the complete exact Git delta' }
-                        'phase-swap' { 'Fresh build provenance must name the exact phase source' }
+                        'phase-swap' { 'before binary hash mismatch' }
                         'unrelated-base' { 'merge-base --is-ancestor' }
                     }
                     Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
