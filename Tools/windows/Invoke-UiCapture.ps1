@@ -37,6 +37,10 @@ $releaseFailure = $null
 $releaseWritten = $false
 $cleanupProven = $false
 $processJournalPath = $null
+$journalState = $null
+$journalProof = $null
+$boundWorkerManifest = $null
+$journalFailure = $null
 $safeOutputInitialized = $false
 $primaryFailure = $null
 $recoveryReceipts = [Collections.Generic.List[object]]::new()
@@ -188,7 +192,7 @@ function Assert-CapPreflightReport {
             'lease-bound admission omitted-product-diff through actual capture command',
             'lease-bound admission phase-swap through actual capture command',
             'lease-bound admission unrelated-base through actual capture command',
-            'actual journal reader permits worker atomic replacement while retaining its snapshot'
+            'actual immutable journal reader preserves held snapshots across concurrent numbered publications'
         )) {
             if (@($preflight.cases | Where-Object name -CEQ $required).Count -ne 1) {
                 throw "Repaired-core preflight is missing a unique required actual-command case: $required"
@@ -235,27 +239,26 @@ function Assert-CapPreflightReport {
         throw 'Offline preflight lacks two fresh, isolated, no-backend zmx seed cleanup proofs.'
     }
     $seedEvidenceRoot = Assert-CapSupervisorPath ([string]$preflight.actualSeedEvidenceReuse.sourceRoot)
-    $seedJournalPath = Assert-CapSupervisorPath ([string]$preflight.actualSeedEvidenceReuse.processJournalPath)
+    if (-not $preflight.actualSeedEvidenceReuse.PSObject.Properties['journalProof']) {
+        throw 'LegacyJournalProtocol: mutable seed journal proof must be regenerated as an exact numbered terminal reference.'
+    }
+    $seedReference = $preflight.actualSeedEvidenceReuse.journalProof
+    $seedJournalPath = Assert-CapSupervisorPath ([string]$seedReference.directory)
     if ($preflight.actualSeedEvidenceReuse.mode -cne $preflight.actualSeedEvidenceMode -or
         $preflight.actualSeedEvidenceReuse.sourceRunId -cne
             $preflight.actualPhaseSeedLifecycle[0].evidenceRunId -or
-        $seedJournalPath -cne (Join-Path $seedEvidenceRoot 'process-journal.json') -or
-        -not (Test-Path -LiteralPath $seedJournalPath -PathType Leaf) -or
-        (Get-FileHash -Algorithm SHA256 -LiteralPath $seedJournalPath).Hash -ne
-            $preflight.actualSeedEvidenceReuse.processJournalSha256) {
+        $seedReference.binding.runId -cne $preflight.actualSeedEvidenceReuse.sourceRunId) {
         throw 'Offline actual-seed evidence source root or process journal does not match its hash-bound receipt.'
     }
-    $seedJournal = Get-Content -LiteralPath $seedJournalPath -Raw | ConvertFrom-Json
-    if ($seedJournal.jobSha256 -ne $jobHash -or $seedJournal.moduleSha256 -ne $moduleHash -or
-        $seedJournal.workerSha256 -ne $workerHash) {
-        throw 'Offline actual-seed process journal was recorded against different current controls.'
-    }
+    $seedProof = Read-CapNumberedSeedProof -Root $root -Reference $seedReference `
+        -JobSha256 $jobHash -ModuleSha256 $moduleHash -WorkerSha256 $workerHash -DeadlineUtc $leaseExpiresUtc
+    $seedJournal = $seedProof.Terminal.Payload.data
     $seedArguments = @($job.binaries.offlineZmx.seedArgumentOrder)
     foreach ($seedEvidence in $preflight.actualPhaseSeedLifecycle) {
         $receiptPath = Assert-CapSupervisorPath ([string]$seedEvidence.receiptPath)
         if (-not $receiptPath.StartsWith($seedEvidenceRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -or
             $seedEvidence.processJournalPath -cne $seedJournalPath -or
-            $seedEvidence.processJournalSha256 -ne $preflight.actualSeedEvidenceReuse.processJournalSha256 -or
+            $seedEvidence.processJournalSha256 -cne $seedReference.record.terminal.sha256 -or
             -not (Test-Path -LiteralPath $receiptPath -PathType Leaf) -or
             (Get-FileHash -Algorithm SHA256 -LiteralPath $receiptPath).Hash -ne $seedEvidence.receiptSha256) {
             throw "Actual $($seedEvidence.phase) zmx seed receipt is outside or inconsistent with its bound evidence root."
@@ -404,34 +407,76 @@ function Add-CapTrackedIdentity {
     }
 }
 
-function Open-CapJournalRead {
-    param([Parameter(Mandatory)][string]$Path)
+function Refresh-CapJournal {
+    param([Parameter(Mandatory)][string]$Path, [DateTime]$ReadDeadlineUtc = $deadlineUtc)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
-
-    # A polling reader must not prevent the worker from atomically replacing its journal.
-    return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
-        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    if (-not $journalState -or $journalState.Directory -ine $Path) {
+        throw 'JournalIdentity: polling state is not bound to the authorized numbered directory.'
+    }
+    $journalState.DeadlineUtc = $ReadDeadlineUtc
+    try {
+        $reading = Read-CapJournalSnapshot -State $journalState
+        if ($reading.State -ceq 'PendingFirstPublication') { return }
+        foreach ($entry in $reading.Snapshot.Payload.data.entries) { $null = Add-CapTrackedIdentity -Entry $entry }
+    } catch {
+        if ($null -eq $journalFailure) {
+            $script:journalFailure = $_.Exception
+            $cleanupFailures.Add("Journal observation failed: $($_.Exception.Message)")
+        }
+        throw
+    }
 }
 
-function Refresh-CapJournal {
-    param([Parameter(Mandatory)][string]$Path)
-    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+function Read-CapQuiescentWorkerProof {
+    if (-not [CapNative]::IsExited($workerRun.Identity.Process.Handle, $workerRun.Identity.Pid) -or
+        -not $workerRun.StdoutTask.IsCompleted -or -not $workerRun.StderrTask.IsCompleted -or
+        $workerRun.StdoutTask.IsFaulted -or $workerRun.StderrTask.IsFaulted) {
+        throw 'JournalCleanupUnproven: worker kernel exit and successful both-stream EOF are required first.'
+    }
+    $journalState.DeadlineUtc = $leaseExpiresUtc
+    $record = Read-CapJournalFinalRecord -Stdout ([string]$workerRun.StdoutTask.Result) -Binding $journalState.Binding
+    if ($record.manifest.name -cne 'manifest.json') { throw 'JournalFinalBinding: final manifest name differs.' }
+    $script:journalProof = Read-CapJournalFinalProof -State $journalState `
+        -OutputDirectory $outputDirectory -Record $record -RetainStreams
+    $script:boundWorkerManifest = $journalProof.Manifest
+    if ($boundWorkerManifest.ownedProcessSurvivors.Count -ne 0 -or
+        $boundWorkerManifest.pendingLaunchesRemaining.Count -ne 0 -or
+        $boundWorkerManifest.cleanupFailures.Count -ne 0) {
+        throw 'JournalCleanupUnproven: final owned cleanup arrays are not empty.'
+    }
+    Assert-CapDataRecord $boundWorkerManifest @{
+        leaseId = [string]; jobManifestSha256 = [string]; moduleSha256 = [string]
+        workerSha256 = [string]; supervisorSha256 = [string]; leaseReceiptSha256 = [string]
+    } 'Proven worker manifest identity'
+    if ($boundWorkerManifest.leaseId -cne $journalState.Binding.leaseId -or
+        $boundWorkerManifest.jobManifestSha256 -cne $journalState.Binding.jobSha256 -or
+        $boundWorkerManifest.moduleSha256 -cne $journalState.Binding.moduleSha256 -or
+        $boundWorkerManifest.workerSha256 -cne $journalState.Binding.workerSha256 -or
+        $boundWorkerManifest.supervisorSha256 -cne $journalState.Binding.supervisorSha256 -or
+        $boundWorkerManifest.leaseReceiptSha256 -cne $leaseHash) {
+        throw 'JournalIdentity: final manifest source/lease fields differ from the proven binding.'
+    }
+    if ($workerRun.Identity.Process.ExitCode -ne 0 -and $boundWorkerManifest.status -ceq 'COMPLETE') {
+        throw 'JournalFinalBinding: failed worker cannot supply a COMPLETE final manifest.'
+    }
+    $null = Assert-CapNoWorkerTransientArtifacts -Directories @($runDirectory, $outputDirectory)
+    if (-not $primaryFailure -and $workerRun.Identity.Process.ExitCode -eq 0) {
+        $jobFailure = Get-CapWorkerJobFailure
+        if ($null -ne $jobFailure) {
+            $script:primaryFailure = $jobFailure
+            Write-CapSupervisorLog "WORKER_JOB_ASSERTION_FAILURE=$($jobFailure.Exception.ToString())"
+        }
+    }
+}
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    try {
-        $stream = Open-CapJournalRead -Path $Path
-        try {
-            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true)
-            try { $journal = $reader.ReadToEnd() | ConvertFrom-Json }
-            finally { $reader.Dispose() }
-        } finally { $stream.Dispose() }
+function Get-CapWorkerJobFailure {
+    param()
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) {
+        Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
     }
-    catch { throw "Worker process journal is malformed: $($_.Exception.Message)" }
-    if ($journal.leaseId -ne $lease.leaseId -or $journal.jobSha256 -ne $jobHash -or
-        $journal.moduleSha256 -ne $moduleHash -or $journal.workerSha256 -ne $workerHash) {
-        throw 'Worker process journal hash/lease binding differs from the coordinator-approved run.'
-    }
-    foreach ($entry in $journal.entries) { $null = Add-CapTrackedIdentity -Entry $entry }
+    try { Assert-CapWorkerManifest }
+    catch { return $_ }
+    return $null
 }
 
 function Get-CapAppSessionPrefix {
@@ -554,11 +599,10 @@ function Assert-CapNoTrackedSurvivors {
 function Assert-CapWorkerManifest {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    $path = Join-Path $outputDirectory 'manifest.json'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw 'Worker exited successfully without a final capture manifest.'
+    if ($null -eq $boundWorkerManifest -or $null -eq $journalProof) {
+        throw 'Worker exited without exact quiescent manifest/terminal binding.'
     }
-    $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $manifest = $boundWorkerManifest
     if ($rehearsal) {
         if ($manifest.status -cne 'COMPLETE' -or $manifest.executionMode -cne $ExecutionMode -or
             $manifest.guiLaunches.Count -ne 0 -or $manifest.images.Count -ne 0 -or
@@ -747,14 +791,17 @@ try {
     $shortLease = $lease.leaseId.Replace('-', '').Substring(0, 8)
     $runDirectory = Join-Path $root ('runs\' + [guid]::NewGuid().ToString('N'))
     $authorizationPath = Join-Path $runDirectory 'supervisor-authorization.json'
-    $processJournalPath = Join-Path $runDirectory 'process-journal.json'
-    $manifestPath = Join-Path $outputDirectory 'manifest.partial.json'
+    $processJournalPath = Join-Path $runDirectory 'process-journal'
+    $manifestPath = Join-Path $outputDirectory 'manifest.json'
     $workerLogPath = Join-Path $outputDirectory 'worker.log'
     $releaseReceiptPath = Join-Path $outputDirectory 'lease-release.json'
     foreach ($path in @($runDirectory)) {
         if (Test-Path -LiteralPath $path) { throw "Refusing to reuse prior capture run path: $path" }
     }
     New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
+    $null = New-Item -ItemType Directory -Path $processJournalPath
+    $diagnosticsDirectory = Join-Path $outputDirectory 'diagnostics'
+    $null = New-Item -ItemType Directory -Path $diagnosticsDirectory
     $supervisorIdentity = Get-CapProcessIdentity -Process $thisProcess `
         -ExpectedImagePath $supervisorExecutable -Role 'b-capture-supervisor'
     $auth = [ordered]@{
@@ -802,6 +849,11 @@ try {
         '-AuthorizationPath', $authorizationPath,
         '-AuthorizationSha256', $authorizationHash, '-OwnedRoot', $root
     ) -WorkingDirectory $runDirectory -Role 'b-capture-worker'
+    $journalBinding = New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
+        -LeaseId $lease.leaseId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
+        -WorkerSha256 $workerHash -SupervisorSha256 $supervisorHash -Identity $workerRun.Identity
+    $journalState = New-CapJournalState -Root $root -Directory $processJournalPath -Binding $journalBinding `
+        -DeadlineUtc $deadlineUtc -ObservationPath (Join-Path $diagnosticsDirectory 'journal-read-observations.jsonl')
     $lastJournalRead = [DateTime]::MinValue
     while ([DateTime]::UtcNow -lt $deadlineUtc) {
         if (@(Get-CapTraceFailures).Count -gt 0) { throw 'Capture tracing failed; supervisor is beginning guarded cleanup.' }
@@ -816,7 +868,7 @@ try {
     if ($workerWait.State -ne 'Exited') {
         $primaryFailure = [TimeoutException]::new('Worker reached the bounded capture deadline; supervisor is beginning guarded cleanup.')
         Write-CapSupervisorLog "WORKER_DEADLINE=REACHED utc=$([DateTime]::UtcNow.ToString('o'))"
-        Refresh-CapJournal -Path $processJournalPath
+        Refresh-CapJournal -Path $processJournalPath -ReadDeadlineUtc $leaseExpiresUtc
         if (-not $rehearsal) {
             Recover-CapGuiRoots -CleanupDeadlineUtc $leaseExpiresUtc
             Stop-CapTrackedPeers
@@ -826,10 +878,9 @@ try {
         if ($workerGrace.State -eq 'Exited') { $workerWait = $workerGrace }
         else { Stop-CapWorkerIfNeeded }
     } else {
-        Refresh-CapJournal -Path $processJournalPath
+        Refresh-CapJournal -Path $processJournalPath -ReadDeadlineUtc $leaseExpiresUtc
         $workerExitCode = $workerWait.ExitCode
         if ($workerExitCode -ne 0) { $primaryFailure = [InvalidOperationException]::new("Capture worker exited with code $workerExitCode.") }
-        elseif (-not $primaryFailure) { Assert-CapWorkerManifest }
     }
 } catch {
     if (-not $primaryFailure) { $primaryFailure = $_ }
@@ -844,7 +895,7 @@ try {
     if ($workerRun) {
         # A journal or log failure must not bypass the remaining guarded stops.
         foreach ($step in @(
-            { if ($processJournalPath) { Refresh-CapJournal -Path $processJournalPath } },
+            { if ($journalState) { Refresh-CapJournal -Path $processJournalPath -ReadDeadlineUtc $leaseExpiresUtc } },
             {
                 if (-not $rehearsal -and $tracked.Count -gt 0) {
                     Recover-CapGuiRoots -CleanupDeadlineUtc ([DateTime]::UtcNow.AddSeconds(30))
@@ -861,7 +912,8 @@ try {
             },
             { Stop-CapWorkerIfNeeded },
             { Write-CapProcessOutput -Run $workerRun -Prefix 'supervisor-worker' },
-            { Assert-CapNoTrackedSurvivors }
+            { Assert-CapNoTrackedSurvivors },
+            { Read-CapQuiescentWorkerProof }
         )) {
             try { & $step }
             catch {
@@ -886,15 +938,7 @@ try {
                 try { Write-CapTrace -Command 'Write-CapJsonAtomic' -Parameters @{ Path = $releaseReceiptPath; FinalRelease = $true } }
                 catch { $cleanupFailures.Add("Release trace write failed: $(Get-CapSupervisorFailureText $_)") }
             }
-            $manifest = $null
-            foreach ($name in @('manifest.json', 'manifest.partial.json')) {
-                $path = Join-Path $outputDirectory $name
-                if (Test-Path -LiteralPath $path -PathType Leaf) {
-                    try { $manifest = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -DateKind String }
-                    catch { $cleanupFailures.Add("Release manifest read failed: $(Get-CapSupervisorFailureText $_)") }
-                    break
-                }
-            }
+            $manifest = $boundWorkerManifest
             if ($workerRun -and (-not $manifest -or
                 -not $manifest.PSObject.Properties['ownedProcessSurvivors'] -or
                 -not $manifest.PSObject.Properties['pendingLaunchesRemaining'] -or
@@ -948,6 +992,8 @@ try {
             workerCleanupFailures = if ($manifest -and $manifest.PSObject.Properties['cleanupFailures'] -and $manifest.cleanupFailures -is [array]) { ,@($manifest.cleanupFailures) } else { $null }
             workerPendingLaunchesRemaining = if ($manifest -and $manifest.PSObject.Properties['pendingLaunchesRemaining'] -and $manifest.pendingLaunchesRemaining -is [array]) { ,@($manifest.pendingLaunchesRemaining) } else { $null }
             workerOwnedProcessSurvivors = if ($manifest -and $manifest.PSObject.Properties['ownedProcessSurvivors'] -and $manifest.ownedProcessSurvivors -is [array]) { ,@($manifest.ownedProcessSurvivors) } else { $null }
+            journalFinalBinding = if ($journalProof) { $journalProof.Record } else { $null }
+            journalPublishedInventory = if ($journalProof) { ,@($journalProof.Inventory) } else { $null }
             captures = if ($manifest) { $manifest.images.Count } else { 0 }
             sourceHashesBeforeImport = [ordered]@{ module = $moduleHash; worker = $workerHash; supervisor = $supervisorHash }
             }
@@ -959,6 +1005,8 @@ try {
         [Console]::Error.WriteLine("LEASE_RELEASE_WRITE_FAILED: $(Get-CapSupervisorFailureText $_)")
     }
 }
+
+if ($journalProof) { foreach ($stream in $journalProof.HeldStreams) { $stream.Dispose() } }
 
 if ($cleanupFailures.Count -or $releaseFailure -or -not $releaseWritten) {
     throw "Capture supervisor failed. Primary=$(Get-CapSupervisorFailureText $primaryFailure); cleanup=$($cleanupFailures -join '; '); release=$(Get-CapSupervisorFailureText $releaseFailure); releaseWritten=$releaseWritten"

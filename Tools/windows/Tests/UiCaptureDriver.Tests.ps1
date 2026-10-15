@@ -1,6 +1,9 @@
 param(
     [string]$ScratchRoot = (Join-Path ([IO.Path]::GetTempPath()) ('gc-capture-' + [guid]::NewGuid().ToString('N'))),
-    [switch]$LaunchContractOnly
+    [switch]$LaunchContractOnly,
+    [switch]$JournalContractOnly,
+    [ValidateSet('','Writer','Reader')][string]$JournalActor = '',
+    [string]$JournalActorConfig = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -8,6 +11,118 @@ $driverDirectory = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $driverDirectory 'UiCaptureDriver.psm1'
 $supervisorPath = Join-Path $driverDirectory 'Invoke-UiCapture.ps1'
 $workerPath = Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1'
+
+function Write-JournalContractJson {
+    param([string]$Path, $Value)
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json $Value -Depth 40 -Compress) + "`n")
+    $file = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $file.Write($bytes, 0, $bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+}
+
+function Read-JournalContractJson {
+    param([string]$Path)
+    try { $file = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }
+    catch {
+        $exception = $_.Exception
+        while ($exception.InnerException) { $exception = $exception.InnerException }
+        $native = '{0:X8}' -f ([long]$exception.HResult -band 4294967295L)
+        if ($native -in @('80070002','80070003','80070020','80070021')) { return $null }
+        throw
+    }
+    try {
+        $reader = [IO.StreamReader]::new($file, [Text.UTF8Encoding]::new($false, $true), $false)
+        try { return ConvertFrom-Json $reader.ReadToEnd() -Depth 40 -DateKind String }
+        finally { $reader.Dispose() }
+    } finally { $file.Dispose() }
+}
+
+function Wait-JournalContractFile {
+    param([string]$Path, [DateTime]$Deadline)
+    while ([DateTime]::UtcNow -lt $Deadline) {
+        foreach ($failureName in @('Writer-failed.json','Reader-failed.json')) {
+            $failure = Read-JournalContractJson (Join-Path (Split-Path -Parent $Path) $failureName)
+            if ($failure) { throw "HARNESSFAIL: contract actor: $($failure.error)" }
+        }
+        $value = Read-JournalContractJson $Path
+        if ($null -ne $value) { return $value }
+        Start-Sleep -Milliseconds 5
+    }
+    throw "HARNESSFAIL: barrier/observer deadline at $Path"
+}
+
+function New-JournalContractStamp {
+    param([string]$Role, [string]$Event)
+    return [ordered]@{
+        role = $Role; event = $Event; pid = $PID; utc = [DateTime]::UtcNow.ToString('o')
+        monotonicTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+        monotonicFrequency = [Diagnostics.Stopwatch]::Frequency
+    }
+}
+
+if ($JournalActor) {
+    $contractConfiguration = Read-JournalContractJson $JournalActorConfig
+    Import-Module $modulePath -Force -WarningAction SilentlyContinue
+    $contractDeadline = [DateTime]::Parse($contractConfiguration.deadlineUtc,
+        [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $contractHome = $contractConfiguration.root
+    Set-CapTracePath -Path (Join-Path $contractHome ($JournalActor + '-calls.jsonl'))
+    try {
+        if ($JournalActor -ceq 'Writer') {
+            $self = [Diagnostics.Process]::GetCurrentProcess()
+            $identity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName -Role 'journal-contract-writer'
+            $binding = New-CapJournalBinding -RunId $contractConfiguration.runId `
+                -LeaseId $contractConfiguration.leaseId -JobSha256 ('A' * 64) `
+                -ModuleSha256 $contractConfiguration.moduleSha256 -WorkerSha256 $contractConfiguration.workerSha256 `
+                -SupervisorSha256 $contractConfiguration.supervisorSha256 -Identity $identity
+            $state = New-CapJournalState -Root $contractHome -Directory (Join-Path $contractHome 'snapshots') `
+                -Binding $binding -DeadlineUtc $contractDeadline
+            Write-JournalContractJson (Join-Path $contractHome 'writer-ready.json') @{
+                stamp = New-JournalContractStamp 'Writer' 'ready'; binding = $binding
+            }
+            $null = Wait-JournalContractFile (Join-Path $contractHome 'publish-one.json') $contractDeadline
+            $first = Publish-CapJournalSnapshot -State $state -Kind Bootstrap -Value ([pscustomobject]@{ entries = @(); counter = 1L })
+            Write-JournalContractJson (Join-Path $contractHome 'published-one.json') @{
+                stamp = New-JournalContractStamp 'Writer' 'published1'; reference = $first
+            }
+            $null = Wait-JournalContractFile (Join-Path $contractHome 'publish-rest.json') $contractDeadline
+            Write-JournalContractJson (Join-Path $contractHome 'writer-attempt.json') @{
+                stamp = New-JournalContractStamp 'Writer' 'attempt2'
+            }
+            for ($sequence = 2; $sequence -le $contractConfiguration.publications; $sequence++) {
+                $last = Publish-CapJournalSnapshot -State $state -Kind Progress -Value ([pscustomobject]@{
+                    entries = @(); counter = [long]$sequence
+                })
+            }
+            Write-JournalContractJson (Join-Path $contractHome 'published-rest.json') @{
+                stamp = New-JournalContractStamp 'Writer' 'publishedLast'; reference = $last
+            }
+        } else {
+            $binding = (Wait-JournalContractFile (Join-Path $contractHome 'writer-ready.json') $contractDeadline).binding
+            $state = New-CapJournalState -Root $contractHome -Directory (Join-Path $contractHome 'snapshots') `
+                -Binding $binding -DeadlineUtc $contractDeadline `
+                -ObservationPath (Join-Path $contractHome 'journal-read-observations.jsonl')
+            Write-JournalContractJson (Join-Path $contractHome 'reader-ready.json') @{
+                stamp = New-JournalContractStamp 'Reader' 'ready'
+            }
+            $null = Wait-JournalContractFile (Join-Path $contractHome 'read-one.json') $contractDeadline
+            $reading = Read-CapJournalSnapshot $state
+            Write-JournalContractJson (Join-Path $contractHome 'reader-accepted.json') @{
+                stamp = New-JournalContractStamp 'Reader' 'accepted'; reading = $reading
+            }
+        }
+        $null = Wait-JournalContractFile (Join-Path $contractHome 'finish.json') $contractDeadline
+        if (@(Get-CapTraceFailures).Count -ne 0) { throw 'Contract actor trace failed.' }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.ToString())
+        Write-JournalContractJson (Join-Path $contractHome ($JournalActor + '-failed.json')) @{
+            stamp = New-JournalContractStamp $JournalActor 'HARNESSFAIL'
+            error = $_.Exception.ToString()
+        }
+        exit 1
+    }
+}
+
 $mode = 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
 $results = [Collections.Generic.List[object]]::new()
 $scratch = [IO.Path]::GetFullPath($ScratchRoot)
@@ -47,6 +162,399 @@ function Assert-CapRejects {
     throw "Expected refusal containing '$Expected'."
 }
 
+    function New-JournalContractContext {
+        param([string]$Name)
+        $contractRoot = Join-Path $scratch ('journal-contracts\' + $Name)
+        $null = New-Item -ItemType Directory -Path (Join-Path $contractRoot 'snapshots')
+        $self = [Diagnostics.Process]::GetCurrentProcess()
+        try {
+            $identity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName -Role 'journal-contract'
+            $binding = New-CapJournalBinding -RunId ([guid]::NewGuid().ToString()) -LeaseId ([guid]::NewGuid().ToString()) `
+                -JobSha256 ('A' * 64) -ModuleSha256 $sourceHashesBefore[$modulePath] `
+                -WorkerSha256 $sourceHashesBefore[$workerPath] -SupervisorSha256 $sourceHashesBefore[$supervisorPath] `
+                -Identity $identity
+        } finally { $self.Dispose() }
+        $state = New-CapJournalState -Root $contractRoot -Directory (Join-Path $contractRoot 'snapshots') `
+            -Binding $binding -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(2))
+        return [pscustomobject]@{ Root = $contractRoot; State = $state; Binding = $binding }
+    }
+
+    function Invoke-JournalConcurrentContract {
+        param([string]$Name, [switch]$LockedFirst, [int]$Publications = 128)
+        $contractRoot = Join-Path $scratch ('journal-contracts\' + $Name)
+        $null = New-Item -ItemType Directory -Path (Join-Path $contractRoot 'snapshots')
+        $configuration = Join-Path $contractRoot 'actors.json'
+        $deadline = [DateTime]::UtcNow.AddSeconds(90)
+        Write-JournalContractJson $configuration @{
+            root = $contractRoot; deadlineUtc = $deadline.ToString('o'); runId = [guid]::NewGuid().ToString()
+            leaseId = [guid]::NewGuid().ToString(); publications = $Publications
+            moduleSha256 = $sourceHashesBefore[$modulePath]; workerSha256 = $sourceHashesBefore[$workerPath]
+            supervisorSha256 = $sourceHashesBefore[$supervisorPath]
+        }
+        $actors = [Collections.Generic.List[object]]::new()
+        $cleanup = [Collections.Generic.List[object]]::new()
+        $cleanupErrors = [Collections.Generic.List[string]]::new()
+        $held = $null
+        $setupLock = $null
+        try {
+            foreach ($childKind in @('Writer','Reader')) {
+                $actor = Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
+                    '-NoProfile','-File',$PSCommandPath,'-JournalActor',$childKind,'-JournalActorConfig',$configuration
+                ) -WorkingDirectory $contractRoot -Role ('journal-contract-' + $childKind.ToLowerInvariant()) -CloseStdin
+                $actors.Add($actor)
+            }
+            $writerReady = Wait-JournalContractFile (Join-Path $contractRoot 'writer-ready.json') $deadline
+            $readerReady = Wait-JournalContractFile (Join-Path $contractRoot 'reader-ready.json') $deadline
+            Assert-CapTest ($writerReady.binding.workerPid -eq $actors[0].Identity.Pid -and
+                $writerReady.binding.workerCreationFileTimeUtc -eq $actors[0].Identity.CreationFileTimeUtc) 'Actual writer binding differs from held generation.'
+            Write-JournalContractJson (Join-Path $contractRoot 'publish-one.json') (New-JournalContractStamp 'Observer' 'publish1')
+            $first = Wait-JournalContractFile (Join-Path $contractRoot 'published-one.json') $deadline
+            $path = Join-Path $contractRoot 'snapshots\000001.json'
+            $held = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            $beforeHash = (Get-FileHash -InputStream $held -Algorithm SHA256).Hash
+            Assert-CapTest ($beforeHash -ceq $first.reference.sha256) 'Consumer first bytes differ from publisher expected bytes.'
+            $held.Position = 0
+            $lockStamp = New-JournalContractStamp 'Observer' 'lock'
+            if ($LockedFirst) {
+                $held.Dispose(); $held = $null
+                $setupLock = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            }
+            Write-JournalContractJson (Join-Path $contractRoot 'read-one.json') (New-JournalContractStamp 'Observer' 'read')
+            $nativeObservation = $null
+            if ($LockedFirst) {
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    $failure = Read-JournalContractJson (Join-Path $contractRoot 'Reader-failed.json')
+                    if ($failure) { throw "HARNESSFAIL: observer/reader missed fixed retry window: $($failure.error)" }
+                    $observationPath = Join-Path $contractRoot 'journal-read-observations.jsonl'
+                    try {
+                        $stream = [IO.File]::Open($observationPath, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                    } catch {
+                        $inner = $_.Exception.GetBaseException()
+                        if ($inner -isnot [IO.FileNotFoundException]) { throw }
+                        Start-Sleep -Milliseconds 5
+                        continue
+                    }
+                    try {
+                        $textReader = [IO.StreamReader]::new($stream)
+                        try { $text = $textReader.ReadToEnd() } finally { $textReader.Dispose() }
+                    } finally { $stream.Dispose() }
+                    $lastLine = $text.LastIndexOf("`n")
+                    if ($lastLine -ge 0) {
+                        $observations = @($text.Substring(0, $lastLine + 1) -split "`n" | Where-Object { $_ } |
+                            ForEach-Object { ConvertFrom-Json $_ -DateKind String })
+                        $nativeObservation = @($observations | Where-Object {
+                            $_.sequence -eq 1 -and $_.attempt -eq 1 -and $_.decision -ceq 'OpenFailed' -and
+                            $_.nativeHresult -in @('80070020','80070021')
+                        }) | Select-Object -First 1
+                        if ($nativeObservation) { break }
+                    }
+                    Start-Sleep -Milliseconds 5
+                }
+                Assert-CapTest ($null -ne $nativeObservation) 'HARNESSFAIL: no actual first-sequence native Open error.'
+            }
+            $observerSeen = New-JournalContractStamp 'Observer' 'error-seen'
+            Write-JournalContractJson (Join-Path $contractRoot 'publish-rest.json') $observerSeen
+            $published = Wait-JournalContractFile (Join-Path $contractRoot 'published-rest.json') $deadline
+            $accepted = Wait-JournalContractFile (Join-Path $contractRoot 'reader-accepted.json') $deadline
+            if ($LockedFirst) {
+                Assert-CapTest ($accepted.reading.State -ceq 'Published' -and
+                    $accepted.reading.Snapshot.Reference.sequence -eq 2 -and
+                    $accepted.reading.Snapshot.Reference.sha256 -ceq $published.reference.sha256 -and
+                    $accepted.reading.Snapshot.Reference.length -eq $published.reference.length -and
+                    $null -ne $setupLock) 'Reader did not verify actual2 under held lock1.'
+                $observations = @(Get-Content -LiteralPath (Join-Path $contractRoot 'journal-read-observations.jsonl') |
+                    ForEach-Object { ConvertFrom-Json $_ -DateKind String })
+                Assert-CapTest (@($observations | Where-Object {
+                    $_.sequence -eq 2 -and $_.decision -ceq 'AcceptedLiveSequenceOnly' -and $_.retries -ge 1
+                }).Count -eq 1) 'Actual retry-to2 telemetry missing.'
+            } else {
+                $afterHash = (Get-FileHash -InputStream $held -Algorithm SHA256).Hash
+                Assert-CapTest ($afterHash -ceq $beforeHash) 'Held immutable first snapshot changed.'
+            }
+            $readerState = New-CapJournalState -Root $contractRoot -Directory (Join-Path $contractRoot 'snapshots') `
+                -Binding $writerReady.binding -DeadlineUtc $deadline
+            $latest = Read-CapJournalSnapshot $readerState
+            Assert-CapTest ($latest.Snapshot.Reference.sequence -eq $Publications -and
+                $latest.Snapshot.Reference.sha256 -ceq $published.reference.sha256 -and
+                @(Get-ChildItem -LiteralPath (Join-Path $contractRoot 'snapshots') -Filter '*.json' -File).Count -eq $Publications) 'Positive publication count/latest state differs.'
+            return [ordered]@{
+                publications = $Publications; nativeObservation = $nativeObservation
+                writerReady = $writerReady; readerReady = $readerReady; observerLock = $lockStamp
+                observerSeen = $observerSeen; writerPublished = $published; readerAccepted = $accepted
+                evidence = 'Actual immutable publisher/reader, external setup barriers, no production hook or UI.'
+            }
+        } finally {
+            if ($held) { $held.Dispose() }
+            if ($setupLock) { $setupLock.Dispose() }
+            Write-JournalContractJson (Join-Path $contractRoot 'finish.json') (New-JournalContractStamp 'Observer' 'unlock-finish')
+            foreach ($actor in $actors) {
+                try {
+                    $wait = Wait-CapManagedProcess -Run $actor -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(10))
+                    if ($wait.State -cne 'Exited') { $null = Stop-CapManagedProcess -Identity $actor.Identity; throw 'HARNESSFAIL: actor required guarded stop.' }
+                    $stdout = $actor.StdoutTask.Wait(2000); $stderr = $actor.StderrTask.Wait(2000)
+                    Assert-CapTest ($wait.ExitCode -eq 0 -and $stdout -and $stderr -and
+                        [CapNative]::IsExited($actor.Identity.Process.Handle, $actor.Identity.Pid)) 'Actor normal exit/kernel/bothEOF not proven.'
+                    $cleanup.Add([pscustomobject]@{ pid = $actor.Identity.Pid; creation = $actor.Identity.CreationFileTimeUtc
+                        kernelExited = $true; stdoutEof = $stdout; stderrEof = $stderr; exitCode = $wait.ExitCode })
+                } catch { $cleanupErrors.Add($_.Exception.ToString()) }
+                finally {
+                    try {
+                        if ([CapNative]::IsExited($actor.Identity.Process.Handle, $actor.Identity.Pid)) {
+                            $actor.Identity.Process.Dispose()
+                        } else { $cleanupErrors.Add("Owned actor remains live: $($actor.Identity.Pid)") }
+                    } catch { $cleanupErrors.Add($_.Exception.ToString()) }
+                }
+            }
+            Write-JournalContractJson (Join-Path $contractRoot 'actor-cleanup.json') @{
+                receipts = @($cleanup.ToArray()); expected = 2; failures = @($cleanupErrors.ToArray())
+            }
+            Assert-CapTest ($cleanup.Count -eq 2 -and $cleanupErrors.Count -eq 0) `
+                "Empty/incomplete actual actor cleanup: $($cleanupErrors -join '; ')"
+        }
+    }
+
+    function New-JournalTerminalFixture {
+        param([string]$Name, [ValidateSet('COMPLETE','FAILED')][string]$Outcome = 'COMPLETE',
+            [switch]$InvalidJobContract)
+        $context = New-JournalContractContext $Name
+        $data = [pscustomobject]@{ entries = @(); ownedProcesses = @(); outcome = $Outcome
+            ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @() }
+        $null = Publish-CapJournalSnapshot $context.State Bootstrap $data
+        $terminal = Publish-CapJournalSnapshot $context.State Terminal $data
+        $manifest = [pscustomobject]@{ status = $Outcome; ownedProcesses = @(); ownedProcessSurvivors = @(); pendingLaunchesRemaining = @()
+            cleanupFailures = @(); journal = [pscustomobject]@{ protocolVersion = 2L; binding = $context.Binding
+                directory = $context.State.Directory; terminal = $terminal; published = @($context.State.Published.ToArray()) } }
+        if ($InvalidJobContract) {
+            $manifest | Add-Member -NotePropertyMembers @{
+                leaseId = $context.Binding.leaseId; leaseReceiptSha256 = ('B' * 64)
+                jobManifestSha256 = $context.Binding.jobSha256
+                moduleSha256 = $context.Binding.moduleSha256
+                workerSha256 = $context.Binding.workerSha256
+                supervisorSha256 = $context.Binding.supervisorSha256
+                executionMode = 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
+                guiLaunches = @(); images = @(); rehearsalLaunches = @(); failures = @()
+            }
+        }
+        $reference = Write-CapImmutableJson -Root $context.Root -Path (Join-Path $context.Root 'manifest.json') -Value $manifest
+        $line = Format-CapJournalFinalRecord $context.Binding $reference $terminal
+        return [pscustomobject]@{ Context = $context; Line = $line; Record = (Read-CapJournalFinalRecord $line $context.Binding) }
+    }
+
+    function Invoke-JournalContractGroups {
+        param([switch]$IncludeConcurrent)
+        if ($IncludeConcurrent) {
+            Invoke-CapTest 'actual immutable journal reader preserves held snapshots across concurrent numbered publications' {
+                Invoke-JournalConcurrentContract -Name 'concurrent128' -Publications 128
+            }
+        }
+        Invoke-CapTest 'numbered journal publisher refuses collisions without overwriting prior evidence' {
+            $c = New-JournalContractContext 'collision'
+            $reference = Publish-CapJournalSnapshot $c.State Bootstrap ([pscustomobject]@{ entries = @() })
+            $path = Join-Path $c.State.Directory $reference.name
+            $null = Assert-CapRejects { Write-CapImmutableJson -Root $c.Root -Path $path -Value @{ invalid = $true } } 'SequenceConflict'
+            Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $reference.sha256) 'Collision changed prior bytes.'
+            return @{ subcases = 1; priorBytesUnchanged = $true; retainedStagingFault = $true }
+        }
+        Invoke-CapTest 'numbered journal reader retries only transient Open failures within count and deadline' {
+            $progress = Invoke-JournalConcurrentContract -Name 'retry-to2' -LockedFirst -Publications 2
+            $c = New-JournalContractContext 'retry-exhaustion'
+            $null = Publish-CapJournalSnapshot $c.State Bootstrap ([pscustomobject]@{ entries = @() })
+            $lock = [IO.File]::Open((Join-Path $c.State.Directory '000001.json'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            try { $null = Assert-CapRejects { Read-CapJournalSnapshot $c.State } 'JournalUnavailable' }
+            finally { $lock.Dispose() }
+            return @{ subcases = 2; realRetry = $progress; exhaustion = 'Observed actual held-file Open retry exhaustion, not a mock.' }
+        }
+        Invoke-CapTest 'numbered journal reader never regresses below its highest observed sequence' {
+            $c = New-JournalContractContext 'floor'
+            $null = Publish-CapJournalSnapshot $c.State Bootstrap ([pscustomobject]@{ entries = @() })
+            $null = Publish-CapJournalSnapshot $c.State Progress ([pscustomobject]@{ entries = @() })
+            $read = Read-CapJournalSnapshot $c.State
+            Assert-CapTest ($read.Snapshot.Reference.sequence -eq 2) 'Floor2 was not actually observed.'
+            [IO.File]::Move((Join-Path $c.State.Directory '000002.json'), (Join-Path $c.Root 'fault-removed-000002.json'))
+            $null = Assert-CapRejects { Read-CapJournalSnapshot $c.State } 'JournalUnavailable'
+            Assert-CapTest ($c.State.HighestObserved -eq 2 -and $c.State.LastApplied -eq 2) 'Reader returned older state.'
+            return @{ subcases = 1; fault = 'Owned fixture publication removed for negative control, never a publisher action.' }
+        }
+        Invoke-CapTest 'numbered journal rejects corrupt encoding hashes schema and foreign identities' {
+            $executed = 0
+            foreach ($fault in @('encoding','parse','hash','schema','identity','lease','gap','alias','case','zero','expiry','acl')) {
+                $c = New-JournalContractContext ('fault-' + $fault)
+                $null = Publish-CapJournalSnapshot $c.State Bootstrap ([pscustomobject]@{ entries = @() })
+                $path = Join-Path $c.State.Directory '000001.json'
+                $expected = 'Journal'
+                $originalAcl = $null
+                try {
+                    switch ($fault) {
+                        'encoding' { [IO.File]::WriteAllBytes($path, [byte[]]@(255)); $expected = 'JournalEncoding' }
+                        'parse' { [IO.File]::WriteAllText($path, '{"x":1,"x":2}'); $expected = 'JournalParse' }
+                        'hash' {
+                            $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+                            $value.payloadLength++
+                            [IO.File]::WriteAllText($path, (ConvertTo-Json $value -Compress)); $expected = 'JournalHash'
+                        }
+                        'schema' { [IO.File]::WriteAllText($path, '{}'); $expected = 'JournalSchema' }
+                        'identity' { $c.State.Binding = $c.State.Binding.PSObject.Copy(); $c.State.Binding.runId = [guid]::NewGuid().ToString(); $expected = 'JournalIdentity' }
+                        'lease' { $c.State.Binding = $c.State.Binding.PSObject.Copy(); $c.State.Binding.leaseId = [guid]::NewGuid().ToString(); $expected = 'JournalIdentity' }
+                        'gap' {
+                            [IO.File]::Move($path, (Join-Path $c.State.Directory '000002.json')); $expected = 'JournalSchema'
+                        }
+                        'alias' { [IO.File]::Move($path, (Join-Path $c.State.Directory '1.json')); $expected = 'JournalNamespace' }
+                        'case' {
+                            [IO.File]::Move($path, (Join-Path $c.Root 'fault-case.json'))
+                            [IO.File]::Move((Join-Path $c.Root 'fault-case.json'), (Join-Path $c.State.Directory '000001.JSON'))
+                            $expected = 'JournalNamespace'
+                        }
+                        'zero' { [IO.File]::Move($path, (Join-Path $c.State.Directory '000000.json')); $expected = 'SequenceConflict' }
+                        'expiry' { $c.State.DeadlineUtc = [DateTime]::UtcNow.AddSeconds(-1); $expected = 'JournalUnavailable' }
+                        'acl' {
+                            $originalAcl = Get-Acl -LiteralPath $path
+                            $denied = Get-Acl -LiteralPath $path
+                            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+                            $denied.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,
+                                [Security.AccessControl.FileSystemRights]::ReadData, [Security.AccessControl.AccessControlType]::Deny))
+                            Set-Acl -LiteralPath $path -AclObject $denied
+                            $expected = 'JournalAccessDenied'
+                        }
+                    }
+                    $null = Assert-CapRejects { Read-CapJournalSnapshot $c.State } $expected
+                    $executed++
+                } finally { if ($null -ne $originalAcl) { Set-Acl -LiteralPath $path -AclObject $originalAcl } }
+            }
+            Assert-CapTest ($executed -eq 12) 'Immediate-fault inventory was empty or incomplete.'
+            return @{ subcases = $executed; mode = 'Actual owned filesystem inputs/ACL, no reader endpoint mock.' }
+        }
+        Invoke-CapTest 'final manifest and release bind the exact quiescent terminal journal' {
+            $executed = 0
+            foreach ($outcome in @('COMPLETE','FAILED')) {
+                $f = New-JournalTerminalFixture ('terminal-' + $outcome) $outcome
+                $proof = Read-CapJournalFinalProof $f.Context.State $f.Context.Root $f.Record
+                Assert-CapTest ($proof.Manifest.status -ceq $outcome) 'Failed manifest was accepted as COMPLETE.'
+                $null = Assert-CapRejects { Read-CapJournalFinalRecord ($f.Line + "`n" + $f.Line) $f.Context.Binding } 'JournalFinalRecord'
+                $null = Assert-CapRejects { Read-CapJournalFinalRecord ($f.Line + "`nAFTER") $f.Context.Binding } 'JournalFinalRecord'
+                $null = Assert-CapRejects { Read-CapJournalFinalRecord 'ordinary log only' $f.Context.Binding } 'JournalFinalRecord'
+                $null = Assert-CapRejects { Read-CapJournalFinalRecord 'CAP_JOURNAL_FINAL_V2 partial!' $f.Context.Binding } 'JournalFinalRecord'
+                $foreign = $f.Context.Binding.PSObject.Copy()
+                $foreign.leaseId = [guid]::NewGuid().ToString()
+                $null = Assert-CapRejects { Read-CapJournalFinalRecord $f.Line $foreign } 'JournalFinalRecord'
+                $wrongHash = $f.Record.PSObject.Copy()
+                $wrongHash.manifest = $f.Record.manifest.PSObject.Copy()
+                $wrongHash.manifest.sha256 = '0' * 64
+                $null = Assert-CapRejects { Read-CapJournalFinalProof $f.Context.State $f.Context.Root $wrongHash } 'JournalHash'
+                $null = Assert-CapRejects { Publish-CapJournalSnapshot $f.Context.State Progress ([pscustomobject]@{ entries = @() }) } 'JournalPublicationClosed'
+                $executed += 8
+            }
+            $f = New-JournalTerminalFixture 'post-terminal'
+            [IO.File]::Copy((Join-Path $f.Context.State.Directory '000002.json'), (Join-Path $f.Context.State.Directory '000003.json'))
+            $null = Assert-CapRejects { Read-CapJournalFinalProof $f.Context.State $f.Context.Root $f.Record } 'PostTerminalPublication'
+            $executed++
+            $f = New-JournalTerminalFixture 'sealed-gap'
+            [IO.File]::Move((Join-Path $f.Context.State.Directory '000001.json'), (Join-Path $f.Context.Root 'fault-removed-first.json'))
+            $null = Assert-CapRejects { Read-CapJournalFinalProof $f.Context.State $f.Context.Root $f.Record } 'SequenceGap'
+            $executed++
+            $classification = & {
+                $fixture = New-JournalTerminalFixture 'valid-cleanup-invalid-job' -InvalidJobContract
+                $journalProof = Read-CapJournalFinalProof $fixture.Context.State $fixture.Context.Root $fixture.Record
+                $boundWorkerManifest = $journalProof.Manifest
+                $rehearsal = $true
+                $ExecutionMode = 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
+                $ast = [Management.Automation.Language.Parser]::ParseInput(
+                    [IO.File]::ReadAllText($supervisorPath), [ref]$null, [ref]$null)
+                foreach ($functionName in @('Assert-CapWorkerManifest','Get-CapWorkerJobFailure')) {
+                    $definition = $ast.Find({ param($node)
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq $functionName
+                    }, $true)
+                    Assert-CapTest ($null -ne $definition) "Actual job assertion function missing: $functionName"
+                    . ([scriptblock]::Create($definition.Extent.Text))
+                }
+                $statusGuards = @($ast.FindAll({ param($node)
+                    $node -is [Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses[0].Item1.Extent.Text.Contains('$workerLaunchAttempted') -and
+                    $node.Clauses[0].Item1.Extent.Text.Contains('$cleanupFailures.Count -eq 0') -and
+                    $node.Extent.Text.Contains("'FAILED_ZERO_SURVIVORS'")
+                }, $true))
+                Assert-CapTest ($statusGuards.Count -eq 1) 'Actual release status expression missing or duplicated.'
+                $actualStatus = [scriptblock]::Create($statusGuards[0].Extent.Text)
+                $workerLaunchAttempted = $true
+                $cleanupFailures = [Collections.Generic.List[string]]::new()
+                $survivors = [Collections.Generic.List[object]]::new()
+                $cleanupProven = $true
+                $primaryFailure = Get-CapWorkerJobFailure
+                Assert-CapTest ($null -ne $primaryFailure -and
+                    $primaryFailure.Exception.Message.Contains('Offline real-launch manifest is incomplete') -and
+                    $cleanupFailures.Count -eq 0) 'Invalid job assertion was lost or misclassified as cleanup failure.'
+                $jobStatus = & $actualStatus
+                Assert-CapTest ($jobStatus -ceq 'FAILED_ZERO_SURVIVORS') 'Valid cleanup plus failed job did not preserve primary failure status.'
+                $invalid = $fixture.Record.PSObject.Copy()
+                $invalid.manifest = $fixture.Record.manifest.PSObject.Copy()
+                $invalid.manifest.sha256 = '0' * 64
+                $bindingFailure = Assert-CapRejects {
+                    Read-CapJournalFinalProof $fixture.Context.State $fixture.Context.Root $invalid
+                } 'JournalHash'
+                $cleanupFailures.Add($bindingFailure)
+                $cleanupProven = $false
+                $bindingStatus = & $actualStatus
+                Assert-CapTest ($bindingStatus -ceq 'CLEANUP_UNPROVEN') 'Invalid cleanup binding became an ordinary failed job.'
+                return [pscustomobject]@{
+                    label = 'valid-cleanup-invalid-job versus invalid-cleanup-binding'
+                    validCleanupInvalidJob = $jobStatus
+                    invalidCleanupBinding = $bindingStatus
+                    mode = 'Actual source assertion/status expressions and real bound-file negatives; no product/GUI or native worker mock.'
+                }
+            }
+            $executed += 2
+            Assert-CapTest ($executed -eq 20) 'Terminal positive/negative subcase inventory differs.'
+            return @{ subcases = $executed; jobCleanupClassification = $classification
+                mode = 'Exact file/data binding controls; real worker quiescence is tested by actual capture commands.' }
+        }
+        Invoke-CapTest 'journal proof inventory retains publications and refuses residual temporary artifacts' {
+            $f = New-JournalTerminalFixture 'retention'
+            $before = @(Get-ChildItem -LiteralPath $f.Context.State.Directory -File | ForEach-Object { $_.Name })
+            $null = Read-CapJournalFinalProof $f.Context.State $f.Context.Root $f.Record
+            Assert-CapTest (@(Get-ChildItem -LiteralPath $f.Context.State.Directory -File).Count -eq 2) 'Published evidence was deleted.'
+            $tmp = Join-Path $f.Context.Root 'legacy-seed.json.tmp'
+            [IO.File]::WriteAllText($tmp, 'retained negative diagnostic')
+            $null = Assert-CapRejects { Assert-CapNoWorkerTransientArtifacts @($f.Context.Root) } 'ResidualJournalArtifact'
+            Assert-CapTest ([IO.File]::Exists($tmp) -and $before.Count -eq 2) 'Residual diagnostic was deleted to pass.'
+            return @{ subcases = 2; retainedPublications = $before; residualPreserved = $true }
+        }
+        Invoke-CapTest 'journal native bindings match the exact sixteen-declaration contract' {
+            $expected = @(
+                'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
+                'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
+                'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
+                'GraphCodeUiaGateState|GetClassName|user32.dll|GetClassNameW',
+                'CapNative|GetProcessId|kernel32.dll|GetProcessId',
+                'CapNative|GetProcessTimes|kernel32.dll|GetProcessTimes',
+                'CapNative|QueryFullProcessImageNameW|kernel32.dll|QueryFullProcessImageNameW',
+                'CapNative|WaitForSingleObject|kernel32.dll|WaitForSingleObject',
+                'CapNative|TerminateProcess|kernel32.dll|TerminateProcess',
+                'CapNative|WaitNamedPipeW|kernel32.dll|WaitNamedPipeW',
+                'CapNative|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
+                'CapNative|GetWindowRect|user32.dll|GetWindowRect',
+                'CapNative|GetClientRect|user32.dll|GetClientRect',
+                'CapNative|GetDpiForWindow|user32.dll|GetDpiForWindow',
+                'CapNative|SetWindowPos|user32.dll|SetWindowPos',
+                'CapNative|PrintWindow|user32.dll|PrintWindow'
+            )
+            $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
+            Assert-CapTest ($actual.Count -eq 16 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static16 export contract differs.'
+            return @{ subcases = 16; evidence = 'API export resolution only, no native window or GUI action.' }
+        }
+        Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
+            $f = New-JournalTerminalFixture 'seed-reference'
+            $legacy = [pscustomobject]@{ processJournalPath = (Join-Path $f.Context.Root 'process-journal.json') }
+            $null = Assert-CapRejects { Read-CapNumberedSeedProof $f.Context.Root $legacy ('A' * 64) `
+                $sourceHashesBefore[$modulePath] $sourceHashesBefore[$workerPath] ([DateTime]::UtcNow.AddMinutes(1)) } 'LegacyJournalProtocol'
+            $reference = [pscustomobject]@{ protocolVersion = 2L; directory = $f.Context.State.Directory
+                outputDirectory = $f.Context.Root; binding = $f.Context.Binding; record = $f.Record }
+            $proof = Read-CapNumberedSeedProof $f.Context.Root $reference ('A' * 64) `
+                $sourceHashesBefore[$modulePath] $sourceHashesBefore[$workerPath] ([DateTime]::UtcNow.AddMinutes(1))
+            Assert-CapTest ($proof.Manifest.status -ceq 'COMPLETE') 'Exact new seed reference was not verified.'
+            return @{ subcases = 2; actualLegacyRefused = $true; exactReferenceVerified = $true }
+        }
+    }
 function Invoke-CapBoundedChild {
     param([string]$FilePath, [string[]]$Arguments, [string]$Directory, [string]$Role, [int]$Seconds = 45,
         [hashtable]$Environment = @{})
@@ -512,6 +1020,17 @@ function Assert-CapRehearsalSuccess {
 $target = $null
 try {
     $target = New-CapHarmlessTarget
+    if ($JournalContractOnly) {
+        Invoke-JournalContractGroups -IncludeConcurrent
+        Invoke-CapTest 'real harmless managed-worker journal integration' {
+            $run = Invoke-CapCaptureCommand -Name 'journal-integration'
+            $null = Assert-CapRehearsalSuccess -Run $run -Arguments @()
+            Assert-CapTest ($run.receipt.journalPublishedInventory.Count -ge 2 -and
+                $null -ne $run.receipt.journalFinalBinding) 'Actual quiescent worker final binding is missing.'
+            return @{ status = $run.receipt.status; binding = $run.receipt.journalFinalBinding
+                inventory = $run.receipt.journalPublishedInventory; gui = 'NotExecuted' }
+        }
+    } else {
     $cimRaceTarget = New-CapCimRaceTarget
     if (-not $LaunchContractOnly) {
         foreach ($mutation in @('accepted', 'lane-d', 'red-ci', 'binary-hash', 'product-diff',
@@ -660,7 +1179,12 @@ try {
                         Assert-CapTest ($run.receipt.traceFailures.Count -gt 0) 'Trace I/O failure was not preserved in the actual release.'
                     }
                     if ($behavior -eq 'timeout') {
-                        $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.partial.json') -Raw | ConvertFrom-Json
+                        $reference = $run.receipt.journalFinalBinding.manifest
+                        $manifestPath = Join-Path $run.output $reference.name
+                        Assert-CapTest ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -ceq $reference.sha256) `
+                            'Timeout evidence is not the exact bound immutable FAILED manifest.'
+                        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                        Assert-CapTest ($manifest.status -ceq 'FAILED') 'Timed-out target was not recorded as FAILED.'
                         Assert-CapTest ($manifest.rehearsalLaunches[0].cleanupResult -ceq 'TERMINATED_GUARDED_HANDLE') 'Timed-out target was not stopped by held kernel identity.'
                     }
                 }
@@ -886,45 +1410,10 @@ try {
             $null = Assert-CapRejects { Assert-CapFixtureMapping @parameters } 'owned project path'
             return 'Actual shared root/source/mapping predicates only; no product binary, HWND, native compatibility, or live capture was executed.'
         }
-        Invoke-CapTest 'actual journal reader permits worker atomic replacement while retaining its snapshot' {
-            foreach ($definition in @(
-                @($supervisorPath, 'Open-CapJournalRead'),
-                @($workerPath, 'Write-CapJsonAtomic')
-            )) {
-                $ast = [Management.Automation.Language.Parser]::ParseInput(
-                    [IO.File]::ReadAllText($definition[0]), [ref]$null, [ref]$null)
-                $function = $ast.Find({ param($node)
-                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $definition[1]
-                }, $true)
-                Assert-CapTest ($null -ne $function) "Actual journal function missing: $($definition[1])"
-                . ([scriptblock]::Create($function.Extent.Text))
-            }
-            $directory = Join-Path $scratch 'journal-sharing-component'
-            $null = New-Item -ItemType Directory -Path $directory
-            $path = Join-Path $directory 'process-journal.json'
-            Write-CapJsonAtomic -Path $path -Value ([ordered]@{ version = 1; componentOnly = $true; cleanupComplete = $false })
-            $stream = Open-CapJournalRead -Path $path
-            try {
-                Write-CapJsonAtomic -Path $path -Value ([ordered]@{
-                    version = 2; componentOnly = $true; cleanupComplete = $true
-                    ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
-                })
-                $reader = [IO.StreamReader]::new($stream)
-                try { $snapshot = $reader.ReadToEnd() | ConvertFrom-Json }
-                finally { $reader.Dispose() }
-                $freshStream = Open-CapJournalRead -Path $path
-                try {
-                    $freshReader = [IO.StreamReader]::new($freshStream)
-                    try { $current = $freshReader.ReadToEnd() | ConvertFrom-Json }
-                    finally { $freshReader.Dispose() }
-                } finally { $freshStream.Dispose() }
-                Assert-CapTest ($snapshot.version -eq 1 -and -not $snapshot.cleanupComplete -and
-                    $current.version -eq 2 -and $current.cleanupComplete -and $current.ownedProcessSurvivors.Count -eq 0 -and
-                    $current.pendingLaunchesRemaining.Count -eq 0 -and $current.cleanupFailures.Count -eq 0) `
-                    'Atomic replacement lost the held snapshot or a fresh read mistook it for completed cleanup.'
-            } finally { $stream.Dispose() }
-            return 'Actual supervisor reader and actual worker atomic writer; held file I/O only, no process, lease or GUI mock.'
+        Invoke-CapTest 'actual immutable journal reader preserves held snapshots across concurrent numbered publications' {
+            Invoke-JournalConcurrentContract -Name 'concurrent128' -Publications 128
         }
+        Invoke-JournalContractGroups
         Invoke-CapTest 'actual rehearsal data satisfies the repaired report gate and refuses stale proof' {
             $source = [IO.File]::ReadAllText($supervisorPath)
             $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null)
@@ -1015,9 +1504,19 @@ try {
     $script:runDirectory = $sceneTestRoot
     $script:outputDirectory = Join-Path $sceneTestRoot 'mock-output'
     $script:workerLog = Join-Path $sceneTestRoot 'mock-worker.log'
-    $script:journalPath = Join-Path $sceneTestRoot 'mock-process-journal.json'
-    $script:manifestPath = Join-Path $sceneTestRoot 'mock-manifest.partial.json'
+    $script:journalPath = Join-Path $sceneTestRoot 'mock-process-journal'
+    $script:manifestPath = Join-Path $sceneTestRoot 'mock-manifest.json'
     New-Item -ItemType Directory -Path $script:outputDirectory -Force | Out-Null
+    $null = New-Item -ItemType Directory -Path $script:journalPath
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $identity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName -Role 'mock-scene-file-contract'
+        $binding = New-CapJournalBinding -RunId ([guid]::NewGuid().ToString()) -LeaseId $script:auth.leaseId `
+            -JobSha256 $script:jobHash -ModuleSha256 $script:moduleHash -WorkerSha256 $script:workerHash `
+            -SupervisorSha256 $sourceHashesBefore[$supervisorPath] -Identity $identity
+    } finally { $self.Dispose() }
+    $script:journalState = New-CapJournalState -Root $root -Directory $script:journalPath `
+        -Binding $binding -DeadlineUtc $script:leaseDeadlineUtc
     [IO.File]::WriteAllText($script:workerLog, '', [Text.UTF8Encoding]::new($false))
     $script:images = [Collections.Generic.List[object]]::new()
     $script:runs = [Collections.Generic.List[object]]::new()
@@ -1231,7 +1730,9 @@ try {
         $null = Invoke-CapNormalScenes -Phase $phase
         $null = Invoke-CapActionsScene -Phase $phase
     }
-    $mockManifest = Get-Content -LiteralPath $script:manifestPath -Raw | ConvertFrom-Json
+    $readingState = New-CapJournalState -Root $root -Directory $script:journalPath `
+        -Binding $binding -DeadlineUtc $script:leaseDeadlineUtc
+    $mockManifest = (Read-CapJournalSnapshot $readingState).Snapshot.Payload.data.progressManifest
     $expectedScenePairs = @(
         'before:project-alpha', 'before:project-beta', 'before:overview', 'before:workspace', 'before:actions',
         'after:project-alpha', 'after:project-beta', 'after:overview', 'after:workspace', 'after:actions'
@@ -1336,6 +1837,7 @@ try {
         }
 
     }
+    }
 } catch {
     $results.Add([ordered]@{ name = 'suite setup/execution'; passed = $false; error = $_.Exception.ToString() })
     Write-Host "FAIL suite setup/execution: $($_.Exception.Message)"
@@ -1349,7 +1851,8 @@ try {
     }
     $passed = @($results | Where-Object passed -EQ $true).Count
     $failed = @($results | Where-Object passed -EQ $false).Count
-    $report = [ordered]@{ suite = 'UiCaptureDriver'; executed = $results.Count; passed = $passed; failed = $failed
+    $suiteName = if ($JournalContractOnly) { 'UiCaptureJournalContracts' } else { 'UiCaptureDriver' }
+    $report = [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed
         mode = $mode; gui = 'NotExecuted'; nativeCompatibilityPreflight = 'NotExecuted'; images = 0
         backendTurns = 0; fixture = $target; sourceHashesBeforeImport = $sourceHashesBefore
         controls = [ordered]@{ moduleSha256 = $sourceHashesBefore[$modulePath]
@@ -1357,7 +1860,8 @@ try {
         cases = @($results) }
     $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
 }
-[ordered]@{ suite = 'UiCaptureDriver'; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
+[ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-if ($results.Count -le 0 -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } else { 59 }
+if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

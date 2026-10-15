@@ -2040,7 +2040,697 @@ function Get-CapAuthorizedWorkerDeadline {
     return $deadline
 }
 
+function New-CapJournalFailure {
+    param([string]$Class, [string]$Message, [AllowNull()][Exception]$Inner = $null)
+    $failure = [IO.IOException]::new("$Class`: $Message", $Inner)
+    $failure.Data['CapJournalFailure'] = $Class
+    return $failure
+}
+
+function Get-CapJournalNativeError {
+    param([Exception]$Exception)
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        if ($current -is [IO.IOException] -or $current -is [UnauthorizedAccessException]) {
+            return '{0:X8}' -f ([long]$current.HResult -band 4294967295L)
+        }
+    }
+    return '{0:X8}' -f ([long]$Exception.HResult -band 4294967295L)
+}
+
+function ConvertFrom-CapJournalBytes {
+    param([byte[]]$Bytes)
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 239 -and $Bytes[1] -eq 187 -and $Bytes[2] -eq 191) {
+        throw (New-CapJournalFailure 'JournalEncoding' 'Published JSON must be UTF-8 without BOM.')
+    }
+    try { $json = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes) }
+    catch { throw (New-CapJournalFailure 'JournalEncoding' $_.Exception.Message $_.Exception) }
+    try {
+        $document = [Text.Json.JsonDocument]::Parse($json)
+        try {
+            $visit = {
+                param([Text.Json.JsonElement]$Element)
+                if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+                    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                    foreach ($property in $Element.EnumerateObject()) {
+                        if (-not $names.Add($property.Name)) { throw "Duplicate JSON field: $($property.Name)" }
+                        & $visit $property.Value
+                    }
+                } elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+                    foreach ($item in $Element.EnumerateArray()) { & $visit $item }
+                }
+            }
+            & $visit $document.RootElement
+        } finally { $document.Dispose() }
+        return ConvertFrom-Json -InputObject $json -DateKind String -Depth 60
+    } catch { throw (New-CapJournalFailure 'JournalParse' $_.Exception.Message $_.Exception) }
+}
+
+function New-CapJournalBinding {
+    [CmdletBinding()]
+    param([string]$RunId, [string]$LeaseId, [string]$JobSha256, [string]$ModuleSha256,
+        [string]$WorkerSha256, [string]$SupervisorSha256, [Parameter(Mandatory)]$Identity)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $null = [guid]::Parse($RunId)
+    $null = [guid]::Parse($LeaseId)
+    foreach ($hash in @($JobSha256, $ModuleSha256, $WorkerSha256, $SupervisorSha256)) {
+        if ($hash -cnotmatch '\A[A-F0-9]{64}\z') { throw 'Journal binding requires exact source digests.' }
+    }
+    return [pscustomobject][ordered]@{
+        runId = $RunId; leaseId = $LeaseId; jobSha256 = $JobSha256
+        moduleSha256 = $ModuleSha256; workerSha256 = $WorkerSha256
+        supervisorSha256 = $SupervisorSha256
+        workerPid = [long]$Identity.Pid
+        workerCreationFileTimeUtc = [long]$Identity.CreationFileTimeUtc
+        workerImagePath = [IO.Path]::GetFullPath($Identity.ExpectedImagePath).ToUpperInvariant()
+        workerExecutableSha256 = (Get-FileHash -LiteralPath $Identity.ExpectedImagePath -Algorithm SHA256).Hash
+        workerParentPid = [long]$Identity.ParentPid
+        workerSessionId = [long]$Identity.SessionId
+        workerRole = [string]$Identity.Role
+    }
+}
+
+function Assert-CapJournalBinding {
+    param($Actual, $Expected)
+    $fields = @{
+        runId = [string]; leaseId = [string]; jobSha256 = [string]; moduleSha256 = [string]
+        workerSha256 = [string]; supervisorSha256 = [string]; workerPid = [long]
+        workerCreationFileTimeUtc = [long]; workerImagePath = [string]
+        workerExecutableSha256 = [string]; workerParentPid = [long]; workerSessionId = [long]
+        workerRole = [string]
+    }
+    try {
+        Assert-CapDataRecord $Actual $fields 'Journal binding'
+        if (@($Actual.PSObject.Properties).Count -ne $fields.Count) { throw 'Unexpected journal identity field.' }
+        $null = [guid]::Parse($Actual.runId)
+        $null = [guid]::Parse($Actual.leaseId)
+        if ($Actual.workerPid -le 0 -or $Actual.workerCreationFileTimeUtc -le 0 -or
+            $Actual.workerParentPid -le 0 -or $Actual.workerSessionId -lt 0 -or
+            -not [IO.Path]::IsPathFullyQualified($Actual.workerImagePath)) {
+            throw 'Invalid worker generation identity.'
+        }
+        foreach ($name in @('jobSha256','moduleSha256','workerSha256','supervisorSha256','workerExecutableSha256')) {
+            if ($Actual.$name -cnotmatch '\A[A-F0-9]{64}\z') { throw "Invalid identity digest: $name" }
+        }
+        foreach ($name in $fields.Keys) {
+            if ($Actual.$name -cne $Expected.$name) { throw "Journal identity differs: $name" }
+        }
+    } catch { throw (New-CapJournalFailure 'JournalIdentity' $_.Exception.Message $_.Exception) }
+}
+
+function New-CapJournalState {
+    [CmdletBinding()]
+    param([string]$Root, [string]$Directory, [Parameter(Mandatory)]$Binding,
+        [Parameter(Mandatory)][DateTime]$DeadlineUtc, [string]$ObservationPath = '')
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $directoryPath = Assert-CapArtifactPath -Root $Root -Path $Directory
+    if (-not ([IO.File]::GetAttributes($directoryPath) -band [IO.FileAttributes]::Directory)) {
+        throw 'Journal requires an existing dedicated directory.'
+    }
+    if ($ObservationPath) {
+        $ObservationPath = Assert-CapArtifactPath -Root $Root -Path $ObservationPath
+    }
+    Assert-CapJournalBinding $Binding $Binding
+    return [pscustomobject]@{
+        Root = [IO.Path]::GetFullPath($Root); Directory = $directoryPath; Binding = $Binding
+        DeadlineUtc = $DeadlineUtc; ObservationPath = $ObservationPath
+        HighestObserved = 0L; LastApplied = 0L; Sequence = 0L; PreviousHash = ('0' * 64)
+        Published = [Collections.Generic.List[object]]::new()
+        Accepted = [Collections.Generic.Dictionary[long,string]]::new()
+        Terminal = $null; PublicationFailed = $false; FatalError = $null
+    }
+}
+
+function Write-CapJournalObservation {
+    param($State, [long]$Sequence, [int]$Attempt, [string]$Decision,
+        [AllowNull()][string]$NativeError, $Transaction)
+    if (-not $State.ObservationPath) { return }
+    $record = [ordered]@{
+        runId = $State.Binding.runId; readerPid = $PID; sequence = $Sequence; attempt = $Attempt
+        utc = [DateTime]::UtcNow.ToString('o')
+        monotonicTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+        monotonicFrequency = [Diagnostics.Stopwatch]::Frequency
+        nativeHresult = $NativeError; decision = $Decision
+        deadlineUtc = $Transaction.DeadlineUtc.ToString('o'); retries = $Transaction.Retries
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        (ConvertTo-Json -InputObject $record -Compress -Depth 8) + "`n")
+    try {
+        $stream = [IO.File]::Open($State.ObservationPath, [IO.FileMode]::Append,
+            [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+    } catch { throw (New-CapJournalFailure 'JournalObservationFailure' $_.Exception.Message $_.Exception) }
+}
+
+function Write-CapImmutableJson {
+    [CmdletBinding()]
+    param([string]$Root, [string]$Path, [Parameter(Mandatory)]$Value,
+        [string]$TemporaryName = ('.cap-final-' + [guid]::NewGuid().ToString('N') + '.tmp'))
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $path = Assert-CapArtifactPath -Root $Root -Path $Path
+    if ($TemporaryName -cnotmatch '\A(?:\.cap-journal-[0-9]{6}-[0-9a-f]{32}|\.cap-final-[0-9a-f]{32})\.tmp\z') {
+        throw (New-CapJournalFailure 'JournalNamespace' 'Invalid unpublished staging name.')
+    }
+    $temporary = Join-Path (Split-Path -Parent $path) $TemporaryName
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(
+        (ConvertTo-Json -InputObject $Value -Depth 60 -Compress))
+    try {
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        [IO.File]::Move($temporary, $path)
+    } catch {
+        $native = Get-CapJournalNativeError $_.Exception
+        $class = if ($native -in @('80070050', '800700B7')) { 'SequenceConflict' } else { 'JournalPublicationFailure' }
+        throw (New-CapJournalFailure $class "$path HRESULT=$native; staging artifact retained. $($_.Exception.Message)" $_.Exception)
+    }
+    return [pscustomobject]@{
+        name = [IO.Path]::GetFileName($path); length = [long]$bytes.Length
+        sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    }
+}
+
+function Publish-CapJournalSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$State,
+        [ValidateSet('Bootstrap','Progress','Terminal')][string]$Kind,
+        [Parameter(Mandatory)]$Value)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    if ($State.PublicationFailed -or $null -ne $State.Terminal) {
+        throw (New-CapJournalFailure 'JournalPublicationClosed' 'No publication after failure or Terminal.')
+    }
+    if ([DateTime]::UtcNow -ge $State.DeadlineUtc) {
+        throw (New-CapJournalFailure 'JournalExpired' 'Publication deadline reached.')
+    }
+    $sequence = [long]($State.Sequence + 1)
+    if ($sequence -gt 999999) { throw (New-CapJournalFailure 'SequenceConflict' 'Sequence overflow.') }
+    $payload = [pscustomobject][ordered]@{
+        binding = $State.Binding; sequence = $sequence; previousSequence = [long]$State.Sequence
+        previousSha256 = $State.PreviousHash; kind = $Kind; data = $Value
+    }
+    $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes(
+        (ConvertTo-Json -InputObject $payload -Depth 55 -Compress))
+    $envelope = [ordered]@{
+        schemaVersion = 2L; sequence = $sequence; payloadLength = [long]$bytes.Length
+        payloadSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        payloadBase64 = [Convert]::ToBase64String($bytes)
+    }
+    $name = $sequence.ToString('D6', [Globalization.CultureInfo]::InvariantCulture) + '.json'
+    try {
+        $reference = Write-CapImmutableJson -Root $State.Root -Path (Join-Path $State.Directory $name) `
+            -Value $envelope -TemporaryName ('.cap-journal-' + $sequence.ToString('D6') + '-' +
+                [guid]::NewGuid().ToString('N') + '.tmp')
+    } catch { $State.PublicationFailed = $true; throw }
+    $reference | Add-Member -NotePropertyName sequence -NotePropertyValue $sequence
+    $State.Sequence = $sequence
+    $State.PreviousHash = $reference.sha256
+    $State.Published.Add($reference)
+    if ($Kind -ceq 'Terminal') { $State.Terminal = $reference }
+    return $reference
+}
+
+function Get-CapJournalNames {
+    param($State, [switch]$Final)
+    $numbers = [Collections.Generic.Dictionary[long,string]]::new()
+    try { $paths = @([IO.Directory]::EnumerateFileSystemEntries($State.Directory)) }
+    catch { throw (New-CapJournalFailure 'JournalNamespace' $_.Exception.Message $_.Exception) }
+    foreach ($path in $paths) {
+        $name = [IO.Path]::GetFileName($path)
+        if ($name -cmatch '\A(?:\.cap-journal-[0-9]{6}-[0-9a-f]{32}|\.cap-final-[0-9a-f]{32})\.tmp\z') {
+            if ($Final) { throw (New-CapJournalFailure 'ResidualJournalArtifact' $path) }
+            continue
+        }
+        try { $attributes = [IO.File]::GetAttributes($path) }
+        catch {
+            $class = if ((Get-CapJournalNativeError $_.Exception) -eq '80070005') { 'JournalAccessDenied' } else { 'JournalNamespace' }
+            throw (New-CapJournalFailure $class $_.Exception.Message $_.Exception)
+        }
+        if ($name -cnotmatch '\A[0-9]{6}\.json\z' -or
+            ($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint))) {
+            throw (New-CapJournalFailure 'JournalNamespace' "Noncanonical publication: $name")
+        }
+        $number = [long]::Parse($name.Substring(0, 6), [Globalization.CultureInfo]::InvariantCulture)
+        if ($number -lt 1 -or -not $numbers.TryAdd($number, $name)) {
+            throw (New-CapJournalFailure 'SequenceConflict' "Invalid or duplicate publication: $name")
+        }
+    }
+    return ,$numbers
+}
+
+function New-CapJournalTransaction {
+    param($State)
+    $remaining = [Math]::Min(1000.0, ($State.DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+    return [pscustomobject]@{
+        DeadlineUtc = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(0, $remaining))
+        Clock = [Diagnostics.Stopwatch]::StartNew()
+        BudgetMilliseconds = [Math]::Max(0, $remaining)
+        Retries = 0
+        Attempts = [Collections.Generic.Dictionary[long,int]]::new()
+    }
+}
+
+function Assert-CapJournalTime {
+    param($Transaction, [long]$Sequence, [AllowNull()][string]$NativeError = $null)
+    if ([DateTime]::UtcNow -ge $Transaction.DeadlineUtc -or
+        $Transaction.Clock.Elapsed.TotalMilliseconds -ge $Transaction.BudgetMilliseconds) {
+        throw (New-CapJournalFailure 'JournalUnavailable' (
+            "sequence=$Sequence HRESULT=$NativeError retries=$($Transaction.Retries); deadline/exhaustion, no late success."))
+    }
+}
+
+function Read-CapJournalObject {
+    param($State, [long]$Sequence, $Transaction, [switch]$Advance, [switch]$RetainStream)
+    $native = $null
+    while ($true) {
+        Assert-CapJournalTime $Transaction $Sequence $native
+        if (-not $Transaction.Attempts.ContainsKey($Sequence)) { $Transaction.Attempts[$Sequence] = 0 }
+        if ($Transaction.Attempts[$Sequence] -ge 8) {
+            throw (New-CapJournalFailure 'JournalUnavailable' "sequence=$Sequence HRESULT=$native; eight Open attempts.")
+        }
+        $Transaction.Attempts[$Sequence]++
+        $attempt = $Transaction.Attempts[$Sequence]
+        $name = $Sequence.ToString('D6', [Globalization.CultureInfo]::InvariantCulture) + '.json'
+        $retained = $false
+        try {
+            $stream = [IO.File]::Open((Join-Path $State.Directory $name), [IO.FileMode]::Open,
+                [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        } catch {
+            $native = Get-CapJournalNativeError $_.Exception
+            Write-CapJournalObservation $State $Sequence $attempt 'OpenFailed' $native $Transaction
+            if ($native -notin @('80070002','80070003','80070020','80070021')) {
+                $class = if ($native -eq '80070005') { 'JournalAccessDenied' } else { 'JournalOpenFailure' }
+                throw (New-CapJournalFailure $class "sequence=$Sequence HRESULT=$native" $_.Exception)
+            }
+            if ($Transaction.Retries -ge 7) {
+                throw (New-CapJournalFailure 'JournalUnavailable' "sequence=$Sequence HRESULT=$native; global retry limit.")
+            }
+            $Transaction.Retries++
+            Assert-CapJournalTime $Transaction $Sequence $native
+            $remaining = [Math]::Min(($Transaction.DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
+                $Transaction.BudgetMilliseconds - $Transaction.Clock.Elapsed.TotalMilliseconds)
+            if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(100, [Math]::Floor($remaining))) }
+            Assert-CapJournalTime $Transaction $Sequence $native
+            if ($Advance) {
+                $names = Get-CapJournalNames $State
+                foreach ($number in $names.Keys) { $State.HighestObserved = [Math]::Max($State.HighestObserved, $number) }
+                $Sequence = [Math]::Max($Sequence, $State.HighestObserved)
+            }
+            continue
+        }
+        try {
+            $buffer = [IO.MemoryStream]::new()
+            try { $stream.CopyTo($buffer); $bytes = $buffer.ToArray() }
+            finally { $buffer.Dispose() }
+            Assert-CapJournalTime $Transaction $Sequence
+            $envelope = ConvertFrom-CapJournalBytes $bytes
+            try {
+                Assert-CapDataRecord $envelope @{ schemaVersion = [long]; sequence = [long]
+                    payloadLength = [long]; payloadSha256 = [string]; payloadBase64 = [string] } 'Journal envelope'
+                if (@($envelope.PSObject.Properties).Count -ne 5 -or $envelope.schemaVersion -ne 2 -or
+                    $envelope.sequence -ne $Sequence) { throw 'Envelope version/name/sequence mismatch.' }
+                $payloadBytes = [Convert]::FromBase64String($envelope.payloadBase64)
+                if ([Convert]::ToBase64String($payloadBytes) -cne $envelope.payloadBase64) {
+                    throw 'Noncanonical payload base64.'
+                }
+            } catch { throw (New-CapJournalFailure 'JournalSchema' $_.Exception.Message $_.Exception) }
+            if ($payloadBytes.Length -ne $envelope.payloadLength -or
+                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($payloadBytes)) -cne $envelope.payloadSha256) {
+                throw (New-CapJournalFailure 'JournalHash' "Payload hash/length differs at $Sequence.")
+            }
+            $payload = ConvertFrom-CapJournalBytes $payloadBytes
+            try {
+                Assert-CapDataRecord $payload @{ binding = [pscustomobject]; sequence = [long]
+                    previousSequence = [long]; previousSha256 = [string]; kind = [string]; data = [pscustomobject] } 'Journal payload'
+                if (@($payload.PSObject.Properties).Count -ne 6 -or
+                    $payload.previousSha256 -cnotmatch '\A[A-F0-9]{64}\z' -or
+                    $payload.kind -cnotin @('Bootstrap','Progress','Terminal')) { throw 'Invalid journal payload schema.' }
+                Assert-CapDataRecord $payload.data @{ entries = [array] } 'Journal entries'
+            } catch { throw (New-CapJournalFailure 'JournalSchema' $_.Exception.Message $_.Exception) }
+            Assert-CapJournalBinding $payload.binding $State.Binding
+            if ($payload.sequence -ne $Sequence -or $payload.previousSequence -ne ($Sequence - 1)) {
+                throw (New-CapJournalFailure 'SequenceGap' "Predecessor/sequence mismatch at $Sequence.")
+            }
+            Assert-CapJournalTime $Transaction $Sequence
+            $reference = [pscustomobject]@{
+                sequence = $Sequence; name = $name; length = [long]$bytes.Length
+                sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+            }
+            Write-CapJournalObservation $State $Sequence $attempt 'ReadVerified' $null $Transaction
+            Assert-CapJournalTime $Transaction $Sequence
+            $result = [pscustomobject]@{ Reference = $reference; Payload = $payload; Stream = $null }
+            if ($RetainStream) { $result.Stream = $stream; $retained = $true }
+            return $result
+        } finally { if (-not $retained) { $stream.Dispose() } }
+    }
+}
+
+function Read-CapJournalSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$State)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    if ($null -ne $State.FatalError) { throw $State.FatalError }
+    try {
+        $transaction = New-CapJournalTransaction $State
+        Assert-CapJournalTime $transaction $State.HighestObserved
+        $names = Get-CapJournalNames $State
+        foreach ($number in $names.Keys) { $State.HighestObserved = [Math]::Max($State.HighestObserved, $number) }
+        if ($State.HighestObserved -eq 0) {
+            return [pscustomobject]@{ State = 'PendingFirstPublication'; Snapshot = $null; HashChainVerified = $false }
+        }
+        while ($true) {
+            $snapshot = Read-CapJournalObject $State $State.HighestObserved $transaction -Advance
+            $names = Get-CapJournalNames $State
+            foreach ($number in $names.Keys) { $State.HighestObserved = [Math]::Max($State.HighestObserved, $number) }
+            if ($snapshot.Reference.sequence -lt $State.HighestObserved) { continue }
+            for ($number = 1L; $number -le $snapshot.Reference.sequence; $number++) {
+                if (-not $names.ContainsKey($number)) {
+                    $null = Read-CapJournalObject $State $number $transaction
+                }
+            }
+            Assert-CapJournalTime $transaction $snapshot.Reference.sequence
+            if ($snapshot.Reference.sequence -lt $State.LastApplied) {
+                throw (New-CapJournalFailure 'SequenceRegression' 'Cannot apply older journal state.')
+            }
+            if ($State.Accepted.ContainsKey($snapshot.Reference.sequence) -and
+                $State.Accepted[$snapshot.Reference.sequence] -cne $snapshot.Reference.sha256) {
+                throw (New-CapJournalFailure 'JournalHash' 'An accepted immutable publication changed.')
+            }
+            $State.Accepted[$snapshot.Reference.sequence] = $snapshot.Reference.sha256
+            $State.LastApplied = $snapshot.Reference.sequence
+            Write-CapJournalObservation $State $snapshot.Reference.sequence `
+                $transaction.Attempts[$snapshot.Reference.sequence] 'AcceptedLiveSequenceOnly' $null $transaction
+            Assert-CapJournalTime $transaction $snapshot.Reference.sequence
+            return [pscustomobject]@{ State = 'Published'; Snapshot = $snapshot; HashChainVerified = $false }
+        }
+    } catch { $State.FatalError = $_.Exception; throw }
+}
+
+function Assert-CapJournalReference {
+    param($Reference, [switch]$Numbered)
+    try {
+        Assert-CapDataRecord $Reference @{ name = [string]; length = [long]; sha256 = [string] } 'Journal reference'
+        $expectedProperties = if ($Numbered) { 4 } else { 3 }
+        if (@($Reference.PSObject.Properties).Count -ne $expectedProperties) { throw 'Unexpected byte reference field.' }
+        if ($Reference.length -le 0 -or $Reference.sha256 -cnotmatch '\A[A-F0-9]{64}\z' -or
+            [IO.Path]::GetFileName($Reference.name) -cne $Reference.name -or
+            $Reference.name.Contains(':')) { throw 'Noncanonical byte reference.' }
+        if ($Numbered) {
+            Assert-CapDataRecord $Reference @{ sequence = [long] } 'Numbered reference'
+            if ($Reference.sequence -lt 1 -or $Reference.sequence -gt 999999 -or
+                $Reference.name -cne ($Reference.sequence.ToString('D6') + '.json')) {
+                throw 'Numbered reference differs from its sequence.'
+            }
+        }
+    } catch { throw (New-CapJournalFailure 'JournalSchema' $_.Exception.Message $_.Exception) }
+}
+
+function Format-CapJournalFinalRecord {
+    [CmdletBinding()]
+    param($Binding, $Manifest, $Terminal)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    Assert-CapJournalReference $Manifest
+    Assert-CapJournalReference $Terminal -Numbered
+    $record = [ordered]@{ schemaVersion = 2L; binding = $Binding; manifest = $Manifest; terminal = $Terminal }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        (ConvertTo-Json -InputObject $record -Depth 15 -Compress))
+    return 'CAP_JOURNAL_FINAL_V2 ' + [Convert]::ToBase64String($bytes)
+}
+
+function Read-CapJournalFinalRecord {
+    [CmdletBinding()]
+    param([string]$Stdout, $Binding)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $lines = @([regex]::Split($Stdout, '\r?\n') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $records = @($lines | Where-Object { $_.StartsWith('CAP_JOURNAL_FINAL', [StringComparison]::Ordinal) })
+    if ($records.Count -ne 1 -or $lines[-1] -cne $records[0] -or
+        $records[0] -cnotmatch '\ACAP_JOURNAL_FINAL_V2 ([A-Za-z0-9+/]+={0,2})\z') {
+        throw (New-CapJournalFailure 'JournalFinalRecord' 'Missing, duplicate, partial or nonfinal stdout binding.')
+    }
+    try {
+        $encoded = $records[0].Substring('CAP_JOURNAL_FINAL_V2 '.Length)
+        $bytes = [Convert]::FromBase64String($encoded)
+        if ([Convert]::ToBase64String($bytes) -cne $encoded) { throw 'Noncanonical final base64.' }
+        $record = ConvertFrom-CapJournalBytes $bytes
+        Assert-CapDataRecord $record @{ schemaVersion = [long]; binding = [pscustomobject]
+            manifest = [pscustomobject]; terminal = [pscustomobject] } 'Final binding'
+        if ($record.schemaVersion -ne 2 -or @($record.PSObject.Properties).Count -ne 4) { throw 'Final binding schema differs.' }
+        Assert-CapJournalBinding $record.binding $Binding
+        Assert-CapJournalReference $record.manifest
+        Assert-CapJournalReference $record.terminal -Numbered
+        if ((Format-CapJournalFinalRecord $Binding $record.manifest $record.terminal) -cne $records[0]) {
+            throw 'Final record is not the canonical compact encoding.'
+        }
+        return $record
+    } catch { throw (New-CapJournalFailure 'JournalFinalRecord' $_.Exception.Message $_.Exception) }
+}
+
+function Read-CapJournalFinalProof {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$State, [string]$OutputDirectory,
+        [Parameter(Mandatory)]$Record, [switch]$RetainStreams)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    if ($null -ne $State.FatalError) { throw $State.FatalError }
+    Assert-CapJournalBinding $Record.binding $State.Binding
+    Assert-CapJournalReference $Record.terminal -Numbered
+    Assert-CapJournalReference $Record.manifest
+    if ($State.HighestObserved -gt $Record.terminal.sequence) {
+        throw (New-CapJournalFailure 'PostTerminalPublication' 'Observed floor exceeds final binding.')
+    }
+    $transaction = New-CapJournalTransaction $State
+    Assert-CapJournalTime $transaction $Record.terminal.sequence
+    $manifestPath = Assert-CapArtifactPath -Root $State.Root -Path (Join-Path $OutputDirectory $Record.manifest.name)
+    $stream = $null
+    $held = [Collections.Generic.List[IO.Stream]]::new()
+    $keepStreams = $false
+    try {
+        $stream = Open-CapJournalManifestStream $State $manifestPath $transaction $Record.terminal.sequence
+        $held.Add($stream)
+        $memory = [IO.MemoryStream]::new()
+        try { $stream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $memory.Dispose() }
+        if ($bytes.Length -ne $Record.manifest.length -or
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $Record.manifest.sha256) {
+            throw (New-CapJournalFailure 'JournalHash' 'Final manifest bytes differ.')
+        }
+        $manifest = ConvertFrom-CapJournalBytes $bytes
+        Assert-CapDataRecord $manifest @{ journal = [pscustomobject]; status = [string]
+            ownedProcesses = [array]; ownedProcessSurvivors = [array]
+            pendingLaunchesRemaining = [array]; cleanupFailures = [array] } 'Final manifest'
+        Assert-CapDataRecord $manifest.journal @{ protocolVersion = [long]; binding = [pscustomobject]
+            terminal = [pscustomobject]; published = [array]; directory = [string] } 'Final journal inventory'
+        Assert-CapJournalBinding $manifest.journal.binding $State.Binding
+        if ($manifest.journal.protocolVersion -ne 2 -or $manifest.status -cnotin @('COMPLETE','FAILED') -or
+            $manifest.journal.directory -ine $State.Directory -or
+            (ConvertTo-Json $manifest.journal.terminal -Compress) -cne (ConvertTo-Json $Record.terminal -Compress)) {
+            throw (New-CapJournalFailure 'JournalFinalBinding' 'Terminal manifest binding differs.')
+        }
+        Assert-CapJournalTime $transaction $Record.terminal.sequence
+        $names = Get-CapJournalNames $State -Final
+        $published = @($manifest.journal.published)
+        if (@($names.Keys | Where-Object { $_ -gt $Record.terminal.sequence }).Count -ne 0) {
+            throw (New-CapJournalFailure 'PostTerminalPublication' 'Publication above exact terminal sequence.')
+        }
+        if ($published.Count -ne $Record.terminal.sequence -or $names.Count -ne $published.Count) {
+            throw (New-CapJournalFailure 'SequenceGap' 'Final inventory has missing or extra publications.')
+        }
+        $previous = '0' * 64
+        $terminal = $null
+        for ($index = 0; $index -lt $published.Count; $index++) {
+            $reference = $published[$index]
+            Assert-CapJournalReference $reference -Numbered
+            $number = [long]($index + 1)
+            if ($reference.sequence -ne $number -or -not $names.ContainsKey($number)) {
+                throw (New-CapJournalFailure 'SequenceGap' 'Final inventory is not exactly contiguous.')
+            }
+            $object = Read-CapJournalObject $State $number (New-CapJournalTransaction $State) -RetainStream
+            $held.Add($object.Stream)
+            if ($object.Reference.sha256 -cne $reference.sha256 -or $object.Reference.length -ne $reference.length -or
+                $object.Payload.previousSha256 -cne $previous) {
+                throw (New-CapJournalFailure 'JournalHash' "Final predecessor chain or bytes differ at $number.")
+            }
+            if (($number -eq 1 -and $object.Payload.kind -cne 'Bootstrap') -or
+                ($number -gt 1 -and $object.Payload.kind -ceq 'Bootstrap')) {
+                throw (New-CapJournalFailure 'JournalSchema' 'Bootstrap position differs.')
+            }
+            if ($number -lt $Record.terminal.sequence -and $object.Payload.kind -ceq 'Terminal') {
+                throw (New-CapJournalFailure 'PostTerminalPublication' 'A publication follows an earlier Terminal.')
+            }
+            $previous = $object.Reference.sha256
+            $terminal = $object
+        }
+        if ($null -eq $terminal -or $terminal.Payload.kind -cne 'Terminal' -or
+            $terminal.Reference.sha256 -cne $Record.terminal.sha256 -or
+            $terminal.Reference.length -ne $Record.terminal.length) {
+            throw (New-CapJournalFailure 'JournalFinalBinding' 'Exact Terminal snapshot missing.')
+        }
+        $data = $terminal.Payload.data
+        Assert-CapDataRecord $data @{ entries = [array]; ownedProcesses = [array]; outcome = [string]
+            ownedProcessSurvivors = [array]; pendingLaunchesRemaining = [array]; cleanupFailures = [array] } 'Terminal cleanup'
+        if ($data.outcome -cne $manifest.status -or
+            (ConvertTo-Json $data.ownedProcesses -Depth 15 -Compress) -cne
+                (ConvertTo-Json $manifest.ownedProcesses -Depth 15 -Compress) -or
+            (ConvertTo-Json $data.ownedProcessSurvivors -Depth 12 -Compress) -cne
+                (ConvertTo-Json $manifest.ownedProcessSurvivors -Depth 12 -Compress) -or
+            (ConvertTo-Json $data.pendingLaunchesRemaining -Depth 12 -Compress) -cne
+                (ConvertTo-Json $manifest.pendingLaunchesRemaining -Depth 12 -Compress) -or
+            (ConvertTo-Json $data.cleanupFailures -Depth 12 -Compress) -cne
+                (ConvertTo-Json $manifest.cleanupFailures -Depth 12 -Compress)) {
+            throw (New-CapJournalFailure 'JournalFinalBinding' 'Manifest and terminal cleanup differ.')
+        }
+        $processKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $entryKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($process in $data.ownedProcesses) {
+            Assert-CapDataRecord $process @{ pid = [long]; creationFileTimeUtc = [long]; expectedImagePath = [string]
+                role = [string]; parentPid = [long]; sessionId = [long]; kernelExited = [bool]
+                stdoutEof = [bool]; stderrEof = [bool]; streamOwnerPid = [long]
+                streamOwnerCreationFileTimeUtc = [long] } 'Owned process receipt'
+            if (-not $process.kernelExited -or -not $process.stdoutEof -or -not $process.stderrEof) {
+                throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Kernel exit or owning-stream EOF is unproved.')
+            }
+            if ($process.pid -le 0 -or $process.creationFileTimeUtc -le 0 -or $process.parentPid -le 0 -or
+                $process.sessionId -lt 0 -or $process.streamOwnerPid -le 0 -or
+                $process.streamOwnerCreationFileTimeUtc -le 0 -or -not [IO.Path]::IsPathFullyQualified($process.expectedImagePath)) {
+                throw (New-CapJournalFailure 'JournalIdentity' 'Invalid cleanup generation identity.')
+            }
+            if (-not $processKeys.Add("$($process.pid):$($process.creationFileTimeUtc):$($process.role)")) {
+                throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Duplicate owned process receipt.')
+            }
+            $owners = @($data.ownedProcesses | Where-Object {
+                $_.pid -eq $process.streamOwnerPid -and
+                $_.creationFileTimeUtc -eq $process.streamOwnerCreationFileTimeUtc -and
+                $_.streamOwnerPid -eq $_.pid
+            })
+            if ($owners.Count -ne 1) {
+                throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Owning managed-root streams are unbound.')
+            }
+        }
+        foreach ($entry in $data.entries) {
+            Assert-CapDataRecord $entry @{ pid = [long]; creationFileTimeUtc = [long]; role = [string]
+                expectedImagePath = [string]; expectedParentPid = [long]; expectedSessionId = [long] } 'Registered generation'
+            $matches = @($data.ownedProcesses | Where-Object {
+                $_.pid -eq $entry.pid -and $_.creationFileTimeUtc -eq $entry.creationFileTimeUtc -and
+                $_.role -ceq $entry.role -and $_.expectedImagePath -ieq $entry.expectedImagePath -and
+                $_.parentPid -eq $entry.expectedParentPid -and $_.sessionId -eq $entry.expectedSessionId
+            })
+            if ($matches.Count -ne 1) { throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Registered generation lacks exact cleanup receipt.') }
+            $null = $entryKeys.Add("$($entry.pid):$($entry.creationFileTimeUtc):$($entry.role)")
+        }
+        if (-not $entryKeys.SetEquals($processKeys)) {
+            throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Owned and registered generation inventories differ.')
+        }
+        $namesAfter = Get-CapJournalNames $State -Final
+        if ($namesAfter.Count -ne $names.Count -or
+            @($namesAfter.Keys | Where-Object { -not $names.ContainsKey($_) }).Count -ne 0) {
+            throw (New-CapJournalFailure 'PostTerminalPublication' 'Namespace changed after final inventory.')
+        }
+        if ([DateTime]::UtcNow -ge $State.DeadlineUtc) {
+            throw (New-CapJournalFailure 'JournalUnavailable' 'Final inventory exceeded cleanup hard deadline.')
+        }
+        $result = [pscustomobject]@{
+            Manifest = $manifest; Terminal = $terminal; Record = $Record; Inventory = $published
+            HeldStreams = @(); HashChainVerified = $true
+        }
+        if ($RetainStreams) { $result.HeldStreams = @($held.ToArray()); $keepStreams = $true }
+        return $result
+    } finally { if (-not $keepStreams) { foreach ($item in $held) { $item.Dispose() } } }
+}
+
+function Read-CapNumberedSeedProof {
+    [CmdletBinding()]
+    param([string]$Root, [Parameter(Mandatory)]$Reference, [string]$JobSha256,
+        [string]$ModuleSha256, [string]$WorkerSha256, [DateTime]$DeadlineUtc)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    if ($Reference -isnot [pscustomobject] -or -not $Reference.PSObject.Properties['protocolVersion'] -or
+        $Reference.protocolVersion -ne 2) {
+        throw (New-CapJournalFailure 'LegacyJournalProtocol' 'Exact numbered terminal proof is required.')
+    }
+    Assert-CapDataRecord $Reference @{ directory = [string]; outputDirectory = [string]
+        binding = [pscustomobject]; record = [pscustomobject] } 'Numbered seed proof'
+    if ($Reference.directory.EndsWith('.json', [StringComparison]::OrdinalIgnoreCase) -or
+        $Reference.binding.jobSha256 -cne $JobSha256 -or
+        $Reference.binding.moduleSha256 -cne $ModuleSha256 -or
+        $Reference.binding.workerSha256 -cne $WorkerSha256) {
+        throw (New-CapJournalFailure 'JournalIdentity' 'Seed proof layout or exact source binding differs.')
+    }
+    $state = New-CapJournalState -Root $Root -Directory $Reference.directory `
+        -Binding $Reference.binding -DeadlineUtc $DeadlineUtc
+    $proof = Read-CapJournalFinalProof -State $state -OutputDirectory $Reference.outputDirectory -Record $Reference.record
+    if ($proof.Manifest.status -cne 'COMPLETE' -or $proof.Terminal.Payload.data.ownedProcessSurvivors.Count -ne 0 -or
+        $proof.Terminal.Payload.data.pendingLaunchesRemaining.Count -ne 0 -or
+        $proof.Terminal.Payload.data.cleanupFailures.Count -ne 0) {
+        throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Seed proof is not a completed clean terminal.')
+    }
+    return $proof
+}
+
+function Open-CapJournalManifestStream {
+    param($State, [string]$Path, $Transaction, [long]$Sequence)
+    $native = $null
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        Assert-CapJournalTime $Transaction $Sequence $native
+        try {
+            return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        } catch {
+            $native = Get-CapJournalNativeError $_.Exception
+            Write-CapJournalObservation $State $Sequence $attempt 'FinalManifestOpenFailed' $native $Transaction
+            if ($native -notin @('80070002','80070003','80070020','80070021')) {
+                throw (New-CapJournalFailure 'JournalOpenFailure' "Final manifest HRESULT=$native" $_.Exception)
+            }
+            if ($Transaction.Retries -ge 7) { break }
+            $Transaction.Retries++
+            Assert-CapJournalTime $Transaction $Sequence $native
+            $remaining = [Math]::Min(($Transaction.DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
+                $Transaction.BudgetMilliseconds - $Transaction.Clock.Elapsed.TotalMilliseconds)
+            if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(100, [Math]::Floor($remaining))) }
+        }
+    }
+    throw (New-CapJournalFailure 'JournalUnavailable' "Final manifest sequence=$Sequence HRESULT=$native; retry limit.")
+}
+
+function Assert-CapNoWorkerTransientArtifacts {
+    [CmdletBinding()]
+    param([string[]]$Directories)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    if ($Directories.Count -eq 0) { throw 'Worker artifact inventory requires explicit roots.' }
+    $files = [Collections.Generic.List[string]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    foreach ($directory in $Directories) { $pending.Push($directory) }
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        if ([IO.File]::GetAttributes($directory) -band [IO.FileAttributes]::ReparsePoint) {
+            throw (New-CapJournalFailure 'JournalNamespace' "Reparse-point inventory root: $directory")
+        }
+        foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $attributes = [IO.File]::GetAttributes($path)
+            if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw (New-CapJournalFailure 'JournalNamespace' "Reparse-point artifact preserved: $path")
+            }
+            if ($attributes -band [IO.FileAttributes]::Directory) { $pending.Push($path) }
+            else {
+                $files.Add($path)
+                if ($path.EndsWith('.tmp', [StringComparison]::OrdinalIgnoreCase) -or
+                    $path.EndsWith('.partial', [StringComparison]::OrdinalIgnoreCase) -or
+                    $path.EndsWith('.partial.json', [StringComparison]::OrdinalIgnoreCase)) {
+                    throw (New-CapJournalFailure 'ResidualJournalArtifact' "$path retained, never deleted.")
+                }
+            }
+        }
+    }
+    if ($files.Count -eq 0) { throw 'Worker artifact inventory is empty; cannot prove an executed run.' }
+    return @($files.ToArray())
+}
+
 Export-ModuleMember -Function @(
+    'New-CapJournalBinding',
+    'New-CapJournalState',
+    'Publish-CapJournalSnapshot',
+    'Read-CapJournalSnapshot',
+    'Write-CapImmutableJson',
+    'Format-CapJournalFinalRecord',
+    'Read-CapJournalFinalRecord',
+    'Read-CapJournalFinalProof',
+    'Read-CapNumberedSeedProof',
+    'Assert-CapNoWorkerTransientArtifacts',
     'Set-CapTracePath',
     'Write-CapTrace',
     'Get-CapTraceFailures',

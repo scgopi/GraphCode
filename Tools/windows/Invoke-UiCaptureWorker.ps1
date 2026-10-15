@@ -14,6 +14,11 @@ $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $peerScript = Join-Path $root 'inputs\offline-peer-source.ps1'
 $fixturePath = Join-Path $root 'fixtures\fixture.json'
 $journalPath = $null
+$journalState = $null
+$journalFinalLine = $null
+$journalFinalCleanupCount = -1
+$ownedProcessReceipts = @()
+$leaseExpiresUtc = [DateTime]::MinValue
 $outputDirectory = $null
 $runDirectory = $null
 $auth = $null
@@ -114,15 +119,64 @@ function Write-CapProcessJournal {
         }
     }
     if ($index -ge 0) { $journalEntries[$index] = $entry } else { $journalEntries.Add($entry) }
-    Write-CapJsonAtomic -Path $journalPath -Value ([ordered]@{
-        schemaVersion = 1
-        leaseId = $auth.leaseId
-        jobSha256 = $jobHash
-        workerSha256 = $workerHash
-        moduleSha256 = $moduleHash
-        updatedUtc = [DateTime]::UtcNow.ToString('o')
-        entries = @($journalEntries)
+    Write-CapWorkerJournalSnapshot -Kind 'Progress'
+}
+
+function Write-CapWorkerJournalSnapshot {
+    param([ValidateSet('Bootstrap','Progress','Terminal')][string]$Kind,
+        [string]$Outcome = 'CAPTURING')
+    if ($null -eq $journalState) { throw 'Worker journal was not initialized before publication.' }
+    $null = Publish-CapJournalSnapshot -State $journalState -Kind $Kind -Value ([pscustomobject]@{
+        entries = @($journalEntries.ToArray())
+        outcome = $Outcome
+        ownedProcesses = @($ownedProcessReceipts)
+        ownedProcessSurvivors = @($ownedProcessSurvivors)
+        pendingLaunchesRemaining = @($pendingLaunchesRemaining)
+        cleanupFailures = @($cleanupFailures.ToArray())
+        progressManifest = [pscustomobject](New-CapManifest -Status $Outcome)
     })
+}
+
+function Get-CapWorkerProcessReceipts {
+    $records = [Collections.Generic.List[object]]::new()
+    $roots = @{}
+    foreach ($run in $runs) {
+        $identity = $run.Identity
+        $kernelExited = [CapNative]::IsExited($identity.Process.Handle, $identity.Pid)
+        $stdoutEof = $run.StdoutTask.IsCompleted -and -not $run.StdoutTask.IsFaulted -and -not $run.StdoutTask.IsCanceled
+        $stderrEof = $run.StderrTask.IsCompleted -and -not $run.StderrTask.IsFaulted -and -not $run.StderrTask.IsCanceled
+        $record = [pscustomobject]@{
+            pid = [long]$identity.Pid; creationFileTimeUtc = [long]$identity.CreationFileTimeUtc
+            expectedImagePath = $identity.ExpectedImagePath; role = $identity.Role
+            parentPid = [long]$identity.ParentPid; sessionId = [long]$identity.SessionId
+            kernelExited = $kernelExited; stdoutEof = $stdoutEof; stderrEof = $stderrEof
+            streamOwnerPid = [long]$identity.Pid
+            streamOwnerCreationFileTimeUtc = [long]$identity.CreationFileTimeUtc
+        }
+        if ($roots.ContainsKey($identity.Pid)) { throw 'Duplicate managed-root process generation.' }
+        $roots[$identity.Pid] = $record
+        $records.Add($record)
+    }
+    foreach ($identity in $descendantIdentities) {
+        $parentPid = $identity.ParentPid
+        $visited = [Collections.Generic.HashSet[int]]::new()
+        while (-not $roots.ContainsKey($parentPid)) {
+            if (-not $visited.Add([int]$parentPid)) { throw 'Descendant ownership cycle.' }
+            $parents = @($descendantIdentities | Where-Object { $_.Pid -eq $parentPid })
+            if ($parents.Count -ne 1) { throw 'Descendant has no unique owning managed stream root.' }
+            $parentPid = $parents[0].ParentPid
+        }
+        $owner = $roots[$parentPid]
+        $records.Add([pscustomobject]@{
+            pid = [long]$identity.Pid; creationFileTimeUtc = [long]$identity.CreationFileTimeUtc
+            expectedImagePath = $identity.ExpectedImagePath; role = $identity.Role
+            parentPid = [long]$identity.ParentPid; sessionId = [long]$identity.SessionId
+            kernelExited = [CapNative]::IsExited($identity.Process.Handle, $identity.Pid)
+            stdoutEof = $owner.stdoutEof; stderrEof = $owner.stderrEof
+            streamOwnerPid = $owner.pid; streamOwnerCreationFileTimeUtc = $owner.creationFileTimeUtc
+        })
+    }
+    return @($records.ToArray())
 }
 
 function Assert-CapAcceptedInputs {
@@ -505,7 +559,7 @@ function Save-CapSceneImage {
         privacyReview = $null
     }
     $images.Add($record)
-    Write-CapJsonAtomic -Path $manifestPath -Value (New-CapManifest -Status 'CAPTURING')
+    Write-CapWorkerJournalSnapshot -Kind 'Progress'
     Write-CapWorkerLog "IMAGE phase=$Phase scene=$SceneName sha256=$($capture.Sha256) size=$($capture.Width)x$($capture.Height) dpi=$($capture.Dpi) colors=$($capture.SampledColors)"
 }
 
@@ -544,6 +598,7 @@ function New-CapManifest {
         pendingLaunchesRemaining = @($pendingLaunchesRemaining)
         failures = @($cleanupFailures)
         ownedProcessSurvivors = @($ownedProcessSurvivors)
+        ownedProcesses = @($ownedProcessReceipts)
         privacyRequirement = 'Every image requires an individual privacy check before reviewer handoff.'
     }
 }
@@ -910,7 +965,7 @@ function Invoke-CapActionsScene {
         $null = Test-CapPipeUnserved -PipeName $pipeName
         Save-CapSceneImage -AppRun $app -SceneName 'actions' -ZoomEvidence $zoom -Phase $Phase
         $script:images[$script:images.Count - 1] | Add-Member -NotePropertyName actionObservations -NotePropertyValue $observations
-        Write-CapJsonAtomic -Path $manifestPath -Value (New-CapManifest -Status 'CAPTURING')
+        Write-CapWorkerJournalSnapshot -Kind 'Progress'
         Close-CapGraphCodeApp -AppRun $app -NormalExit
         if (-not [CapNative]::IsExited($app.Run.Identity.Process.Handle, $app.Run.Identity.Pid) -or
             $app.Run.Identity.Process.ExitCode -ne 0) {
@@ -1032,6 +1087,7 @@ try {
     }
     $leaseWindow = Get-CapLeaseWindow -GrantedUtc $lease.grantedUtc -ExpiresUtc $lease.expiresUtc `
         -MaximumMinutes ([double]$lease.maxMinutes) -NowUtc ([DateTime]::UtcNow)
+    $leaseExpiresUtc = $leaseWindow.ExpiresUtc
     $leaseDeadlineUtc = Get-CapAuthorizedWorkerDeadline -WorkerDeadlineUtc $auth.workerDeadlineUtc `
         -LeaseWindow $leaseWindow -NowUtc $leaseWindow.NowUtc
     $selfProcess = [Diagnostics.Process]::GetCurrentProcess()
@@ -1046,6 +1102,16 @@ try {
     if ($supervisorIdentity.CreationFileTimeUtc -ne [long]$auth.supervisorCreationFileTimeUtc) {
         throw 'Supervisor kernel generation differs from the run authorization.'
     }
+    if ($journalPath -ine (Join-Path $runDirectory 'process-journal') -or
+        $manifestPath -ine (Join-Path $outputDirectory 'manifest.json')) {
+        throw 'Worker journal/final manifest paths differ from the numbered protocol authorization.'
+    }
+    $journalBinding = New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
+        -LeaseId $auth.leaseId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
+        -WorkerSha256 $workerHash -SupervisorSha256 $supervisorHash -Identity $selfIdentity
+    $journalState = New-CapJournalState -Root $root -Directory $journalPath `
+        -Binding $journalBinding -DeadlineUtc $leaseExpiresUtc
+    Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
     if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
         $identity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
         if (($identity | ConvertTo-Json -Depth 15 -Compress) -cne ($auth.jobIdentity | ConvertTo-Json -Depth 15 -Compress)) {
@@ -1152,42 +1218,50 @@ try {
             ForEach-Object { [pscustomobject]@{ role = $_.Role; pid = $_.Pid
                 creationFileTimeUtc = $_.CreationFileTimeUtc; expectedImagePath = $_.ExpectedPath; state = 'KERNEL_LIVE_UNRETURNED_LAUNCH' } })
     )
-    if ($journalPath -and $auth) {
+    try { $ownedProcessReceipts = @(Get-CapWorkerProcessReceipts) }
+    catch { $cleanupFailures.Add("Owned process/stream inventory failed: $($_.Exception.Message)") }
+    if ($journalState -and $auth) {
         try {
-            Write-CapJsonAtomic -Path $journalPath -Value ([ordered]@{
-                schemaVersion = 1; leaseId = $auth.leaseId; jobSha256 = $jobHash
-                workerSha256 = $workerHash; moduleSha256 = $moduleHash
-                updatedUtc = [DateTime]::UtcNow.ToString('o'); entries = @($journalEntries)
-                ownedProcessSurvivors = @($ownedProcessSurvivors)
-                pendingLaunchesRemaining = @($pendingLaunchesRemaining)
-                cleanupFailures = @($cleanupFailures)
-            })
+            $null = Assert-CapNoWorkerTransientArtifacts -Directories @($runDirectory, $outputDirectory)
+            if (@(Get-CapTraceFailures).Count -ne 0) { throw 'Worker trace evidence failed.' }
         } catch { $cleanupFailures.Add("Final process journal update failed: $($_.Exception.Message)") }
     }
     foreach ($run in $runs) { $run.Identity.Process.Dispose() }
     foreach ($identity in $descendantIdentities) { $identity.Process.Dispose() }
-    if ($manifestPath -and $job -and $auth) {
+    if ($manifestPath -and $job -and $auth -and $journalState) {
         $finalStatus = if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
             (($rehearsal -and $rehearsalLaunches.Count -eq 1 -and $images.Count -eq 0) -or
             (-not $rehearsal -and $images.Count -eq 10))) {
             'COMPLETE'
         } else { 'FAILED' }
         try {
+            Write-CapWorkerJournalSnapshot -Kind 'Terminal' -Outcome $finalStatus
             $manifest = New-CapManifest -Status $finalStatus
             if ($primaryFailure) { $manifest.failures += "Worker failure: $($primaryFailure.Exception.ToString())" }
-            if ($finalStatus -eq 'COMPLETE') {
-                $finalManifest = Join-Path $outputDirectory 'manifest.json'
-                if (Test-Path -LiteralPath $finalManifest) { throw "Refusing to replace prior final manifest: $finalManifest" }
-                Write-CapJsonAtomic -Path $finalManifest -Value $manifest
-            } else {
-                Write-CapJsonAtomic -Path $manifestPath -Value $manifest
+            $manifest['journal'] = [pscustomobject]@{
+                protocolVersion = 2L; binding = $journalState.Binding; directory = $journalPath
+                terminal = $journalState.Terminal; published = @($journalState.Published.ToArray())
             }
+            $manifestReference = Write-CapImmutableJson -Root $root -Path $manifestPath -Value $manifest
+            $null = Assert-CapNoWorkerTransientArtifacts -Directories @($runDirectory, $outputDirectory)
+            $journalFinalLine = Format-CapJournalFinalRecord -Binding $journalState.Binding `
+                -Manifest $manifestReference -Terminal $journalState.Terminal
+            $journalFinalCleanupCount = $cleanupFailures.Count
         } catch { $cleanupFailures.Add("Final manifest write failed: $($_.Exception.Message)") }
     }
 }
 
+if ($journalFinalLine) {
+    if (-not $primaryFailure -and $cleanupFailures.Count -eq 0) {
+        try { Write-CapWorkerLog "WORKER_COMPLETE images=$($images.Count) lease=$($auth.leaseId)" }
+        catch { $cleanupFailures.Add("Completion logging failed: $($_.Exception.Message)") }
+    }
+    if (@(Get-CapTraceFailures).Count -eq 0 -and $cleanupFailures.Count -eq $journalFinalCleanupCount) {
+        [Console]::Out.WriteLine($journalFinalLine)
+        [Console]::Out.Flush()
+    } else { $cleanupFailures.Add('Final worker trace evidence failed; final record withheld.') }
+}
 if ($cleanupFailures.Count -gt 0) {
     throw "Capture worker cleanup was incomplete: $($cleanupFailures -join '; ')"
 }
 if ($primaryFailure) { throw $primaryFailure }
-Write-CapWorkerLog "WORKER_COMPLETE images=$($images.Count) lease=$($auth.leaseId)"
