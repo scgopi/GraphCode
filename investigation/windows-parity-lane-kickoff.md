@@ -130,8 +130,8 @@ References on this machine:
   V3's twelve turns exceeded its initial two-turn ceiling; V11's separately
   permitted one response/zero executed tools does not erase that deviation
   or make the combined return zero-turn. Producer raster reports are not
-  blanket independent clearance: only three specific new images and the
-  earlier eleven-image v2 sample were independently opened by the parent.
+  blanket independent clearance. The operator independently opened only three
+  specific new images; the earlier eleven-image v2 sample was a separate independent review.
   This docs intake opens no images and adds no privacy verdict. The original
   publication hold remains; current Windows pairs are still required for
   every demoted Partial row, with all 98 identities/statuses unchanged.

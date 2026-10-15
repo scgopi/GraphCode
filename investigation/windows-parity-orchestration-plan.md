@@ -195,8 +195,8 @@ source-only reachability, exact project/overview zoom and menu context,
 root-Composite versus worker-aggregate limits, and transient folder startup
 versus persistent deselection. Keep v3's twelve-versus-two-turn deviation
 distinct from v11's separately permitted one response and zero executed tools.
-The parent reviewed only three specific new images plus the prior eleven-image
-v2 sample; combining producer-clearance reports grants no blanket independent
+The operator independently opened only three specific new images; the earlier
+eleven-image v2 sample was a separate independent review. Combining producer-clearance reports grants no blanket independent
 privacy verdict and never clears held originals. Mac-only references and a
 text/hash intake cannot tick Windows acceptance boxes or authorize product,
 native, renderer or capture work. The kickoff's exact-command retrospective
