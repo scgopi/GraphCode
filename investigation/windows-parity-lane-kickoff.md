@@ -18,8 +18,9 @@ Each issue gets two workers, in order (operator decision, 2026-10-14):
 
 ### If you are the planning worker
 
-Produce the plan from evidence, not memory. Read-only on the repository; you may build, and
-you may run focused hidden-window tests, to confirm current behaviour. Don't use the desktop.
+Produce the plan from evidence, not memory. Read-only on the repository. Build,
+test or desktop execution requires the per-issue command grant in Environment;
+planning permission alone authorizes none of them.
 
 1. **Read** the issue, its comments (including earlier attempts' findings), the ledger rows,
    the macOS captures and the macOS source.
@@ -94,9 +95,22 @@ References on this machine:
   Fitted canvas pixels are not authored card dimensions or 100% zoom.
 - **Publication hold:** consult the local notice
   `C:\gc-ref\macos-groundtruth-2ccf303a.DO-NOT-PUBLISH.txt` by path only; do not
-  copy the notice or held images. Every other image needs individual visual privacy
+  open or quote its contents. Held originals
+  `issue-722\722-menus-split-round3@1x-srgb.png` and
+  `issue-722\722-menus-split-round3@2x.png`: **NEVER open, copy or upload**.
+  Every other image needs individual visual privacy
   clearance before upload. A sample review, correct masks or matching hashes do not
   clear unreviewed images, especially masked terminal captures.
+- **Companion, not replacement:** `C:\gc-ref\macos-groundtruth-2ccf303a-gapfill-v2`,
+  same source, adds exact empty-global/project, project/overview 100%, native
+  Open Folder/Project Settings, inline Reclaim/Keep and Goal/Composite/menu
+  splits. Retained metadata reports 543 files / 178 PNGs / 542 verified payload
+  hashes / zero backend turns. Independent clearance covers only 11 sampled
+  images; 167 unsampled remain independently uncleared. The thirty-row pairing
+  worksheet records 6 sampled components / 3 recorded unsampled / 21 none;
+  all 30 need current Windows evidence and none is promoted. The primary
+  `764-final-fixtures-fitted` remains project 90%, not global/intrinsic 100%.
+  Preserve the ledger's dated original intake, with this additive qualification.
 - **Historical macOS fallback:** Run A is secondary, only for a state the primary
   lacks. Keep its source, fixture and evidence limits distinct.
 - **Windows beta26 "before" captures:** `C:\GraphCode-DevBox-Return\media\`.
@@ -108,6 +122,14 @@ References on this machine:
 
 ## Scope
 
+The batched coordinator reconciliation records merged A/#808, E/#816, B/#814,
+D/#815 and C/#817 source slices, not whole issue closure. #768/#778/#764/#774/#767
+remain open, full B8/C6/D2/E4 criteria stay unchecked and B/C/D/E visual
+acceptance is NotExecuted (#826). Preserve all 98 ledger identities/order and
+**6 Validated / 89 Partial / 3 Out of scope**; thirty demoted rows stay Partial.
+The orchestration plan's current execution/evidence authority governs J5,
+parked adapters and the unapproved stock-only real-window route.
+
 - **One issue, one PR, one coherent slice.** The first PR fixes the issue's primary
   defect. Leave remaining acceptance boxes unticked and list them. Small PRs merge;
   large ones loop through review.
@@ -117,6 +139,33 @@ References on this machine:
 
 ## Environment: do exactly this
 
+**Execution admission overrides the examples below.** Every worker needs a
+**per-issue exact local command allow-list** and **fresh owned roots** before
+execution. Repository bootstrap/build/test examples are **not blanket permission**.
+No local full `Tools\windows\Tests\ValidationRunner.Tests.ps1`,
+no `validate.ps1 -Task windows-shell` unit/integration, and
+no GraphCode/daemon/zmx/provider build or launch unless separately explicitly
+granted. CI owns broad/native regression. Narrow harmless-process, offscreen
+or capture exceptions remain separately reviewed and command-bound; they do
+not authorize adjacent suites or general product execution.
+
+No source changes in flight; keep failures immutable and positive executed
+counts (zero-executed is not a pass). At five failures of the same kind, stop
+and escalate to the operator; no owner rotation, root rename or reset without
+an explicit user decision. Routine approval waits use a coordinator message and idle,
+not a blocking `ask_user`. Check live `awaiting_input` before starting a capture
+lease clock: message acceptance is not admitted permission.
+No manual screenshots, screenshot/golden/pixel-baseline CI or fallback.
+Unrelated-product PRs excluding all four capture-core files may receive at most
+two failed-job reruns per exact head, globally across workflows, citing
+[#826](https://github.com/scgopi/GraphCode/issues/826) and preserving failures.
+The four files are `Tools\windows\UiCaptureDriver.psm1`,
+`Tools\windows\Invoke-UiCaptureWorker.ps1`, `Tools\windows\Invoke-UiCapture.ps1`
+and `Tools\windows\Tests\UiCaptureDriver.Tests.ps1`; core-changing repairs
+do not get this exception.
+
+The following root/tool setup applies **only when the exact commands are
+separately granted**; do not bootstrap, seed or build merely to start a lane.
 Replace `<id>` with your lane id, for example `c4`.
 
 | What | Where |
@@ -143,12 +192,13 @@ Replace `<id>` with your lane id, for example `c4`.
 5. **Tests:**
    - A `--test-filter` that matches nothing exits 0. Quote the executed count, which must be positive.
    - Register new Zig test roots in `Tools/windows/Tests/WindowsShell.Tests.ps1`.
-   - The native UIA provider suite (`Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1`)
-     runs hidden and needs no desktop.
+   - Hidden-window or native UIA labels do not exempt a command from admission;
+     native suites belong to CI unless explicitly granted.
 6. **GitHub, done by you.** Use the GitHub access described in your issue block. Account and credential details are
    deliberately not kept in this repository.
-   - Push your branch, create your PR as a draft, edit its body and mark it ready yourself. The app's PR tools fail on
-   this repository, so don't use them.
+   - Push your branch and create one draft PR using the app-native PR tool.
+     Report tool failure rather than silently switching creation paths.
+     The coordinator owns admission, readiness and merge; do not self-approve.
    - Sign off every commit (`git commit -s`) and add the trailer
      `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
 7. **Rebase hygiene:**
@@ -160,8 +210,9 @@ Replace `<id>` with your lane id, for example `c4`.
    - Edit it only with approval.
    - Assert on **named** elements; don't count broad sets. In wave 1 a canvas held loop cards,
      worktree cards and a banner.
-   - Add positive and negative functional cases to `Tools/windows/Tests/ValidationRunner.Tests.ps1`,
-     and run that file locally before pushing.
+   - Add positive and negative functional cases within an approved file lease.
+     Full local ValidationRunner execution is not authorized by a script edit;
+     any focused exception needs its exact command approved first.
 
 ## Order of work (the per-PR gate)
 
@@ -173,15 +224,13 @@ Report each step's result, or NotExecuted with the reason.
    - Layout criteria are testable as geometry: rects lie inside the client area and above
      the footer, text bounds come from the container, and nothing overlaps.
    - A compile error is not RED.
-3. **GREEN.** Run the focused tests and quote "All N tests passed", with N positive.
-4. **Push a draft PR; exact-head CI is your regression gate.**
-   - Don't run the full unit or integration part locally. They need the desktop, and CI runs
-     them in parallel and authoritatively.
-   - Run locally only what doesn't need the desktop: focused roots, `ValidationRunner.Tests.ps1`
-     when scripts change, and `-Task visual-baseline` when tokens, palette, fonts or visual
-     contracts change.
-   - Every workflow on the exact head must be green. Cite run and job IDs, with counts, in
-     the `REGRESSION:` line.
+3. **GREEN.** Run only admitted focused commands and quote the positive executed count.
+4. **Push a draft PR; exact-head CI owns broad/native regression.**
+   - Execute locally only the approved exact allow-list. A focused root, script
+     edit or hidden-window label grants no exception. No visual-baseline task.
+   - Report nonempty exact-head run/job inventories and failures honestly.
+     Configured path skips are not executed tests; a dispatch is not a PR check.
+     Cite actual regression commands/results, not predicted CI outcomes.
 5. **Code review.**
    - Start a `rubber-duck` agent with the reviewer model named in your issue block. It must be
      from a different vendor than you.
@@ -189,34 +238,27 @@ Report each step's result, or NotExecuted with the reason.
    - It must open each log it cites, confirm every RED, GREEN and REGRESSION line, check that
      no unrelated file changed, and check the rebase diff.
    - Fix or answer every finding.
-6. **Screenshots, once, last.** Only after steps 4 and 5 pass on the final head:
-   - send `LEASE REQUEST lane=<id> purpose=<surfaces> est=<15 at most>`, and wait for `LEASE GRANTED`;
-   - capture before (main) and after (your head) at 100%, with `PrintWindow(hwnd, hdc, 2)` plus
-     pixel verification. For owned popups that `PrintWindow` omits, use an ownership-checked
-     screen capture (`WindowFromPoint` at the centre and on a 40 px grid);
-   - don't call `ActivateWindow` from `uia-live-gate.ps1` (#797);
-   - end the shell with File > Exit, stop by PID every process you own, including `zmx.exe`
-     daemons, and verify that none remain;
-   - send `LEASE RELEASED`.
-7. **Visual review: a local agent review, not CI.** Screenshot verification is a judgement made by an agent. It
-   isn't a CI pipeline and it isn't a pixel baseline (operator decision, 2026-10-14).
-   - Start a vision-capable reviewer from a different vendor than you. Give it the screenshots, the PR description,
-     the diff and the paired macOS captures.
-   - It opens every image and decides whether each one shows what the PR claims was built and matches the macOS
-     reference. It confirms or rejects each acceptance box, citing what it saw.
-   - **Neighbouring screens:** when your change touches shared paint or layout code (`GraphCanvas.zig`,
-     `DesignTokens.zig`, `AppFont.zig`, `Sidebar.zig`, or the paint and layout paths in `App.zig`), the same desktop
-     slot also captures the sidebar, the Graph overview, a project canvas and a loop workspace. The reviewer checks
-     them for unintended changes against the last accepted captures on the issue.
-   - Upload privacy-safe fixture images with the github-pr-media skill, and add a table to the PR: macOS capture,
-     Windows before, Windows after, and the boxes each row shows.
+6. **Capture is gated, not an instruction to run.** Follow the orchestration
+   plan's current #826/#822 authority. B/C/D/E visual acceptance is
+   **NotExecuted (#826)**. A merged code slice is not visual acceptance.
+   A later real-window route needs core merge, reviewed plan and exact commands;
+   only an admitted dedicated LAST slot of at most 15 minutes may be used.
+   No inherited lease, manual capture, automatic neighbouring-screen expansion
+   or fallback follows this gate.
+7. **Visual review remains local and scoped, not CI.** Only individually
+   privacy-cleared admitted images may be opened or published. A different-vendor
+   reviewer records the exact paired surfaces/criteria and leaves every
+   unsupported box unticked. An offscreen result is
+   **real paint path, offscreen component render**, not window, popup, native-control, terminal, input,
+   accessibility, physical-input or persistence evidence. Its first scene hides
+   the right panel; later surfaces need separate approval. Never bind historical
+   pixels to current source using conversion-time hashes.
 8. **Hand over.**
    - Fill in `.github/PULL_REQUEST_TEMPLATE.md`, add a **Not verified** list, and use `Refs #<n>`,
      never `Fixes`.
    - Check the body with `pwsh -NoProfile -File Tools\tdd\Test-TddEvidence.ps1 -BodyPath <file>`.
-   - Run `gh pr ready <n>`, and wait for exact-head CI to be green again (DCO re-runs).
-   - Message the coordinator with `PR READY #<n>`, the head SHA and a five-line evidence summary.
-     Don't merge.
+   - Message the coordinator with the draft PR URL, exact head and bounded
+     evidence/NotExecuted summary. Wait idle for admission; don't mark ready or merge.
 
 ## Evidence honesty
 
@@ -234,8 +276,8 @@ Report each step's result, or NotExecuted with the reason.
   - an exact-head CI failure that you caused.
 - After **5 failed iterations of the same kind**, stop and send `STUCK` with a handoff note:
   what you tried, the failing output, the reviewer findings, and what's worth keeping.
-- Before that, keep iterating in this session. Waiting for the desktop, CI or review is not
-  a failure.
+- Before that, iterate only within admitted commands. Waiting for approval,
+  desktop, CI or review is not a failure; it grants no execution permission.
 
 ## Communication
 

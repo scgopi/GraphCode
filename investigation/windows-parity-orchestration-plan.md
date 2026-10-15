@@ -47,24 +47,25 @@ truth for status. The issues carry the acceptance criteria and the priority.
 
 | Cause | Fix |
 | --- | --- |
-| Every lane's full unit and integration runs went through the one desktop, and were re-run each time a head moved. The queue dominated elapsed time. | Exact-head CI is the regression gate, and the desktop is for screenshots only: one slot of 15 minutes at most per PR, taken last (see below). |
+| Every lane's full unit and integration runs went through the one desktop, and were re-run each time a head moved. The queue dominated elapsed time. | Exact-head CI owns broad/native regression. Historical screenshot-slot instructions are superseded by the execution/capture gates below. |
 | Escalation thresholds of 2 or 3 restarted sessions, which lost bootstrap, builds and context. Every lane escalated at least once. | Escalate only after 5 failed iterations (operator decision; see "Abandon and escalate"). |
 | Kickoffs were hand-copied per lane, and drifted: an 8-character validation root that failed the 81-character preflight, a wrong `Refs` line, the wrong reviewer model. | One canonical kickoff, `investigation/windows-parity-lane-kickoff.md`. The coordinator sends only an issue block. |
 | Environment traps were rediscovered lane by lane: a junction root, the root length, a stale profile log, `onboarding-seen`, `CopyFromScreen` capturing the wrong app, the `ActivateWindow` Alt tap (#797), `zmx` daemons left running, `vcvars`, the PR tool failing on forks. | They are listed once, in the kickoff's "Environment" section. |
 | The coordinator relayed every PR creation and body edit. | Lanes create and edit their own PRs, using the access details in their issue block (not kept in the repository). |
 | A rebase conflict resolution silently reverted #789's geometry helpers. | After each rebase, the lane and its reviewer read `git diff origin/main...HEAD`. |
-| Broad new assertions in `uia-live-gate.ps1` (counting every canvas card) failed CI twice. | Gate edits assert on named elements, with local `ValidationRunner.Tests.ps1` cases. |
-| Screenshots were taken before review, then retaken after each fix. | Code review first; screenshots once, on the final head; then an image-only review. |
+| Broad new assertions in `uia-live-gate.ps1` (counting every canvas card) failed CI twice. | Gate edits assert on named elements, with scoped contract cases; full local ValidationRunner is no longer authorized by a script edit. |
+| Screenshots were taken before review, then retaken after each fix. | Review first; any future capture requires separate admission. Manual screenshots and visual CI were canceled. |
 
 **Coordinator rules (added 2026-10-14):**
 - **Verify before ruling.** Check a scope or parity ruling against the macOS
   source before sending it. Two wave-1 rulings were reversed (a historical
   baseline pin, and a Restart button macOS does show).
-- **Run harness changes end to end locally first.** A coordinator PR that changes
-  a validation script runs that script locally before merge. #802 merged with a
-  known local failure, and #805 had to fix it.
-- **Answer every lane message within one turn**, and keep the desktop queue
-  moving. An undeliverable grant goes to the next lane at once.
+- **Do not treat a harness edit as execution permission.** #802 merged with a
+  known local failure, and #805 had to fix it. A local reproduction now needs a
+  per-issue exact command grant; CI owns broad/native regression.
+- **Answer actionable lane messages promptly.** Routine approval waits use
+  message plus idle. Check live awaiting-input and execution admission before a
+  lease clock; delivery of a grant is not evidence that it was admitted.
 
 ## Wave 2 (started 2026-10-14)
 
@@ -78,21 +79,97 @@ through four steps:
    approves its file scope (including any out-of-lease files, up front), and
    records `Plan approved` on the issue.
 3. **Implement.** An implementation worker (`gpt-6-luna`, high; `gpt-6.1-sol`, high, long_context, for highly complex features) executes the approved plan under the
-   per-PR gate. Exact-head CI is the regression gate, screenshots are taken once
-   at the end, and escalation comes only after 5 failed iterations.
-4. **Merge.** The coordinator merges on exact-head CI, after the code and image
-   reviews.
+   per-PR gate and exact command allow-list. CI owns broad/native regression;
+   capture is separately gated, and five failures trigger an operator stop.
+4. **Merge.** The coordinator owns admission/readiness/merge on accepted source
+   review and exact-head CI, explicitly recording any deferred visual criteria.
+   A code-slice merge does not close those criteria.
 
 Planning runs in parallel for all lanes. Implementation stays one per lane.
 
 | Lane | Issue | Planner | Implementer | Reviewer |
 | --- | --- | --- | --- | --- |
 
-**Desktop lease.** Screenshots of a running shell, Windows Sandbox runs and any
-local integration run take the desktop. One session holds it at a time, and the
-coordinator hands it out. Focused hidden-window `zig test` runs in parallel,
-each in its own scratch roots. Full unit and integration validation run in
-exact-head CI (see below).
+### Current execution and evidence authority
+
+Every worker needs a **per-issue exact local command allow-list** and
+**fresh owned roots** before execution. Repository bootstrap/build/test examples
+are **not blanket permission**. No local full `Tools\windows\Tests\ValidationRunner.Tests.ps1`,
+no `validate.ps1 -Task windows-shell` unit/integration, and
+no GraphCode/daemon/zmx/provider build or launch unless separately explicitly
+granted. CI owns broad/native regression. Narrow harmless-process/offscreen/
+capture exceptions remain separately reviewed and command-bound.
+
+No source changes in flight; keep failures immutable. Zero-executed is not a
+pass. At five failures of the same kind, stop for the operator;
+no owner rotation, root rename or reset without an explicit user decision. Routine approval waits
+use a coordinator message and idle, not blocking `ask_user`. Check live
+`awaiting_input` before starting any capture lease clock:
+message acceptance is not admitted permission.
+No manual screenshots, screenshot/golden/pixel-baseline CI
+or fallback. No automatically granted local execution follows a green workflow.
+
+For unrelated-product PRs excluding `Tools\windows\UiCaptureDriver.psm1`,
+`Tools\windows\Invoke-UiCaptureWorker.ps1`, `Tools\windows\Invoke-UiCapture.ps1`
+and `Tools\windows\Tests\UiCaptureDriver.Tests.ps1`, the #826 exception permits
+at most **two failed-job reruns per exact head, globally across workflows**,
+citing #826 and preserving the original failures. **Core-changing repairs do
+not get this exception.**
+
+**Capture core.** [#826](https://github.com/scgopi/GraphCode/issues/826) remains
+open, no longer under its former blocked-title/no-new-owner ruling. The
+[explicit user override](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6186430845)
+appoints J5 (GPT-6.1 Sol/high) as sole owner of only the two Phase A fixture
+defects: validAbsentWQL and StrictMode whole-array wrapping, with a fresh
+five-failure budget. Static Sonnet review was accepted and the exact decision
+driver then conditional 51-case direct suite were granted; current runtime/CI
+acceptance is pending. This is not authority for other edits. J4's fifth failure
+(**5 executed / 3 passed / 2 failed**) stays frozen historical evidence, not an
+accepted lifecycle repair. The pure 12-row decision matrix and three mutant
+distinctions are not a full endpoint pass. Phase B immutable numbered journal
+work may be planned only after Phase A review plus green CI is accepted, then
+requires its own plan/review before implementation. Cap and the D adapter stay
+parked until #826 merges and explicit ordered resumption; no automatic capture
+authority follows a core merge.
+
+**Offscreen route.** The seven-file first project scene is authorized only for
+controlled post-C rebase and source review. No current-source export, PNG or
+visual acceptance exists. It is **real paint path, offscreen component render**:
+two idle cards, one edge, 1280x720; the first scene hides the right panel.
+Only actual in-frame card/edge/panel/layout pixels can support a later scoped
+claim, never window/composition, popups, terminal, native controls, input,
+accessibility, physical input or persistence. Do not rebind old dirty
+`4fafbfb2` pixels with conversion-time current hashes. Sidebar, right-panel and
+NativeForms slices need separate later approvals after the first proves out.
+
+**Selected real-window option 1: UNAPPROVED plan, not available mechanics.**
+The [earlier proposal](https://github.com/scgopi/GraphCode/issues/822#issuecomment-6186605912)
+is under review and needs a shorter stock-only revision. The later operator
+steer prohibits any fork, patch or derivative of WinAppCli or another external
+repository: **stock pinned WinAppCli 0.5.0 only**. Restore/foreground are
+acceptable and must be recorded inside the dedicated **LAST, at most 15-minute**
+desktop slot when explicitly granted; they are not forbidden in that route.
+Backend may remain unattested. Correct-pixel fallback may be admitted only
+with all postchecks: per-capture success, target DWM-frame dimensions within
+DPI rounding, a single window with no non-target owned popups/composite,
+nonblank variance, unchanged pre/post roster and identity, privacy review and
+then local vision review. Variance proves neither backend nor absence of fallback.
+The first proposed slice is only the GraphCode main window plus authentic Clone
+dialog, with minimal GraphCode profile generalisation only if source hardcodes
+require it. No implementation, install, probe or execution before #826 merges,
+plan review and explicit new commands. Menus retain semantic HMENU evidence;
+terminal/tray remain deferred. This is not a new visual CI or manual-capture grant.
+
+**Merged slices, deferred claims.** A/#808, E/#816, B/#814, D/#815 and C/#817
+are all merged; accepted main for this reconciliation is
+`24209d2a70efee78be2a8214edf013e9b787ccd0`. The ledger's merged-slice table
+records their exact merges and bounded source progress. #768/#778/#764/#774/#767
+remain open; full B8/C6/D2/E4 criteria stay unchecked, and B/C/D/E visual
+acceptance is NotExecuted (#826). A's historical 26 assets are text-prompt
+evidence, not a NativeForms/policy-overflow repair. The 98 canonical identities,
+order and statuses remain **6 Validated / 89 Partial / 3 Out of scope**, including
+all thirty demoted rows still Partial. No worker may promote rows from code,
+unit/UIA/native-menu/offscreen capability or macOS-only references.
 
 **Short validation root.** The UIA live-gate preflight refuses sandbox paths
 longer than 81 UTF-16 characters, and `validate.ps1` appends
@@ -105,42 +182,32 @@ resolved path. That breaks the `WorktreeGitProcess` unit fixtures, and very
 probably caused local `ScrubbedShellStartup` `registered-project` failures that
 exact-head CI did not reproduce.
 
-**The desktop is for screenshots only (since 2026-10-14).** One machine has one
-desktop, and wave 1 showed that serialising every lane's full unit and
-integration runs through it, and re-running them each time a head moved,
-dominated elapsed time: three product PRs merged in about ten hours. So:
+**CI and desktop separation.** Hosted exact-head workflows own broad/native
+regression. Report a nonempty run/job inventory, actual positive executed counts
+and configured skips separately; a manual dispatch is not a PR required check.
+Some App/WindowsNativeDialogs unit roots show or focus windows: "unit" or
+"hidden" does not establish harmlessness or authorize local execution.
+Only the separately admitted final capture route can consume a desktop slot;
+the old screenshot queue does not grant a lease.
 
-- **Exact-head CI is the regression gate.** Its three unit shards, the
-  integration job (the live UIA gate) and packaging run in parallel on hosted
-  runners, and they're authoritative. A `REGRESSION:` line may cite the exact-head
-  CI run and job IDs, with their counts.
-- **Don't run the full unit or integration part locally in a desktop slot**,
-  except to debug a CI failure you can't reproduce otherwise; ask first. Some
-  App and WindowsNativeDialogs unit roots call `ShowWindow`, `SetForegroundWindow`
-  or `SetFocus`, so they can't run outside a lease.
-- **Focused hidden-window `zig test` roots, `-Task visual-baseline` and
-  `ValidationRunner.Tests.ps1` run freely**, without the desktop.
-- **Desktop slots are 15 minutes at most, and one per PR.** Take one only after
-  the code review has accepted the code and exact-head CI is green, so that the
-  screenshots are taken once, on the final head.
-
-**Captures.**
+**Historical capture environment notes, not execution permission.**
 - Seed `onboarding-seen` in the fixture's `GRAPHCODE_SUPPORT_DIR`;
   `WindowsOnboarding.Store` reads it there, not from `LOCALAPPDATA`.
 - Windows Sandbox clamps the guest screen to about 1520x823 and failed
   `EnumDisplaySettings` with vGPU disabled. Use it for clean-install and
   first-run flows, not for 1440x900 visual captures.
 
-**Creating PRs.** Workers create and edit their own PRs. The GitHub access details
-come with the issue block and are not kept in the repository. The app's PR tool
-tries a fork push and fails.
+**Creating PRs.** Workers create one draft with the app-native PR tool and the
+complete repository template; report failure rather than switching creation
+paths. The coordinator owns readiness, admission and merge. Access details
+remain outside the repository.
 
-**Provider checkouts.** Seed `winghostty` and `zmx` under the lane's
+**Provider checkouts, only when command-granted.** Seed `winghostty` and `zmx` under the lane's
 `-ProviderRoot` from the read-only local mirrors in `C:\gc-cache\git\*.git`.
 Check out the pinned commit, point `origin` back at GitHub, then run
 bootstrap: it verifies the pin.
 
-**Toolchain.** Each session bootstraps its own tool, provider and scratch
+**Toolchain, only when command-granted.** Each session bootstraps its own tool, provider and scratch
 roots: `C:\gct\<lane>`, `C:\gcp\<lane>` and `C:\gcs\<lane>`. To skip the
 slow Zig download, seed the tool root from the checksum-verified, read-only
 cache in `C:\gc-cache\zig`.
@@ -253,6 +320,10 @@ same kind:
 | The rubber duck or the visual sign-off rejects the PR with substantive findings (not wording) | 5 rejections |
 | Exact-head CI fails for a reason the session caused | 5 times |
 
+This threshold is a **stop/operator gate**, not permission to rotate owners or
+reset roots/counters. The following handoff procedure requires an explicit user
+decision before appointing a replacement; it does not automatically restart work.
+
 Everything else is **corrected in place, not escalated**:
 - A contradicted evidence claim (overclaiming) is fixed in the PR body, and the
   reviewer re-checks it.
@@ -309,41 +380,36 @@ silently.
    - no two control rects overlap.
 
    Use the existing `RealShellWindow` and form-geometry test patterns.
-3. **Implement**, then run the focused Zig tests and paste their output
-   counts. Assert a positive executed-test count, because a filter that matches
-   nothing still exits 0.
-4. **Full validation is exact-head CI**: push, and wait for every workflow on
-   the exact head to be green. Locally, run only what doesn't need the desktop:
-   the focused roots, `ValidationRunner.Tests.ps1` when gate or runner scripts
-   change, `-Task packaging` when packaging changes, and `-Task visual-baseline` when
-   `DesignTokens.zig`, palette, font or visual-contract files change. That task
-   runs `VisualBaseline.Tests.ps1` and `PaletteParity.Tests.ps1`, which the shell
-   suites don't. `windows-spikes` is a CI workflow job, not a `validate.ps1`
-   task, and every exact-head workflow must be green before merge. Report
-   every failure, including
+3. **Implement**, then run only the admitted focused commands and paste actual
+   output counts. Assert a positive executed-test count, because a filter that
+   matches nothing still exits 0.
+4. **Broad/native regression is exact-head CI.** Local execution is limited to
+   the admitted per-issue exact allow-list; script changes, focused/hidden roots
+   and packaging changes do not grant new commands. No visual-baseline task.
+   `windows-spikes` is a CI workflow job, not a `validate.ps1` task.
+   Every exact-head workflow must be green before merge. Report every failure, including
    flakes, with the rerun result next to it. Never replace a failing log with a
    passing one.
-5. **Visual evidence (local), last.** Capture once, after steps 4 and 6 pass on
-   the final head, in one desktop slot of 15 minutes at most. Use the shared
-   reference fixture, and capture the surface **before and after** at 100%, with
-   `PrintWindow(hwnd, hdc, 2)` plus pixel verification. Don't use `ActivateWindow`
-   from `uia-live-gate.ps1` (#797). Afterwards, check that no processes you own remain,
-   including `zmx.exe` daemons. Windows Sandbox can't do 1440x900 captures. The PR
-   includes a table: macOS capture, Windows before, Windows after, and the
-   acceptance boxes each pair shows.
-6. **Rubber duck, before the screenshots.** A reviewer from a different vendor
-   receives the diff, the PR body and the evidence folder; it sees the screenshots
-   in a final, image-only pass after step 5. It must check:
+5. **Visual evidence is separately gated.** No manual screenshots or automatic
+   neighbouring-screen batch. The current authority above controls any future
+   final desktop slot. B/C/D/E visual acceptance is **NotExecuted (#826)**,
+   not silently waived by merge. Record exact paired scenes, source binding and
+   limitations only after an admitted run; historical pixels cannot acquire
+   current provenance during conversion.
+6. **Source/evidence review, before any admitted capture.** A reviewer from a
+   different vendor receives the diff, PR body and evidence folder. Only an
+   admitted capture proceeds to a final privacy-cleared image pass. It checks:
    - every RED/GREEN/REGRESSION line matches a log it opened;
    - every screenshot it cites shows the claimed state;
    - no criterion is claimed from a UIA readback or unit test alone;
    - no unrelated file changed;
-   - the behaviour of neighbouring surfaces didn't regress (it opens their
-     captures as well).
+   - neighbouring-surface evidence within the admitted scope, explicitly
+     listing unexecuted checks rather than manufacturing a new capture grant.
 
    Its findings are fixed or answered in the PR before merge.
-7. **Visual sign-off.** The visual model ticks each acceptance box with a crop
-   reference, or leaves it unticked with a reason.
+7. **Visual sign-off.** Only accepted individually privacy-cleared image pairs
+   can support the named criteria; otherwise leave boxes unticked with a reason.
+   Offscreen component evidence cannot stand in for whole-window/native behavior.
 8. **Merge.** Only the coordinator merges, after exact-head CI is green, using
    `gh pr merge --squash --match-head-commit <sha>`. Ledger rows change only in
    a coordinator ledger PR, after the evidence is accepted.
@@ -362,6 +428,10 @@ silently.
   incomplete evidence stays `Partial` or unticked.
 
 ## Local testing (no Dev Box)
+
+This table describes evidence classes, **not executable permission**. CI owns
+the broad/native rows. Any local exception needs the exact allow-list and
+fresh owned roots above; manual screenshots remain canceled.
 
 | Lane | What it proves | How |
 | --- | --- | --- |
@@ -408,6 +478,27 @@ Use the separately recorded global overview for that context. Likewise, a
 disabled global menu command is not evidence that a similarly named workspace
 bar button is disabled.
 
+### Additive companion qualification (2026-10-15)
+
+The original primary remains `C:\gc-ref\macos-groundtruth-2ccf303a`.
+`C:\gc-ref\macos-groundtruth-2ccf303a-gapfill-v2` is additive, not a
+replacement or blanket clearance: **543 files / 178 PNGs / 542 verified payload
+hashes / zero backend turns** in the retained metadata. Independent review
+cleared only **11 sampled images**; **167 unsampled remain independently
+uncleared**. This documentation reconciliation reads metadata/hashes only and
+adds no image privacy verdict. The primary's two held issue-722 originals and
+path-only hold notice remain governed by the canonical kickoff.
+
+New macOS references include exact empty global/project scenes, separate
+project/overview 100% scenes, native Open Folder/Project Settings, inline
+Reclaim/Keep, Goal/Composite and menu splits. The primary fitted-project 90%
+frames are not relabelled as global or intrinsic 100%. The read-only thirty-row
+worksheet records 6 sampled components / 3 recorded but independently unsampled /
+21 without a new exact recording; all 30 require current Windows evidence,
+with zero promotions. Worksheet and spotcheck metadata hashes are retained in
+the ledger. Preserve its dated 2026-10-14 table as historical observation;
+companion qualification is a later update, not retroactive provenance.
+
 The ledger's dated intake recovers all 30 previously unassessed row identities.
 Pair only exact states that were actually recorded. The retained Windows
 bundle is **Windows beta26 (pre-wave-1)**; a historical pair is not a verdict
@@ -425,11 +516,10 @@ baseline CI lane is revived by this intake.
 
 - **Wave 1 (P1).** Lanes A–E start in parallel. Calibrate the models on the
   first issue in each lane.
-- **After each wave:**
-  1. cut a local unpublished candidate;
-  2. run the L1 and L2 qualification;
-  3. re-run the paired captures on the surfaces that changed;
-  4. promote ledger rows only where the gate evidence is complete;
-  5. publish a prerelease only with operator approval.
+- **After each wave:** review the accepted source slices, exact-head hosted
+  regression and outstanding criteria. Candidate builds, local L1/L2 execution
+  and paired capture each require their own explicit commands and admission;
+  they do not run automatically. Promote ledger rows only after complete
+  accepted evidence, and publish a prerelease only with operator approval.
 - **Wave 2 (P2)** and **wave 3 (P3)** follow the same loop. The testing-gap
   verification in lane F runs throughout.
