@@ -476,6 +476,8 @@ function Assert-CapRehearsalSuccess {
 
 $script:journalSelf = $null
 $script:journalHighestSeen = 0
+$script:journalHighestSha256 = $null
+$script:journalRelistCount = 0
 $journalSupervisorFunctions = @('Open-CapJournalRead', 'Test-CapFileNotFoundError', 'Get-CapJournalSnapshotList',
     'Read-CapJournalSnapshotBytes', 'Convert-CapJournalSnapshot', 'Read-CapJournalHighest', 'Refresh-CapJournal',
     'Assert-CapJournalTerminal', 'Add-CapTrackedIdentity')
@@ -506,6 +508,8 @@ function Set-CapJournalReaderContext {
     Set-Variable -Scope 1 -Name tracked -Value ([Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase))
     Set-Variable -Scope 1 -Name untrackedJournalEntries -Value ([Collections.Generic.List[object]]::new())
     $script:journalHighestSeen = 0
+    $script:journalHighestSha256 = $null
+    $script:journalRelistCount = 0
 }
 
 function New-CapJournalFixtureDirectory {
@@ -836,43 +840,44 @@ try {
             return 'Actual shared root/source/mapping predicates only; no product binary, HWND, native compatibility, or live capture was executed.'
         }
         Invoke-CapTest 'actual journal reader permits worker atomic replacement while retaining its snapshot' {
-            foreach ($definition in @(
-                @($supervisorPath, 'Open-CapJournalRead'),
-                @($workerPath, 'Write-CapJsonAtomic')
-            )) {
-                $ast = [Management.Automation.Language.Parser]::ParseInput(
-                    [IO.File]::ReadAllText($definition[0]), [ref]$null, [ref]$null)
-                $function = $ast.Find({ param($node)
-                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $definition[1]
-                }, $true)
-                Assert-CapTest ($null -ne $function) "Actual journal function missing: $($definition[1])"
-                . ([scriptblock]::Create($function.Extent.Text))
-            }
+            # Historical case name kept: the worker no longer replaces a mutable path (File.Replace left a
+            # window where the name was missing). It now publishes immutable numbered snapshots, so a held
+            # reader keeps its exact snapshot and a fresh read sees the newer published one.
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath @('Open-CapJournalRead'))))
+            . ([scriptblock]::Create((Get-CapActualFunctionText $workerPath @('Publish-CapJournalSnapshot'))))
+            $script:journalSequence = 0; $script:journalPreviousSha256 = $null; $script:journalTerminal = $null
             $directory = Join-Path $scratch 'journal-sharing-component'
             $null = New-Item -ItemType Directory -Path $directory
-            $path = Join-Path $directory 'process-journal.json'
-            Write-CapJsonAtomic -Path $path -Value ([ordered]@{ version = 1; componentOnly = $true; cleanupComplete = $false })
-            $stream = Open-CapJournalRead -Path $path
+            $base = Join-Path $directory 'process-journal.json'
             try {
-                Write-CapJsonAtomic -Path $path -Value ([ordered]@{
-                    version = 2; componentOnly = $true; cleanupComplete = $true
-                    ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
-                })
-                $reader = [IO.StreamReader]::new($stream)
-                try { $snapshot = $reader.ReadToEnd() | ConvertFrom-Json }
-                finally { $reader.Dispose() }
-                $freshStream = Open-CapJournalRead -Path $path
+                $first = Publish-CapJournalSnapshot -BasePath $base -Fields ([ordered]@{ version = 1; componentOnly = $true; cleanupComplete = $false })
+                $stream = Open-CapJournalRead -Path $first.Path
                 try {
-                    $freshReader = [IO.StreamReader]::new($freshStream)
-                    try { $current = $freshReader.ReadToEnd() | ConvertFrom-Json }
-                    finally { $freshReader.Dispose() }
-                } finally { $freshStream.Dispose() }
-                Assert-CapTest ($snapshot.version -eq 1 -and -not $snapshot.cleanupComplete -and
-                    $current.version -eq 2 -and $current.cleanupComplete -and $current.ownedProcessSurvivors.Count -eq 0 -and
-                    $current.pendingLaunchesRemaining.Count -eq 0 -and $current.cleanupFailures.Count -eq 0) `
-                    'Atomic replacement lost the held snapshot or a fresh read mistook it for completed cleanup.'
-            } finally { $stream.Dispose() }
-            return 'Actual supervisor reader and actual worker atomic writer; held file I/O only, no process, lease or GUI mock.'
+                    $second = Publish-CapJournalSnapshot -BasePath $base -Fields ([ordered]@{
+                        version = 2; componentOnly = $true; cleanupComplete = $true
+                        ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
+                    })
+                    $reader = [IO.StreamReader]::new($stream)
+                    try { $snapshot = $reader.ReadToEnd() | ConvertFrom-Json }
+                    finally { $reader.Dispose() }
+                    $freshStream = Open-CapJournalRead -Path $second.Path
+                    try {
+                        $freshReader = [IO.StreamReader]::new($freshStream)
+                        try { $current = $freshReader.ReadToEnd() | ConvertFrom-Json }
+                        finally { $freshReader.Dispose() }
+                    } finally { $freshStream.Dispose() }
+                    Assert-CapTest ($snapshot.version -eq 1 -and -not $snapshot.cleanupComplete -and
+                        $current.version -eq 2 -and $current.cleanupComplete -and $current.ownedProcessSurvivors.Count -eq 0 -and
+                        $current.pendingLaunchesRemaining.Count -eq 0 -and $current.cleanupFailures.Count -eq 0) `
+                        'Publication lost the held snapshot or a fresh read mistook it for completed cleanup.'
+                    Assert-CapTest ($first.Path -cne $second.Path -and $snapshot.sequence -eq 1 -and $current.sequence -eq 2 -and
+                        $current.previousSha256 -ceq $first.Sha256 -and
+                        (Get-FileHash -LiteralPath $first.Path -Algorithm SHA256).Hash -ceq $first.Sha256 -and
+                        @(Get-ChildItem -LiteralPath $directory -File).Count -eq 2) `
+                        'The first published snapshot was replaced instead of staying immutable.'
+                } finally { $stream.Dispose() }
+            } finally { $script:journalSequence = 0; $script:journalPreviousSha256 = $null; $script:journalTerminal = $null }
+            return 'Actual supervisor reader open and actual worker publisher; held file I/O only, no process, lease or GUI mock.'
         }
         Invoke-CapTest 'actual rehearsal data satisfies the repaired report gate and refuses stale proof' {
             $source = [IO.File]::ReadAllText($supervisorPath)
@@ -1001,7 +1006,7 @@ try {
             $script:openHook = { param($Path)
                 if ($script:openCalls.Count -eq 1) {
                     Remove-Item -LiteralPath $Path -Force
-                    $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 2 -Phase 'two'
+                    $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence 2 -Phase 'two' -PreviousSha256 ('A' * 64)
                 }
             }
             try {
@@ -1052,7 +1057,7 @@ try {
             $script:openHook = { param($Path)
                 $next = [int](([IO.Path]::GetFileName($Path) -split '\.')[1]) + 1
                 Remove-Item -LiteralPath $Path -Force
-                $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence $next -Phase "again-$next"
+                $null = Write-CapJournalFixtureSnapshot -Directory $directory -Sequence $next -Phase "again-$next" -PreviousSha256 ('A' * 64)
             }
             try {
                 $null = Assert-CapRejects { Refresh-CapJournal -Path $base } 'budget exhausted'
@@ -1133,6 +1138,9 @@ Write-Output "WRITER_DONE publications=$count"
                 $heldReader = [IO.StreamReader]::new($held)
                 try { $heldBytes = $heldReader.ReadToEnd() } finally { $heldReader.Dispose() }
                 Assert-CapTest ($run.StdoutTask.Wait(5000) -and $run.StderrTask.Wait(5000)) 'Writer EOF was incomplete.'
+                $writerExit = $run.Identity.Process.ExitCode
+                $writerStdout = [string]$run.StdoutTask.Result
+                $writerStderr = [string]$run.StderrTask.Result
             } finally {
                 $null = $events.cont.Set()
                 if (-not $run.Identity.Process.HasExited) { $null = Stop-CapManagedProcess -Identity $run.Identity -TimeoutMilliseconds 5000 }
@@ -1142,8 +1150,8 @@ Write-Output "WRITER_DONE publications=$count"
                 $run.Identity.Process.Dispose()
             }
             Assert-CapTest ($errors.Count -eq 0) "The supervisor reader failed $($errors.Count) of $reads reads during concurrent publication; first: $($errors | Select-Object -First 2)"
-            Assert-CapTest ($run.Identity.Process.ExitCode -eq 0 -and ([string]$run.StdoutTask.Result).Contains('WRITER_DONE')) `
-                "The real worker publisher failed: $($run.StderrTask.Result)"
+            Assert-CapTest ($writerExit -eq 0 -and $writerStdout.Contains('WRITER_DONE')) `
+                "The real worker publisher failed: exit=$writerExit stderr=$writerStderr"
             Assert-CapTest ($reads -gt 0 -and $midRead) 'No positive concurrent read count or mid-stream checkpoint was observed.'
             $snapshots = @(Get-ChildItem -LiteralPath $directory -Filter 'process-journal*.json' -File)
             Assert-CapTest ($snapshots.Count -eq $publications) "Expected $publications immutable snapshots, found $($snapshots.Count)."
@@ -1233,8 +1241,46 @@ Write-Output "WRITER_DONE publications=$count"
                     $null = Assert-CapRejects { Assert-CapJournalTerminal -BasePath $base -Manifest $manifest -Expected $expected -TerminalRequired } 'not bound to the final manifest'
                 } catch { throw "Manifest binding negative '$name': $($_.Exception.Message)" }
             }
+            $null = Assert-CapRejects {
+                Assert-CapJournalTerminal -BasePath $base -Manifest (& $newManifest $records) -Expected $expected -TerminalRequired `
+                    -MinimumSequence 3 -ObservedSha256 ('0' * 64)
+            } 'changed after it was first observed'
+            $null = Assert-CapRejects {
+                Assert-CapJournalTerminal -BasePath $base -Manifest (& $newManifest $records) -Expected $expected -TerminalRequired -MinimumSequence 5
+            } 'regressed or vanished'
             return [ordered]@{ negatives = @($negatives.Keys); bindingNegatives = @($bindingMutations.Keys)
                 data = 'Actual terminal verifier over real chained files; no worker/process mock.' }
+        }
+        Invoke-CapTest 'actual worker publisher never overwrites a published name and seals after its terminal snapshot' {
+            . ([scriptblock]::Create((Get-CapActualFunctionText $workerPath @('Publish-CapJournalSnapshot'))))
+            . ([scriptblock]::Create((Get-CapActualFunctionText $supervisorPath @('Get-CapJournalSnapshotList'))))
+            $script:journalSequence = 0; $script:journalPreviousSha256 = $null; $script:journalTerminal = $null
+            $directory = New-CapJournalFixtureDirectory 'publisher-collision'
+            $base = Join-Path $directory 'process-journal.json'
+            $foreignPath = Join-Path $directory 'process-journal.1.json'
+            [IO.File]::WriteAllText($foreignPath, 'FOREIGN')
+            try {
+                $thrown = $null
+                try { $null = Publish-CapJournalSnapshot -BasePath $base -Fields ([ordered]@{ marker = 'first' }) }
+                catch { $thrown = Get-CapUnwrappedException $_ }
+                Assert-CapTest ($thrown -is [IO.IOException] -and [IO.File]::ReadAllText($foreignPath) -ceq 'FOREIGN' -and
+                    $script:journalSequence -eq 0 -and $null -eq $script:journalPreviousSha256) `
+                    'A colliding published name was overwritten, or the sequence advanced past a failed publication.'
+                $leftover = @(Get-ChildItem -LiteralPath $directory -Filter 'process-journal.pending-*.tmp' -File)
+                Assert-CapTest ($leftover.Count -eq 1 -and ([IO.File]::ReadAllText($leftover[0].FullName) | ConvertFrom-Json).marker -ceq 'first') `
+                    'The unpublished complete snapshot was not retained for forensics.'
+                $listing = Get-CapJournalSnapshotList -BasePath $base
+                Assert-CapTest (@($listing.Snapshots).Count -eq 1 -and @($listing.Temporaries).Count -eq 1) 'The unpublished temporary was treated as a published snapshot.'
+                Remove-Item -LiteralPath $foreignPath, $leftover[0].FullName -Force
+                $one = Publish-CapJournalSnapshot -BasePath $base -Fields ([ordered]@{ marker = 'one' })
+                $final = Publish-CapJournalSnapshot -BasePath $base -Terminal -Fields ([ordered]@{ marker = 'terminal' })
+                Assert-CapTest ($one.Sequence -eq 1 -and $final.Sequence -eq 2 -and
+                    (([IO.File]::ReadAllText($final.Path) | ConvertFrom-Json).previousSha256 -ceq $one.Sha256) -and
+                    ([IO.File]::ReadAllText($final.Path) | ConvertFrom-Json).terminal) 'Sequence, hash chain or terminal flag was not published.'
+                $null = Assert-CapRejects { Publish-CapJournalSnapshot -BasePath $base -Fields ([ordered]@{ marker = 'late' }) } 'sealed by its terminal snapshot'
+                Assert-CapTest (@(Get-ChildItem -LiteralPath $directory -File).Count -eq 2) 'A version was published after the terminal snapshot.'
+            } finally { $script:journalSequence = 0; $script:journalPreviousSha256 = $null; $script:journalTerminal = $null }
+            return 'Actual worker publisher over real files; collision, forensic temporary and post-terminal sealing.'
         }
         Invoke-CapTest 'real capture command publishes immutable journal snapshots and proves their removal at release' {
             $run = Invoke-CapCaptureCommand -Name 'journal-release'

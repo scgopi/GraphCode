@@ -29,6 +29,9 @@ $seedRuns = [Collections.Generic.List[object]]::new()
 $applicationRuns = [Collections.Generic.List[object]]::new()
 $descendantIdentities = [Collections.Generic.List[object]]::new()
 $journalEntries = [Collections.Generic.List[object]]::new()
+$journalSequence = 0
+$journalPreviousSha256 = $null
+$journalTerminal = $null
 $manifestPath = $null
 $logPath = $null
 $workerLog = $null
@@ -85,6 +88,42 @@ function Assert-CapOwnedPath {
     return Assert-CapArtifactPath -Root $root -Path $Path
 }
 
+function Publish-CapJournalSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$BasePath,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Fields,
+        [switch]$Terminal
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($script:journalTerminal) { throw 'The worker process journal is sealed by its terminal snapshot; refusing a newer version.' }
+    $directory = [IO.Path]::GetDirectoryName($BasePath)
+    $stem = [IO.Path]::GetFileNameWithoutExtension($BasePath)
+    $sequence = $script:journalSequence + 1
+    $snapshot = [ordered]@{
+        schemaVersion = 1
+        sequence = $sequence
+        previousSha256 = $script:journalPreviousSha256
+        terminal = [bool]$Terminal
+    }
+    foreach ($key in $Fields.Keys) { $snapshot[$key] = $Fields[$key] }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $snapshot -Depth 40))
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    $temporary = Join-Path $directory ('{0}.pending-{1}.tmp' -f $stem, [guid]::NewGuid().ToString('N'))
+    $published = Join-Path $directory ('{0}.{1}.json' -f $stem, $sequence)
+    # The complete closed snapshot reaches disk under an unpublished name first; the non-overwriting
+    # move then makes it visible atomically, so no reader can see a missing or partial published file.
+    $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+    [IO.File]::Move($temporary, $published)
+    $script:journalSequence = $sequence
+    $script:journalPreviousSha256 = $hash
+    $receipt = [pscustomobject]@{ Sequence = $sequence; Sha256 = $hash; Path = $published }
+    if ($Terminal) { $script:journalTerminal = $receipt }
+    return $receipt
+}
+
 function Write-CapProcessJournal {
     param(
         [Parameter(Mandatory)]$Identity,
@@ -114,14 +153,29 @@ function Write-CapProcessJournal {
         }
     }
     if ($index -ge 0) { $journalEntries[$index] = $entry } else { $journalEntries.Add($entry) }
-    Write-CapJsonAtomic -Path $journalPath -Value ([ordered]@{
-        schemaVersion = 1
+    $null = Publish-CapJournalSnapshot -BasePath $journalPath -Fields ([ordered]@{
         leaseId = $auth.leaseId
         jobSha256 = $jobHash
         workerSha256 = $workerHash
         moduleSha256 = $moduleHash
         updatedUtc = [DateTime]::UtcNow.ToString('o')
         entries = @($journalEntries)
+    })
+}
+
+function Write-CapTerminalProcessJournal {
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    $null = Publish-CapJournalSnapshot -BasePath $journalPath -Terminal -Fields ([ordered]@{
+        leaseId = $auth.leaseId
+        jobSha256 = $jobHash
+        workerSha256 = $workerHash
+        moduleSha256 = $moduleHash
+        updatedUtc = [DateTime]::UtcNow.ToString('o')
+        entries = @($journalEntries)
+        ownedProcessSurvivors = @($ownedProcessSurvivors)
+        pendingLaunchesRemaining = @($pendingLaunchesRemaining)
+        cleanupFailures = @($cleanupFailures)
     })
 }
 
@@ -544,6 +598,13 @@ function New-CapManifest {
         pendingLaunchesRemaining = @($pendingLaunchesRemaining)
         failures = @($cleanupFailures)
         ownedProcessSurvivors = @($ownedProcessSurvivors)
+        processJournal = if ($journalTerminal) {
+            [ordered]@{
+                terminalSequence = [long]$journalTerminal.Sequence
+                terminalSha256 = [string]$journalTerminal.Sha256
+                snapshotCount = [long]$journalTerminal.Sequence
+            }
+        } else { $null }
         privacyRequirement = 'Every image requires an individual privacy check before reviewer handoff.'
     }
 }
@@ -1153,16 +1214,8 @@ try {
                 creationFileTimeUtc = $_.CreationFileTimeUtc; expectedImagePath = $_.ExpectedPath; state = 'KERNEL_LIVE_UNRETURNED_LAUNCH' } })
     )
     if ($journalPath -and $auth) {
-        try {
-            Write-CapJsonAtomic -Path $journalPath -Value ([ordered]@{
-                schemaVersion = 1; leaseId = $auth.leaseId; jobSha256 = $jobHash
-                workerSha256 = $workerHash; moduleSha256 = $moduleHash
-                updatedUtc = [DateTime]::UtcNow.ToString('o'); entries = @($journalEntries)
-                ownedProcessSurvivors = @($ownedProcessSurvivors)
-                pendingLaunchesRemaining = @($pendingLaunchesRemaining)
-                cleanupFailures = @($cleanupFailures)
-            })
-        } catch { $cleanupFailures.Add("Final process journal update failed: $($_.Exception.Message)") }
+        try { Write-CapTerminalProcessJournal }
+        catch { $cleanupFailures.Add("Final process journal update failed: $($_.Exception.Message)") }
     }
     foreach ($run in $runs) { $run.Identity.Process.Dispose() }
     foreach ($identity in $descendantIdentities) { $identity.Process.Dispose() }

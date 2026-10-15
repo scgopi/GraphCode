@@ -37,6 +37,10 @@ $releaseFailure = $null
 $releaseWritten = $false
 $cleanupProven = $false
 $processJournalPath = $null
+$journalHighestSeen = 0
+$journalHighestSha256 = $null
+$journalRelistCount = 0
+$journalRelease = $null
 $safeOutputInitialized = $false
 $primaryFailure = $null
 $recoveryReceipts = [Collections.Generic.List[object]]::new()
@@ -408,30 +412,433 @@ function Open-CapJournalRead {
     param([Parameter(Mandatory)][string]$Path)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    # A polling reader must not prevent the worker from atomically replacing its journal.
+    # Published snapshots are immutable; ReadWrite|Delete sharing still lets the worker and release proceed.
     return [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
         ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+}
+
+function Test-CapFileNotFoundError {
+    param([Parameter(Mandatory)]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [Management.Automation.MethodInvocationException] -and $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    return $exception -is [IO.FileNotFoundException]
+}
+
+function Get-CapJournalSnapshotList {
+    param([Parameter(Mandatory)][string]$BasePath)
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $directory = [IO.Path]::GetDirectoryName($BasePath)
+    $stem = [IO.Path]::GetFileNameWithoutExtension($BasePath)
+    $options = [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    $published = [regex]::new('^' + [regex]::Escape($stem) + '\.([1-9][0-9]{0,8})\.json$', $options)
+    $unpublished = [regex]::new('^' + [regex]::Escape($stem) + '\.pending-[0-9a-f]{32}\.tmp$', $options)
+    $snapshots = [Collections.Generic.List[object]]::new()
+    $temporaries = [Collections.Generic.List[string]]::new()
+    foreach ($path in [IO.Directory]::EnumerateFiles($directory, "$stem.*")) {
+        $name = [IO.Path]::GetFileName($path)
+        $match = $published.Match($name)
+        if ($match.Success) {
+            $snapshots.Add([pscustomobject]@{ Sequence = [int]$match.Groups[1].Value; Name = $name; Path = $path })
+        } elseif ($unpublished.IsMatch($name)) {
+            $temporaries.Add($name)
+        } else {
+            throw "Unexpected file in the worker journal namespace: $name"
+        }
+    }
+    return [pscustomobject]@{
+        Snapshots = @($snapshots | Sort-Object Sequence)
+        Temporaries = @($temporaries | Sort-Object)
+    }
+}
+
+function Read-CapJournalSnapshotBytes {
+    param([Parameter(Mandatory)][string]$Path)
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $stream = Open-CapJournalRead -Path $Path
+    try {
+        $memory = [IO.MemoryStream]::new()
+        try { $stream.CopyTo($memory); return , $memory.ToArray() }
+        finally { $memory.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
+function Convert-CapJournalSnapshot {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][hashtable]$Expected
+    )
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes))
+    $malformed = "Worker process journal snapshot $($Entry.Name) is malformed"
+    try {
+        $journal = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes) |
+            ConvertFrom-Json -DateKind String -ErrorAction Stop
+    } catch { throw "${malformed}: $($_.Exception.Message)" }
+    if ($journal -isnot [pscustomobject]) { throw "${malformed}: the document is not a JSON object." }
+    foreach ($property in @('schemaVersion', 'sequence', 'previousSha256', 'terminal', 'leaseId', 'jobSha256',
+        'moduleSha256', 'workerSha256', 'updatedUtc', 'entries')) {
+        if (-not $journal.PSObject.Properties[$property]) { throw "${malformed}: it lacks '$property'." }
+    }
+    if ($journal.schemaVersion -ne 1 -or ($journal.sequence -isnot [int] -and $journal.sequence -isnot [long]) -or
+        $journal.terminal -isnot [bool] -or $journal.entries -isnot [array] -or
+        ($Entry.Sequence -eq 1 -and $null -ne $journal.previousSha256) -or
+        ($Entry.Sequence -gt 1 -and $journal.previousSha256 -cnotmatch '^[A-F0-9]{64}$')) {
+        throw "${malformed}: its schema, sequence type, previous hash or entries are invalid."
+    }
+    if ([long]$journal.sequence -ne $Entry.Sequence) {
+        throw "Worker process journal snapshot $($Entry.Name) body sequence $($journal.sequence) differs from its published name."
+    }
+    if ($journal.leaseId -ne $Expected.LeaseId -or $journal.jobSha256 -ne $Expected.JobSha256 -or
+        $journal.moduleSha256 -ne $Expected.ModuleSha256 -or $journal.workerSha256 -ne $Expected.WorkerSha256) {
+        throw 'Worker process journal hash/lease binding differs from the coordinator-approved run.'
+    }
+    return [pscustomobject]@{
+        Sequence = [int]$Entry.Sequence; Name = $Entry.Name; Path = $Entry.Path; Sha256 = $hash
+        Length = $Bytes.Length; Terminal = [bool]$journal.terminal
+        PreviousSha256 = $journal.previousSha256; Journal = $journal
+    }
+}
+
+function Read-CapJournalHighest {
+    param(
+        [Parameter(Mandatory)][string]$BasePath,
+        [Parameter(Mandatory)][hashtable]$Expected,
+        [int]$MinimumSequence = 0,
+        [DateTime]$DeadlineUtc = [DateTime]::UtcNow.AddSeconds(10),
+        [int]$MaximumAttempts = 8
+    )
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $relists = 0
+    for ($attempt = 1; $attempt -le $MaximumAttempts -and [DateTime]::UtcNow -lt $DeadlineUtc; $attempt++) {
+        $snapshots = @((Get-CapJournalSnapshotList -BasePath $BasePath).Snapshots)
+        if ($snapshots.Count -eq 0) {
+            if ($MinimumSequence -gt 0) {
+                throw "Worker process journal highest published sequence regressed or vanished: sequence $MinimumSequence was observed and none is published."
+            }
+            return $null
+        }
+        $highest = $snapshots[$snapshots.Count - 1]
+        if ($highest.Sequence -lt $MinimumSequence) {
+            throw "Worker process journal highest published sequence regressed or vanished: $($highest.Sequence) is below the observed $MinimumSequence."
+        }
+        try { $bytes = Read-CapJournalSnapshotBytes -Path $highest.Path }
+        catch {
+            # Only a missing just-listed name means "list again"; every other failure is real evidence.
+            if (-not (Test-CapFileNotFoundError $_)) { throw }
+            $relists++
+            $MinimumSequence = [Math]::Max($MinimumSequence, $highest.Sequence)
+            continue
+        }
+        $snapshot = Convert-CapJournalSnapshot -Bytes $bytes -Entry $highest -Expected $Expected
+        $snapshot | Add-Member -NotePropertyName Relists -NotePropertyValue $relists
+        return $snapshot
+    }
+    throw "Worker process journal re-list budget exhausted after $relists missing just-listed snapshot(s)."
 }
 
 function Refresh-CapJournal {
     param([Parameter(Mandatory)][string]$Path)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
-    try {
-        $stream = Open-CapJournalRead -Path $Path
+    $snapshot = Read-CapJournalHighest -BasePath $Path -MinimumSequence $script:journalHighestSeen `
+        -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(10)) -Expected @{
+            LeaseId = [string]$lease.leaseId; JobSha256 = $jobHash; ModuleSha256 = $moduleHash; WorkerSha256 = $workerHash
+        }
+    if ($null -eq $snapshot) { return }
+    if ($snapshot.Sequence -eq $script:journalHighestSeen -and $script:journalHighestSha256 -and
+        $snapshot.Sha256 -cne $script:journalHighestSha256) {
+        throw "Published worker process journal snapshot $($snapshot.Name) changed after it was first observed."
+    }
+    $script:journalHighestSeen = $snapshot.Sequence
+    $script:journalHighestSha256 = $snapshot.Sha256
+    $script:journalRelistCount += $snapshot.Relists
+    foreach ($entry in $snapshot.Journal.entries) { $null = Add-CapTrackedIdentity -Entry $entry }
+}
+
+function Assert-CapJournalTerminal {
+    param(
+        [Parameter(Mandatory)][string]$BasePath,
+        [AllowNull()]$Manifest,
+        [Parameter(Mandatory)][hashtable]$Expected,
+        [switch]$TerminalRequired,
+        [int]$MinimumSequence = 0,
+        [string]$ObservedSha256,
+        [DateTime]$DeadlineUtc = [DateTime]::UtcNow.AddSeconds(15),
+        [int]$MaximumAttempts = 8
+    )
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $records = @()
+    $temporaries = @()
+    $complete = $false
+    for ($attempt = 1; $attempt -le $MaximumAttempts -and [DateTime]::UtcNow -lt $DeadlineUtc -and -not $complete; $attempt++) {
+        $listing = Get-CapJournalSnapshotList -BasePath $BasePath
+        $loaded = [Collections.Generic.List[object]]::new()
+        $complete = $true
+        foreach ($entry in @($listing.Snapshots)) {
+            try { $bytes = Read-CapJournalSnapshotBytes -Path $entry.Path }
+            catch {
+                if (-not (Test-CapFileNotFoundError $_)) { throw }
+                $complete = $false
+                break
+            }
+            $loaded.Add((Convert-CapJournalSnapshot -Bytes $bytes -Entry $entry -Expected $Expected))
+        }
+        $records = @($loaded)
+        $temporaries = @($listing.Temporaries)
+    }
+    if (-not $complete) { throw 'Worker process journal re-list budget exhausted during terminal verification.' }
+    if ($records.Count -eq 0) {
+        if ($TerminalRequired -or $MinimumSequence -gt 0) {
+            throw 'Worker process journal has no published snapshot although the worker exited successfully or one was observed.'
+        }
+        return [pscustomobject]@{ Inventory = @(); Temporaries = $temporaries; TerminalPresent = $false
+            TerminalSequence = $null; TerminalSha256 = $null; TerminalBoundToManifest = $false; HighestSequence = 0 }
+    }
+    for ($i = 0; $i -lt $records.Count; $i++) {
+        $record = $records[$i]
+        if ($record.Sequence -ne ($i + 1)) {
+            throw "Worker process journal sequence gap: expected $($i + 1) but found $($record.Sequence)."
+        }
+        $previous = if ($i -eq 0) { $null } else { $records[$i - 1].Sha256 }
+        if ($record.PreviousSha256 -cne $previous) {
+            throw "Worker process journal hash chain is broken at sequence $($record.Sequence)."
+        }
+        if ($i -lt ($records.Count - 1) -and $record.Terminal) {
+            throw "Worker process journal has a published snapshot after its terminal snapshot (sequence $($record.Sequence))."
+        }
+    }
+    $last = $records[$records.Count - 1]
+    if ($last.Sequence -lt $MinimumSequence) {
+        throw "Worker process journal highest published sequence regressed or vanished: $($last.Sequence) is below the observed $MinimumSequence."
+    }
+    if ($MinimumSequence -gt 0 -and $ObservedSha256 -and $records[$MinimumSequence - 1].Sha256 -cne $ObservedSha256) {
+        throw "Published worker process journal snapshot $($records[$MinimumSequence - 1].Name) changed after it was first observed."
+    }
+    if ($TerminalRequired -and -not $last.Terminal) {
+        throw "Worker process journal terminal snapshot is missing: the highest published snapshot $($last.Sequence) is not terminal."
+    }
+    $bound = $false
+    if ($last.Terminal) {
+        $arrayNames = @('ownedProcessSurvivors', 'pendingLaunchesRemaining', 'cleanupFailures')
+        foreach ($name in $arrayNames) {
+            if (-not $last.Journal.PSObject.Properties[$name] -or $last.Journal.$name -isnot [array]) {
+                throw "Worker process journal terminal arrays are incomplete: '$name' is absent or not an array."
+            }
+        }
+        $binding = if ($null -ne $Manifest -and $Manifest.PSObject.Properties['processJournal']) { $Manifest.processJournal } else { $null }
+        $notBound = 'Worker process journal terminal snapshot is not bound to the final manifest'
+        if ($null -eq $binding) {
+            if ($TerminalRequired) { throw "${notBound}: the manifest carries no journal binding." }
+        } else {
+            $boundValues = $binding | Select-Object terminalSequence, terminalSha256, snapshotCount
+            $manifestValues = $Manifest | Select-Object leaseId, jobManifestSha256, moduleSha256, workerSha256
+            $same = $boundValues.terminalSequence -eq $last.Sequence -and $boundValues.terminalSha256 -ceq $last.Sha256 -and
+                $boundValues.snapshotCount -eq $records.Count -and
+                $manifestValues.leaseId -eq $Expected.LeaseId -and $manifestValues.jobManifestSha256 -eq $Expected.JobSha256 -and
+                $manifestValues.moduleSha256 -eq $Expected.ModuleSha256 -and $manifestValues.workerSha256 -eq $Expected.WorkerSha256
+            foreach ($name in $arrayNames) {
+                if (-not $Manifest.PSObject.Properties[$name] -or
+                    (ConvertTo-Json -InputObject @($Manifest.$name) -Depth 40 -Compress) -cne
+                    (ConvertTo-Json -InputObject @($last.Journal.$name) -Depth 40 -Compress)) { $same = $false }
+            }
+            if (-not $same) { throw "${notBound}: sequence, hash, count, identity or cleanup arrays differ." }
+            $bound = $true
+        }
+    }
+    return [pscustomobject]@{
+        Inventory = @($records | ForEach-Object {
+            [pscustomobject]@{ Sequence = $_.Sequence; Name = $_.Name; Path = $_.Path; Sha256 = $_.Sha256
+                Length = $_.Length; Terminal = $_.Terminal }
+        })
+        Temporaries = $temporaries
+        TerminalPresent = [bool]$last.Terminal
+        TerminalSequence = if ($last.Terminal) { $last.Sequence } else { $null }
+        TerminalSha256 = if ($last.Terminal) { $last.Sha256 } else { $null }
+        TerminalBoundToManifest = $bound
+        HighestSequence = $last.Sequence
+    }
+}
+
+function Get-CapJournalRawInventory {
+    param([Parameter(Mandatory)][string]$BasePath)
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $items = [Collections.Generic.List[object]]::new()
+    $stem = [IO.Path]::GetFileNameWithoutExtension($BasePath)
+    foreach ($path in [IO.Directory]::EnumerateFiles([IO.Path]::GetDirectoryName($BasePath), "$stem.*")) {
+        $item = [ordered]@{ name = [IO.Path]::GetFileName($path); length = $null; sha256 = $null; readError = $null }
         try {
-            $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true)
-            try { $journal = $reader.ReadToEnd() | ConvertFrom-Json }
-            finally { $reader.Dispose() }
-        } finally { $stream.Dispose() }
+            $bytes = Read-CapJournalSnapshotBytes -Path $path
+            $item.length = $bytes.Length
+            $item.sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        } catch { $item.readError = $_.Exception.Message }
+        $items.Add([pscustomobject]$item)
     }
-    catch { throw "Worker process journal is malformed: $($_.Exception.Message)" }
-    if ($journal.leaseId -ne $lease.leaseId -or $journal.jobSha256 -ne $jobHash -or
-        $journal.moduleSha256 -ne $moduleHash -or $journal.workerSha256 -ne $workerHash) {
-        throw 'Worker process journal hash/lease binding differs from the coordinator-approved run.'
+    return @($items | Sort-Object name)
+}
+
+function Write-CapJournalInventoryRecord {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json -InputObject $Value -Depth 40))
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
+    return [ordered]@{ path = $Path; sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) }
+}
+
+function Invoke-CapJournalRelease {
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $terminalRequired = [bool]($workerWait -and $workerWait.State -eq 'Exited' -and $workerWait.ExitCode -eq 0)
+    $record = [ordered]@{
+        state = 'UNPROVEN'
+        workerLaunchAttempted = $workerLaunchAttempted
+        positiveInventoryRequired = $terminalRequired
+        terminalRequired = $terminalRequired
+        basePath = $processJournalPath
+        observedHighestSequence = $script:journalHighestSeen
+        relistCount = $script:journalRelistCount
+        preCleanupInventory = @()
+        inventoryCount = 0
+        retainedPendingTemporaries = @()
+        terminalVerified = $false
+        terminalBoundToManifest = $false
+        terminalSequence = $null
+        terminalSha256 = $null
+        verificationFailure = $null
+        inventoryRecord = $null
+        removedCount = 0
+        removed = @()
+        remainingAfterCleanup = @()
+        removalFailures = @()
     }
-    foreach ($entry in $journal.entries) { $null = Add-CapTrackedIdentity -Entry $entry }
+    $script:journalRelease = $record
+    $expected = @{ LeaseId = [string]$lease.leaseId; JobSha256 = $jobHash; ModuleSha256 = $moduleHash; WorkerSha256 = $workerHash }
+    $proof = $null
+    try {
+        $manifest = $null
+        foreach ($name in @('manifest.json', 'manifest.partial.json')) {
+            $manifestPath = Join-Path $outputDirectory $name
+            if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -DateKind String
+                break
+            }
+        }
+        $proof = Assert-CapJournalTerminal -BasePath $processJournalPath -Manifest $manifest -Expected $expected `
+            -TerminalRequired:$terminalRequired -MinimumSequence $script:journalHighestSeen `
+            -ObservedSha256 $script:journalHighestSha256
+    } catch {
+        $record.verificationFailure = Get-CapSupervisorFailureText $_
+        $cleanupFailures.Add("Worker process journal verification failed: $($_.Exception.Message)")
+    }
+    $items = @()
+    if ($proof) {
+        $items = @($proof.Inventory)
+        $record.terminalVerified = [bool]$proof.TerminalPresent
+        $record.terminalBoundToManifest = [bool]$proof.TerminalBoundToManifest
+        $record.terminalSequence = $proof.TerminalSequence
+        $record.terminalSha256 = $proof.TerminalSha256
+        $record.preCleanupInventory = @($items | ForEach-Object {
+            [ordered]@{ sequence = $_.Sequence; name = $_.Name; sha256 = $_.Sha256; length = $_.Length; terminal = $_.Terminal }
+        })
+        $record.retainedPendingTemporaries = @($proof.Temporaries)
+    } else {
+        try { $record.preCleanupInventory = @(Get-CapJournalRawInventory -BasePath $processJournalPath) }
+        catch { $cleanupFailures.Add("Worker process journal forensic inventory failed: $($_.Exception.Message)") }
+    }
+    $record.inventoryCount = @($record.preCleanupInventory).Count
+    if ($proof -and $items.Count -eq 0) {
+        $record.state = 'NONE_PUBLISHED_WORKER_FAILED'
+        Write-CapSupervisorLog 'JOURNAL_RELEASE state=NONE_PUBLISHED_WORKER_FAILED inventory=0 (the worker did not succeed; no snapshot was published)'
+        return
+    }
+    $evidenceFailed = $false
+    try {
+        $record.inventoryRecord = Write-CapJournalInventoryRecord -Path (Join-Path $outputDirectory 'journal-snapshot-inventory.json') -Value ([ordered]@{
+            schemaVersion = 1; kind = 'JOURNAL_SNAPSHOT_INVENTORY_BEFORE_REMOVAL'
+            leaseId = $lease.leaseId; jobSha256 = $jobHash; moduleSha256 = $moduleHash; workerSha256 = $workerHash
+            supervisorSha256 = $supervisorHash; runDirectory = $runDirectory; basePath = $processJournalPath
+            capturedUtc = [DateTime]::UtcNow.ToString('o'); terminalRequired = $terminalRequired
+            verificationPassed = $null -ne $proof; verificationFailure = $record.verificationFailure
+            terminalSequence = $record.terminalSequence; terminalSha256 = $record.terminalSha256
+            terminalBoundToManifest = $record.terminalBoundToManifest
+            snapshots = @($record.preCleanupInventory); retainedPendingTemporaries = @($record.retainedPendingTemporaries)
+            removalIntended = $null -ne $proof
+        })
+    } catch {
+        $evidenceFailed = $true
+        $cleanupFailures.Add("Worker process journal pre-removal evidence could not be preserved: $($_.Exception.Message)")
+    }
+    if (-not $proof) {
+        $record.state = 'RETAINED_VERIFICATION_FAILED'
+        Write-CapSupervisorLog "JOURNAL_RELEASE state=RETAINED_VERIFICATION_FAILED inventory=$($record.inventoryCount) removed=0"
+        return
+    }
+    if ($evidenceFailed) {
+        $record.state = 'REMOVAL_UNPROVEN'
+        return
+    }
+    $stem = [Regex]::Escape([IO.Path]::GetFileNameWithoutExtension($processJournalPath))
+    $ownedDirectory = [IO.Path]::GetFullPath($runDirectory).TrimEnd('\')
+    $removed = [Collections.Generic.List[object]]::new()
+    $removalFailures = [Collections.Generic.List[string]]::new()
+    foreach ($item in $items) {
+        try {
+            $null = Assert-CapSupervisorPath $item.Path
+            if ([IO.Path]::GetDirectoryName($item.Path) -ine $ownedDirectory -or
+                $item.Name -cnotmatch "^$stem\.[1-9][0-9]{0,8}\.json$") {
+                throw 'it is not an exact snapshot in the owned run directory'
+            }
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $item.Path).Hash -cne $item.Sha256) {
+                throw 'its bytes changed after verification'
+            }
+            [IO.File]::Delete($item.Path)
+            if (Test-Path -LiteralPath $item.Path) { throw 'it still exists after removal' }
+            $removed.Add([ordered]@{ sequence = $item.Sequence; name = $item.Name; sha256 = $item.Sha256
+                removedUtc = [DateTime]::UtcNow.ToString('o') })
+        } catch {
+            $message = "Worker process journal snapshot $($item.Name) removal failed: $($_.Exception.Message)"
+            $removalFailures.Add($message)
+            $cleanupFailures.Add($message)
+        }
+    }
+    $remaining = @()
+    try {
+        $after = Get-CapJournalSnapshotList -BasePath $processJournalPath
+        $remaining = @($after.Snapshots | ForEach-Object Name)
+        $record.retainedPendingTemporaries = @($after.Temporaries)
+    } catch {
+        $message = "Worker process journal post-removal inventory failed: $($_.Exception.Message)"
+        $removalFailures.Add($message)
+        $cleanupFailures.Add($message)
+    }
+    $inventoryNames = @($items | ForEach-Object Name)
+    foreach ($name in @($remaining | Where-Object { $_ -cnotin $inventoryNames })) {
+        $message = "Worker process journal snapshot $name appeared after the verified inventory."
+        $removalFailures.Add($message)
+        $cleanupFailures.Add($message)
+    }
+    if ($terminalRequired -and $record.retainedPendingTemporaries.Count -gt 0) {
+        $message = "Worker process journal unpublished temporaries remain after a successful worker: $($record.retainedPendingTemporaries -join ', ')."
+        $removalFailures.Add($message)
+        $cleanupFailures.Add($message)
+    }
+    $record.removed = @($removed)
+    $record.removedCount = $removed.Count
+    $record.remainingAfterCleanup = $remaining
+    $record.removalFailures = @($removalFailures)
+    $record.state = if ($removalFailures.Count -eq 0 -and $remaining.Count -eq 0) { 'SNAPSHOTS_REMOVED_AND_VERIFIED' } else { 'REMOVAL_UNPROVEN' }
+    Write-CapSupervisorLog "JOURNAL_RELEASE state=$($record.state) inventory=$($record.inventoryCount) removed=$($record.removedCount) terminal=$($record.terminalSequence)"
 }
 
 function Get-CapAppSessionPrefix {
@@ -861,7 +1268,8 @@ try {
             },
             { Stop-CapWorkerIfNeeded },
             { Write-CapProcessOutput -Run $workerRun -Prefix 'supervisor-worker' },
-            { Assert-CapNoTrackedSurvivors }
+            { Assert-CapNoTrackedSurvivors },
+            { Invoke-CapJournalRelease }
         )) {
             try { & $step }
             catch {
@@ -870,6 +1278,10 @@ try {
             }
         }
         $cleanupProven = $cleanupFailures.Count -eq 0
+    } elseif ($workerLaunchAttempted -and $processJournalPath) {
+        # No process handle was returned, so no worker can have been proven; still account for any snapshot.
+        try { Invoke-CapJournalRelease }
+        catch { $cleanupFailures.Add((Get-CapSupervisorFailureText $_)) }
     }
     foreach ($record in $tracked.Values) {
         try { $record.Identity.Process.Dispose() }
@@ -939,6 +1351,16 @@ try {
             workerStdoutEof = if ($workerRun) { $workerRun.StdoutTask.IsCompleted } else { $false }
             workerStderrEof = if ($workerRun) { $workerRun.StderrTask.IsCompleted } else { $false }
             journalEntriesWithoutHeldKernelHandle = @($untrackedJournalEntries)
+            journal = if ($journalRelease) { $journalRelease } else {
+                [ordered]@{
+                    state = if ($workerLaunchAttempted) { 'UNPROVEN' } else { 'NO_WORKER_STARTED' }
+                    workerLaunchAttempted = $workerLaunchAttempted
+                    positiveInventoryRequired = $false; terminalRequired = $false
+                    inventoryCount = 0; preCleanupInventory = @(); removedCount = 0; removed = @()
+                    remainingAfterCleanup = @(); terminalVerified = $false; terminalBoundToManifest = $false
+                    inventoryRecord = $null
+                }
+            }
             kernelVerifiedSurvivors = @($survivors)
             recovery = @($recoveryReceipts)
             cleanupFailures = @($cleanupFailures)
