@@ -1603,11 +1603,13 @@ function Read-CapBoundJson {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Reference)
     Assert-CapDataRecord $Reference @{ path = [string]; sha256 = [string] } 'Artifact reference'
     $path = Assert-CapArtifactPath -Root $Root -Path $Reference.path
+    $bytes = [IO.File]::ReadAllBytes($path)
     if ($Reference.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
-        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $Reference.sha256) {
+        [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -ne $Reference.sha256) {
         throw "Bound artifact hash mismatch: $path"
     }
-    $json = [IO.File]::ReadAllText($path)
+    $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+    $json = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, $offset, $bytes.Length - $offset)
     $document = [Text.Json.JsonDocument]::Parse($json)
     try {
         $visit = {
@@ -1629,8 +1631,8 @@ function Read-CapBoundJson {
 
 function Invoke-CapAdmissionGit {
     param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string[]]$Arguments)
-    $output = @(& git --no-pager -c core.quotepath=false -C $Repository @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw "Source identity Git command failed: $($output -join [Environment]::NewLine)" }
+    $output = @(& git --no-pager --no-optional-locks -c core.quotepath=false -c core.fsmonitor=false -C $Repository @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Source identity Git command failed ($($Arguments -join ' ')): $($output -join [Environment]::NewLine)" }
     return $output
 }
 
@@ -1716,6 +1718,7 @@ function Assert-CapJobIdentity {
             [string](Invoke-CapAdmissionGit $repository @('rev-parse', '--verify', "$commit`^{commit}")) -cne $commit) {
             throw 'Named source head/base/reviewed head is not an existing exact Git commit.'
         }
+        $null = Invoke-CapAdmissionGit $repository @('merge-base', '--is-ancestor', $Job.base, $Job.head)
     }
     if ([string](Invoke-CapAdmissionGit $repository @('rev-parse', 'HEAD')) -cne $Job.head -or
         @(Invoke-CapAdmissionGit $repository @('status', '--porcelain', '--untracked-files=all')).Count -ne 0) {

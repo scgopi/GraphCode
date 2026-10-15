@@ -184,7 +184,10 @@ function Assert-CapPreflightReport {
             'lease-bound admission ci-head through actual capture command',
             'lease-bound admission empty-ci through actual capture command',
             'lease-bound admission source-bytes through actual capture command',
-            'lease-bound admission lease-base through actual capture command'
+            'lease-bound admission lease-base through actual capture command',
+            'lease-bound admission omitted-product-diff through actual capture command',
+            'lease-bound admission phase-swap through actual capture command',
+            'lease-bound admission unrelated-base through actual capture command'
         )) {
             if (@($preflight.cases | Where-Object name -CEQ $required).Count -ne 1) {
                 throw "Repaired-core preflight is missing a unique required actual-command case: $required"

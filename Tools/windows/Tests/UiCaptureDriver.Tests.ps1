@@ -265,12 +265,16 @@ function New-CapAdmissionJob {
     $reviewed = [string](Invoke-CapTestGit $repository @('rev-parse', 'HEAD'))
     $null = New-Item -ItemType Directory -Path (Join-Path $repository 'Tools\windows') -Force
     [IO.File]::WriteAllText((Join-Path $repository 'Tools\windows\Invoke-UiCapture.ps1'), '# Offline tooling-only delta')
-    if ($Mutation -eq 'product-diff') {
+    if ($Mutation -in @('product-diff', 'omitted-product-diff')) {
         [IO.File]::WriteAllText((Join-Path $repository 'graphcode-windows\product.txt'), 'UNREVIEWED product')
     }
     $null = Invoke-CapTestGit $repository @('add', '.')
     $null = Invoke-CapTestGit $repository @('commit', '--quiet', '-m', 'Offline candidate')
     $head = [string](Invoke-CapTestGit $repository @('rev-parse', 'HEAD'))
+    if ($Mutation -eq 'unrelated-base') {
+        $tree = [string](Invoke-CapTestGit $repository @('rev-parse', "$base`^{tree}"))
+        $base = [string](Invoke-CapTestGit $repository @('commit-tree', $tree, '-m', 'Offline unrelated base'))
+    }
     $Job.head = $head
     $Job.base = $base
     if ($Mutation -eq 'lane-d') { $Job.lane = 'D' }
@@ -351,6 +355,17 @@ function New-CapAdmissionJob {
         ci = Write-CapTestArtifact (Join-Path $Owned 'ci.json') $ci
     }
     $Job.admission.ci.runs = @([ordered]@{ id = 123; attempt = 1 })
+    if ($Mutation -eq 'omitted-product-diff') {
+        $proofPath = $Job.admission.equivalence.path
+        $proof = Get-Content -LiteralPath $proofPath -Raw | ConvertFrom-Json -DateKind String
+        $proof.headDeltaPaths = @($proof.headDeltaPaths | Where-Object { $_ -cne 'graphcode-windows/product.txt' })
+        $Job.admission.equivalence = Write-CapTestArtifact $proofPath $proof
+    }
+    if ($Mutation -eq 'phase-swap') {
+        $before = $Job.binaries.before
+        $Job.binaries.before = $Job.binaries.after
+        $Job.binaries.after = $before
+    }
     if ($Mutation -eq 'duplicate-json') {
         $path = $Job.admission.ci.path
         [IO.File]::WriteAllText($path, [IO.File]::ReadAllText($path).Insert(1, "`"head`":`"$head`","))
@@ -395,7 +410,8 @@ try {
     $target = New-CapHarmlessTarget
     if (-not $LaunchContractOnly) {
         foreach ($mutation in @('accepted', 'lane-d', 'red-ci', 'binary-hash', 'product-diff',
-            'ci-head', 'empty-ci', 'source-bytes', 'lease-base', 'duplicate-ci', 'duplicate-json', 'null-build', 'stale-build')) {
+            'ci-head', 'empty-ci', 'source-bytes', 'lease-base', 'duplicate-ci', 'duplicate-json', 'null-build', 'stale-build',
+            'omitted-product-diff', 'phase-swap', 'unrelated-base')) {
             Invoke-CapTest "lease-bound admission $mutation through actual capture command" {
                 $run = Invoke-CapCaptureCommand -Name "admission-$mutation" -AdmissionMutation $mutation
                 if ($mutation -in @('accepted', 'lane-d')) {
@@ -419,6 +435,9 @@ try {
                         'duplicate-json' { 'Duplicate JSON field' }
                         'null-build' { "field 'sourceCommit'" }
                         'stale-build' { 'Fresh build provenance must name the exact phase source' }
+                        'omitted-product-diff' { 'Equivalence proof does not name the complete exact Git delta' }
+                        'phase-swap' { 'Fresh build provenance must name the exact phase source' }
+                        'unrelated-base' { 'merge-base --is-ancestor' }
                     }
                     Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
                         $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and -not $run.receipt.workerStarted -and
