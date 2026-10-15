@@ -121,9 +121,11 @@ open, no longer under its former blocked-title/no-new-owner ruling. The
 [explicit user override](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6186430845)
 appoints J5 (GPT-6.1 Sol/high) as sole owner of only the two Phase A fixture
 defects: validAbsentWQL and StrictMode whole-array wrapping, with a fresh
-five-failure budget. Static Sonnet review was accepted and the exact decision
-driver then conditional 51-case direct suite were granted; current runtime/CI
-acceptance is pending. This is not authority for other edits. J4's fifth failure
+five-failure budget. Phase A requires accepted static review, the exact positive
+5-case decision driver followed by the 51-case direct suite (original 49 plus
+2), and accepted current-head CI. Execution commands remain separately granted;
+these gates are not worker-progress or runtime-acceptance claims.
+This is not authority for other edits. J4's fifth failure
 (**5 executed / 3 passed / 2 failed**) stays frozen historical evidence, not an
 accepted lifecycle repair. The pure 12-row decision matrix and three mutant
 distinctions are not a full endpoint pass. Phase B immutable numbered journal
@@ -132,10 +134,15 @@ requires its own plan/review before implementation. Cap and the D adapter stay
 parked until #826 merges and explicit ordered resumption; no automatic capture
 authority follows a core merge.
 
-**Offscreen route.** The seven-file first project scene is authorized only for
-controlled post-C rebase and source review. No current-source export, PNG or
-visual acceptance exists. It is **real paint path, offscreen component render**:
+**Offscreen route.** The seven-file first project scene requires controlled
+post-C source freeze/review, separate exact native, codec and converter grants,
+and an actual source-bound run. It is **real paint path, offscreen component render**:
 two idle cards, one edge, 1280x720; the first scene hides the right panel.
+Admitted actual images may undergo individual privacy review; claims require
+individually privacy-cleared actual images and different-vendor paired review.
+Actual artifact status is linked from the [issue/receipt](https://github.com/scgopi/GraphCode/issues/822),
+not hardcoded as worker progress here. No PNG/pass or current whole visual/parity
+acceptance is predicted or established by this policy.
 Only actual in-frame card/edge/panel/layout pixels can support a later scoped
 claim, never window/composition, popups, terminal, native controls, input,
 accessibility, physical input or persistence. Do not rebind old dirty
@@ -407,9 +414,12 @@ silently.
      listing unexecuted checks rather than manufacturing a new capture grant.
 
    Its findings are fixed or answered in the PR before merge.
-7. **Visual sign-off.** Only accepted individually privacy-cleared image pairs
-   can support the named criteria; otherwise leave boxes unticked with a reason.
-   Offscreen component evidence cannot stand in for whole-window/native behavior.
+7. **Privacy review, then visual sign-off.** Admitted actual images may undergo
+   individual privacy review/scan first. Paired visual review and publication
+   use only individually privacy-cleared actual images; held originals remain
+   outside admission. Only accepted pairs can support the named criteria;
+   otherwise leave boxes unticked with a reason. Offscreen component evidence
+   cannot stand in for whole-window/native behavior.
 8. **Merge.** Only the coordinator merges, after exact-head CI is green, using
    `gh pr merge --squash --match-head-commit <sha>`. Ledger rows change only in
    a coordinator ledger PR, after the evidence is accepted.

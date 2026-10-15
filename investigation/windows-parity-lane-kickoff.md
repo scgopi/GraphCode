@@ -245,8 +245,11 @@ Report each step's result, or NotExecuted with the reason.
    only an admitted dedicated LAST slot of at most 15 minutes may be used.
    No inherited lease, manual capture, automatic neighbouring-screen expansion
    or fallback follows this gate.
-7. **Visual review remains local and scoped, not CI.** Only individually
-   privacy-cleared admitted images may be opened or published. A different-vendor
+7. **Privacy review precedes paired visual review/publication.** Admitted actual
+   images may undergo initial individual privacy review/scan. Paired visual
+   review and publication use only individually privacy-cleared actual images;
+   the held issue-722 originals remain NEVER open/copy/upload and outside scope.
+   Visual review remains local and scoped, not CI. A different-vendor
    reviewer records the exact paired surfaces/criteria and leaves every
    unsupported box unticked. An offscreen result is
    **real paint path, offscreen component render**, not window, popup, native-control, terminal, input,

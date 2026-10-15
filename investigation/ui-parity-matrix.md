@@ -163,9 +163,13 @@ No whole-wave, runtime, persistence or parity completion follows these merges.
 
 **Evidence routes remain gated.** The first seven-file offscreen scene is two
 idle project cards and one edge at 1280x720, **real paint path, offscreen
-component render**; only controlled post-C rebase/source review is authorized,
-with no current-source export, PNG or visual acceptance. Its right panel is
-hidden. It can eventually evidence only actual in-frame card/edge/panel/layout
+component render**. Authority requires controlled post-C source freeze/review,
+separate exact native, codec and converter grants, an actual source-bound run,
+individual privacy review and different-vendor paired review before claims.
+Actual artifact status belongs in the [issue/receipt](https://github.com/scgopi/GraphCode/issues/822),
+not a predicted PNG/pass or a permanent worker-progress assertion. Its right
+panel is hidden; no whole visual/parity acceptance is established here.
+It can evidence only actual in-frame card/edge/panel/layout
 pixels, not a real window/composition, popups, terminal, native controls, input,
 accessibility, physical input or persistence. Never rebind old dirty
 `4fafbfb2` pixels with conversion-time current hashes. Sidebar/right-panel/
