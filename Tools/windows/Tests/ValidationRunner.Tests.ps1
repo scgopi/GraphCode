@@ -2993,6 +2993,16 @@ try {
       throw "RED: $($expected.Job) bootstrap cap cannot cover the observed cold download and clone time"
     }
   }
+  # The runner contract grows with every new case. On 2026-10-14 it measured up to
+  # 302s in windows-spikes Swift (run 38663273264, against the former 5-minute cap)
+  # and 341s in deterministic hardening (run 38659424901); a 1-2s overrun failed CI.
+  # Keep at least about twice the measured worst case.
+  $runnerContractStep = (Get-WorkflowSteps $portJobs["spikes-swift"]) |
+    Where-Object { $_ -match 'name: Verify validation runner contract' } | Select-Object -First 1
+  $runnerContractCap = [regex]::Match([string]$runnerContractStep, '(?m)^        timeout-minutes: (\d+)\s*$')
+  if (-not $runnerContractCap.Success -or [int]$runnerContractCap.Groups[1].Value -lt 12) {
+    throw "RED: windows-spikes Swift runner-contract step cap leaves no headroom over the measured 341s worst case"
+  }
   foreach ($key in @(
       "windows-zig-v1-`${{ hashFiles('Tools/windows/bootstrap.ps1') }}",
       "windows-providers-v1-`${{ hashFiles('graphcode-windows/provider-pins.json', 'Tools/windows/bootstrap.ps1') }}-emit-win32-host-x86_64-windows-gnu")) {

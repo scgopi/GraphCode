@@ -96,7 +96,7 @@ jobs:
 
       - name: Verify validation runner contract
         shell: pwsh
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: ./Tools/windows/Tests/ValidationRunner.Tests.ps1
 
       - name: Run Swift Windows port validation
