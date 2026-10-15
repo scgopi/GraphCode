@@ -130,8 +130,16 @@ int wmain(int argc, wchar_t **argv) {
     $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
     $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
     $exe = Join-Path $fixture 'capture-target.exe'
+    $compileStdout = Join-Path $fixture 'compile-stdout.log'
+    $compileStderr = Join-Path $fixture 'compile-stderr.log'
     $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W4 /WX /O2 /utf-8 /Fe:"{3}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath
-    [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$command`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
+    # Redirect the whole compile group's stdout/stderr to owned files so the real
+    # compiler and any toolchain telemetry helpers it spawns inherit file handles,
+    # never the module's redirected pipe. Only the short-lived cmd.exe then holds
+    # that pipe, so it reaches bounded EOF promptly on exit. This is a fixture setup
+    # robustness fix; it does not touch any runtime/kernel/EOF/release guard.
+    $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdout, $compileStderr
+    [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
     $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH }
     foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
         'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
@@ -139,19 +147,111 @@ int wmain(int argc, wchar_t **argv) {
     }
     $build = Invoke-CapBoundedChild -FilePath $env:ComSpec -Arguments @('/d', '/c', '.\compile.cmd') `
         -Directory $fixture -Role 'harmless-fixture-compile' -Seconds 90 -Environment $compilerEnvironment
-    [IO.File]::WriteAllText((Join-Path $fixture 'compiler-stdout.log'), $build.stdout)
-    [IO.File]::WriteAllText((Join-Path $fixture 'compiler-stderr.log'), $build.stderr)
-    Assert-CapTest ($build.exitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
-        "Harmless target compilation failed (not launch evidence): $($build.stdout) $($build.stderr)"
+    # Preserve the actual compiler exit before reading the owned compile logs.
+    $compilerExitCode = $build.exitCode
+    $compileStdoutText = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { [IO.File]::ReadAllText($compileStdout) } else { '' }
+    $compileStderrText = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { [IO.File]::ReadAllText($compileStderr) } else { '' }
+    Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
+        "Harmless target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
     $provenance = [ordered]@{
         compiler = $compiler; compilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
         compilerSha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash
-        compilerCommand = $command; compilerExitCode = $build.exitCode
+        compilerCommand = $command; compilerExitCode = $compilerExitCode
+        compileStdoutLog = $compileStdout; compileStderrLog = $compileStderr
+        compileStdoutSha256 = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { (Get-FileHash -LiteralPath $compileStdout -Algorithm SHA256).Hash } else { $null }
+        compileStderrSha256 = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { (Get-FileHash -LiteralPath $compileStderr -Algorithm SHA256).Hash } else { $null }
         source = $sourcePath; sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
         executable = $exe; executableSha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     }
     $provenance | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixture 'provenance.json') -Encoding utf8NoBOM
     return [pscustomobject]$provenance
+}
+
+function New-CapCimRaceTarget {
+    # A harmless console child that optionally zeroes its OWN PEB command line
+    # (self only), so Win32_Process.CommandLine reads empty while the kernel still
+    # reports it live, and blocks on a release file the test owns (barrier). This
+    # deterministically produces a live-incomplete owned child without any mock.
+    $fixture = Join-Path $scratch 'cim-race-fixture'
+    $null = New-Item -ItemType Directory -Path $fixture
+    $source = @'
+#include <windows.h>
+#include <winternl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void clear_own_command_line(void) {
+    PPEB peb = (PPEB)NtCurrentTeb()->ProcessEnvironmentBlock;
+    if (peb == NULL || peb->ProcessParameters == NULL) return;
+    peb->ProcessParameters->CommandLine.Length = 0;
+    peb->ProcessParameters->CommandLine.MaximumLength = 0;
+    peb->ProcessParameters->CommandLine.Buffer = NULL;
+}
+
+int wmain(void) {
+    char behavior[64] = {0};
+    wchar_t releaseFile[32768] = {0};
+    int i;
+    GetEnvironmentVariableA("CAP_CIM_BEHAVIOR", behavior, (DWORD)sizeof(behavior));
+    if (strstr(behavior, "clearcmd") != NULL) clear_own_command_line();
+    puts("CAP_READY");
+    fflush(stdout);
+    if (strstr(behavior, "fileblock") != NULL) {
+        /* Barrier: stay live until the owning test creates the release file. */
+        if (GetEnvironmentVariableW(L"CAP_CIM_RELEASE_FILE", releaseFile, 32768) == 0) return 91;
+        for (i = 0; i < 1200; ++i) {
+            if (GetFileAttributesW(releaseFile) != INVALID_FILE_ATTRIBUTES) break;
+            Sleep(50);
+        }
+    }
+    fputs("CAP_STDERR_EOF\n", stderr);
+    fflush(stderr);
+    return 0;
+}
+'@
+    $sourcePath = Join-Path $fixture 'cim-race-target.c'
+    [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+        throw 'Existing MSVC discovery is unavailable; this offline suite does not install a compiler.'
+    }
+    $discovery = Invoke-CapBoundedChild -FilePath $vswhere -Arguments @(
+        '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+        '-property', 'installationPath'
+    ) -Directory $fixture -Role 'cim-race-compiler-discovery'
+    Assert-CapTest ($discovery.exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($discovery.stdout)) 'Existing MSVC was not found.'
+    $installation = $discovery.stdout.Trim()
+    $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+    $version = [IO.File]::ReadAllText((Join-Path $installation 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt')).Trim()
+    $compiler = Join-Path $installation "VC\Tools\MSVC\$version\bin\Hostx64\x64\cl.exe"
+    $exe = Join-Path $fixture 'cim-race-target.exe'
+    $compileStdout = Join-Path $fixture 'compile-stdout.log'
+    $compileStderr = Join-Path $fixture 'compile-stderr.log'
+    $command = 'call "{0}" -vcvars_ver={1} >nul && "{2}" /nologo /W3 /O2 /utf-8 /Fe:"{3}" "{4}" /link /SUBSYSTEM:CONSOLE' -f $vcvars, $version, $compiler, $exe, $sourcePath
+    # Same owned-file redirection as New-CapHarmlessTarget: the compiler and any
+    # telemetry helpers inherit file handles, so only the short-lived cmd.exe holds
+    # the module's redirected pipe and it reaches bounded EOF on exit.
+    $redirectedCommand = '({0}) > "{1}" 2> "{2}"' -f $command, $compileStdout, $compileStderr
+    [IO.File]::WriteAllText((Join-Path $fixture 'compile.cmd'), "@echo off`r`n$redirectedCommand`r`nexit /b %errorlevel%`r`n", [Text.UTF8Encoding]::new($false))
+    $compilerEnvironment = @{ PATH = (Split-Path -Parent $vswhere) + ';' + $env:PATH }
+    foreach ($key in @('VSCMD_VER', '__VSCMD_PREINIT_PATH', 'VSINSTALLDIR', 'VCINSTALLDIR',
+        'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'WindowsSDKVersion', 'INCLUDE', 'LIB', 'LIBPATH')) {
+        $compilerEnvironment[$key] = ''
+    }
+    $build = Invoke-CapBoundedChild -FilePath $env:ComSpec -Arguments @('/d', '/c', '.\compile.cmd') `
+        -Directory $fixture -Role 'cim-race-fixture-compile' -Seconds 90 -Environment $compilerEnvironment
+    # Preserve the actual compiler exit before reading the owned compile logs.
+    $compilerExitCode = $build.exitCode
+    $compileStdoutText = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { [IO.File]::ReadAllText($compileStdout) } else { '' }
+    $compileStderrText = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { [IO.File]::ReadAllText($compileStderr) } else { '' }
+    Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
+        "CIM race target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
+    return [pscustomobject]@{
+        executable = $exe
+        sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+        executableSha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+    }
 }
 
 function Invoke-CapCaptureCommand {
@@ -412,6 +512,7 @@ function Assert-CapRehearsalSuccess {
 $target = $null
 try {
     $target = New-CapHarmlessTarget
+    $cimRaceTarget = New-CapCimRaceTarget
     if (-not $LaunchContractOnly) {
         foreach ($mutation in @('accepted', 'lane-d', 'red-ci', 'binary-hash', 'product-diff',
             'ci-head', 'empty-ci', 'source-bytes', 'lease-base', 'duplicate-ci', 'duplicate-json', 'null-build', 'stale-build',
@@ -593,6 +694,124 @@ try {
                     $null = Stop-CapManagedProcess -Identity $run.Identity
                 }
                 $run.Identity.Process.Dispose()
+            }
+        }
+        Invoke-CapTest 'attestation decision seam: fix matrix is correct over all rows and a faithful main mutant discriminates on the torn-row/just-exited and exited-without-EOF rows' {
+            # TEST-ONLY faithful transcription of baseline main (D4579E92) decision logic:
+            #  - Get-CapProcessIdentity read CIM first and THREW on an Incomplete row before
+            #    consulting the retained kernel exit (so a torn row refused even once the child
+            #    had genuinely exited); Absent retried while live and broke when exited; Complete
+            #    used metadata.
+            #  - Start-CapManagedProcessCore had NO both-stream EOF gate, so an exited generation
+            #    recognized during attestation was accepted gone without EOF.
+            # This is a decision-level transcription of the THREE selected counterexamples, NOT a
+            # complete model of main (main also skips CIM when its initial snapshot is already
+            # exited and still identity-validates a Complete row) and NOT main's code executing;
+            # it is DISTINCT from the historical observed main RED (J3 baseline 49/48/1, CIM).
+            function Resolve-MainAttestationDispositionMutant {
+                param([string]$State, [bool]$KernelExited, [bool]$BothStreamsEofReached)
+                if ($State -eq 'Incomplete') { return 'MainRefusesIncomplete' }
+                if ($KernelExited) { return 'MainGoneNoEofGate' }
+                if ($State -eq 'Complete') { return 'MainUseMetadata' }
+                return 'MainRetryAbsent'
+            }
+            $rows = @(
+                @{ s = 'Complete';   k = $false; e = $false; fix = 'UseMetadata' }
+                @{ s = 'Complete';   k = $false; e = $true;  fix = 'UseMetadata' }
+                @{ s = 'Incomplete'; k = $false; e = $false; fix = 'RefuseLiveIncomplete' }
+                @{ s = 'Incomplete'; k = $false; e = $true;  fix = 'RefuseLiveIncomplete' }
+                @{ s = 'Absent';     k = $false; e = $false; fix = 'RetryAbsent' }
+                @{ s = 'Absent';     k = $false; e = $true;  fix = 'RetryAbsent' }
+                @{ s = 'Complete';   k = $true;  e = $false; fix = 'RequireBothEofBeforeGone' }
+                @{ s = 'Complete';   k = $true;  e = $true;  fix = 'GoneByKernelExit' }
+                @{ s = 'Incomplete'; k = $true;  e = $false; fix = 'RequireBothEofBeforeGone' }
+                @{ s = 'Incomplete'; k = $true;  e = $true;  fix = 'GoneByKernelExit' }
+                @{ s = 'Absent';     k = $true;  e = $false; fix = 'RequireBothEofBeforeGone' }
+                @{ s = 'Absent';     k = $true;  e = $true;  fix = 'GoneByKernelExit' }
+            )
+            foreach ($r in $rows) {
+                $got = Resolve-CapAttestationDisposition -State $r.s -KernelExited $r.k -BothStreamsEofReached $r.e
+                Assert-CapTest ($got -ceq $r.fix) "Fix disposition($($r.s),exit=$($r.k),eof=$($r.e))=$got; expected $($r.fix)."
+            }
+            $discriminators = @(
+                @{ s = 'Incomplete'; k = $true; e = $true;  fixCorrect = 'GoneByKernelExit';         mainWrong = 'MainRefusesIncomplete' }
+                @{ s = 'Complete';   k = $true; e = $false; fixCorrect = 'RequireBothEofBeforeGone'; mainWrong = 'MainGoneNoEofGate' }
+                @{ s = 'Absent';     k = $true; e = $false; fixCorrect = 'RequireBothEofBeforeGone'; mainWrong = 'MainGoneNoEofGate' }
+            )
+            $discriminationCount = 0
+            foreach ($d in $discriminators) {
+                $fixGot = Resolve-CapAttestationDisposition -State $d.s -KernelExited $d.k -BothStreamsEofReached $d.e
+                $mainGot = Resolve-MainAttestationDispositionMutant -State $d.s -KernelExited $d.k -BothStreamsEofReached $d.e
+                Assert-CapTest ($fixGot -ceq $d.fixCorrect) "Fix must be correct on discriminator ($($d.s),$($d.k),$($d.e)): got $fixGot."
+                Assert-CapTest ($mainGot -ceq $d.mainWrong) "Main mutant must reproduce the wrong disposition: got $mainGot."
+                Assert-CapTest ($fixGot -cne $mainGot) 'Fix and main mutant must differ on this row.'
+                $discriminationCount++
+            }
+            Assert-CapTest ($discriminationCount -eq 3) "Expected 3 discriminating rows; observed $discriminationCount."
+            return [ordered]@{ fixRowsProven = $rows.Count; discriminatingRows = $discriminationCount
+                note = 'Deterministic: real fix helper GREEN over 12 rows; test-only faithful main mutant RED on 3 rows (CIM torn-row refusal + missing EOF gate); distinct from the historical J3 49/48/1 CIM RED.' }
+        }
+        Invoke-CapTest 'live-incomplete child is refused with UNPROVEN rollback; test release records it genuinely gone' {
+            $owned = Join-Path $scratch 'cim-incomplete'
+            $null = New-Item -ItemType Directory -Path $owned
+            $releaseFile = Join-Path $owned 'release.flag'
+            # Outer try/finally covers launch + refusal + ALL assertions so the owned barrier is
+            # always released and the owned pending resolved even if an early assertion fails.
+            try {
+                $refusal = $null
+                try {
+                    $null = Start-CapManagedProcess -FilePath $cimRaceTarget.executable -ArgumentList @() `
+                        -WorkingDirectory (Split-Path -Parent $cimRaceTarget.executable) -Role 'cim-incomplete-live-refused' `
+                        -Environment @{ CAP_CIM_BEHAVIOR = 'clearcmd-fileblock'; CAP_CIM_RELEASE_FILE = $releaseFile }
+                    throw 'A live child with incomplete CIM was not refused.'
+                } catch {
+                    $refusal = $_.Exception.Message
+                    if ($refusal -eq 'A live child with incomplete CIM was not refused.') { throw $refusal }
+                    Assert-CapTest ($refusal -match 'incomplete current CIM metadata; refusing') "Refusal was not the live-incomplete guard: $refusal"
+                }
+                $pending = @((Get-CapPendingLaunches) | Where-Object { $_.Role -ceq 'cim-incomplete-live-refused' })
+                Assert-CapTest ($pending.Count -eq 1 -and $null -ne $pending[0].RollbackFailure -and $pending[0].KernelExited -eq $false) `
+                    'Live-incomplete child was not left as an UNPROVEN/retained pending launch (strict production contract).'
+                $childPid = $pending[0].Pid
+                $clsLive = Read-CapProcessMetadataState -Pid $childPid
+                Assert-CapTest ($clsLive.State -ceq 'Incomplete') "Live refused child classified $($clsLive.State); expected Incomplete."
+                # Test graceful assistance: release the test's OWN known child via a private
+                # release file it owns (never a kill of a foreign/generic pid).
+                [IO.File]::WriteAllText($releaseFile, 'release')
+                $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    $p = @((Get-CapPendingLaunches) | Where-Object { $_.Pid -eq $childPid })
+                    if (-not $p -or $p.KernelExited -eq $true) { break }
+                    Start-Sleep -Milliseconds 50
+                }
+                $clsGone = Read-CapProcessMetadataState -Pid $childPid
+                Assert-CapTest ($clsGone.State -ceq 'Absent') "Exited child classified $($clsGone.State); expected Absent."
+                # Resolve-CapPendingLaunches processes all module-owned pending records; at this
+                # point only this control's own child should remain pending.
+                $resolved = @(Resolve-CapPendingLaunches)
+                $me = $resolved | Where-Object { $_.Pid -eq $childPid }
+                Assert-CapTest ($me -and $me.Result -ceq 'SKIP_GENUINELY_EXITED_KERNEL' -and $me.KernelExited -and
+                    $me.StdoutEof -and $me.StderrEof -and
+                    @((Get-CapPendingLaunches) | Where-Object { $_.Role -ceq 'cim-incomplete-live-refused' }).Count -eq 0) `
+                    'Test-release cleanup did not record genuinely gone + both EOF + zero pending.'
+                return [ordered]@{ refusal = $refusal
+                    productionRollback = 'UNPROVEN_RETAINED (strict live-unknown contract preserved; no held-handle metadata bypass)'
+                    incompleteClassificationObserved = $true
+                    cleanup = 'TEST_GRACEFUL_RELEASE_OF_OWN_CHILD (not production live-unknown rollback success)'
+                    resolvedResult = $me.Result }
+            } finally {
+                # Leak-prevention for THIS control's own child only (never a foreign kill):
+                # release the owned barrier file, wait for the owned generation's kernel exit,
+                # then resolve its own pending record. No bare catch that could mask a fault.
+                if (-not (Test-Path -LiteralPath $releaseFile)) { [IO.File]::WriteAllText($releaseFile, 'release') }
+                if (@((Get-CapPendingLaunches) | Where-Object { $_.Role -ceq 'cim-incomplete-live-refused' })) {
+                    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+                    while ([DateTime]::UtcNow -lt $deadline -and
+                        @((Get-CapPendingLaunches) | Where-Object { $_.Role -ceq 'cim-incomplete-live-refused' -and $_.KernelExited -ne $true })) {
+                        Start-Sleep -Milliseconds 50
+                    }
+                    $null = Resolve-CapPendingLaunches
+                }
             }
         }
         Invoke-CapTest 'current metadata and saved parent lifetime refuse unknown generations' {

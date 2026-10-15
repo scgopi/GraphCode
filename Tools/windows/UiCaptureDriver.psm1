@@ -822,15 +822,35 @@ function Get-CapProcessIdentity {
         throw "Live $Role executable mismatch: $($snapshot.ImagePath) != $expected."
     }
     $metadata = $null
+    # Observability (records the ACTUAL terminal classification and whether the
+    # conclusion was governed by a retained kernel exit; never a mere alias of the
+    # metadata-observed flag).
+    $terminalState = if ($snapshot.IsExited) { 'KernelExitedBeforeQuery' } else { $null }
+    $concludedGoneByKernelExit = [bool]$snapshot.IsExited
     if (-not $snapshot.IsExited) {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
-            $metadata = Get-CapCurrentMetadata -Pid $Process.Id
-            if ($metadata) { break }
+            $state = Read-CapProcessMetadataState -Pid $Process.Id
+            # The retained kernel handle governs an Absent/Incomplete reading. EOF is
+            # proven later by the launch caller, so the loop passes BothStreamsEofReached
+            # = $false and treats either exited disposition as "break and defer the EOF
+            # gate to the caller".
             $snapshot = [CapNative]::Snapshot($Process.Handle, $Process.Id)
-            if ($snapshot.IsExited) { break }
+            $disposition = Resolve-CapAttestationDisposition -State $state.State `
+                -KernelExited ([bool]$snapshot.IsExited) -BothStreamsEofReached $false
+            $terminalState = if ($snapshot.IsExited) { "KernelExitedWith$($state.State)" } else { $state.State }
+            if ($disposition -eq 'UseMetadata') { $metadata = $state.Metadata; break }
+            if ($disposition -eq 'GoneByKernelExit' -or $disposition -eq 'RequireBothEofBeforeGone') {
+                $concludedGoneByKernelExit = $true; break
+            }
+            if ($disposition -eq 'RefuseLiveIncomplete') {
+                # A torn-down row on a still-live owned child is refused outright,
+                # exactly as main did; it is never retried into a passing outcome.
+                throw "Live $Role PID $($Process.Id) has incomplete current CIM metadata; refusing ownership inference."
+            }
+            # RetryAbsent: not yet listed on a live child -> bounded startup re-poll.
             Start-Sleep -Milliseconds 50
         }
-        if ($null -eq $metadata -and -not $snapshot.IsExited -and
+        if ($null -eq $metadata -and -not $concludedGoneByKernelExit -and -not $snapshot.IsExited -and
             ($ExpectedParentPid -lt 0 -or $ExpectedSessionId -lt 0)) {
             throw "Live $Role PID $($Process.Id) has no current CIM metadata."
         }
@@ -850,6 +870,8 @@ function Get-CapProcessIdentity {
         SessionId = if ($ExpectedSessionId -ge 0) { $ExpectedSessionId } elseif ($metadata) { $metadata.SessionId } else { $null }
         InitialMetadataObserved = $null -ne $metadata
         InitialMetadataMatchesExpected = $expectedMetadataMatches
+        AttestationTerminalState = $terminalState
+        ConcludedGoneByKernelExit = $concludedGoneByKernelExit
     }
     if ($metadata) { $null = Assert-CapMetadataRecord -Identity $identity -Metadata $metadata }
     return $identity
@@ -892,27 +914,83 @@ function Test-CapGraphAppRootRole {
     return $Role -match '^graphcode-app-(before|after)-(normal|actions)$'
 }
 
+function Read-CapProcessMetadataState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Pid)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+
+    # Classify the current Win32_Process reading without inferring liveness:
+    #   Absent     - no single matching row (the PID is not currently listed)
+    #   Incomplete - a row exists but a required field is torn down/unreadable
+    #   Complete    - a fully populated owned-process row
+    # The caller decides what Absent/Incomplete means by consulting the retained
+    # kernel handle; this function never treats a missing field as proof of death.
+    $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $Pid" -ErrorAction Stop)
+    if ($rows.Count -ne 1) { return [pscustomobject]@{ State = 'Absent'; Metadata = $null } }
+    $row = $rows[0]
+    if ($null -eq $row.CreationDate -or [string]::IsNullOrWhiteSpace([string]$row.ExecutablePath) -or
+        [string]::IsNullOrWhiteSpace([string]$row.CommandLine) -or $null -eq $row.ParentProcessId) {
+        return [pscustomobject]@{ State = 'Incomplete'; Metadata = $null }
+    }
+    return [pscustomobject]@{
+        State = 'Complete'
+        Metadata = [pscustomobject]@{
+            Pid = [int]$row.ProcessId
+            ParentPid = [int]$row.ParentProcessId
+            SessionId = [int]$row.SessionId
+            CreationFileTimeUtc = Convert-CapCimCreationTime $row.CreationDate
+            ImagePath = ConvertTo-CapImagePath -Path ([string]$row.ExecutablePath)
+            CommandLine = [string]$row.CommandLine
+        }
+    }
+}
+
+function Resolve-CapAttestationDisposition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('Complete', 'Incomplete', 'Absent')][string]$State,
+        [Parameter(Mandatory)][bool]$KernelExited,
+        [Parameter(Mandatory)][bool]$BothStreamsEofReached
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+
+    # Pure decision rule bound to the (observed CIM classification x retained-kernel
+    # exit x both-stream EOF) matrix. No process, I/O or timing. It encodes two
+    # invariants: the retained kernel handle governs an Absent/Incomplete reading,
+    # and a genuinely-gone conclusion requires both redirected streams to have
+    # reached bounded EOF - a kernel exit alone never suffices.
+    #   UseMetadata              - live child, complete row; attest with it.
+    #   RefuseLiveIncomplete     - live child, torn-down row; refuse immediately.
+    #   RetryAbsent              - live child, not yet listed; bounded startup re-poll.
+    #   GoneByKernelExit         - kernel exited AND both streams reached EOF; gone.
+    #   RequireBothEofBeforeGone - kernel exited but EOF not yet proven; not gone.
+    if (-not $KernelExited) {
+        switch ($State) {
+            'Complete' { return 'UseMetadata' }
+            'Incomplete' { return 'RefuseLiveIncomplete' }
+            'Absent' { return 'RetryAbsent' }
+        }
+    }
+    if ($BothStreamsEofReached) { return 'GoneByKernelExit' }
+    return 'RequireBothEofBeforeGone'
+}
+
 function Get-CapCurrentMetadata {
     [CmdletBinding()]
     param([Parameter(Mandatory)][int]$Pid)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
 
-    $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $Pid" -ErrorAction Stop)
-    if ($rows.Count -ne 1) { return $null }
-    $row = $rows[0]
-    if ($null -eq $row.CreationDate -or [string]::IsNullOrWhiteSpace([string]$row.ExecutablePath) -or
-        [string]::IsNullOrWhiteSpace([string]$row.CommandLine) -or $null -eq $row.ParentProcessId) {
+    # Strict contract (unchanged): a complete reading returns the metadata record,
+    # an absent reading returns $null, and an incomplete reading is refused. Callers
+    # that must distinguish incomplete from absent use Read-CapProcessMetadataState.
+    $state = Read-CapProcessMetadataState -Pid $Pid
+    if ($state.State -eq 'Incomplete') {
         throw "Live PID $Pid has incomplete current CIM metadata; refusing ownership inference."
     }
-    return [pscustomobject]@{
-        Pid = [int]$row.ProcessId
-        ParentPid = [int]$row.ParentProcessId
-        SessionId = [int]$row.SessionId
-        CreationFileTimeUtc = Convert-CapCimCreationTime $row.CreationDate
-        ImagePath = ConvertTo-CapImagePath -Path ([string]$row.ExecutablePath)
-        CommandLine = [string]$row.CommandLine
-    }
+    return $state.Metadata
 }
 
 function Assert-CapMetadataRecord {
@@ -958,11 +1036,16 @@ function Assert-CapProcessIdentity {
         (ConvertTo-CapImagePath -Path $Identity.ExpectedImagePath)) {
         throw "Kernel process identity changed for live PID $($Identity.Pid); refusing."
     }
-    $metadata = Get-CapCurrentMetadata -Pid $Identity.Pid
-    if ($null -eq $metadata) {
+    $state = Read-CapProcessMetadataState -Pid $Identity.Pid
+    if ($state.State -ne 'Complete') {
+        # A missing or incomplete reading is governed by the retained kernel handle,
+        # never treated as proof of death on its own. If the owned generation has
+        # exited, report it exited; if it is still live, an incomplete/absent row
+        # is a refusal, not a silent pass.
         if ([CapNative]::IsExited($Identity.Process.Handle, $Identity.Pid)) { return [pscustomobject]@{ State = 'Exited'; Snapshot = $snapshot; Metadata = $null } }
-        throw "Live PID $($Identity.Pid) has no current CIM row; refusing."
+        throw "Live PID $($Identity.Pid) has no complete current CIM row; refusing."
     }
+    $metadata = $state.Metadata
     $null = Assert-CapMetadataRecord -Identity $Identity -Metadata $metadata
     return [pscustomobject]@{ State = 'Live'; Snapshot = $snapshot; Metadata = $metadata }
 }
@@ -1160,11 +1243,29 @@ function Start-CapManagedProcessCore {
         if ($identity.Pid -ne $process.Id -or $identity.CreationFileTimeUtc -ne $launchRecord.Snapshot.CreationFileTimeUtc) {
             throw "Identity attestor returned a different kernel generation for $Role."
         }
-        if (-not [CapNative]::IsExited($process.Handle, $process.Id)) {
+        $exitedDuringAttestation = [CapNative]::IsExited($process.Handle, $process.Id)
+        if (-not $exitedDuringAttestation) {
             if (-not $identity.InitialMetadataObserved -or -not $identity.InitialMetadataMatchesExpected) {
                 throw "Live $Role PID $($process.Id) lacks a complete expected-parent/session attestation."
             }
-            $null = Assert-CapProcessIdentity -Identity $identity
+            # Consume the verification result: the child can exit during this final
+            # assertion, and that exit must also be routed through the shared EOF gate
+            # rather than silently accepted.
+            $verified = Assert-CapProcessIdentity -Identity $identity
+            if ($verified.State -eq 'Exited') { $exitedDuringAttestation = $true }
+        }
+        if ($exitedDuringAttestation) {
+            # The owned generation exited during attestation. Route the final gone
+            # decision through the same pure decision seam: a retained kernel exit is
+            # accepted as genuinely gone ONLY when both redirected streams have reached
+            # bounded EOF, never from a missing or incomplete CIM reading alone. Every
+            # attestation-time exit, including one discovered inside the final assertion,
+            # passes through this one gate.
+            $bothEof = $launchRecord.StdoutTask.Wait(2000) -and $launchRecord.StderrTask.Wait(2000)
+            $final = Resolve-CapAttestationDisposition -State 'Absent' -KernelExited $true -BothStreamsEofReached $bothEof
+            if ($final -cne 'GoneByKernelExit') {
+                throw "Exited $Role PID $($process.Id) did not reach bounded stdout/stderr EOF; cannot attest it genuinely gone."
+            }
         }
         $launchRecord.Identity = $identity
         if ($CloseStdin) { $process.StandardInput.Close() }
@@ -1966,6 +2067,8 @@ Export-ModuleMember -Function @(
     'Find-CapTopLevelWindow',
     'Capture-CapWindow',
     'Get-CapProcessIdentity',
+    'Read-CapProcessMetadataState',
+    'Resolve-CapAttestationDisposition',
     'Get-CapCurrentMetadata',
     'Assert-CapMetadataRecord',
     'Assert-CapProcessIdentity',
