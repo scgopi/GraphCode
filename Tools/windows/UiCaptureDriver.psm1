@@ -1549,6 +1549,316 @@ function Test-CapFixtureIsolation {
     }
 }
 
+function Assert-CapDataRecord {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][hashtable]$Fields,
+        [Parameter(Mandatory)][string]$Label)
+    if ($Value -isnot [pscustomobject]) { throw "$Label must be a complete typed object." }
+    foreach ($name in $Fields.Keys) {
+        $property = $Value.PSObject.Properties[$name]
+        if ($null -eq $property -or $null -eq $property.Value -or
+            -not $Fields[$name].IsInstanceOfType($property.Value) -or
+            ($property.Value -is [string] -and [string]::IsNullOrWhiteSpace($property.Value))) {
+            throw "$Label requires a non-null $($Fields[$name].Name) field '$name'."
+        }
+    }
+}
+
+function Assert-CapSceneContract {
+    param([Parameter(Mandatory)]$Job)
+    if ($Job.lane -cne 'B' -or $Job.sceneAdapter -cne 'B_FIVE_SCENES_V1') {
+        throw 'Unsupported scene adapter; generic identity does not implement C/D/E scene execution.'
+    }
+    Assert-CapDataRecord $Job @{ authority = [pscustomobject]; captureContract = [pscustomobject]
+        scenes = [array]; fixture = [pscustomobject] } 'B scene job'
+    Assert-CapDataRecord $Job.authority @{ centralCaptureLeaseGrantedByThisArtifact = [bool]
+        bWorkerMayLaunchGui = [bool] } 'Job non-authority'
+    Assert-CapDataRecord $Job.captureContract @{ phases = [array]; sceneCountPerPhase = [long]
+        windowOuterXYWH = [array]; expectedClientWH = [array]; dpi = [long]; canvasZoomPercent = [long] } 'B geometry'
+    Assert-CapDataRecord $Job.fixture @{ sha256 = [string]; mappingSha256 = [string]
+        originalRoot = [string]; offlinePeerReference = [pscustomobject] } 'B fixture'
+    Assert-CapDataRecord $Job.fixture.offlinePeerReference @{ sha256 = [string] } 'Offline peer'
+    Assert-CapDataRecord $Job.binaries.offlineZmx @{ sha256 = [string]; seedArgumentOrder = [array] } 'Offline seed'
+    if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -or $Job.authority.bWorkerMayLaunchGui -or
+        ($Job.captureContract.phases -join ',') -cne 'before,after' -or
+        $Job.captureContract.sceneCountPerPhase -ne 5 -or
+        ($Job.captureContract.windowOuterXYWH -join ',') -cne '30,30,1456,959' -or
+        ($Job.captureContract.expectedClientWH -join ',') -cne '1440,900' -or
+        $Job.captureContract.dpi -ne 96 -or $Job.captureContract.canvasZoomPercent -ne 100 -or
+        $Job.scenes.Count -ne 5 -or
+        (($Job.scenes | ForEach-Object name) -join ',') -cne 'project-alpha,project-beta,overview,workspace,actions') {
+        throw 'B scene, geometry, zoom or non-authority contract differs from the implemented adapter.'
+    }
+    $seed = @('run', 'graphcode-11111111-1111-4111-8111-000000000001', '-d',
+        'cmd.exe', '/Q', '/K', 'echo Offline card fixture - no backend')
+    if (($Job.binaries.offlineZmx.seedArgumentOrder -join [char]0) -cne ($seed -join [char]0)) {
+        throw 'B scene adapter requires the exact offline cmd-only seed vector.'
+    }
+    foreach ($digest in @($Job.fixture.sha256, $Job.fixture.mappingSha256,
+        $Job.fixture.offlinePeerReference.sha256, $Job.binaries.offlineZmx.sha256)) {
+        if ($digest -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Scene input SHA256 digest is missing or invalid.' }
+    }
+}
+
+function Read-CapBoundJson {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Reference)
+    Assert-CapDataRecord $Reference @{ path = [string]; sha256 = [string] } 'Artifact reference'
+    $path = Assert-CapArtifactPath -Root $Root -Path $Reference.path
+    if ($Reference.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $Reference.sha256) {
+        throw "Bound artifact hash mismatch: $path"
+    }
+    $json = [IO.File]::ReadAllText($path)
+    $document = [Text.Json.JsonDocument]::Parse($json)
+    try {
+        $visit = {
+            param([Text.Json.JsonElement]$Element)
+            if ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Object) {
+                $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                foreach ($property in $Element.EnumerateObject()) {
+                    if (-not $names.Add($property.Name)) { throw "Duplicate JSON field in bound artifact: $($property.Name)" }
+                    & $visit $property.Value
+                }
+            } elseif ($Element.ValueKind -eq [Text.Json.JsonValueKind]::Array) {
+                foreach ($item in $Element.EnumerateArray()) { & $visit $item }
+            }
+        }
+        & $visit $document.RootElement
+    } finally { $document.Dispose() }
+    return ConvertFrom-Json -InputObject $json -DateKind String
+}
+
+function Invoke-CapAdmissionGit {
+    param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string[]]$Arguments)
+    $output = @(& git --no-pager -c core.quotepath=false -C $Repository @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Source identity Git command failed: $($output -join [Environment]::NewLine)" }
+    return $output
+}
+
+function Assert-CapSourceArchive {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Repository,
+        [Parameter(Mandatory)][string]$Commit, [Parameter(Mandatory)]$Receipt)
+    $sourceRoot = Assert-CapArtifactPath -Root $Root -Path $Receipt.sourceRoot
+    # This is archive byte validation, not a claim that compilation was observed by this process.
+    $treeSpec = if ($Receipt.sourceSubdirectory -ceq '.') { "$Commit`^{tree}" }
+        elseif ($Receipt.sourceSubdirectory -ceq 'graphcode-windows') { "${Commit}:graphcode-windows" }
+        else { throw 'Fresh source coverage must be the full repository or graphcode-windows, not a narrowed input subset.' }
+    $tree = [string](Invoke-CapAdmissionGit $Repository @('rev-parse', '--verify', $treeSpec))
+    if ($tree -cne $Receipt.sourceTree) { throw 'Fresh source tree does not match the named Git object.' }
+    $entries = @(Invoke-CapAdmissionGit $Repository @('ls-tree', '-r', $tree))
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $gitlinks = [Collections.Generic.List[string]]::new()
+    foreach ($entry in $entries) {
+        if ($entry -notmatch '^(100644|100755|160000) (blob|commit) ([a-f0-9]{40})\t([^\r\n\t"]+)$') {
+            throw "Unsupported source archive entry: $entry"
+        }
+        $mode, $kind, $blob, $relative = $Matches[1], $Matches[2], $Matches[3], $Matches[4]
+        if ($mode -eq '160000' -and $kind -eq 'commit') { $gitlinks.Add("$relative=$blob"); continue }
+        if ($kind -cne 'blob' -or -not $expected.Add($relative)) { throw 'Invalid or duplicate source archive path.' }
+        $file = Assert-CapArtifactPath -Root $Root -Path (Join-Path $sourceRoot $relative.Replace('/', '\'))
+        $stream = [IO.File]::OpenRead($file)
+        $hash = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA1)
+        try {
+            $hash.AppendData([Text.Encoding]::UTF8.GetBytes("blob $($stream.Length)`0"))
+            $buffer = [byte[]]::new(65536)
+            while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { $hash.AppendData($buffer, 0, $read) }
+            $actual = [Convert]::ToHexString($hash.GetHashAndReset()).ToLowerInvariant()
+        } finally { $hash.Dispose(); $stream.Dispose() }
+        if ($actual -cne $blob) { throw "Fresh source bytes differ from the named Git object: $relative" }
+    }
+    $files = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force -File)
+    if ($expected.Count -le 0 -or $files.Count -ne $expected.Count) { throw 'Fresh source archive has missing or additional files.' }
+    foreach ($file in $files) {
+        $relative = [IO.Path]::GetRelativePath($sourceRoot, $file.FullName).Replace('\', '/')
+        if (-not $expected.Contains($relative)) { throw "Untracked fresh source input: $relative" }
+    }
+    return [pscustomobject]@{ tree = $tree; files = $expected.Count; gitlinks = @($gitlinks) }
+}
+
+function Assert-CapJobIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)]$Job,
+        [Parameter(Mandatory)]$Lease, [Parameter(Mandatory)][string]$JobSha256,
+        [switch]$OfflineTestData)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    Assert-CapDataRecord $Job @{ lane = [string]; head = [string]; base = [string]
+        sourceRepository = [string]; admission = [pscustomobject]; binaries = [pscustomobject] } 'Job identity'
+    Assert-CapDataRecord $Job.admission @{ schemaVersion = [long]; reviewedHead = [string]
+        reviewAcceptance = [pscustomobject]; equivalence = [pscustomobject]; ci = [pscustomobject] } 'Job admission'
+    Assert-CapDataRecord $Lease @{ lane = [string]; head = [string]; base = [string]; jobManifestSha256 = [string]
+        reviewedHead = [string]; reviewAcceptanceSha256 = [string]; equivalenceSha256 = [string]
+        ciInventorySha256 = [string]; ciRuns = [array]
+        beforeBuildReceiptSha256 = [string]; afterBuildReceiptSha256 = [string]
+        beforeBinarySha256 = [string]; afterBinarySha256 = [string] } 'Lease identity'
+    if ($Job.admission.schemaVersion -ne 1 -or $Job.lane -cnotmatch '^[A-Z]$' -or
+        $Lease.lane -cne $Job.lane -or $Lease.head -cne $Job.head -or $Lease.base -cne $Job.base -or
+        $Lease.jobManifestSha256 -ne $JobSha256 -or $Lease.reviewedHead -cne $Job.admission.reviewedHead -or
+        $Lease.reviewAcceptanceSha256 -ne $Job.admission.reviewAcceptance.sha256 -or
+        $Lease.equivalenceSha256 -ne $Job.admission.equivalence.sha256 -or
+        $Lease.ciInventorySha256 -ne $Job.admission.ci.sha256) {
+        throw 'Lease-bound job identity differs from the separately supplied coordinator lease.'
+    }
+    $repository = [IO.Path]::GetFullPath($Job.sourceRepository)
+    if (-not [IO.Path]::IsPathFullyQualified($Job.sourceRepository) -or
+        $Job.sourceRepository -notmatch '^[A-Za-z]:\\' -or $Job.sourceRepository.Substring(2).Contains(':') -or
+        $Job.sourceRepository -match '(^|\\)\.\.?($|\\)') { throw 'Source repository must be an explicit safe local path.' }
+    $ancestor = $repository
+    while ($ancestor) {
+        if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Source repository has a reparse-point ancestor.'
+        }
+        $ancestor = Split-Path -Parent $ancestor
+    }
+    if ([string](Invoke-CapAdmissionGit $repository @('rev-parse', '--show-object-format')) -cne 'sha1') {
+        throw 'Unsupported Git source object format.'
+    }
+    foreach ($commit in @($Job.head, $Job.base, $Job.admission.reviewedHead)) {
+        if ($commit -cnotmatch '^[a-f0-9]{40}$' -or
+            [string](Invoke-CapAdmissionGit $repository @('rev-parse', '--verify', "$commit`^{commit}")) -cne $commit) {
+            throw 'Named source head/base/reviewed head is not an existing exact Git commit.'
+        }
+    }
+    if ([string](Invoke-CapAdmissionGit $repository @('rev-parse', 'HEAD')) -cne $Job.head -or
+        @(Invoke-CapAdmissionGit $repository @('status', '--porcelain', '--untracked-files=all')).Count -ne 0) {
+        throw 'Named source repository is not clean at the exact job head.'
+    }
+    $review = Read-CapBoundJson $Root $Job.admission.reviewAcceptance
+    $equivalence = Read-CapBoundJson $Root $Job.admission.equivalence
+    Assert-CapDataRecord $review @{ schemaVersion = [long]; verdict = [string]; evidenceMode = [string]
+        reviewedHead = [string]; reviewedBase = [string] } 'Review acceptance'
+    Assert-CapDataRecord $equivalence @{ schemaVersion = [long]; reviewedHead = [string]; head = [string]
+        reviewedBase = [string]; base = [string]; headDeltaPaths = [array]; baseDeltaPaths = [array] } 'Equivalence proof'
+    $reviewMode = if ($OfflineTestData) { 'OFFLINE_TEST_DATA_NOT_REVIEW' } else { 'COORDINATOR_ADMITTED_REVIEW' }
+    if ($review.schemaVersion -ne 1 -or $equivalence.schemaVersion -ne 1 -or
+        $review.verdict -cne 'ACCEPT' -or $review.evidenceMode -cne $reviewMode -or
+        $review.reviewedHead -cne $Job.admission.reviewedHead -or
+        $equivalence.reviewedHead -cne $review.reviewedHead -or $equivalence.reviewedBase -cne $review.reviewedBase -or
+        $equivalence.head -cne $Job.head -or $equivalence.base -cne $Job.base -or
+        $review.reviewedBase -cnotmatch '^[a-f0-9]{40}$') { throw 'Reviewed reference/equivalence identity is not coordinator-bound acceptance.' }
+    $null = Invoke-CapAdmissionGit $repository @('rev-parse', '--verify', "$($review.reviewedBase)`^{commit}")
+    foreach ($pair in @(
+        @($review.reviewedHead, $Job.head, 'headDeltaPaths'),
+        @($review.reviewedBase, $Job.base, 'baseDeltaPaths')
+    )) {
+        $delta = @(Invoke-CapAdmissionGit $repository @('diff', '--name-only', '--no-renames', '--no-ext-diff',
+            '--no-textconv', $pair[0], $pair[1], '--'))
+        $declared = @($equivalence.($pair[2]))
+        if (($delta -join "`0") -cne ($declared -join "`0") -or @($declared | Where-Object { $_ -isnot [string] }).Count) {
+            throw 'Equivalence proof does not name the complete exact Git delta.'
+        }
+        foreach ($path in $delta) {
+            # Docs and capture/test harnesses are not product build inputs; every other path is protected.
+            $productRoot = $path -match '^(graphcode-windows|graphcode|graphcoded|graphcode-cli|GraphcodeKit|ThirdParty|Tuist)/'
+            $nonProduct = -not $productRoot -and ($path -cmatch '\.md$' -or
+                $path -cmatch '^(windows-tests/|Tools/[^/]+/Tests/)' -or
+                $path -cmatch '^Tools/windows/(UiCaptureDriver\.psm1|Invoke-UiCapture(?:Worker)?\.ps1)$')
+            if (-not $nonProduct) { throw "Non-equivalent product/provider/build input diff: $path" }
+        }
+    }
+    $ci = Read-CapBoundJson $Root $Job.admission.ci
+    Assert-CapDataRecord $ci @{ schemaVersion = [long]; repository = [string]; head = [string]
+        evidenceMode = [string]; observedUtc = [string]; runs = [array] } 'CI inventory'
+    Assert-CapDataRecord $Job.admission.ci @{ runs = [array] } 'Job CI identity'
+    $ciMode = if ($OfflineTestData) { 'OFFLINE_TEST_DATA_NOT_LIVE_CI' } else { 'COORDINATOR_ADMITTED_GITHUB_API_SNAPSHOT' }
+    if ($ci.schemaVersion -ne 1 -or $ci.repository -cne 'scgopi/GraphCode' -or $ci.head -cne $Job.head -or
+        $ci.evidenceMode -cne $ciMode -or $ci.runs.Count -le 0 -or
+        $ci.runs.Count -ne $Job.admission.ci.runs.Count -or $ci.runs.Count -ne $Lease.ciRuns.Count -or
+        (ConvertTo-CapUtcInstant $ci.observedUtc 'CI observedUtc') -gt [DateTime]::UtcNow) {
+        throw 'CI inventory identity, mode, observation time or run count differs from the lease-bound job.'
+    }
+    $runIds = [Collections.Generic.HashSet[long]]::new()
+    $contextIds = [Collections.Generic.HashSet[long]]::new()
+    $contextCount = 0
+    for ($i = 0; $i -lt $ci.runs.Count; $i++) {
+        $run = $ci.runs[$i]
+        Assert-CapDataRecord $run @{ id = [long]; run_attempt = [long]; head_sha = [string]
+            status = [string]; conclusion = [string]; total_count = [long]; jobs = [array] } 'CI run'
+        foreach ($identity in @($Job.admission.ci.runs[$i], $Lease.ciRuns[$i])) {
+            Assert-CapDataRecord $identity @{ id = [long]; attempt = [long] } 'Bound CI run identity'
+            if ($identity.id -ne $run.id -or $identity.attempt -ne $run.run_attempt) { throw 'CI run identity/attempt differs from the lease.' }
+        }
+        if ($run.id -le 0 -or $run.run_attempt -le 0 -or -not $runIds.Add($run.id) -or
+            $run.head_sha -cne $Job.head -or $run.status -cne 'completed' -or $run.conclusion -cne 'success') {
+            throw 'CI run is not exact-head completed success with a unique positive identity.'
+        }
+        if ($run.total_count -le 0 -or $run.total_count -ne $run.jobs.Count) {
+            throw 'CI inventory must contain a positive complete context count.'
+        }
+        foreach ($context in $run.jobs) {
+            Assert-CapDataRecord $context @{ id = [long]; run_id = [long]; head_sha = [string]; name = [string]
+                status = [string]; conclusion = [string]; configuredSkip = [bool] } 'CI context'
+            if ($context.id -le 0 -or -not $contextIds.Add($context.id) -or $context.run_id -ne $run.id -or
+                $context.head_sha -cne $Job.head -or $context.status -cne 'completed' -or
+                ($context.conclusion -cne 'success' -and
+                    -not ($context.conclusion -ceq 'skipped' -and $context.configuredSkip))) {
+                throw 'CI context is not exact-head green or an explicitly configured skip.'
+            }
+            $contextCount++
+        }
+    }
+    $builds = [ordered]@{}
+    foreach ($phase in @('before', 'after')) {
+        $binary = $Job.binaries.$phase
+        Assert-CapDataRecord $binary @{ path = [string]; sha256 = [string]; source = [string]
+            binaryBuiltAtSource = [string]; buildReceipt = [pscustomobject] } "$phase binary"
+        if ($Lease."${phase}BuildReceiptSha256" -ne $binary.buildReceipt.sha256 -or
+            $Lease."${phase}BinarySha256" -ne $binary.sha256) { throw 'Lease-bound build receipt/binary identity differs.' }
+        $commit = if ($phase -ceq 'before') { $Job.base } else { $Job.head }
+        $receipt = Read-CapBoundJson $Root $binary.buildReceipt
+        Assert-CapDataRecord $receipt @{ schemaVersion = [long]; evidenceMode = [string]; sourceCommit = [string]
+            sourceTree = [string]; sourceRoot = [string]; sourceSubdirectory = [string]
+            binaryBuiltAtSource = [string]; archive = [pscustomobject]; log = [pscustomobject]
+            rawReceipt = [pscustomobject]; executablePath = [string]; executableSha256 = [string]
+            startedUtc = [string]; finishedUtc = [string]; exitCode = [long]; command = [string]; inputs = [array] } "$phase fresh build receipt"
+        $buildMode = if ($OfflineTestData) { 'OFFLINE_TEST_DATA_NOT_PRODUCT_BUILD' } else { 'SEPARATE_FRESH_BUILD' }
+        if ($receipt.schemaVersion -ne 1 -or $receipt.evidenceMode -cne $buildMode -or
+            $binary.source -cne $commit -or $binary.binaryBuiltAtSource -cne $commit -or
+            $receipt.sourceCommit -cne $commit -or $receipt.binaryBuiltAtSource -cne $commit -or
+            $receipt.exitCode -ne 0 -or $receipt.executablePath -cne $binary.path -or
+            $receipt.executableSha256 -ne $binary.sha256 -or $receipt.inputs.Count -le 0) {
+            throw 'Fresh build provenance must name the exact phase source and actual built-at commit.'
+        }
+        $started = ConvertTo-CapUtcInstant $receipt.startedUtc 'Build startedUtc'
+        $finished = ConvertTo-CapUtcInstant $receipt.finishedUtc 'Build finishedUtc'
+        if ($finished -lt $started -or $finished -gt [DateTime]::UtcNow) { throw 'Fresh build timestamps are reversed or future-dated.' }
+        $binaryPath = Assert-CapArtifactPath -Root $Root -Path $binary.path
+        if ($binary.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash -ne $binary.sha256) {
+            throw "$phase binary hash mismatch against the separately produced fresh build."
+        }
+        $artifactPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($reference in @($receipt.archive, $receipt.log) + @($receipt.inputs)) {
+            Assert-CapDataRecord $reference @{ path = [string]; sha256 = [string] } 'Build artifact'
+            $path = Assert-CapArtifactPath -Root $Root -Path $reference.path
+            if (-not $artifactPaths.Add($path)) { throw 'Duplicate fresh build artifact/input path.' }
+            if ($reference.sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $reference.sha256) {
+                throw "Fresh build artifact hash mismatch: $path"
+            }
+        }
+        $raw = Read-CapBoundJson $Root $receipt.rawReceipt
+        Assert-CapDataRecord $raw @{ sourceSha = [string]; builtAtSha = [string]; sourceTree = [string]
+            sourceExportSha256 = [string]; executableSha256 = [string]; exitCode = [long]
+            startedUtc = [string]; finishedUtc = [string]; command = [string] } 'Original build receipt'
+        if ($raw.sourceSha -cne $commit -or $raw.builtAtSha -cne $commit -or $raw.sourceTree -cne $receipt.sourceTree -or
+            $raw.sourceExportSha256 -ne $receipt.archive.sha256 -or $raw.executableSha256 -ne $binary.sha256 -or
+            $raw.exitCode -ne 0 -or $raw.startedUtc -cne $receipt.startedUtc -or
+            $raw.finishedUtc -cne $receipt.finishedUtc -or $raw.command -cne $receipt.command) {
+            throw 'Original build receipt does not agree with its relocated fresh-build artifacts.'
+        }
+        $source = Assert-CapSourceArchive -Root $Root -Repository $repository -Commit $commit -Receipt $receipt
+        $builds[$phase] = [ordered]@{ source = $binary.source; binaryBuiltAtSource = $binary.binaryBuiltAtSource
+            sha256 = $binary.sha256; receiptSha256 = $binary.buildReceipt.sha256
+            sourceTree = $source.tree; sourceFiles = $source.files; gitlinks = $source.gitlinks }
+    }
+    return [pscustomobject]@{
+        head = $Job.head; base = $Job.base; lane = $Job.lane; reviewedHead = $Job.admission.reviewedHead
+        sourceRepository = $repository; ciInventorySha256 = $Job.admission.ci.sha256
+        ciRuns = $ci.runs.Count; ciContexts = $contextCount
+        equivalenceSha256 = $Job.admission.equivalence.sha256; builds = [pscustomobject]$builds
+        attestation = 'LEASE_BOUND_ARTIFACT_VALIDATION_NOT_OBSERVED_COMPILATION_OR_LIVE_CI'
+    }
+}
+
 function ConvertTo-CapUtcInstant {
     param(
         [Parameter(Mandatory)][string]$Value,
@@ -1632,6 +1942,10 @@ Export-ModuleMember -Function @(
     'Get-CapTraceFailures',
     'Assert-CapArtifactPath',
     'Assert-CapFixtureMapping',
+    'Read-CapBoundJson',
+    'Assert-CapDataRecord',
+    'Assert-CapJobIdentity',
+    'Assert-CapSceneContract',
     'Assert-CapDescendantLifetime',
     'Test-CapGraphAppRootRole',
     'Resolve-CapAutomationCandidate',

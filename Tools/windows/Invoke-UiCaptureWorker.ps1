@@ -123,10 +123,7 @@ function Write-CapProcessJournal {
 function Assert-CapAcceptedInputs {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    if ($job.lane -ne 'B' -or $job.head -ne 'e3ff22f278524645e4cae2690e1ff5c1aee7d66e' -or
-        $job.base -ne '6916bc2c2baabc2f83c92230aeee8b49e879758e') {
-        throw 'The copied B job does not name the accepted exact head/base.'
-    }
+    Assert-CapSceneContract -Job $job
     if ($job.authority.centralCaptureLeaseGrantedByThisArtifact -ne $false -or
         $lease.status -ne 'GRANTED' -or $lease.lane -ne 'B' -or
         $lease.authorizedAction -ne 'central-cap-capture' -or
@@ -139,47 +136,29 @@ function Assert-CapAcceptedInputs {
         $lease.preflightReceiptSha256 -ne $auth.preflightReceiptSha256) {
         throw 'Lease receipt hashes do not bind the exact reviewed B job and capture controls.'
     }
-    $ci = [string]$job.freshness.ci
-    $review = [string]$job.freshness.narrowRebaseReview
-    $runner = [string]$job.freshness.focusedRunner
-    if ($ci -notmatch '24 completed contexts,20SUCCESS/4configured SKIPPED' -or
-        $ci -notmatch 'seven successful workflows' -or
-        $review -notmatch 'ACCEPT' -or $runner -notmatch '166G1executed/166passed/0failed') {
-        throw 'The copied job does not carry the exact-head green CI, focused-runner, and accepted narrow-review evidence.'
-    }
-    $equivalenceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\g1-rebase-equivalence.json')).Hash
     $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath $fixturePath `
         -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
         -ExpectedMappingSha256 $auth.fixtureMappingSha256 `
-        -ExpectedSourceSha256 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA' `
-        -OriginalRoot 'C:\gcs\ib\captures'
+        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot
     $expectedHashes = @{
         fixture = $mappingProof.FixtureSha256
-        fixtureSource = 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA'
+        fixtureSource = $job.fixture.sha256
         fixtureMapping = $auth.fixtureMappingSha256
-        peer = '1331A36866E3B90BE7156A83AFFB65AAB1112DEC4425E9C9176399199ED91F11'
-        zmx = 'DFFF744FA8D7B0FB483416674C2FF4C2647EA46A3BDD82A95DC173A1FA07DC5B'
-        before = '83688A62FD21CCAD36327FE6B4C3143FED25F211A6A136D0FD20CDEF4DF48420'
-        after = 'C610D91E614F9ACFFC28AF37B3C6429D978AC5EEF8B4AC492F8EB39506CA9E51'
+        peer = $job.fixture.offlinePeerReference.sha256
+        zmx = $job.binaries.offlineZmx.sha256
+        before = $job.binaries.before.sha256
+        after = $job.binaries.after.sha256
     }
-    $actual = @{
-        fixture = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
-        fixtureSource = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\fixture-source.json')).Hash
-        fixtureMapping = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'reports\fixture-mapping.json')).Hash
-        peer = (Get-FileHash -Algorithm SHA256 -LiteralPath $peerScript).Hash
-        zmx = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
-        before = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-before.exe')).Hash
-        after = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-after.exe')).Hash
+    $paths = @{
+        fixture = $fixturePath; fixtureSource = (Join-Path $root 'inputs\fixture-source.json')
+        fixtureMapping = (Join-Path $root 'reports\fixture-mapping.json'); peer = $peerScript
+        zmx = (Join-Path $root 'runtime\zmx.exe'); before = (Join-Path $root 'inputs\graphcode-before.exe')
+        after = (Join-Path $root 'inputs\graphcode-after.exe')
     }
-    if ($equivalenceHash -ne '0D3C236B736DC38DCFDB36166F7593313F10A27A716DAD39664EFFC329F3B8CA' -or
-        $job.fixture.sha256 -ne $expectedHashes.fixtureSource -or
-        $job.fixture.offlinePeerReference.sha256 -ne '1331A36866E3B90BE7156A83AFFB65AAB1112DEC4425E9C9176399199ED91F11' -or
-        $job.binaries.offlineZmx.sha256 -ne $expectedHashes.zmx -or
-        $job.binaries.before.sha256 -ne $expectedHashes.before -or
-        $job.binaries.after.sha256 -ne $expectedHashes.after) {
-        throw 'Job pins and cap-owned input provenance do not agree.'
-    }
+    $actual = @{}
     foreach ($key in $expectedHashes.Keys) {
+        $path = Assert-CapArtifactPath -Root $root -Path $paths[$key]
+        $actual[$key] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ($actual[$key] -ne $expectedHashes[$key]) { throw "Cap-owned $key input hash changed: $($actual[$key])." }
     }
     $script:fixtureSourceHash = $actual.fixtureSource
@@ -1036,8 +1015,8 @@ try {
     if ($AuthorizationPath -ine $auth.authorizationPath) {
         throw 'Worker command-line authorization does not match the supervisor-bound record.'
     }
-    $job = Get-Content -LiteralPath $jobPath -Raw | ConvertFrom-Json
-    $lease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json -DateKind String
+    $job = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $jobPath; sha256 = $jobHash })
+    $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
     if (-not $rehearsal -and $lease.fixtureMappingSha256 -ne $auth.fixtureMappingSha256) {
         throw 'Worker lease does not bind its exact owned-root fixture mapping.'
     }
@@ -1062,6 +1041,12 @@ try {
     if ($supervisorIdentity.CreationFileTimeUtc -ne [long]$auth.supervisorCreationFileTimeUtc) {
         throw 'Supervisor kernel generation differs from the run authorization.'
     }
+    if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
+        $identity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
+        if (($identity | ConvertTo-Json -Depth 15 -Compress) -cne ($auth.jobIdentity | ConvertTo-Json -Depth 15 -Compress)) {
+            throw 'Worker recomputed job identity differs from supervisor authorization.'
+        }
+    }
     if ($rehearsal) {
         if ($lease.status -cne 'REHEARSAL_ONLY' -or $lease.desktopAuthorized -ne $false -or
             $lease.authorizedAction -cne 'no-desktop-real-launch-rehearsal' -or
@@ -1074,13 +1059,6 @@ try {
         }
     } else {
     Assert-CapAcceptedInputs
-    $sourceRoot = [IO.Path]::GetFullPath($job.binaries.after.path)
-    for ($parentDepth = 0; $parentDepth -lt 4; $parentDepth++) { $sourceRoot = Split-Path -Parent $sourceRoot }
-    $sourceHead = (& git -C $sourceRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $sourceHead -ne $job.head) { throw "B source head changed after grant: $sourceHead" }
-    $sourceStatus = @(& git -C $sourceRoot status --porcelain)
-    if ($LASTEXITCODE -ne 0 -or $sourceStatus.Count -ne 0) { throw 'B source worktree is no longer clean.' }
-
     $zmxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
     $beforeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-before.exe')).Hash
     $afterHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-after.exe')).Hash

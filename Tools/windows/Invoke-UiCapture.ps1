@@ -20,11 +20,9 @@ $requestedOutputDirectory = $OutputDirectory
 $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $workerPath = Join-Path $PSScriptRoot 'Invoke-UiCaptureWorker.ps1'
 $rehearsal = $ExecutionMode -ceq 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
-$jobHashExpected = 'E5EF95F46F97C96337DA3195DEA7E415667B6F19F09721C853770C1819CDA40C'
-$equivalenceHashExpected = '0D3C236B736DC38DCFDB36166F7593313F10A27A716DAD39664EFFC329F3B8CA'
-$preflight08HashExpected = '5B3F075635007C70D7D82C5759A144B56E2D5B37074525943F6B12354776B349'
 $fixtureMappingHashExpected = if ($FixtureMappingSha256) { $FixtureMappingSha256.ToUpperInvariant() }
-    else { '962A8C7F98025FD3C523DF842E0E6E5E372CE3E37A81B3977A3039B3CD420E1F' }
+    else { $null }
+$jobIdentity = $null
 $fixtureHashExpected = $null
 $tracked = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
 $untrackedJournalEntries = [Collections.Generic.List[object]]::new()
@@ -122,87 +120,30 @@ function Get-CapSupervisorFailureText {
     throw 'Unexpected capture failure representation.'
 }
 
-function Get-CapSourceRoot {
-    param([Parameter(Mandatory)][string]$BinaryPath)
-    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
-
-    $sourceRoot = [IO.Path]::GetFullPath($BinaryPath)
-    for ($parentDepth = 0; $parentDepth -lt 4; $parentDepth++) { $sourceRoot = Split-Path -Parent $sourceRoot }
-    if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot '.git'))) { throw "B repository root was not found from binary path: $sourceRoot" }
-    return $sourceRoot
-}
-
 function Assert-CapGreenJob {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    if ($jobHash -ne $jobHashExpected) { throw "Green B job hash mismatch: $jobHash" }
-    if ($job.lane -ne 'B' -or $job.head -ne 'e3ff22f278524645e4cae2690e1ff5c1aee7d66e' -or
-        $job.base -ne '6916bc2c2baabc2f83c92230aeee8b49e879758e') {
-        throw 'Green B successor job no longer matches the accepted exact head/base.'
-    }
-    if ($job.authority.centralCaptureLeaseGrantedByThisArtifact -ne $false -or
-        $job.authority.bWorkerMayLaunchGui -ne $false) {
-        throw 'Job authority must remain explicit that only a separate central lease can authorize capture.'
-    }
-    if (($job.captureContract.phases -join ',') -cne 'before,after' -or
-        $job.captureContract.sceneCountPerPhase -ne 5 -or
-        ($job.captureContract.windowOuterXYWH -join ',') -cne '30,30,1456,959' -or
-        ($job.captureContract.expectedClientWH -join ',') -cne '1440,900' -or
-        $job.captureContract.dpi -ne 96 -or $job.captureContract.canvasZoomPercent -ne 100 -or
-        $job.scenes.Count -ne 5 -or
-        (($job.scenes | ForEach-Object name) -join ',') -cne 'project-alpha,project-beta,overview,workspace,actions') {
-        throw 'B scene, geometry, or zoom contract differs from the reviewed five-scene job.'
-    }
-    $expectedSeedArguments = @(
-        'run', 'graphcode-11111111-1111-4111-8111-000000000001', '-d',
-        'cmd.exe', '/Q', '/K', 'echo Offline card fixture - no backend'
-    )
-    if (($job.binaries.offlineZmx.seedArgumentOrder -join [char]0) -cne ($expectedSeedArguments -join [char]0)) {
-        throw 'The reviewed B job no longer specifies the exact offline cmd-only seed argument vector.'
-    }
-    $ci = [string]$job.freshness.ci
-    $review = [string]$job.freshness.narrowRebaseReview
-    $runner = [string]$job.freshness.focusedRunner
-    if ($ci -notmatch '24 completed contexts,20SUCCESS/4configured SKIPPED' -or
-        $ci -notmatch 'seven successful workflows' -or
-        $review -notmatch 'ACCEPT' -or $runner -notmatch '166G1executed/166passed/0failed') {
-        throw 'Green job is missing exact-head CI, focused-runner, or accepted narrow-review evidence.'
-    }
-    $equivalencePath = Join-Path $root 'inputs\g1-rebase-equivalence.json'
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $equivalencePath).Hash -ne $equivalenceHashExpected) {
-        throw 'G1 source/binary equivalence proof changed.'
-    }
+    Assert-CapSceneContract -Job $job
     $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath (Join-Path $root 'fixtures\fixture.json') `
         -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
         -ExpectedMappingSha256 $fixtureMappingHashExpected `
-        -ExpectedSourceSha256 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA' `
-        -OriginalRoot 'C:\gcs\ib\captures'
+        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot
     $script:fixtureHashExpected = $mappingProof.FixtureSha256
     $inputHashes = @{
         fixture = @((Join-Path $root 'fixtures\fixture.json'), $fixtureHashExpected)
-        fixtureSource = @((Join-Path $root 'inputs\fixture-source.json'), 'BFC26149FCC5AD2DE4C042E1E4F200F8C2299B662E24DA426EDB3683AA4C56FA')
+        fixtureSource = @((Join-Path $root 'inputs\fixture-source.json'), $job.fixture.sha256)
         fixtureMapping = @((Join-Path $root 'reports\fixture-mapping.json'), $fixtureMappingHashExpected)
-        peer = @((Join-Path $root 'inputs\offline-peer-source.ps1'), '1331A36866E3B90BE7156A83AFFB65AAB1112DEC4425E9C9176399199ED91F11')
-        zmx = @((Join-Path $root 'runtime\zmx.exe'), 'DFFF744FA8D7B0FB483416674C2FF4C2647EA46A3BDD82A95DC173A1FA07DC5B')
-        before = @((Join-Path $root 'inputs\graphcode-before.exe'), '83688A62FD21CCAD36327FE6B4C3143FED25F211A6A136D0FD20CDEF4DF48420')
-        after = @((Join-Path $root 'inputs\graphcode-after.exe'), 'C610D91E614F9ACFFC28AF37B3C6429D978AC5EEF8B4AC492F8EB39506CA9E51')
+        peer = @((Join-Path $root 'inputs\offline-peer-source.ps1'), $job.fixture.offlinePeerReference.sha256)
+        zmx = @((Join-Path $root 'runtime\zmx.exe'), $job.binaries.offlineZmx.sha256)
+        before = @((Join-Path $root 'inputs\graphcode-before.exe'), $job.binaries.before.sha256)
+        after = @((Join-Path $root 'inputs\graphcode-after.exe'), $job.binaries.after.sha256)
     }
     foreach ($key in $inputHashes.Keys) {
+        $null = Assert-CapArtifactPath -Root $root -Path $inputHashes[$key][0]
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputHashes[$key][0]).Hash
         if ($actual -ne $inputHashes[$key][1]) { throw "Cap-owned $key input hash mismatch: $actual" }
     }
-    if ($job.fixture.sha256 -ne $inputHashes.fixtureSource[1] -or
-        $job.binaries.before.sha256 -ne $inputHashes.before[1] -or
-        $job.binaries.after.sha256 -ne $inputHashes.after[1] -or
-        $job.binaries.offlineZmx.sha256 -ne $inputHashes.zmx[1]) {
-        throw 'Pinned input hashes do not match the green job manifest.'
-    }
-    $sourceRoot = Get-CapSourceRoot -BinaryPath $job.binaries.after.path
-    $head = (& git -C $sourceRoot rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $head -ne $job.head) { throw "B source worktree head mismatch: $head" }
-    $status = @(& git -C $sourceRoot status --porcelain)
-    if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) { throw 'B source worktree is not clean.' }
-    return $sourceRoot
+    return $jobIdentity.sourceRepository
 }
 
 function Assert-CapPreflightReport {
@@ -222,6 +163,11 @@ function Assert-CapPreflightReport {
             @($preflight.cases | Where-Object passed -NE $true).Count -ne 0) {
             throw 'The repaired-core preflight does not prove a nonempty successful exact-source offline rehearsal.'
         }
+        $caseNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($case in $preflight.cases) {
+            Assert-CapDataRecord $case @{ name = [string]; passed = [bool] } 'Preflight case'
+            if (-not $caseNames.Add($case.name)) { throw 'Duplicate preflight case identity.' }
+        }
         foreach ($required in @(
             'real capture command with nonempty arguments',
             'real capture command with genuine zero arguments',
@@ -229,7 +175,16 @@ function Assert-CapPreflightReport {
             'same capture command handles target nonzero',
             'same capture command handles target timeout',
             'same capture command handles target primary-cleanup',
-            'same capture command handles target receipt-block'
+            'same capture command handles target receipt-block',
+            'lease-bound admission accepted through actual capture command',
+            'lease-bound admission lane-d through actual capture command',
+            'lease-bound admission red-ci through actual capture command',
+            'lease-bound admission binary-hash through actual capture command',
+            'lease-bound admission product-diff through actual capture command',
+            'lease-bound admission ci-head through actual capture command',
+            'lease-bound admission empty-ci through actual capture command',
+            'lease-bound admission source-bytes through actual capture command',
+            'lease-bound admission lease-base through actual capture command'
         )) {
             if (@($preflight.cases | Where-Object name -CEQ $required).Count -ne 1) {
                 throw "Repaired-core preflight is missing a unique required actual-command case: $required"
@@ -343,7 +298,7 @@ function Assert-CapPreflightReport {
         throw 'Offline preflight did not exercise the required positive and negative UIA guard paths.'
     }
     $priorLifecyclePath = Join-Path $root 'reports\preflight-08.json'
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $priorLifecyclePath).Hash -ne $preflight08HashExpected) {
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $priorLifecyclePath).Hash -ne $job.admission.priorLifecycleSha256) {
         throw 'Preserved real no-GUI preflight-08 lifecycle evidence changed.'
     }
     $priorLifecycle = Get-Content -LiteralPath $priorLifecyclePath -Raw | ConvertFrom-Json
@@ -365,17 +320,27 @@ function Assert-CapLease {
     $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
     $script:leaseHash = $leaseHash
     if ($leaseHash -ne $LeaseReceiptSha256.ToUpperInvariant()) { throw 'Coordinator lease receipt hash mismatch.' }
-    $lease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json -DateKind String
+    $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
+    Assert-CapDataRecord $lease @{ schemaVersion = [long]; leaseId = [string]; lane = [string]
+        status = [string]; authorizedAction = [string]; head = [string]; jobManifestSha256 = [string]
+        moduleSha256 = [string]; workerSha256 = [string]; supervisorSha256 = [string]
+        grantedUtc = [string]; expiresUtc = [string]; maxMinutes = [long] } 'Coordinator lease'
+    if ($rehearsal) {
+        Assert-CapDataRecord $lease @{ desktopAuthorized = [bool] } 'Rehearsal lease'
+    } else {
+        Assert-CapDataRecord $lease @{ centralPreflightAccepted = [bool]; preflightReceiptSha256 = [string]
+            fixtureMappingSha256 = [string] } 'Capture lease'
+    }
     $expectedStatus = if ($rehearsal) { 'REHEARSAL_ONLY' } else { 'GRANTED' }
     $expectedAction = if ($rehearsal) { 'no-desktop-real-launch-rehearsal' } else { 'central-cap-capture' }
     if ($lease.schemaVersion -ne 1 -or $lease.status -ne $expectedStatus -or
-        $lease.lane -ne 'B' -or $lease.authorizedAction -ne $expectedAction -or
+        $lease.lane -cne $job.lane -or $lease.authorizedAction -ne $expectedAction -or
         (-not $rehearsal -and $lease.centralPreflightAccepted -ne $true) -or
         ($rehearsal -and $lease.desktopAuthorized -ne $false) -or
         $lease.head -ne $job.head -or $lease.jobManifestSha256 -ne $jobHash -or
         $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
         $lease.supervisorSha256 -ne $supervisorHash -or $lease.preflightReceiptSha256 -ne $preflightHash) {
-        throw 'Coordinator lease does not bind the accepted B head and exact worker/preflight hashes.'
+        throw 'Coordinator lease does not bind the job lane/head and exact worker/preflight hashes.'
     }
     if (-not $rehearsal -and $lease.fixtureMappingSha256 -ne $fixtureMappingHashExpected) {
         throw 'Live lease does not bind the exact owned-root fixture mapping.'
@@ -719,12 +684,15 @@ try {
         throw 'Exact green job or offline preflight receipt is missing.'
     }
     $jobHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $JobPath).Hash
-    if ($rehearsal) {
-        if (-not $JobSha256 -or $jobHash -ne $JobSha256.ToUpperInvariant()) {
-            throw 'Rehearsal job does not match the explicitly supplied hash.'
+    if ($JobSha256 -and $jobHash -ne $JobSha256.ToUpperInvariant()) { throw 'Job does not match the explicitly supplied hash.' }
+    $job = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $JobPath; sha256 = $jobHash })
+    if (-not $rehearsal) {
+        if ($job.fixture.mappingSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            ($FixtureMappingSha256 -and $FixtureMappingSha256 -ne $job.fixture.mappingSha256)) {
+            throw 'Job fixture mapping digest is missing or differs from the supplied mapping digest.'
         }
-    } elseif ($jobHash -ne $jobHashExpected) { throw "B green job hash mismatch: $jobHash" }
-    $job = Get-Content -LiteralPath $JobPath -Raw | ConvertFrom-Json -DateKind String
+        $fixtureMappingHashExpected = $job.fixture.mappingSha256
+    }
     if ($rehearsal) {
         if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -ne $false -or
             $job.rehearsalTarget.arguments -isnot [array] -or
@@ -738,11 +706,16 @@ try {
         $sourceRoot = $PSScriptRoot
     } else {
         $preflightHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preflightPath).Hash
-        $preflight = Get-Content -LiteralPath $preflightPath -Raw | ConvertFrom-Json
+        $preflight = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $preflightPath; sha256 = $preflightHash })
+    }
+    $null = Assert-CapLease
+    if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
+        $jobIdentity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
+    }
+    if (-not $rehearsal) {
         $sourceRoot = Assert-CapGreenJob
         $null = Assert-CapPreflightReport
     }
-    $null = Assert-CapLease
     $exports = @(Get-Command -Module UiCaptureDriver | Sort-Object Name)
     if ($exports.Count -lt 30) { throw "Capture driver exports unavailable: count=$($exports.Count)." }
     if (-not $rehearsal) {
@@ -786,6 +759,7 @@ try {
         preflightReceiptSha256 = $preflightHash
         fixtureMappingSha256 = $fixtureMappingHashExpected
         sourceRoot = $sourceRoot
+        jobIdentity = $jobIdentity
         runDirectory = $runDirectory
         outputDirectory = $outputDirectory
         processJournalPath = $processJournalPath
