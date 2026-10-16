@@ -546,8 +546,13 @@ Windows 2025 job 116753830293 actually executed **59 / 57 passed / 2 failed**:
 target-nonzero lacked Failure/release/EOF evidence and the repaired-report
 gate refused the failed rehearsal; underlying cause **unknown**. Windows
 2022 job 116753830273 has actual log/JSON **59 / 59 passed / 0 failed**,
-still stubbed/no-desktop, not real-zmx/GUI. No all-required-CI/Ready/merge,
-#834 lease, rerun or new fix owner is admitted. The sole published file is
+still stubbed/no-desktop, not real-zmx/GUI. These original failed results do
+not establish all nine required status contexts as passing, Ready/merge or a
+#834 lease. The operator separately authorized **one diagnostic rerun of only
+failed jobs**, on unchanged `359a033ba749a9bcf2648ba8b96ee424ad8f398a`,
+in runs 38832369751 and 38832369710 (attempt 2), not a source fix or reset.
+This document grants **no additional rerun, new fix owner, native/GUI/capture
+execution**. The sole published file is
 `Tools\windows\Tests\UiCaptureDriver.Tests.ps1`. The separate wrapper has six local contract GREEN
 results, also **Pending coordinator verification/merge**, and is not available
 on the read main. Missing-API wrapper RED was not behavioural/test-first
