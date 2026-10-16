@@ -578,6 +578,53 @@ function Invoke-CapBoundedChild {
     }
 }
 
+function Read-CapCompileLogSnapshot {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ Text = ''; Sha256 = $null }
+    }
+
+    $fileStream = $null
+    $snapshot = $null
+    try {
+        $fileStream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        )
+        $snapshot = [IO.MemoryStream]::new()
+        $fileStream.CopyTo($snapshot)
+        $bytes = $snapshot.ToArray()
+    } finally {
+        if ($null -ne $snapshot) { $snapshot.Dispose() }
+        if ($null -ne $fileStream) { $fileStream.Dispose() }
+    }
+
+    $textStream = [IO.MemoryStream]::new($bytes)
+    $reader = $null
+    try {
+        $reader = [IO.StreamReader]::new($textStream, [Text.Encoding]::UTF8, $true, 1024, $true)
+        $text = $reader.ReadToEnd()
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        $textStream.Dispose()
+    }
+
+    $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $hashAlgorithm.ComputeHash($bytes)
+    } finally {
+        $hashAlgorithm.Dispose()
+    }
+
+    return [pscustomobject]@{
+        Text = $text
+        Sha256 = ([BitConverter]::ToString($digest)).Replace('-', '')
+    }
+}
+
 function New-CapHarmlessTarget {
     $fixture = Join-Path $scratch 'fixture'
     $null = New-Item -ItemType Directory -Path $fixture
@@ -657,8 +704,10 @@ int wmain(int argc, wchar_t **argv) {
         -Directory $fixture -Role 'harmless-fixture-compile' -Seconds 90 -Environment $compilerEnvironment
     # Preserve the actual compiler exit before reading the owned compile logs.
     $compilerExitCode = $build.exitCode
-    $compileStdoutText = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { [IO.File]::ReadAllText($compileStdout) } else { '' }
-    $compileStderrText = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { [IO.File]::ReadAllText($compileStderr) } else { '' }
+    $compileStdoutSnapshot = Read-CapCompileLogSnapshot -Path $compileStdout
+    $compileStderrSnapshot = Read-CapCompileLogSnapshot -Path $compileStderr
+    $compileStdoutText = $compileStdoutSnapshot.Text
+    $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "Harmless target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
     $provenance = [ordered]@{
@@ -666,8 +715,8 @@ int wmain(int argc, wchar_t **argv) {
         compilerSha256 = (Get-FileHash -LiteralPath $compiler -Algorithm SHA256).Hash
         compilerCommand = $command; compilerExitCode = $compilerExitCode
         compileStdoutLog = $compileStdout; compileStderrLog = $compileStderr
-        compileStdoutSha256 = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { (Get-FileHash -LiteralPath $compileStdout -Algorithm SHA256).Hash } else { $null }
-        compileStderrSha256 = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { (Get-FileHash -LiteralPath $compileStderr -Algorithm SHA256).Hash } else { $null }
+        compileStdoutSha256 = $compileStdoutSnapshot.Sha256
+        compileStderrSha256 = $compileStderrSnapshot.Sha256
         source = $sourcePath; sourceSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
         executable = $exe; executableSha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     }
@@ -751,8 +800,10 @@ int wmain(void) {
         -Directory $fixture -Role 'cim-race-fixture-compile' -Seconds 90 -Environment $compilerEnvironment
     # Preserve the actual compiler exit before reading the owned compile logs.
     $compilerExitCode = $build.exitCode
-    $compileStdoutText = if (Test-Path -LiteralPath $compileStdout -PathType Leaf) { [IO.File]::ReadAllText($compileStdout) } else { '' }
-    $compileStderrText = if (Test-Path -LiteralPath $compileStderr -PathType Leaf) { [IO.File]::ReadAllText($compileStderr) } else { '' }
+    $compileStdoutSnapshot = Read-CapCompileLogSnapshot -Path $compileStdout
+    $compileStderrSnapshot = Read-CapCompileLogSnapshot -Path $compileStderr
+    $compileStdoutText = $compileStdoutSnapshot.Text
+    $compileStderrText = $compileStderrSnapshot.Text
     Assert-CapTest ($compilerExitCode -eq 0 -and (Test-Path -LiteralPath $exe -PathType Leaf)) `
         "CIM race target compilation failed (not launch evidence): $compileStdoutText $compileStderrText"
     return [pscustomobject]@{
