@@ -451,11 +451,117 @@ pixels, not a real window/composition, popups, terminal, native controls, input,
 accessibility, physical input or persistence. Never rebind old dirty
 `4fafbfb2` pixels with conversion-time current hashes. Sidebar/right-panel/
 NativeForms slices require separate later approvals after the first proves out.
-The selected stock-only real-window route under #822 requires #826 merge,
+At this earlier merged-slice checkpoint, the selected stock-only real-window
+route under #822 required #826 merge,
 an accepted current plan and separate exact implementation/native/install/capture
 grants. A reviewed plan alone is not an execution lease; no capture mechanics
 are available by virtue of this ledger. No manual screenshots or
 screenshot/golden/pixel-baseline CI fallback is authorized.
+
+### 2026-10-15 source and capture-status retrospective
+
+This is a bounded source/receipt update, **not visual acceptance**. It leaves
+all 98 canonical identities, order and statuses at **6 Validated / 89 Partial /
+3 Out of scope**, all thirty qualified rows `Partial`, every full B8/C6/D2/E4
+criterion unchecked, and the 65-item/30-row crosswalks, digests, locators and
+privacy limits above unchanged. It opens/copies/uploads no images, including
+the held issue-722 originals or publication-hold notice.
+
+**Qualified source repair, not a successful capture.**
+[#829](https://github.com/scgopi/GraphCode/pull/829) merged as
+`badcf5149be2a01abd866e4cf180521f485fa2c4`; the coordinator verified all four
+reviewed blobs, both hosted 59-case runs (Windows 2022 and 2025), all nine
+required status contexts and fresh Ready/DCO admission. Configured path skips
+are not runtime proof. The original qualified role-label RED and old CI failures
+remain evidence. [#826](https://github.com/scgopi/GraphCode/issues/826) stays
+open because the later **real pinned-provider** path failed.
+
+The source-bound PTR BEFORE build was actually
+`112d458303891f87af6c1dc6beaf7e48073fd65c` (first-parent B baseline before
+#814's `4fafbfb2`); AFTER was actually
+`944ee565ed2e36885b8cf1087fc5fbe2d05d38b6`, not a new build of badcf.
+Reviewed `944ee565`, test merge `59e9fd3e4e017fcc65202290c1ceee632e15cc60`
+and merged `badcf514` have the same **complete tree**
+`a6ccbfd5580d9fba0c336da93e716609c4538ce0`. Five-clone raw
+proofs total **14,260 file checks / zero mismatch**, not unique contents;
+separate actual LFS-filter counts are 43 per GraphCode clone / zero providers.
+Setup's original console/exit/EOF were lost after the Tee failure; the
+operator qualified self-written five-positive reports plus held-PID exit,
+not an invented observed exit 0. Coordinator assembly 1 failed on
+OrderedDictionary/Measure-Object before writes; corrected explicit accumulation
+and fixture path preceded the one renewed assembly 2's **13 source/data
+records**, not new builds or native execution.
+The read-only assembly receipts are
+`C:\gcs\coord2\coor-b-assembly2-readback.json` and
+`C:\gcs\coord2\coor-b-assembly2-inventory.json`.
+
+**One actual B slot, zero images.** User-selected coordinator execution used
+lease `640c69a9-049e-46ba-9ebe-5c813a3f93a1`, granted
+`2026-10-15T23:50:18.464Z` / expiry `2026-10-16T00:05:18.464Z`,
+run `cdba36a51f144798b40fd78bdb50251b`. At about 23:50:45Z the exited
+seed launcher PID 36288 failed bounded stdout/stderr EOF because daemon
+PID 22760 held inherited pipes. The retained
+`C:\gccp\capture-coordinator-b1\manifest.json` and `lease-release.json`
+record `guiLaunches=[]`, `images=[]`, **captures 0** and
+**CLEANUP_UNPROVEN**: both worker EOF flags false and final binding null.
+The operator's separate later daemon stop/zero GraphCode-zmx process report
+does not make that original receipt clean. No paired vision, checkbox or
+ledger promotion follows; **no retry or new live B lease** was granted.
+The [actual mechanism report](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6205088603)
+is tracked separately in [#834](https://github.com/scgopi/GraphCode/issues/834).
+Core-59b's actual 59/59 result was explicitly **not a real-zmx/peer rehearsal**,
+with `Start-CapOfflineSeed` stubbed; it did not exercise this daemon failure.
+Earlier public cap stop comments
+[#764](https://github.com/scgopi/GraphCode/issues/764#issuecomment-6204588086) /
+[#826](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6204588503)
+predate this slot and are not capture-mechanism results.
+
+**Simpler component route, still no accepted pixels.** Merged
+[#830](https://github.com/scgopi/GraphCode/pull/830) supplies **real paint path,
+offscreen component render** capability, not a live window, screenshot,
+manual/golden CI or a whole-row verdict. The new #764 worker has neutral
+JSON/eight-box mapping. Its actual one-case native RED (expected 6, found 2)
+preceded the coordinator's exact grant: a qualified admission of a
+**deviation**, not retroactive authority or a RED retry. M2/M3 standing scope
+permits scoped offscreen GDI tests/scene contracts/conversion on owned outputs,
+production paint unchanged; no actual GREEN/PNG/vision is yet accepted by the
+coordinator. Source findings alone are not confirmed visual bugs; actual
+scenes and paired review are required for a visual verdict. Track a suspected
+paint bug separately, not in this evidence change. No box/row is promoted.
+
+The fixture-only reader fix for [#833](https://github.com/scgopi/GraphCode/issues/833) has
+actual held-writer `80070020` RED (harness exit 0, one failed record),
+tracked-helper AST GREEN 1/1 with same-byte SHA, a 59-unique-named-case
+all-pass suite with identical named floor, and one accepted source review.
+The published draft is [#836](https://github.com/scgopi/GraphCode/pull/836),
+head `359a033ba749a9bcf2648ba8b96ee424ad8f398a`. At documentation freeze
+`2026-10-16T01:14:57.815Z`, coordinator-verified **original CI is blocked**:
+port [38832369751](https://github.com/scgopi/GraphCode/actions/runs/38832369751),
+job 116753854474, failed `VerifyValidationRunner` before Swift/real-zmx test
+execution. `Get-Content` hit `mp-start.identity` sharing violation in the
+unchanged `uia-live-gate.ps1` blob at badcf/359a, already using atomic
+pending-file move; holder/cause **unknown**.
+Hardening [38832369710](https://github.com/scgopi/GraphCode/actions/runs/38832369710)
+Windows 2025 job 116753830293 actually executed **59 / 57 passed / 2 failed**:
+target-nonzero lacked Failure/release/EOF evidence and the repaired-report
+gate refused the failed rehearsal; underlying cause **unknown**. Windows
+2022 job 116753830273 has actual log/JSON **59 / 59 passed / 0 failed**,
+still stubbed/no-desktop, not real-zmx/GUI. No all-required-CI/Ready/merge,
+#834 lease, rerun or new fix owner is admitted. The sole published file is
+`Tools\windows\Tests\UiCaptureDriver.Tests.ps1`. The separate wrapper has six local contract GREEN
+results, also **Pending coordinator verification/merge**, and is not available
+on the read main. Missing-API wrapper RED was not behavioural/test-first
+evidence. #834 has an **approved design/final cost addendum only** for suspended
+CreateProcessW/handle-list work preserving public `zmx run -d`, not a repair
+already executed or an execution grant; an internal `--daemon` bypass is not
+approved. No implementation edits before #836 merge (the #833 fixture fix)
+and the exact sole-core lease; Sonnet 5.5/high source review precedes any
+native execution. Real production zmx/peer RED/GREEN, orphan cleanup,
+permanent no-stub preflight and the full 59-case + #833 floor remain gates.
+D adapter then option-1 helper remain
+downstream. The orchestration plan carries these bounded dependencies; none
+resumes stopped owners, authorizes capture or changes the reference/privacy
+limits.
 
 ## Preview delivery lanes
 

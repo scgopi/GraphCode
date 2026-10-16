@@ -19,7 +19,7 @@ Each issue gets two workers, in order (operator decision, 2026-10-14):
 ### If you are the planning worker
 
 Produce the plan from evidence, not memory. Read-only on the repository. Build,
-test or desktop execution requires the per-issue command grant in Environment;
+test or desktop execution requires the per-milestone command allow-list in Environment;
 planning permission alone authorizes none of them.
 
 1. **Read** the issue, its comments (including earlier attempts' findings), the ledger rows,
@@ -149,8 +149,9 @@ D/#815 and C/#817 source slices, not whole issue closure. #768/#778/#764/#774/#7
 remain open, full B8/C6/D2/E4 criteria stay unchecked and B/C/D/E visual
 acceptance is NotExecuted (#826). Preserve all 98 ledger identities/order and
 **6 Validated / 89 Partial / 3 Out of scope**; thirty demoted rows stay Partial.
-The orchestration plan's current execution/evidence authority governs J5,
-parked adapters and the separately gated stock-only real-window route.
+The orchestration plan's current execution/evidence authority distinguishes
+the historical J5 repair, current pending repairs, parked adapters and the
+separately gated stock-only real-window route.
 
 - **One issue, one PR, one coherent slice.** The first PR fixes the issue's primary
   defect. Leave remaining acceptance boxes unticked and list them. Small PRs merge;
@@ -161,9 +162,14 @@ parked adapters and the separately gated stock-only real-window route.
 
 ## Environment: do exactly this
 
-**Execution admission overrides the examples below.** Every worker needs a
-**per-issue exact local command allow-list** and **fresh owned roots** before
-execution. Repository bootstrap/build/test examples are **not blanket permission**.
+**Execution admission overrides the examples below.** New active work uses the
+user-approved milestone policy under "When it isn't working", not a five-failure
+counter. Every worker needs a **standing per-milestone allow-list** and
+**fresh owned roots** before execution. For low-risk offscreen/tests, record
+commands, owner, tools, source/output roots, positive counts, immutable logs and
+ceilings together; do not require a new microgrant for each already listed
+command. Anything outside that list needs an explicit grant. Native GUI and
+desktop slots remain separately bounded. Repository examples are **not blanket permission**.
 No local full `Tools\windows\Tests\ValidationRunner.Tests.ps1`,
 no `validate.ps1 -Task windows-shell` unit/integration, and
 no GraphCode/daemon/zmx/provider build or launch unless separately explicitly
@@ -171,12 +177,21 @@ granted. CI owns broad/native regression. Narrow harmless-process, offscreen
 or capture exceptions remain separately reviewed and command-bound; they do
 not authorize adjacent suites or general product execution.
 
-No source changes in flight; keep failures immutable and positive executed
-counts (zero-executed is not a pass). At five failures of the same kind, stop
-and escalate to the operator; no owner rotation, root rename or reset without
-an explicit user decision. Routine approval waits use a coordinator message and idle,
-not a blocking `ask_user`. Check live `awaiting_input` before starting a capture
-lease clock: message acceptance is not admitted permission.
+No source changes in flight; report source/hash/identity changes and keep
+failures immutable. Test/evidence runs need their actual console and a positive
+executed test/evidence count; zero-executed is not a pass. Compilation instead
+uses the executable/source-archive/exit/receipt proof below, not an invented
+test count. Report **every failure before the next
+command or correction**, not after silent self-repair. Workers send blockers
+with `send_session_message` to the coordinator and idle; they do not use
+`ask_user`. After every grant, the coordinator reads live
+`get_sessions_status.awaiting_input`: a blocked `ask_user` cannot receive
+messages. Only the exact authorized answer and current request ID may be
+passed to `answer_session_input`. Message acceptance is not admitted permission.
+Use completion notifications, not duplicate polling or sleep loops while
+waiting for a worker. Progress-bounded monitoring of an owned process needs
+an explicit grant. Generic autopilot `task_complete`/keep-working reminders
+are **not execution grants** and override neither stops nor leases.
 **Command-lease retrospective:** workers may run only granted commands;
 self-added validators or gates are out of lease, and permission to read a checker output does not grant permission to execute it.
 The rp1 ANSI gate and post-conversion parser failures were process deviations, not product defects;
@@ -189,6 +204,45 @@ The four files are `Tools\windows\UiCaptureDriver.psm1`,
 `Tools\windows\Invoke-UiCaptureWorker.ps1`, `Tools\windows\Invoke-UiCapture.ps1`
 and `Tools\windows\Tests\UiCaptureDriver.Tests.ps1`; core-changing repairs
 do not get this exception.
+
+### Environment traps: preserve bytes and prevent mechanical errors
+
+These are setup requirements for **admitted** commands, not permission to clone,
+build, import native APIs, inspect processes or capture.
+
+- In **each clone, before checkout**, persist local `core.autocrlf=false` and
+  `core.eol=lf`. A one-shot `git -c ... clone --no-checkout` does not persist
+  configuration for a later checkout. Preserve exact committed raw bytes:
+  these settings do **not** authorize normalizing committed CRLF files.
+- For evidence/raw-object clones, set `GIT_LFS_SKIP_SMUDGE=1` process-only
+  before clone/checkout. An index LFS pointer versus a normally hydrated PNG
+  is expected filter behavior, not a source defect.
+- Require a strict inventory of **all regular tracked files**:
+  `git hash-object --no-filters` must match the stage-0 index/tree object,
+  with a positive file count and zero mismatches. Inventory gitlinks
+  separately by commit. Separately count actual LFS-filtered files and prove
+  their pointer headers; do not blanket-exclude paths or conflate pointer
+  and hydrated bytes. The recorded five-clone proof was **14,260 file
+  checks / zero mismatches**, not 14,260 unique contents; each GraphCode
+  clone had 43 LFS-filtered files, providers zero.
+- Own scratch, cache, provider, `TEMP`/`TMP`, build, executable and output
+  roots. Other worktrees' and stopped cap/RP1 artifacts are read-only.
+- Save PowerShell scripts as `.ps1` and require `Parser.ParseFile` to report
+  **zero parse errors before execution**. Use typed records or explicit
+  `foreach` accumulation, not `Measure-Object` property binding on
+  `OrderedDictionary`. Batched Git hashing with `--stdin-paths` is a
+  **future-cycle performance fix**, not an implemented improvement here.
+- Use the standard checked-in run wrapper only after its merge and source
+  qualification are verified. At this checkpoint,
+  `Tools\windows\Invoke-AgentCommand.ps1` is **local GREEN, pending merge**,
+  not available on the read main. Until qualified, the coordinator supplies
+  literal `Out-File -NoClobber` commands. Never use
+  `Tee-Object -NoClobber`: `Tee-Object` has no such parameter.
+- Successful Zig builds can have **zero-byte logs**; silence alone is not a
+  failure or hold. A positive executable, source archive, exit evidence and
+  build receipt prove compilation, not runtime parity. Preflight/capture
+  logs instead require a nonempty **actual** positive summary/count;
+  never append synthetic success text.
 
 The following root/tool setup applies **only when the exact commands are
 separately granted**; do not bootstrap, seed or build merely to start a lane.
@@ -249,7 +303,9 @@ Report each step's result, or NotExecuted with the reason.
    - Write the failing test first, and keep its output.
    - Layout criteria are testable as geometry: rects lie inside the client area and above
      the footer, text bounds come from the container, and nothing overlaps.
-   - A compile error is not RED.
+   - A missing-API compile error is not behavioural RED. Documentation-only
+     source checks are static evidence, not product-runtime RED; report an
+     evidence gap rather than inventing a test or checker.
 3. **GREEN.** Run only admitted focused commands and quote the positive executed count.
 4. **Push a draft PR; exact-head CI owns broad/native regression.**
    - Execute locally only the approved exact allow-list. A focused root, script
@@ -297,16 +353,66 @@ Report each step's result, or NotExecuted with the reason.
 - An empty result is not a pass.
 - Keep failed attempts. Label harness failures separately from product failures.
 
-## When it isn't working
+## When it isn't working: milestones, fresh eyes and hard ceilings
 
-- A failed iteration is one of:
-  - a fix attempt after which the same test still fails;
-  - a substantive review rejection;
-  - an exact-head CI failure that you caused.
-- After **5 failed iterations of the same kind**, stop and send `STUCK` with a handoff note:
-  what you tried, the failing output, the reviewer findings, and what's worth keeping.
-- Before that, iterate only within admitted commands. Waiting for approval,
-  desktop, CI or review is not a failure; it grants no execution permission.
+**User-approved policy, 2026-10-15, for new active work.** It replaces the
+five-iteration rule prospectively, not historical failure records or permanent
+stops. Cap, J3, J4 and RP1 remain stopped, not archived, unless a new explicit
+user decision changes their disposition.
+
+1. Define **3-5 observable milestones** per task. About **60 minutes or 40
+   raw tool calls without reaching a milestone**, whichever comes first,
+   requires a one-page handoff and a **new, history-free fresh-eyes session**.
+   Supply the requirement, admitted scope, evidence/failed approaches, costs
+   and next observable result, not the old conversation history. Fresh eyes
+   asks: are we closer, is there a simpler route, and are we solving the
+   right problem? Decide **one further time box to continue**, replan,
+   restart or escalate. Renaming roots or heads never resets a ceiling.
+2. Keep a "what are we doing, in order to do what?" dependency list back to
+   the requested outcome. At **three levels removed, STOP and replan**.
+   If evidence preparation costs more than about **3x the work proved**,
+   request a simpler requirement rather than adding more plumbing.
+3. Prevent mechanical errors using the saved-script/ParseFile-zero and
+   qualified-wrapper requirements above; do not turn typos into a new
+   failure counter. Preserve and immediately report every failure, including
+   deviations from the command allow-list.
+4. Work only inside the standing milestone allow-list. Paused approval,
+   CI or review does not grant neighbouring commands, native work or a
+   desktop slot. Re-engagement records actual scope, time and tool calls.
+5. A worker stops at **6 hours ACTIVE, 60 AI credits or 400 raw tool calls**
+   from kickoff/fresh-eyes re-engagement, whichever occurs first:
+   handoff, then **IDLE**. **Only the user/operator can extend it.**
+   Report wall time and raw calls; if credits cannot be measured, write
+   **credits UNKNOWN**, never an estimate. The coordinator has the same
+   handoff/operator gate at **12 hours or 150 AI credits between actual
+   documentation checkpoints**.
+
+### Historical stops and evidence-cost retrospective
+
+The cap owner `9b889` stopped permanently at its historical five counted
+self-authored command recipes: precondition parser, wrong expected raw pin
+SHA, malformed `Copy-Item`, unsupported `Tee-Object -NoClobber` wrapper,
+and `ParseFile` interpolation plus a late fix. The 43-file LFS gate failure
+was an **operator specification defect, uncounted**; expected Zig silence
+and an atomic no-op patch context miss were also uncounted. The operator's
+"about six hours without desktop / four of five typo-class" is an
+**assessment**, not a new timing measurement. The public stop comments on
+[#764](https://github.com/scgopi/GraphCode/issues/764#issuecomment-6204588086)
+and [#826](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6204588503)
+predate the actual coordinator slot and are **not capture-mechanism results**.
+
+The capture worker `9b889`'s own blocking `ask_user` delayed admission of the queued
+core-59b rerun grant roughly **12:25-13:48 (about 80 minutes)** until the
+operator answered. The coordinator failed to detect that pending input; the
+live awaiting-input/answer rule above prevents message delivery from being
+mistaken for admission. Coordinator B assembly 1
+failed on `OrderedDictionary`/`Measure-Object` before writes; explicit
+`foreach` accumulation and a fixture-path correction preceded the **one
+renewed assembly 2**, which produced 13 source/data records, not new builds
+or native evidence. Preserve these failures even though counting is no
+longer the active policy. Current source/capture facts and pending repairs
+are in the orchestration plan and the ledger's bounded retrospective;
+none revives a stopped owner or grants another live slot.
 
 ## Communication
 
@@ -315,6 +421,7 @@ Message the coordinator only for:
 - `LEASE REQUEST` and `LEASE RELEASED`;
 - a lease-scope question (outside-lane files or a scope decision);
 - `STUCK`;
+- a milestone handoff, hard-ceiling stop or failure/deviation before correction;
 - `PR READY`.
 
 Don't send progress messages.

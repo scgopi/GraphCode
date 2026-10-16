@@ -48,7 +48,7 @@ truth for status. The issues carry the acceptance criteria and the priority.
 | Cause | Fix |
 | --- | --- |
 | Every lane's full unit and integration runs went through the one desktop, and were re-run each time a head moved. The queue dominated elapsed time. | Exact-head CI owns broad/native regression. Historical screenshot-slot instructions are superseded by the execution/capture gates below. |
-| Escalation thresholds of 2 or 3 restarted sessions, which lost bootstrap, builds and context. Every lane escalated at least once. | Escalate only after 5 failed iterations (operator decision; see "Abandon and escalate"). |
+| Escalation thresholds of 2 or 3 restarted sessions, which lost bootstrap, builds and context. Every lane escalated at least once. | The 2026-10-14 decision was five failed iterations. That historical rule is superseded for new active work by the 2026-10-15 milestone policy below; permanent stops remain. |
 | Kickoffs were hand-copied per lane, and drifted: an 8-character validation root that failed the 81-character preflight, a wrong `Refs` line, the wrong reviewer model. | One canonical kickoff, `investigation/windows-parity-lane-kickoff.md`. The coordinator sends only an issue block. |
 | Environment traps were rediscovered lane by lane: a junction root, the root length, a stale profile log, `onboarding-seen`, `CopyFromScreen` capturing the wrong app, the `ActivateWindow` Alt tap (#797), `zmx` daemons left running, `vcvars`, the PR tool failing on forks. | They are listed once, in the kickoff's "Environment" section. |
 | The coordinator relayed every PR creation and body edit. | Lanes create and edit their own PRs, using the access details in their issue block (not kept in the repository). |
@@ -79,8 +79,9 @@ through four steps:
    approves its file scope (including any out-of-lease files, up front), and
    records `Plan approved` on the issue.
 3. **Implement.** An implementation worker (`gpt-6-luna`, high; `gpt-6.1-sol`, high, long_context, for highly complex features) executes the approved plan under the
-   per-PR gate and exact command allow-list. CI owns broad/native regression;
-   capture is separately gated, and five failures trigger an operator stop.
+   per-PR gate and standing milestone command allow-list. CI owns broad/native
+   regression; capture is separately gated. New active work follows the
+   milestone/fresh-eyes and hard-ceiling policy below, not a five-counter.
 4. **Merge.** The coordinator owns admission/readiness/merge on accepted source
    review and exact-head CI, explicitly recording any deferred visual criteria.
    A code-slice merge does not close those criteria.
@@ -92,20 +93,32 @@ Planning runs in parallel for all lanes. Implementation stays one per lane.
 
 ### Current execution and evidence authority
 
-Every worker needs a **per-issue exact local command allow-list** and
-**fresh owned roots** before execution. Repository bootstrap/build/test examples
-are **not blanket permission**. No local full `Tools\windows\Tests\ValidationRunner.Tests.ps1`,
+Every worker needs a **standing per-milestone allow-list** and **fresh owned
+roots** before execution. Bundle low-risk offscreen/test commands, owner,
+tools, source/output roots, positive counts, immutable logs and ceilings in
+one admission, not per-command microgrants. Anything outside it needs an
+explicit grant; native GUI/desktop slots remain separately bounded.
+Repository examples are **not blanket permission**.
+No local full `Tools\windows\Tests\ValidationRunner.Tests.ps1`,
 no `validate.ps1 -Task windows-shell` unit/integration, and
 no GraphCode/daemon/zmx/provider build or launch unless separately explicitly
 granted. CI owns broad/native regression. Narrow harmless-process/offscreen/
 capture exceptions remain separately reviewed and command-bound.
 
-No source changes in flight; keep failures immutable. Zero-executed is not a
-pass. At five failures of the same kind, stop for the operator;
-no owner rotation, root rename or reset without an explicit user decision. Routine approval waits
-use a coordinator message and idle, not blocking `ask_user`. Check live
-`awaiting_input` before starting any capture lease clock:
-message acceptance is not admitted permission.
+No source changes in flight; report source/hash/identity changes and preserve
+all failures. Test/evidence runs need actual console output and a positive
+executed test/evidence count; zero-executed is not a pass. Compilation uses
+executable/source-archive/exit/receipt proof, not an invented test count.
+**Report every failure before the next
+command/correction.** Workers use `send_session_message` to the coordinator
+and idle, never blocking `ask_user`. After **every grant**, the coordinator
+reads live `get_sessions_status.awaiting_input`; blocked `ask_user` cannot
+receive messages. Use `answer_session_input` only with its exact current
+request ID and exact authorized answer. Message acceptance is not admitted
+permission. Prefer completion notifications, not duplicate polling/sleep
+waits; progress-bounded owned-process monitoring requires an explicit grant.
+Generic autopilot completion/keep-working reminders grant no execution and
+override neither a stop nor a lease.
 No manual screenshots, screenshot/golden/pixel-baseline CI
 or fallback. No automatically granted local execution follows a green workflow.
 
@@ -116,12 +129,12 @@ at most **two failed-job reruns per exact head, globally across workflows**,
 citing #826 and preserving the original failures. **Core-changing repairs do
 not get this exception.**
 
-**Capture core.** [#826](https://github.com/scgopi/GraphCode/issues/826) remains
-open, no longer under its former blocked-title/no-new-owner ruling. The
+**Historical capture-core authority, not a new active budget.**
+[#826](https://github.com/scgopi/GraphCode/issues/826) remains open. The
 [explicit user override](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6186430845)
 appoints J5 (GPT-6.1 Sol/high) as sole owner of only the two Phase A fixture
-defects: validAbsentWQL and StrictMode whole-array wrapping, with a fresh
-five-failure budget. Phase A requires accepted static review, the exact positive
+defects: validAbsentWQL and StrictMode whole-array wrapping, with the then-authorized
+five-failure budget. Phase A required accepted static review, the exact positive
 5-case decision driver followed by the 51-case direct suite (original 49 plus
 2), and accepted current-head CI. Execution commands remain separately granted;
 these gates are not worker-progress or runtime-acceptance claims.
@@ -130,9 +143,107 @@ This is not authority for other edits. J4's fifth failure
 accepted lifecycle repair. The pure 12-row decision matrix and three mutant
 distinctions are not a full endpoint pass. Phase B immutable numbered journal
 work may be planned only after Phase A review plus green CI is accepted, then
-requires its own plan/review before implementation. Cap and the D adapter stay
-parked until #826 merges and explicit ordered resumption; no automatic capture
-authority follows a core merge.
+requires its own plan/review before implementation. The stopped cap/J3/J4/RP1
+owners are not resumed or archived by the new policy.
+The current repair and dependency state below supersedes the earlier
+"until #826 merges" scheduling assumption; no merge itself grants capture.
+
+**2026-10-15 source repair and actual B-slot result.**
+[#829](https://github.com/scgopi/GraphCode/pull/829) merged as
+`badcf5149be2a01abd866e4cf180521f485fa2c4`: the coordinator verified all four
+reviewed blobs, both hosted 59-case runs (Windows 2022 and 2025), all nine
+required status contexts and fresh Ready/DCO admission. Configured path skips
+are not runtime proof. Preserve the original qualified role-label RED and old
+CI failures. This source repair did **not** close #826: the subsequent real
+pinned-provider path failed.
+
+The user chose the coordinator as B executor. Its one production lease
+`640c69a9-049e-46ba-9ebe-5c813a3f93a1` was granted
+`2026-10-15T23:50:18.464Z`, expiring `2026-10-16T00:05:18.464Z`;
+run `cdba36a51f144798b40fd78bdb50251b` failed before GUI launch. The exited
+seed launcher PID 36288 could not reach bounded stdout/stderr EOF because
+daemon PID 22760 retained inherited pipes. The original receipt is
+**CLEANUP_UNPROVEN**, both worker EOF flags false, final binding null,
+`guiLaunches=[]`, `images=[]`, **zero captures**. The operator separately
+stopped the owned daemon and reported zero GraphCode/zmx processes; that
+later cleanup does not rewrite the original receipt. No paired vision,
+checkbox or ledger acceptance follows. There is **no retry/new live B lease**.
+The [actual mechanism report](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6205088603)
+and new [#834](https://github.com/scgopi/GraphCode/issues/834) carry this defect.
+
+Core-59b was explicitly **NOT a real-zmx/peer rehearsal**:
+`Start-CapOfflineSeed` was stubbed. Its actual 59/59 pass did not exercise
+the daemon-inherited-pipe failure. The qualified PTR builds were actually at
+BEFORE `112d458303891f87af6c1dc6beaf7e48073fd65c` (first-parent B baseline
+before #814's `4fafbfb2`) and AFTER
+`944ee565ed2e36885b8cf1087fc5fbe2d05d38b6`, **not a badcf build**.
+The complete trees of reviewed `944ee565`, test merge
+`59e9fd3e4e017fcc65202290c1ceee632e15cc60` and merged `badcf514` are
+identical: `a6ccbfd5580d9fba0c336da93e716609c4538ce0`.
+The five-clone raw proof totals 14,260 file checks / zero mismatches,
+not unique contents; actual LFS-filter counts are 43 per GraphCode clone,
+zero per provider. Setup's original console/exit/EOF were lost after the
+Tee failure: admission used explicitly qualified **self-written five-positive
+reports plus held-PID exit**, not an invented observed exit 0.
+Coordinator assembly 1 failed before writes on ordered-dictionary property
+binding; corrected explicit accumulation and fixture path then produced one
+renewed assembly 2 with 13 source/data records, not another build/native run.
+Retained read-only receipts:
+`C:\gcs\coord2\coor-b-assembly2-readback.json`,
+`C:\gcs\coord2\coor-b-assembly2-inventory.json` and
+`C:\gccp\capture-coordinator-b1\manifest.json` / `lease-release.json`.
+
+**Bounded active repairs at this documentation checkpoint.**
+The fixture-only reader fix for
+[#833](https://github.com/scgopi/GraphCode/issues/833):
+actual held-writer RED was `80070020`, with harness exit 0 recording one
+failed case, **not compile/API RED**. Tracked-helper AST GREEN was 1/1 with
+same-byte SHA; the full suite executed 59 unique named cases, all passed,
+with its named floor identical. One source review accepted it. The published
+draft is [#836](https://github.com/scgopi/GraphCode/pull/836), head
+`359a033ba749a9bcf2648ba8b96ee424ad8f398a`. At documentation freeze
+`2026-10-16T01:14:57.815Z`, coordinator-verified **original CI is blocked**:
+port run [38832369751](https://github.com/scgopi/GraphCode/actions/runs/38832369751),
+job 116753854474, failed `VerifyValidationRunner` before Swift; Swift/real-zmx
+test steps did not execute. `Get-Content` hit a sharing violation on
+`mp-start.identity` in the unchanged `uia-live-gate.ps1` blob at badcf/359a;
+source already uses an atomic pending-file move. The holder/cause is **unknown**.
+Hardening run [38832369710](https://github.com/scgopi/GraphCode/actions/runs/38832369710),
+Windows 2025 job 116753830293, actually executed 59 cases: **57 passed / 2 failed**.
+The target-nonzero case lacked Failure/release/EOF evidence; the repaired-report
+gate also refused the failed rehearsal. Underlying cause is **unknown**.
+Windows 2022 job 116753830273 has actual log/JSON **59 executed / 59 passed /
+0 failed**; it remains stubbed/no-desktop, not real-zmx/GUI evidence.
+No all-required-CI/Ready/merge or #834 lease is admitted; no rerun or new fix
+owner is granted. The operator published the draft after the worker's app-native 422 main-to-main
+binding failure, not a credential failure. None proves real zmx or GUI.
+Its sole published file is `Tools\windows\Tests\UiCaptureDriver.Tests.ps1`.
+
+The separate standard-wrapper worker has local actual **6 contract GREEN**
+results. Missing-API RED only showed a test-only wrapper was absent after
+implementation was already written: not behavioural/test-first evidence.
+The proposed eight-line registration in the existing ValidationRunner block
+preserves the baseline 921 CRLF / 3808 LF mix and the old normalization
+failure record. Publication/CI/merge remain **Pending coordinator
+verification**. Do not adopt `Tools\windows\Invoke-AgentCommand.ps1`
+before qualified merge; until then use coordinator-supplied literal
+`Out-File -NoClobber` commands, never unsupported `Tee-Object -NoClobber`.
+
+The read-only #834 plan/final cost addendum is an **approved design**, not
+implemented or an execution grant. The design specifies seven new native imports
+(16 to 23), suspended `CreateProcessW` plus a handle allow-list, keeping
+public `zmx run -d` and internal daemon semantics unchanged. The considered
+zero-import `ShellExecute`/cmd route retains a cmd handle but cannot bind the
+fast public-zmx intermediary generation before execution under that unchanged
+contract; this is not a universal zero-import impossibility claim.
+An internal `--daemon` bypass is not approved. **No implementation edits**
+before #836's verified merge (the #833 fixture fix) and an exact sole-core
+lease. Sonnet 5.5/high source review and an orphan-cleanup plan must precede
+**any native execution**. Required proof is typed file closure, not fake EOF; real production
+pinned zmx plus peer RED/GREEN and a permanent no-stub preflight; the
+59-case + #833 floor remains, and an uncensused daemon is **UNPROVEN**.
+The D adapter follows #834; option-1 helper owner `5be` follows D. Other
+stopped owners remain stopped.
 
 **Offscreen route.** The seven-file first project scene requires controlled
 post-C source freeze/review, separate exact native, codec and converter grants,
@@ -149,11 +260,27 @@ accessibility, physical input or persistence. Do not rebind old dirty
 `4fafbfb2` pixels with conversion-time current hashes. Sidebar, right-panel and
 NativeForms slices need separate later approvals after the first proves out.
 
+**Fresh-eyes simpler route for #764.** Merged
+[#830](https://github.com/scgopi/GraphCode/pull/830) provides the real-paint-path
+offscreen component capability, not live windows, screenshots, manual capture
+or golden CI. Active worker `2e46` (Luna 6/high, Sonnet 5.5/high review) has
+M1 neutral JSON plus an eight-box map. Its actual native RED executed one
+case (expected 6, found 2) **before the coordinator's exact grant**.
+The generic reminder had no timestamped grant ID: this was a deviation,
+subsequently qualified by the operator, not prior authority; **no RED retry**.
+M2/M3 standing scope permits scoped offscreen GDI tests, scene contracts and
+conversion on owned outputs, with production paint unchanged. No actual GREEN,
+PNG or vision is yet accepted by the coordinator. Source findings alone are
+not confirmed visual bugs: actual scenes and paired review are required for
+a visual verdict. Track a suspected paint bug separately rather than fixing
+it in the component-evidence PR. No box/row promotion now.
+
 **Selected real-window option 1: stock-only route, execution separately gated.**
 The [earlier proposal](https://github.com/scgopi/GraphCode/issues/822#issuecomment-6186605912)
-records route provenance, not execution authority. The selected route requires
-#826 merge, an accepted current plan and separate exact implementation, native,
-install and capture grants. A reviewed plan alone is not an execution lease;
+records route provenance, not execution authority. Following the failed B slot,
+the selected route waits for #834 repair qualification, the ordered D adapter
+and option-1 helper work, an accepted current plan and separate exact
+implementation, native, install and capture grants. A reviewed plan alone is not an execution lease;
 ungranted execution is **UNAPPROVED**. The operator steer prohibits any fork,
 patch or derivative of WinAppCli or another external
 repository: **stock pinned WinAppCli 0.5.0 only**. Restore/foreground are
@@ -166,8 +293,8 @@ nonblank variance, unchanged pre/post roster and identity, privacy review and
 then local vision review. Variance proves neither backend nor absence of fallback.
 The first proposed slice is only the GraphCode main window plus authentic Clone
 dialog, with minimal GraphCode profile generalisation only if source hardcodes
-require it. No implementation, install, probe or execution before #826 merges,
-plan review and explicit new commands. Menus retain semantic HMENU evidence;
+require it. No implementation, install, probe or execution before those
+dependencies, plan review and explicit new commands. Menus retain semantic HMENU evidence;
 terminal/tray remain deferred. This is not a new visual CI or manual-capture grant.
 
 **Merged slices, deferred claims.** A/#808, E/#816, B/#814, D/#815 and C/#817
@@ -336,7 +463,73 @@ and measure:
 
 Promote or demote models on that data, not on benchmarks alone.
 
-### Abandon and escalate a struggling session
+### Milestone and cost policy for new active work (2026-10-15)
+
+The user replaced the five-iteration rule **prospectively**. Keep all historical
+failures, deviations and permanent cap/J3/J4/RP1 stops; do not resume or
+archive those owners without a new explicit user decision.
+
+1. Plan **3-5 observable milestones** per task. After about **60 minutes or
+   40 raw tool calls without a milestone**, whichever comes first, produce a
+   one-page handoff and use a **new history-free fresh-eyes session**. Give it
+   the requirement, scope, actual results/failures, costs and next measurable
+   result, not inherited conversation history. Ask: closer, simpler route,
+   right problem? Record a decision: **one further time box to continue**,
+   replan, restart or escalate. Renaming roots/heads does not reset ceilings.
+2. Keep the dependency list "doing what, in order to do what?" At **three
+   levels removed from the requirement, STOP and replan**. Evidence preparation
+   costing more than about **3x the work proved** calls for a simpler
+   requirement, not more evidence plumbing.
+3. Prevent mechanical errors, do not count them as the new progress policy.
+   Save `.ps1`, require `Parser.ParseFile` **zero errors before execution**,
+   and use the standard wrapper only after qualified merge. Report **every**
+   failure before the next command/correction; never silently self-repair.
+   Workers send blockers to the coordinator, not `ask_user`.
+4. Use standing milestone allow-lists for low-risk offscreen/tests, including
+   commands, owner, tools, roots, counts/logs and ceilings. They replace
+   per-command microgrants **inside** the admitted list, not grants for new
+   commands. Native/desktop slots stay separately bounded. Test/evidence runs
+   need actual console and positive executed test/evidence counts; compilation
+   uses executable/source-archive/exit/receipt proof, not invented test counts.
+   Preserve failures and report source/
+   hash/identity changes.
+5. At **6 hours ACTIVE, 60 AI credits or 400 raw tool calls** from worker
+   kickoff/fresh-eyes re-engagement, whichever comes first: handoff and
+   **IDLE; only the user/operator may extend**. Report wall time and raw
+   calls, and **credits UNKNOWN** when not measurable; never estimate.
+   Coordinator checkpoints use **12 hours or 150 AI credits between actual
+   documentation checkpoints**, with the same handoff/operator gate.
+
+The kickoff's dedicated **Environment traps** section is the setup authority:
+persistent clone-local EOL configuration before checkout without rewriting
+committed CRLF, process-only LFS skip-smudge for raw evidence clones, strict
+all-regular-file raw index/tree equality with positive counts/zero mismatch,
+separate gitlink and actual LFS-pointer proofs, and owned cache/provider/temp/
+build/executable/output roots. It also covers saved ParseFile-zero scripts,
+explicit accumulation instead of OrderedDictionary property binding, and
+future-only `--stdin-paths` batching. Silent successful Zig compilation is
+expected; preflight/capture needs actual nonempty positive summaries. Neither
+synthetic log appends nor another owner's writable artifacts are acceptable.
+
+**Historical cost/admission lessons.** The cap stop's five self-authored
+recipes were precondition parser, wrong raw expected pin SHA, malformed
+Copy-Item, unsupported Tee wrapper and ParseFile interpolation/late fix.
+The operator-specification 43-file LFS gate, expected Zig silence and atomic
+no-op patch context miss were uncounted. "About six hours without desktop /
+four of five typo-class" is the operator's assessment, not a fresh timing
+measurement. The public cap stops on
+[#764](https://github.com/scgopi/GraphCode/issues/764#issuecomment-6204588086)
+and [#826](https://github.com/scgopi/GraphCode/issues/826#issuecomment-6204588503)
+precede the actual B slot and do not describe a capture-mechanism result.
+Capture worker `9b889`'s blocking ask_user held the queued coordinator
+core-59b grant admission about 12:25-13:48 (roughly 80 minutes) until the
+operator answered. The coordinator did not detect the pending input; check
+live awaiting-input after every grant and answer only its exact authorized
+request. No duplicate worker
+polling/sleep waits; owned-process monitoring requires a progress-bounded
+grant. Generic autopilot reminders do not override stops or execution leases.
+
+### Historical five-failure escalation record (2026-10-14; superseded)
 
 Escalating restarts the work in a new session: bootstrap, provider builds and
 context are lost, and in wave 1 that restart cost more than the iterations it
@@ -344,6 +537,10 @@ saved. Every lane escalated at least once on thresholds of 2 or 3, and three
 product PRs merged in about ten hours. So, by **operator decision**
 (2026-10-14), a session is abandoned **only after 5 failed iterations** of the
 same kind:
+
+This paragraph, table and escalation procedure record the **old decision**,
+not an active counter, automatic restart or execution grant. The milestone
+policy above now governs new work; already-stopped owners remain stopped.
 
 | Trigger (each counts as one failed iteration) | Threshold |
 | --- | --- |
@@ -411,11 +608,14 @@ silently.
    - no two control rects overlap.
 
    Use the existing `RealShellWindow` and form-geometry test patterns.
+   A compile/API error is not behavioural RED. Documentation-only static
+   checks must be labelled static; if no existing document contract supplies
+   honest evidence, report the gap rather than inventing runtime RED/tooling.
 3. **Implement**, then run only the admitted focused commands and paste actual
    output counts. Assert a positive executed-test count, because a filter that
    matches nothing still exits 0.
 4. **Broad/native regression is exact-head CI.** Local execution is limited to
-   the admitted per-issue exact allow-list; script changes, focused/hidden roots
+   the admitted standing milestone allow-list; script changes, focused/hidden roots
    and packaging changes do not grant new commands. No visual-baseline task.
    `windows-spikes` is a CI workflow job, not a `validate.ps1` task.
    Every exact-head workflow must be green before merge. Report every failure, including
