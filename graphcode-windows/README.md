@@ -846,11 +846,19 @@ Keep claims aligned with the
 
 ### Offscreen canvas paint artifact
 
-The opt-in `paint export: project-paint-v1` Zig test calls the production
+The opt-in `paint export: <scene-id>` Zig test calls the production
 `GraphCanvas.paint` and `paintHeader` functions into three fresh 1280x720
 memory DIBs, then writes BMP transport files and a paint receipt. It runs only
 when `GRAPHCODE_PAINT_EXPORT_DIR` and `GRAPHCODE_PAINT_SOURCE_COMMIT` are set;
-the export directory must be fresh and empty. From a bootstrapped checkout:
+the export directory must be fresh and empty. Run one scene per fresh run root.
+The default `project-paint-v1` scene retains its original fixture, export names,
+seven-file source binding, and converter profile. The two closed #764 profiles
+are `project-paint-764` (the six-card project canvas fixture) and
+`overview-paint-764` (that project plus a synthetic peer lane); the latter
+binds both fixture JSON files. The #764 export requires a valid
+`GRAPHCODE_PAINT_SOURCE_COMMIT` before it creates any BMPs. These neutral
+fixtures exercise the real paint path but do not reproduce the macOS reference
+content or establish whole-window parity. From a bootstrapped checkout:
 
 Run the entire procedure from PowerShell 7 (`pwsh`), not Windows PowerShell
 5.1; the converter requires PowerShell 7's JSON and hash APIs.
@@ -867,15 +875,44 @@ $testBinary = Join-Path $runRoot "canvas-paint-tests.exe"
 $nativeLog = Join-Path $runRoot "native.log"
 $runReceiptPath = Join-Path $runRoot "run-receipt.json"
 $environmentFile = (Resolve-Path .\.graphcode-tools\environment.ps1).Path
-$sourcePaths = @(
-  "graphcode-windows\src\GraphCanvas.zig",
-  "graphcode-windows\src\GdiplusAA.zig",
-  "graphcode-windows\fixtures\paint-project-v1.json",
-  "Tools\windows\Convert-CanvasPaintArtifact.ps1",
-  "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
-  "Tools\windows\Tests\WindowsShell.Tests.ps1",
-  "graphcode-windows\README.md"
-)
+$scene = "project-paint-v1" # Use project-paint-764 or overview-paint-764 for #764.
+$sourcePaths = switch ($scene) {
+ "project-paint-v1" {
+   @(
+     "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\GdiplusAA.zig",
+     "graphcode-windows\fixtures\paint-project-v1.json",
+     "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+     "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+     "Tools\windows\Tests\WindowsShell.Tests.ps1",
+     "graphcode-windows\README.md"
+   )
+ }
+ "project-paint-764" {
+   @(
+     "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\GdiplusAA.zig",
+     "graphcode-windows\fixtures\paint-764-project.json",
+     "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+     "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+     "Tools\windows\Tests\WindowsShell.Tests.ps1",
+     "graphcode-windows\README.md"
+   )
+ }
+ "overview-paint-764" {
+   @(
+     "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\GdiplusAA.zig",
+     "graphcode-windows\fixtures\paint-764-project.json",
+     "graphcode-windows\fixtures\paint-764-overview-peer.json",
+     "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+     "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+     "Tools\windows\Tests\WindowsShell.Tests.ps1",
+     "graphcode-windows\README.md"
+   )
+ }
+ default { throw "Unsupported paint scene: $scene" }
+}
 function Get-PaintSourceHashes {
   $hashes = [ordered]@{}
   foreach ($relativePath in $sourcePaths) {
@@ -901,7 +938,8 @@ $env:GRAPHCODE_PAINT_EXPORT_DIR = $exportRoot
 $env:GRAPHCODE_PAINT_SOURCE_COMMIT = $sourceHeadBefore
 $env:TEMP = $tempRoot
 $env:TMP = $tempRoot
-$command = '& $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" --test-filter "paint export: project-paint-v1" --cache-dir ' +
+$testFilter = "paint export: $scene"
+$command = '& $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" --test-filter "' + $testFilter + '" --cache-dir ' +
   (Join-Path $runRoot "zig-local") + ' --global-cache-dir ' + (Join-Path $runRoot "zig-global") +
   ' -femit-bin="' + $testBinary + '"'
 $nativeExitCode = $null
@@ -912,7 +950,7 @@ try {
   & $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig `
     -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus `
     "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" `
-    --test-filter "paint export: project-paint-v1" `
+    --test-filter $testFilter `
     --cache-dir (Join-Path $runRoot "zig-local") `
     --global-cache-dir (Join-Path $runRoot "zig-global") `
     ("-femit-bin=" + $testBinary) *>&1 | Tee-Object -FilePath $nativeLog
@@ -953,7 +991,8 @@ try {
 }
 if ($nativeExitCode -ne 0) { throw "Offscreen paint test failed: $nativeExitCode" }
 pwsh -NoProfile -File Tools\windows\Convert-CanvasPaintArtifact.ps1 `
-  -InputBmp (Join-Path $exportRoot "transport\project-paint-v1.bmp") `
+  -Scene $scene `
+  -InputBmp (Join-Path $exportRoot "transport\$scene.bmp") `
   -ReceiptPath (Join-Path $exportRoot "transport\paint-receipt.json") `
   -RunReceiptPath $runReceiptPath `
   -TestBinaryPath $testBinary `
@@ -962,15 +1001,24 @@ pwsh -NoProfile -File Tools\windows\Convert-CanvasPaintArtifact.ps1 `
 
 The converter parses and hashes the same frozen run receipt, paint receipt,
 and native log bytes. It requires a successful native exit, the exact named
-1/1 paint-test result, stable hashes for all seven leased files before and
-after the run, and current file hashes matching that native-run snapshot.
+1/1 scene-specific paint-test result, stable hashes for the exact scene-profile
+source paths (seven for project and eight for overview) before and after the run, and current file
+hashes matching that native-run snapshot. The #764 receipts bind the fixture JSON set, surface, card and graph-edge
+inventory, painted-edge count, clock-qualified age labels, image names, receipt
+bytes, run HEAD, source hashes, test binary, and native log; the converter
+rejects other scene IDs and arbitrary source inventories. The project scene
+checks its three painted edge strokes and labels. Overview reports its four
+fixture graph edges as inventory only: the overview paint surface draws project
+lanes and cards, not those edges. The default `project-paint-v1` profile retains
+its original exact seven-file binding and receipt shape; the two #764 profiles
+bind their exact scene-specific file sets.
 Immediately after the native command, the wrapper records whether the emitted
 test binary, native log, and paint receipt exist and, when present, their
 SHA-256 values. Missing files remain explicitly marked missing; successful
 conversion requires all three hashes to match the exact bytes consumed by the
 converter. `sourceBaseCommit` identifies the run's base HEAD only; the measured
-source hashes bind the seven leased files, not a clean-tree snapshot of other
-imported modules or their dirty/untracked state. A stale run receipt cannot be
+source hashes bind only the selected profile's leased files, not a clean-tree
+snapshot of other imported modules or their dirty/untracked state. A stale run receipt cannot be
 converted after those source or native-artifact bytes change. The converter
 then performs a lossless BMP-to-PNG round trip, verifies decoded RGB against
 the native render, and atomically publishes one PNG with a paint-only
@@ -984,19 +1032,29 @@ drawing operation used GDI+ rather than the existing GDI
 fallback. Font evidence samples the card-title, card-state, card-metadata,
 and header-title selections; it is not a census of every text draw. Font-file
 facts are lookup candidates, not proof of the physical font file selected by
-GDI. The converter's eight contract cases use synthetic codec BMPs and
-receipts, not a product paint scene; they include refusal controls for
+GDI. The converter's original eight contract cases and sixteen additional closed
+scene-profile cases use synthetic codec BMPs and receipts, not product paint
+scenes; they include refusal controls for
 post-run test-binary, native-log, and paint-receipt substitutions. The
 codec/write case calls the real PNG encoder with a stream that allows a
 partial staging-file write and then fails; it separately covers final
 publication failure. They run with:
 `pwsh -NoProfile -File Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1
 -ScratchRoot <fresh-private-directory>`. The evidence class is **real paint
-path, offscreen component render**. It can support canvas card, edge, panel,
-and layout review only where those pixels are actually in-frame; this fixture
-hides the right panel and cannot validate its content. It does not prove
-whole-window composition, popups, terminals, native controls, accessibility,
-or per-monitor DPI. The three
+path, offscreen component render**. The #764 fixtures exercise card state,
+color, type, role, age, attention, card metadata/worktree branch as retained by the width-fitted card metadata, project edge
+strokes and labels/connector positions, and project/overview layout through the
+real paint functions. Each card's age text is checked and recorded with its
+observation epoch; a run fails if any label changes during a render or across
+the three repeat renders. Age labels are therefore time-qualified rather than
+cross-run golden values. Fixture `createdAt` values use the daemon's
+reference-date seconds and are normalized to Unix seconds by the production
+model and converter before age evidence is compared. Fixture values are
+synthetic. They do not prove button/input
+behavior, shared sidebar or loop-bar palette parity, project opening/fit,
+whole-window composition, backend lifecycle or persistence, popups, terminals,
+native controls, UI Automation, accessibility, or per-monitor DPI. The right
+panel is hidden and cannot be validated from these scenes. The three
 matching RGB hashes establish same-host/build/fixture repeatability only, not
 a cross-machine golden. Artifacts are for local agent visual review; there is
 no screenshot fallback, golden-image baseline, or CI visual gate.

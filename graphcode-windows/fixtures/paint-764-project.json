@@ -1,0 +1,115 @@
+{
+  "version": 2,
+  "kind": "event",
+  "sequence": 1,
+  "event": {
+    "graphChanged": {
+      "id": "paint-764-project",
+      "project": {
+        "path": "C:\\GraphCodeFixture\\CardStates",
+        "name": "Card States",
+        "remote": false
+      },
+      "nodes": [
+        {
+          "id": "fixture-main-idle",
+          "title": "Main idle",
+          "loopType": "sketch",
+          "state": "idle",
+          "createdAt": 725760000,
+          "backend": "copilotCLI",
+          "firstInstruction": "Inspect the local fixture."
+        },
+        {
+          "id": "fixture-goal-done",
+          "title": "Goal complete",
+          "loopType": "goalBased",
+          "state": "succeeded",
+          "createdAt": 725760000,
+          "goal": {
+            "summary": "Render the synthetic graph."
+          },
+          "worktreeBinding": {
+            "path": "C:\\GraphCodeFixture\\CardStates\\worktrees\\review",
+            "branch": "review"
+          }
+        },
+        {
+          "id": "fixture-composite-blocked",
+          "title": "Composite blocked",
+          "loopType": "composite",
+          "state": "blocked",
+          "createdAt": 725760000,
+          "backend": "claudeCode",
+          "firstInstruction": "Wait for the synthetic prerequisite."
+        },
+        {
+          "id": "fixture-turn-running",
+          "title": "Turn running",
+          "loopType": "turnBased",
+          "state": "running",
+          "presence": {
+            "presence": "busy",
+            "confidence": "reported"
+          },
+          "activity": "Rendering synthetic content",
+          "createdAt": 725760000,
+          "backend": "copilotCLI",
+          "checkDescription": "Check the fixture output."
+        },
+        {
+          "id": "fixture-timed-stopped",
+          "title": "Timed stopped",
+          "loopType": "timeBased",
+          "state": "stopped",
+          "createdAt": 725760000,
+          "backend": "claudeCode",
+          "triggerPrompt": "Run the local fixture check."
+        },
+        {
+          "id": "fixture-turn-needs-you",
+          "title": "Turn needs you",
+          "loopType": "turnBased",
+          "state": "running",
+          "presence": {
+            "presence": "awaitingInput",
+            "confidence": "reported"
+          },
+          "activity": "Review the synthetic prompt",
+          "createdAt": 725760000,
+          "backend": "copilotCLI",
+          "checkDescription": "Respond to the local prompt."
+        }
+      ],
+      "edges": [
+        {
+          "id": "fixture-main-to-goal",
+          "from": "fixture-main-idle",
+          "to": "fixture-goal-done",
+          "kind": "handoff",
+          "condition": "always",
+          "fired": false,
+          "fireCount": 0
+        },
+        {
+          "id": "fixture-goal-to-blocked",
+          "from": "fixture-goal-done",
+          "to": "fixture-composite-blocked",
+          "kind": "handoff",
+          "condition": "always",
+          "fired": false,
+          "fireCount": 0
+        },
+        {
+          "id": "fixture-turn-to-timed",
+          "from": "fixture-turn-running",
+          "to": "fixture-timed-stopped",
+          "kind": "handoff",
+          "condition": "always",
+          "fired": false,
+          "fireCount": 0
+        }
+      ]
+    }
+  }
+}

@@ -3686,6 +3686,14 @@ const PaintExportFixture = struct {
     sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8,
 };
 
+const Paint764Scene = enum { project, overview };
+
+const Paint764Fixture = struct {
+    model: GraphModel.Model,
+    project_sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8,
+    peer_sha256: ?[std.crypto.hash.sha2.Sha256.digest_length]u8,
+};
+
 fn paintExportFixtureModel(allocator: std.mem.Allocator) !PaintExportFixture {
     var model = GraphModel.Model.init(allocator);
     errdefer model.deinit();
@@ -3714,7 +3722,55 @@ fn paintExportFixtureModel(allocator: std.mem.Allocator) !PaintExportFixture {
     return .{ .model = model, .sha256 = fixture_digest };
 }
 
-fn paintExportFixture(dib: ParityDib, model: *const GraphModel.Model, allocator: std.mem.Allocator) !void {
+fn paint764FixtureModel(allocator: std.mem.Allocator, scene: Paint764Scene) !Paint764Fixture {
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+
+    const project_bytes = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "fixtures\\paint-764-project.json",
+        64 * 1024,
+    );
+    defer allocator.free(project_bytes);
+    var project_sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(project_bytes, &project_sha256, .{});
+    _ = try model.updateFromFrame(project_bytes);
+    if (!model.setSelectedIndex(0)) return error.Paint764ProjectSelectionFailed;
+
+    var peer_sha256: ?[std.crypto.hash.sha2.Sha256.digest_length]u8 = null;
+    if (scene == .overview) {
+        const peer_bytes = try std.fs.cwd().readFileAlloc(
+            allocator,
+            "fixtures\\paint-764-overview-peer.json",
+            64 * 1024,
+        );
+        defer allocator.free(peer_bytes);
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(peer_bytes, &digest, .{});
+        peer_sha256 = digest;
+        _ = try model.updateFromFrame(peer_bytes);
+    }
+
+    const project = model.graphFor("C:\\GraphCodeFixture\\CardStates") orelse
+        return error.Paint764ProjectMissing;
+    if (project.nodes.items.len != 6 or project.edges.items.len != 3)
+        return error.Paint764ProjectInventoryMismatch;
+    if (scene == .overview and model.graphs.items.len != 2)
+        return error.Paint764OverviewInventoryMismatch;
+    return .{
+        .model = model,
+        .project_sha256 = project_sha256,
+        .peer_sha256 = peer_sha256,
+    };
+}
+
+fn paintExportFixture(
+    dib: ParityDib,
+    model: *const GraphModel.Model,
+    allocator: std.mem.Allocator,
+    surface: Surface,
+    header_context: []const u8,
+) !void {
     if (c.SetMapMode(dib.dc, c.MM_ANISOTROPIC) == 0) return error.PaintFixtureMapModeFailed;
     if (c.SetWindowExtEx(dib.dc, 96, 96, null) == 0 or c.SetViewportExtEx(dib.dc, 96, 96, null) == 0)
         return error.PaintFixtureDpiMappingFailed;
@@ -3747,14 +3803,14 @@ fn paintExportFixture(dib: ParityDib, model: *const GraphModel.Model, allocator:
         &sidebar_state,
         -1,
         controls,
-        .project,
+        surface,
     );
     paintHeader(
         dib.dc,
         allocator,
         1280,
         "",
-        .{ .title = "GraphCode", .context = "Alpha", .panel_visible = false },
+        .{ .title = "GraphCode", .context = header_context, .panel_visible = false },
         null,
     );
     if (c.GdiFlush() == 0) return error.PaintFixtureFlushFailed;
@@ -3801,6 +3857,7 @@ const PaintRenderProof = struct {
     bmp_sha256: [32]u8,
     dpi_x: i32,
     dpi_y: i32,
+    age_observed_at: u64 = 0,
 };
 
 fn verifyPaintContract(dib: ParityDib, fixture: *const PaintExportFixture, allocator: std.mem.Allocator) !void {
@@ -3848,6 +3905,263 @@ fn verifyPaintContract(dib: ParityDib, fixture: *const PaintExportFixture, alloc
     try std.testing.expect(dib.nonBackgroundPixels(Tokens.canvas_tone) > 10_000);
 }
 
+fn verifyPaint764Inventory(fixture: *const Paint764Fixture, scene: Paint764Scene) !void {
+    const model = &fixture.model;
+    const graph = model.graph orelse return error.Paint764ActiveGraphMissing;
+    try std.testing.expectEqual(@as(usize, 6), graph.nodes.items.len);
+    try std.testing.expectEqual(@as(usize, 3), graph.edges.items.len);
+    try std.testing.expectEqual(@as(?u64, 1_704_067_200), graph.nodes.items[0].created_at);
+    try std.testing.expectEqualStrings("review", graph.nodes.items[1].worktree_branch);
+    try std.testing.expectEqual(@as(usize, 0), model.activity.items.len);
+    try std.testing.expectEqual(NodeRole.entry, nodeRole(graph.edges.items, "fixture-main-idle", &.{}));
+    try std.testing.expectEqual(NodeRole.interior, nodeRole(graph.edges.items, "fixture-goal-done", &.{}));
+    try std.testing.expectEqual(NodeRole.interior, nodeRole(graph.edges.items, "fixture-timed-stopped", &.{}));
+    try std.testing.expectEqual(NodeRole.entry, nodeRole(graph.edges.items, "fixture-turn-running", &.{}));
+    try std.testing.expectEqual(NodeRole.interior, nodeRole(graph.edges.items, "fixture-composite-blocked", &.{}));
+    try std.testing.expectEqual(NodeRole.unwired, nodeRole(graph.edges.items, "fixture-turn-needs-you", &.{}));
+    try std.testing.expect(attentionActionVisible(
+        graph.nodes.items[2],
+        graph.nodes.items,
+        graph.edges.items,
+    ));
+    try std.testing.expect(attentionActionVisible(
+        graph.nodes.items[5],
+        graph.nodes.items,
+        graph.edges.items,
+    ));
+
+    var main_count: usize = 0;
+    var goal_count: usize = 0;
+    var timed_count: usize = 0;
+    var turn_count: usize = 0;
+    var composite_count: usize = 0;
+    var state_words = [_]usize{0} ** 6;
+    for (graph.nodes.items) |node| {
+        if (std.mem.eql(u8, cardTypeName(node.loop_type), "Main")) main_count += 1;
+        if (std.mem.eql(u8, cardTypeName(node.loop_type), "Goal")) goal_count += 1;
+        if (std.mem.eql(u8, cardTypeName(node.loop_type), "Timed")) timed_count += 1;
+        if (std.mem.eql(u8, cardTypeName(node.loop_type), "Turn")) turn_count += 1;
+        if (std.mem.eql(u8, cardTypeName(node.loop_type), "Composite")) composite_count += 1;
+        try std.testing.expectEqual(@as(?u64, 1_704_067_200), node.created_at);
+        const word = cardState(node).word;
+        for ([_][]const u8{ "IDLE", "DONE", "STOPPED", "RUNNING", "BLOCKED", "NEEDS YOU" }, 0..) |expected, index| {
+            if (std.mem.eql(u8, word, expected)) state_words[index] += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), main_count);
+    try std.testing.expectEqual(@as(usize, 1), goal_count);
+    try std.testing.expectEqual(@as(usize, 1), timed_count);
+    try std.testing.expectEqual(@as(usize, 2), turn_count);
+    try std.testing.expectEqual(@as(usize, 1), composite_count);
+    for (state_words) |count| try std.testing.expectEqual(@as(usize, 1), count);
+
+    if (scene == .overview) {
+        try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
+        try std.testing.expectEqual(@as(usize, 2), model.graphs.items[1].nodes.items.len);
+        try std.testing.expectEqual(@as(usize, 1), model.graphs.items[1].edges.items.len);
+        try std.testing.expect(fixture.peer_sha256 != null);
+        try std.testing.expectEqualStrings("sample", model.graphs.items[1].nodes.items[0].worktree_branch);
+    } else {
+        try std.testing.expectEqual(@as(usize, 1), model.graphs.items.len);
+        try std.testing.expect(fixture.peer_sha256 == null);
+    }
+}
+
+fn paint764AgeLabel(allocator: std.mem.Allocator, created_at: u64, now: u64) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    try writeCardAge(result.writer(), now -| created_at);
+    return result.toOwnedSlice();
+}
+
+fn verifyPaint764AgeStable(
+    model: *const GraphModel.Model,
+    allocator: std.mem.Allocator,
+    first_observation: u64,
+    second_observation: u64,
+) !void {
+    for (model.graphs.items) |graph| {
+        for (graph.nodes.items) |node| {
+            const created_at = node.created_at orelse continue;
+            const first = try paint764AgeLabel(allocator, created_at, first_observation);
+            defer allocator.free(first);
+            const second = try paint764AgeLabel(allocator, created_at, second_observation);
+            defer allocator.free(second);
+            if (!std.mem.eql(u8, first, second)) return error.PaintExportAgeBucketChanged;
+        }
+    }
+}
+
+fn paint764AgeEvidence(
+    allocator: std.mem.Allocator,
+    fixture: *const Paint764Fixture,
+    observed_at: u64,
+) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    const writer = result.writer();
+    try writer.print("{{\"observedAtEpochSeconds\":{d},\"nodes\":[", .{observed_at});
+    var first_node = true;
+    for (fixture.model.graphs.items) |graph| {
+        for (graph.nodes.items) |node| {
+            const created_at = node.created_at orelse continue;
+            const age = try paint764AgeLabel(allocator, created_at, observed_at);
+            defer allocator.free(age);
+            try writer.print(
+                "{s}{{\"id\":\"{s}\",\"createdAtEpochSeconds\":{d},\"display\":\"{s}\"}}",
+                .{ if (first_node) "" else ",", node.id, created_at, age },
+            );
+            first_node = false;
+        }
+    }
+    try writer.writeAll("]}");
+    return result.toOwnedSlice();
+}
+
+fn verifyPaint764CardPixels(
+    dib: ParityDib,
+    allocator: std.mem.Allocator,
+    node: GraphModel.Node,
+    bounds: c.RECT,
+    role: NodeRole,
+    attention: bool,
+    now: u64,
+) !void {
+    try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
+    try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
+    const presentation = cardState(node);
+    const pill_width = blk: {
+        const old = try selectCardFont(dib.dc, 10, .card_state);
+        defer _ = c.SelectObject(dib.dc, old);
+        break :blk try measuredText(dib.dc, allocator, presentation.word) + 22;
+    };
+    const rows = cardTextLayout(bounds, 1, pill_width);
+    try std.testing.expect(dib.count(rows.pill, presentation.fill) > 20);
+    try std.testing.expect(dib.count(rows.title, 0x00F4F4F4) > 0);
+    try std.testing.expectEqual(@as(usize, 36), dib.count(rows.meta, loopTypeColor(node.loop_type)));
+    const meta_bounds = rect(rows.meta.left + 11, rows.meta.top, rows.meta.right, rows.meta.bottom);
+    const old_font = try selectCardFont(dib.dc, 10.5, .card_mono);
+    defer _ = c.SelectObject(dib.dc, old_font);
+    const metadata = try cardMetaForWidth(
+        dib.dc,
+        allocator,
+        node,
+        now,
+        meta_bounds.right - meta_bounds.left,
+    );
+    defer allocator.free(metadata);
+    if (node.created_at) |created_at| {
+        const age = try paint764AgeLabel(allocator, created_at, now);
+        defer allocator.free(age);
+        try std.testing.expect(std.mem.endsWith(u8, metadata, age));
+    }
+    if (node.worktree_branch.len != 0) {
+        try std.testing.expect(std.mem.indexOf(u8, metadata, node.worktree_branch) != null);
+    }
+    if (attention) {
+        const action = attentionActionBounds(bounds, &.{ .zoom = 1 });
+        try std.testing.expect(dib.count(action, 0x000A9FFF) > 0);
+    }
+    if (!attention and (role == .entry or role == .unwired)) {
+        try std.testing.expect(dib.count(rows.detail, if (role == .unwired) 0x007ACDFF else 0x009F9C9C) > 0);
+    }
+}
+
+fn paint764NodeIndex(nodes: []const GraphModel.Node, id: []const u8) ?usize {
+    for (nodes, 0..) |node, index| {
+        if (std.mem.eql(u8, node.id, id)) return index;
+    }
+    return null;
+}
+
+fn verifyPaint764Contract(
+    dib: ParityDib,
+    fixture: *const Paint764Fixture,
+    allocator: std.mem.Allocator,
+    scene: Paint764Scene,
+    age_observed_at: u64,
+) !void {
+    try verifyPaint764Inventory(fixture, scene);
+    const controls = WorkspaceControls.State{
+        .graph_visible = true,
+        .rail_visible = true,
+        .panel_visible = false,
+        .activity_enabled = false,
+    };
+    const viewport = renderBounds(1280, 720, controls);
+    const graph_bounds = rect(viewport.left, viewport.top, viewport.right, viewport.bottom);
+    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    if (scene == .project) {
+        const graph = fixture.model.graph orelse return error.Paint764ActiveGraphMissing;
+        for (graph.nodes.items, 0..) |node, index| {
+            const bounds = nodeBounds(index, &state);
+            try std.testing.expect(bounds.left >= viewport.left and bounds.top >= viewport.top);
+            try std.testing.expect(bounds.right <= viewport.right and bounds.bottom <= viewport.bottom);
+            try verifyPaint764CardPixels(
+                dib,
+                allocator,
+                node,
+                bounds,
+                nodeRole(graph.edges.items, node.id, &.{}),
+                needsAttention(node, graph.nodes.items, graph.edges.items),
+                age_observed_at,
+            );
+        }
+        var placed_edge_labels: [128]c.RECT = undefined;
+        var placed_edge_label_count: usize = 0;
+        for (graph.edges.items) |edge| {
+            const from = connectorPosition(graph.nodes.items, edge.from, true, &state) orelse
+                return error.Paint764EdgeSourceMissing;
+            const to = connectorPosition(graph.nodes.items, edge.to, false, &state) orelse
+                return error.Paint764EdgeTargetMissing;
+            const from_index = paint764NodeIndex(graph.nodes.items, edge.from) orelse
+                return error.Paint764EdgeSourceMissing;
+            const to_index = paint764NodeIndex(graph.nodes.items, edge.to) orelse
+                return error.Paint764EdgeTargetMissing;
+            try std.testing.expectEqual(nodeBounds(from_index, &state).right, from.x);
+            try std.testing.expectEqual(nodeBounds(to_index, &state).left, to.x);
+            const center_x = @divTrunc(from.x + to.x, 2);
+            const center_y = @divTrunc(from.y + to.y, 2);
+            const stroke_sample = rect(center_x - 3, center_y - 3, center_x + 4, center_y + 4);
+            try std.testing.expect(dib.count(stroke_sample, edgeKindColor(edge.kind)) > 0);
+            const label = try edgeLabel(allocator, edge);
+            defer allocator.free(label);
+            try std.testing.expectEqualStrings("handoff", label);
+            var label_y = if (@abs(to.y - from.y) < 40)
+                @min(from.y, to.y) - 76
+            else
+                @divTrunc(from.y + to.y, 2) - 10;
+            var label_bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
+            var attempts: usize = 0;
+            while (attempts < 12 and overlapsPlaced(label_bounds, placed_edge_labels[0..placed_edge_label_count])) : (attempts += 1) {
+                label_y += 24;
+                label_bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
+            }
+            if (placed_edge_label_count < placed_edge_labels.len) {
+                placed_edge_labels[placed_edge_label_count] = label_bounds;
+                placed_edge_label_count += 1;
+            }
+            try std.testing.expect(dib.count(label_bounds, edgeKindColor(edge.kind)) > 0);
+        }
+    } else {
+        for (fixture.model.graphs.items, 0..) |graph, graph_index| {
+            const lane = overviewLaneBounds(&fixture.model, graph_index, graph_bounds, &state);
+            try std.testing.expect(lane.left >= viewport.left and lane.right <= viewport.right);
+            try std.testing.expect(lane.top >= viewport.top and lane.bottom <= viewport.bottom);
+            const caption = overviewLaneCaption(&fixture.model, graph_index, graph_bounds, &state);
+            try std.testing.expect(dib.count(caption.worktrees, 0x00352B1C) > 0);
+            for (graph.nodes.items, 0..) |node, node_index| {
+                const bounds = overviewCardBounds(&fixture.model, graph_index, node_index, graph_bounds, &state);
+                try std.testing.expect(bounds.left >= lane.left and bounds.top > lane.top);
+                try std.testing.expect(bounds.right <= lane.right and bounds.bottom < lane.bottom);
+                try verifyPaint764CardPixels(dib, allocator, node, bounds, .interior, false, age_observed_at);
+            }
+        }
+    }
+    try std.testing.expect(c.GdiFlush() != 0);
+    try std.testing.expect(dib.nonBackgroundPixels(Tokens.canvas_tone) > 10_000);
+}
+
 fn renderPaintArtifact(
     allocator: std.mem.Allocator,
     fixture: *const PaintExportFixture,
@@ -3856,7 +4170,7 @@ fn renderPaintArtifact(
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
     if (!GdiplusAA.isReady()) return error.PaintExportGdiplusNotReady;
-    try paintExportFixture(dib, &fixture.model, allocator);
+    try paintExportFixture(dib, &fixture.model, allocator, .project, "Alpha");
     try verifyPaintContract(dib, fixture, allocator);
     const rgb_sha256 = try dib.rgbSha256(allocator);
     const bmp_sha256 = try dib.writeBmp(allocator, path);
@@ -3944,6 +4258,314 @@ fn writePaintReceipt(
     var file = try std.fs.cwd().createFile(path, .{ .exclusive = true });
     defer file.close();
     try file.writeAll(receipt);
+}
+
+fn paint764SceneName(scene: Paint764Scene) []const u8 {
+    return if (scene == .project) "project-paint-764" else "overview-paint-764";
+}
+
+fn paint764HeaderContext(scene: Paint764Scene) []const u8 {
+    return if (scene == .project) "Card States" else "Overview";
+}
+
+fn paint764ArtifactName(allocator: std.mem.Allocator, scene: Paint764Scene, render_index: usize) ![]u8 {
+    const suffix = switch (render_index) {
+        0 => "",
+        1 => "-repeat-2",
+        2 => "-repeat-3",
+        else => return error.Paint764RenderIndexInvalid,
+    };
+    return std.fmt.allocPrint(allocator, "{s}{s}.bmp", .{ paint764SceneName(scene), suffix });
+}
+
+fn renderPaint764Artifact(
+    allocator: std.mem.Allocator,
+    fixture: *const Paint764Fixture,
+    path: []const u8,
+    scene: Paint764Scene,
+) !PaintRenderProof {
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    if (!GdiplusAA.isReady()) return error.PaintExportGdiplusNotReady;
+    const surface: Surface = if (scene == .project) .project else .overview;
+    const age_started_at: u64 = @intCast(@max(0, std.time.timestamp()));
+    try paintExportFixture(dib, &fixture.model, allocator, surface, paint764HeaderContext(scene));
+    const age_observed_at: u64 = @intCast(@max(0, std.time.timestamp()));
+    try verifyPaint764AgeStable(&fixture.model, allocator, age_started_at, age_observed_at);
+    try verifyPaint764Contract(dib, fixture, allocator, scene, age_observed_at);
+    return .{
+        .rgb_sha256 = try dib.rgbSha256(allocator),
+        .bmp_sha256 = try dib.writeBmp(allocator, path),
+        .dpi_x = c.GetDeviceCaps(dib.dc, c.LOGPIXELSX),
+        .dpi_y = c.GetDeviceCaps(dib.dc, c.LOGPIXELSY),
+        .age_observed_at = age_observed_at,
+    };
+}
+
+fn writePaint764Receipt(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    fixture: *const Paint764Fixture,
+    render: PaintRenderProof,
+    font_facts: *const [4]PaintFontFact,
+    hashes: *const [3][32]u8,
+    source_commit: []const u8,
+    scene: Paint764Scene,
+) !void {
+    const project_hex = std.fmt.bytesToHex(fixture.project_sha256, .lower);
+    var peer_hex_storage: [64]u8 = undefined;
+    const peer_hex: []const u8 = if (fixture.peer_sha256) |digest| blk: {
+        peer_hex_storage = std.fmt.bytesToHex(digest, .lower);
+        break :blk peer_hex_storage[0..];
+    } else "";
+    const fixture_list = if (scene == .overview)
+        try std.fmt.allocPrint(
+            allocator,
+            \\[{{"path":"graphcode-windows/fixtures/paint-764-project.json","sha256":"{s}"}},{{"path":"graphcode-windows/fixtures/paint-764-overview-peer.json","sha256":"{s}"}}]
+        ,
+            .{ project_hex, peer_hex },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            \\[{{"path":"graphcode-windows/fixtures/paint-764-project.json","sha256":"{s}"}}]
+        ,
+            .{project_hex},
+        );
+    defer allocator.free(fixture_list);
+    const bmp_hex = std.fmt.bytesToHex(render.bmp_sha256, .lower);
+    const rgb_hex = std.fmt.bytesToHex(render.rgb_sha256, .lower);
+    const render0_hex = std.fmt.bytesToHex(hashes[0], .lower);
+    const render1_hex = std.fmt.bytesToHex(hashes[1], .lower);
+    const render2_hex = std.fmt.bytesToHex(hashes[2], .lower);
+    const nodes: usize = if (scene == .project) 6 else 8;
+    const edges: usize = if (scene == .project) 3 else 4;
+    const painted_edges: usize = if (scene == .project) edges else 0;
+    const age_evidence = try paint764AgeEvidence(allocator, fixture, render.age_observed_at);
+    defer allocator.free(age_evidence);
+    const artifact0 = try paint764ArtifactName(allocator, scene, 0);
+    defer allocator.free(artifact0);
+    const artifact1 = try paint764ArtifactName(allocator, scene, 1);
+    defer allocator.free(artifact1);
+    const artifact2 = try paint764ArtifactName(allocator, scene, 2);
+    defer allocator.free(artifact2);
+    const fonts_json = try std.fmt.allocPrint(allocator,
+        \\[
+        \\  {{"role": "card-title", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\  {{"role": "card-state", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\  {{"role": "card-mono", "logicalFace": "Consolas", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}},
+        \\  {{"role": "header", "logicalFace": "Segoe UI", "actualFace": "{s}", "height": {d}, "weight": {d}, "quality": "CLEARTYPE_QUALITY"}}
+        \\]
+    , .{
+        font_facts[0].actual_face,
+        font_facts[0].height,
+        font_facts[0].weight,
+        font_facts[1].actual_face,
+        font_facts[1].height,
+        font_facts[1].weight,
+        font_facts[2].actual_face,
+        font_facts[2].height,
+        font_facts[2].weight,
+        font_facts[3].actual_face,
+        font_facts[3].height,
+        font_facts[3].weight,
+    });
+    defer allocator.free(fonts_json);
+    const receipt = try std.fmt.allocPrint(allocator,
+        \\{{
+        \\  "schemaVersion": 1,
+        \\  "evidenceClass": "paint-only",
+        \\  "scene": "{s}",
+        \\  "fixturePath": "graphcode-windows/fixtures/paint-764-project.json",
+        \\  "fixtureSha256": "{s}",
+        \\  "fixtures": {s},
+        \\  "sourceCommit": "{s}",
+        \\  "renderer": "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB",
+        \\  "dimensions": {{"width": 1280, "height": 720, "logicalWidth": 1280, "logicalHeight": 720}},
+        \\  "dpiMapping": {{"windowExtX": 96, "windowExtY": 96, "viewportExtX": 96, "viewportExtY": 96, "deviceDpiX": {d}, "deviceDpiY": {d}}},
+        \\  "canvas": {{"surface": "{s}", "zoom": 1, "panX": 0, "panY": 0, "selectedIndex": 0, "railVisible": true, "panelVisible": false, "activityEnabled": false}},
+        \\  "model": {{"nodes": {d}, "edges": {d}, "paintedEdges": {d}, "activityHistory": 0, "createdAtValues": {d}}},
+        \\  "ageEvidence": {s},
+        \\  "header": {{"title": "GraphCode", "context": "{s}", "reachabilityClaim": "declared fixture/test value only; not App reachability"}},
+        \\  "gdiPlusReady": true,
+        \\  "colorAssumption": "SDR RGB; unused DIB alpha is normalized to opaque in BMP transport",
+        \\  "fontEvidenceScope": "Sampled card title, state, metadata, and header title font selections only; not a census of every text draw",
+        \\  "fonts": {s},
+        \\  "transport": [
+        \\    {{"name": "{s}", "bmpSha256": "{s}", "rgbSha256": "{s}"}},
+        \\    {{"name": "{s}", "rgbSha256": "{s}"}},
+        \\    {{"name": "{s}", "rgbSha256": "{s}"}}
+        \\  ],
+        \\  "renderRgbSha256": ["{s}", "{s}", "{s}"],
+        \\  "candidateArtifactCount": 1,
+        \\  "excludedSurfaces": ["whole window composition", "input and button behavior", "project opening and canvas fit", "backend lifecycle and persistence", "UI Automation and accessibility", "per-monitor DPI", "unreviewed sidebar and loop-bar palette"]
+        \\}}
+    , .{
+        paint764SceneName(scene),
+        project_hex,
+        fixture_list,
+        source_commit,
+        render.dpi_x,
+        render.dpi_y,
+        if (scene == .project) "project" else "overview",
+        nodes,
+        edges,
+        painted_edges,
+        nodes,
+        age_evidence,
+        paint764HeaderContext(scene),
+        fonts_json,
+        artifact0,
+        bmp_hex,
+        rgb_hex,
+        artifact1,
+        render1_hex,
+        artifact2,
+        render2_hex,
+        render0_hex,
+        render1_hex,
+        render2_hex,
+    });
+    defer allocator.free(receipt);
+    var file = try std.fs.cwd().createFile(path, .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(receipt);
+}
+
+fn verifyPaint764Transport(allocator: std.mem.Allocator, transport: []const u8, scene: Paint764Scene) !usize {
+    var directory = try std.fs.cwd().openDir(transport, .{ .iterate = true });
+    defer directory.close();
+    var seen = [_]bool{false} ** 3;
+    var iterator = directory.iterate();
+    while (try iterator.next()) |entry| {
+        if (entry.kind != .file) return error.PaintExportUnexpectedArtifact;
+        var match: ?usize = null;
+        for (0..seen.len) |index| {
+            const expected = try paint764ArtifactName(allocator, scene, index);
+            defer allocator.free(expected);
+            if (std.mem.eql(u8, entry.name, expected)) {
+                match = index;
+                break;
+            }
+        }
+        const index = match orelse return error.PaintExportUnexpectedArtifact;
+        if (seen[index]) return error.PaintExportDuplicateArtifact;
+        seen[index] = true;
+        const artifact_path = try std.fs.path.join(allocator, &.{ transport, entry.name });
+        defer allocator.free(artifact_path);
+        const stat = try std.fs.cwd().statFile(artifact_path);
+        if (stat.size <= 54) return error.PaintExportArtifactEmpty;
+    }
+    for (seen) |present| {
+        if (!present) return error.PaintExportArtifactMissing;
+    }
+    return seen.len;
+}
+
+fn paint764Export(scene: Paint764Scene) !void {
+    const allocator = std.testing.allocator;
+    const export_root = std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_EXPORT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer allocator.free(export_root);
+    if (export_root.len == 0) return error.PaintExportDirectoryEmpty;
+    const source_commit = std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_SOURCE_COMMIT") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.PaintExportSourceCommitMissing,
+        else => return err,
+    };
+    defer allocator.free(source_commit);
+    if (source_commit.len != 40) return error.PaintExportSourceCommitInvalid;
+    for (source_commit) |character| {
+        if (!std.ascii.isDigit(character) and !(character >= 'a' and character <= 'f'))
+            return error.PaintExportSourceCommitInvalid;
+    }
+    const transport = try std.fs.path.join(allocator, &.{ export_root, "transport" });
+    defer allocator.free(transport);
+    var export_dir = try std.fs.cwd().openDir(export_root, .{ .iterate = true });
+    defer export_dir.close();
+    var iterator = export_dir.iterate();
+    if (try iterator.next() != null) return error.PaintExportRootNotEmpty;
+    try std.fs.cwd().makeDir(transport);
+
+    var fixture = try paint764FixtureModel(allocator, scene);
+    defer fixture.model.deinit();
+    try verifyPaint764Inventory(&fixture, scene);
+    GdiplusAA.init();
+    defer GdiplusAA.deinit();
+    const deadline = std.time.nanoTimestamp() + 2_000_000_000;
+    while (!GdiplusAA.isReady()) {
+        if (std.time.nanoTimestamp() >= deadline) return error.PaintExportGdiplusNotReady;
+        std.Thread.sleep(1_000_000);
+    }
+
+    var font_facts: [4]PaintFontFact = undefined;
+    var font_facts_len: usize = 0;
+    defer for (font_facts[0..font_facts_len]) |fact| allocator.free(fact.actual_face);
+    const font_requests = [_]struct {
+        font: c.HFONT,
+        face: []const u8,
+        height: i32,
+        weight: i32,
+    }{
+        .{ .font = AppFont.getStyle(14.5, .card_title), .face = "Segoe UI", .height = -15, .weight = c.FW_SEMIBOLD },
+        .{ .font = AppFont.getStyle(10, .card_state), .face = "Segoe UI", .height = -10, .weight = c.FW_BOLD },
+        .{ .font = AppFont.getStyle(10.5, .card_mono), .face = "Consolas", .height = -11, .weight = c.FW_NORMAL },
+        .{ .font = AppFont.get(11, false), .face = "Segoe UI", .height = -11, .weight = c.FW_NORMAL },
+    };
+    var rgb_hashes: [3][32]u8 = undefined;
+    var first_proof: PaintRenderProof = undefined;
+    for (0..3) |render_index| {
+        const file_name = try paint764ArtifactName(allocator, scene, render_index);
+        defer allocator.free(file_name);
+        const artifact_path = try std.fs.path.join(allocator, &.{ transport, file_name });
+        defer allocator.free(artifact_path);
+        const proof = try renderPaint764Artifact(allocator, &fixture, artifact_path, scene);
+        if (render_index == 0) {
+            first_proof = proof;
+            const dib = try ParityDib.init(1280, 720);
+            defer dib.deinit();
+            for (font_requests) |request| {
+                font_facts[font_facts_len] = try inspectPaintFont(
+                    allocator,
+                    dib.dc,
+                    request.font,
+                    request.face,
+                    request.height,
+                    request.weight,
+                );
+                font_facts_len += 1;
+            }
+        } else if (proof.dpi_x != first_proof.dpi_x or proof.dpi_y != first_proof.dpi_y) {
+            return error.PaintExportDeviceMetricsChanged;
+        } else {
+            try verifyPaint764AgeStable(
+                &fixture.model,
+                allocator,
+                first_proof.age_observed_at,
+                proof.age_observed_at,
+            );
+        }
+        rgb_hashes[render_index] = proof.rgb_sha256;
+    }
+    try std.testing.expectEqualSlices(u8, &rgb_hashes[0], &rgb_hashes[1]);
+    try std.testing.expectEqualSlices(u8, &rgb_hashes[0], &rgb_hashes[2]);
+    const rendered_count = try verifyPaint764Transport(allocator, transport, scene);
+    const canonical_name = try paint764ArtifactName(allocator, scene, 0);
+    defer allocator.free(canonical_name);
+    const canonical_path = try std.fs.path.join(allocator, &.{ transport, canonical_name });
+    defer allocator.free(canonical_path);
+    const canonical_stat = try std.fs.cwd().statFile(canonical_path);
+    if (canonical_stat.size <= 54) return error.PaintExportCanonicalArtifactEmpty;
+    const candidate_count: usize = @intFromBool(rendered_count == 3 and canonical_stat.size > 54);
+    try std.testing.expectEqual(@as(usize, 1), candidate_count);
+    const receipt_path = try std.fs.path.join(allocator, &.{ transport, "paint-receipt.json" });
+    defer allocator.free(receipt_path);
+    try writePaint764Receipt(allocator, receipt_path, &fixture, first_proof, &font_facts, &rgb_hashes, source_commit, scene);
+    std.debug.print(
+        "paint export artifact contract scene={s} expected=1 actual={d} renders={d} matching-rgb-hashes=1\n",
+        .{ paint764SceneName(scene), candidate_count, rendered_count },
+    );
 }
 
 test "paint export: project-paint-v1" {
@@ -4040,6 +4662,26 @@ test "paint export: project-paint-v1" {
     };
     std.debug.print("paint export artifact contract expected=1 actual={d}; renders=3 matching-rgb-hashes=1\n", .{@intFromBool(canonical_exists)});
     try std.testing.expectEqual(@as(usize, 1), @as(usize, @intFromBool(canonical_exists)));
+}
+
+test "paint export: project-paint-764" {
+    try paint764Export(.project);
+}
+
+test "paint export: overview-paint-764" {
+    try paint764Export(.overview);
+}
+
+test "paint scene 764 project inventory" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .project);
+    defer fixture.model.deinit();
+    try verifyPaint764Inventory(&fixture, .project);
+}
+
+test "paint scene 764 overview inventory" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    try verifyPaint764Inventory(&fixture, .overview);
 }
 
 test "loop card parity both production renderers paint named pill and mono meta regions" {

@@ -9,7 +9,7 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\.."))
 $converter = Join-Path $PSScriptRoot "..\Convert-CanvasPaintArtifact.ps1"
 $fixturePath = Join-Path $repoRoot "graphcode-windows\fixtures\paint-project-v1.json"
 $fixtureHash = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash.ToLowerInvariant()
-$sourcePaths = @(
+$sourcePathsV1 = @(
   "graphcode-windows\src\GraphCanvas.zig",
   "graphcode-windows\src\GdiplusAA.zig",
   "graphcode-windows\fixtures\paint-project-v1.json",
@@ -19,6 +19,7 @@ $sourcePaths = @(
   "graphcode-windows\README.md"
 )
 $caseResults = [Collections.Generic.List[object]]::new()
+$sceneCaseResults = [Collections.Generic.List[object]]::new()
 $syntheticFixture = Join-Path $scratchFull "synthetic-codec-fixture.bmp"
 
 function Assert-Contract([bool] $Condition, [string] $Message) {
@@ -88,9 +89,89 @@ function Get-TestFileHash([string] $Path) {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Get-ContractSourceHashes {
+function Get-SceneFixturePaths([string] $Scene) {
+  switch ($Scene) {
+    "project-paint-v1" { return @("graphcode-windows\fixtures\paint-project-v1.json") }
+    "project-paint-764" { return @("graphcode-windows\fixtures\paint-764-project.json") }
+    "overview-paint-764" {
+      return @(
+        "graphcode-windows\fixtures\paint-764-project.json",
+        "graphcode-windows\fixtures\paint-764-overview-peer.json"
+      )
+    }
+    default { throw "Unknown synthetic scene profile: $Scene" }
+  }
+}
+
+function Get-SceneSourcePaths([string] $Scene) {
+  switch ($Scene) {
+    "project-paint-v1" { return $sourcePathsV1 }
+    "project-paint-764" {
+      return @(
+        "graphcode-windows\src\GraphCanvas.zig",
+        "graphcode-windows\src\GdiplusAA.zig",
+        "graphcode-windows\fixtures\paint-764-project.json",
+        "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+        "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+        "Tools\windows\Tests\WindowsShell.Tests.ps1",
+        "graphcode-windows\README.md"
+      )
+    }
+    "overview-paint-764" {
+      return @(
+        "graphcode-windows\src\GraphCanvas.zig",
+        "graphcode-windows\src\GdiplusAA.zig",
+        "graphcode-windows\fixtures\paint-764-project.json",
+        "graphcode-windows\fixtures\paint-764-overview-peer.json",
+        "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+        "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+        "Tools\windows\Tests\WindowsShell.Tests.ps1",
+        "graphcode-windows\README.md"
+      )
+    }
+    default { throw "Unknown synthetic scene profile: $Scene" }
+  }
+}
+
+function Get-SyntheticAgeLabel([long] $CreatedAt, [long] $ObservedAt) {
+  $seconds = [Math]::Max(0, $ObservedAt - $CreatedAt)
+  $days = [long][Math]::Floor($seconds / 86400)
+  $hours = [long][Math]::Floor($seconds / 3600) % 24
+  $minutes = [long][Math]::Floor($seconds / 60) % 60
+  if ($days -gt 0) {
+    if ($hours -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}d {1}h", $days, $hours) }
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}d", $days)
+  }
+  if ($hours -gt 0) {
+    if ($minutes -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}h {1}m", $hours, $minutes) }
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}h", $hours)
+  }
+  if ($minutes -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}m", $minutes) }
+  return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}s", $seconds)
+}
+
+function Get-SyntheticAgeEvidence([string[]] $FixturePaths, [long] $ObservedAt) {
+  $nodes = [Collections.Generic.List[object]]::new()
+  $referenceDateUnixOffset = [long]978307200
+  foreach ($relativePath in $FixturePaths) {
+    $fixturePath = Join-Path $repoRoot $relativePath
+    $fixture = Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($node in $fixture.event.graphChanged.nodes) {
+      if ($null -eq $node.createdAt) { continue }
+      $createdAtEpochSeconds = [long][Math]::Floor([double]$node.createdAt) + $referenceDateUnixOffset
+      $nodes.Add([ordered]@{
+        id = [string]$node.id
+        createdAtEpochSeconds = $createdAtEpochSeconds
+        display = Get-SyntheticAgeLabel $createdAtEpochSeconds $ObservedAt
+      })
+    }
+  }
+  return [ordered]@{ observedAtEpochSeconds = $ObservedAt; nodes = @($nodes) }
+}
+
+function Get-ContractSourceHashes([string] $Scene = "project-paint-v1") {
   $hashes = [ordered]@{}
-  foreach ($relativePath in $sourcePaths) {
+  foreach ($relativePath in (Get-SceneSourcePaths $Scene)) {
     $hashes[$relativePath] = Get-TestFileHash (Join-Path $repoRoot $relativePath)
   }
   return $hashes
@@ -126,20 +207,61 @@ function Update-SyntheticArtifactHash([object] $Run, [string] $Name) {
     [Text.UTF8Encoding]::new($false))
 }
 
-function New-Receipt([string] $TransportPath, [string] $RgbHash, [string] $BmpHash, [string] $FixtureDigest) {
+function New-Receipt(
+  [string] $TransportPath,
+  [string] $RgbHash,
+  [string] $BmpHash,
+  [string] $FixtureDigest,
+  [string] $Scene = "project-paint-v1"
+) {
+  $fixturePaths = Get-SceneFixturePaths $Scene
+  $fixtureFacts = @(
+    foreach ($relativePath in $fixturePaths) {
+      [ordered]@{
+        path = $relativePath.Replace("\", "/")
+        sha256 = Get-TestFileHash (Join-Path $repoRoot $relativePath)
+      }
+    }
+  )
+  $is764 = $Scene -ne "project-paint-v1"
+  $nodes = switch ($Scene) {
+    "project-paint-764" { 6 }
+    "overview-paint-764" { 8 }
+    default { 2 }
+  }
+  $edges = switch ($Scene) {
+    "project-paint-764" { 3 }
+    "overview-paint-764" { 4 }
+    default { 1 }
+  }
+  $paintedEdges = if ($Scene -eq "project-paint-764") { 3 } elseif ($Scene -eq "overview-paint-764") { 0 } else { $null }
+  $createdAtValues = if ($is764) { $nodes } else { 0 }
+  $ageObservedAt = 1800000000
+  $surface = if ($Scene -eq "project-paint-764") { "project" } elseif ($Scene -eq "overview-paint-764") { "overview" } else { $null }
+  $headerContext = if ($Scene -eq "project-paint-764") { "Card States" } elseif ($Scene -eq "overview-paint-764") { "Overview" } else { "Alpha" }
+  $transportNames = switch ($Scene) {
+    "project-paint-764" { @("project-paint-764.bmp", "project-paint-764-repeat-2.bmp", "project-paint-764-repeat-3.bmp") }
+    "overview-paint-764" { @("overview-paint-764.bmp", "overview-paint-764-repeat-2.bmp", "overview-paint-764-repeat-3.bmp") }
+    default { @("project-paint-v1.bmp", "project-paint-v1-repeat-2.bmp", "project-paint-v1-repeat-3.bmp") }
+  }
+  $excludedSurfaces = if ($is764) {
+    @("whole window composition", "input and button behavior", "project opening and canvas fit", "backend lifecycle and persistence", "UI Automation and accessibility", "per-monitor DPI", "unreviewed sidebar and loop-bar palette")
+  } else {
+    @("whole window", "composition", "popups", "terminals", "per-monitor DPI", "sidebar/right-panel fidelity", "native form controls", "accessibility")
+  }
   $receipt = [ordered]@{
     schemaVersion = 1
     evidenceClass = "paint-only"
-    scene = "project-paint-v1"
-    fixturePath = "graphcode-windows/fixtures/paint-project-v1.json"
-    fixtureSha256 = $FixtureDigest
+    scene = $Scene
+    fixturePath = $fixtureFacts[0].path
+    fixtureSha256 = $fixtureFacts[0].sha256
     sourceCommit = "0000000000000000000000000000000000000000"
     renderer = "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB"
     dimensions = [ordered]@{ width = 1280; height = 720; logicalWidth = 1280; logicalHeight = 720 }
     dpiMapping = [ordered]@{ windowExtX = 96; windowExtY = 96; viewportExtX = 96; viewportExtY = 96; deviceDpiX = 96; deviceDpiY = 96 }
     canvas = [ordered]@{ zoom = 1; panX = 0; panY = 0; selectedIndex = 0; railVisible = $true; panelVisible = $false; activityEnabled = $false }
-    model = [ordered]@{ nodes = 2; edges = 1; activityHistory = 0; createdAtValues = 0 }
-    header = [ordered]@{ title = "GraphCode"; context = "Alpha"; reachabilityClaim = "declared fixture/test value only; not App reachability" }
+    model = [ordered]@{ nodes = $nodes; edges = $edges; activityHistory = 0; createdAtValues = $createdAtValues }
+    header = [ordered]@{ title = "GraphCode"; context = $headerContext; reachabilityClaim = "declared fixture/test value only; not App reachability" }
     gdiPlusReady = $true
     colorAssumption = "SDR RGB; unused DIB alpha is normalized to opaque in BMP transport"
     fontEvidenceScope = "Sampled card title, state, metadata, and header title font selections only; not a census of every text draw"
@@ -150,44 +272,61 @@ function New-Receipt([string] $TransportPath, [string] $RgbHash, [string] $BmpHa
       [ordered]@{ role = "header"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = -11; weight = 400; quality = "CLEARTYPE_QUALITY" }
     )
     transport = @(
-      [ordered]@{ name = "project-paint-v1.bmp"; bmpSha256 = $BmpHash; rgbSha256 = $RgbHash },
-      [ordered]@{ name = "project-paint-v1-repeat-2.bmp"; rgbSha256 = $RgbHash },
-      [ordered]@{ name = "project-paint-v1-repeat-3.bmp"; rgbSha256 = $RgbHash }
+      [ordered]@{ name = $transportNames[0]; bmpSha256 = $BmpHash; rgbSha256 = $RgbHash },
+      [ordered]@{ name = $transportNames[1]; rgbSha256 = $RgbHash },
+      [ordered]@{ name = $transportNames[2]; rgbSha256 = $RgbHash }
     )
     renderRgbSha256 = @($RgbHash, $RgbHash, $RgbHash)
     candidateArtifactCount = 1
-    excludedSurfaces = @("whole window", "composition", "popups", "terminals", "per-monitor DPI", "sidebar/right-panel fidelity", "native form controls", "accessibility")
+    excludedSurfaces = $excludedSurfaces
+  }
+  if ($is764) {
+    $receipt["fixtures"] = $fixtureFacts
+    $receipt.model["paintedEdges"] = $paintedEdges
+    $receipt["ageEvidence"] = Get-SyntheticAgeEvidence $fixturePaths $ageObservedAt
+    $receipt.canvas["surface"] = $surface
   }
   $receiptPath = Join-Path $TransportPath "paint-receipt.json"
   [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
   return $receiptPath
 }
 
-function New-SyntheticRun([string] $Name, [int] $Width = 1280, [int] $Height = 720) {
+function New-SyntheticRun(
+  [string] $Name,
+  [int] $Width = 1280,
+  [int] $Height = 720,
+  [string] $Scene = "project-paint-v1"
+) {
   $runRoot = Join-Path $scratchFull $Name
   $transportRoot = Join-Path $runRoot "export\transport"
   New-Item -ItemType Directory -Path $transportRoot -Force | Out-Null
   $testBinary = Join-Path $runRoot "canvas-paint-tests.exe"
   [IO.File]::WriteAllBytes($testBinary, [Text.Encoding]::ASCII.GetBytes("synthetic test binary identity"))
   $nativeLog = Join-Path $runRoot "native.log"
+  $nativeTestName = "GraphCanvas.test.paint export: $Scene"
   [IO.File]::WriteAllText(
     $nativeLog,
     "Synthetic codec fixture only; no product scene.`n" +
-      "1/1 GraphCanvas.test.paint export: project-paint-v1...synthetic contract evidence`nOK`nAll 1 tests passed.`n")
-  $canonical = Join-Path $transportRoot "project-paint-v1.bmp"
+      "1/1 $nativeTestName...synthetic contract evidence`nOK`nAll 1 tests passed.`n")
+  $transportNames = switch ($Scene) {
+    "project-paint-764" { @("project-paint-764.bmp", "project-paint-764-repeat-2.bmp", "project-paint-764-repeat-3.bmp") }
+    "overview-paint-764" { @("overview-paint-764.bmp", "overview-paint-764-repeat-2.bmp", "overview-paint-764-repeat-3.bmp") }
+    default { @("project-paint-v1.bmp", "project-paint-v1-repeat-2.bmp", "project-paint-v1-repeat-3.bmp") }
+  }
+  $canonical = Join-Path $transportRoot $transportNames[0]
   if ($Width -eq 1280 -and $Height -eq 720) {
     Copy-Item -LiteralPath $syntheticFixture -Destination $canonical
   } else {
     New-SyntheticBmp $canonical $Width $Height
   }
-  Copy-Item -LiteralPath $canonical -Destination (Join-Path $transportRoot "project-paint-v1-repeat-2.bmp")
-  Copy-Item -LiteralPath $canonical -Destination (Join-Path $transportRoot "project-paint-v1-repeat-3.bmp")
+  Copy-Item -LiteralPath $canonical -Destination (Join-Path $transportRoot $transportNames[1])
+  Copy-Item -LiteralPath $canonical -Destination (Join-Path $transportRoot $transportNames[2])
   $rgbHash = $script:syntheticRgbHash
   $bmpHash = Get-TestFileHash $canonical
-  $receipt = New-Receipt $transportRoot $rgbHash $bmpHash $fixtureHash
+  $receipt = New-Receipt $transportRoot $rgbHash $bmpHash $fixtureHash $Scene
   $runReceiptPath = Join-Path $runRoot "run-receipt.json"
-  $sourceHashes = Get-ContractSourceHashes
-  $command = '& $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" --test-filter "paint export: project-paint-v1" -femit-bin=' + $testBinary
+  $sourceHashes = Get-ContractSourceHashes $Scene
+  $command = '& $env:GRAPHCODE_ZIG0152 test src\GraphCanvas.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -lgdiplus "-I$env:GRAPHCODE_WINGHOSTTY_ROOT\include" --test-filter "paint export: ' + $Scene + '" -femit-bin=' + $testBinary
   $runReceipt = [ordered]@{
     runId = $Name
     command = $command
@@ -210,6 +349,7 @@ function New-SyntheticRun([string] $Name, [int] $Width = 1280, [int] $Height = 7
   }
   [IO.File]::WriteAllText($runReceiptPath, ($runReceipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
   return [pscustomobject]@{
+    Scene = $Scene
     RunRoot = $runRoot
     TransportRoot = $transportRoot
     InputBmp = $canonical
@@ -231,6 +371,7 @@ function Invoke-Converter([object] $Run) {
     RunReceiptPath = $Run.RunReceiptPath
     TestBinaryPath = $Run.TestBinaryPath
     OutputDirectory = $Run.OutputDirectory
+    Scene = $Run.Scene
   }
   if ($Run.TestPngCodecWriteFailure) {
     $arguments.TestPngCodecWriteFailure = $true
@@ -336,6 +477,17 @@ function Invoke-ContractCase([string] $Name, [scriptblock] $Body) {
   } catch {
     $caseResults.Add([pscustomobject]@{ Name = $Name; Passed = $false; Error = $_.Exception.Message })
     Write-Host "FAIL $Name :: $($_.Exception.Message)"
+  }
+}
+
+function Invoke-SceneContractCase([string] $Name, [scriptblock] $Body) {
+  try {
+    & $Body
+    $sceneCaseResults.Add([pscustomobject]@{ Name = $Name; Passed = $true; Error = $null })
+    Write-Host "PASS scene profile $Name"
+  } catch {
+    $sceneCaseResults.Add([pscustomobject]@{ Name = $Name; Passed = $false; Error = $_.Exception.Message })
+    Write-Host "FAIL scene profile $Name :: $($_.Exception.Message)"
   }
 }
 
@@ -563,4 +715,199 @@ if (-not $namesMatch -or $summary.Executed -ne 8 -or $summary.Passed -ne 8 -or
     Write-Error "Contract $($failure.Name) failed: $($failure.Error)" -ErrorAction Continue
   }
   throw "Canvas paint artifact contracts did not execute the exact 8/8/0/0 suite."
+}
+
+foreach ($scene in @("project-paint-764", "overview-paint-764")) {
+  $artifactName = "$scene.png"
+  $expectedSurface = if ($scene -eq "project-paint-764") { "project" } else { "overview" }
+  Invoke-SceneContractCase "$scene valid round-trip" {
+    $run = New-SyntheticRun "scene-$scene-valid" -Scene $scene
+    $result = @(Invoke-Converter $run)
+    Assert-Contract ($result.Count -eq 1 -and $result[0].ArtifactCount -eq 1) `
+      "The closed scene profile must publish exactly one artifact."
+    Assert-Contract ([IO.Path]::GetFileName($result[0].Artifact) -ceq $artifactName) `
+      "The published image name must be fixed by the selected scene profile."
+    $manifest = Get-Content -LiteralPath $result[0].Manifest -Raw | ConvertFrom-Json -AsHashtable
+    $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Contract ($manifest.scene -ceq $scene -and $manifest.canvasSurface -ceq $expectedSurface) `
+      "Manifest must retain the selected scene and surface."
+    Assert-Contract ($receipt.ageEvidence.nodes[0].createdAtEpochSeconds -eq 1704067200) `
+      "Fixture daemon-reference timestamps must normalize to Unix seconds before age evidence is recorded."
+    $receiptAgeJson = ConvertTo-Json -InputObject $receipt.ageEvidence -Depth 8 -Compress
+    $manifestAgeJson = ConvertTo-Json -InputObject $manifest.ageEvidence -Depth 8 -Compress
+    Assert-Contract ($manifestAgeJson -ceq $receiptAgeJson) `
+      "Manifest must preserve the validated age observation and labels."
+    Assert-Contract ($manifest.nativeRun.testName -ceq "GraphCanvas.test.paint export: $scene") `
+      "Manifest must bind the exact scene-specific native test."
+    $expectedFixturePaths = @(Get-SceneFixturePaths $scene | ForEach-Object { $_.Replace("\", "/") })
+    $actualFixturePaths = @($manifest.fixtureFiles | ForEach-Object { $_.path })
+    Assert-Contract (($actualFixturePaths -join "`n") -ceq ($expectedFixturePaths -join "`n")) `
+      "Manifest must bind the exact fixture set in order."
+    $expectedSourcePaths = @(Get-SceneSourcePaths $scene | ForEach-Object { $_.Replace("\", "/") } | Sort-Object -CaseSensitive)
+    $actualSourcePaths = @($manifest.sourceFiles | ForEach-Object { $_.path } | Sort-Object -CaseSensitive)
+    Assert-Contract ($expectedSourcePaths.Count -eq (6 + $expectedFixturePaths.Count) -and
+      ($actualSourcePaths -join "`n") -ceq ($expectedSourcePaths -join "`n")) `
+      "Manifest must bind the exact scene-specific leased source paths."
+    Assert-Contract ((Get-ChildItem -LiteralPath $run.OutputDirectory -Force).Count -eq 2) `
+      "Scene publication must contain exactly the PNG and manifest."
+  }
+}
+
+Invoke-SceneContractCase "project-paint-764 fixture digest refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-fixture-mismatch" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.fixtureSha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "FixtureHashMismatch"
+}
+
+Invoke-SceneContractCase "overview-paint-764 source inventory refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-source-inventory" -Scene "overview-paint-764"
+  $receipt = Get-Content -LiteralPath $run.RunReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.sourceHashesBefore["unleased-source.json"] = "0000000000000000000000000000000000000000000000000000000000000000"
+  $receipt.sourceHashesAfter["unleased-source.json"] = "0000000000000000000000000000000000000000000000000000000000000000"
+  [IO.File]::WriteAllText($run.RunReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Assert-ConverterFailure $run "NativeSourceSnapshotInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 wrong surface refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-wrong-surface" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.canvas.surface = "overview"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "RenderConfigurationInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 wrong scene refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-wrong-scene" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.scene = "overview-paint-764"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "ReceiptSchemaInvalid"
+}
+
+Invoke-SceneContractCase "overview-paint-764 missing fixture refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-missing-fixture" -Scene "overview-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.fixtures = @($receipt.fixtures | Select-Object -First 1)
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "FixtureHashMismatch"
+}
+
+Invoke-SceneContractCase "overview-paint-764 fixture order refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-fixture-order" -Scene "overview-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.fixtures = @($receipt.fixtures[1], $receipt.fixtures[0])
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "FixtureHashMismatch"
+}
+
+Invoke-SceneContractCase "overview-paint-764 native profile mismatch refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-native-profile-mismatch" -Scene "overview-paint-764"
+  $runReceipt = Get-Content -LiteralPath $run.RunReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $runReceipt.command = $runReceipt.command.Replace(
+    '--test-filter "paint export: overview-paint-764"',
+    '--test-filter "paint export: project-paint-764"')
+  [IO.File]::WriteAllText($run.RunReceiptPath, ($runReceipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Assert-ConverterFailure $run "NativeRunReceiptInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-v1 stray profile fields refusal" {
+  $run = New-SyntheticRun "scene-project-paint-v1-stray-profile-fields" -Scene "project-paint-v1"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt["fixtures"] = @([ordered]@{ path = "graphcode-windows/fixtures/paint-project-v1.json"; sha256 = $fixtureHash })
+  $receipt.canvas["surface"] = "project"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "SceneProfileFieldsInvalid"
+}
+
+Invoke-SceneContractCase "overview-paint-764 painted edge mismatch refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-painted-edge-mismatch" -Scene "overview-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.model.paintedEdges = 4
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "PaintEvidenceInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 painted edge mismatch refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-painted-edge-mismatch" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.model.paintedEdges = 0
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "PaintEvidenceInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 age label mismatch refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-age-label-mismatch" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.ageEvidence.nodes[0].display = "incorrect-age"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "AgeEvidenceInvalid"
+}
+
+Invoke-SceneContractCase "overview-paint-764 age count refusal" {
+  $run = New-SyntheticRun "scene-overview-paint-764-age-count" -Scene "overview-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.ageEvidence.nodes = @($receipt.ageEvidence.nodes | Select-Object -First 7)
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "AgeEvidenceInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 age epoch type refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-age-epoch-type" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.ageEvidence.observedAtEpochSeconds = "1800000000"
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "AgeEvidenceInvalid"
+}
+
+Invoke-SceneContractCase "project-paint-764 timestamp census refusal" {
+  $run = New-SyntheticRun "scene-project-paint-764-timestamp-census" -Scene "project-paint-764"
+  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+  $receipt.model.createdAtValues = 5
+  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Update-SyntheticArtifactHash $run "paintReceipt"
+  Assert-ConverterFailure $run "PaintEvidenceInvalid"
+}
+
+$expectedSceneNames = @(
+  "project-paint-764 valid round-trip",
+  "overview-paint-764 valid round-trip",
+  "project-paint-764 fixture digest refusal",
+  "overview-paint-764 source inventory refusal",
+  "project-paint-764 wrong surface refusal",
+  "project-paint-764 wrong scene refusal",
+  "overview-paint-764 missing fixture refusal",
+  "overview-paint-764 fixture order refusal",
+  "overview-paint-764 native profile mismatch refusal",
+  "project-paint-v1 stray profile fields refusal",
+  "overview-paint-764 painted edge mismatch refusal",
+  "project-paint-764 painted edge mismatch refusal",
+  "project-paint-764 age label mismatch refusal",
+  "overview-paint-764 age count refusal",
+  "project-paint-764 age epoch type refusal",
+  "project-paint-764 timestamp census refusal"
+)
+$sceneNames = @($sceneCaseResults | ForEach-Object { $_.Name })
+$scenePassed = @($sceneCaseResults | Where-Object Passed).Count
+$sceneFailed = $sceneCaseResults.Count - $scenePassed
+$sceneNamesMatch = ($sceneNames.Count -eq $expectedSceneNames.Count) -and
+  (($sceneNames -join "`n") -ceq ($expectedSceneNames -join "`n"))
+Write-Host "CANVAS_PAINT_SCENE_CASES executed=$($sceneCaseResults.Count) passed=$scenePassed failed=$sceneFailed names=$($sceneNames -join '|')"
+if (-not $sceneNamesMatch -or $sceneCaseResults.Count -ne 16 -or $scenePassed -ne 16 -or $sceneFailed -ne 0) {
+  foreach ($failure in $sceneCaseResults | Where-Object { -not $_.Passed }) {
+    Write-Error "Scene profile contract $($failure.Name) failed: $($failure.Error)" -ErrorAction Continue
+  }
+  throw "Canvas paint scene profile contracts did not execute the exact 16/16/0 suite."
 }

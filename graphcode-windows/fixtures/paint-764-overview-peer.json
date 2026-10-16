@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "kind": "event",
+  "sequence": 2,
+  "event": {
+    "graphChanged": {
+      "id": "paint-764-overview-peer",
+      "project": {
+        "path": "C:\\GraphCodeFixture\\OverviewPeer",
+        "name": "Overview Peer",
+        "remote": false
+      },
+      "nodes": [
+        {
+          "id": "fixture-peer-goal",
+          "title": "Peer goal",
+          "loopType": "goalBased",
+          "state": "succeeded",
+          "createdAt": 725760000,
+          "goal": {
+            "summary": "Show a separate overview lane."
+          },
+          "worktreeBinding": {
+            "path": "C:\\GraphCodeFixture\\OverviewPeer\\worktrees\\sample",
+            "branch": "sample"
+          }
+        },
+        {
+          "id": "fixture-peer-turn",
+          "title": "Peer turn",
+          "loopType": "turnBased",
+          "state": "idle",
+          "createdAt": 725760000,
+          "backend": "copilotCLI",
+          "checkDescription": "Keep the second lane visible."
+        }
+      ],
+      "edges": [
+        {
+          "id": "fixture-peer-edge",
+          "from": "fixture-peer-goal",
+          "to": "fixture-peer-turn",
+          "kind": "handoff",
+          "condition": "always",
+          "fired": false,
+          "fireCount": 0
+        }
+      ]
+    }
+  }
+}

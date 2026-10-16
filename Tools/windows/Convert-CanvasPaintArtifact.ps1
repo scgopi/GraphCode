@@ -5,11 +5,80 @@ param(
   [Parameter(Mandatory)][string] $RunReceiptPath,
   [Parameter(Mandatory)][string] $TestBinaryPath,
   [Parameter(Mandatory)][string] $OutputDirectory,
+  [ValidateSet("project-paint-v1", "project-paint-764", "overview-paint-764")]
+  [string] $Scene = "project-paint-v1",
   [Parameter(DontShow)][switch] $TestPngCodecWriteFailure
 )
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
+$sourceFilesV1 = @(
+  "graphcode-windows\src\GraphCanvas.zig",
+  "graphcode-windows\src\GdiplusAA.zig",
+  "graphcode-windows\fixtures\paint-project-v1.json",
+  "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+  "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+  "Tools\windows\Tests\WindowsShell.Tests.ps1",
+  "graphcode-windows\README.md"
+)
+$profiles = @{
+  "project-paint-v1" = [ordered]@{
+    fixturePaths = @("graphcode-windows\fixtures\paint-project-v1.json")
+    sourceFiles = $sourceFilesV1
+    nodes = 2
+    edges = 1
+    createdAtValues = 0
+    surface = $null
+    headerContext = "Alpha"
+    transportNames = @("project-paint-v1.bmp", "project-paint-v1-repeat-2.bmp", "project-paint-v1-repeat-3.bmp")
+    artifactName = "project-paint-v1.png"
+    excludedSurfaces = @("whole window", "composition", "popups", "terminals", "per-monitor DPI", "sidebar/right-panel fidelity", "native form controls", "accessibility")
+  }
+  "project-paint-764" = [ordered]@{
+    fixturePaths = @("graphcode-windows\fixtures\paint-764-project.json")
+    sourceFiles = @(
+      "graphcode-windows\src\GraphCanvas.zig",
+      "graphcode-windows\src\GdiplusAA.zig",
+      "graphcode-windows\fixtures\paint-764-project.json",
+      "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+      "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+      "Tools\windows\Tests\WindowsShell.Tests.ps1",
+      "graphcode-windows\README.md"
+    )
+    nodes = 6
+    edges = 3
+    paintedEdges = 3
+    createdAtValues = 6
+    surface = "project"
+    headerContext = "Card States"
+    transportNames = @("project-paint-764.bmp", "project-paint-764-repeat-2.bmp", "project-paint-764-repeat-3.bmp")
+    artifactName = "project-paint-764.png"
+    excludedSurfaces = @("whole window composition", "input and button behavior", "project opening and canvas fit", "backend lifecycle and persistence", "UI Automation and accessibility", "per-monitor DPI", "unreviewed sidebar and loop-bar palette")
+  }
+  "overview-paint-764" = [ordered]@{
+    fixturePaths = @("graphcode-windows\fixtures\paint-764-project.json", "graphcode-windows\fixtures\paint-764-overview-peer.json")
+    sourceFiles = @(
+      "graphcode-windows\src\GraphCanvas.zig",
+      "graphcode-windows\src\GdiplusAA.zig",
+      "graphcode-windows\fixtures\paint-764-project.json",
+      "graphcode-windows\fixtures\paint-764-overview-peer.json",
+      "Tools\windows\Convert-CanvasPaintArtifact.ps1",
+      "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
+      "Tools\windows\Tests\WindowsShell.Tests.ps1",
+      "graphcode-windows\README.md"
+    )
+    nodes = 8
+    edges = 4
+    paintedEdges = 0
+    createdAtValues = 8
+    surface = "overview"
+    headerContext = "Overview"
+    transportNames = @("overview-paint-764.bmp", "overview-paint-764-repeat-2.bmp", "overview-paint-764-repeat-3.bmp")
+    artifactName = "overview-paint-764.png"
+    excludedSurfaces = @("whole window composition", "input and button behavior", "project opening and canvas fit", "backend lifecycle and persistence", "UI Automation and accessibility", "per-monitor DPI", "unreviewed sidebar and loop-bar palette")
+  }
+}
+$profile = $profiles[$Scene]
 
 function Stop-Artifact(
   [string] $Code,
@@ -29,6 +98,45 @@ function Stop-Artifact(
     }
   }
   throw $exception
+}
+
+function Get-CardAgeLabel([long] $CreatedAt, [long] $ObservedAt) {
+  $seconds = [Math]::Max(0, $ObservedAt - $CreatedAt)
+  $days = [long][Math]::Floor($seconds / 86400)
+  $hours = [long][Math]::Floor($seconds / 3600) % 24
+  $minutes = [long][Math]::Floor($seconds / 60) % 60
+  if ($days -gt 0) {
+    if ($hours -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}d {1}h", $days, $hours) }
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}d", $days)
+  }
+  if ($hours -gt 0) {
+    if ($minutes -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}h {1}m", $hours, $minutes) }
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}h", $hours)
+  }
+  if ($minutes -gt 0) { return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}m", $minutes) }
+  return [string]::Format([Globalization.CultureInfo]::InvariantCulture, "{0}s", $seconds)
+}
+
+function Get-ExpectedAgeEvidence([string[]] $FixturePaths, [long] $ObservedAt) {
+  $nodes = [Collections.Generic.List[object]]::new()
+  $referenceDateUnixOffset = [long]978307200
+  foreach ($relativePath in $FixturePaths) {
+    $fixturePath = Join-Path $repoRoot $relativePath
+    $fixture = Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($node in $fixture.event.graphChanged.nodes) {
+      if ($null -eq $node.createdAt) { continue }
+      $createdAtEpochSeconds = [long][Math]::Floor([double]$node.createdAt) + $referenceDateUnixOffset
+      $nodes.Add([ordered]@{
+        id = [string]$node.id
+        createdAtEpochSeconds = $createdAtEpochSeconds
+        display = Get-CardAgeLabel $createdAtEpochSeconds $ObservedAt
+      })
+    }
+  }
+  return [ordered]@{
+    observedAtEpochSeconds = $ObservedAt
+    nodes = @($nodes)
+  }
 }
 
 function Get-Sha256Bytes([byte[]] $Bytes) {
@@ -214,20 +322,12 @@ $testBinaryFull = [IO.Path]::GetFullPath($TestBinaryPath)
 $outputFull = [IO.Path]::GetFullPath($OutputDirectory)
 $runRoot = [IO.Path]::GetDirectoryName($testBinaryFull)
 $transportRoot = Join-Path $runRoot "export\transport"
-$expectedInput = Join-Path $transportRoot "project-paint-v1.bmp"
+$expectedInput = Join-Path $transportRoot $profile.transportNames[0]
 $expectedReceipt = Join-Path $transportRoot "paint-receipt.json"
 $expectedRunReceipt = Join-Path $runRoot "run-receipt.json"
 $nativeLogPath = Join-Path $runRoot "native.log"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
-$sourceFiles = @(
-  "graphcode-windows\src\GraphCanvas.zig",
-  "graphcode-windows\src\GdiplusAA.zig",
-  "graphcode-windows\fixtures\paint-project-v1.json",
-  "Tools\windows\Convert-CanvasPaintArtifact.ps1",
-  "Tools\windows\Tests\CanvasPaintArtifact.Tests.ps1",
-  "Tools\windows\Tests\WindowsShell.Tests.ps1",
-  "graphcode-windows\README.md"
-)
+$sourceFiles = @($profile.sourceFiles)
 if (-not [StringComparer]::OrdinalIgnoreCase.Equals($inputFull, $expectedInput) -or
     -not [StringComparer]::OrdinalIgnoreCase.Equals($receiptFull, $expectedReceipt) -or
     -not [StringComparer]::OrdinalIgnoreCase.Equals($runReceiptFull, $expectedRunReceipt)) {
@@ -276,8 +376,12 @@ if ($runReceipt -isnot [System.Collections.IDictionary] -or
   Stop-Artifact "NativeRunReceiptInvalid" "Run receipt is missing its run, export, binary, or log identity."
 }
 if ($receipt.schemaVersion -ne 1 -or $receipt.evidenceClass -cne "paint-only" -or
-    $receipt.scene -cne "project-paint-v1" -or $receipt.renderer -cne "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB") {
+    $receipt.scene -cne $Scene -or $receipt.renderer -cne "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB") {
   Stop-Artifact "ReceiptSchemaInvalid" "Receipt does not describe the approved paint-only render."
+}
+if ($Scene -eq "project-paint-v1" -and
+    ($receipt.Contains("fixtures") -or $receipt.canvas.Contains("surface") -or $receipt.model.Contains("paintedEdges"))) {
+  Stop-Artifact "SceneProfileFieldsInvalid" "The legacy scene profile may not include the newer closed-profile fields."
 }
 if ($receipt.sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
   Stop-Artifact "SourceCommitInvalid" "Receipt source commit must be a full lowercase Git object ID."
@@ -307,7 +411,7 @@ if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
 $nativeCommand = [string]$runReceipt.command
 if ([string]::IsNullOrWhiteSpace($nativeCommand) -or
     -not $nativeCommand.Contains("test src\GraphCanvas.zig") -or
-    -not $nativeCommand.Contains('--test-filter "paint export: project-paint-v1"') -or
+    -not $nativeCommand.Contains("--test-filter `"paint export: $Scene`"") -or
     $nativeCommand.IndexOf($testBinaryFull, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
   Stop-Artifact "NativeRunReceiptInvalid" "Run receipt command does not identify the approved filtered GraphCanvas paint test and emitted binary."
 }
@@ -334,7 +438,9 @@ Assert-NativeArtifactBinding $runReceipt.nativeArtifacts "paintReceipt" $receipt
   $receiptDocument.Sha256 "NativePaintReceiptHashMismatch"
 $nativeLogLines = @($nativeLogDocument.Text -split "\r?\n" | Where-Object { $_.Length -gt 0 })
 $nativeResultLines = @($nativeLogLines | Where-Object { $_ -match '^\d+/\d+ ' })
-$nativeTestLines = @($nativeLogLines | Where-Object { $_ -match '^1/1 GraphCanvas\.test\.paint export: project-paint-v1' })
+$expectedNativeTest = "GraphCanvas.test.paint export: $Scene"
+$nativeTestPattern = '^1/1 ' + [regex]::Escape($expectedNativeTest) + '\.\.\.'
+$nativeTestLines = @($nativeLogLines | Where-Object { $_ -match $nativeTestPattern })
 $nativeSummaries = @($nativeLogLines | Where-Object { $_ -match '^All \d+ tests (?:passed|failed|skipped)\.$' })
 $nativeFailureMarkers = @($nativeLogLines | Where-Object { $_ -match '(?i)\b(?:FAIL|FAILED|SKIP|SKIPPED|ERROR|PANIC)\b' })
 if ($nativeResultLines.Count -ne 1 -or $nativeTestLines.Count -ne 1 -or $nativeSummaries.Count -ne 1 -or
@@ -357,7 +463,7 @@ $beforeKeys = @($runReceipt.sourceHashesBefore.Keys | Sort-Object -CaseSensitive
 $afterKeys = @($runReceipt.sourceHashesAfter.Keys | Sort-Object -CaseSensitive)
 if (($beforeKeys -join "`n") -cne ($expectedSourceKeys -join "`n") -or
     ($afterKeys -join "`n") -cne ($expectedSourceKeys -join "`n")) {
-  Stop-Artifact "NativeSourceSnapshotInvalid" "Run receipt must contain exactly the seven leased source paths before and after the native test."
+  Stop-Artifact "NativeSourceSnapshotInvalid" "Run receipt source paths do not match the exact scene profile before and after the native test."
 }
 $sourceHashes = [Collections.Generic.List[object]]::new()
 foreach ($relativePath in $sourceFiles) {
@@ -388,14 +494,20 @@ if ($receipt.dimensions.width -ne 1280 -or $receipt.dimensions.height -ne 720 -o
     $receipt.canvas.panelVisible -or $receipt.canvas.activityEnabled) {
   Stop-Artifact "RenderConfigurationInvalid" "Receipt does not match the fixed 1280x720 canvas configuration."
 }
+if ($null -ne $profile.surface -and $receipt.canvas.surface -cne $profile.surface) {
+  Stop-Artifact "RenderConfigurationInvalid" "Receipt surface does not match the approved scene profile."
+}
 if ($receipt.dpiMapping.deviceDpiX -le 0 -or $receipt.dpiMapping.deviceDpiY -le 0) {
   Stop-Artifact "DeviceMetricsInvalid" "Receipt must contain positive device-context DPI metrics."
 }
-if ($receipt.model.nodes -ne 2 -or $receipt.model.edges -ne 1 -or
-    $receipt.model.activityHistory -ne 0 -or $receipt.model.createdAtValues -ne 0 -or
-    $receipt.header.title -cne "GraphCode" -or $receipt.header.context -cne "Alpha" -or
+if ($receipt.model.nodes -ne $profile.nodes -or $receipt.model.edges -ne $profile.edges -or
+    $receipt.model.activityHistory -ne 0 -or $receipt.model.createdAtValues -ne $profile.createdAtValues -or
+    $receipt.header.title -cne "GraphCode" -or $receipt.header.context -cne $profile.headerContext -or
     $receipt.gdiPlusReady -ne $true -or $receipt.candidateArtifactCount -ne 1) {
   Stop-Artifact "PaintEvidenceInvalid" "Receipt model census, header, readiness, or artifact count is invalid."
+}
+if ($Scene -ne "project-paint-v1" -and $receipt.model.paintedEdges -ne $profile.paintedEdges) {
+  Stop-Artifact "PaintEvidenceInvalid" "Painted edge count does not match the selected scene surface."
 }
 if ($receipt.header.reachabilityClaim -cne "declared fixture/test value only; not App reachability") {
   Stop-Artifact "HeaderClaimInvalid" "Header provenance must not imply App reachability."
@@ -406,25 +518,60 @@ if ($receipt.colorAssumption -cne "SDR RGB; unused DIB alpha is normalized to op
 if ($receipt.fontEvidenceScope -cne "Sampled card title, state, metadata, and header title font selections only; not a census of every text draw") {
   Stop-Artifact "FontEvidenceScopeInvalid" "Receipt must state the limits of its sampled font evidence."
 }
-$expectedExcludedSurfaces = @(
-  "whole window",
-  "composition",
-  "popups",
-  "terminals",
-  "per-monitor DPI",
-  "sidebar/right-panel fidelity",
-  "native form controls",
-  "accessibility"
-)
+$expectedExcludedSurfaces = @($profile.excludedSurfaces)
 if (($receipt.excludedSurfaces -join "`n") -cne ($expectedExcludedSurfaces -join "`n")) {
   Stop-Artifact "ExcludedSurfacesInvalid" "Receipt does not preserve the approved evidence limits."
 }
 
-$fixturePath = Join-Path $repoRoot "graphcode-windows\fixtures\paint-project-v1.json"
-$actualFixtureHash = Get-Sha256File $fixturePath
-if ($receipt.fixturePath -cne "graphcode-windows/fixtures/paint-project-v1.json" -or
-    $receipt.fixtureSha256 -cne $actualFixtureHash) {
-  Stop-Artifact "FixtureHashMismatch" "Receipt fixture identity does not match the bytes in the repository."
+$fixtureFacts = [Collections.Generic.List[object]]::new()
+foreach ($relativePath in $profile.fixturePaths) {
+  $fixturePath = Join-Path $repoRoot $relativePath
+  if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf) -or (Test-HasReparseComponent $fixturePath)) {
+    Stop-Artifact "FixtureHashMismatch" "Scene fixture is missing or a reparse point: $relativePath"
+  }
+  $fixtureFacts.Add([ordered]@{
+    path = $relativePath.Replace("\", "/")
+    sha256 = Get-Sha256File $fixturePath
+  })
+}
+$actualFixtureHash = [string]$fixtureFacts[0].sha256
+if ($receipt.fixturePath -cne $fixtureFacts[0].path -or $receipt.fixtureSha256 -cne $actualFixtureHash) {
+  Stop-Artifact "FixtureHashMismatch" "Receipt primary fixture identity does not match the bytes in the repository."
+}
+if ($Scene -eq "project-paint-v1") {
+  if ($profile.fixturePaths.Count -ne 1) {
+    Stop-Artifact "FixtureHashMismatch" "The legacy scene profile must bind exactly its original fixture."
+  }
+} else {
+  if ($receipt.fixtures -isnot [System.Collections.IList] -or
+      @($receipt.fixtures).Count -ne $fixtureFacts.Count) {
+    Stop-Artifact "FixtureHashMismatch" "Receipt must bind every fixture in the closed scene profile."
+  }
+  for ($index = 0; $index -lt $fixtureFacts.Count; $index++) {
+    if ($receipt.fixtures[$index].path -cne $fixtureFacts[$index].path -or
+        $receipt.fixtures[$index].sha256 -cne $fixtureFacts[$index].sha256) {
+      Stop-Artifact "FixtureHashMismatch" "Receipt fixture identity differs from the scene profile at index $index."
+    }
+  }
+  $ageEvidence = $receipt.ageEvidence
+  if ($ageEvidence -isnot [System.Collections.IDictionary] -or
+      ($ageEvidence.observedAtEpochSeconds -isnot [int] -and $ageEvidence.observedAtEpochSeconds -isnot [long]) -or
+      $ageEvidence.nodes -isnot [System.Collections.IList]) {
+    Stop-Artifact "AgeEvidenceInvalid" "Scene receipts must bind an age observation time and node display list."
+  }
+  $expectedAgeEvidence = Get-ExpectedAgeEvidence $profile.fixturePaths ([long]$ageEvidence.observedAtEpochSeconds)
+  if (@($ageEvidence.nodes).Count -ne @($expectedAgeEvidence.nodes).Count) {
+    Stop-Artifact "AgeEvidenceInvalid" "Age evidence must cover every timestamped node in fixture order."
+  }
+  for ($index = 0; $index -lt @($expectedAgeEvidence.nodes).Count; $index++) {
+    $actualAge = $ageEvidence.nodes[$index]
+    $expectedAge = $expectedAgeEvidence.nodes[$index]
+    if ($actualAge.id -cne $expectedAge.id -or
+        $actualAge.createdAtEpochSeconds -ne $expectedAge.createdAtEpochSeconds -or
+        $actualAge.display -cne $expectedAge.display) {
+      Stop-Artifact "AgeEvidenceInvalid" "Age evidence differs from the fixture metadata at node index $index."
+    }
+  }
 }
 
 $expectedFontRoles = @(
@@ -448,11 +595,7 @@ for ($index = 0; $index -lt $expectedFontRoles.Count; $index++) {
   }
 }
 
-$expectedTransportNames = @(
-  "project-paint-v1.bmp",
-  "project-paint-v1-repeat-2.bmp",
-  "project-paint-v1-repeat-3.bmp"
-)
+$expectedTransportNames = @($profile.transportNames)
 if (@($receipt.transport).Count -ne $expectedTransportNames.Count -or
     @($receipt.renderRgbSha256).Count -ne 3 -or
     $receipt.renderRgbSha256[0] -cne $receipt.renderRgbSha256[1] -or
@@ -525,7 +668,7 @@ try {
   } catch {
     Stop-Artifact "OutputWriteFailed" "Could not create a fresh staging directory: $($_.Exception.Message)"
   }
-  $pngPath = Join-Path $stagingFull "project-paint-v1.png"
+  $pngPath = Join-Path $stagingFull $profile.artifactName
   $manifestPath = Join-Path $stagingFull "paint-only-manifest.json"
   $pngFileStream = $null
   $pngStream = $null
@@ -753,7 +896,7 @@ namespace GraphCode.PaintArtifactTests
     evidenceClass = "real paint path, offscreen component render"
     artifactCount = 1
     artifact = [ordered]@{
-      name = "project-paint-v1.png"
+      name = $profile.artifactName
       width = 1280
       height = 720
       pngSha256 = Get-Sha256File $pngPath
@@ -765,7 +908,7 @@ namespace GraphCode.PaintArtifactTests
       path = $receipt.fixturePath
       sha256 = $actualFixtureHash
       sourceBaseCommit = $receipt.sourceCommit
-      sourceBaseCommitRole = "Base HEAD only; sourceFiles SHA-256 values bind the seven leased files, not a clean-tree snapshot of other imported modules or their dirty/untracked state."
+      sourceBaseCommitRole = "Base HEAD only; sourceFiles SHA-256 values bind the selected scene profile's leased files, not a clean-tree snapshot of other imported modules or their dirty/untracked state."
     }
     sourceFiles = $sourceHashes.ToArray()
     nativeRun = [ordered]@{
@@ -773,7 +916,7 @@ namespace GraphCode.PaintArtifactTests
       runReceiptPath = $runReceiptFull
       runReceiptSha256 = $runReceiptDocument.Sha256
       nativeExitCode = $runReceipt.nativeExitCode
-      testName = "GraphCanvas.test.paint export: project-paint-v1"
+      testName = $expectedNativeTest
       testSummary = $nativeSummaries[0]
       sourceHeadBefore = $runReceipt.sourceHeadBefore
       sourceHeadAfter = $runReceipt.sourceHeadAfter
@@ -821,6 +964,11 @@ namespace GraphCode.PaintArtifactTests
     fontFileEvidenceScope = "actualFace is the selected face reported by GetTextFace/LOGFONT; file entries are lookup candidates and do not identify the selected physical font file."
     excludedSurfaces = $receipt.excludedSurfaces
   }
+  if ($Scene -ne "project-paint-v1") {
+    $manifest["fixtureFiles"] = $fixtureFacts.ToArray()
+    $manifest["canvasSurface"] = $profile.surface
+    $manifest["ageEvidence"] = $receipt.ageEvidence
+  }
   $json = $manifest | ConvertTo-Json -Depth 12
   $manifestBytes = [Text.UTF8Encoding]::new($false).GetBytes($json + "`n")
   $manifestPartial = $manifestPath + ".partial"
@@ -833,7 +981,7 @@ namespace GraphCode.PaintArtifactTests
   }
   [IO.File]::Move($manifestPartial, $manifestPath)
   $publishedNames = @(Get-ChildItem -LiteralPath $stagingFull -Force | ForEach-Object { $_.Name } | Sort-Object)
-  $expectedPublishedNames = @("paint-only-manifest.json", "project-paint-v1.png")
+  $expectedPublishedNames = @("paint-only-manifest.json", $profile.artifactName)
   [Array]::Sort($expectedPublishedNames, [StringComparer]::Ordinal)
   if (($publishedNames -join "`n") -cne ($expectedPublishedNames -join "`n")) {
     Stop-Artifact "PublishedContentsInvalid" "Published output must contain exactly one PNG and one manifest."
@@ -848,7 +996,7 @@ namespace GraphCode.PaintArtifactTests
     Stop-Artifact "OutputPublishFailed" "Could not atomically publish the verified output from $stagingFull`: $($_.Exception.Message)"
   }
   [pscustomobject]@{
-    Artifact = (Join-Path $outputFull "project-paint-v1.png")
+    Artifact = (Join-Path $outputFull $profile.artifactName)
     Manifest = (Join-Path $outputFull "paint-only-manifest.json")
     ArtifactCount = 1
     PngSha256 = $manifest.artifact.pngSha256
