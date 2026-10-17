@@ -78,7 +78,10 @@ extension ProjectFeature.State {
       // Attribution only — the card can say where the brief came from. The follow
       // travels too, for the two types that follow: timed and composite re-read the
       // template on their next run; goal, turn and main snapshot at creation.
-      attachments: draftAttachments.items,
+      attachments: draftAttachments.items.map { item in
+        draftAttachments.remotePaths[item.id].map { PromptAttachment(id: item.id, path: $0) }
+          ?? item
+      },
       createdFromTemplateID: templates.applied?.id,
       templateFollow: {
         guard let applied = templates.applied,

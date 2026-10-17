@@ -112,7 +112,10 @@ extension CLISessionBackendKind {
         hooksFile: hooksFile, sessionName: sessionName, zmxPath: zmxPath,
         sessionsDirectory: sessionsDirectory, displayName: displayName)
       + nameArguments(displayName: displayName, resuming: resuming)
-    guard let prompt, !prompt.isEmpty else { return model }
+    guard let prompt, !prompt.isEmpty else {
+      // A resumed session is a fresh process: grants it was launched with don't carry over.
+      return model + resumeGrants(settings, workspacePaths)
+    }
     let briefingDirectory = (briefingPath as NSString?)?.deletingLastPathComponent
     switch self {
     case .claudeCode:
@@ -247,6 +250,14 @@ extension CLISessionBackendKind {
     case .openCode: return settings.openCodePermissions.arguments
     case .pi: return settings.piProjectTrust.arguments
     case .nod: return []
+    }
+  }
+
+  private func resumeGrants(_ settings: GraphcodeSettings, _ paths: [String]) -> [String] {
+    switch self {
+    case .copilotCLI: return settings.copilotPermissions.readableDirectories(paths)
+    case .codex: return settings.codexApprovals.writableDirectories(paths)
+    case .claudeCode, .openCode, .pi, .nod: return []
     }
   }
 

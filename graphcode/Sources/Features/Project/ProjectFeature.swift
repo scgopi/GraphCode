@@ -335,12 +335,14 @@ struct ProjectFeature {
 
   @Dependency(\.orchestratorClient) var orchestratorClient
   @Dependency(\.templateLibrary) var templateLibrary
+  @Dependency(\.remoteAttachmentClient) var remoteAttachmentClient
 
   /// The one long-lived effect the template feature owns: the directory watch that
   /// keeps `templateLibrary` current while the form is open. Cancelled when the
   /// form closes.
   enum CancelID {
     case templateWatch
+    case draftUpload
   }
 
   var body: some ReducerOf<Self> {
@@ -415,7 +417,7 @@ struct ProjectFeature {
       case .draftAttachment(let action): return draftAttachment(&state, action)
 
       case .createNodeConfirmed:
-        return confirmCreateNode(&state)
+        return confirmCreateNodeAfterUploads(&state)
 
       // Template actions were handled by the switch above; they land here as
       // no-ops so this switch stays exhaustive, and nothing runs twice.

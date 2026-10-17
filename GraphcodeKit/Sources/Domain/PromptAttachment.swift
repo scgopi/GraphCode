@@ -14,9 +14,9 @@ import Foundation
 /// chosen by the client (`NodeDraft.id`), which is what makes that possible before the
 /// node exists.
 ///
-/// Local graphs only. A remote project's session runs on another machine, and the ensure
-/// dial that delivers graphcode's files there carries text (`remoteDeliveryScript`) — a
-/// path to a file that host has never seen would read to the agent as a missing file.
+/// A remote project's session runs on another machine, so its images are staged here and
+/// copied to that host when Create is pressed (`RemoteAttachmentUpload`); the draft then
+/// carries the remote path, and a failed copy creates no node at all.
 public struct PromptAttachment: Codable, Equatable, Sendable, Identifiable {
   public var id: UUID
   /// Absolute, on the machine that runs the loop.

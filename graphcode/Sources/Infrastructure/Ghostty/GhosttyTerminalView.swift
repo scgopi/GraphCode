@@ -128,6 +128,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     view.isActive = isActive
     view.isVisible = isVisible
     view.remoteLocation = remoteLocation
+    view.remoteImagePaste = remoteImagePasteTarget
     view.onFocusRequested = onFocusRequested
     view.onExitAcknowledged = onExitAcknowledged
     view.onProcessExited = onProcessExited
