@@ -205,7 +205,7 @@ function Assert-CapAcceptedInputs {
 
     Assert-CapSceneContract -Job $job
     if ($job.authority.centralCaptureLeaseGrantedByThisArtifact -ne $false -or
-        $lease.status -ne 'GRANTED' -or $lease.lane -ne 'B' -or
+        $lease.status -ne 'GRANTED' -or $lease.lane -cne $job.lane -or
         $lease.authorizedAction -ne 'central-cap-capture' -or
         $lease.centralPreflightAccepted -ne $true) {
         throw 'A separate coordinator-granted central-cap lease and preflight acceptance are required.'
@@ -219,7 +219,8 @@ function Assert-CapAcceptedInputs {
     $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath $fixturePath `
         -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
         -ExpectedMappingSha256 $auth.fixtureMappingSha256 `
-        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot
+        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot `
+        -SceneAdapter $job.sceneAdapter -ExpectedPeerSha256 $job.fixture.offlinePeerReference.sha256
     $expectedHashes = @{
         fixture = $mappingProof.FixtureSha256
         fixtureSource = $job.fixture.sha256
@@ -258,6 +259,17 @@ function Initialize-CapPhaseRoot {
     [IO.File]::WriteAllText((Join-Path $support 'settings.json'),
         '{"defaultBackend":"copilotCLI","showsActivityStrip":true,"briefsSessionsAboutTheGraph":false}',
         [Text.UTF8Encoding]::new($false))
+    if (-not $rehearsal -and $job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
+        [IO.File]::WriteAllText((Join-Path $support 'quick-chats.json'),(ConvertTo-Json -InputObject @($fixture.chats) -Depth 20),[Text.UTF8Encoding]::new($false))
+        $layoutBase=Join-Path $phaseRoot 'layouts\workspace.json'
+        $null=New-Item -ItemType Directory -Path (Split-Path -Parent $layoutBase)
+        foreach ($layout in $fixture.layouts) {
+            $key=if ($layout.project -ceq 'graphcode://quick-chats') {Join-Path $phaseRoot 'profile'} else {$layout.project}
+            $resolved=Get-CapDLayoutPath -LayoutBase $layoutBase -ProjectKey $key -LoopId $layout.loop
+            [IO.File]::WriteAllText($resolved.LoopPath,($layout | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+        }
+    }
     $zmx = Assert-CapOwnedPath (Join-Path $root ([guid]::NewGuid().ToString('N').Substring(0, 5)))
     $null = New-Item -ItemType Directory -Path $zmx
     $null = Assert-CapOwnedPath $zmx
@@ -294,6 +306,19 @@ function Get-CapBaseEnvironment {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        if ($ActionsFixture) { throw 'D does not support builtin UIA fixture actions.' }
+        $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\D Offline Capture Fixture')
+        $null=New-Item -ItemType Directory -Path $project -Force
+        $null=Assert-CapOwnedPath $project
+        if (-not (Test-Path -LiteralPath $project -PathType Container)) {throw 'D fixture project working directory was not created.'}
+        return @{
+            APPDATA=(Join-Path $Roots.Profile 'AppData\Roaming');HOME=$Roots.Profile;USERPROFILE=$Roots.Profile
+            LOCALAPPDATA=$Roots.Local;TEMP=$Roots.Temp;TMP=$Roots.Temp;GRAPHCODE_SUPPORT_DIR=$Roots.Support
+            GRAPHCODE_DAEMON_PIPE="\\.\pipe\$PipeName";GRAPHCODE_ZMX=(Join-Path $root 'runtime\zmx.exe')
+            ZMX_DIR=$Roots.Zmx;GRAPHCODE_WORKSPACE_LAYOUT=(Join-Path $Roots.Root 'layouts\workspace.json')
+        }
+    }
     $projectAlpha = Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\Alpha')
     $null = New-Item -ItemType Directory -Path $projectAlpha,(Join-Path $root 'fixtures\projects\Beta') -Force
     $envMap = @{
@@ -331,9 +356,11 @@ function Start-CapOfflinePeer {
 
     $null = Test-CapPipeUnserved -PipeName $PipeName
     $pwshPath = Join-Path $PSHOME 'pwsh.exe'
-    $run = Start-CapManagedProcess -FilePath $pwshPath -ArgumentList @(
+    $arguments=@(
         '-NoProfile', '-File', $peerScript, '-PipeName', $PipeName, '-FixturePath', $fixturePath
-    ) -WorkingDirectory $Roots.Peer -Role "offline-fixture-peer-$Phase" -Environment @{
+    )
+    if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {$arguments+=@('-CommandLog',(Join-Path $Roots.Peer 'commands.jsonl'),'-ModulePath',$modulePath,'-ModuleSha256',$moduleHash)}
+    $run = Start-CapManagedProcess -FilePath $pwshPath -ArgumentList $arguments -WorkingDirectory $Roots.Peer -Role "offline-fixture-peer-$Phase" -Environment @{
         APPDATA = Join-Path $Roots.Profile 'AppData\Roaming'
         HOME = $Roots.Profile
         LOCALAPPDATA = $Roots.Local
@@ -355,16 +382,21 @@ function Start-CapOfflinePeer {
 function Start-CapOfflineSeed {
     param(
         [Parameter(Mandatory)]$Roots,
-        [Parameter(Mandatory)][string]$Phase
+        [Parameter(Mandatory)][string]$Phase,
+        [string]$SessionName
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    $arguments = @($job.binaries.offlineZmx.seedArgumentOrder | ForEach-Object { [string]$_ })
-    if ($arguments.Count -ne 7 -or $arguments[0] -cne 'run' -or
+    $isD=$job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
+    $arguments=if ($isD) {
+        if ($SessionName -cnotin @('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')) {throw 'Unknown D seed session.'}
+        @('run',$SessionName,'-d',(Join-Path ([Environment]::SystemDirectory) 'cmd.exe'))+@($job.binaries.offlineZmx.seedCommand)
+    } else {@($job.binaries.offlineZmx.seedArgumentOrder | ForEach-Object {[string]$_})}
+    if (-not $isD -and ($arguments.Count -ne 7 -or $arguments[0] -cne 'run' -or
         $arguments[1] -cne 'graphcode-11111111-1111-4111-8111-000000000001' -or
         $arguments[2] -cne '-d' -or $arguments[3] -cne 'cmd.exe' -or
         $arguments[4] -cne '/Q' -or $arguments[5] -cne '/K' -or
-        $arguments[6] -cne 'echo Offline card fixture - no backend') {
+        $arguments[6] -cne 'echo Offline card fixture - no backend')) {
         throw 'The B job does not contain the exact seven-argument offline cmd-only zmx seed.'
     }
     $zmxRoot = Assert-CapOwnedPath $Roots.Zmx
@@ -523,13 +555,15 @@ function Invoke-CapSceneAction {
     param(
         [Parameter(Mandatory)]$AppRun,
         [Parameter(Mandatory)][string]$Action,
-        [string]$Name
+        [string]$Name,
+        [string]$SubjectId
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapWorkerDeadline "before action $Action"
-    $result = Invoke-CapAction -Action $Action -Name $Name -RootHandle $AppRun.Window `
+    $result = Invoke-CapAction -Action $Action -Name $Name -SubjectId $SubjectId -RootHandle $AppRun.Window `
         -ProcessIdentity $AppRun.Run.Identity
+    if ($AppRun.PSObject.Properties['DActions']) {$AppRun.DActions.Add($result)}
     Write-CapWorkerLog "ACTION phase=$($AppRun.Phase) action=$Action name=$Name result=$($result | ConvertTo-Json -Compress)"
     Start-Sleep -Milliseconds 250
     Assert-CapWorkerDeadline "after action $Action"
@@ -568,8 +602,11 @@ function Save-CapSceneImage {
     Assert-CapWorkerDeadline "before image $Phase/$SceneName"
     $metrics = Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
     $expectedOuter = @(30, 30, 1486, 989)
-    if ((Compare-Object $expectedOuter @($metrics.OuterBounds)) -or $metrics.Dpi -ne 96 -or
-        $metrics.ClientBounds[2] -ne 1440 -or $metrics.ClientBounds[3] -ne 900) {
+    $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
+    if ($isD) {$expectedOuter=@($AppRun.Placement.outerBounds)}
+    $height=if ($isD) {952} else {900}
+    if (($expectedOuter -join ',') -cne (@($metrics.OuterBounds) -join ',') -or $metrics.Dpi -ne 96 -or
+        ($metrics.ClientBounds -join ',') -cne "0,0,1440,$height") {
         throw "Unexpected window geometry for ${Phase}/${SceneName}: $(ConvertTo-Json -InputObject $metrics -Compress)."
     }
     if ($ZoomEvidence -and [Math]::Abs([double]$ZoomEvidence.ZoomPercent - 100.0) -gt 1.0) {
@@ -607,6 +644,17 @@ function Save-CapSceneImage {
         privacyReview = $null
     }
     $images.Add($record)
+    if ($isD) {
+        $record | Add-Member -NotePropertyName sceneAdapter -NotePropertyValue 'D_QUICK_CHAT_V1'
+        $record | Add-Member -NotePropertyName observedState -NotePropertyValue $AppRun.DObservation
+        $record | Add-Member -NotePropertyName actions -NotePropertyValue @($AppRun.DActions)
+        $record | Add-Member -NotePropertyName captureUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o'))
+        $record | Add-Member -NotePropertyName zoomApplicable -NotePropertyValue ($null -ne $ZoomEvidence)
+        $record | Add-Member -NotePropertyName zoomReason -NotePropertyValue $(if ($ZoomEvidence) {'Measured source-width canvas probe'} else {'Workspace or fixed sidebar chrome'})
+        $record | Add-Member -NotePropertyName dpiAwareness -NotePropertyValue 'NotVerified: unchanged native bindings do not query runtime awareness context'
+        $record | Add-Member -NotePropertyName sceneLabel -NotePropertyValue $(if ($SceneName -ceq 'd-chat-history-roles') {'Observed production-restored history chat Shell state; actual baseline UIA role recorded'} else {$SceneName})
+        $AppRun.DActions.Clear()
+    }
     Write-CapWorkerJournalSnapshot -Kind 'Progress'
     Write-CapWorkerLog "IMAGE phase=$Phase scene=$SceneName sha256=$($capture.Sha256) size=$($capture.Width)x$($capture.Height) dpi=$($capture.Dpi) colors=$($capture.SampledColors)"
 }
@@ -615,7 +663,7 @@ function New-CapManifest {
     param([Parameter(Mandatory)][string]$Status)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    return [ordered]@{
+    $result = [ordered]@{
         schemaVersion = 1
         status = $Status
         executionMode = if ($mockSceneRun) { 'OFFLINE_MOCK_ONLY' }
@@ -649,6 +697,14 @@ function New-CapManifest {
         ownedProcesses = @($ownedProcessReceipts)
         privacyRequirement = 'Every image requires an individual privacy check before reviewer handoff.'
     }
+    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        $result.sceneAdapter=$job.sceneAdapter;$result.lane='D';$result.requiredSceneNames=@(Get-CapDSceneNames)
+        $result.backendTurns=0;$result.backendAgentAttach=$false;$result.restartInvoked=$false
+        $result.uncoveredLiveObligations=@(
+            @{name='missing-bound-chat-workspace-tabs';status='NotExecuted';reason='Production events route away; component coverage only'},
+            @{name='saved-Agent-Split-role-labels';status='NotExecuted';reason='Production listing prunes absent panes; only two chat seeds authorized'})
+    }
+    return $result
 }
 
 function New-CapAppRunRecord {
@@ -695,7 +751,8 @@ function Start-CapGraphCodeApp {
     }
     $arguments = if ($rehearsal) { [string[]]@($job.rehearsalTarget.arguments) } else { [string[]]@() }
     if ($rehearsal) { $role = 'rehearsal-target' }
-    $workingDirectory = if ($rehearsal) { $Roots.Peer } else { Join-Path $root 'fixtures\projects\Alpha' }
+    $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
+    $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
     if (-not $rehearsal) {
         $shellSession = 'graphcode-' + $SessionPrefix + '-' + [guid]::Empty.ToString('D')
         $null = Assert-CapZmxLeasePath -ZmxDir $Roots.Zmx -SessionName $shellSession `
@@ -711,7 +768,14 @@ function Start-CapGraphCodeApp {
     $window = Find-CapTopLevelWindow -ProcessIdentity $run.Identity -TimeoutSeconds 30 -DeadlineUtc $leaseDeadlineUtc
     $appRun.Window = $window
     Write-CapProcessJournal -Identity $run.Identity -Phase $Phase -Window $window
-    Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity
+    if ($isD) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $area=[Windows.Forms.Screen]::FromHandle($window).WorkingArea
+        $placement=Get-CapDGeometry -Metrics (Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity) -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom)
+        Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity -X $placement.x -Y $placement.y -Width $placement.width -Height $placement.height
+        $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
+        $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
+    } else {Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity}
     Start-Sleep -Milliseconds 500
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
     if ($metrics.Dpi -ne 96) { throw "Actual app DPI is $($metrics.Dpi), expected 96." }
@@ -722,12 +786,14 @@ function Get-CapTreeForApp {
     param([Parameter(Mandatory)]$AppRun)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    $dSessions=@{}
+    if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {$dSessions.ExactSessionNames=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')}
     $tree = @(Get-CapOwnedDescendants -Roots @($AppRun.Run.Identity) `
         -ZmxPath (Join-Path $root 'runtime\zmx.exe') `
         -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
         -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
         -SessionName $AppRun.SessionPrefix -CommandMarker $AppRun.SessionPrefix `
-        -AllowGraphCodeRoot -AllowUnmarkedCmd)
+        -AllowGraphCodeRoot -AllowUnmarkedCmd @dSessions)
     foreach ($identity in $tree) {
         Write-CapProcessJournal -Identity $identity -Phase $AppRun.Phase
         if (-not @($descendantIdentities | Where-Object {
@@ -1056,6 +1122,101 @@ function Invoke-CapActionsScene {
     }
 }
 
+function Read-CapDState {
+    param($AppRun,[string]$State)
+    Assert-CapWorkerDeadline "D state $State"
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $element=[Windows.Automation.AutomationElement]::FromHandle($AppRun.Window)
+    if ($null -eq $element) {throw 'D UIA root is unavailable.'}
+    $rows=@($element)+@($element.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition))
+    $observation=Get-CapDObservation -Candidates $rows -ExpectedProcessId $AppRun.Run.Identity.Pid -State $State -Phase $AppRun.Phase
+    $observation.evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
+    $AppRun.DObservation=$observation
+    return $observation
+}
+
+function Save-CapDScene {
+    param($AppRun,[string]$Scene,[string]$State,[string]$ProbeName,[string]$ProbePrefix='canvas-card-')
+    $null=Read-CapDState -AppRun $AppRun -State $State
+    $zoom=$null
+    if ($ProbeName) {
+        $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'actual-size'
+        $probe=Wait-CapVisibleElement -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity -Name $ProbeName -AutomationIdPrefix $ProbePrefix
+        $spec=@($job.scenes | Where-Object name -CEQ $Scene)
+        $index=if ($AppRun.Phase -ceq 'before') {0} else {1}
+        $width=if ($State -ceq 'chats') {220} else {[int]$spec[0].naturalWidthBeforeAfter[$index]}
+        $zoom=Measure-CapZoom -Element $probe -NaturalWidth $width
+    }
+    Save-CapSceneImage -AppRun $AppRun -SceneName $Scene -ZoomEvidence $zoom -Phase $AppRun.Phase
+}
+
+function Invoke-CapDScenes {
+    param([Parameter(Mandatory)][ValidateSet('before','after')][string]$Phase)
+    Assert-CapWorkerDeadline "D phase $Phase"
+    if (($leaseDeadlineUtc-[DateTime]::UtcNow).TotalSeconds -lt $(if ($Phase -ceq 'before') {$job.captureContract.estimatedSeconds} else {1})) {
+        throw 'Insufficient admitted D scene budget before the cleanup reserve.'
+    }
+    $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\normal")
+    $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
+    $pipe="gc-cap-d-$($auth.leaseId.Replace('-','').Substring(0,8))-$Phase"
+    $peer=$null;$app=$null;$seeds=[Collections.Generic.List[object]]::new()
+    try {
+        $peer=Start-CapOfflinePeer -Roots $roots -PipeName $pipe -Phase "$Phase-normal"
+        foreach ($i in 0..1) {
+            $label=@('primary','history')[$i]
+            $seedPhase="$Phase-$label"
+            $null=New-Item -ItemType Directory -Path (Join-Path $runDirectory "phases\$seedPhase\normal")
+            $seeds.Add((Start-CapOfflineSeed -Roots $roots -Phase $seedPhase -SessionName "graphcode-$($fixture.chats[$i].id)"))
+        }
+        $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $pipe -SessionPrefix 'D_EXACT_SESSIONS_ONLY'
+        $app | Add-Member -NotePropertyName DObservation -NotePropertyValue $null
+        $app | Add-Member -NotePropertyName DActions -NotePropertyValue ([Collections.Generic.List[object]]::new())
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'quick-chats-destination'
+        Save-CapDScene -AppRun $app -Scene 'd-quick-chats-canvas' -State 'chats' -ProbeName 'Quick Chat capture fixture' -ProbePrefix 'quick-chat-card-'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-quick-chat' -Name 'Quick Chat capture fixture'
+        Save-CapDScene -AppRun $app -Scene 'd-chat-primary-shell' -State 'primary'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'quick-chats-destination'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-quick-chat' -Name 'Quick Chat history fixture'
+        Save-CapDScene -AppRun $app -Scene 'd-chat-history-roles' -State 'history'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-show-graph'
+        Save-CapDScene -AppRun $app -Scene 'd-chat-show-graph-destination' -State 'project' -ProbeName 'Loop workspace fixture'
+        Save-CapDScene -AppRun $app -Scene 'd-neighbor-sidebar' -State 'project'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'overview-destination'
+        Save-CapDScene -AppRun $app -Scene 'd-neighbor-overview' -State 'overview' -ProbeName 'Loop workspace fixture'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'D Offline Capture Fixture'
+        Save-CapDScene -AppRun $app -Scene 'd-neighbor-project' -State 'project' -ProbeName 'Loop workspace fixture'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name 'Loop workspace fixture'
+        $toggle=$null
+        try {$toggle=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity -Name 'Expand loop panel' -AutomationIdPrefix 'workspace-toggle-panel-'}
+        catch {
+            if ($_.Exception.Message -notmatch 'found=0\.') {throw}
+            $null=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity -Name 'Collapse loop panel' -AutomationIdPrefix 'workspace-toggle-panel-'
+        }
+        if ($null -ne $toggle) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-toggle-panel' -Name 'Expand loop panel' -SubjectId 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'}
+        Save-CapDScene -AppRun $app -Scene 'd-normal-panel-expanded' -State 'expanded'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-toggle-panel' -Name 'Collapse loop panel' -SubjectId 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+        Save-CapDScene -AppRun $app -Scene 'd-normal-panel-collapsed' -State 'collapsed'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-show-graph'
+        Save-CapDScene -AppRun $app -Scene 'd-normal-route-away-project' -State 'project' -ProbeName 'Loop workspace fixture'
+        foreach ($layout in $fixture.layouts) {
+            $key=if ($layout.project -ceq 'graphcode://quick-chats') {$roots.Profile} else {$layout.project}
+            $path=Get-CapDLayoutPath -LayoutBase (Join-Path $roots.Root 'layouts\workspace.json') -ProjectKey $key -LoopId $layout.loop
+            $saved=Get-Content -LiteralPath (Assert-CapOwnedPath $path.LoopPath) -Raw | ConvertFrom-Json -DateKind String
+            if ($saved.project -cne $layout.project -or $saved.loop -cne $layout.loop -or $saved.selectedTab -ne 0 -or $saved.tabs.Count -ne 1) {
+                throw 'Production-persisted D layout lost its exact project/loop/Shell binding.'
+            }
+        }
+        Close-CapGraphCodeApp -AppRun $app -NormalExit
+        if (-not [CapNative]::IsExited($app.Run.Identity.Process.Handle,$app.Run.Identity.Pid) -or $app.Run.Identity.Process.ExitCode -ne 0) {
+            throw 'D app did not complete File > Exit with zero exit.'
+        }
+    } finally {
+        if ($app) {Close-CapGraphCodeApp -AppRun $app}
+        foreach ($seed in $seeds) {Close-CapOfflineSeed -SeedRun $seed}
+        if ($peer) {Close-CapPeer -PeerRun $peer -Label $pipe}
+    }
+}
+
 function Invoke-CapRealLaunchRehearsal {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -1233,6 +1394,14 @@ try {
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetPath).Hash -ne $job.rehearsalTarget.sha256) {
             throw 'Harmless target changed after supervisor authorization.'
         }
+        if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+            Assert-CapSceneContract -Job $job
+            $proof=Assert-CapFixtureMapping -Root $root -FixturePath $fixturePath `
+                -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
+                -ExpectedMappingSha256 $auth.fixtureMappingSha256 -ExpectedSourceSha256 $job.fixture.sha256 `
+                -OriginalRoot $job.fixture.originalRoot -SceneAdapter $job.sceneAdapter -ExpectedPeerSha256 $job.fixture.offlinePeerReference.sha256
+            $fixtureHash=$proof.FixtureSha256
+        }
     } else {
     Assert-CapAcceptedInputs
     $zmxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
@@ -1256,11 +1425,13 @@ try {
     } else {
     foreach ($phase in @('before', 'after')) {
         Assert-CapWorkerDeadline "starting phase $phase"
-        Invoke-CapNormalScenes -Phase $phase
-        Invoke-CapActionsScene -Phase $phase
+        if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
+        else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    if ($images.Count -ne 10) { throw "Expected ten images across before/after; captured $($images.Count)." }
-    if ($zmxSeedReceipts.Count -ne 2 -or @($zmxSeedReceipts | Where-Object {
+    $expectedImages=if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedSeeds=if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
+    if ($images.Count -ne $expectedImages) { throw "Expected $expectedImages images across before/after; captured $($images.Count)." }
+    if ($zmxSeedReceipts.Count -ne $expectedSeeds -or @($zmxSeedReceipts | Where-Object {
         $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.cmdCount -lt 1 -or
         $_.cleanupStatus -ne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
         $null -eq $_.outputProof -or -not $_.outputProof.jobActive0
