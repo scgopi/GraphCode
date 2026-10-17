@@ -52,27 +52,40 @@ extension GhosttyTerminalNSView {
   }
 
   private func upload(_ payload: DraftImageImport.Payload, to target: RemoteImagePasteTarget) {
+    pasteUploadsInFlight += 1
     showPasteNotice("Copying image to \(target.host)…", isError: false, sticky: true)
     let fileName = RemoteImagePaste.fileName(fileExtension: payload.fileExtension)
     Task { @MainActor [weak self] in
+      let outcome: Result<String, Error>
       do {
-        let path = try await RemoteAttachmentUpload.upload(
-          payload.data, fileName: fileName, projectPath: target.projectPath,
-          nodeID: target.nodeID)
-        guard let self else { return }
-        guard self.remoteImagePaste == target, !self.processHasExited, let surface = self.surface
-        else {
-          self.showPasteNotice(
-            "The image was copied, but the session ended before it could be referenced.",
-            isError: true, sticky: false)
-          return
-        }
-        let text = RemoteAttachmentUpload.composerReference(toImageAt: path)
-        text.withCString { ghostty_surface_text(surface, $0, UInt(text.utf8.count)) }
-        self.hidePasteNotice()
+        outcome = .success(
+          try await RemoteAttachmentUpload.upload(
+            payload.data, fileName: fileName, projectPath: target.projectPath,
+            nodeID: target.nodeID))
       } catch {
-        self?.showPasteNotice(error.localizedDescription, isError: true, sticky: false)
+        outcome = .failure(error)
       }
+      guard let self else { return }
+      self.pasteUploadsInFlight -= 1
+      self.finishUpload(outcome, to: target)
+    }
+  }
+
+  private func finishUpload(_ outcome: Result<String, Error>, to target: RemoteImagePasteTarget) {
+    switch outcome {
+    case .failure(let error):
+      showPasteNotice(error.localizedDescription, isError: true, sticky: false)
+    case .success(let path):
+      guard remoteImagePaste == target, !processHasExited, let surface else {
+        showPasteNotice(
+          "The image was copied, but the session ended before it could be referenced.",
+          isError: true, sticky: false)
+        return
+      }
+      let text = RemoteAttachmentUpload.composerReference(toImageAt: path)
+      text.withCString { ghostty_surface_text(surface, $0, UInt(text.utf8.count)) }
+      // Another paste still on its way keeps its notice up.
+      if pasteUploadsInFlight == 0 { hidePasteNotice() }
     }
   }
 

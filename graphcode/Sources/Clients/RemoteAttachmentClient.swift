@@ -20,7 +20,9 @@ extension RemoteAttachmentClient: DependencyKey {
         data, fileName: fileName, projectPath: projectPath, nodeID: nodeID)
     },
     discard: { projectPath, nodeID in
-      RemoteAttachmentUpload.removeRemoteMemory(projectPath: projectPath, nodeID: nodeID)
+      // The draft uploaded moments ago, so even a Codespace is running.
+      RemoteAttachmentUpload.removeRemoteMemory(
+        projectPath: projectPath, nodeID: nodeID, includingCodespace: true)
     })
 
   static let testValue = RemoteAttachmentClient(

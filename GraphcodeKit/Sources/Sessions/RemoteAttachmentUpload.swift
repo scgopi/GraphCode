@@ -154,34 +154,40 @@ public enum RemoteAttachmentUpload {
     throw RemoteAttachmentUploadError.failed(detail ?? "exit \(result.exitCode)")
   }
 
-  /// The ssh argv that removes a deleted node's remote memory — the remote twin of
-  /// `NodeMemory.remove`. Its digest, shed prompt and attachments are copies of things
-  /// the Mac holds or the node no longer needs.
-  public static func removalInvocation(forProjectPath projectPath: String, nodeID: UUID)
-    -> [String]?
-  {
-    guard let location = RemoteProjectLocation.parse(projectPath: projectPath) else {
-      return nil
+  /// The ssh argv that removes deleted nodes' remote memory — the remote twin of
+  /// `NodeMemory.remove`. Their digests, shed prompts and attachments are copies of things
+  /// the Mac holds or the nodes no longer need. One dial for any number of nodes.
+  ///
+  /// `nil` for a Codespace unless `includingCodespace`: every Codespace dial goes through
+  /// gh, which *starts* a stopped codespace, so deleting a graph of idle loops would boot
+  /// the machine just to tidy a private folder it may never use again.
+  public static func removalInvocation(
+    forProjectPath projectPath: String, nodeIDs: [UUID], includingCodespace: Bool = false
+  ) -> [String]? {
+    guard let location = RemoteProjectLocation.parse(projectPath: projectPath), !nodeIDs.isEmpty,
+      includingCodespace || !location.isCodespace
+    else { return nil }
+    let directories = nodeIDs.map {
+      let directory = RemoteGraphAccess.memoryDirectory(
+        forProjectPath: location.projectPath, nodeID: $0)
+      return "~/" + RemoteProjectLocation.shellQuoted(String(directory.dropFirst(2)))
     }
-    let directory = RemoteGraphAccess.memoryDirectory(
-      forProjectPath: location.projectPath, nodeID: nodeID)
-    let command =
-      "rm -rf ~/" + RemoteProjectLocation.shellQuoted(String(directory.dropFirst(2)))
-    return location.sshInvocation(remoteCommand: command)
+    return location.sshInvocation(remoteCommand: "rm -rf " + directories.joined(separator: " "))
   }
 
   /// Best effort and detached: the host may be offline, and deleting a node must never
-  /// wait on it. What a failure leaves is a private directory under `~/.graphcode`.
-  public static func removeRemoteMemory(projectPath: String, nodeID: UUID) {
-    guard let argv = removalInvocation(forProjectPath: projectPath, nodeID: nodeID) else {
-      return
-    }
-    Task.detached {
-      RemoteProjectLocation.prepareControlSocketDirectory()
-      _ = try? await FoundationProcessRunner().run(
-        ProcessRequest(
-          executable: URL(fileURLWithPath: argv[0]), arguments: Array(argv.dropFirst())),
-        timeout: .seconds(30))
+  /// wait on it. Coalesced by `RemoteMemoryJanitor`, so deleting a whole graph costs one
+  /// dial per host rather than one per loop. What a failure leaves is a private directory
+  /// under `~/.graphcode`.
+  public static func removeRemoteMemory(
+    projectPath: String, nodeID: UUID, includingCodespace: Bool = false
+  ) {
+    guard let location = RemoteProjectLocation.parse(projectPath: projectPath),
+      includingCodespace || !location.isCodespace
+    else { return }
+    Task {
+      await RemoteMemoryJanitor.shared.enqueue(
+        projectPath: projectPath, nodeID: nodeID, includingCodespace: includingCodespace)
     }
   }
 
@@ -208,6 +214,58 @@ public enum RemoteAttachmentUploadError: Error, Equatable, LocalizedError {
     case .timedOut: return "Copying the image to the remote machine timed out."
     case .unreachable(let detail): return "Couldn't reach the remote machine: \(detail)"
     case .failed(let detail): return "Couldn't copy the image to the remote machine: \(detail)"
+    }
+  }
+}
+
+/// Collects remote-memory removals for a moment and sends each project's as one `rm -rf`,
+/// one project at a time.
+actor RemoteMemoryJanitor {
+  static let shared = RemoteMemoryJanitor()
+
+  private struct Key: Hashable {
+    var projectPath: String
+    var includingCodespace: Bool
+  }
+
+  private let delay: Duration
+  private let runner: any ProcessRunner
+  private var pending: [Key: [UUID]] = [:]
+  private var flushScheduled = false
+
+  init(delay: Duration = .seconds(2), runner: any ProcessRunner = FoundationProcessRunner()) {
+    self.delay = delay
+    self.runner = runner
+  }
+
+  func enqueue(projectPath: String, nodeID: UUID, includingCodespace: Bool = false) {
+    pending[Key(projectPath: projectPath, includingCodespace: includingCodespace), default: []]
+      .append(nodeID)
+    guard !flushScheduled else { return }
+    flushScheduled = true
+    Task { await flushAfterDelay() }
+  }
+
+  private func flushAfterDelay() async {
+    try? await Task.sleep(for: delay)
+    await flush()
+  }
+
+  func flush() async {
+    let batch = pending
+    pending = [:]
+    flushScheduled = false
+    RemoteProjectLocation.prepareControlSocketDirectory()
+    for (key, nodeIDs) in batch {
+      guard
+        let argv = RemoteAttachmentUpload.removalInvocation(
+          forProjectPath: key.projectPath, nodeIDs: nodeIDs,
+          includingCodespace: key.includingCodespace)
+      else { continue }
+      _ = try? await runner.run(
+        ProcessRequest(
+          executable: URL(fileURLWithPath: argv[0]), arguments: Array(argv.dropFirst())),
+        timeout: .seconds(30))
     }
   }
 }

@@ -51,6 +51,7 @@ final class GhosttyTerminalNSView: NSView {
   var swallowedPasteKeyCode: UInt16?
   var pasteNoticeLabel: NSTextField?
   var pasteNoticeGeneration = 0
+  var pasteUploadsInFlight = 0
 
   private var markedText: String = ""
 
@@ -280,6 +281,9 @@ final class GhosttyTerminalNSView: NSView {
   // MARK: - Keyboard
 
   override func keyDown(with event: NSEvent) {
+    // AppKit often delivers no keyUp for a ⌘ chord, so a swallow left armed by ⌘V would
+    // otherwise eat the release of the next plain `v`.
+    swallowedPasteKeyCode = nil
     // "Any key" means any key: taken here, before the surface, because the process the
     // surface would encode it for is gone. Left to libghostty, only keys that encode a
     // character would count, and each one re-requested a close the app had already

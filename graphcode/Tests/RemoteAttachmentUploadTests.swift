@@ -216,7 +216,7 @@ struct RemoteAttachmentUploadTests {
     }
   }
 
-  private struct RecordingRunner: ProcessRunner {
+  fileprivate struct RecordingRunner: ProcessRunner {
     let recorded: LockIsolated<[ProcessRequest]>
     let result: ProcessResult
     func run(_ request: ProcessRequest, timeout: Duration?) async throws -> ProcessResult {
@@ -240,18 +240,6 @@ struct RemoteAttachmentUploadTests {
     #expect(path == "/home/dev/x.png")
     #expect(recorded.value.count == 1)
     #expect(recorded.value.first?.standardInput == awkwardBytes)
-  }
-
-  @Test
-  func removalTargetsOnlyTheNodesRemoteMemory() throws {
-    let argv = try #require(
-      RemoteAttachmentUpload.removalInvocation(forProjectPath: sshProject, nodeID: nodeID))
-    let command = try #require(argv.last)
-    #expect(command.hasPrefix("rm -rf ~/'.graphcode/memory/"))
-    #expect(command.hasSuffix("/\(nodeID.uuidString)'"))
-    #expect(
-      RemoteAttachmentUpload.removalInvocation(forProjectPath: "/Users/dev/w", nodeID: nodeID)
-        == nil)
   }
 
   @Test
@@ -280,6 +268,54 @@ struct RemoteAttachmentUploadTests {
 }
 
 extension RemoteAttachmentUploadTests {
+  @Test
+  func removalTargetsOnlyTheNodesRemoteMemory() throws {
+    let other = UUID()
+    let argv = try #require(
+      RemoteAttachmentUpload.removalInvocation(
+        forProjectPath: sshProject, nodeIDs: [nodeID, other]))
+    let command = try #require(argv.last)
+    #expect(command.hasPrefix("rm -rf ~/'.graphcode/memory/"))
+    #expect(command.contains("/\(nodeID.uuidString)' ~/'.graphcode/memory/"))
+    #expect(command.hasSuffix("/\(other.uuidString)'"))
+    #expect(
+      RemoteAttachmentUpload.removalInvocation(forProjectPath: "/Users/dev/w", nodeIDs: [nodeID])
+        == nil)
+    #expect(
+      RemoteAttachmentUpload.removalInvocation(forProjectPath: sshProject, nodeIDs: []) == nil)
+  }
+
+  @Test
+  func deletingCodespaceLoopsNeverStartsTheCodespace() {
+    // gh starts a stopped codespace on any dial; tidying a private folder is not worth that.
+    let codespace = "codespace://fluffy-space-umbrella/workspaces/widget"
+    #expect(
+      RemoteAttachmentUpload.removalInvocation(forProjectPath: codespace, nodeIDs: [nodeID])
+        == nil)
+    // A cancelled draft that just uploaded knows the codespace is up.
+    #expect(
+      RemoteAttachmentUpload.removalInvocation(
+        forProjectPath: codespace, nodeIDs: [nodeID], includingCodespace: true) != nil)
+  }
+
+  @Test
+  func deletingAWholeGraphCostsOneDialPerProject() async throws {
+    let recorded = LockIsolated<[ProcessRequest]>([])
+    let janitor = RemoteMemoryJanitor(
+      delay: .seconds(3600),
+      runner: RecordingRunner(
+        recorded: recorded,
+        result: ProcessResult(exitCode: 0, standardOutput: Data(), standardError: Data())))
+    let ids = (0..<30).map { _ in UUID() }
+    for id in ids { await janitor.enqueue(projectPath: sshProject, nodeID: id) }
+    await janitor.enqueue(
+      projectPath: "codespace://fluffy-space-umbrella/workspaces/widget", nodeID: nodeID)
+    await janitor.flush()
+    #expect(recorded.value.count == 1)
+    let command = try #require(recorded.value.first?.arguments.last)
+    #expect(ids.allSatisfy { command.contains($0.uuidString) })
+  }
+
   /// A loopback sshd with a fake `HOME` (`TEST_RUNNER_GRAPHCODE_LOOPBACK_RIG`): `ssh` is a
   /// wrapper passing the rig's own `-F` config, so the human's `~/.ssh` is never touched.
   private static let loopbackRig = ProcessInfo.processInfo.environment["GRAPHCODE_LOOPBACK_RIG"]
