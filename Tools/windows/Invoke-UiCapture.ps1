@@ -133,7 +133,8 @@ function Assert-CapGreenJob {
     $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath (Join-Path $root 'fixtures\fixture.json') `
         -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
         -ExpectedMappingSha256 $fixtureMappingHashExpected `
-        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot
+        -ExpectedSourceSha256 $job.fixture.sha256 -OriginalRoot $job.fixture.originalRoot `
+        -SceneAdapter $job.sceneAdapter -ExpectedPeerSha256 $job.fixture.offlinePeerReference.sha256
     $script:fixtureHashExpected = $mappingProof.FixtureSha256
     $inputHashes = @{
         fixture = @((Join-Path $root 'fixtures\fixture.json'), $fixtureHashExpected)
@@ -545,11 +546,15 @@ function Recover-CapGuiRoots {
             continue
         }
         $prefix = Get-CapAppSessionPrefix -Record $record
+        $dSessions=@{}
+        if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+            $dSessions.ExactSessionNames=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
+        }
         $tree = @(Get-CapOwnedDescendants -Roots @($identity) `
             -ZmxPath (Join-Path $root 'runtime\zmx.exe') `
             -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
             -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
-            -SessionName $prefix -CommandMarker $prefix -AllowGraphCodeRoot -AllowUnmarkedCmd)
+            -SessionName $prefix -CommandMarker $prefix -AllowGraphCodeRoot -AllowUnmarkedCmd @dSessions)
         foreach ($child in $tree) {
             $null = $tracked.TryAdd(
                 ('{0}:{1}:{2}' -f $child.Pid, $child.CreationFileTimeUtc, $record.Phase),
@@ -653,6 +658,62 @@ function Assert-CapWorkerManifest {
                 $_.stdoutEof -or $_.stderrEof -or -not $_.outputProof.jobActive0
             }).Count -ne 0) { throw 'Real seed rehearsal lacks two ready, job-empty, closed-file phases.' }
             foreach ($seed in $manifest.zmxSeeds) { $null = Assert-CapJobOutputProof -Root $root -Proof $seed.outputProof }
+        }
+        return
+    }
+    if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        $expected=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapDSceneNames) {"${phase}:$scene"}})
+        $actual=@($manifest.images | ForEach-Object {"$($_.phase):$($_.scene)"})
+        if ($manifest.sceneAdapter -cne $job.sceneAdapter -or $manifest.lane -cne 'D' -or
+            $manifest.status -cne 'COMPLETE' -or $manifest.executionMode -cne 'LIVE_CAPTURE' -or
+            $manifest.images.Count -ne 20 -or @($actual | Sort-Object -Unique).Count -ne 20 -or
+            (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
+            $manifest.head -cne $job.head -or $manifest.base -cne $job.base -or
+            $manifest.moduleSha256 -ne $moduleHash -or $manifest.workerSha256 -ne $workerHash -or
+            $manifest.supervisorSha256 -ne $supervisorHash -or $manifest.jobManifestSha256 -ne $jobHash -or
+            $manifest.leaseReceiptSha256 -ne $leaseHash -or $manifest.preflightReceiptSha256 -ne $preflightHash -or
+            $manifest.fixtureSourceSha256 -ne $job.fixture.sha256 -or $manifest.fixtureSha256 -ne $fixtureHashExpected -or
+            $manifest.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or $manifest.backendTurns -ne 0 -or
+            $manifest.backendAgentAttach -ne $false -or $manifest.restartInvoked -ne $false -or $manifest.failures.Count -ne 0) {
+            throw 'D manifest requires twenty unique real captures with exact source, fixture and lease bindings.'
+        }
+        foreach ($field in @('cleanupFailures','ownedProcessSurvivors','pendingLaunchesRemaining')) {
+            if ($manifest.$field -isnot [array] -or $manifest.$field.Count -ne 0) { throw "D manifest has unproved $field." }
+        }
+        if ($manifest.uncoveredLiveObligations.Count -ne 2 -or
+            @($manifest.uncoveredLiveObligations | Where-Object status -CNE 'NotExecuted').Count -ne 0 -or
+            (($manifest.uncoveredLiveObligations | ForEach-Object name | Sort-Object) -join ',') -cne
+                'missing-bound-chat-workspace-tabs,saved-Agent-Split-role-labels') { throw 'D manifest hid uncovered live obligations.' }
+        foreach ($image in $manifest.images) {
+            $phase=$job.binaries.($image.phase)
+            if ($image.sceneAdapter -cne $job.sceneAdapter -or $image.captureMode -cne 'PRINTWINDOW' -or
+                $image.privacyStatus -cne 'CAPTURED_PENDING_INDIVIDUAL_REVIEW' -or
+                $image.observedState.evidenceMode -cne 'OWNED_UIA_READ_NOT_VISUAL_PARITY' -or
+                -not $image.observedState.readSucceeded -or -not $image.observedState.healthyRoot -or
+                $image.sourceHead -cne $phase.source -or $image.binaryBuiltAtSource -cne $phase.binaryBuiltAtSource -or
+                $image.binarySha256 -ne $phase.sha256 -or $image.fixtureSha256 -ne $fixtureHashExpected -or
+                $image.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or $image.fixtureSourceSha256 -ne $job.fixture.sha256 -or
+                ($image.clientBounds -join ',') -cne '0,0,1440,952' -or $image.dpi -ne 96 -or
+                $image.sampledColors -lt 4 -or $image.nonMagentaSamples -lt 20 -or
+                $image.width -ne ($image.outerBounds[2]-$image.outerBounds[0]) -or
+                $image.height -ne ($image.outerBounds[3]-$image.outerBounds[1])) { throw 'D image has invalid live observation, geometry or provenance.' }
+            if ($image.zoomApplicable -and ($null -eq $image.zoom -or [Math]::Abs($image.zoom.ZoomPercent-100) -gt 1)) { throw 'D canvas lacks actual-size zoom evidence.' }
+            $imagePath=Assert-CapSupervisorPath $image.path
+            if ((Get-FileHash -LiteralPath $imagePath -Algorithm SHA256).Hash -ne $image.sha256) { throw 'D image bytes changed.' }
+        }
+        if ($manifest.zmxSeeds.Count -ne 4 -or
+            (($manifest.zmxSeeds | ForEach-Object phase | Sort-Object) -join ',') -cne 'after-history,after-primary,before-history,before-primary' -or
+            @($manifest.zmxSeeds | ForEach-Object zmxRoot | Sort-Object -Unique).Count -ne 2) { throw 'D seed phase/session inventory differs.' }
+        foreach ($seed in $manifest.zmxSeeds) {
+            $id=if ($seed.phase.EndsWith('-primary')) {'33333333-3333-4333-8333-333333333333'} else {'44444444-4444-4444-8444-444444444444'}
+            $arguments=@('run',"graphcode-$id",'-d',(Join-Path ([Environment]::SystemDirectory) 'cmd.exe'),'/Q','/K','echo D_OFFLINE_QUICKCHAT_FIXTURE')
+            if ($seed.sessionName -cne "graphcode-$id" -or ($seed.argumentList -join [char]0) -cne ($arguments -join [char]0) -or
+                $seed.exitCode -ne 0 -or -not $seed.daemonReady -or $seed.daemonCount -lt 1 -or $seed.cmdCount -lt 1 -or
+                $seed.stdoutEof -or $seed.stderrEof -or $seed.cleanupStatus -cne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
+                $seed.descendants.Count -lt 2 -or $seed.cleanup.Count -lt ($seed.descendants.Count+1)) { throw 'D seed readiness or cleanup is unproved.' }
+            $null=Assert-CapJobOutputProof -Root $root -Proof $seed.outputProof
+            $null=Assert-CapSupervisorPath $seed.zmxRoot
+            $null=Assert-CapSupervisorPath $seed.supportRoot
         }
         return
     }
@@ -808,6 +869,16 @@ try {
     $null = Assert-CapLease
     if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
         $jobIdentity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
+    }
+    if ($rehearsal -and $null -ne $job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        Assert-CapSceneContract -Job $job
+        $fixtureMappingHashExpected=$job.fixture.mappingSha256
+        $proof=Assert-CapFixtureMapping -Root $root -FixturePath (Join-Path $root 'fixtures\fixture.json') `
+            -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
+            -ExpectedMappingSha256 $fixtureMappingHashExpected -ExpectedSourceSha256 $job.fixture.sha256 `
+            -OriginalRoot $job.fixture.originalRoot -SceneAdapter $job.sceneAdapter -ExpectedPeerSha256 $job.fixture.offlinePeerReference.sha256
+        $fixtureHashExpected=$proof.FixtureSha256
     }
     if (-not $rehearsal) {
         $sourceRoot = Assert-CapGreenJob

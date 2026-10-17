@@ -12,6 +12,8 @@ param(
     [switch]$PreflightReportContractOnly,
     [switch]$SelectorRefusalContractOnly,
     [switch]$IdentityContractOnly,
+    [switch]$DAdapterContractOnly,
+    [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
     [string]$PrebuiltFixtureManifestSha256 = '',
     [switch]$RequireRealSeed,
@@ -1033,7 +1035,8 @@ function Invoke-CapCaptureCommand {
         [string]$Behavior = 'normal',
         [string]$LeaseMutation = '',
         [string]$AdmissionMutation = '',
-        [switch]$RealSeed
+        [switch]$RealSeed,
+        [string]$DSceneMutation = ''
     )
     $owned = Join-Path $scratch "cases\$Name"
     $null = New-Item -ItemType Directory -Path $owned
@@ -1063,6 +1066,7 @@ function Invoke-CapCaptureCommand {
                 '-d','cmd.exe','/Q','/K','echo Offline card fixture - no backend') } }
     }
     if ($AdmissionMutation) { $job = New-CapAdmissionJob -Owned $owned -Job $job -Mutation $AdmissionMutation }
+    if ($DSceneMutation) { $job = New-CapDSceneJob -Owned $owned -Job $job -Mutation $DSceneMutation }
     $job | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $jobPath -Encoding utf8NoBOM
     $jobHash = (Get-FileHash -LiteralPath $jobPath -Algorithm SHA256).Hash
     $now = [DateTime]::UtcNow
@@ -1294,6 +1298,332 @@ function Assert-CapRehearsalSuccess {
     Assert-CapTest (@(Get-ChildItem -LiteralPath $Run.output -Filter '*.png' -File).Count -eq 0) 'Offline rehearsal created image files.'
     return [ordered]@{ commandExit = $Run.child.exitCode; release = $Run.receiptPath; releaseSha256 = $Run.receiptSha256
         targetArguments = @($Arguments); actualTargetLaunches = 1; images = 0; desktop = 'NotExecuted' }
+}
+
+function New-CapDSceneJob {
+    param([string]$Owned, $Job, [string]$Mutation)
+    $Job.lane = 'D'
+    $Job.sceneAdapter = 'D_QUICK_CHAT_V1'
+    $Job.authority = @{centralCaptureLeaseGrantedByThisArtifact=$false;dWorkerMayLaunchGui=$false}
+    $Job.captureContract = @{
+        phases=@('before','after');sceneCountPerPhase=10;expectedClientWH=@(1440,952);dpi=96;canvasZoomPercent=100
+        placement='MEASURED_FIT_WORKAREA';estimatedSeconds=600;cleanupReserveSeconds=90
+        requireLiveMissingChat=$false;requireLiveSavedAgentSplit=$false
+    }
+    $Job.scenes = @('d-quick-chats-canvas','d-chat-primary-shell','d-chat-history-roles','d-chat-show-graph-destination',
+        'd-neighbor-sidebar','d-neighbor-overview','d-neighbor-project','d-normal-panel-expanded',
+        'd-normal-panel-collapsed','d-normal-route-away-project') | ForEach-Object { @{name=$_;naturalWidthBeforeAfter=@(250,250)} }
+    $original = Join-Path $Owned 'original'
+    $projects = Join-Path $Owned 'fixtures\projects'
+    foreach ($directory in @('inputs','fixtures','reports','runtime')) {
+        $null = New-Item -ItemType Directory -Path (Join-Path $Owned $directory)
+    }
+    $utc = [DateTime]::UtcNow
+    $seconds = ($utc-[DateTime]::new(2001,1,1,0,0,0,[DateTimeKind]::Utc)).TotalSeconds
+    $primary='33333333-3333-4333-8333-333333333333'
+    $history='44444444-4444-4444-8444-444444444444'
+    $normal='AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+    $project = Join-Path $original 'D Offline Capture Fixture'
+    $fixture = @{
+        schemaVersion=1;sceneAdapter='D_QUICK_CHAT_V1';fixtureUtc=$utc.ToString('o');createdAt=$seconds
+        graphs=@(@{id='d-capture-graph';project=@{name='D Offline Capture Fixture';path=$project}
+            nodes=@(
+                @{id=$normal;title='Loop workspace fixture';loopType='turnBased';state='running';backend='claudeCode'
+                    createdAt=$seconds-3600;metricHistory=@(@{value=3},@{value=2});inputTokens=256;outputTokens=128},
+                @{id='BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB';title='Secondary loop fixture';loopType='turnBased'
+                    state='idle';backend='copilot';createdAt=$seconds-7200;metricHistory=@()}
+            );edges=@()})
+        chats=@(
+            @{id=$primary;title='Quick Chat capture fixture';backend='claudeCode';createdAt=$seconds-2100;activity=$null},
+            @{id=$history;title='Quick Chat history fixture';backend='copilot';createdAt=$seconds-10800;activity=$null})
+        layouts=@(
+            @{schemaVersion=2;project='graphcode://quick-chats';loop=$primary;selectedTab=0
+                tabs=@(@{id=1;direction='horizontal';focused=0;panes=@(@{id=$primary;agent=$false})})},
+            @{schemaVersion=2;project='graphcode://quick-chats';loop=$history;selectedTab=0
+                tabs=@(@{id=2;direction='horizontal';focused=0;panes=@(@{id=$history;agent=$false})})},
+            @{schemaVersion=2;project=$project;loop=$normal;selectedTab=0
+                tabs=@(@{id=3;direction='horizontal';focused=0;panes=@(@{id=$normal;agent=$true})})})
+    }
+    switch ($Mutation) {
+        'wrong-chat' {$fixture.chats[0].id='55555555-5555-4555-8555-555555555555'}
+        'wrong-loop' {$fixture.graphs[0].nodes[0].id='foreign-loop'}
+        'one-metric' {$fixture.graphs[0].nodes[0].metricHistory=@(@{value=3})}
+        'wrong-date' {$fixture.createdAt='not-a-numeric-Swift-date'}
+        'layout-project' {$fixture.layouts[0].project='foreign-project'}
+        'layout-loop' {$fixture.layouts[0].loop='foreign-chat'}
+        'embedded-path' {$fixture.graphs[0].nodes[0].worktreeBinding=@{path='C:\foreign\not-owned'}}
+    }
+    $sourcePath = Join-Path $Owned 'inputs\fixture-source.json'
+    $sourceRef = Write-CapTestArtifact $sourcePath $fixture
+    $originalEscaped=($original | ConvertTo-Json -Compress).Trim('"')
+    $ownedEscaped=($projects | ConvertTo-Json -Compress).Trim('"')
+    $mapped=[IO.File]::ReadAllText($sourcePath).Replace($originalEscaped,$ownedEscaped) | ConvertFrom-Json -DateKind String
+    $mappedRef=Write-CapTestArtifact (Join-Path $Owned 'fixtures\fixture.json') $mapped
+    $mappingRef=Write-CapTestArtifact (Join-Path $Owned 'reports\fixture-mapping.json') @{
+        sourcePath=(Join-Path $original 'fixture.json');sourceSha256=$sourceRef.sha256;copiedSourcePath=$sourcePath
+        rewrittenFixturePath=$mappedRef.path;rewrittenFixtureSha256=$mappedRef.sha256
+        pathPrefixMap=@{from=$original;to=$projects};graphs=1;topLevelNodes=2;quickChats=2;layouts=3;pathsRewritten=$true
+    }
+    $peerPath=Join-Path $Owned 'inputs\offline-peer-source.ps1'
+    [IO.File]::WriteAllText($peerPath,(Get-CapDPeerSource),[Text.UTF8Encoding]::new($false))
+    $Job.fixture=@{sha256=$sourceRef.sha256;mappingSha256=$mappingRef.sha256;originalRoot=$original
+        offlinePeerReference=@{sha256=(Get-FileHash -LiteralPath $peerPath -Algorithm SHA256).Hash}}
+    $Job.binaries.offlineZmx=@{sha256=('B'*64);seedCommand=@('/Q','/K','echo D_OFFLINE_QUICKCHAT_FIXTURE')}
+    switch ($Mutation) {
+        'lane-mismatch' {$Job.lane='B'}
+        'b-geometry' {$Job.captureContract.expectedClientWH=@(1440,900)}
+        'b-scenes' {$Job.scenes=@(@{name='project-alpha'})}
+        'live-missing' {$Job.captureContract.requireLiveMissingChat=$true}
+        'live-roles' {$Job.captureContract.requireLiveSavedAgentSplit=$true}
+        'runtime-awareness' {$Job.captureContract.requireRuntimeDpiAwareness=$true}
+        'historical-shape' {$Job.head=@{sha=$Job.head};$Job.base=@{sha=$Job.base}}
+        'stale-source' {[IO.File]::AppendAllText($sourcePath,"`n")}
+        'stale-map' {[IO.File]::AppendAllText($mappingRef.path,"`n")}
+        'stale-peer' {[IO.File]::AppendAllText($peerPath,"`n# changed")}
+        'stale-fixture' {[IO.File]::AppendAllText($mappedRef.path,"`n")}
+    }
+    return $Job
+}
+
+function Invoke-CapDContracts {
+    if ($DAdapterCase -in @('All','SceneContract')) {
+        Invoke-CapTest 'D declared scene inventory is admitted by the shared scene guard' {
+            $job = @{
+                lane = 'D'; sceneAdapter = 'D_QUICK_CHAT_V1'
+                authority = @{ centralCaptureLeaseGrantedByThisArtifact = $false; dWorkerMayLaunchGui = $false }
+                captureContract = @{
+                    phases = @('before','after'); sceneCountPerPhase = 10; expectedClientWH = @(1440,952)
+                    dpi = 96; canvasZoomPercent = 100; placement = 'MEASURED_FIT_WORKAREA'
+                    estimatedSeconds = 600; cleanupReserveSeconds = 90
+                    requireLiveMissingChat = $false; requireLiveSavedAgentSplit = $false
+                }
+                scenes = @('d-quick-chats-canvas','d-chat-primary-shell','d-chat-history-roles',
+                    'd-chat-show-graph-destination','d-neighbor-sidebar','d-neighbor-overview',
+                    'd-neighbor-project','d-normal-panel-expanded','d-normal-panel-collapsed',
+                    'd-normal-route-away-project') | ForEach-Object { @{name=$_;naturalWidthBeforeAfter=@(250,250)} }
+                fixture = @{sha256=('A'*64);mappingSha256=('B'*64);originalRoot='C:\declared'
+                    offlinePeerReference=@{sha256=('C'*64)}}
+                binaries = @{offlineZmx=@{sha256=('D'*64);seedCommand=@('/Q','/K','echo D_OFFLINE_QUICKCHAT_FIXTURE')}}
+            } | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+            Assert-CapSceneContract -Job $job
+            return 'Shared production scene predicate only; no launch, native call, fixture or image.'
+        }
+    }
+    if ($DAdapterCase -in @('All','ActualAdmission')) {
+        Invoke-CapTest 'D scene-marked fixture admission through actual capture command' {
+            $run = Invoke-CapCaptureCommand -Name 'd-scenes-valid' -AdmissionMutation 'lane-d' -DSceneMutation 'valid'
+            $detail = Assert-CapRehearsalSuccess -Run $run -Arguments @()
+            foreach ($component in @('supervisor','worker')) {
+                $trace = @(Get-Content -LiteralPath (Join-Path $run.output "$component-calls.jsonl") | ForEach-Object { $_ | ConvertFrom-Json })
+                foreach ($command in @('Assert-CapSceneContract','Assert-CapFixtureMapping')) {
+                    Assert-CapTest (@($trace | Where-Object command -CEQ $command).Count -eq 1) "D data not checked by $component/$command."
+                }
+            }
+            return $detail
+        }
+    }
+    if ($DAdapterCase -in @('All','FixtureDirectory')) {
+        Invoke-CapTest 'D environment creates the exact owned project cwd before launch resolution' {
+            $caseRoot=Join-Path $scratch 'd-owned-cwd'
+            $null=New-Item -ItemType Directory -Path $caseRoot
+            & {
+                param($OwnedRoot,$WorkerSource)
+                $root=$OwnedRoot
+                $job=[pscustomobject]@{sceneAdapter='D_QUICK_CHAT_V1'}
+                $rehearsal=$false
+                $isD=$true
+                $roots=[pscustomobject]@{Root=$root;Profile=(Join-Path $root 'profile');Local=(Join-Path $root 'local')
+                    Temp=(Join-Path $root 'temp');Support=(Join-Path $root 'support');Zmx=(Join-Path $root 'zmx')}
+                $errors=$null
+                $ast=[Management.Automation.Language.Parser]::ParseFile($WorkerSource,[ref]$null,[ref]$errors)
+                Assert-CapTest ($errors.Count -eq 0) 'Current worker did not parse.'
+                $definitions=@($ast.FindAll({param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -cin @('Assert-CapOwnedPath','Get-CapBaseEnvironment')
+                },$true))
+                Assert-CapTest ($definitions.Count -eq 2) 'Actual environment/path functions missing or duplicated.'
+                foreach ($definition in $definitions) {. ([scriptblock]::Create($definition.Extent.Text))}
+                $expected=Join-Path $root 'fixtures\projects\D Offline Capture Fixture'
+                Assert-CapTest (-not (Test-Path -LiteralPath $expected)) 'Owned D project must start absent.'
+                $environment=Get-CapBaseEnvironment -Roots $roots -PipeName 'd-cwd-component' -SessionPrefix 'd-cwd-component'
+                Assert-CapTest (Test-Path -LiteralPath $expected -PathType Container) 'D environment did not create the exact owned project working directory.'
+                $launch=@($ast.FindAll({param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Start-CapGraphCodeApp'
+                },$true))
+                $cwd=@($launch[0].FindAll({param($node)
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left.Extent.Text -ceq '$workingDirectory'
+                },$true))
+                Assert-CapTest ($launch.Count -eq 1 -and $cwd.Count -eq 1) 'Actual launch cwd assignment missing or duplicated.'
+                . ([scriptblock]::Create($cwd[0].Extent.Text))
+                Assert-CapTest ($workingDirectory -ceq $expected) 'Actual app launch cwd differs from the created D directory.'
+                Assert-CapTest ($environment.GRAPHCODE_SUPPORT_DIR -ceq $roots.Support) 'D isolation environment changed.'
+                return @{created=$expected;resolved=$workingDirectory;mode='ACTUAL_ENVIRONMENT_AND_CWD_EXPRESSION_NO_LAUNCH'}
+            } $caseRoot $workerPath
+        }
+    }
+    if ($DAdapterCase -cne 'All') { return }
+    Invoke-CapTest 'D scene-marked real launch preserves empty Unicode and quoted arguments' {
+        $arguments=[string[]]@('',('caf'+[char]0x00e9),'quote"inside','trailing\')
+        $run=Invoke-CapCaptureCommand -Name 'd-scenes-argv' -Arguments $arguments -AdmissionMutation 'lane-d' -DSceneMutation 'valid'
+        Assert-CapRehearsalSuccess -Run $run -Arguments $arguments
+    }
+    foreach ($mutation in @('lane-mismatch','b-geometry','b-scenes','live-missing','live-roles','runtime-awareness','historical-shape',
+        'stale-source','stale-map','stale-peer','stale-fixture','wrong-chat','wrong-loop','one-metric','wrong-date',
+        'layout-project','layout-loop','embedded-path')) {
+        Invoke-CapTest "D scene-marked actual command refuses $mutation" {
+            $run=Invoke-CapCaptureCommand -Name "d-scenes-$mutation" -AdmissionMutation 'lane-d' -DSceneMutation $mutation
+            $expected=switch ($mutation) {
+                'lane-mismatch' {'Unsupported scene adapter'}
+                {$_ -in @('b-geometry','b-scenes')} {'D scene, geometry'}
+                {$_ -in @('live-missing','live-roles')} {'required-live requests refuse'}
+                'runtime-awareness' {'required-runtime-awareness job refuses'}
+                'historical-shape' {"field 'head'"}
+                {$_ -in @('stale-source','stale-map')} {'trusted hashes'}
+                'stale-peer' {'D peer bytes differ'}
+                'stale-fixture' {'exact source and rewritten'}
+                'wrong-chat' {'D chat identity'}
+                'wrong-loop' {'D normal-loop identity'}
+                'one-metric' {'two numeric object samples'}
+                'wrong-date' {'frozen Swift-reference date'}
+                {$_ -in @('layout-project','layout-loop')} {'D layout binding'}
+                'embedded-path' {'embedded path'}
+            }
+            Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
+                $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and -not $run.receipt.workerStarted -and
+                $run.receipt.primaryFailure.Contains($expected) -and $run.receipt.captures -eq 0 -and
+                $run.receipt.cleanupFailures.Count -eq 0 -and $run.receipt.kernelVerifiedSurvivors.Count -eq 0) `
+                "D $mutation did not refuse with official zero-worker release: $($run.child.stdout) $($run.child.stderr)"
+            return @{release=$run.receiptPath;sha256=$run.receiptSha256;status=$run.receipt.status;reason=$run.receipt.primaryFailure}
+        }
+    }
+    foreach ($mutation in @('malformed','expired','future','over-15','missing-offset','traversal-id','hash')) {
+        Invoke-CapTest "D scene-marked actual command refuses $mutation lease" {
+            $run=Invoke-CapCaptureCommand -Name "d-lease-$mutation" -AdmissionMutation 'lane-d' -DSceneMutation 'valid' -LeaseMutation $mutation
+            Assert-CapTest ($run.child.exitCode -ne 0 -and $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and
+                -not $run.receipt.workerStarted -and $run.receipt.captures -eq 0 -and $run.receipt.cleanupFailures.Count -eq 0) 'D invalid lease did not refuse with official release.'
+            return @{release=$run.receiptPath;status=$run.receipt.status;reason=$run.receipt.primaryFailure}
+        }
+    }
+    foreach ($behavior in @('nonzero','timeout','primary-cleanup','receipt-block','trace-readonly')) {
+        Invoke-CapTest "D scene-marked actual command handles target $behavior" {
+            $run=Invoke-CapCaptureCommand -Name "d-target-$behavior" -AdmissionMutation 'lane-d' -DSceneMutation 'valid' -Behavior $behavior
+            Assert-CapTest ($run.child.exitCode -ne 0) 'D failing target returned success.'
+            if ($behavior -ceq 'receipt-block') {
+                Assert-CapTest ($null -eq $run.receipt -and $run.child.stderr.Contains('LEASE_RELEASE_WRITE_FAILED')) 'Blocked D official receipt did not remain an explicit write failure.'
+            } else {
+                Assert-CapTest ($null -ne $run.receipt -and $run.receipt.workerStarted -and
+                    $run.receipt.kernelVerifiedSurvivors.Count -eq 0 -and $run.receipt.captures -eq 0 -and
+                    $null -ne $run.receipt.primaryFailure) 'D failure lost primary/release/zero-survivor evidence.'
+                $expectedStatus=if ($behavior -in @('primary-cleanup','trace-readonly')) {'CLEANUP_UNPROVEN'} else {'FAILED_ZERO_SURVIVORS'}
+                Assert-CapTest ($run.receipt.status -ceq $expectedStatus) "D target $behavior had wrong cleanup classification."
+            }
+            return @{output=$run.output;releaseSha256=$run.receiptSha256;exit=$run.child.exitCode}
+        }
+    }
+    Invoke-CapTest 'D component layout geometry sessions and closed peer predicates' {
+        $layout=Get-CapDLayoutPath -LayoutBase 'C:\owned\layouts\workspace.json' -ProjectKey 'abc' -LoopId 'unsafe/id'
+        Assert-CapTest ($layout.ProjectPath -ceq 'C:\owned\layouts\workspace.eacf018fbf1678ba.json' -and
+            $layout.LoopPath -match '\\loop-[a-f0-9]{16}\.json$') 'Production layout-path mirror did not use little-endian SHA256 suffix.'
+        $geometry=Get-CapDGeometry -Metrics ([pscustomobject]@{Dpi=96;OuterBounds=@(30,30,1486,989);ClientBounds=@(0,0,1440,900)}) -WorkArea @(0,0,1920,1040)
+        Assert-CapTest (($geometry.outerBounds -join ',') -ceq '0,0,1456,1011') 'D placement copied B Y=30 or wrong client height.'
+        $null=Assert-CapRejects {Get-CapDGeometry -Metrics ([pscustomobject]@{Dpi=144;OuterBounds=@(0,0,1456,1011);ClientBounds=@(0,0,1440,952)}) -WorkArea @(0,0,1920,1080)} '96 DPI'
+        $null=Assert-CapRejects {Get-CapDGeometry -Metrics ([pscustomobject]@{Dpi=96;OuterBounds=@(0,0,1456,1011);ClientBounds=@(0,0,1440,952)}) -WorkArea @(0,0,1400,1000)} 'do not fit'
+        $sessions=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
+        Assert-CapTest (Test-CapDSessionCommand -CommandLine "`"C:\owned\zmx.exe`" attach $($sessions[0]) --size 80x24" -SessionNames $sessions) 'Exact D token refused.'
+        Assert-CapTest (-not (Test-CapDSessionCommand -CommandLine "zmx.exe attach $($sessions[0])-foreign --size 80x24" -SessionNames $sessions)) 'D recovery admitted prefix.'
+        Assert-CapTest (-not (Test-CapDSessionCommand -CommandLine 'zmx.exe ls' -SessionNames $sessions)) 'Bare listing is not an exact D token.'
+        $fixture=Get-Content -LiteralPath (Join-Path $scratch 'cases\d-scenes-valid\fixtures\fixture.json') -Raw | ConvertFrom-Json -DateKind String
+        $sequence=0
+        $frame=@{version=2;kind='request';requestID=[guid]::NewGuid().ToString();command=@{graphCommand=@{
+            projectPath=$fixture.graphs[0].project.path;command=@{resumeSession=@{_0='AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'}}}}} |
+            ConvertTo-Json -Depth 10 | ConvertFrom-Json -DateKind String
+        $reply=@(Get-CapDPeerFrames -Frame $frame -Fixture $fixture -Sequence ([ref]$sequence))
+        Assert-CapTest ($reply.Count -eq 1 -and $reply[0].success -and $reply[0].requestID -ceq $frame.requestID) 'Exact metadata-only acknowledgement missing.'
+        $frame.command.graphCommand.command.resumeSession._0='foreign-loop'
+        $null=Assert-CapRejects {Get-CapDPeerFrames -Frame $frame -Fixture $fixture -Sequence ([ref]$sequence)} 'exact metadata-only'
+        return 'DATA_COMPONENT_ONLY: path mirror, geometry, exact tokens and peer predicates; no pipe, provider or image.'
+    }
+    Invoke-CapTest 'D UIA action component predicates reject ambiguous disabled foreign and missing-pattern targets' {
+        $holder=Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 20') -WorkingDirectory $scratch -Role 'd-uia-component-holder'
+        $tracePath=Join-Path $scratch 'd-uia-component-calls.jsonl'
+        Set-CapTracePath -Path $tracePath
+        try {
+            foreach ($action in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')) {
+                $name=switch ($action) {'open-quick-chat' {'Quick Chat capture fixture'}; 'workspace-toggle-panel' {'Collapse loop panel'}; default {''}}
+                $spec=Get-CapActionSpec -Action $action -Name $name
+                $id=if ($spec.AutomationId) {$spec.AutomationId} else {$spec.AutomationIdPrefix+'123'}
+                $candidate=[pscustomobject]@{Name=$spec.Name;AutomationId=$id;ProcessId=$holder.Identity.Pid;IsEnabled=$true
+                    IsOffscreen=$false;ControlType=[Windows.Automation.ControlType]::Button;HasInvokePattern=$true
+                    BoundingRectangle=[pscustomobject]@{Left=1;Top=1;Width=100;Height=30}}
+                $candidates=@($candidate)
+                $arguments=@{Action=$action;Name=$name;SubjectId='AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+                    RootHandle=[IntPtr]1;ProcessIdentity=$holder.Identity;WindowProcessResolver={param($window) $holder.Identity.Pid}
+                    ElementResolver={param($window,$identity,$spec) @($candidates)}
+                    Invoker={param($spec,$element) [pscustomobject]@{componentOnly=$true;name=$element.Name}}}
+                $dispatch=Invoke-CapAction @arguments
+                Assert-CapTest $dispatch.componentOnly 'D explicit component dispatch missing.'
+                $candidates=@($candidate,$candidate);$null=Assert-CapRejects {Invoke-CapAction @arguments} 'found=2'
+                $candidates=@($candidate);$candidate.IsEnabled=$false;$null=Assert-CapRejects {Invoke-CapAction @arguments} 'disabled'
+                $candidate.IsEnabled=$true;$candidate.HasInvokePattern=$false;$null=Assert-CapRejects {Invoke-CapAction @arguments} 'InvokePattern'
+                $candidate.HasInvokePattern=$true;$candidate.IsOffscreen=$true;$null=Assert-CapRejects {Invoke-CapAction @arguments} 'found=0'
+                $candidate.IsOffscreen=$false;$candidate.ProcessId++;$null=Assert-CapRejects {Invoke-CapAction @arguments} 'does not match owned PID'
+                $candidate.ProcessId=$holder.Identity.Pid;$candidate.ControlType=[Windows.Automation.ControlType]::Text
+                $null=Assert-CapRejects {Invoke-CapAction @arguments} 'control type'
+            }
+            $refusals=@(Get-Content -LiteralPath $tracePath | ForEach-Object {ConvertFrom-Json $_ -DateKind String} |
+                Where-Object command -CEQ 'CapSelectorRefusal')
+            Assert-CapTest ($refusals.Count -eq 12) 'D component selector refusals were not retained in the case-owned trace.'
+        } finally {
+            Set-CapTracePath -Path (Join-Path $scratch 'test-calls.jsonl')
+            $null=Stop-CapManagedProcess -Identity $holder.Identity -TimeoutMilliseconds 5000
+            Assert-CapTest ($holder.StdoutTask.Wait(2000) -and $holder.StderrTask.Wait(2000)) 'D component EOF missing.'
+            $holder.Identity.Process.Dispose()
+        }
+        return @{mode='UIA_COMPONENT_ONLY: synthetic candidates/HWND/invoker, actual resolver; no native window or image.'
+            selectorRefusalTrace=$tracePath;selectorRefusalCount=$refusals.Count}
+    }
+    Invoke-CapTest 'D typed observation components distinguish phases fallback roles and route-away' {
+        function New-DObservationRow([string]$Id,[string]$Name) {
+            return [pscustomobject]@{AutomationId=$Id;Name=$Name;ProcessId=123;IsOffscreen=$false
+                BoundingRectangle=[pscustomobject]@{Left=1;Top=1;Width=220;Height=30}}
+        }
+        $healthy=@((New-DObservationRow 'graphcode-root' 'GraphCode'),(New-DObservationRow 'graph' 'Graph'))
+        $shell=New-DObservationRow 'workspace-tab-123' 'Shell tab'
+        $after=$healthy+@($shell,(New-DObservationRow 'workspace-quick-chat-bar-1' 'Quick Chat capture fixture'),
+            (New-DObservationRow 'workspace-restart-session-2' 'Restart session'),(New-DObservationRow 'workspace-show-graph-3' 'Show in Graph'))
+        $positive=Get-CapDObservation -Candidates $after -ExpectedProcessId 123 -State primary -Phase after
+        Assert-CapTest ($positive.healthyRoot -and $positive.observations.Count -eq 4) 'After predicate lacks exact observations.'
+        $null=Get-CapDObservation -Candidates ($healthy+@($shell)) -ExpectedProcessId 123 -State missing -Phase after
+        $null=Assert-CapRejects {Get-CapDObservation -Candidates $after -ExpectedProcessId 123 -State missing -Phase after} 'still exposes chat controls'
+        $shell.Name='Agent tab'
+        $null=Get-CapDObservation -Candidates ($healthy+@($shell)) -ExpectedProcessId 123 -State primary -Phase before
+        $null=Assert-CapRejects {Get-CapDObservation -Candidates ($healthy+@($shell)) -ExpectedProcessId 123 -State primary -Phase after} 'requires one bounded'
+        $shell.Name='Shell tab'
+        $null=Get-CapDObservation -Candidates ($healthy+@($shell,(New-DObservationRow 'workspace-tab-124' 'Agent tab'),
+            (New-DObservationRow 'workspace-tab-125' 'Split tab'))) -ExpectedProcessId 123 -State roles-component -Phase after
+        $null=Assert-CapRejects {Get-CapDObservation -Candidates @($shell) -ExpectedProcessId 123 -State missing -Phase after} 'healthy owned root'
+        return 'UIA_COMPONENT_ONLY: actual phase predicates with synthetic healthy trees; not live scenes.'
+    }
+}
+
+function Write-CapDContractReport {
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($result in $results) {
+        if (-not $names.Add($result.name)) { throw "Duplicate D case: $($result.name)" }
+    }
+    foreach ($path in $sourceHashesBefore.Keys) {
+        Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $sourceHashesBefore[$path]) "D source changed: $path"
+    }
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $report = [pscustomobject][ordered]@{suite='UiCaptureDriver';executed=$results.Count;passed=$passed;failed=$failed
+        mode=$mode;gui='NotExecuted';images=0;backendTurns=0;cases=@($results);sourceHashesBeforeImport=$sourceHashesBefore}
+    $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    $expected = if ($DAdapterCase -ceq 'All') {37} else {1}
+    if ($results.Count -ne $expected -or $failed -ne 0 -or $passed -ne $expected) { exit 1 }
+    exit 0
 }
 
 function Invoke-CapJobOwnershipContract {
@@ -2950,6 +3280,11 @@ if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenCon
     exit 0
 }
 
+if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDirectory')) {
+    Invoke-CapDContracts
+    Write-CapDContractReport
+}
+
 if ($PrepareFixturesOnly) {
     if ($ReceiptContractOnly -or $FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or $PrebuiltFixtureManifest) {
         throw 'Fixture preparation cannot also consume or run contract suites.'
@@ -2966,6 +3301,10 @@ $target = $null
 try {
     $prebuilt = Read-CapPrebuiltFixtures $PrebuiltFixtureManifest $PrebuiltFixtureManifestSha256
     $target = $prebuilt.Target
+    if ($DAdapterContractOnly) {
+        Invoke-CapDContracts
+        Write-CapDContractReport
+    }
     if ($JournalContractOnly) {
         Invoke-JournalContractGroups -IncludeConcurrent
         Invoke-CapTest 'real harmless managed-worker journal integration' {
@@ -2979,6 +3318,7 @@ try {
     } else {
     $cimRaceTarget = $prebuilt.CimRace
     if (-not $LaunchContractOnly) {
+        Invoke-CapDContracts
         Invoke-CapIdentityContracts
         Invoke-CapSelectorRefusalContracts
         Invoke-CapTest 'prebuilt fixture binder accepts exact artifacts and refuses missing or tampered bytes' { Invoke-CapPrebuiltFixtureContract }
@@ -3984,6 +4324,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 95 } else { 92 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 132 } else { 129 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

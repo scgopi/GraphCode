@@ -325,6 +325,44 @@ signalled handle is distinguished from a requested termination. Normal guarded
 termination and genuinely exited handles run in the offline suite; the exact
 access-denied exit race is not forced and is not claimed as runtime-proven.
 
+### D same-core Quick Chat adapter
+
+`D_QUICK_CHAT_V1` adds closed D scene, fixture and action branches to the same
+module, supervisor and worker. Scene-marked no-desktop jobs validate the actual
+scene and relocated fixture in both processes before the harmless console target.
+They do not execute D scenes, a peer, zmx, product, live UIA or images.
+
+The declared future inventory is ten scenes per phase, twenty images total:
+populated chats, primary chat, restored history Shell, graph destination,
+sidebar, overview, project, expanded/collapsed normal panels and route-away.
+The client is 1440x952 at measured 96 DPI, with measured frame/work-area placement.
+Runtime DPI-awareness remains unverified; jobs requiring it refuse.
+
+One exact project, two loops, two dated chats, two metric samples and three
+schema-2 layouts are bound to complete owned-prefix relocation and peer bytes.
+Only the two exact chat sessions use System32 cmd.exe with
+`/Q /K echo D_OFFLINE_QUICKCHAT_FIXTURE`. The peer acknowledges only the exact
+fixture project's metadata-only normal-loop `resumeSession`; unapproved
+verbs/payloads/identities fail. No backend attaches or receives input.
+
+`d-chat-history-roles` describes actual restored Shell, not saved Agent/Split
+labels. Those labels and missing-bound-chat live fallback remain **NotExecuted**
+with component-only predicates; jobs requiring them live refuse. No extra seeds,
+failed listing, fabricated trees/images, timing race or product hook substitutes.
+Current job containment, typed closed-file output proof, numbered journals,
+identity, UTC, lease and official release guards are retained; file closure is
+not raw stdout/stderr EOF.
+
+Focused child selection uses `-DAdapterContractOnly` (37 distinct cases).
+`-DAdapterCase SceneContract`, `ActualAdmission` or `FixtureDirectory` selects one named case.
+Prepare owned fixtures with `-PrepareFixturesOnly`, then supply the exact
+`-PrebuiltFixtureManifest` and `-PrebuiltFixtureManifestSha256` for launch cases.
+Default child registration includes inherited92 plus new37, exact129.
+Declared counts are not execution evidence. Component predicates, harmless
+launches and passing counts establish neither real scene behavior nor parity.
+A future live run still needs current product/build admission, accepted B release,
+applicable native evidence and a separately granted slot with90 seconds reserved.
+
 ## Issue 834 job ownership: source candidate, not native qualification
 
 The job-based pivot is an operator-delegated design decision for later user

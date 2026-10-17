@@ -820,7 +820,8 @@ function Assert-CapZmxLeasePath {
 function Get-CapActionSpec {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit')][string]$Action,
+        [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
+            'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')][string]$Action,
         [string]$Name
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -833,6 +834,16 @@ function Get-CapActionSpec {
             return [pscustomobject]@{ AutomationId = $null; AutomationIdPrefix = 'open-project-'; Name = $Name; CommandId = $null }
         }
         'overview-destination' { return [pscustomobject]@{ AutomationId = 'overview-destination'; AutomationIdPrefix = $null; Name = 'Graph'; CommandId = $null } }
+        'quick-chats-destination' { return [pscustomobject]@{AutomationId='quick-chats-destination';AutomationIdPrefix=$null;Name='Quick Chats';CommandId=$null} }
+        'open-quick-chat' {
+            if ($Name -cnotin @('Quick Chat capture fixture','Quick Chat history fixture')) { throw 'Unknown D fixture chat target.' }
+            return [pscustomobject]@{AutomationId=$null;AutomationIdPrefix='quick-chat-card-';Name=$Name;CommandId=$null}
+        }
+        'workspace-show-graph' { return [pscustomobject]@{AutomationId=$null;AutomationIdPrefix='workspace-show-graph-';Name='Show in Graph';CommandId=$null} }
+        'workspace-toggle-panel' {
+            if ($Name -cnotin @('Expand loop panel','Collapse loop panel')) { throw 'Normal panel action requires its exact current state.' }
+            return [pscustomobject]@{AutomationId=$null;AutomationIdPrefix='workspace-toggle-panel-';Name=$Name;CommandId=$null}
+        }
         'open-loop' {
             if ([string]::IsNullOrWhiteSpace($Name)) { throw 'open-loop requires a loop name.' }
             return [pscustomobject]@{ AutomationId = $null; AutomationIdPrefix = 'canvas-card-'; Name = $Name; CommandId = $null }
@@ -850,7 +861,9 @@ function Assert-CapFixtureMapping {
         [Parameter(Mandatory)][string]$MappingPath,
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedMappingSha256,
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSourceSha256,
-        [Parameter(Mandatory)][string]$OriginalRoot
+        [Parameter(Mandatory)][string]$OriginalRoot,
+        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1')][string]$SceneAdapter = 'B_FIVE_SCENES_V1',
+        [string]$ExpectedPeerSha256
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
     $FixturePath = Assert-CapArtifactPath -Root $Root -Path $FixturePath
@@ -863,23 +876,26 @@ function Assert-CapFixtureMapping {
         throw 'Fixture mapping/source does not match its exact trusted hashes.'
     }
     $mapping = Get-Content -LiteralPath $MappingPath -Raw | ConvertFrom-Json -DateKind String
+    $isD = $SceneAdapter -ceq 'D_QUICK_CHAT_V1'
+    $graphCount = if ($isD) {1} else {2}
+    $nodeCount = if ($isD) {2} else {10}
     if ($mapping.sourcePath -cne (Join-Path $OriginalRoot 'fixture.json') -or
         $mapping.sourceSha256 -ne $ExpectedSourceSha256 -or
         $mapping.copiedSourcePath -cne $SourcePath -or $mapping.rewrittenFixturePath -cne $FixturePath -or
         $mapping.rewrittenFixtureSha256 -ne $fixtureHash -or
         $mapping.pathPrefixMap.from -cne $OriginalRoot -or
         $mapping.pathPrefixMap.to -cne (Join-Path $Root 'fixtures\projects') -or
-        $mapping.graphs -ne 2 -or $mapping.topLevelNodes -ne 10 -or $mapping.pathsRewritten -ne $true) {
+        $mapping.graphs -ne $graphCount -or $mapping.topLevelNodes -ne $nodeCount -or $mapping.pathsRewritten -ne $true) {
         throw 'Fixture mapping does not bind the exact source and rewritten owned-root fixture.'
     }
     $source = Get-Content -LiteralPath $SourcePath -Raw | ConvertFrom-Json -DateKind String
     $fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json -DateKind String
-    if ($source.graphs.Count -ne 2 -or $fixture.graphs.Count -ne 2 -or
-        ($source.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne 10 -or
-        ($fixture.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne 10) {
+    if ($source.graphs.Count -ne $graphCount -or $fixture.graphs.Count -ne $graphCount -or
+        ($source.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne $nodeCount -or
+        ($fixture.graphs | ForEach-Object { $_.nodes.Count } | Measure-Object -Sum).Sum -ne $nodeCount) {
         throw 'Fixture mapping changed the two-graph/ten-node capture contract.'
     }
-    foreach ($index in 0..1) {
+    foreach ($index in 0..($graphCount-1)) {
         $sourceProject = $source.graphs[$index].project
         $mappedProject = $fixture.graphs[$index].project
         if ($sourceProject.path -cne (Join-Path $OriginalRoot $sourceProject.name) -or
@@ -914,6 +930,18 @@ function Assert-CapFixtureMapping {
         ConvertFrom-Json -DateKind String | ConvertTo-Json -Depth 40 -Compress
     if (($fixture | ConvertTo-Json -Depth 40 -Compress) -cne $expectedFixture) {
         throw 'Rewritten fixture differs from the source beyond the complete owned-prefix substitution.'
+    }
+    if ($isD) {
+        if ($mapping.quickChats -ne 2 -or $mapping.layouts -ne 3) { throw 'D fixture mapping requires two chats and three layouts.' }
+        Assert-CapDFixture -Fixture $fixture -ProjectRoot $projectsRoot
+        $peerPath = Assert-CapArtifactPath -Root $Root -Path (Join-Path $Root 'inputs\offline-peer-source.ps1')
+        $peerBytes = [IO.File]::ReadAllBytes($peerPath)
+        $canonicalPeer = [Text.UTF8Encoding]::new($false).GetBytes((Get-CapDPeerSource))
+        if ($ExpectedPeerSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($peerBytes)) -ne $ExpectedPeerSha256 -or
+            -not [Linq.Enumerable]::SequenceEqual[byte]($peerBytes,$canonicalPeer)) {
+            throw 'D peer bytes differ from the hash-bound same-module fixture peer.'
+        }
     }
     return [pscustomobject]@{ FixtureSha256 = $fixtureHash; SourceSha256 = $sourceHash; MappingSha256 = $mappingHash }
 }
@@ -1427,6 +1455,7 @@ function Invoke-CapAction {
         [Parameter(Mandatory)][IntPtr]$RootHandle,
         [Parameter(Mandatory)]$ProcessIdentity,
         [string]$Name,
+        [string]$SubjectId,
         [scriptblock]$Invoker,
         [scriptblock]$WindowProcessResolver,
         [scriptblock]$ElementResolver
@@ -1435,7 +1464,8 @@ function Invoke-CapAction {
 
 
     if ($Action -in @('reply', 'reclaim', 'keep')) { throw "Mutating graph action '$Action' is prohibited by the capture contract." }
-    if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit')) {
+    if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
+        'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')) {
         throw "Unsupported capture action '$Action'."
     }
     if ($WindowProcessResolver -and -not $Invoker) { throw 'A custom HWND resolver is allowed only with the action mock.' }
@@ -1465,6 +1495,17 @@ function Invoke-CapAction {
     $current = if ($element.PSObject.Properties['Current']) { $element.Current } else { $element }
     $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
     $null = Assert-CapUiaProcessIds -ExpectedProcessId $ProcessIdentity.Pid -ObservedProcessIds @([int]$current.ProcessId)
+    if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')) {
+        if (-not $current.IsEnabled) { throw 'D action target is disabled.' }
+        if ($current.ControlType -ne [System.Windows.Automation.ControlType]::Button -and
+            $current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { throw 'D action target has an unexpected control type.' }
+        if ($Invoker -and (-not $element.PSObject.Properties['HasInvokePattern'] -or -not $element.HasInvokePattern)) {
+            throw 'D component action target does not support InvokePattern.'
+        }
+        if ($Action -ceq 'workspace-toggle-panel' -and $SubjectId -cne 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA') {
+            throw 'D panel action requires the normal-loop subject.'
+        }
+    }
     if ($Invoker) { return & $Invoker $spec $element }
     $invoke = $element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $invoke.Invoke()
@@ -2348,7 +2389,8 @@ function Get-CapOwnedDescendants {
         [Parameter(Mandatory)][string]$SessionName,
         [Parameter(Mandatory)][string]$CommandMarker,
         [switch]$AllowGraphCodeRoot,
-        [switch]$AllowUnmarkedCmd
+        [switch]$AllowUnmarkedCmd,
+        [string[]]$ExactSessionNames = @()
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -2414,15 +2456,20 @@ function Get-CapOwnedDescendants {
             if ($imagePath -ieq (ConvertTo-CapImagePath -Path $ZmxPath)) {
                 $validParentRole = $parent.Role -eq 'zmx-seed' -or
                     ($AllowGraphCodeRoot -and (Test-CapGraphAppRootRole -Role $parent.Role))
-                if (-not $validParentRole -or $meta.CommandLine -notlike "*$SessionName*") {
+                $sessionMatches = if ($ExactSessionNames.Count -gt 0) {
+                    Test-CapDSessionCommand -CommandLine $meta.CommandLine -SessionNames $ExactSessionNames
+                } else { $meta.CommandLine -like "*$SessionName*" }
+                if (-not $validParentRole -or -not $sessionMatches) {
                     $process.Dispose()
                     throw "Unrecognized live zmx child PID $pid; refusing."
                 }
                 $identity.Role = 'zmx-daemon'
             } elseif ($imagePath -ieq (ConvertTo-CapImagePath -Path $CmdPath)) {
-                $commandMatches = $CommandMarker -and $meta.CommandLine -like "*$CommandMarker*"
+                $dSeed = $SessionName -cin @('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
+                $expectedMarker = if ($dSeed -or $ExactSessionNames.Count -gt 0) {'D_OFFLINE_QUICKCHAT_FIXTURE'} else {$CommandMarker}
+                $commandMatches = $expectedMarker -and $meta.CommandLine -like "*$expectedMarker*"
                 if ($parent.Role -notin @('zmx-daemon', 'offline-cmd-peer') -or
-                    (-not $commandMatches -and -not $AllowUnmarkedCmd)) {
+                    (-not $commandMatches -and (-not $AllowUnmarkedCmd -or $dSeed -or $ExactSessionNames.Count -gt 0))) {
                     $process.Dispose()
                     throw "Unrecognized live cmd child PID $pid; refusing."
                 }
@@ -2588,6 +2635,46 @@ function Assert-CapDataRecord {
 
 function Assert-CapSceneContract {
     param([Parameter(Mandatory)]$Job)
+    if ($Job.lane -ceq 'D' -and $Job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
+        Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+        Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array];fixture=[pscustomobject]} 'D scene job'
+        Assert-CapDataRecord $Job.authority @{centralCaptureLeaseGrantedByThisArtifact=[bool];dWorkerMayLaunchGui=[bool]} 'D non-authority'
+        $contract=$Job.captureContract
+        Assert-CapDataRecord $contract @{phases=[array];sceneCountPerPhase=[long];expectedClientWH=[array];dpi=[long]
+            canvasZoomPercent=[long];placement=[string];estimatedSeconds=[long];cleanupReserveSeconds=[long]
+            requireLiveMissingChat=[bool];requireLiveSavedAgentSplit=[bool]} 'D scene contract'
+        if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -or $Job.authority.dWorkerMayLaunchGui -or
+            ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 10 -or
+            ($contract.expectedClientWH -join ',') -cne '1440,952' -or $contract.dpi -ne 96 -or
+            $contract.canvasZoomPercent -ne 100 -or $contract.placement -cne 'MEASURED_FIT_WORKAREA' -or
+            $contract.estimatedSeconds -le 0 -or $contract.estimatedSeconds -gt 810 -or $contract.cleanupReserveSeconds -ne 90 -or
+            $Job.scenes.Count -ne 10 -or (($Job.scenes | ForEach-Object name) -join ',') -cne ((Get-CapDSceneNames) -join ',')) {
+            throw 'D scene, geometry, budget or non-authority contract differs from the closed adapter.'
+        }
+        if ($contract.requireLiveMissingChat -or $contract.requireLiveSavedAgentSplit) {
+            throw 'D live missing-chat and saved Agent/Split obligations are NotExecuted; required-live requests refuse.'
+        }
+        if ($contract.PSObject.Properties['requireRuntimeDpiAwareness'] -and $contract.requireRuntimeDpiAwareness) {
+            throw 'Runtime DPI awareness is unverified; a required-runtime-awareness job refuses.'
+        }
+        foreach ($scene in $Job.scenes) {
+            Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'D scene'
+            if ($scene.naturalWidthBeforeAfter.Count -ne 2 -or
+                @($scene.naturalWidthBeforeAfter | Where-Object {$_ -isnot [long] -or $_ -lt 1 -or $_ -gt 1000}).Count -ne 0) {
+                throw 'D canvas widths must bind both frozen source phases.'
+            }
+        }
+        Assert-CapDataRecord $Job.fixture @{sha256=[string];mappingSha256=[string];originalRoot=[string];offlinePeerReference=[pscustomobject]} 'D fixture'
+        Assert-CapDataRecord $Job.fixture.offlinePeerReference @{sha256=[string]} 'D peer'
+        Assert-CapDataRecord $Job.binaries.offlineZmx @{sha256=[string];seedCommand=[array]} 'D seed'
+        if (($Job.binaries.offlineZmx.seedCommand -join [char]0) -cne (@('/Q','/K','echo D_OFFLINE_QUICKCHAT_FIXTURE') -join [char]0)) {
+            throw 'D requires the exact cmd-only seed command.'
+        }
+        foreach ($digest in @($Job.fixture.sha256,$Job.fixture.mappingSha256,$Job.fixture.offlinePeerReference.sha256,$Job.binaries.offlineZmx.sha256)) {
+            if ($digest -notmatch '^[A-Fa-f0-9]{64}$') { throw 'D scene input digest is missing or invalid.' }
+        }
+        return
+    }
     if ($Job.lane -cne 'B' -or $Job.sceneAdapter -cne 'B_FIVE_SCENES_V1') {
         throw 'Unsupported scene adapter; generic identity does not implement C/D/E scene execution.'
     }
@@ -2620,6 +2707,251 @@ function Assert-CapSceneContract {
         $Job.fixture.offlinePeerReference.sha256, $Job.binaries.offlineZmx.sha256)) {
         if ($digest -notmatch '^[A-Fa-f0-9]{64}$') { throw 'Scene input SHA256 digest is missing or invalid.' }
     }
+}
+
+function Get-CapDSceneNames {
+    return @('d-quick-chats-canvas','d-chat-primary-shell','d-chat-history-roles','d-chat-show-graph-destination',
+        'd-neighbor-sidebar','d-neighbor-overview','d-neighbor-project','d-normal-panel-expanded',
+        'd-normal-panel-collapsed','d-normal-route-away-project')
+}
+
+function Assert-CapDFixture {
+    param([Parameter(Mandatory)]$Fixture,[Parameter(Mandatory)][string]$ProjectRoot)
+    Assert-CapDataRecord $Fixture @{schemaVersion=[long];sceneAdapter=[string];fixtureUtc=[string];graphs=[array];chats=[array];layouts=[array]} 'D fixture data'
+    $utc=ConvertTo-CapUtcInstant -Value $Fixture.fixtureUtc -Field 'fixtureUtc'
+    $seconds=($utc-[DateTime]::new(2001,1,1,0,0,0,[DateTimeKind]::Utc)).TotalSeconds
+    if ($Fixture.schemaVersion -ne 1 -or $Fixture.sceneAdapter -cne 'D_QUICK_CHAT_V1' -or
+        $Fixture.createdAt -isnot [ValueType] -or [Math]::Abs([double]$Fixture.createdAt-$seconds) -gt 0.001 -or
+        $seconds -le 10800 -or $Fixture.graphs.Count -ne 1 -or $Fixture.chats.Count -ne 2 -or $Fixture.layouts.Count -ne 3) {
+        throw 'D fixture schema, frozen Swift-reference date or inventory differs.'
+    }
+    $graph=$Fixture.graphs[0]
+    $project=Join-Path $ProjectRoot 'D Offline Capture Fixture'
+    if ($graph.id -cne 'd-capture-graph' -or $graph.project.name -cne 'D Offline Capture Fixture' -or
+        $graph.project.path -cne $project -or $graph.nodes.Count -ne 2 -or $graph.edges.Count -ne 0) { throw 'D graph identity differs.' }
+    $ids=@('33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444',
+        'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA','BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB')
+    foreach ($i in 0..1) {
+        $chat=$Fixture.chats[$i]
+        if ($chat.id -cne $ids[$i] -or $chat.title -cne @('Quick Chat capture fixture','Quick Chat history fixture')[$i] -or
+            $chat.backend -cne @('claudeCode','copilot')[$i] -or $chat.createdAt -isnot [ValueType] -or
+            [Math]::Abs([double]$chat.createdAt-($seconds-@(2100,10800)[$i])) -gt 0.001 -or $null -ne $chat.activity) {
+            throw 'D chat identity, backend or frozen date differs.'
+        }
+        $node=$graph.nodes[$i]
+        if ($node.id -cne $ids[$i+2] -or $node.title -cne @('Loop workspace fixture','Secondary loop fixture')[$i] -or
+            $node.loopType -cne 'turnBased' -or $node.state -cne @('running','idle')[$i] -or
+            $node.createdAt -isnot [ValueType] -or [double]$node.createdAt -le 0) { throw 'D normal-loop identity or date differs.' }
+    }
+    $metric=$graph.nodes[0].metricHistory
+    if ($metric -isnot [array] -or $metric.Count -ne 2 -or $metric[0].value -isnot [ValueType] -or
+        $metric[1].value -isnot [ValueType] -or $metric[0].value -ne 3 -or $metric[1].value -ne 2 -or
+        $graph.nodes[0].inputTokens -ne 256 -or $graph.nodes[0].outputTokens -ne 128) {
+        throw 'D normal-loop metric requires two numeric object samples and declared synthetic tokens.'
+    }
+    foreach ($i in 0..2) {
+        $layout=$Fixture.layouts[$i]
+        $expectedProject=if ($i -lt 2) {'graphcode://quick-chats'} else {$project}
+        if ($layout.schemaVersion -ne 2 -or $layout.project -cne $expectedProject -or $layout.loop -cne $ids[$i] -or
+            $layout.selectedTab -ne 0 -or $layout.tabs.Count -ne 1 -or $layout.tabs[0].id -ne ($i+1) -or
+            $layout.tabs[0].direction -cne 'horizontal' -or $layout.tabs[0].focused -ne 0 -or
+            $layout.tabs[0].panes.Count -ne 1 -or $layout.tabs[0].panes[0].id -cne $ids[$i] -or
+            $layout.tabs[0].panes[0].agent -isnot [bool] -or $layout.tabs[0].panes[0].agent -ne ($i -eq 2)) {
+            throw 'D layout binding, topology or role differs from the two-seed restored-Shell contract.'
+        }
+    }
+}
+
+function Get-CapDLayoutPath {
+    param([Parameter(Mandatory)][string]$LayoutBase,[Parameter(Mandatory)][string]$ProjectKey,[Parameter(Mandatory)][string]$LoopId)
+    $suffixFor={param([string]$Text)
+        $bytes=[Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($Text))
+        [Convert]::ToHexString([byte[]]$bytes[7..0]).ToLowerInvariant()
+    }
+    $base=if ($LayoutBase.EndsWith('.json',[StringComparison]::Ordinal)) {$LayoutBase.Substring(0,$LayoutBase.Length-5)} else {$LayoutBase}
+    $projectPath="$base.$(& $suffixFor $ProjectKey).json"
+    $file=if ($LoopId -cmatch '^[A-Za-z0-9_-]{1,128}$') {"$LoopId.json"} else {"loop-$(& $suffixFor $LoopId).json"}
+    return [pscustomobject]@{ProjectPath=$projectPath;LoopPath=(Join-Path (Split-Path -Parent $projectPath) $file)}
+}
+
+function Test-CapDSessionCommand {
+    param([Parameter(Mandatory)][string]$CommandLine,[Parameter(Mandatory)][string[]]$SessionNames)
+    $expected=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
+    if (($SessionNames -join ',') -cne ($expected -join ',')) { throw 'D session recovery requires the two exact declared chat sessions.' }
+    foreach ($name in $SessionNames) {
+        if ($CommandLine -cmatch ('(?:^|\s|")'+[regex]::Escape($name)+'(?=$|\s|")')) { return $true }
+    }
+    return $false
+}
+
+function Get-CapDGeometry {
+    param([Parameter(Mandatory)]$Metrics,[Parameter(Mandatory)][int[]]$WorkArea)
+    if ($Metrics.Dpi -ne 96 -or $WorkArea.Count -ne 4 -or $Metrics.ClientBounds.Count -ne 4 -or
+        $Metrics.OuterBounds.Count -ne 4) { throw 'D geometry requires measured 96 DPI and ordered rectangles.' }
+    $outer=$Metrics.OuterBounds;$client=$Metrics.ClientBounds
+    $width=1440+($outer[2]-$outer[0])-($client[2]-$client[0])
+    $height=952+($outer[3]-$outer[1])-($client[3]-$client[1])
+    if ($width -lt 1440 -or $height -lt 952 -or $WorkArea[2]-$WorkArea[0] -lt $width -or $WorkArea[3]-$WorkArea[1] -lt $height) {
+        throw 'D requested client and measured frame do not fit the work area.'
+    }
+    return [pscustomobject]@{x=$WorkArea[0];y=$WorkArea[1];width=$width;height=$height
+        outerBounds=@($WorkArea[0],$WorkArea[1],($WorkArea[0]+$width),($WorkArea[1]+$height))}
+}
+
+function Get-CapDObservation {
+    param([Parameter(Mandatory)][object[]]$Candidates,[Parameter(Mandatory)][int]$ExpectedProcessId,
+        [Parameter(Mandatory)][ValidateSet('chats','primary','history','project','overview','expanded','collapsed','missing','roles-component')][string]$State,
+        [Parameter(Mandatory)][ValidateSet('before','after')][string]$Phase)
+    $rows=@($Candidates | ForEach-Object {if ($_.PSObject.Properties['Current']) {$_.Current} else {$_}})
+    foreach ($row in $rows) {$null=Assert-CapUiaProcessIds -ExpectedProcessId $ExpectedProcessId -ObservedProcessIds @([int]$row.ProcessId)}
+    $root=@($rows | Where-Object AutomationId -CEQ 'graphcode-root')
+    $graph=@($rows | Where-Object AutomationId -CEQ 'graph')
+    if ($root.Count -ne 1 -or $graph.Count -ne 1 -or $root[0].IsOffscreen -or $graph[0].IsOffscreen -or
+        $root[0].BoundingRectangle.Width -le 0 -or $graph[0].BoundingRectangle.Width -le 0) { throw 'D observation requires one healthy owned root and Graph.' }
+    $required=[Collections.Generic.List[object]]::new()
+    $require={param([string]$Prefix,[string]$Name)
+        $found=@($rows | Where-Object {([string]$_.AutomationId).StartsWith($Prefix,[StringComparison]::Ordinal) -and $_.Name -ceq $Name})
+        if ($found.Count -ne 1 -or $found[0].IsOffscreen -or $found[0].BoundingRectangle.Width -le 0 -or
+            $found[0].BoundingRectangle.Height -le 0) { throw "D observation requires one bounded $Prefix/$Name; found=$($found.Count)." }
+        $required.Add([pscustomobject]@{name=$found[0].Name;automationId=$found[0].AutomationId;bounds=$found[0].BoundingRectangle})
+    }
+    switch ($State) {
+        'chats' {& $require 'quick-chat-card-' 'Quick Chat capture fixture'; & $require 'quick-chat-card-' 'Quick Chat history fixture'}
+        {$_ -in @('primary','history')} {
+            if ($Phase -ceq 'after') {
+                & $require 'workspace-quick-chat-bar-' $(if ($State -ceq 'primary') {'Quick Chat capture fixture'} else {'Quick Chat history fixture'})
+                & $require 'workspace-tab-' 'Shell tab'
+                & $require 'workspace-restart-session-' 'Restart session'
+                & $require 'workspace-show-graph-' 'Show in Graph'
+                if (@($rows | Where-Object {$_.AutomationId -match '^workspace-(toggle-panel|detail-|stop-)'}).Count -ne 0) { throw 'D chat workspace exposes normal-loop details or actions.' }
+            } else {
+                $tabs=@($rows | Where-Object {$_.AutomationId -match '^workspace-tab-[0-9]+$'})
+                if ($tabs.Count -ne 1) { throw 'Baseline D chat requires its actual single restored tab.' }
+                & $require 'workspace-tab-' $tabs[0].Name
+            }
+        }
+        {$_ -in @('project','overview')} {
+            & $require 'canvas-card-' 'Loop workspace fixture'; & $require 'canvas-card-' 'Secondary loop fixture'
+            if (@($rows | Where-Object {$_.AutomationId -match '^workspace-(tab-|quick-chat-bar-|loop-bar-|detail-|toggle-panel-)'}).Count -ne 0) { throw 'D route-away still exposes workspace chrome.' }
+        }
+        'expanded' {
+            & $require 'workspace-loop-bar-' 'Selected loop workspace'; & $require 'workspace-toggle-panel-' 'Collapse loop panel'
+            & $require 'workspace-detail-sparkline-' 'Metric sparkline'; & $require 'workspace-detail-start-' 'Start time'
+            & $require 'workspace-detail-usage-' '384 tokens'; & $require 'workspace-tab-' 'Agent tab'
+        }
+        'collapsed' {
+            & $require 'workspace-loop-bar-' 'Selected loop workspace'; & $require 'workspace-toggle-panel-' 'Expand loop panel'
+            & $require 'workspace-tab-' 'Agent tab'
+            if (@($rows | Where-Object AutomationId -Like 'workspace-detail-*').Count -ne 0) { throw 'Collapsed D panel still exposes details.' }
+        }
+        'missing' {
+            & $require 'workspace-tab-' 'Shell tab'
+            if (@($rows | Where-Object {$_.AutomationId -match '^workspace-(quick-chat-bar-|restart-session-|show-graph-)'}).Count -ne 0) { throw 'Missing-bound-chat component still exposes chat controls.' }
+        }
+        'roles-component' {& $require 'workspace-tab-' 'Shell tab'; & $require 'workspace-tab-' 'Agent tab'; & $require 'workspace-tab-' 'Split tab'}
+    }
+    return [pscustomobject]@{state=$State;phase=$Phase;readSucceeded=$true;healthyRoot=$true;observations=@($required)
+        evidenceMode='DATA_PREDICATE_NOT_LIVE_OBSERVATION';backendAgentAttach=$false;restartInvoked=$false}
+}
+
+function Get-CapDPeerFrames {
+    param([Parameter(Mandatory)]$Frame,[Parameter(Mandatory)]$Fixture,[Parameter(Mandatory)][ref]$Sequence)
+    $project=$Fixture.graphs[0].project
+    if ($Frame.kind -ceq 'hello') {
+        if ($Frame.version -ne 2) { throw 'D peer requires protocol 2.' }
+        return [ordered]@{version=2;kind='hello';supportedVersions=@(1,2);selectedVersion=2}
+    }
+    Assert-CapDataRecord $Frame @{version=[long];kind=[string];requestID=[string];command=[pscustomobject]} 'D peer request'
+    if ($Frame.version -ne 2 -or $Frame.kind -cne 'request' -or @($Frame.command.PSObject.Properties).Count -ne 1) { throw 'D peer refuses malformed command.' }
+    $verb=@($Frame.command.PSObject.Properties)[0].Name
+    $payload=$Frame.command.$verb
+    if ($payload -isnot [pscustomobject]) { throw 'D peer refuses malformed payload.' }
+    $keys=@($payload.PSObject.Properties.Name)
+    $response=[ordered]@{version=2;kind='response';requestID=$Frame.requestID;success=$true}
+    switch -CaseSensitive ($verb) {
+        'listRecentProjects' {
+            if ($keys.Count -ne 0) { throw 'D peer refuses extra payload.' }
+            $response.Remove('success');$response.event=@{recentProjectsListed=@(@{path=$project.path;name=$project.name;remote=$false;lastOpenedAt=0})}
+            $Sequence.Value++
+            return @($response,@{version=2;kind='event';sequence=$Sequence.Value;event=@{graphChanged=$Fixture.graphs[0]}})
+        }
+        'listQuickChats' {
+            if ($keys.Count -ne 0) { throw 'D peer refuses extra payload.' }
+            $response.Remove('success');$response.event=@{quickChatsListed=@($Fixture.chats)}
+        }
+        'openQuickChat' {
+            if (($keys -join ',') -cne 'id' -or $payload.id -cnotin @($Fixture.chats | ForEach-Object id)) { throw 'D peer refuses unknown chat.' }
+            $chat=@($Fixture.chats | Where-Object id -CEQ $payload.id);$Sequence.Value++
+            return @($response,@{version=2;kind='event';sequence=$Sequence.Value;event=@{quickChatChanged=$chat[0]}})
+        }
+        {$_ -cin @('openProject','readProjectGraph')} {
+            if (($keys -join ',') -cne 'path' -or $payload.path -cne $project.path) { throw 'D peer refuses foreign project.' }
+            $response.Remove('success');$response.event=@{graphChanged=$Fixture.graphs[0]}
+        }
+        'graphCommand' {
+            if ((($keys | Sort-Object) -join ',') -cne 'command,projectPath' -or $payload.projectPath -cne $project.path -or
+                $payload.command -isnot [pscustomobject] -or @($payload.command.PSObject.Properties).Count -ne 1 -or
+                @($payload.command.PSObject.Properties)[0].Name -cne 'resumeSession' -or
+                $payload.command.resumeSession -isnot [pscustomobject] -or
+                (@($payload.command.resumeSession.PSObject.Properties.Name) -join ',') -cne '_0' -or
+                $payload.command.resumeSession._0 -cne 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA') { throw 'D peer refuses all but exact metadata-only resumeSession.' }
+        }
+        {$_ -cin @('restoreOpenProjects','openGlobalGraph')} {if ($keys.Count -ne 0) { throw 'D peer refuses extra payload.' }}
+        default { throw "D peer refuses unapproved command '$verb'." }
+    }
+    return $response
+}
+
+function Get-CapDPeerSource {
+    return @'
+param([string]$PipeName,[string]$FixturePath,[string]$CommandLog,[string]$ModulePath,[string]$ModuleSha256)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if ((Get-FileHash -LiteralPath $ModulePath -Algorithm SHA256).Hash -ne $ModuleSha256) {
+    throw 'D fixture peer module hash changed.'
+}
+Import-Module $ModulePath -Force -WarningAction SilentlyContinue
+$fixture = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json -DateKind String
+function Read-Exact([IO.Stream]$Stream,[int]$Length) {
+    $bytes = [byte[]]::new($Length)
+    $offset = 0
+    while ($offset -lt $Length) {
+        $read = $Stream.Read($bytes,$offset,$Length-$offset)
+        if ($read -eq 0) {
+            if ($offset -ne 0) { throw 'Truncated fixture peer frame.' }
+            return $null
+        }
+        $offset += $read
+    }
+    return ,$bytes
+}
+$sequence = 0
+while ($true) {
+    $pipe = [IO.Pipes.NamedPipeServerStream]::new($PipeName,[IO.Pipes.PipeDirection]::InOut,1)
+    try {
+        $pipe.WaitForConnection()
+        while ($pipe.IsConnected) {
+            $header = Read-Exact $pipe 4
+            if ($null -eq $header) { break }
+            $length = ([int]$header[0] -shl 24) -bor ([int]$header[1] -shl 16) -bor ([int]$header[2] -shl 8) -bor $header[3]
+            if ($length -le 0 -or $length -gt 2097152) { throw 'Invalid fixture peer frame length.' }
+            $bytes = Read-Exact $pipe $length
+            if ($null -eq $bytes) { throw 'Missing fixture peer frame body.' }
+            $frame = [Text.UTF8Encoding]::new($false,$true).GetString($bytes) | ConvertFrom-Json -DateKind String
+            $responses = @(Get-CapDPeerFrames -Frame $frame -Fixture $fixture -Sequence ([ref]$sequence))
+            [IO.File]::AppendAllText($CommandLog,($frame | ConvertTo-Json -Depth 20 -Compress)+"`n",[Text.UTF8Encoding]::new($false))
+            foreach ($response in $responses) {
+                $payload = [Text.Encoding]::UTF8.GetBytes(($response | ConvertTo-Json -Depth 40 -Compress))
+                $size = $payload.Length
+                $prefix = [byte[]]@((($size -shr 24)-band 255),(($size -shr 16)-band 255),(($size -shr 8)-band 255),($size-band 255))
+                $pipe.Write($prefix,0,4)
+                $pipe.Write($payload,0,$payload.Length)
+                $pipe.Flush()
+            }
+        }
+    } finally { $pipe.Dispose() }
+}
+'@
 }
 
 function Read-CapBoundJson {
@@ -3772,6 +4104,14 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-CapDSceneNames',
+    'Assert-CapDFixture',
+    'Get-CapDLayoutPath',
+    'Test-CapDSessionCommand',
+    'Get-CapDGeometry',
+    'Get-CapDObservation',
+    'Get-CapDPeerFrames',
+    'Get-CapDPeerSource',
     'Start-CapJobLauncher',
     'Release-CapJobLauncher',
     'Wait-CapJobTarget',
