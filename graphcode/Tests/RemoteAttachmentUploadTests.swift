@@ -268,6 +268,32 @@ struct RemoteAttachmentUploadTests {
 }
 
 extension RemoteAttachmentUploadTests {
+  @Test(arguments: [
+    (CLISessionBackendKind.copilotCLI, GraphcodeSettings(copilotPermissions: .allowTools)),
+    (CLISessionBackendKind.codex, GraphcodeSettings(codexApprovals: .workspace)),
+  ])
+  func aResumedLoopKeepsItsDirectoryGrants(
+    backend: CLISessionBackendKind, settings: GraphcodeSettings
+  ) throws {
+    let node = LoopNode(id: nodeID, title: "Fix", loopType: .turnBased, backend: backend)
+    let argv = try #require(
+      ZmxSessionLauncher.resumeArguments(
+        forNode: node, sessionID: "abc-123", projectPath: sshProject, settings: settings))
+    let memory = RemoteGraphAccess.memoryDirectory(forProjectPath: sshProject, nodeID: nodeID)
+    let grant = try #require(argv.firstIndex(of: memory))
+    #expect(argv[grant - 1] == "--add-dir")
+  }
+
+  @Test
+  func aResumeOnDefaultSettingsStillGrantsNothing() {
+    let paths = ["/home/dev/widget"]
+    for backend in [CLISessionBackendKind.copilotCLI, .codex, .claudeCode] {
+      let argv = backend.launchArguments(
+        prompt: nil, tier: .standard, workspacePaths: paths, resuming: true)
+      #expect(!argv.contains("--add-dir"))
+    }
+  }
+
   @Test
   func removalTargetsOnlyTheNodesRemoteMemory() throws {
     let other = UUID()
