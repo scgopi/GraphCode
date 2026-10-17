@@ -425,8 +425,13 @@ struct RemoteSessionLaunchTests {
     let node = LoopNode(title: "Fix", loopType: .turnBased)
     let paths = ZmxSessionLauncher.workspacePaths(
       forNode: node, projectPath: location.projectPath)
-    // The path a path-verifying backend needs is the one the session sees on its host.
-    #expect(paths == ["/home/dev/widget"])
+    // The path a path-verifying backend needs is the one the session sees on its host —
+    // and the node's remote memory, where a pasted image lands mid-session.
+    #expect(
+      paths == [
+        "/home/dev/widget",
+        RemoteGraphAccess.memoryDirectory(forProjectPath: location.projectPath, nodeID: node.id),
+      ])
   }
 }
 

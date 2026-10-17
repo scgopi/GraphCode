@@ -53,6 +53,7 @@ import PackageDescription
       "Sessions/CopilotSessionLog.swift",
       "Sessions/CopilotTrust.swift",
       "Sessions/OpenCodePresencePlugin.swift",
+      "Sessions/RemoteAttachmentUpload.swift",
       "Sessions/RemoteEnsureGate.swift",
       "Sessions/RemoteGraphAccess.swift",
       "Sessions/RemoteSocketForwarder.swift",

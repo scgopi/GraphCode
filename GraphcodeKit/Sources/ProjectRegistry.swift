@@ -728,6 +728,7 @@ public actor ProjectRegistry {
       for node in graph?.nodesAtAnyDepth ?? [] {
         terminateSession?(node, canonicalPath)
         NodeMemory.remove(projectPath: canonicalPath, nodeID: node.id)
+        RemoteAttachmentUpload.removeRemoteMemory(projectPath: canonicalPath, nodeID: node.id)
       }
       // Drop the in-memory store too, or a later reopen would resurrect the graph we
       // just deleted from the one still sitting in `stores`.
@@ -1315,6 +1316,7 @@ public actor ProjectRegistry {
       },
       onRemoveMemory: { nodeID in
         NodeMemory.remove(projectPath: path, nodeID: nodeID)
+        RemoteAttachmentUpload.removeRemoteMemory(projectPath: path, nodeID: nodeID)
       },
       onRefinePlaybook: { nodeID, text in
         NodeMemory.refinePlaybook(text, projectPath: path, nodeID: nodeID)

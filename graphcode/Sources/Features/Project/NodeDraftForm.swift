@@ -246,13 +246,14 @@ struct NodeDraftForm: View {
   }
 
   private var isCreateEnabled: Bool {
-    store.draft.isValid && !store.draftBlocksOnTokens
+    store.draft.isValid && !store.draftBlocksOnTokens && !store.draftAttachments.isUploading
   }
 
   /// The primary button says what Create will actually do — and when a template
   /// shaped the draft, it says the shape the draft took on.
   private var createLabel: String {
-    switch store.draftLoopType {
+    if store.draftAttachments.isUploading { return "Copying images…" }
+    return switch store.draftLoopType {
     case .sketch: "Start"
     case .composite: "Create & open"
     case .goalBased: store.templates.applied?.shape != nil ? "Create goal loop" : "Create loop"

@@ -1511,9 +1511,8 @@ public enum ZmxSessionLauncher {
     } else {
       wakeDirectory = wakeFile?.deletingLastPathComponent().path
     }
-    let paths =
-      Self.workspacePaths(forNode: node, projectPath: projectPath)
-      + (wakeDirectory.map { [$0] } ?? [])
+    let granted = Self.workspacePaths(forNode: node, projectPath: projectPath)
+    let paths = granted + (wakeDirectory.map { granted.contains($0) ? [] : [$0] } ?? [])
     // The hooks that make the session report what it is doing (`PresenceHooks`). For a
     // remote project the file can't come from here — it is written *on the remote host*
     // by the ensure script (`remoteEnsureInvocation`) and referenced as a `$HOME` path
@@ -1796,6 +1795,10 @@ public enum ZmxSessionLauncher {
     if let projectPath, !projectPath.hasPrefix("graphcode://") {
       if let remote = RemoteProjectLocation.parse(projectPath: projectPath) {
         paths.append(remote.remotePath)
+        // Granted whether or not anything is in it yet: an image pasted into the running
+        // session lands here (`RemoteAttachmentUpload`), long after launch.
+        paths.append(
+          RemoteGraphAccess.memoryDirectory(forProjectPath: remote.projectPath, nodeID: node.id))
       } else {
         paths.append(projectPath)
       }
@@ -2043,7 +2046,12 @@ public enum ZmxSessionLauncher {
     // session that died with the machine from one that ended.
     let name = SurfaceRef(id: node.id, launchesClaudeCode: true).zmxSessionName
     let markerWrite = RemoteBootMarker.writeFragment(forSessionName: name)
-    let missing = "{ \(launch); } && { \(markerWrite); }"
+    let attachments = RemoteAttachmentUpload.attachmentsDirectory(
+      forProjectPath: location.projectPath, nodeID: node.id)
+    let attachmentsMake =
+      "mkdir -p -m 700 ~/" + RemoteProjectLocation.shellQuoted(String(attachments.dropFirst(2)))
+      + " 2>/dev/null"
+    let missing = "{ \(attachmentsMake); \(launch); } && { \(markerWrite); }"
     // A finished loop is only brought back after a reboot: `gc_reboot_ok` is 1 unless this
     // is such a sweep and the host has not rebooted since the session's boot marker.
     let rebootGate: String = {

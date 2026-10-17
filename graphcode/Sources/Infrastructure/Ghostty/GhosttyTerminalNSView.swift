@@ -45,6 +45,13 @@ final class GhosttyTerminalNSView: NSView {
   /// other view-owned state; read from the action callback's thread, torn-read benign.
   var remoteLocation: RemoteProjectLocation?
 
+  /// Set only on a remote agent surface. See `RemoteImagePaste`.
+  var remoteImagePaste: RemoteImagePasteTarget?
+  /// The press `interceptRemoteImagePaste` took, so its release is swallowed too.
+  var swallowedPasteKeyCode: UInt16?
+  var pasteNoticeLabel: NSTextField?
+  var pasteNoticeGeneration = 0
+
   private var markedText: String = ""
 
   // The visibility caches, stored here rather than in `+Visibility` for the reason
@@ -289,6 +296,7 @@ final class GhosttyTerminalNSView: NSView {
       TerminalFontZoomStore.shared.apply(adjustment)
       return
     }
+    if interceptRemoteImagePaste(event) { return }
     // `sendKeyEvent` already writes the key (including its text, for plain
     // characters) straight to the surface when it returns true — running
     // `interpretKeyEvents` afterward as well would redispatch that same text
@@ -307,6 +315,10 @@ final class GhosttyTerminalNSView: NSView {
     // end, and a shell being told about a key nobody pressed is worse than being told
     // nothing.
     guard zoomAdjustment(for: event) == nil else { return }
+    if let swallowed = swallowedPasteKeyCode, swallowed == event.keyCode {
+      swallowedPasteKeyCode = nil
+      return
+    }
     _ = sendKeyEvent(event, action: GHOSTTY_ACTION_RELEASE)
   }
 

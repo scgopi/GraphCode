@@ -310,19 +310,153 @@ struct DraftAttachmentReducerTests {
     #expect(!FileManager.default.fileExists(atPath: path))
   }
 
+  private static let remoteProject = ProjectRef(path: "ssh://box/srv/work/repo", name: "repo")
+
+  private static func remoteStore(
+    upload: @escaping @Sendable (Data, String, String, UUID) async throws -> String,
+    sent: SentCommandsBox, discarded: LockIsolated<Int> = LockIsolated(0)
+  ) -> TestStore<ProjectFeature.State, ProjectFeature.Action> {
+    var state = ProjectFeature.State(graph: LoopGraph(project: remoteProject))
+    state.draftLoopType = .sketch
+    state.draftTitle = "Header"
+    state.draftSketchNote = "match this"
+    state.showingNewNodeForm = true
+    let store = TestStore(initialState: state) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sent.append(command) }
+      $0.remoteAttachmentClient = RemoteAttachmentClient(
+        upload: upload, discard: { _, _ in discarded.withValue { $0 += 1 } })
+    }
+    store.exhaustivity = .off
+    return store
+  }
+
   @Test
   @MainActor
-  func aLoopOnAnotherMachineSaysSoRatherThanNamingAFileThatHostNeverSaw() async {
-    // The ensure dial that delivers graphcode's files to a remote host carries text.
-    let remote = ProjectRef(path: "ssh://box/~/work/repo", name: "repo")
-    let store = Self.store(remote)
+  func aRemoteDraftStagesTheImageLocallyUntilCreate() async throws {
+    let uploads = LockIsolated(0)
+    let store = Self.remoteStore(
+      upload: { _, _, _, _ in
+        uploads.withValue { $0 += 1 }
+        return "/home/dev/x.png"
+      }, sent: SentCommandsBox())
     defer { Self.cleanUp(store) }
 
-    await store.send(.draftAttachment(.imageArrived(Self.payload))) {
-      $0.draftAttachments.notice =
-        "Images can't be attached to a loop on another machine yet."
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    #expect(store.state.draftAttachments.items.count == 1)
+    #expect(store.state.draftAttachments.notice == nil)
+    #expect(store.state.draftSketchNote == "match this [image #1]")
+    #expect(uploads.value == 0)
+  }
+
+  @Test
+  @MainActor
+  func createCopiesRemoteImagesFirstAndThePromptNamesTheRemotePath() async throws {
+    let sent = SentCommandsBox()
+    let received = LockIsolated<[Data]>([])
+    let store = Self.remoteStore(
+      upload: { data, fileName, projectPath, _ in
+        received.withValue { $0.append(data) }
+        #expect(projectPath == "ssh://box/srv/work/repo")
+        return "/home/dev/.graphcode/memory/repo/n/attachments/\(fileName)"
+      }, sent: sent)
+    defer { Self.cleanUp(store) }
+
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    let local = try #require(store.state.draftAttachments.items.first?.path)
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+    await store.skipReceivedActions()
+
+    #expect(received.value == [Self.payload.data])
+    #expect(!store.state.showingNewNodeForm)
+    let commands = await sent.all
+    let created = commands.compactMap { command -> LoopNode? in
+      guard case .graphCommand(_, .createNode(let draft)) = command else { return nil }
+      return draft.makeNode()
     }
-    #expect(store.state.draftAttachments.items.isEmpty)
+    let node = try #require(created.first)
+    #expect(
+      node.attachments.map(\.path) == ["/home/dev/.graphcode/memory/repo/n/attachments/image-1.png"]
+    )
+    #expect(
+      node.sessionPrompt?.contains("/home/dev/.graphcode/memory/repo/n/attachments/image-1.png")
+        == true)
+    #expect(!FileManager.default.fileExists(atPath: local))
+  }
+
+  @Test
+  @MainActor
+  func aFailedUploadKeepsTheFormOpenAndCreatesNothing() async throws {
+    let sent = SentCommandsBox()
+    let store = Self.remoteStore(
+      upload: { _, _, _, _ in throw RemoteAttachmentUploadError.unreachable("no route") },
+      sent: sent)
+    defer { Self.cleanUp(store) }
+
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    let local = try #require(store.state.draftAttachments.items.first?.path)
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+    await store.skipReceivedActions()
+
+    #expect(store.state.showingNewNodeForm)
+    #expect(!store.state.draftAttachments.isUploading)
+    #expect(store.state.draftAttachments.notice == "Couldn't reach the remote machine: no route")
+    #expect(await sent.all.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: local))
+  }
+
+  @Test
+  @MainActor
+  func aReplyForACancelledDraftCreatesNothing() async throws {
+    let sent = SentCommandsBox()
+    let discarded = LockIsolated(0)
+    let store = Self.remoteStore(
+      upload: { _, _, _, _ in "/home/dev/x.png" }, sent: sent, discarded: discarded)
+    defer { Self.cleanUp(store) }
+    let staleDraft = UUID()
+
+    await store.send(
+      .draftAttachment(.uploaded(draftID: staleDraft, paths: [UUID(): "/home/dev/x.png"])))
+    #expect(store.state.showingNewNodeForm)
+    #expect(await sent.all.isEmpty)
+
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    await store.send(.createNodeConfirmed)
+    await store.send(.cancelNewNodeForm)
+    await store.finish()
+    #expect(discarded.value == 1)
+  }
+
+  @Test
+  @MainActor
+  func aLocalDraftNeverDials() async throws {
+    let sent = SentCommandsBox()
+    var state = ProjectFeature.State(graph: LoopGraph(project: Self.project))
+    state.draftLoopType = .sketch
+    state.draftTitle = "Header"
+    state.showingNewNodeForm = true
+    let store = TestStore(initialState: state) {
+      ProjectFeature()
+    } withDependencies: {
+      $0.orchestratorClient.send = { command in await sent.append(command) }
+      $0.remoteAttachmentClient = RemoteAttachmentClient(
+        upload: { _, _, _, _ in
+          Issue.record("a local draft dialed")
+          return ""
+        }, discard: { _, _ in })
+    }
+    store.exhaustivity = .off
+    defer { Self.cleanUp(store) }
+
+    await store.send(.draftAttachment(.imageArrived(Self.payload)))
+    let local = try #require(store.state.draftAttachments.items.first?.path)
+    await store.send(.createNodeConfirmed)
+    await store.finish()
+    #expect(!store.state.showingNewNodeForm)
+    #expect(FileManager.default.fileExists(atPath: local))
   }
 
   @Test
@@ -334,4 +468,46 @@ struct DraftAttachmentReducerTests {
     await store.send(.draftAttachment(.imageArrived(Self.payload)))
     #expect(store.state.draftAttachments.items.isEmpty)
   }
+}
+
+@Suite
+struct RemoteImagePasteKeyTests {
+  @Test
+  func commandVAndControlVArePastesAndNothingElseIs() {
+    #expect(RemoteImagePaste.isPasteKey([.command], characters: "v"))
+    #expect(RemoteImagePaste.isPasteKey([.control], characters: "v"))
+    #expect(RemoteImagePaste.isPasteKey([.command, .capsLock], characters: "V"))
+    #expect(!RemoteImagePaste.isPasteKey([.command, .control], characters: "v"))
+    #expect(!RemoteImagePaste.isPasteKey([.command, .option], characters: "v"))
+    #expect(!RemoteImagePaste.isPasteKey([.command, .shift], characters: "v"))
+    #expect(!RemoteImagePaste.isPasteKey([], characters: "v"))
+    #expect(!RemoteImagePaste.isPasteKey([.command], characters: "c"))
+  }
+
+  @Test
+  func pastedFilesGetGeneratedNamesTheUploaderAccepts() {
+    let name = RemoteImagePaste.fileName(fileExtension: "PNG")
+    #expect(name.hasPrefix("paste-"))
+    #expect(name.hasSuffix(".png"))
+    #expect(RemoteAttachmentUpload.isSafeFileName(name))
+    #expect(RemoteImagePaste.fileName(fileExtension: "png") != name)
+  }
+
+  @Test
+  func aTextAndImagePasteboardStaysText() {
+    let pasteboard = NSPasteboard(name: NSPasteboard.Name("graphcode-test-\(UUID().uuidString)"))
+    defer { pasteboard.releaseGlobally() }
+    pasteboard.clearContents()
+    pasteboard.setString("words", forType: .string)
+    pasteboard.setData(Data([0x89, 0x50, 0x4E, 0x47]), forType: .png)
+    #expect(DraftImageImport.payload(on: pasteboard) == nil)
+    pasteboard.clearContents()
+    pasteboard.setData(Data([0x89, 0x50, 0x4E, 0x47]), forType: .png)
+    #expect(DraftImageImport.payload(on: pasteboard)?.fileExtension == "png")
+  }
+}
+
+private actor SentCommandsBox {
+  private(set) var all: [DaemonCommand] = []
+  func append(_ command: DaemonCommand) { all.append(command) }
 }

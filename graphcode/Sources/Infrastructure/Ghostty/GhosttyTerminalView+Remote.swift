@@ -5,6 +5,14 @@ import GraphcodeKit
 /// project lives on another machine, and the reconnect behaviour that keeps it alive
 /// across network drops and host reboots.
 extension GhosttyTerminalView {
+  /// Only an agent surface: a plain remote shell has no composer for a path to land in,
+  /// and an agent surface's id is its loop's (`TerminalLayout`), which names the folder
+  /// the image goes to.
+  var remoteImagePasteTarget: RemoteImagePasteTarget? {
+    guard launchesClaudeCode, let projectPath, let location = remoteLocation else { return nil }
+    return RemoteImagePasteTarget(projectPath: projectPath, nodeID: surfaceID, host: location.host)
+  }
+
   /// The argv for a surface whose project is remote: a local `/bin/sh` reconnect loop
   /// (`SSHReconnectLoop`) around the `ssh -t … zmx attach` dial — both kinds: an agent
   /// surface joins (or, when it owns the launch, creates) the loop's session on the
