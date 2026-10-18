@@ -69,7 +69,7 @@ $profiles = @{
     )
     nodes = 8
     edges = 4
-    paintedEdges = 0
+    paintedEdges = 4
     createdAtValues = 8
     surface = "overview"
     headerContext = "Overview"

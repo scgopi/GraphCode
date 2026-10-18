@@ -1057,9 +1057,11 @@ hashes matching that native-run snapshot. The #764 receipts bind the fixture JSO
 inventory, painted-edge count, clock-qualified age labels, image names, receipt
 bytes, run HEAD, source hashes, test binary, and native log; the converter
 rejects other scene IDs and arbitrary source inventories. The project scene
-checks its three painted edge strokes and labels. Overview reports its four
-fixture graph edges as inventory only: the overview paint surface draws project
-lanes and cards, not those edges. The default `project-paint-v1` profile retains
+checks its three painted edge strokes and labels. Overview paints its four
+fixture graph edges as well as the project lanes and cards. New source-bound
+overview receipts require exactly four painted edges; zero, three, and five
+are rejected rather than accepting the historical zero-edge contract too.
+Historical receipts are not rewritten. The default `project-paint-v1` profile retains
 its original exact seven-file binding and receipt shape; the two #764 profiles
 bind their exact scene-specific file sets.
 Immediately after the native command, the wrapper records whether the emitted

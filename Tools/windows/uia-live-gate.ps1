@@ -6085,8 +6085,8 @@ try {
   }
   Write-Host ("UIA_COMPOSITE_NAVIGATION_EVIDENCE=" + ($compositeNavigationEvidence | ConvertTo-Json -Compress))
 
-  # Connector handles: GraphCanvas.drawNode paints a highlighted (0x00FFCD7A COLORREF
-  # -> RGB 0x7ACDFF, light blue) hover handle at the outgoing connector position
+  # Connector handles: GraphCanvas.drawNode paints a circular 14pt handle with a
+  # light '+' glyph (RGB 0xE6E6E6) at the outgoing connector position
   # (card.Right, card's vertical midpoint) with no dedicated UIA element, and
   # drag-to-connect is driven entirely by raw WM_LBUTTONDOWN/WM_MOUSEMOVE/
   # WM_LBUTTONUP messages in App.zig (hitTestConnector on down, updateEdgeDrag on
@@ -6110,7 +6110,7 @@ try {
     $shellWindow, $connectorScreenX, $connectorScreenY, [ref]$connectorClientX, [ref]$connectorClientY
   )) "could not map the source loop's outgoing connector to client coordinates"
   $null = Ensure-ShellForeground $shellWindow "before-connector-hover"
-  $expectedConnectorHoverColor = [System.Drawing.Color]::FromArgb(0x7A, 0xCD, 0xFF)
+  $expectedConnectorHoverColor = [System.Drawing.Color]::FromArgb(0xE6, 0xE6, 0xE6)
   $connectorHoverObserved = $false
   for ($attempt = 0; $attempt -lt 20 -and (-not $connectorHoverObserved); $attempt++) {
     Require ([GraphCodeUiaGateState]::PostMouseMoveAt($shellWindow, $connectorClientX, $connectorClientY)) `

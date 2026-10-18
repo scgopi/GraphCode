@@ -235,7 +235,7 @@ function New-Receipt(
     "overview-paint-764" { 4 }
     default { 1 }
   }
-  $paintedEdges = if ($Scene -eq "project-paint-764") { 3 } elseif ($Scene -eq "overview-paint-764") { 0 } else { $null }
+  $paintedEdges = if ($Scene -eq "project-paint-764") { 3 } elseif ($Scene -eq "overview-paint-764") { 4 } else { $null }
   $createdAtValues = if ($is764) { $nodes } else { 0 }
   $ageObservedAt = 1800000000
   $surface = if ($Scene -eq "project-paint-764") { "project" } elseif ($Scene -eq "overview-paint-764") { "overview" } else { $null }
@@ -1041,6 +1041,10 @@ foreach ($scene in @("project-paint-764", "overview-paint-764")) {
       "Manifest must retain the selected scene and surface."
     Assert-Contract ($receipt.ageEvidence.nodes[0].createdAtEpochSeconds -eq 1704067200) `
       "Fixture daemon-reference timestamps must normalize to Unix seconds before age evidence is recorded."
+    if ($scene -eq "overview-paint-764") {
+      Assert-Contract ($receipt.model.paintedEdges -eq 4 -and $receipt.model.edges -eq 4) `
+        "Connected overview must paint the exact four edges in its two bound fixtures."
+    }
     $receiptAgeJson = ConvertTo-Json -InputObject $receipt.ageEvidence -Depth 8 -Compress
     $manifestAgeJson = ConvertTo-Json -InputObject $manifest.ageEvidence -Depth 8 -Compress
     Assert-Contract ($manifestAgeJson -ceq $receiptAgeJson) `
@@ -1135,13 +1139,15 @@ Invoke-SceneContractCase "project-paint-v1 stray profile fields refusal" {
   Assert-ConverterFailure $run "SceneProfileFieldsInvalid"
 }
 
-Invoke-SceneContractCase "overview-paint-764 painted edge mismatch refusal" {
-  $run = New-SyntheticRun "scene-overview-paint-764-painted-edge-mismatch" -Scene "overview-paint-764"
-  $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
-  $receipt.model.paintedEdges = 4
-  [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-  Update-SyntheticArtifactHash $run "paintReceipt"
-  Assert-ConverterFailure $run "PaintEvidenceInvalid"
+foreach ($paintedEdges in @(0, 3, 5)) {
+  Invoke-SceneContractCase "overview-paint-764 painted edge $paintedEdges refusal" {
+    $run = New-SyntheticRun "scene-overview-paint-764-painted-edge-$paintedEdges-mismatch" -Scene "overview-paint-764"
+    $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    $receipt.model.paintedEdges = $paintedEdges
+    [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    Update-SyntheticArtifactHash $run "paintReceipt"
+    Assert-ConverterFailure $run "PaintEvidenceInvalid"
+  }
 }
 
 Invoke-SceneContractCase "project-paint-764 painted edge mismatch refusal" {
@@ -1200,7 +1206,9 @@ $expectedSceneNames = @(
   "overview-paint-764 fixture order refusal",
   "overview-paint-764 native profile mismatch refusal",
   "project-paint-v1 stray profile fields refusal",
-  "overview-paint-764 painted edge mismatch refusal",
+  "overview-paint-764 painted edge 0 refusal",
+  "overview-paint-764 painted edge 3 refusal",
+  "overview-paint-764 painted edge 5 refusal",
   "project-paint-764 painted edge mismatch refusal",
   "project-paint-764 age label mismatch refusal",
   "overview-paint-764 age count refusal",
@@ -1213,9 +1221,9 @@ $sceneFailed = $sceneCaseResults.Count - $scenePassed
 $sceneNamesMatch = ($sceneNames.Count -eq $expectedSceneNames.Count) -and
   (($sceneNames -join "`n") -ceq ($expectedSceneNames -join "`n"))
 Write-Host "CANVAS_PAINT_SCENE_CASES executed=$($sceneCaseResults.Count) passed=$scenePassed failed=$sceneFailed names=$($sceneNames -join '|')"
-if (-not $sceneNamesMatch -or $sceneCaseResults.Count -ne 16 -or $scenePassed -ne 16 -or $sceneFailed -ne 0) {
+if (-not $sceneNamesMatch -or $sceneCaseResults.Count -ne 18 -or $scenePassed -ne 18 -or $sceneFailed -ne 0) {
   foreach ($failure in $sceneCaseResults | Where-Object { -not $_.Passed }) {
     Write-Error "Scene profile contract $($failure.Name) failed: $($failure.Error)" -ErrorAction Continue
   }
-  throw "Canvas paint scene profile contracts did not execute the exact 16/16/0 suite."
+  throw "Canvas paint scene profile contracts did not execute the exact 18/18/0 suite."
 }

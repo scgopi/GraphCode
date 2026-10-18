@@ -700,10 +700,15 @@ pub fn paint(
             if (graph.nodes.items.len == 0) {
                 emptyGraph(hdc, allocator, graph, graph_bounds);
             } else {
-                drawEdges(hdc, graph, state);
-                drawEdgeLabels(hdc, allocator, graph, state);
                 if (resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, declared_entries)) |roles| {
                     defer allocator.free(roles);
+                    const geometry = GraphGeometry{ .state = state };
+                    if (graphBand(graph.nodes.items.len, geometry)) |band| {
+                        drawLaneBand(hdc, band, state.zoom);
+                        drawEntryOrigin(hdc, allocator, graph.nodes.items.len, roles, geometry, band, false);
+                    }
+                    drawEdges(hdc, graph, state);
+                    drawEdgeLabels(hdc, allocator, graph, state);
                     for (graph.nodes.items, 0..) |node, index| {
                         drawLoopCardShadow(hdc, allocator, node, nodeBounds(index, state), state, roles[index],
                             needsAttention(node, graph.nodes.items, graph.edges.items), model.selectedIndex() == index);
@@ -851,9 +856,14 @@ fn drawOverview(
         const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, active_declared_entries);
         defer allocator.free(roles);
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
-        roundedCard(hdc, lane, Tokens.workspace_rail, false);
+        drawLaneBand(hdc, rect(lane.left - scaledValue(18, state.zoom), lane.top, lane.right, lane.bottom), state.zoom);
         const caption = overviewLaneCaption(model, graph_index, bounds, state);
-        drawTextRect(hdc, allocator, graph.project.name, caption.title, scaledValue(14, state.zoom), 0x00E8E8E8, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
+        const title = try std.fmt.allocPrint(allocator, "{s} · {d} loop{s}", .{
+            graph.project.name, graph.nodes.items.len, if (graph.nodes.items.len == 1) "" else "s",
+        });
+        defer allocator.free(title);
+        drawFolderGlyph(hdc, caption.title, state.zoom, graph.project.isGlobal());
+        drawTextRect(hdc, allocator, title, rect(caption.title.left + scaledValue(16, state.zoom), caption.title.top, caption.title.right, caption.title.bottom), scaledValue(11, state.zoom), 0x009D9D9D, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS);
         const open = caption.open;
         const worktrees = caption.worktrees;
         fill(hdc, open, 0x002D2418);
@@ -873,6 +883,9 @@ fn drawOverview(
                 drawTextRect(hdc, allocator, "Worktree notice unavailable", notice_bounds, scaledValue(9, state.zoom), 0x00B8B8BE, c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER);
             }
         }
+        const geometry = GraphGeometry{ .state = state, .overview = .{ .model = model, .graph_index = graph_index, .bounds = bounds } };
+        drawEntryOrigin(hdc, allocator, graph.nodes.items.len, roles, geometry, lane, true);
+        drawGraphEdges(hdc, graph.nodes.items, graph.edges.items, geometry, false);
         for (graph.nodes.items, 0..) |node, node_index| {
             drawLoopCardShadow(hdc, allocator, node, overviewCardBounds(model, graph_index, node_index, bounds, state),
                 state, roles[node_index], needsAttention(node, graph.nodes.items, graph.edges.items), false);
@@ -1498,25 +1511,11 @@ fn drawGrid(hdc: c.HDC, bounds: c.RECT, state: *const CanvasState) void {
 }
 
 fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) void {
-    for (graph.edges.items, 0..) |edge, index| {
-        const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
-        const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        const selected = if (state.selected_edge_id.len != 0)
-            std.mem.eql(u8, edge.id, state.selected_edge_id)
-        else
-            state.selected_edge == index;
-        const color = if (selected)
-            Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count > 0)
-            0x006BD58D
-        else
-            edgeKindColor(edge.kind);
-        drawBezier(hdc, from, to, color, edgeKindPenStyle(edge.kind));
-    }
+    drawGraphEdges(hdc, graph.nodes.items, graph.edges.items, .{ .state = state }, true);
     if (state.edge_dragging) {
         if (state.edge_drag_source_id.len != 0) {
             if (connectorPosition(graph.nodes.items, state.edge_drag_source_id, true, state)) |from| {
-                drawBezier(hdc, from, .{ .x = state.edge_drag_x, .y = state.edge_drag_y }, Tokens.rgb(Tokens.canvas_selection), c.PS_SOLID);
+                drawBezier(hdc, from, .{ .x = state.edge_drag_x, .y = state.edge_drag_y }, Tokens.rgb(Tokens.canvas_selection), state.zoom);
             }
         }
     }
@@ -1647,36 +1646,274 @@ fn effectiveEdgeUntil(text: []const u8) error{InvalidUtf8}![]const u8 {
     return text[@min(start, end)..end];
 }
 
-fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, style: c_int) void {
-    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
-    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
-    const width: f32 = if (style == c.PS_SOLID) 2 else 1;
-    const p1 = c.POINT{ .x = from.x, .y = from.y };
-    const p2 = c.POINT{ .x = from.x + bend, .y = from.y };
-    const p3 = c.POINT{ .x = to.x - bend, .y = to.y };
-    const p4 = c.POINT{ .x = to.x, .y = to.y };
-    // Solid connectors are anti-aliased via GDI+; dashed/preview styles
-    // (style != PS_SOLID) keep plain GDI since GDI+'s dash patterns don't
-    // need to match pixel-for-pixel and the pen style enum differs.
-    if (style == c.PS_SOLID and
-        GdiplusAA.drawBezier(hdc, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y, p4.x, p4.y, color, width))
-    {
-        return;
-    }
-
-    const pen = c.CreatePen(style, if (style == c.PS_SOLID) 2 else 1, color);
-    if (pen == null) return;
-    const old = c.SelectObject(hdc, pen);
-    var points = [_]c.POINT{ p1, p2, p3, p4 };
-    _ = c.PolyBezier(hdc, &points, 4);
-    _ = c.SelectObject(hdc, old);
-    _ = c.DeleteObject(pen);
+fn drawBezier(hdc: c.HDC, from: Connector, to: Connector, color: u32, zoom: f32) void {
+    drawRoute(hdc, CubicRoute.between(from, to, zoom), color, 2 * zoom, null);
 }
 
 const Connector = struct {
     x: i32,
     y: i32,
 };
+
+const CubicRoute = struct {
+    from: Connector,
+    out: Connector,
+    in: Connector,
+    to: Connector,
+
+    fn between(from: Connector, to: Connector, zoom: f32) CubicRoute {
+        const span = to.x - from.x;
+        const reach: i32 = @max(scaledValue(26, zoom), @divTrunc(@as(i32, @intCast(@abs(span))), 2));
+        const bend = if (span < 0) -reach else reach;
+        return .{
+            .from = from,
+            .out = .{ .x = from.x + bend, .y = from.y },
+            .in = .{ .x = to.x - bend, .y = to.y },
+            .to = to,
+        };
+    }
+
+    fn point(self: CubicRoute, t: f32) Connector {
+        const one = 1 - t;
+        return .{
+            .x = @intFromFloat(@as(f32, @floatFromInt(self.from.x)) * one * one * one +
+                @as(f32, @floatFromInt(self.out.x)) * 3 * one * one * t +
+                @as(f32, @floatFromInt(self.in.x)) * 3 * one * t * t +
+                @as(f32, @floatFromInt(self.to.x)) * t * t * t),
+            .y = @intFromFloat(@as(f32, @floatFromInt(self.from.y)) * one * one * one +
+                @as(f32, @floatFromInt(self.out.y)) * 3 * one * one * t +
+                @as(f32, @floatFromInt(self.in.y)) * 3 * one * t * t +
+                @as(f32, @floatFromInt(self.to.y)) * t * t * t),
+        };
+    }
+};
+
+const GraphGeometry = struct {
+    state: *const CanvasState,
+    overview: ?struct { model: *const GraphModel.Model, graph_index: usize, bounds: c.RECT } = null,
+
+    fn card(self: GraphGeometry, index: usize) c.RECT {
+        if (self.overview) |view|
+            return overviewCardBounds(view.model, view.graph_index, index, view.bounds, self.state);
+        return nodeBounds(index, self.state);
+    }
+};
+
+fn graphEdgeRoute(nodes: []const GraphModel.Node, edge: GraphModel.Edge, geometry: GraphGeometry) ?CubicRoute {
+    var source: ?c.RECT = null;
+    var target: ?c.RECT = null;
+    for (nodes, 0..) |node, index| {
+        if (std.mem.eql(u8, node.id, edge.from)) source = geometry.card(index);
+        if (std.mem.eql(u8, node.id, edge.to)) target = geometry.card(index);
+    }
+    const from = source orelse return null;
+    const to = target orelse return null;
+    const forward = from.left + from.right <= to.left + to.right;
+    return CubicRoute.between(
+        .{ .x = if (forward) from.right else from.left, .y = @divTrunc(from.top + from.bottom, 2) },
+        .{ .x = if (forward) to.left else to.right, .y = @divTrunc(to.top + to.bottom, 2) },
+        geometry.state.zoom,
+    );
+}
+
+fn graphEdgeColor(edge: GraphModel.Edge, selected: bool) u32 {
+    if (selected) return Tokens.canvas_selection;
+    if (edge.cycle_guard != null and edge.fire_count > 0)
+        return blendCardColor(0x000A9FFF, Tokens.canvas_tone, 55);
+    if (std.mem.eql(u8, edge.kind, "spawn"))
+        return blendCardColor(0x00E98590, Tokens.canvas_tone, 50);
+    return blendCardColor(0x00FFFFFF, Tokens.canvas_tone, if (std.mem.eql(u8, edge.kind, "message")) 28 else 45);
+}
+
+fn graphEdgeDash(edge: GraphModel.Edge) ?[2]i32 {
+    if (edge.cycle_guard != null and edge.fire_count > 0) return .{ 5, 4 };
+    if (std.mem.eql(u8, edge.kind, "message")) return .{ 4, 4 };
+    if (std.mem.eql(u8, edge.kind, "spawn")) return .{ 2, 4 };
+    return if (edge.fired or edge.fire_count > 0) null else .{ 5, 4 };
+}
+
+fn drawRoute(hdc: c.HDC, route: CubicRoute, color: u32, width: f32, dash: ?[2]i32) void {
+    if (dash == null and GdiplusAA.drawBezier(hdc, route.from.x, route.from.y, route.out.x, route.out.y, route.in.x, route.in.y, route.to.x, route.to.y, color, width)) return;
+    var brush = std.mem.zeroes(c.LOGBRUSH);
+    brush.lbStyle = c.BS_SOLID;
+    brush.lbColor = color;
+    var pattern: [2]c.DWORD = .{ 1, 1 };
+    if (dash) |values| {
+        pattern = .{ @intCast(values[0]), @intCast(values[1]) };
+    }
+    const pen = c.ExtCreatePen(@intCast(c.PS_GEOMETRIC | c.PS_ENDCAP_FLAT | c.PS_JOIN_ROUND |
+        @as(c_int, if (dash == null) c.PS_SOLID else c.PS_USERSTYLE)), @intFromFloat(@max(1, @round(width))), &brush, if (dash == null) 0 else 2, if (dash == null) null else &pattern);
+    if (pen == null) {
+        std.log.warn("Canvas connector pen creation failed: {d}", .{c.GetLastError()});
+        return;
+    }
+    defer _ = c.DeleteObject(pen);
+    const old = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old);
+    const points = [_]c.POINT{
+        .{ .x = route.from.x, .y = route.from.y }, .{ .x = route.out.x, .y = route.out.y },
+        .{ .x = route.in.x, .y = route.in.y },     .{ .x = route.to.x, .y = route.to.y },
+    };
+    if (c.PolyBezier(hdc, &points, points.len) == 0)
+        std.log.warn("Canvas connector paint failed: {d}", .{c.GetLastError()});
+}
+
+fn drawGraphEdges(hdc: c.HDC, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge, geometry: GraphGeometry, selectable: bool) void {
+    const zoom = geometry.state.zoom;
+    for (edges, 0..) |edge, index| {
+        const route = graphEdgeRoute(nodes, edge, geometry) orelse continue;
+        const selected = selectable and (if (geometry.state.selected_edge_id.len != 0)
+            std.mem.eql(u8, edge.id, geometry.state.selected_edge_id)
+        else
+            geometry.state.selected_edge == index);
+        const color = graphEdgeColor(edge, selected);
+        const logical_dash = graphEdgeDash(edge);
+        const dash: ?[2]i32 = if (logical_dash) |values|
+            .{ scaledValue(values[0], zoom), scaledValue(values[1], zoom) }
+        else
+            null;
+        drawRoute(hdc, route, color, (if (selected) @as(f32, 2.5) else 1.5) * zoom, dash);
+        const direction: i32 = if (route.to.x >= route.in.x) 1 else -1;
+        const length = scaledValue(7, zoom);
+        const half = scaledValue(3, zoom);
+        const head = [_]c.POINT{
+            .{ .x = route.to.x, .y = route.to.y },
+            .{ .x = route.to.x - direction * length, .y = route.to.y - half },
+            .{ .x = route.to.x - direction * length, .y = route.to.y + half },
+        };
+        const brush = c.CreateSolidBrush(color);
+        if (brush != null) {
+            const old_brush = c.SelectObject(hdc, brush);
+            const old_pen = c.SelectObject(hdc, c.GetStockObject(c.NULL_PEN));
+            _ = c.Polygon(hdc, &head, head.len);
+            _ = c.SelectObject(hdc, old_pen);
+            _ = c.SelectObject(hdc, old_brush);
+            _ = c.DeleteObject(brush);
+        } else {
+            std.log.warn("Canvas edge arrow brush creation failed: {d}", .{c.GetLastError()});
+        }
+        if (edge.fired or edge.fire_count > 0) {
+            const middle = route.point(0.5);
+            drawGraphDot(hdc, middle, scaledValue(5, zoom), 0x00FFBC7C, 0x00FFBC7C, 0);
+        }
+    }
+}
+
+fn drawGraphDot(hdc: c.HDC, center: Connector, diameter: i32, color: u32, border: u32, border_width: f32) void {
+    const radius = @divTrunc(diameter, 2);
+    const bounds = rect(center.x - radius, center.y - radius, center.x - radius + diameter, center.y - radius + diameter);
+    if (GdiplusAA.drawRoundedRect(hdc, bounds, radius, color, border, border_width)) return;
+    const brush = c.CreateSolidBrush(color);
+    const pen = c.CreatePen(c.PS_SOLID, @intFromFloat(@max(1, @round(border_width))), border);
+    if (brush == null or pen == null) {
+        if (brush != null) _ = c.DeleteObject(brush);
+        if (pen != null) _ = c.DeleteObject(pen);
+        std.log.warn("Canvas port resource creation failed: {d}", .{c.GetLastError()});
+        return;
+    }
+    defer _ = c.DeleteObject(brush);
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_brush);
+    defer _ = c.SelectObject(hdc, old_pen);
+    _ = c.Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+}
+
+fn drawLaneBand(hdc: c.HDC, bounds: c.RECT, zoom: f32) void {
+    const pen = c.CreatePen(c.PS_SOLID, 1, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 5));
+    if (pen == null) {
+        std.log.warn("Canvas band pen creation failed: {d}", .{c.GetLastError()});
+        return;
+    }
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(hdc, pen);
+    const old_brush = c.SelectObject(hdc, c.GetStockObject(c.NULL_BRUSH));
+    defer _ = c.SelectObject(hdc, old_pen);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const diameter = scaledValue(24, zoom);
+    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, diameter, diameter);
+}
+
+fn graphBand(node_count: usize, geometry: GraphGeometry) ?c.RECT {
+    if (node_count == 0) return null;
+    var bounds = geometry.card(0);
+    for (1..node_count) |index| {
+        const card = geometry.card(index);
+        bounds.left = @min(bounds.left, card.left);
+        bounds.top = @min(bounds.top, card.top);
+        bounds.right = @max(bounds.right, card.right);
+        bounds.bottom = @max(bounds.bottom, card.bottom);
+    }
+    return rect(bounds.left - scaledValue(30, geometry.state.zoom), bounds.top - scaledValue(20, geometry.state.zoom), bounds.right + scaledValue(20, geometry.state.zoom), bounds.bottom + scaledValue(20, geometry.state.zoom));
+}
+
+fn drawEntryOrigin(hdc: c.HDC, allocator: std.mem.Allocator, node_count: usize, roles: []const NodeRole, geometry: GraphGeometry, band: c.RECT, overview: bool) void {
+    var has_entry = false;
+    for (roles) |role| {
+        if (role == .entry or role == .unwired) has_entry = true;
+    }
+    if (!has_entry) return;
+    const zoom = geometry.state.zoom;
+    const enclosing = graphBand(node_count, geometry) orelse return;
+    const first_left = enclosing.left + scaledValue(30, zoom);
+    // Keep the existing public card/hit/UIA layout; its gutter is narrower than macOS's 62pt origin lane.
+    const origin = Connector{
+        .x = first_left - scaledValue(if (overview) 26 else 16, zoom),
+        .y = @divTrunc(band.top + band.bottom, 2),
+    };
+    const color = blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 22);
+    for (roles, 0..) |role, index| {
+        if (role != .entry and role != .unwired) continue;
+        const card = geometry.card(index);
+        const port = Connector{ .x = card.left, .y = @divTrunc(card.top + card.bottom, 2) };
+        if (card.left < first_left + scaledValue(Tokens.loop_card_width, zoom)) {
+            const reach = @max(scaledValue(20, zoom), @divTrunc((port.x - origin.x) * 55, 100));
+            drawRoute(hdc, .{ .from = origin, .out = .{ .x = origin.x + reach, .y = origin.y }, .in = .{ .x = port.x - reach, .y = port.y }, .to = port }, color, 1.5 * zoom, null);
+        } else {
+            var gap = scaledValue(40, zoom);
+            for (0..node_count) |other_index| {
+                const other = geometry.card(other_index);
+                if (other.right < card.left and other.top < card.bottom and other.bottom > card.top)
+                    gap = @min(gap, card.left - other.right);
+            }
+            const gutter = card.left - @max(1, @divTrunc(gap, 2));
+            const corridor = card.top - scaledValue(12, zoom);
+            const corner = @min(scaledValue(10, zoom), @max(1, @divTrunc(gap, 2)));
+            const sign: i32 = if (corridor < origin.y) -1 else 1;
+            const a = Connector{ .x = origin.x, .y = corridor - sign * corner };
+            const b = Connector{ .x = origin.x + corner, .y = corridor };
+            const d = Connector{ .x = gutter - corner, .y = corridor };
+            const e = Connector{ .x = gutter, .y = corridor + corner };
+            const f = Connector{ .x = gutter, .y = port.y - corner };
+            const g = Connector{ .x = gutter + corner, .y = port.y };
+            const turns = [_]CubicRoute{
+                .{ .from = origin, .out = origin, .in = a, .to = a },
+                .{ .from = a, .out = .{ .x = origin.x, .y = corridor }, .in = .{ .x = origin.x, .y = corridor }, .to = b },
+                .{ .from = b, .out = b, .in = d, .to = d },
+                .{ .from = d, .out = .{ .x = gutter, .y = corridor }, .in = .{ .x = gutter, .y = corridor }, .to = e },
+                .{ .from = e, .out = e, .in = f, .to = f },
+                .{ .from = f, .out = .{ .x = gutter, .y = port.y }, .in = .{ .x = gutter, .y = port.y }, .to = g },
+                .{ .from = g, .out = g, .in = port, .to = port },
+            };
+            for (turns) |turn| drawRoute(hdc, turn, color, 1.5 * zoom, null);
+        }
+    }
+    drawGraphDot(hdc, origin, scaledValue(12, zoom), color, Tokens.canvas_tone, 2 * zoom);
+    drawTextRect(hdc, allocator, "ENTRY", rect(origin.x - scaledValue(15, zoom), origin.y + scaledValue(8, zoom), origin.x + scaledValue(15, zoom), origin.y + scaledValue(23, zoom)), scaledValue(9, zoom), blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 42), c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+}
+
+fn drawFolderGlyph(hdc: c.HDC, bounds: c.RECT, zoom: f32, global: bool) void {
+    const x = bounds.left;
+    const y = @divTrunc(bounds.top + bounds.bottom, 2);
+    const color = blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 50);
+    if (global) {
+        drawGraphDot(hdc, .{ .x = x + scaledValue(5, zoom), .y = y }, scaledValue(8, zoom), Tokens.canvas_tone, color, 1);
+    } else {
+        fill(hdc, rect(x, y - scaledValue(4, zoom), x + scaledValue(5, zoom), y), color);
+        fill(hdc, rect(x, y - scaledValue(2, zoom), x + scaledValue(11, zoom), y + scaledValue(5, zoom)), color);
+    }
+}
 
 fn connectorPosition(nodes: []const GraphModel.Node, node_id: []const u8, outgoing: bool, state: *const CanvasState) ?Connector {
     for (nodes, 0..) |node, index| {
@@ -1727,8 +1964,8 @@ fn drawNode(
     );
     if (state.hovered_connector == index) {
         const connector = connectorPositionForIndex(nodes, index, true, state);
-        fill(hdc, rect(connector.x - connectorRadius(state), connector.y - connectorRadius(state), connector.x + connectorRadius(state), connector.y + connectorRadius(state)), 0x00FFCD7A);
-        drawTextRect(hdc, allocator, "+", rect(connector.x - scaled(8, state), connector.y - scaled(8, state), connector.x + scaled(8, state), connector.y + scaled(8, state)), scaled(12, state), 0x00262626, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        drawGraphDot(hdc, connector, scaled(14, state), 0x00302F2E, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 40), state.zoom);
+        drawTextRect(hdc, allocator, "+", rect(connector.x - scaled(7, state), connector.y - scaled(7, state), connector.x + scaled(7, state), connector.y + scaled(7, state)), scaled(9, state), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
     }
 }
 
@@ -1809,6 +2046,10 @@ fn drawLoopCard(
         fill(hdc, offer.reclaim, 0x003A3A44);
         drawTextRect(hdc, allocator, "Reclaim", offer.reclaim, scaled(9, state), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
         drawTextRect(hdc, allocator, "Keep", offer.keep, scaled(9, state), 0x008A8A8A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    }
+    if (role == .entry or role == .unwired) {
+        const accent = loopTypeColor(node.loop_type);
+        drawGraphDot(hdc, .{ .x = bounds.left, .y = @divTrunc(bounds.top + bounds.bottom, 2) }, scaled(10, state), if (role == .unwired) blendCardColor(accent, Tokens.canvas_tone, 40) else accent, Tokens.canvas_tone, 2 * state.zoom);
     }
 }
 
@@ -2695,9 +2936,8 @@ pub fn hitTestEdge(
 ) ?usize {
     if (!insideGraph(x, y, graph_bounds)) return null;
     for (edges, 0..) |edge, index| {
-        const from = connectorPosition(nodes, edge.from, true, state) orelse continue;
-        const to = connectorPosition(nodes, edge.to, false, state) orelse continue;
-        if (bezierDistanceSquared(from, to, x, y) <= edgeHitRadius(state) * edgeHitRadius(state)) return index;
+        const route = graphEdgeRoute(nodes, edge, .{ .state = state }) orelse continue;
+        if (routeDistanceSquared(route, x, y) <= edgeHitRadius(state) * edgeHitRadius(state)) return index;
     }
     return null;
 }
@@ -2721,23 +2961,16 @@ fn distanceSquared(x1: i32, y1: i32, x2: i32, y2: i32) i32 {
 }
 
 fn bezierDistanceSquared(from: Connector, to: Connector, x: i32, y: i32) i32 {
-    const distance: i32 = if (to.x >= from.x) to.x - from.x else from.x - to.x;
-    const bend: i32 = @max(@as(i32, 24), @divTrunc(distance, 2));
-    var previous = from;
+    return routeDistanceSquared(CubicRoute.between(from, to, 1), x, y);
+}
+
+fn routeDistanceSquared(route: CubicRoute, x: i32, y: i32) i32 {
+    var previous = route.from;
     var best: i32 = std.math.maxInt(i32);
     var step: i32 = 1;
     while (step <= 24) : (step += 1) {
         const t = @as(f32, @floatFromInt(step)) / 24.0;
-        const one = 1.0 - t;
-        const px = @as(f32, @floatFromInt(from.x)) * one * one * one +
-            @as(f32, @floatFromInt(from.x + bend)) * 3 * one * one * t +
-            @as(f32, @floatFromInt(to.x - bend)) * 3 * one * t * t +
-            @as(f32, @floatFromInt(to.x)) * t * t * t;
-        const py = @as(f32, @floatFromInt(from.y)) * one * one * one +
-            @as(f32, @floatFromInt(from.y)) * 3 * one * one * t +
-            @as(f32, @floatFromInt(to.y)) * 3 * one * t * t +
-            @as(f32, @floatFromInt(to.y)) * t * t * t;
-        const current = Connector{ .x = @intFromFloat(px), .y = @intFromFloat(py) };
+        const current = route.point(t);
         best = @min(best, segmentDistanceSquared(previous, current, x, y));
         previous = current;
     }
@@ -3210,6 +3443,171 @@ test "edge connectors resolve reordered node IDs to card positions" {
     try std.testing.expectEqual(expected_to.left, to.x);
     try std.testing.expectEqual(@divTrunc(expected_to.top + expected_to.bottom, 2), to.y);
     try std.testing.expect(connectorPosition(&nodes, "missing", true, &state) == null);
+}
+
+test "connected canvas entry ports straddle the leading edge on both surfaces" {
+    try initPaint764TestRenderer();
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    const state = CanvasState{};
+    for ([_]Paint764Scene{ .project, .overview }) |scene| {
+        try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
+        const card = chrome764Card(&fixture, scene, 0, &state);
+        const cy = @divTrunc(card.top + card.bottom, 2);
+        // LoopCardView.Metrics.port = 10; the 2pt canvas ring is outside the card clip.
+        const outside = rect(card.left - 4, cy - 2, card.left, cy + 3);
+        try std.testing.expect(dib.count(outside, 0x00E3DAD3) >= 8);
+        try std.testing.expectEqual(@as(?usize, 0), if (scene == .project)
+            hitTest(fixture.model.graph.?.nodes.items, card.left + 2, cy, &state, chrome764GraphBounds())
+        else if (hitTestOverview(&fixture.model, card.left + 2, cy, &state, chrome764GraphBounds())) |hit|
+            hit.node_index
+        else
+            null);
+    }
+}
+
+test "connected canvas reverse curves share the source-derived horizontal controls with hits" {
+    // CanvasEdgeGeometry.controls: signed half-span, 26pt minimum reach.
+    const from = Connector{ .x = 800, .y = 120 };
+    const to = Connector{ .x = 300, .y = 320 };
+    try std.testing.expect(bezierDistanceSquared(from, to, 652, 151) <= 4);
+    try std.testing.expect(bezierDistanceSquared(from, to, 792, 151) > 100);
+}
+
+test "connected canvas facing anchors retain endpoint identity and shared hit geometry" {
+    const nodes = [_]GraphModel.Node{ graphRoleTestNode("target"), graphRoleTestNode("source") };
+    var edge = graphRoleTestEdge("source", "target", "handoff");
+    const state = CanvasState{ .zoom = 0.75, .pan_x = 120, .pan_y = 30 };
+    const route = graphEdgeRoute(&nodes, edge, .{ .state = &state }) orelse return error.MissingConnector;
+    try std.testing.expectEqual(nodeBounds(1, &state).left, route.from.x);
+    try std.testing.expectEqual(nodeBounds(0, &state).right, route.to.x);
+    const middle = route.point(0.5);
+    try std.testing.expectEqual(@as(?usize, 0), hitTestEdge(&nodes, &.{edge}, middle.x, middle.y, &state, rect(220, 34, 1280, 720)));
+    edge.to = @constCast("missing");
+    try std.testing.expect(graphEdgeRoute(&nodes, edge, .{ .state = &state }) == null);
+}
+
+test "connected canvas stroke patterns preserve real edge kinds and fired state" {
+    var edge = graphRoleTestEdge("a", "b", "handoff");
+    try std.testing.expectEqual(@as(?[2]i32, .{ 5, 4 }), graphEdgeDash(edge));
+    const quiet = graphEdgeColor(edge, false);
+    edge.fired = true;
+    try std.testing.expect(graphEdgeDash(edge) == null);
+    try std.testing.expectEqual(quiet, graphEdgeColor(edge, false));
+    edge.kind = @constCast("message");
+    try std.testing.expectEqual(@as(?[2]i32, .{ 4, 4 }), graphEdgeDash(edge));
+    try std.testing.expect(graphEdgeColor(edge, false) != quiet);
+    edge.kind = @constCast("spawn");
+    try std.testing.expectEqual(@as(?[2]i32, .{ 2, 4 }), graphEdgeDash(edge));
+    const spawn = graphEdgeColor(edge, false);
+    edge.cycle_guard = .{ .max_iterations = 3 };
+    edge.fire_count = 2;
+    try std.testing.expectEqual(@as(?[2]i32, .{ 5, 4 }), graphEdgeDash(edge));
+    try std.testing.expect(graphEdgeColor(edge, false) != spawn);
+    try std.testing.expectEqual(Tokens.canvas_selection, graphEdgeColor(edge, true));
+}
+
+test "connected canvas overview keeps notebook lines visible inside folder lanes" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    try paint764TestSurface(dib, &fixture, std.testing.allocator, .overview);
+    // This unoccupied row is inside the first band, not under a card or caption.
+    const sample = rect(280, 330, 400, 345);
+    var darkest: u32 = 255;
+    var lightest: u32 = 0;
+    var x = sample.left;
+    while (x < sample.right) : (x += 1) {
+        const color = c.GetPixel(dib.dc, x, 340);
+        try std.testing.expect(color != c.CLR_INVALID);
+        darkest = @min(darkest, color & 255);
+        lightest = @max(lightest, color & 255);
+    }
+    // CanvasBand.fill is white at 0.022; it tints rather than erasing the grid.
+    try std.testing.expect(lightest > darkest);
+    try std.testing.expect(darkest < 24);
+}
+
+test "connected canvas overview paints actual graph edges between card middles" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    try paint764TestSurface(dib, &fixture, std.testing.allocator, .overview);
+    const state = CanvasState{};
+    const first = overviewCardBounds(&fixture.model, 0, 0, chrome764GraphBounds(), &state);
+    const next = overviewCardBounds(&fixture.model, 0, 1, chrome764GraphBounds(), &state);
+    const cy = @divTrunc(first.top + first.bottom, 2);
+    var ink: usize = 0;
+    var x = first.right + 1;
+    while (x < next.left - 1) : (x += 1) {
+        const stroke = c.GetPixel(dib.dc, x, cy);
+        const ground = c.GetPixel(dib.dc, x, cy + 4);
+        try std.testing.expect(stroke != c.CLR_INVALID and ground != c.CLR_INVALID);
+        if (paint764RgbL1(stroke, ground) > 40) ink += 1;
+    }
+    try std.testing.expect(ink > 0);
+}
+
+test "connected canvas root furniture includes a distinct twelve point ENTRY origin" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    var dib = try ParityDib.init(1280, 720);
+    defer dib.deinit();
+    for ([_]Paint764Scene{ .project, .overview }) |scene| {
+        try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
+        const cy: i32 = if (scene == .project) 202 else 224;
+        const marker = rect(230, cy - 6, 242, cy + 6);
+        const caption = rect(221, cy + 8, 251, cy + 23);
+        try std.testing.expect(dib.count(marker, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 22)) > 20);
+        try std.testing.expect(dib.count(caption, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 42)) > 0);
+    }
+}
+
+test "connected canvas hover continuation is a circular fourteen point handle" {
+    try initPaint764TestRenderer();
+    var fixture = try chrome764IsolatedFixture();
+    defer fixture.model.deinit();
+    var normal = try ParityDib.init(1280, 720);
+    defer normal.deinit();
+    var hover = try ParityDib.init(1280, 720);
+    defer hover.deinit();
+    const state = CanvasState{};
+    const hovered = CanvasState{ .hovered_connector = 0 };
+    try chrome764Paint(normal, &fixture, .project, &state, null, &.{"chrome-isolated"});
+    try chrome764Paint(hover, &fixture, .project, &hovered, null, &.{"chrome-isolated"});
+    const graph = fixture.model.graph.?;
+    const center = connectorPositionForIndex(graph.nodes.items, 0, true, &state);
+    try std.testing.expectEqual(c.GetPixel(normal.dc, center.x + 6, center.y + 6), c.GetPixel(hover.dc, center.x + 6, center.y + 6));
+    try std.testing.expect(try label858Differences(normal, hover, rect(center.x - 7, center.y - 7, center.x + 7, center.y + 7)) > 20);
+    try std.testing.expectEqual(@as(?usize, 0), hitTestConnector(graph.nodes.items, center.x, center.y, &hovered, chrome764GraphBounds()));
+    const consumer = try std.fs.cwd().readFileAlloc(std.testing.allocator, "..\\Tools\\windows\\uia-live-gate.ps1", 2 * 1024 * 1024);
+    defer std.testing.allocator.free(consumer);
+    const prefix = "$expectedConnectorHoverColor = [System.Drawing.Color]::FromArgb(";
+    const color_start = (std.mem.indexOf(u8, consumer, prefix) orelse return error.HoverConsumerColorMissing) + prefix.len;
+    const color_end = std.mem.indexOfScalarPos(u8, consumer, color_start, ')') orelse return error.HoverConsumerColorMissing;
+    var components = std.mem.splitScalar(u8, consumer[color_start..color_end], ',');
+    var expected: u32 = 0;
+    for ([_]u5{ 0, 8, 16 }) |shift| {
+        const value = components.next() orelse return error.HoverConsumerColorMissing;
+        expected |= @as(u32, try std.fmt.parseInt(u8, std.mem.trim(u8, value, " \r\n"), 0)) << shift;
+    }
+    if (components.next() != null) return error.HoverConsumerColorInvalid;
+    var before_match = false;
+    var after_match = false;
+    var x = center.x - 6;
+    while (x <= center.x + 6) : (x += 1) {
+        var y = center.y - 6;
+        while (y <= center.y + 6) : (y += 1) {
+            before_match = before_match or chrome764ColorNear(c.GetPixel(normal.dc, x, y), expected, 24);
+            after_match = after_match or chrome764ColorNear(c.GetPixel(hover.dc, x, y), expected, 24);
+        }
+    }
+    try std.testing.expect(!before_match);
+    try std.testing.expect(after_match);
 }
 
 test "canvas zoom keeps the graph point beneath the cursor stable" {
@@ -5030,7 +5428,7 @@ fn writePaint764Receipt(
     const render2_hex = std.fmt.bytesToHex(hashes[2], .lower);
     const nodes: usize = if (scene == .project) 6 else 8;
     const edges: usize = if (scene == .project) 3 else 4;
-    const painted_edges: usize = if (scene == .project) edges else 0;
+    const painted_edges: usize = edges;
     const age_evidence = try paint764AgeEvidence(allocator, fixture, render.age_observed_at);
     defer allocator.free(age_evidence);
     const artifact0 = try paint764ArtifactName(allocator, scene, 0);
@@ -5656,6 +6054,8 @@ test "loop card parity chrome 764 tinted falloff and offset black lift on both g
     defer normal.deinit();
     var warm = try ParityDib.init(1280, 720);
     defer warm.deinit();
+    var background = try ParityDib.init(1280, 720);
+    defer background.deinit();
     var checks = Chrome764Checks{};
     const state = CanvasState{};
     for ([_]Paint764Scene{ .project, .overview }) |scene| {
@@ -5664,20 +6064,28 @@ test "loop card parity chrome 764 tinted falloff and offset black lift on both g
         try chrome764State(&fixture, 0, "failed", "idle");
         try chrome764Paint(warm, &fixture, scene, &state, null, &.{"chrome-isolated"});
         const bounds = chrome764Card(&fixture, scene, 0, &state);
-        const ground: u32 = if (scene == .project) Tokens.canvas_tone else Tokens.workspace_rail;
-        const x = bounds.left + 125;
+        fill(background.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+        drawGrid(background.dc, chrome764GraphBounds(), &state);
+        if (scene == .project) {
+            drawLaneBand(background.dc, graphBand(1, .{ .state = &state }).?, 1);
+        } else {
+            const lane = overviewLaneBounds(&fixture.model, 0, chrome764GraphBounds(), &state);
+            drawLaneBand(background.dc, rect(lane.left - 18, lane.top, lane.right, lane.bottom), 1);
+        }
+        // Clear of caption ink; measure shadow contrast against the actual grid/band, not an opaque lane.
+        const x = bounds.left + 225;
         var last_green: u32 = 255;
         var last_orange: u32 = 255;
         for ([_]i32{ 6, 12, 20 }) |distance| {
             const np = c.GetPixel(normal.dc, x, bounds.top - distance);
             const wp = c.GetPixel(warm.dc, x, bounds.top - distance);
-            const green = (np >> 8) & 255;
-            const orange = wp & 255;
-            checks.expect(green > ((ground >> 8) & 255), "positive-type-tinted-halo", scene, "chrome-isolated");
-            checks.expect(orange > (ground & 255), "positive-attention-orange-halo", scene, "chrome-isolated");
+            const ground = c.GetPixel(background.dc, x, bounds.top - distance);
+            const green = ((np >> 8) & 255) -| ((ground >> 8) & 255);
+            const orange = (wp & 255) -| (ground & 255);
+            checks.expect(green > 0, "positive-type-tinted-halo", scene, "chrome-isolated");
+            checks.expect(orange > 0, "positive-attention-orange-halo", scene, "chrome-isolated");
             checks.expect(green <= last_green and orange <= last_orange, "bounded-alpha-falloff-not-flat-rings", scene, "chrome-isolated");
-            if (distance == 20) checks.expect(orange -| (ground & 255) > green -| ((ground >> 8) & 255),
-                "emphasized-halo-wider-and-stronger", scene, "chrome-isolated");
+            if (distance == 20) checks.expect(orange > green, "emphasized-halo-wider-and-stronger", scene, "chrome-isolated");
             last_green = green;
             last_orange = orange;
             std.debug.print("chrome764 halo surface={s} distance={d} normal=0x{x} warm=0x{x} ground=0x{x}\n",
@@ -5709,11 +6117,10 @@ test "loop card parity chrome 764 rounded stripe alpha hairline and unwired dash
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
             try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
             const bounds = chrome764Card(&fixture, scene, 5, &state);
-            const face = chrome764Face(attention, 48, 96);
-            checks.pixel(c.GetPixel(dib.dc, bounds.left + 2, bounds.top + 48),
-                chrome764Blend(accent, face, 35), "unwired-alpha-over-local-gradient", scene, "fixture-turn-needs-you");
+            const face = chrome764Face(attention, 40, 96);
+            checks.pixel(c.GetPixel(dib.dc, bounds.left + 2, bounds.top + 40), chrome764Blend(accent, face, 35), "unwired-alpha-over-local-gradient", scene, "fixture-turn-needs-you");
             const corner = c.GetPixel(dib.dc, bounds.left + 1, bounds.top + 1);
-            const middle = c.GetPixel(dib.dc, bounds.left + 1, bounds.top + 48);
+            const middle = c.GetPixel(dib.dc, bounds.left + 1, bounds.top + 40);
             checks.expect(!chrome764ColorNear(corner, middle, 8), "radius11-corner-excludes-rectangular-stripe", scene, "fixture-turn-needs-you");
             var transitions: usize = 0;
             var previous = c.GetPixel(dib.dc, bounds.left + 30, bounds.bottom);
