@@ -186,8 +186,6 @@ pub fn draw(
 ) void {
     const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
     fill(hdc, sidebar, Tokens.workspace_rail);
-    drawText(hdc, allocator, "GRAPH", 18, Tokens.header_height + 20, 16, 0x00FFFFFF);
-    drawText(hdc, allocator, "Projects", 18, Tokens.header_height + 54, 14, 0x00B8B8B8);
     const footer = effectiveFooter(viewport_bottom, update_version.len != 0, ingress_error.len != 0);
     const has_update = footer.update;
     const has_error = footer.ingress;
@@ -210,12 +208,12 @@ pub fn draw(
             .local_heading => {
                 drawStyledTextRect(hdc, allocator, row.project_name orelse "Local Projects", rect(18, row.top, 198, row.top + 20), 11, .semibold, 0x00909090, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom)
-                    drawDisclosureIcon(hdc, rect(198, row.top, 220, row.top + 20), state.local_collapsed, 0x00909090);
+                    drawDisclosureIcon(hdc, rect(198, row.top, bounds.right, row.top + 20), state.local_collapsed, 0x00909090);
             },
             .remote_heading => {
                 drawStyledTextRect(hdc, allocator, row.project_name orelse "Remote Repositories", rect(18, row.top, 198, row.top + 20), 11, .semibold, 0x00909090, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom)
-                    drawDisclosureIcon(hdc, rect(198, row.top, 220, row.top + 20), state.remote_collapsed, 0x00909090);
+                    drawDisclosureIcon(hdc, rect(198, row.top, bounds.right, row.top + 20), state.remote_collapsed, 0x00909090);
             },
             .project => {
                 const project = model.recent_projects.items[row.index];
@@ -224,7 +222,7 @@ pub fn draw(
             },
             .overview => {
                 if (navigationRowSelected(row, surface, model.selected_project_path))
-                    fill(hdc, bounds, 0x003A3A44);
+                    drawSelection(hdc, bounds);
                 drawOutlineIcon(hdc, .graph, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
                 drawTextRect(hdc, allocator, "Graph", rect(44, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom and row.has_graph) {
@@ -234,7 +232,7 @@ pub fn draw(
             },
             .open_project => if (row.project_path) |path| {
                 const selected = navigationRowSelected(row, surface, model.selected_project_path);
-                if (selected) fill(hdc, bounds, 0x003A3A44);
+                if (selected) drawSelection(hdc, bounds);
                 const graph = graphForProject(model, path);
                 const remote = if (graph) |value| value.project().isRemote() else std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
                 drawOutlineIcon(hdc, if (remote) .remote_folder else .local_folder, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
@@ -274,14 +272,14 @@ pub fn draw(
                     drawStateIndicator(hdc, node.state, text.state);
                     if (elapsed) |value| drawStyledTextRect(hdc, allocator, value, text.age, 10.5, .card_mono, 0x00908E8E, loop_text_format | c.DT_RIGHT);
                     if (row.has_children)
-                        drawDisclosureIcon(hdc, rect(198, row.top + 4, 220, row.top + 20), !state.isNodeExpanded(node.id), if (hover_y >= bounds.top and hover_y < bounds.bottom) 0x00B8B8B8 else 0x006A6A6A);
+                        drawDisclosureIcon(hdc, rect(198, row.top + 4, bounds.right, row.top + 20), !state.isNodeExpanded(node.id), if (hover_y >= bounds.top and hover_y < bounds.bottom) 0x00B8B8B8 else 0x006A6A6A);
                 }
             },
             .worktree => if (inspection) |value| {
                 const entry = value.entries.items[row.index];
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
                 if (selected and WorktreeStatus.decision(entry) == .reclaimable)
-                    fill(hdc, bounds, 0x003A3A44);
+                    drawSelection(hdc, bounds);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
                 const size = WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage()) catch null;
                 defer if (size) |value_text| allocator.free(value_text);
@@ -294,7 +292,7 @@ pub fn draw(
             },
             .quick_chat_overview => {
                 const selected = navigationRowSelected(row, surface, model.selected_project_path);
-                if (selected) fill(hdc, bounds, 0x003A3A44);
+                if (selected) drawSelection(hdc, bounds);
                 drawOutlineIcon(hdc, .chat, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
                 drawTextRect(hdc, allocator, "Quick Chats", rect(44, row.top + 5, 172, row.top + 27), 13, if (selected) 0x00FFFFFF else 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom) {
@@ -416,10 +414,10 @@ fn measuredAgeWidth(hdc: c.HDC, label: []const u8) !i32 {
     return measuredWidth(hdc, label);
 }
 
-/// Top edge of the scrollable sidebar content, 3 px above the first row's top so a row's
-/// selection fill is never cut at rest. The GRAPH / Projects header above it is fixed, so rows,
-/// labels, hit targets, and UIA bounds all start here and never overlap it.
-pub const content_top: i32 = Tokens.header_height + 78 - 3;
+/// AppSidebarView's sidebar List has no fixed title block. Keep a small Windows inset
+/// below the application header, shared by paint clipping, hit testing, and UIA.
+pub const content_top: i32 = Tokens.header_height + 8;
+const first_row_top: i32 = content_top + 3;
 
 const footer_status_extent: i32 = 58;
 const footer_error_extent: i32 = 50;
@@ -621,7 +619,8 @@ pub const ProjectGraph = union(enum) {
 pub const RowControl = enum { add_loop, disclosure, new_chat, chats_disclosure };
 
 const navigation_row_height: i32 = 32;
-const section_gap: i32 = 12;
+// AppSidebarView.sectionHeaderRow owns the gap; peer destinations have none.
+const section_gap: i32 = 18;
 const global_project_path = "graphcode://global";
 
 pub fn navigationRowSelected(row: Row, surface: Surface, selected_project_path: ?[]const u8) bool {
@@ -662,7 +661,7 @@ pub fn rowBounds(row: Row) c.RECT {
         .worktree => 31,
         else => 29,
     };
-    return rect(12, row.top + top_offset, Tokens.sidebar_width, row.top + bottom_offset);
+    return rect(12, row.top + top_offset, Tokens.sidebar_width - 12, row.top + bottom_offset);
 }
 
 pub fn newLoopBounds(row: Row) c.RECT {
@@ -670,7 +669,8 @@ pub fn newLoopBounds(row: Row) c.RECT {
 }
 
 pub fn disclosureBounds(row: Row) c.RECT {
-    return rect(198, row.top - 3, 220, row.top + 29);
+    const bounds = rowBounds(row);
+    return rect(198, bounds.top, bounds.right, bounds.bottom);
 }
 
 pub fn newChatBounds(row: Row) c.RECT {
@@ -685,13 +685,13 @@ pub fn rowControlAt(x: i32, y: i32, row: Row) ?RowControl {
     const bounds = rowBounds(row);
     if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom) return null;
     return switch (row.kind) {
-        .overview, .open_project, .loop => if (x >= 198 and x < 220 and row.has_children)
+        .overview, .open_project, .loop => if (x >= 198 and row.has_children)
             .disclosure
         else if (x >= 174 and x < 198 and row.has_graph)
             .add_loop
         else
             null,
-        .quick_chat_overview => if (x >= 198 and x < 220 and row.has_children)
+        .quick_chat_overview => if (x >= 198 and row.has_children)
             .chats_disclosure
         else if (x >= 174 and x < 198)
             .new_chat
@@ -711,7 +711,7 @@ pub fn appendRows(
     state: ?*const State,
 ) !std.ArrayList(Row) {
     var rows: std.ArrayList(Row) = .empty;
-    var top: i32 = Tokens.header_height + 78 - scroll_offset;
+    var top: i32 = first_row_top - scroll_offset;
     const local_collapsed = if (state) |value| value.local_collapsed else false;
     const remote_collapsed = if (state) |value| value.remote_collapsed else false;
     const chats_collapsed = if (state) |value| value.chats_collapsed else false;
@@ -732,7 +732,6 @@ pub fn appendRows(
         }
     }
 
-    top += section_gap;
     try rows.append(allocator, .{
         .kind = .quick_chat_overview,
         .index = 0,
@@ -746,21 +745,20 @@ pub fn appendRows(
             top += navigation_row_height;
         }
     }
-    top += section_gap;
-
     if (hasOpenOwnerInSection(model, .local)) {
+        top += section_gap;
         try rows.append(allocator, .{ .kind = .local_heading, .index = 0, .top = top, .project_name = "Local Projects" });
         top += 24;
         if (!local_collapsed) top = try appendOpenOwners(allocator, &rows, model, .local, top, state);
-        top += section_gap;
     }
     if (hasOpenOwnerInSection(model, .remote)) {
+        top += section_gap;
         try rows.append(allocator, .{ .kind = .remote_heading, .index = 0, .top = top, .project_name = "Remote Repositories" });
         top += 24;
         if (!remote_collapsed) top = try appendOpenOwners(allocator, &rows, model, .remote, top, state);
-        top += section_gap;
     }
     if (inspection) |value| {
+        top += 12;
         for (value.entries.items, 0..) |_, index| {
             try rows.append(allocator, .{ .kind = .worktree, .index = index, .top = top });
             top += 34;
@@ -770,14 +768,14 @@ pub fn appendRows(
 }
 
 pub fn sharedGraphTop(model: *const GraphModel.Model, graph_index: usize) i32 {
-    if (graph_index >= model.graphs.items.len) return Tokens.header_height + 78;
+    if (graph_index >= model.graphs.items.len) return first_row_top;
     const path = model.graphs.items[graph_index].project.path;
-    var rows = appendRows(std.heap.page_allocator, model, null, 0, null) catch return Tokens.header_height + 78;
+    var rows = appendRows(std.heap.page_allocator, model, null, 0, null) catch return first_row_top;
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         if (row.kind == .open_project and row.project_path != null and std.mem.eql(u8, row.project_path.?, path)) return row.top;
     }
-    return Tokens.header_height + 78;
+    return first_row_top;
 }
 
 pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_index: usize) i32 {
@@ -792,10 +790,10 @@ pub fn sharedLoopTop(model: *const GraphModel.Model, graph_index: usize, node_in
 }
 
 pub fn sharedWorktreeTop(model: *const GraphModel.Model, index: usize) i32 {
-    var rows = appendRows(std.heap.page_allocator, model, null, 0, null) catch return Tokens.header_height + 78;
+    var rows = appendRows(std.heap.page_allocator, model, null, 0, null) catch return first_row_top;
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| if (row.kind == .worktree and row.index == index) return row.top;
-    return Tokens.header_height + 78;
+    return first_row_top;
 }
 
 pub fn rowAt(
@@ -812,7 +810,7 @@ pub fn rowAt(
     defer rows.deinit(std.heap.page_allocator);
     for (rows.items) |row| {
         const bounds = rowBounds(row);
-        if (y >= bounds.top and y < bounds.bottom) return row;
+        if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) return row;
     }
     return null;
 }
@@ -1357,7 +1355,7 @@ pub fn hitTestOverviewLoop(x: i32, y: i32, model: *const GraphModel.Model, scrol
     for (rows.items) |row| {
         if (row.kind != .loop or row.project_path == null or !std.mem.eql(u8, row.project_path.?, global_project_path)) continue;
         const bounds = rowBounds(row);
-        if (y >= bounds.top and y < bounds.bottom) return row.index;
+        if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) return row.index;
     }
     return null;
 }
@@ -2107,8 +2105,175 @@ test "quick chat rows use the navigation row height after graph loops" {
     const chats_row = for (rows.items) |row| {
         if (row.kind == .quick_chat_overview) break row;
     } else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(i32, 36), chats_row.top - last_graph_loop.top);
+    try std.testing.expectEqual(@as(i32, 24), chats_row.top - last_graph_loop.top);
     try std.testing.expectEqual(@as(usize, 1), countRows(rows.items, .quick_chat));
+}
+
+test "sidebar framing starts with navigation instead of a fixed title block" {
+    // AppSidebarView.sidebarList starts with Graph, then Quick Chats; no title rows.
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, null);
+    defer rows.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+    try std.testing.expectEqual(RowKind.overview, rows.items[0].kind);
+    try std.testing.expectEqual(Tokens.header_height + 8, rowBounds(rows.items[0]).top);
+
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    var painted_rows: usize = 0;
+    for (rows.items) |row| {
+        var pixels: usize = 0;
+        var y = row.top;
+        while (y < row.top + 24) : (y += 1) {
+            var x: i32 = 18;
+            while (x < 172) : (x += 1) {
+                if (c.GetPixel(bitmap.hdc, x, y) != Tokens.workspace_rail) pixels += 1;
+            }
+        }
+        try std.testing.expect(pixels > 20);
+        painted_rows += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), painted_rows);
+    var y = rowBounds(rows.items[rows.items.len - 1]).bottom;
+    while (y < 240) : (y += 1) {
+        var x: i32 = 0;
+        while (x < Tokens.sidebar_width) : (x += 1)
+            try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, x, y));
+    }
+}
+
+test "sidebar framing keeps peer destinations adjacent and gaps on folder captions" {
+    // AppSidebarView has no inter-project padding; sectionHeaderRow owns 18pt above it.
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendTestOpenProject(allocator, &model, "C:\\local", "Local");
+    try appendTestOpenProject(allocator, &model, "ssh://host/remote", "Remote");
+    var rows = try appendRows(allocator, &model, null, 0, null);
+    defer rows.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 6), rows.items.len);
+    try std.testing.expectEqual(rowBounds(rows.items[0]).bottom, rowBounds(rows.items[1]).top);
+    var captions: usize = 0;
+    for (rows.items[1..], 1..) |row, index| {
+        if (row.kind != .local_heading and row.kind != .remote_heading) continue;
+        try std.testing.expectEqual(@as(i32, 18), rowBounds(row).top - rowBounds(rows.items[index - 1]).bottom);
+        try std.testing.expectEqual(rowBounds(row).bottom, rowBounds(rows.items[index + 1]).top);
+        captions += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), captions);
+}
+
+test "sidebar framing folder captions own the source-defined eighteen point gap" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendTestOpenProject(allocator, &model, "C:\\local", "Local");
+    try appendTestOpenProject(allocator, &model, "ssh://host/remote", "Remote");
+    var rows = try appendRows(allocator, &model, null, 0, null);
+    defer rows.deinit(allocator);
+    var checked: usize = 0;
+    for (rows.items[1..], 1..) |row, index| {
+        if (row.kind != .local_heading and row.kind != .remote_heading) continue;
+        try std.testing.expectEqual(@as(i32, 18), rowBounds(row).top - rowBounds(rows.items[index - 1]).bottom);
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), checked);
+}
+
+test "sidebar framing rounds every selected navigation surface inside the rail" {
+    // macOS delegates selection to List.listStyle(.sidebar), not a full-width fill.
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendTestOpenProject(allocator, &model, "C:\\local", "Local");
+    model.selected_project_path = try allocator.dupe(u8, "C:\\local");
+    const surfaces = [_]Surface{ .overview, .quick_chats, .project };
+    const kinds = [_]RowKind{ .overview, .quick_chat_overview, .open_project };
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    for (surfaces, kinds) |surface, kind| {
+        draw(bitmap.hdc, &model, surface, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        const row = for (rows.items) |candidate| {
+            if (candidate.kind == kind) break candidate;
+        } else return error.TestUnexpectedResult;
+        const bounds = rowBounds(row);
+        try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, bounds.left, bounds.top));
+        try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, bounds.right - 1, bounds.top));
+        try std.testing.expectEqual(@as(u32, 0x003A3A44), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
+        try std.testing.expectEqual(@as(u32, 0x003A3A44), c.GetPixel(bitmap.hdc, bounds.left + 1, row.top + 16));
+        try std.testing.expectEqual(@as(i32, 12), bounds.left);
+        try std.testing.expectEqual(Tokens.sidebar_width - bounds.left, bounds.right);
+        try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, Tokens.sidebar_width - 1, row.top + 16));
+    }
+}
+
+test "sidebar framing rounds reclaimable worktree selection without selecting unsafe rows" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = try allocator.dupe(u8, "main"),
+        .project_path = try allocator.dupe(u8, "C:\\local"),
+    };
+    defer WorktreeStatus.deinitInspection(allocator, &inspection);
+    try inspection.entries.append(.{
+        .path = try allocator.dupe(u8, "worktree"),
+        .branch = try allocator.dupe(u8, "landed"),
+        .pushed = true,
+        .landed = true,
+    });
+    var rows = try appendRows(allocator, &model, &inspection, 0, null);
+    defer rows.deinit(allocator);
+    const row = rows.items[rows.items.len - 1];
+    try std.testing.expectEqual(RowKind.worktree, row.kind);
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    draw(bitmap.hdc, &model, .workspace, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    const bounds = rowBounds(row);
+    try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, bounds.left, bounds.top));
+    try std.testing.expectEqual(@as(u32, 0x003A3A44), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
+    inspection.entries.items[0].dirty = true;
+    draw(bitmap.hdc, &model, .workspace, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
+}
+
+test "sidebar framing shares inset row bounds with hit testing and controls" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendTestOpenProject(allocator, &model, "C:\\local", "Local");
+    var rows = try appendRows(allocator, &model, null, 0, null);
+    defer rows.deinit(allocator);
+    var checked: usize = 0;
+    for (rows.items) |row| {
+        const bounds = rowBounds(row);
+        const y = row.top + 8;
+        try std.testing.expect(rowAt(bounds.left - 1, y, &model, null, 0, 700, null) == null);
+        try std.testing.expect(rowAt(bounds.right, y, &model, null, 0, 700, null) == null);
+        const hit = rowAt(bounds.left, y, &model, null, 0, 700, null) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(row.kind, hit.kind);
+        if (row.kind == .open_project or row.kind == .quick_chat_overview) {
+            const add = newLoopBounds(row);
+            const disclosure = disclosureBounds(row);
+            try std.testing.expect(add.left >= bounds.left and disclosure.right <= bounds.right);
+            try std.testing.expectEqual(bounds.top, add.top);
+            try std.testing.expectEqual(bounds.bottom, add.bottom);
+        }
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), checked);
 }
 
 test "sidebar row parity uses the macOS kind stripe palette" {
@@ -2607,29 +2772,33 @@ fn manyLoopModel(allocator: std.mem.Allocator, loops: usize) !GraphModel.Model {
     return model;
 }
 
-test "scrolled rows beneath the fixed GRAPH/Projects header are not hit" {
+test "scrolled rows beneath the application header inset are not hit" {
     const allocator = std.testing.allocator;
     var model = try manyLoopModel(allocator, 40);
     defer model.deinit();
     var state = State.init(allocator);
     defer state.deinit();
     const content_bottom = contentViewportBottom(500, false, false);
-    const scroll: i32 = 150;
-
-    var rows = try appendRows(allocator, &model, null, scroll, &state);
-    defer rows.deinit(allocator);
     var under_header: usize = 0;
-    for (rows.items) |row| {
-        const y = row.top + 8;
-        if (y >= Tokens.header_height and y < content_top) {
-            under_header += 1;
-            try std.testing.expect(rowAt(24, y, &model, null, scroll, content_bottom, &state) == null);
+    for (0..24) |offset| {
+        const scroll: i32 = 150 + @as(i32, @intCast(offset));
+        var rows = try appendRows(allocator, &model, null, scroll, &state);
+        defer rows.deinit(allocator);
+        for (rows.items) |row| {
+            const y = row.top + 8;
+            if (y >= Tokens.header_height and y < content_top) {
+                under_header += 1;
+                try std.testing.expect(rowAt(24, y, &model, null, scroll, content_bottom, &state) == null);
+            }
         }
+        var y: i32 = Tokens.header_height;
+        while (y < content_top) : (y += 1)
+            try std.testing.expect(rowAt(24, y, &model, null, scroll, content_bottom, &state) == null);
     }
     try std.testing.expect(under_header >= 2);
 }
 
-test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
+test "scrolled rows are not drawn over the application header inset" {
     const allocator = std.testing.allocator;
     var model = try manyLoopModel(allocator, 40);
     defer model.deinit();
@@ -2840,6 +3009,22 @@ fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
         _ = c.FillRect(hdc, &bounds, brush);
         _ = c.DeleteObject(brush);
     }
+}
+
+fn drawSelection(hdc: c.HDC, bounds: c.RECT) void {
+    // macOS's sidebar List supplies the rounded surface. Retain the existing neutral
+    // ink: Sidebar.draw has no app/window activation input to qualify an accent fill.
+    const brush = c.CreateSolidBrush(0x003A3A44) orelse {
+        std.log.err("Sidebar selection brush creation failed", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(brush);
+    const previous_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, previous_brush);
+    const previous_pen = c.SelectObject(hdc, c.GetStockObject(c.NULL_PEN));
+    defer _ = c.SelectObject(hdc, previous_pen);
+    if (c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, 12, 12) == 0)
+        std.log.err("Sidebar selection paint failed", .{});
 }
 
 fn drawText(
