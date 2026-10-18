@@ -18,6 +18,30 @@ not a synthetic terminal proof.
 Workspace reopen and activation restore the selected tab's focused pane rather
 than assuming that terminal slot zero or the last active slot is visible.
 
+The loop bar's **Restart session** is available for unresolved graph loops and
+sends the daemon's `restartNode` command, not `stopNode` or a local attach-client
+recreation. The shell retires that loop's old agent attachment before queueing
+the request and remounts only after the same connection reports an increased
+`sessionRestarts` counter for that loop. Queue rejection requests reattachment to
+the unchanged daemon session and reports any local reattachment failure;
+daemon errors, disconnects, and a 30-second confirmation timeout leave it retired
+until an explicit reopen. Opening another workspace while waiting is respected.
+**Stop Loop** remains a distinct Loop-menu operation. Quick Chats are not graph
+nodes and report that session restart is unsupported rather than sending a
+graph command.
+
+Workspace tab pills share the available strip width, with a 92-logical-pixel
+minimum where space permits and a selected-tab window when they overflow.
+Agent names follow the primary pane: **Goal**, **Loop**, or the recorded backend's
+display name; plain-shell tabs are **Shell**. Missing backend metadata is labeled
+**Agent**, never assumed to be Claude Code. `Ctrl+1` through `Ctrl+9` select those
+tab indexes in terminal context. Hints occupy the trailing edge on the title's
+line and give way to Close on hover. Paint, pointer targets, and published UIA
+use the same visible bounds; the existing final-tab and session-ownership close
+guards remain in force. Component and hidden-window tests cover this routing and
+geometry, not actual daemon restart continuity, native keyboard input, glyph
+pixels, or paired macOS visual parity.
+
 By default, the pinned Winghostty child HWND already owns the terminal's UI Automation
 Text/Text2 provider. GraphCode supplies an owned UTF-8 snapshot of its existing
 pane-sized rendered-cell grid, with spaces for empty cells, preserved trailing

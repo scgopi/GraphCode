@@ -593,6 +593,17 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
+    pub fn sendNodeActionChecked(
+        self: *DaemonClient,
+        project_path: []const u8,
+        node_id: []const u8,
+        action: []const u8,
+        text: ?[]const u8,
+    ) !void {
+        const command = try Wire.commandGraphNodeAction(self.allocator, project_path, node_id, action, text);
+        try self.sendCommandChecked(command);
+    }
+
     pub fn sendDetachTemplate(self: *DaemonClient, project_path: []const u8, node_id: []const u8) void {
         const command = Wire.commandGraphDetachTemplate(self.allocator, project_path, node_id) catch {
             self.publishState(self.connectionState(), "detach template command encoding failed");
@@ -1621,6 +1632,51 @@ test "a request that cannot be encoded leaves nothing pending" {
     client.sendCommandOnWorker("{\"listRecentProjects\":{}}", null, .graph_changed);
     try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
 }
+
+    test "an event that merely carries a requestID does not complete a pending request" {
+        var client = try DaemonClient.initForTesting(std.testing.allocator);
+        defer client.deinit();
+        client.publishState(.connected, "");
+        const read = client.sendReadProjectGraph("C:\\work\\A").?;
+        try std.testing.expect(client.trackRequest(&read.request_id));
+        const spoof = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"event\",\"sequence\":3,\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
+            .{read.request_id},
+        );
+        defer std.testing.allocator.free(spoof);
+        try std.testing.expect(client.handleFrame(spoof));
+        try std.testing.expectEqual(@as(usize, 1), client.pending_request_count);
+        const response = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
+            .{read.request_id},
+        );
+        defer std.testing.allocator.free(response);
+        try std.testing.expect(client.handleFrame(response));
+        try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+    }
+
+    test "an error envelope for the request correlates and an unknown-command error is not a response" {
+        var client = try DaemonClient.initForTesting(std.testing.allocator);
+        defer client.deinit();
+        client.publishState(.connected, "");
+        ReadCapture.reset(&client);
+        const read = client.sendReadProjectGraph("C:\\work\\A").?;
+        try std.testing.expect(client.trackRequest(&read.request_id));
+        const failure = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{\"version\":2,\"kind\":\"error\",\"requestID\":\"{s}\",\"error\":" ++
+                "{{\"code\":\"malformedEnvelope\",\"message\":\"unknown command\"}}}}",
+            .{read.request_id},
+        );
+        defer std.testing.allocator.free(failure);
+        try std.testing.expect(client.handleFrame(failure));
+        client.poll();
+        try std.testing.expectEqual(@as(usize, 1), ReadCapture.count);
+        try std.testing.expectEqual(Wire.FrameKind.@"error", Wire.frameKind(ReadCapture.at(0)));
+        try std.testing.expectEqualStrings(&read.request_id, Wire.correlatedRequestID(ReadCapture.at(0)).?);
+    }
 
 test "an event that merely carries a requestID does not complete a pending request" {
     var client = try DaemonClient.initForTesting(std.testing.allocator);

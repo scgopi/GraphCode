@@ -157,6 +157,15 @@ const max_surfaces: usize = 32;
 
 pub const ChromeAction = enum { new_tab, split_right, split_down };
 pub const TabAction = enum { select, close };
+pub const TabChrome = struct {
+    bounds: c.RECT,
+    title: c.RECT,
+    indicator: ?c.RECT = null,
+    asks: ?c.RECT = null,
+    trailing: ?c.RECT = null,
+    shortcut: ?[]const u8 = null,
+    show_close: bool = false,
+};
 pub const LoopBarAction = LoopBarLayout.Action;
 pub const QuickChatBarAction = LoopBarLayout.QuickChatAction;
 
@@ -213,6 +222,7 @@ pub fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, index: usiz
     return .{ .left = left, .top = origin_y + 3, .right = left + 68, .bottom = origin_y + Tokens.tab_bar_height - 3 };
 }
 
+/// Legacy fixed geometry; live chrome and UIA use Workspace.visibleTabBounds.
 pub fn tabBounds(origin_x: i32, origin_y: i32, index: usize) c.RECT {
     const left = origin_x + @as(i32, @intCast(index)) * 120;
     return .{ .left = left, .top = origin_y + 4, .right = left + 112, .bottom = origin_y + Tokens.tab_bar_height - 4 };
@@ -558,6 +568,10 @@ pub const Workspace = struct {
     layout_width: i32 = 960,
     layout_height: i32 = 250,
     collapsed: bool = false,
+    agent_tab_title: []u8 = &.{},
+    agent_tab_state: enum { quiet, running, needs_you, asks } = .quiet,
+    chrome_hover_tab: ?usize = null,
+    agent_restart_suspended: bool = false,
     project_path: []u8 = &.{},
     /// The open loop's directory, where new terminal sessions start (see `sessionDirectory`).
     shell_directory: []u8 = &.{},
@@ -666,6 +680,7 @@ pub const Workspace = struct {
         self.allocator.free(self.project_key);
         if (self.loop_id.len != 0) self.allocator.free(self.loop_id);
         if (self.legacy_directory.len != 0) self.allocator.free(self.legacy_directory);
+        if (self.agent_tab_title.len != 0) self.allocator.free(self.agent_tab_title);
     }
 
     pub fn setKeyCallback(
@@ -761,6 +776,11 @@ pub const Workspace = struct {
     fn clearLoopScope(self: *Workspace) void {
         if (self.loop_id.len != 0) self.allocator.free(self.loop_id);
         self.loop_id = &.{};
+        if (self.agent_tab_title.len != 0) self.allocator.free(self.agent_tab_title);
+        self.agent_tab_title = &.{};
+        self.agent_tab_state = .quiet;
+        self.agent_restart_suspended = false;
+        self.chrome_hover_tab = null;
     }
 
     /// Restores the layout's panes; a layout scoped to a loop leaves slot 0 and the loop's
@@ -2014,6 +2034,48 @@ pub const Workspace = struct {
         try self.attachNode(index, session, false);
     }
 
+    pub fn suspendLoopAgent(self: *Workspace) void {
+        self.agent_restart_suspended = true;
+        if (std.mem.eql(u8, self.resize_child_session, self.loop_id)) self.stopResizeChild();
+        self.cancelRecreateForID(self.loop_id);
+        for (self.surfaces, 0..) |slot, index| {
+            if (std.mem.eql(u8, slot.session_name, self.loop_id) or
+                (self.launch_waits[index].active() and std.mem.eql(u8, self.launch_waits[index].session, self.loop_id)))
+            {
+                self.cancelLaunchWait(index);
+                self.daemon_sessions[index] = false;
+                self.passive_retry_due_ms[index] = 0;
+                self.destroySurface(index);
+            }
+        }
+        self.launch_outcome = null;
+    }
+
+    pub fn setTabPresentation(self: *Workspace, loop_type: []const u8, backend: []const u8, state: []const u8) !void {
+        const title = agentTabTitle(loop_type, backend);
+        if (!std.mem.eql(u8, title, self.agent_tab_title)) {
+            const owned = try self.allocator.dupe(u8, title);
+            if (self.agent_tab_title.len != 0) self.allocator.free(self.agent_tab_title);
+            self.agent_tab_title = owned;
+        }
+        self.agent_tab_state = if (std.mem.eql(u8, state, "awaitingInput"))
+            .asks
+        else if (std.mem.eql(u8, state, "running"))
+            .running
+        else if (std.mem.eql(u8, state, "blocked"))
+            .needs_you
+        else
+            .quiet;
+    }
+
+    pub fn tabTitle(self: *const Workspace, index: usize) ?[]const u8 {
+        if (index >= self.layout.tabs.items.len) return null;
+        const tab = self.layout.tabs.items[index];
+        if (tab.panes.items.len != 0 and tab.panes.items[0].launches_agent and self.agent_tab_title.len != 0)
+            return self.agent_tab_title;
+        return tabLabel(tab);
+    }
+
     pub fn resize(self: *Workspace, origin_x: i32, origin_y: i32, width: i32, height: i32) void {
         self.collapsed = false;
         self.layout_origin_x = origin_x;
@@ -2059,20 +2121,82 @@ pub const Workspace = struct {
         if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return null;
         const controls_left = self.chromeControlsLeft();
         if (x < self.layout_origin_x or x >= controls_left) return null;
-        const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
-        _ = self.visibleTabBounds(index) orelse return null;
-        const action = tabActionForBounds(self.layout_origin_x, self.layout_origin_y, index, x, y) orelse return null;
-        return .{ .index = index, .action = action };
+        for (0..self.layout.tabs.items.len) |index| {
+            const bounds = self.visibleTabBounds(index) orelse continue;
+            if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom) continue;
+            const close = self.tabCloseBounds(index);
+            return .{ .index = index, .action = if (self.canCloseTab() and close != null and x >= close.?.left) .close else .select };
+        }
+        return null;
+    }
+
+    pub fn updateChromeHover(self: *Workspace, x: i32, y: i32) bool {
+        const next = if (self.tabActionAt(x, y)) |target| target.index else null;
+        if (next == self.chrome_hover_tab) return false;
+        self.chrome_hover_tab = next;
+        return true;
     }
 
     fn chromeControlsLeft(self: *const Workspace) i32 {
         return @max(self.layout_origin_x, self.layout_origin_x + self.layout_width - 220);
     }
 
-    fn visibleTabBounds(self: *const Workspace, index: usize) ?c.RECT {
+    pub fn visibleTabBounds(self: *const Workspace, index: usize) ?c.RECT {
         if (self.collapsed or index >= self.layout.tabs.items.len) return null;
-        const bounds = tabBounds(self.layout_origin_x, self.layout_origin_y, index);
-        return if (bounds.right <= self.chromeControlsLeft()) bounds else null;
+        const inset = Dpi.scale(8, self.dpi);
+        const gap = Dpi.scale(4, self.dpi);
+        const available = self.chromeControlsLeft() - self.layout_origin_x - 2 * inset;
+        if (available <= 0) return null;
+        const capacity: usize = @intCast(@max(1, @divTrunc(available + gap, Dpi.scale(92, self.dpi) + gap)));
+        const count = @min(self.layout.tabs.items.len, capacity);
+        const selected = @min(self.layout.selected_tab, self.layout.tabs.items.len - 1);
+        const first = if (selected >= count) selected - count + 1 else 0;
+        if (index < first or index >= first + count) return null;
+        const position: i32 = @intCast(index - first);
+        const visible_count: i32 = @intCast(count);
+        const content = available - gap * (visible_count - 1);
+        const left = self.layout_origin_x + inset + @divTrunc(content * position, visible_count) + gap * position;
+        const right = self.layout_origin_x + inset + @divTrunc(content * (position + 1), visible_count) + gap * position;
+        return .{ .left = left, .top = self.layout_origin_y + 4, .right = right, .bottom = self.layout_origin_y + Tokens.tab_bar_height - 4 };
+    }
+
+    pub fn tabCloseBounds(self: *const Workspace, index: usize) ?c.RECT {
+        const bounds = self.visibleTabBounds(index) orelse return null;
+        if (bounds.right - bounds.left < Dpi.scale(40, self.dpi)) return null;
+        return .{ .left = @max(bounds.left, bounds.right - Dpi.scale(24, self.dpi)), .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+    }
+
+    pub fn tabChrome(self: *const Workspace, index: usize) ?TabChrome {
+        const bounds = self.visibleTabBounds(index) orelse return null;
+        const padding = @min(Dpi.scale(10, self.dpi), @divTrunc(bounds.right - bounds.left, 2));
+        const close = self.tabCloseBounds(index);
+        var chrome = TabChrome{
+            .bounds = bounds,
+            .title = .{ .left = bounds.left + padding, .top = bounds.top, .right = bounds.right - padding, .bottom = bounds.bottom },
+            .show_close = self.chrome_hover_tab == index and self.canCloseTab() and close != null,
+        };
+        if (chrome.show_close) {
+            chrome.trailing = close;
+        } else if (bounds.right - bounds.left >= Dpi.scale(80, self.dpi)) {
+            if (tabShortcut(index)) |hint| {
+                chrome.shortcut = hint;
+                chrome.trailing = .{ .left = bounds.right - Dpi.scale(54, self.dpi), .top = bounds.top, .right = bounds.right - padding, .bottom = bounds.bottom };
+            }
+        }
+        if (chrome.trailing) |trailing| chrome.title.right = @max(chrome.title.left, trailing.left - Dpi.scale(4, self.dpi));
+        const tab = self.layout.tabs.items[index];
+        const has_agent = for (tab.panes.items) |pane| {
+            if (pane.launches_agent) break true;
+        } else false;
+        if (has_agent and self.agent_tab_state != .quiet and chrome.title.right - chrome.title.left >= 16) {
+            chrome.indicator = .{ .left = chrome.title.left, .top = bounds.top + 8, .right = chrome.title.left + 5, .bottom = bounds.top + 13 };
+            chrome.title.left += 11;
+        }
+        if (has_agent and self.agent_tab_state == .asks and chrome.title.right - chrome.title.left >= 80) {
+            chrome.asks = .{ .left = chrome.title.right - 26, .top = bounds.top, .right = chrome.title.right, .bottom = bounds.bottom };
+            chrome.title.right -= 32;
+        }
+        return chrome;
     }
 
     fn paneHeaderChrome(self: *const Workspace, position: usize) ?PaneHeaderChrome {
@@ -2130,22 +2254,24 @@ pub const Workspace = struct {
         GdiGradient.fillVertical(hdc, tab_bar, Tokens.tab_bar_gloss_top, Tokens.tab_bar_gloss_bottom);
         // Theme.tabBarHighlight -- the one-point specular line along the strip's top edge.
         fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.top, .right = tab_bar.right, .bottom = tab_bar.top + 1 }, Tokens.tab_bar_highlight);
-        for (self.layout.tabs.items, 0..) |tab, index| {
-            const bounds = self.visibleTabBounds(index) orelse break;
+        for (self.layout.tabs.items, 0..) |_, index| {
+            const chrome = self.tabChrome(index) orelse continue;
+            const bounds = chrome.bounds;
             const style = tabChromeStyle(index == self.layout.selected_tab);
             if (style.background) |background| fillRoundedRect(hdc, bounds, background, 6, null);
-            drawChromeText(hdc, tabLabel(tab), .{
-                .left = bounds.left + 10,
-                .top = bounds.top,
-                .right = bounds.right - 24,
-                .bottom = bounds.bottom,
-            }, 12, style.font, style.ink);
-            if (self.canCloseTab()) drawChromeText(hdc, "x", .{
-                .left = bounds.right - 17,
+            if (chrome.indicator) |indicator| {
+                const color: u32 = if (self.agent_tab_state == .running) 0x00FF840A else 0x000A9FFF;
+                paintChromeDot(hdc, indicator, color, style.background orelse Tokens.tab_bar_gloss_bottom, self.agent_tab_state == .needs_you);
+            }
+            if (chrome.asks) |asks| drawChromeText(hdc, "asks", asks, 9.5, .card_mono, 0x000A9FFF);
+            if (chrome.title.right > chrome.title.left) drawChromeText(hdc, self.tabTitle(index).?, chrome.title, 12, style.font, style.ink);
+            if (chrome.show_close) drawChromeText(hdc, "x", .{
+                .left = @max(bounds.left, bounds.right - 17),
                 .top = bounds.top,
                 .right = bounds.right - 5,
                 .bottom = bounds.bottom,
             }, 10, .semibold, 0x00999999);
+            if (chrome.shortcut) |value| drawChromeText(hdc, value, chrome.trailing.?, 10, .card_mono, 0x007E7E85);
         }
         fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.bottom - 1, .right = tab_bar.right, .bottom = tab_bar.bottom }, Tokens.tab_bar_shadow_line);
         for (0..3) |index| {
@@ -2191,11 +2317,11 @@ pub const Workspace = struct {
         const now: u64 = @intCast(@max(0, std.time.timestamp()));
         const spend = loopSpendLabel(created_at, token_usage, now, &spend_buffer);
         if (layout.spend) |bounds| drawChromeText(hdc, spend, nativeRect(bounds), 10.5, .card_mono, 0x008E8E93);
-        if (layout.stop) |stop| {
-            fillRoundedRect(hdc, nativeRect(stop), 0x00303035, 6, 0x00414145);
-            var text = nativeRect(stop);
-            text.left += 12;
-            drawChromeText(hdc, "Stop loop", text, 11.5, .semibold, 0x00D8D8DC);
+        if (layout.restart_session) |restart| {
+            fillRoundedRect(hdc, nativeRect(restart), 0x00303035, 6, 0x00414145);
+            var text = nativeRect(restart);
+            text.left += 10;
+            drawChromeText(hdc, "Restart session", text, 11.5, .semibold, 0x00D8D8DC);
         }
         var graph_text = nativeRect(layout.show_graph);
         graph_text.left += 4;
@@ -5026,6 +5152,7 @@ fn isApplicationShortcut(key: usize, ctrl: bool, shift: bool, alt: bool) bool {
     // Ctrl+Alt+PageUp/PageDown stay with the window's own accelerators, which are handled
     // before the key reaches the terminal.
     if (!ctrl or alt) return false;
+    if (key >= '1' and key <= '9') return !shift;
     return switch (key) {
         'O', 'J', c.VK_PRIOR, c.VK_NEXT, 0xBC => true,
         // Ctrl+Shift+[ and ] move between panes; plain Ctrl+[ (ESC) and Ctrl+] belong to the shell.
@@ -7382,8 +7509,25 @@ fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, siz
 }
 
 fn tabLabel(tab: WorkspaceLayout.Tab) []const u8 {
-    if (tab.panes.items.len != 0 and tab.panes.items[0].launches_agent) return "agent";
-    return "shell";
+    if (tab.panes.items.len != 0 and tab.panes.items[0].launches_agent) return "Agent";
+    return "Shell";
+}
+
+fn agentTabTitle(loop_type: []const u8, backend: []const u8) []const u8 {
+    if (std.mem.eql(u8, loop_type, "goalBased")) return "Goal";
+    if (std.mem.eql(u8, loop_type, "timeBased")) return "Loop";
+    if (std.mem.eql(u8, backend, "claudeCode")) return "Claude Code";
+    if (std.mem.eql(u8, backend, "copilotCLI")) return "Copilot CLI";
+    if (std.mem.eql(u8, backend, "codex")) return "Codex";
+    if (std.mem.eql(u8, backend, "openCode")) return "OpenCode";
+    if (std.mem.eql(u8, backend, "pi")) return "Pi";
+    if (std.mem.eql(u8, backend, "nod")) return "Nod";
+    return if (backend.len != 0) backend else "Agent";
+}
+
+pub fn tabShortcut(index: usize) ?[]const u8 {
+    const hints = [_][]const u8{ "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9" };
+    return if (index < hints.len) hints[index] else null;
 }
 
 fn loopPassLabel(count: u32, buffer: *[32]u8) []const u8 {
@@ -7691,11 +7835,12 @@ test "workspace chrome hidden partial tabs have no hit target" {
     defer workspace.layout.deinit();
     try workspace.layout.addTab("agent", true);
     try workspace.layout.addTab("shell", false);
+    try workspace.layout.selectTab(0);
     try std.testing.expectEqual(@as(usize, 0), workspace.tabActionAt(228, 88).?.index);
-    // The second pill extends under the controls and is not painted.
-    try std.testing.expect(workspace.tabActionAt(348, 88) == null);
-    // The gap between fully visible pills is not a tab either.
-    try std.testing.expect(workspace.tabActionAt(336, 88) == null);
+    try std.testing.expect(workspace.visibleTabBounds(1) == null);
+    const visible = workspace.visibleTabBounds(0).?;
+    try std.testing.expect(workspace.tabActionAt(visible.right, 88) == null);
+    try std.testing.expect(workspace.tabActionAt(workspace.chromeControlsLeft(), 88) == null);
 }
 
 test "workspace chrome vertical splits reserve a header above every terminal" {
@@ -7727,10 +7872,10 @@ test "workspace chrome split tabs retain their primary pane identity" {
     defer layout.deinit();
     try layout.addTab("agent", true);
     try layout.splitFocused(.horizontal, "shell");
-    try std.testing.expectEqualStrings("agent", tabLabel(layout.tabs.items[0]));
+    try std.testing.expectEqualStrings("Agent", tabLabel(layout.tabs.items[0]));
     try layout.addTab("plain-shell", false);
     try layout.splitFocused(.vertical, "another-shell");
-    try std.testing.expectEqualStrings("shell", tabLabel(layout.tabs.items[1]));
+    try std.testing.expectEqualStrings("Shell", tabLabel(layout.tabs.items[1]));
 }
 
 test "workspace chrome selected tab is the only filled semibold pill" {
@@ -7744,6 +7889,207 @@ test "workspace chrome selected tab is the only filled semibold pill" {
     try std.testing.expect(chrome_text_format & c.DT_NOPREFIX != 0);
     try std.testing.expect(chrome_text_format & c.DT_END_ELLIPSIS != 0);
     try std.testing.expect(chrome_text_format & c.DT_VCENTER != 0);
+}
+
+test "lane 9 tab pills share available content width rather than a fixed 112 pixels" {
+    // LoopWorkspacePanes.swift:44-83 and LoopWorkspaceView.swift:230-267.
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_origin_x = 220,
+        .layout_origin_y = 80,
+        .layout_width = 1000,
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("loop", true);
+    const single = workspace.visibleTabBounds(0).?;
+    try std.testing.expect(single.right - single.left >= 700);
+    try workspace.layout.addTab("shell", false);
+    const first = workspace.visibleTabBounds(0).?;
+    const second = workspace.visibleTabBounds(1).?;
+    try std.testing.expect(first.right - first.left >= 350);
+    try std.testing.expect(second.right - second.left >= 350);
+    try std.testing.expect(first.right < second.left);
+    try std.testing.expect(second.right <= workspace.chromeControlsLeft());
+}
+
+test "lane 9 shell tab naming follows the macOS plain shell title" {
+    // LoopWorkspaceView.swift:285-294 never calls a plain shell an agent.
+    var layout = try WorkspaceLayout.Layout.init(std.testing.allocator, "chrome-test");
+    defer layout.deinit();
+    try layout.addTab("plain-shell", false);
+    try std.testing.expectEqualStrings("Shell", tabLabel(layout.tabs.items[0]));
+}
+
+test "lane 9 overflow keeps the selected tab painted and hit testable" {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_origin_x = 220,
+        .layout_origin_y = 80,
+        .layout_width = 420,
+    };
+    defer workspace.layout.deinit();
+    for (0..12) |index| {
+        var id: [32]u8 = undefined;
+        try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+    }
+    const selected = workspace.layout.selected_tab;
+    const bounds = workspace.visibleTabBounds(selected) orelse return error.SelectedTabNotVisible;
+    try std.testing.expect(bounds.left >= workspace.layout_origin_x);
+    try std.testing.expect(bounds.right <= workspace.chromeControlsLeft());
+    const target = workspace.tabActionAt(bounds.left + 4, bounds.top + 4).?;
+    try std.testing.expectEqual(selected, target.index);
+    try std.testing.expectEqual(TabAction.select, target.action);
+}
+
+test "lane 9 numbered tab shortcuts are reserved without stealing AltGr or shifted keys" {
+    for ('1'..'9' + 1) |key| {
+        try std.testing.expect(isApplicationShortcut(key, true, false, false));
+        try std.testing.expect(!isApplicationShortcut(key, true, false, true));
+        try std.testing.expect(!isApplicationShortcut(key, true, true, false));
+        try std.testing.expect(!isApplicationShortcut(key, false, false, false));
+    }
+}
+
+test "lane 9 tab names use primary pane type and actual backend without guessing" {
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = std.testing.allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = std.testing.allocator },
+        .layout = try WorkspaceLayout.Layout.init(std.testing.allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+    };
+    defer workspace.layout.deinit();
+    defer if (workspace.agent_tab_title.len != 0) workspace.allocator.free(workspace.agent_tab_title);
+    try workspace.layout.addTab("agent", true);
+    try workspace.layout.splitFocused(.horizontal, "split-shell");
+    try workspace.layout.addTab("plain-shell", false);
+    for ([_]struct { kind: []const u8, backend: []const u8, expected: []const u8 }{
+        .{ .kind = "goalBased", .backend = "copilotCLI", .expected = "Goal" },
+        .{ .kind = "timeBased", .backend = "claudeCode", .expected = "Loop" },
+        .{ .kind = "sketch", .backend = "claudeCode", .expected = "Claude Code" },
+        .{ .kind = "turnBased", .backend = "copilotCLI", .expected = "Copilot CLI" },
+        .{ .kind = "composite", .backend = "codex", .expected = "Codex" },
+        .{ .kind = "sketch", .backend = "openCode", .expected = "OpenCode" },
+        .{ .kind = "sketch", .backend = "pi", .expected = "Pi" },
+        .{ .kind = "sketch", .backend = "nod", .expected = "Nod" },
+        .{ .kind = "sketch", .backend = "future-provider", .expected = "future-provider" },
+        .{ .kind = "sketch", .backend = "", .expected = "Agent" },
+    }) |case| {
+        try workspace.setTabPresentation(case.kind, case.backend, "idle");
+        try std.testing.expectEqualStrings(case.expected, workspace.tabTitle(0).?);
+        try std.testing.expectEqualStrings("Shell", workspace.tabTitle(1).?);
+    }
+    try std.testing.expect(workspace.tabTitle(2) == null);
+    try workspace.setTabPresentation("sketch", "copilotCLI", "blocked");
+    try std.testing.expect(workspace.agent_tab_state == .needs_you);
+    try std.testing.expect(workspace.tabChrome(0).?.asks == null);
+    try workspace.setTabPresentation("sketch", "copilotCLI", "waiting");
+    try std.testing.expect(workspace.agent_tab_state == .quiet);
+    try workspace.setTabPresentation("sketch", "copilotCLI", "awaitingInput");
+    try std.testing.expect(workspace.agent_tab_state == .asks);
+}
+
+test "lane 9 tab content shortcut close and overflow geometry agree at narrow and scaled widths" {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_origin_x = 220,
+        .layout_origin_y = 80,
+    };
+    defer workspace.layout.deinit();
+    defer if (workspace.agent_tab_title.len != 0) allocator.free(workspace.agent_tab_title);
+    try workspace.layout.addTab("agent", true);
+    try workspace.setTabPresentation("sketch", "copilotCLI", "awaitingInput");
+    const single_close = workspace.tabCloseBounds(0).?;
+    try std.testing.expectEqual(TabAction.select, workspace.tabActionAt(single_close.right - 1, single_close.top + 1).?.action);
+    for (1..12) |index| {
+        var id: [32]u8 = undefined;
+        try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+    }
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        workspace.dpi = dpi;
+        for ([_]i32{ 230, 260, 420, 960, 1400 }) |width| {
+            workspace.layout_width = width;
+            for ([_]usize{ 0, 1, 8, 9, 11 }) |selected| {
+                try workspace.layout.selectTab(selected);
+                const selected_bounds = workspace.visibleTabBounds(selected);
+                if (selected_bounds == null) {
+                    try std.testing.expect(workspace.chromeControlsLeft() - workspace.layout_origin_x <= 2 * Dpi.scale(8, dpi));
+                    continue;
+                }
+                var visible: usize = 0;
+                var previous_right = workspace.layout_origin_x;
+                for (0..workspace.tabCount()) |index| {
+                    const chrome = workspace.tabChrome(index) orelse continue;
+                    visible += 1;
+                    try std.testing.expect(chrome.bounds.left >= previous_right);
+                    previous_right = chrome.bounds.right;
+                    try std.testing.expect(chrome.bounds.right <= workspace.chromeControlsLeft());
+                    try std.testing.expect(chrome.title.left >= chrome.bounds.left and chrome.title.right <= chrome.bounds.right);
+                    try std.testing.expect(chrome.title.left <= chrome.title.right);
+                    if (chrome.trailing) |trailing| {
+                        try std.testing.expect(chrome.title.right <= trailing.left);
+                        try std.testing.expectEqual(chrome.title.top, trailing.top);
+                        try std.testing.expectEqual(chrome.title.bottom, trailing.bottom);
+                    }
+                    if (chrome.indicator) |indicator| try std.testing.expect(indicator.right <= chrome.title.left);
+                    if (chrome.asks) |asks| try std.testing.expect(chrome.title.right <= asks.left);
+                    if (chrome.shortcut) |hint| {
+                        try std.testing.expect(index < 9);
+                        try std.testing.expectEqualStrings(tabShortcut(index).?, hint);
+                    }
+                    const hit = workspace.tabActionAt(chrome.bounds.left, chrome.bounds.top).?;
+                    try std.testing.expectEqual(index, hit.index);
+                    try std.testing.expectEqual(TabAction.select, hit.action);
+                }
+                try std.testing.expect(visible > 0);
+                const bounds = selected_bounds.?;
+                _ = workspace.updateChromeHover(bounds.left, bounds.top);
+                const hovered = workspace.tabChrome(selected).?;
+                if (workspace.tabCloseBounds(selected)) |close| {
+                    try std.testing.expect(hovered.show_close and hovered.shortcut == null);
+                    try std.testing.expectEqualDeep(close, hovered.trailing.?);
+                    const hit = workspace.tabActionAt(close.right - 1, close.top + 1).?;
+                    try std.testing.expectEqual(selected, hit.index);
+                    try std.testing.expectEqual(TabAction.close, hit.action);
+                } else try std.testing.expect(!hovered.show_close);
+                _ = workspace.updateChromeHover(-1, -1);
+                try std.testing.expect(!workspace.tabChrome(selected).?.show_close);
+                try std.testing.expect(workspace.tabActionAt(workspace.chromeControlsLeft(), bounds.top) == null);
+            }
+        }
+    }
+    try std.testing.expect(tabShortcut(9) == null);
+    try std.testing.expect(tabShortcut(100) == null);
+    workspace.collapsed = true;
+    try std.testing.expect(workspace.visibleTabBounds(workspace.layout.selected_tab) == null);
+    try std.testing.expect(workspace.tabActionAt(228, 88) == null);
 }
 
 test "workspace chrome split glyphs retain their existing action columns" {
@@ -8118,8 +8464,8 @@ test "workspace tab chrome separates selection and close affordances" {
     try std.testing.expect(tabActionForBounds(220, 34, 0, 340, 42) == null);
 }
 
-test "loop bar actions expose stop only for active loops" {
-    try std.testing.expectEqual(LoopBarAction.stop, loopBarActionAt(220, 34, 1200, 1010, 50, false, false).?);
+test "loop bar actions expose restart only for unresolved loops" {
+    try std.testing.expectEqual(LoopBarAction.restart_session, loopBarActionAt(220, 34, 1200, 1010, 50, false, false).?);
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1010, 50, true, false) == null);
     try std.testing.expectEqual(LoopBarAction.show_graph, loopBarActionAt(220, 34, 1200, 1120, 50, false, false).?);
     try std.testing.expect(loopBarActionAt(220, 34, 1200, 1120, 90, false, false) == null);
@@ -8182,9 +8528,9 @@ test "Quick Chat tab labels preserve saved pane role metadata" {
     try workspace.layout.addTab("chat-split-agent", true);
     try workspace.layout.splitFocused(.horizontal, "chat-split-shell");
 
-    try std.testing.expectEqualStrings("shell", tabLabel(workspace.layout.tabs.items[0]));
-    try std.testing.expectEqualStrings("agent", tabLabel(workspace.layout.tabs.items[1]));
-    try std.testing.expectEqualStrings("agent", tabLabel(workspace.layout.tabs.items[2]));
+    try std.testing.expectEqualStrings("Shell", tabLabel(workspace.layout.tabs.items[0]));
+    try std.testing.expectEqualStrings("Agent", tabLabel(workspace.layout.tabs.items[1]));
+    try std.testing.expectEqualStrings("Agent", tabLabel(workspace.layout.tabs.items[2]));
 }
 
 const AttachOutputProbe = struct {

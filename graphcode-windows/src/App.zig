@@ -257,6 +257,7 @@ const FirstRunStartup = struct {
 
 const WorkspaceKeyRoute = union(enum) {
     action: InputRouter.Action,
+    select_tab: usize,
     copy_terminal_selection,
     paste_clipboard_text,
     terminal_context_menu,
@@ -1342,7 +1343,7 @@ const UiaDynamicTarget = union(enum) {
     },
     quick_chat: []const u8,
     workspace_show_graph,
-    workspace_stop,
+    workspace_loop_restart,
     workspace_new_tab,
     workspace_split_right,
     workspace_split_down,
@@ -1410,6 +1411,7 @@ pub const App = struct {
     canvas_press_project_path: []u8 = &.{},
     canvas_press_node_id: []u8 = &.{},
     workspace: ?*TerminalWorkspace.Workspace = null,
+    pending_session_restart: ?PendingSessionRestart = null,
     navigation_cursor: Navigation.Cursor = .{},
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
     dpi: u32 = Dpi.base_dpi,
@@ -1603,6 +1605,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.clearSessionRestart();
         self.canvas.deinitLayout();
         self.freeLoopProbes();
         self.freeLoopHeld();
@@ -1868,6 +1871,11 @@ pub const App = struct {
         publish: anytype,
     ) void {
         if (self.takeLoopRead(frame)) return;
+        if (self.pending_session_restart) |pending| {
+            const kind = Wire.eventKind(frame);
+            if ((kind == .graph_changed or kind == .nodes_changed or kind == .error_occurred) and
+                self.client.deliveringGeneration() != pending.generation) return;
+        }
         var incoming_project_path: ?[]u8 = null;
         defer if (incoming_project_path) |path| self.allocator.free(path);
         if (self.pending_rebind_path.len != 0 and Wire.eventKind(frame) == .graph_changed) {
@@ -1902,6 +1910,7 @@ pub const App = struct {
             // A presence delta is folded into the held snapshot by the model, so the UI
             // treats it as the snapshot it amounts to.
             .graph_changed, .nodes_changed => {
+                self.confirmSessionRestart();
                 if (incoming_project_path) |path| {
                     if (self.pending_rebind_path.len != 0 and
                         (std.mem.eql(u8, path, self.pending_rebind_path) or
@@ -2025,6 +2034,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
+                self.failSessionRestart("Daemon refused the session restart");
                 const ingress_failure = self.pending_rebind_path.len != 0;
                 if (self.pending_rebind_path.len != 0) {
                     if (self.client.protocolMode() == .v2) {
@@ -2501,7 +2511,9 @@ pub const App = struct {
     fn refreshWorkspace(self: *App) void {
         const workspace = if (self.workspace) |value| value else return;
         if (self.smoke) return self.refreshSmokeTerminals(workspace);
+        self.updateWorkspaceTabPresentation();
         if (self.workspaceQuickChatID() != null) return;
+        if (workspace.agent_restart_suspended) return;
         const project = self.currentProject() orelse return;
         if (!std.mem.eql(u8, workspace.projectPath(), project)) return;
         if (workspace.hasSurface(0) or workspace.hasAttach(0) or workspace.isAwaitingLaunch(0)) return;
@@ -2584,6 +2596,8 @@ pub const App = struct {
             self.setStatus("Unable to open selected loop");
             return;
         };
+        workspace.agent_restart_suspended = false;
+        self.updateWorkspaceTabPresentation();
         workspace.openLaunchedNode(0, node_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch {
             self.setStatus("Unable to open selected loop");
             return;
@@ -4323,6 +4337,12 @@ pub const App = struct {
     }
 
     fn activateLoop(self: *App, project_path: []const u8, node_id: []const u8) bool {
+        if (self.pending_session_restart) |pending| {
+            if (std.mem.eql(u8, pending.project_path, project_path) and std.mem.eql(u8, pending.node_id, node_id)) {
+                self.setStatus("Session restart is still waiting for daemon confirmation");
+                return false;
+            }
+        }
         const owned_project_path = self.allocator.dupe(u8, project_path) catch {
             self.setStatus("Unable to select loop");
             return false;
@@ -4376,6 +4396,174 @@ pub const App = struct {
         const path = self.currentProject() orelse return;
         const node = self.model.selected() orelse return;
         self.client.sendNodeAction(path, node.id, "stopNode", null);
+    }
+
+    const PendingSessionRestart = struct {
+        project_path: []u8,
+        node_id: []u8,
+        seen_restarts: u64,
+        generation: u64,
+        deadline_ms: i64,
+        panel_visible: bool,
+
+        fn deinit(self: *PendingSessionRestart, allocator: std.mem.Allocator) void {
+            allocator.free(self.project_path);
+            allocator.free(self.node_id);
+        }
+    };
+
+    fn clearSessionRestart(self: *App) void {
+        if (self.pending_session_restart) |*pending| pending.deinit(self.allocator);
+        self.pending_session_restart = null;
+    }
+
+    fn failSessionRestart(self: *App, message: []const u8) void {
+        if (self.pending_session_restart == null) return;
+        self.clearSessionRestart();
+        self.setStatus(message);
+    }
+
+    fn restartSelectedSession(self: *App) bool {
+        if (self.isQuickChatWorkspace()) {
+            self.setStatus("Quick Chats do not support session restart");
+            return false;
+        }
+        if (self.pending_session_restart != null) {
+            self.setStatus("Session restart is still waiting for daemon confirmation");
+            return false;
+        }
+        const workspace = self.workspace orelse {
+            self.setStatus("No loop workspace is open to restart");
+            return false;
+        };
+        const path = self.currentProject() orelse {
+            self.setStatus("No project is selected for session restart");
+            return false;
+        };
+        const node = self.model.selected() orelse {
+            self.setStatus("No loop is selected for session restart");
+            return false;
+        };
+        if (self.surface != .workspace or !std.mem.eql(u8, workspace.loop_id, node.id) or
+            !std.mem.eql(u8, workspace.projectPath(), path))
+        {
+            self.setStatus("The selected loop does not own the open workspace");
+            return false;
+        }
+        if (isResolvedLoopState(node.state)) {
+            self.setStatus("This loop has finished; there is no session to restart");
+            return false;
+        }
+        if (std.mem.eql(u8, node.loop_type, "composite") or std.mem.eql(u8, node.loop_type, "proactive")) {
+            self.setStatus("Open a worker loop to restart its session");
+            return false;
+        }
+        const generation = self.client.connectedGeneration() orelse {
+            self.setStatus("Connect to the daemon before restarting a session");
+            return false;
+        };
+        const owned_path = self.allocator.dupe(u8, path) catch {
+            self.setStatus("Unable to retain the session restart target");
+            return false;
+        };
+        const owned_id = self.allocator.dupe(u8, node.id) catch {
+            self.allocator.free(owned_path);
+            self.setStatus("Unable to retain the session restart target");
+            return false;
+        };
+        self.pending_session_restart = .{
+            .project_path = owned_path,
+            .node_id = owned_id,
+            .seen_restarts = node.session_restarts,
+            .generation = generation,
+            .deadline_ms = std.time.milliTimestamp() + TerminalWorkspace.Workspace.loop_open_timeout_ms,
+            .panel_visible = self.workspace_controls.panel_visible,
+        };
+        // Retire the old reader before the worker can send a kill; its exit is not a
+        // resolution, and a counter advance is the daemon's permission to remount.
+        workspace.suspendLoopAgent();
+        self.client.sendNodeActionChecked(owned_path, owned_id, "restartNode", null) catch |err| {
+            std.log.warn("Unable to queue session restart: {s}", .{@errorName(err)});
+            self.clearSessionRestart();
+            workspace.agent_restart_suspended = false;
+            workspace.openLaunchedNode(0, workspace.loop_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch |restore_err| {
+                std.log.warn("Unable to restore terminal after restart queue rejection: {s}", .{@errorName(restore_err)});
+                self.setStatus("Session restart was not queued and the terminal could not be reattached");
+                return false;
+            };
+            self.setStatus("Session restart was not queued; the daemon session was left unchanged");
+            return false;
+        };
+        self.surface = .project;
+        self.workspace_controls.panel_visible = false;
+        workspace.collapse();
+        self.layoutEmptyStateControls();
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        self.setStatus("Session restart requested; waiting for daemon confirmation");
+        return true;
+    }
+
+    fn confirmSessionRestart(self: *App) void {
+        const pending = self.pending_session_restart orelse return;
+        if (self.client.connectedGeneration() != pending.generation) {
+            self.failSessionRestart("Daemon connection changed before session restart was confirmed");
+            return;
+        }
+        if (self.client.deliveringGeneration() != pending.generation) return;
+        const graph = self.model.graphFor(pending.project_path) orelse return;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, pending.node_id) orelse {
+            self.failSessionRestart("The loop was removed before session restart was confirmed");
+            return;
+        };
+        const node = graph.nodes.items[index];
+        if (isResolvedLoopState(node.state)) {
+            self.failSessionRestart("The loop finished before session restart was confirmed");
+            return;
+        }
+        if (node.session_restarts <= pending.seen_restarts) return;
+        const workspace = self.workspace orelse {
+            self.clearSessionRestart();
+            return;
+        };
+        const owns_workspace = std.mem.eql(u8, workspace.loop_id, pending.node_id) and
+            std.mem.eql(u8, workspace.projectPath(), pending.project_path);
+        const reopen = owns_workspace and self.surface == .project and
+            std.mem.eql(u8, self.currentProject() orelse "", pending.project_path) and
+            std.mem.eql(u8, self.selected_node_id, pending.node_id);
+        const panel_visible = pending.panel_visible;
+        self.clearSessionRestart();
+        if (owns_workspace) workspace.agent_restart_suspended = false;
+        if (!reopen) return;
+        self.surface = .workspace;
+        self.workspace_controls.panel_visible = panel_visible;
+        self.layoutWorkspace();
+        self.layoutEmptyStateControls();
+        self.setStatus("Session restart confirmed; reconnecting its terminal");
+    }
+
+    fn pollSessionRestart(self: *App, now_ms: i64) void {
+        const pending = self.pending_session_restart orelse return;
+        if (self.client.connectedGeneration() != pending.generation) {
+            self.failSessionRestart("Daemon connection changed before session restart was confirmed");
+        } else if (now_ms >= pending.deadline_ms) {
+            self.failSessionRestart("Session restart was not confirmed; reopen the loop to retry");
+        }
+    }
+
+    fn updateWorkspaceTabPresentation(self: *App) void {
+        const workspace = self.workspace orelse return;
+        if (workspace.boundQuickChatID()) |id| {
+            const chat = quickChatByID(&self.model, id) orelse return;
+            workspace.setTabPresentation("", chat.backend, "idle") catch
+                self.setStatus("Unable to update workspace tab names");
+            return;
+        }
+        const graph = self.model.graphFor(workspace.projectPath()) orelse return;
+        const index = GraphModel.findNodeIndexByID(graph.nodes.items, workspace.loop_id) orelse return;
+        const node = graph.nodes.items[index];
+        workspace.setTabPresentation(node.loop_type, node.backend, node.state) catch
+            self.setStatus("Unable to update workspace tab names");
     }
 
     fn sendSelectedNode(self: *App) void {
@@ -7107,6 +7295,8 @@ pub const App = struct {
     }
 
     fn dispatchWorkspaceKey(key: usize, ctrl: bool, shift: bool, terminal_context_active: bool) WorkspaceKeyRoute {
+        if (terminal_context_active and ctrl and !shift and key >= '1' and key <= '9')
+            return .{ .select_tab = key - '1' };
         if (terminal_context_active and ctrl and shift) {
             if (key == 'C') return .copy_terminal_selection;
             if (key == 'V') return .paste_clipboard_text;
@@ -7118,6 +7308,16 @@ pub const App = struct {
     fn handleWorkspaceKeyRoute(self: *App, route: WorkspaceKeyRoute) void {
         switch (route) {
             .action => |action| self.handleAction(action),
+            .select_tab => |index| {
+                const workspace = self.workspace orelse return;
+                if (workspace.collapsed or index >= workspace.tabCount()) return;
+                workspace.selectTab(index) catch {
+                    self.setStatus("Unable to select terminal tab");
+                    return;
+                };
+                self.syncAccessibility();
+                _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            },
             .copy_terminal_selection => self.copyTerminalSelection(),
             .paste_clipboard_text => self.pasteClipboardText(),
             .terminal_context_menu => self.showTerminalContextMenu(),
@@ -7650,6 +7850,10 @@ pub const App = struct {
 
     fn onShellKey(context: ?*anyopaque, key: usize, ctrl: bool, shift: bool, alt: bool) bool {
         const self: *App = @ptrCast(@alignCast(context orelse return false));
+        if (self.surface == .workspace and ctrl and !shift and !alt and key >= '1' and key <= '9') {
+            self.handleWorkspaceKeyRoute(.{ .select_tab = key - '1' });
+            return true;
+        }
         if (MainWindow.workspaceCycleDirection(key, ctrl, shift, alt)) |direction| {
             self.cycleWorkspace(direction);
             return true;
@@ -8143,8 +8347,8 @@ pub const App = struct {
                             elements.items[elements.items.len - 1].invokable = false;
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-loop-bar", if (selected_index < graph.nodes.items.len) graph.nodes.items[selected_index].id else "none", "Selected loop workspace", 4, .{ .logical = loopBarRect(loop_bar.bar) }, false, false) catch return;
                             self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(loop_bar.show_graph) }, false, false) catch return;
-                            if (loop_bar.stop) |stop| {
-                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-stop", graph.nodes.items[selected_index].id, "Stop loop", 4, .{ .logical = loopBarRect(stop) }, false, false) catch return;
+                            if (loop_bar.restart_session) |restart| {
+                                self.appendAccessibilityElement(&elements, &owned_identities, "workspace-restart-session", graph.nodes.items[selected_index].id, "Restart session", 4, .{ .logical = loopBarRect(restart) }, false, true) catch return;
                             }
                             const panel_toggle = if (loop_bar.panel_toggle) |expand|
                                 loopBarRect(expand)
@@ -8196,6 +8400,7 @@ pub const App = struct {
         }
         if (self.surface == .workspace) {
             if (self.workspace) |workspace| {
+                self.updateWorkspaceTabPresentation();
                 if (self.workspaceQuickChatID()) |chat_id| {
                     if (quickChatByID(&self.model, chat_id)) |chat| {
                         const bar = TerminalSurface.quickChatBarLayout(
@@ -8207,27 +8412,17 @@ pub const App = struct {
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-show-graph", "show-graph", "Show in Graph", 4, .{ .logical = loopBarRect(bar.show_graph) }, false, true) catch return;
                     }
                 }
-                for (workspace.layout.tabs.items, 0..) |tab, tab_index| {
+                for (workspace.layout.tabs.items, 0..) |_, tab_index| {
+                    const tab_bounds = workspace.visibleTabBounds(tab_index) orelse continue;
                     const tab_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
                     defer self.allocator.free(tab_key);
-                    const tab_bounds = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, tab_index);
-                    var launches_agent = false;
-                    for (tab.panes.items) |pane| {
-                        if (pane.launches_agent) {
-                            launches_agent = true;
-                            break;
-                        }
-                    }
-                    const tab_name = if (tab.panes.items.len > 1)
-                        "Split tab"
-                    else if (launches_agent)
-                        "Agent tab"
-                    else
-                        "Shell tab";
+                    const tab_name = workspace.tabTitle(tab_index).?;
                     self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab", tab_key, tab_name, 4, .{ .physical = tab_bounds }, tab_index == workspace.layout.selected_tab, true) catch return;
-                    const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
-                    defer self.allocator.free(close_key);
-                    self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = .{ .left = tab_bounds.right - 24, .top = tab_bounds.top, .right = tab_bounds.right, .bottom = tab_bounds.bottom } }, false, workspace.canCloseTab()) catch return;
+                    if (workspace.tabCloseBounds(tab_index)) |close_bounds| {
+                        const close_key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return;
+                        defer self.allocator.free(close_key);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab()) catch return;
+                    }
                 }
                 for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
                     const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
@@ -8511,15 +8706,16 @@ pub const App = struct {
                     }
                 }
             } else if (self.model.selectedNodeID()) |node_id| {
-                const identity = std.fmt.allocPrint(self.allocator, "workspace-stop:{s}", .{node_id}) catch return false;
+                const identity = std.fmt.allocPrint(self.allocator, "workspace-restart-session:{s}", .{node_id}) catch return false;
                 defer self.allocator.free(identity);
                 if (Accessibility.worktreeIdentityPayload(identity) == payload) {
                     if (target != null) return false;
-                    target = .workspace_stop;
+                    target = .workspace_loop_restart;
                 }
             }
             if (self.workspace) |workspace| {
                 for (workspace.layout.tabs.items, 0..) |_, tab_index| {
+                    _ = workspace.visibleTabBounds(tab_index) orelse continue;
                     const key = std.fmt.allocPrint(self.allocator, "{d}", .{tab_index}) catch return false;
                     defer self.allocator.free(key);
                     const tab_identity = std.fmt.allocPrint(self.allocator, "workspace-tab:{s}", .{key}) catch return false;
@@ -8530,6 +8726,7 @@ pub const App = struct {
                         if (target != null) return false;
                         target = .{ .workspace_tab = tab_index };
                     } else if (Accessibility.worktreeIdentityPayload(close_identity) == payload) {
+                        if (workspace.tabCloseBounds(tab_index) == null or !workspace.canCloseTab()) return false;
                         if (target != null) return false;
                         target = .{ .workspace_tab_close = tab_index };
                     }
@@ -8660,7 +8857,7 @@ pub const App = struct {
                 }
             },
             .workspace_show_graph => self.handleAction(.show_graph),
-            .workspace_stop => self.stopSelectedNode(),
+            .workspace_loop_restart => if (!self.restartSelectedSession()) return false,
             .workspace_new_tab => self.handleAction(.new_tab),
             .workspace_split_right => self.handleAction(.split_horizontal),
             .workspace_split_down => self.handleAction(.split_vertical),
@@ -8671,6 +8868,8 @@ pub const App = struct {
                 {
                     return false;
                 }
+                self.setStatus("Quick Chats do not support session restart");
+                return false;
             },
             .workspace_tab => |index| if (self.workspace) |workspace| workspace.selectTab(index) catch return false,
             .workspace_tab_close => |index| if (self.workspace) |workspace| workspace.closeTab(index) catch return false,
@@ -9108,7 +9307,7 @@ fn fallbackKeyAction(key: usize, ctrl: bool, shift: bool, alt: bool) InputRouter
     if (alt and (key == c.VK_PRIOR or key == c.VK_NEXT)) return .none;
     return switch (App.dispatchWorkspaceKey(key, ctrl, shift, false)) {
         .action => |action| action,
-        .copy_terminal_selection, .paste_clipboard_text, .terminal_context_menu => InputRouter.keyAction(key, ctrl, shift),
+        .select_tab, .copy_terminal_selection, .paste_clipboard_text, .terminal_context_menu => InputRouter.keyAction(key, ctrl, shift),
     };
 }
 
@@ -9638,6 +9837,7 @@ fn onWindowMessage(
                 app.quick_chats_requested = false;
             }
             if (app.client.isIdle()) app.smoke_idle_ticks += 1 else app.smoke_idle_ticks = 0;
+            app.pollSessionRestart(std.time.milliTimestamp());
             if (app.workspace) |workspace| {
                 workspace.poll();
                 app.reportLaunchOutcome(workspace);
@@ -9837,7 +10037,7 @@ fn onWindowMessage(
                         const bar = TerminalSurface.quickChatBarLayout(rail_left, client.right);
                         if (bar.actionAt(x, y)) |action| {
                             switch (action) {
-                                .restart_session => {},
+                                .restart_session => app.setStatus("Quick Chats do not support session restart"),
                                 .show_graph => app.handleAction(.show_graph),
                             }
                             _ = c.InvalidateRect(hwnd, null, 0);
@@ -9857,7 +10057,7 @@ fn onWindowMessage(
                                 const node = graph.nodes.items[index];
                                 if (workspaceLoopBar(app.workspace_controls, client.right, isResolvedLoopState(node.state)).actionAt(x, y)) |action| {
                                     switch (action) {
-                                        .stop => app.stopSelectedNode(),
+                                        .restart_session => _ = app.restartSelectedSession(),
                                         .show_graph => app.handleAction(.show_graph),
                                     }
                                     _ = c.InvalidateRect(hwnd, null, 0);
@@ -10351,7 +10551,23 @@ fn onWindowMessage(
             result.* = 0;
             return true;
         },
+        c.WM_MOUSELEAVE => {
+            if (app.workspace) |workspace| {
+                if (workspace.updateChromeHover(-1, -1)) _ = c.InvalidateRect(hwnd, null, 0);
+            }
+            result.* = 0;
+            return true;
+        },
         c.WM_MOUSEMOVE => {
+            if (app.workspace) |workspace| {
+                if (workspace.updateChromeHover(mouseX(lparam), mouseY(lparam))) {
+                    if (workspace.chrome_hover_tab != null) {
+                        var tracking = c.TRACKMOUSEEVENT{ .cbSize = @sizeOf(c.TRACKMOUSEEVENT), .dwFlags = c.TME_LEAVE, .hwndTrack = hwnd, .dwHoverTime = 0 };
+                        if (c.TrackMouseEvent(&tracking) == 0) std.log.warn("Unable to track workspace tab hover", .{});
+                    }
+                    _ = c.InvalidateRect(hwnd, null, 0);
+                }
+            }
             const hover_y = logicalCoordinate(mouseY(lparam), app.dpi);
             const hover_x = logicalCoordinate(mouseX(lparam), app.dpi);
             app.updateSidebarRootDrag(hover_y);
@@ -13749,7 +13965,7 @@ const LoopBarProbe = struct {
     var bar_loop_len: usize = 0;
     var has_bar = false;
     var show_graph: ?c.RECT = null;
-    var stop: ?c.RECT = null;
+    var restart: ?c.RECT = null;
     var panel_toggle: ?c.RECT = null;
     var sink: @This() = .{};
 
@@ -13757,7 +13973,7 @@ const LoopBarProbe = struct {
         has_bar = false;
         bar_loop_len = 0;
         show_graph = null;
-        stop = null;
+        restart = null;
         panel_toggle = null;
         app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, app.dpi));
     }
@@ -13775,8 +13991,8 @@ const LoopBarProbe = struct {
                 has_bar = true;
             } else if (std.mem.eql(u8, element.identity, "workspace-show-graph:show-graph")) {
                 show_graph = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
-            } else if (std.mem.startsWith(u8, element.identity, "workspace-stop:")) {
-                stop = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+            } else if (std.mem.startsWith(u8, element.identity, "workspace-restart-session:")) {
+                restart = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
             } else if (std.mem.eql(u8, element.identity, "workspace-toggle-panel:control")) {
                 panel_toggle = .{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
             }
@@ -13981,31 +14197,31 @@ test "Show in Graph from an open loop shows the graph and never moves the loop b
     }
 }
 
-const LoopBarButtons = struct { show_graph: c.RECT, stop: c.RECT, panel_toggle: c.RECT };
+const LoopBarButtons = struct { show_graph: c.RECT, restart: c.RECT, panel_toggle: c.RECT };
 
 fn physicalRectsOverlap(a: c.RECT, b: c.RECT) bool {
     return a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom;
 }
 
-/// Show in Graph, Stop, and the loop panel toggle as UIA publishes them (physical
+/// Show in Graph, Restart, and the loop panel toggle as UIA publishes them (physical
 /// pixels): each present, non-empty, inside the client area, and pairwise disjoint.
 fn expectLoopBarButtonsDisjoint(app: *App) !LoopBarButtons {
     LoopBarProbe.publish(app);
     const buttons = LoopBarButtons{
         .show_graph = LoopBarProbe.show_graph orelse return error.TestExpectedShowGraphButton,
-        .stop = LoopBarProbe.stop orelse return error.TestExpectedStopButton,
+        .restart = LoopBarProbe.restart orelse return error.TestExpectedRestartButton,
         .panel_toggle = LoopBarProbe.panel_toggle orelse return error.TestExpectedPanelToggle,
     };
     var client: c.RECT = undefined;
     try std.testing.expect(c.GetClientRect(app.window.hwnd, &client) != 0);
-    for ([_]c.RECT{ buttons.show_graph, buttons.stop, buttons.panel_toggle }) |bounds| {
+    for ([_]c.RECT{ buttons.show_graph, buttons.restart, buttons.panel_toggle }) |bounds| {
         try std.testing.expect(bounds.left < bounds.right and bounds.top < bounds.bottom);
         try std.testing.expect(bounds.left >= client.left and bounds.right <= client.right);
         try std.testing.expect(bounds.top >= client.top and bounds.bottom <= client.bottom);
     }
-    try std.testing.expect(!physicalRectsOverlap(buttons.show_graph, buttons.stop));
+    try std.testing.expect(!physicalRectsOverlap(buttons.show_graph, buttons.restart));
     try std.testing.expect(!physicalRectsOverlap(buttons.show_graph, buttons.panel_toggle));
-    try std.testing.expect(!physicalRectsOverlap(buttons.stop, buttons.panel_toggle));
+    try std.testing.expect(!physicalRectsOverlap(buttons.restart, buttons.panel_toggle));
     return buttons;
 }
 
@@ -14013,13 +14229,32 @@ fn nativeClickCenter(app: *App, bounds: c.RECT) !void {
     try nativeClick(app, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2));
 }
 
-test "loop panel toggle never covers Show in Graph or Stop, collapsed or expanded, at 1200 and 960px and 100% and 150% DPI" {
+fn deliverSessionRestartGraph(app: *App, project: []const u8, state: []const u8, restarts: u64) !void {
+    const path = try std.json.Stringify.valueAlloc(app.allocator, project, .{});
+    defer app.allocator.free(path);
+    const frame = try std.fmt.allocPrint(app.allocator, "{{\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":{s},\"name\":\"Restart fixture\"}},\"nodes\":[" ++
+        "{{\"id\":\"loop-a\",\"title\":\"Loop A\",\"loopType\":\"turnBased\",\"state\":\"idle\"}}," ++
+        "{{\"id\":\"loop-b\",\"title\":\"Loop B\",\"loopType\":\"sketch\",\"backend\":\"copilotCLI\",\"state\":\"{s}\",\"sessionRestarts\":{d}}}," ++
+        "{{\"id\":\"loop-c\",\"title\":\"Loop C\",\"loopType\":\"turnBased\",\"state\":\"idle\"}}" ++
+        "],\"edges\":[]}}}}}}", .{ path, state, restarts });
+    defer app.allocator.free(frame);
+    app.onFrameWithAccessibilityPublish(frame, LoopBarProbe.publish);
+}
+
+fn connectSessionRestartFixture(app: *App) void {
+    app.client.state = .connected;
+    app.client.connection_generation = 1;
+    app.client.delivering_generation = 1;
+}
+
+test "loop panel toggle never covers Show in Graph or Restart, collapsed or expanded, at 1200 and 960px and 100% and 150% DPI" {
     for ([_]u32{ Dpi.base_dpi, Dpi.base_dpi * 3 / 2 }) |dpi| {
         for ([_]i32{ 1200, 960 }) |width| {
             var fixture: ShowGraphFixture = undefined;
             try fixture.initSized(dpi, width);
             defer fixture.deinit();
             const app = &fixture.app;
+            connectSessionRestartFixture(app);
             try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
             try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
             try std.testing.expect(app.workspace_controls.panel_visible);
@@ -14032,13 +14267,18 @@ test "loop panel toggle never covers Show in Graph or Stop, collapsed or expande
 
             // Collapsed: a native click at the published centre of each button runs only it.
             const collapsed = try expectLoopBarButtonsDisjoint(app);
-            const before_stop = app.client.outbound_count;
-            try nativeClickCenter(app, collapsed.stop);
-            try std.testing.expectEqual(before_stop + 1, app.client.outbound_count);
+            const before_restart = app.client.outbound_count;
+            try nativeClickCenter(app, collapsed.restart);
+            try std.testing.expectEqual(before_restart + 1, app.client.outbound_count);
             const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
-            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "restartNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") == null);
             try std.testing.expect(std.mem.indexOf(u8, newest, "loop-b") != null);
             try std.testing.expect(!app.workspace_controls.panel_visible);
+            try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+            try std.testing.expect(app.pending_session_restart != null);
+            try deliverSessionRestartGraph(app, reopen_fixture_path, "idle", 1);
+            try std.testing.expect(app.pending_session_restart == null);
             try expectLoopBarAndPane(app, &fixture.workspace, "loop-b");
 
             const before_show = app.client.outbound_count;
@@ -14094,7 +14334,7 @@ test "collapsed loop panel routes native tab and loop-bar clicks to the workspac
             // A second tab, selected, so a click on the loop's tab has a visible effect.
             try workspace.layout.addTab("shell-extra", false);
             try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
-            const tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 0);
+            const tab = workspace.visibleTabBounds(0).?;
             const tab_x = tab.left + 24;
             const tab_y = @divTrunc(tab.top + tab.bottom, 2);
             // The tab strip lies below the header and the loop bar, inside the client area.
@@ -14109,15 +14349,355 @@ test "collapsed loop panel routes native tab and loop-bar clicks to the workspac
 
             // A loop-bar control below the header reaches the bar, not the graph.
             LoopBarProbe.publish(app);
-            const stop = LoopBarProbe.stop orelse return error.TestExpectedStopButton;
-            try std.testing.expect(logicalCoordinate(stop.top, dpi) > Tokens.header_height);
-            const before_stop = app.client.outbound_count;
-            try expectWorkspaceOwnsPress(app, @divTrunc(stop.left + stop.right, 2), @divTrunc(stop.top + stop.bottom, 2), "loop-b");
-            try std.testing.expectEqual(before_stop + 1, app.client.outbound_count);
+            const restart = LoopBarProbe.restart orelse return error.TestExpectedRestartButton;
+            try std.testing.expect(logicalCoordinate(restart.top, dpi) > Tokens.header_height);
+            connectSessionRestartFixture(app);
+            const before_restart = app.client.outbound_count;
+            try nativeClickCenter(app, restart);
+            try std.testing.expect(!app.canvas.dragging and !app.canvas.node_dragging);
+            try std.testing.expect(app.edge_drag_source_id.len == 0);
+            try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+            try std.testing.expectEqualStrings("loop-b", app.model.selected().?.id);
+            try std.testing.expectEqual(before_restart + 1, app.client.outbound_count);
             const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
-            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "restartNode") != null);
+            try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") == null);
             try std.testing.expect(std.mem.indexOf(u8, newest, "loop-b") != null);
         }
+    }
+}
+
+test "lane 9 loop bar routes a real restart command instead of stopping the loop" {
+    // LoopWorkspaceLoopBar.swift:113 -> AppFeature+LoopSessions.swift:105-117.
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(Dpi.base_dpi, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    app.toggleWorkspaceDetailPanel();
+    const bar = workspaceLoopBar(app.workspace_controls, 1200, false);
+    const action = bar.restart_session orelse return error.TestExpectedRestartButton;
+    connectSessionRestartFixture(app);
+    const before = app.client.outbound_count;
+    try nativeClickCenter(app, loopBarRect(action));
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "\"restartNode\":{\"_0\":\"loop-b\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, newest, "stopNode") == null);
+}
+
+test "lane 9 numbered tab shortcut selects the same tab named by the pill" {
+    // LoopWorkspaceView.swift:269-279 binds numbers to tab indexes, not pane slots.
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(Dpi.base_dpi, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    const workspace = &fixture.workspace;
+    try workspace.layout.addTab("shell-2", false);
+    try workspace.layout.addTab("shell-3", false);
+    try workspace.layout.selectTab(0);
+    const before = app.client.outbound_count;
+    App.onWorkspaceKey(app, '3', true, false);
+    try std.testing.expectEqual(@as(usize, 2), workspace.layout.selected_tab);
+    try std.testing.expectEqual(before, app.client.outbound_count);
+}
+
+test "lane 9 restart retires before queueing and remounts only after its daemon counter advances" {
+    // AppFeature+LoopSessions.swift:12-17, 170-185; GraphStore.swift:3271-3289.
+    const Probe = struct {
+        var app: *App = undefined;
+        var calls: usize = 0;
+        var retired_before_send = false;
+
+        fn record(_: *DaemonClient, command: []const u8) void {
+            if (std.mem.indexOf(u8, command, "\"restartNode\"") == null) return;
+            calls += 1;
+            const workspace = app.workspace.?;
+            retired_before_send = workspace.agent_restart_suspended and
+                !workspace.isAwaitingLaunch(0) and !workspace.hasAttach(0) and !workspace.hasSurface(0);
+        }
+    };
+    for ([_]bool{ false, true }) |panel_visible| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(96, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        connectSessionRestartFixture(app);
+        try deliverSessionRestartGraph(app, reopen_fixture_path, "running", 9);
+        try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+        if (!panel_visible) app.toggleWorkspaceDetailPanel();
+        const workspace = &fixture.workspace;
+        try std.testing.expect(workspace.isAwaitingLaunch(0));
+        try std.testing.expectEqualStrings("Copilot CLI", workspace.tabTitle(0).?);
+        Probe.app = app;
+        Probe.calls = 0;
+        Probe.retired_before_send = false;
+        app.client.command_recorder = Probe.record;
+        const before = app.client.outbound_count;
+        try std.testing.expect(app.restartSelectedSession());
+        try std.testing.expectEqual(@as(usize, 1), Probe.calls);
+        try std.testing.expect(Probe.retired_before_send);
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        try std.testing.expect(workspace.collapsed and workspace.agent_restart_suspended);
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expect(!app.activateLoop(reopen_fixture_path, "loop-b"));
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        try deliverSessionRestartGraph(app, "C:\\other-project", "running", 50);
+        try std.testing.expect(app.pending_session_restart != null);
+        try std.testing.expect(!workspace.isAwaitingLaunch(0));
+        try deliverSessionRestartGraph(app, reopen_fixture_path, "running", 9);
+        try std.testing.expect(app.pending_session_restart != null);
+        try std.testing.expect(!workspace.isAwaitingLaunch(0));
+        app.client.delivering_generation = 0;
+        try deliverSessionRestartGraph(app, reopen_fixture_path, "running", 99);
+        try std.testing.expectEqual(@as(u64, 9), app.model.graphFor(reopen_fixture_path).?.nodes.items[1].session_restarts);
+        try std.testing.expect(app.pending_session_restart != null);
+        app.client.delivering_generation = 1;
+        try deliverSessionRestartGraph(app, reopen_fixture_path, "running", 10);
+        try std.testing.expect(app.pending_session_restart == null);
+        try std.testing.expect(!workspace.collapsed and !workspace.agent_restart_suspended);
+        try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+        try std.testing.expectEqual(panel_visible, app.workspace_controls.panel_visible);
+        try std.testing.expect(workspace.isAwaitingLaunch(0));
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    }
+}
+
+test "lane 9 Stop remains a different operation and never enters the restart remount protocol" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    const before = app.client.outbound_count;
+    app.handleAction(.stop_node);
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    const command = app.client.outbound[(app.client.outbound_head + before) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"stopNode\":{\"_0\":\"loop-b\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "restartNode") == null);
+    try std.testing.expect(app.pending_session_restart == null);
+    try std.testing.expect(!fixture.workspace.agent_restart_suspended);
+    try std.testing.expect(fixture.workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+}
+
+test "lane 9 restart eligibility matches unresolved loops and refuses unsupported targets without queueing" {
+    for ([_][]const u8{ "idle", "running", "awaitingInput", "blocked", "waiting", "succeeded", "failed", "stalled", "stopped" }) |state| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(96, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        connectSessionRestartFixture(app);
+        try deliverSessionRestartGraph(app, reopen_fixture_path, state, 0);
+        try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+        const before = app.client.outbound_count;
+        const eligible = !isResolvedLoopState(state);
+        try std.testing.expectEqual(eligible, workspaceLoopBar(app.workspace_controls, 1200, !eligible).restart_session != null);
+        try std.testing.expectEqual(eligible, app.restartSelectedSession());
+        try std.testing.expectEqual(before + @as(usize, if (eligible) 1 else 0), app.client.outbound_count);
+        try std.testing.expectEqual(eligible, fixture.workspace.agent_restart_suspended);
+        try std.testing.expectEqual(eligible, app.pending_session_restart != null);
+    }
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    const before = app.client.outbound_count;
+    try std.testing.expect(!app.restartSelectedSession());
+    try std.testing.expectEqualStrings("Connect to the daemon before restarting a session", app.status());
+    try std.testing.expect(fixture.workspace.isAwaitingLaunch(0));
+    connectSessionRestartFixture(app);
+    try std.testing.expect(app.selectNodeIndex(0));
+    try std.testing.expect(!app.restartSelectedSession());
+    try std.testing.expectEqualStrings("The selected loop does not own the open workspace", app.status());
+    try std.testing.expectEqual(before, app.client.outbound_count);
+}
+
+test "lane 9 local restart rejection restores the attachment without sending a daemon kill" {
+    for ([_]bool{ false, true }) |allocation_failure| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(96, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        connectSessionRestartFixture(app);
+        try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+        const before = app.client.outbound_count;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        const old_allocator = app.client.allocator;
+        if (allocation_failure) app.client.allocator = failing.allocator() else app.client.stop_worker = true;
+        defer app.client.allocator = old_allocator;
+        try std.testing.expect(!app.restartSelectedSession());
+        try std.testing.expectEqual(before, app.client.outbound_count);
+        try std.testing.expect(app.pending_session_restart == null);
+        try std.testing.expect(!fixture.workspace.agent_restart_suspended);
+        try std.testing.expect(fixture.workspace.isAwaitingLaunch(0));
+        try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+        try std.testing.expectEqualStrings("Session restart was not queued; the daemon session was left unchanged", app.status());
+    }
+}
+
+test "lane 9 restart error timeout and reconnect never remount an unconfirmed session" {
+    for ([_]enum { daemon_error, timeout, reconnect }{ .daemon_error, .timeout, .reconnect }) |failure| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(96, 1200);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        connectSessionRestartFixture(app);
+        try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+        try std.testing.expect(app.restartSelectedSession());
+        switch (failure) {
+            .daemon_error => app.onFrame(
+                \\{"event":{"errorOccurred":"could not restart: session did not die"}}
+            ),
+            .timeout => app.pollSessionRestart(app.pending_session_restart.?.deadline_ms),
+            .reconnect => {
+                app.client.connection_generation = 2;
+                app.pollSessionRestart(std.time.milliTimestamp());
+            },
+        }
+        try std.testing.expect(app.pending_session_restart == null);
+        try std.testing.expect(fixture.workspace.agent_restart_suspended);
+        try std.testing.expect(!fixture.workspace.isAwaitingLaunch(0));
+        app.refreshWorkspace();
+        try std.testing.expect(!fixture.workspace.isAwaitingLaunch(0));
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expect(app.status().len != 0);
+    }
+}
+
+test "lane 9 confirmed restart does not take over a workspace the human opened meanwhile" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    connectSessionRestartFixture(app);
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    try std.testing.expect(app.restartSelectedSession());
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-a"));
+    const before = app.client.outbound_count;
+    try deliverSessionRestartGraph(app, reopen_fixture_path, "running", 1);
+    try std.testing.expect(app.pending_session_restart == null);
+    try std.testing.expectEqualStrings("loop-a", fixture.workspace.loop_id);
+    try std.testing.expectEqualStrings("loop-a", app.selected_node_id);
+    try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+    try std.testing.expectEqual(before, app.client.outbound_count);
+}
+
+test "lane 9 restart UIA invokes the same node operation and refuses stale or resolved targets" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    connectSessionRestartFixture(app);
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    const before = app.client.outbound_count;
+    try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-restart-session:loop-a")));
+    try std.testing.expectEqual(before, app.client.outbound_count);
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-restart-session:loop-b")));
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    try std.testing.expect(app.pending_session_restart != null);
+    try std.testing.expect(fixture.workspace.agent_restart_suspended);
+    const command = app.client.outbound[(app.client.outbound_head + before) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, command, "\"restartNode\":{\"_0\":\"loop-b\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "stopNode") == null);
+    try deliverSessionRestartGraph(app, reopen_fixture_path, "stopped", 1);
+    try std.testing.expect(app.pending_session_restart == null);
+    try std.testing.expect(!fixture.workspace.isAwaitingLaunch(0));
+    app.surface = .workspace;
+    try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-restart-session:loop-b")));
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+}
+
+test "lane 9 Quick Chat restart reports unsupported through both pointer and UIA without a graph command" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    const allocator = app.allocator;
+    try app.model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat"),
+        .title = try allocator.dupe(u8, "Chat"),
+        .backend = try allocator.dupe(u8, "copilotCLI"),
+    });
+    try fixture.workspace.scopeToLoop("chat", TerminalWorkspace.quick_chat_scope_project, false);
+    app.surface = .workspace;
+    app.layoutWorkspace();
+    const before = app.client.outbound_count;
+    const bar = TerminalSurface.quickChatBarLayout(Tokens.sidebar_width, 1200);
+    try nativeClickCenter(app, loopBarRect(bar.restart_session));
+    try std.testing.expectEqualStrings("Quick Chats do not support session restart", app.status());
+    try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-restart-session:chat")));
+    try std.testing.expectEqualStrings("Quick Chats do not support session restart", app.status());
+    try std.testing.expect(app.pending_session_restart == null);
+    try std.testing.expectEqual(before, app.client.outbound_count);
+}
+
+test "lane 9 visible tab UIA names bounds selection and stale overflow invocations match the workspace" {
+    const Sink = struct {
+        workspace: *TerminalWorkspace.Workspace,
+        seen: usize = 0,
+        selected: usize = 0,
+        failure: ?anyerror = null,
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.check(elements) catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+            for (0..self.workspace.tabCount()) |index| {
+                var key: [64]u8 = undefined;
+                const identity = try std.fmt.bufPrint(&key, "workspace-tab:{d}", .{index});
+                const bounds = self.workspace.visibleTabBounds(index);
+                var matches: usize = 0;
+                for (elements) |element| {
+                    if (!std.mem.eql(u8, identity, element.identity)) continue;
+                    matches += 1;
+                    const expected = bounds orelse return error.HiddenTabPublished;
+                    try std.testing.expectEqualStrings(self.workspace.tabTitle(index).?, element.name);
+                    try std.testing.expectEqualDeep([4]i32{ expected.left, expected.top, expected.right, expected.bottom }, [4]i32{ element.left, element.top, element.right, element.bottom });
+                    try std.testing.expectEqual(index == self.workspace.layout.selected_tab, element.selected);
+                    if (element.selected) self.selected += 1;
+                }
+                try std.testing.expectEqual(@as(usize, if (bounds != null) 1 else 0), matches);
+                self.seen += matches;
+            }
+            try std.testing.expect(self.seen > 0);
+            try std.testing.expectEqual(@as(usize, 1), self.selected);
+        }
+    };
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.initSized(dpi, 960);
+        defer fixture.deinit();
+        const app = &fixture.app;
+        const workspace = &fixture.workspace;
+        try deliverSessionRestartGraph(app, reopen_fixture_path, "awaitingInput", 0);
+        try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+        for (1..12) |index| {
+            var id: [32]u8 = undefined;
+            try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+        }
+        var sink = Sink{ .workspace = workspace };
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+        if (sink.failure) |err| return err;
+        try std.testing.expect(workspace.visibleTabBounds(0) == null);
+        try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-tab:0")));
+        try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-tab-close:0")));
+        const before = app.client.outbound_count;
+        App.onWorkspaceKey(app, '1', true, false);
+        try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+        try std.testing.expectEqualStrings("Copilot CLI", workspace.tabTitle(0).?);
+        sink = .{ .workspace = workspace };
+        app.syncAccessibilityTo(&sink, logicalClientRect(app.window.hwnd, dpi));
+        if (sink.failure) |err| return err;
+        try std.testing.expectEqual(before, app.client.outbound_count);
+        try std.testing.expect(!App.onShellKey(app, '2', true, false, true));
+        try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
+        try std.testing.expect(App.onShellKey(app, '2', true, false, false));
+        try std.testing.expectEqual(@as(usize, 1), workspace.layout.selected_tab);
     }
 }
 
@@ -16234,11 +16814,11 @@ test "workspace surface: native New Tab publishes every drawn tab to UIA and sta
         try fixture.expectTerminalsInWorkspace(1);
 
         // Native clicks on the drawn tabs keep UIA's tab list equal to the drawn one.
-        const agent_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 0);
+        const agent_tab = workspace.visibleTabBounds(0).?;
         try nativeClick(app, agent_tab.left + 24, @divTrunc(agent_tab.top + agent_tab.bottom, 2));
         try std.testing.expectEqual(@as(usize, 0), workspace.layout.selected_tab);
         try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
-        const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+        const shell_tab = workspace.visibleTabBounds(1).?;
         try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
         try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
         try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
@@ -16324,7 +16904,7 @@ test "workspace layout: closing a New Tab ends its shell session and never the l
     defer std.testing.allocator.free(shell);
     try fixture.setLive(&.{ "loop-a", "loop-b", shell });
 
-    const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+    const shell_tab = workspace.visibleTabBounds(1).?;
     try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
     try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
     try fixture.waitFor(LiveTerminalFixture.killed, shell);
@@ -16349,7 +16929,7 @@ test "workspace layout: closing a tab never ends a session that another loop's l
     try fixture.saveLoopLayout(fixture.project, "loop-b", &.{ .{ .id = "loop-b", .agent = true }, .{ .id = shell } });
     try fixture.setLive(&.{ "loop-a", "loop-b", shell });
 
-    const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+    const shell_tab = workspace.visibleTabBounds(1).?;
     try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
     try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
     fixture.settle();
@@ -18139,7 +18719,7 @@ test "workspace layout: a tab's session is recorded as the shell's own when mint
     try std.testing.expect(!fixture.ownedMarker("loop-a"));
     try fixture.setLive(&.{ "loop-a", tab_shell, split_shell });
 
-    const shell_tab = TerminalWorkspace.tabBounds(workspace.layout_origin_x, workspace.layout_origin_y, 1);
+    const shell_tab = workspace.visibleTabBounds(1).?;
     try nativeClick(app, shell_tab.right - 12, @divTrunc(shell_tab.top + shell_tab.bottom, 2));
     try fixture.waitFor(LiveTerminalFixture.killed, tab_shell);
     try fixture.waitFor(LiveTerminalFixture.markerGone, tab_shell);
@@ -19699,7 +20279,7 @@ test "open workspace applies production stopped state and removes Stop control" 
         isResolvedLoopState(graph.nodes.items[selected_index].state),
         false,
     );
-    try std.testing.expect(loop_bar.stop == null);
+    try std.testing.expect(loop_bar.restart_session == null);
     try std.testing.expectEqual(@as(usize, 1), F.publications);
 }
 
@@ -20497,6 +21077,7 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
     const physical_layouts = [_][3]i32{ .{ 220, 80, 708 }, .{ 330, 120, 1062 }, .{ 440, 160, 1416 } };
     for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
         app.dpi = dpi;
+        workspace.dpi = dpi;
         workspace.layout_origin_x = physical_layouts[index][0];
         workspace.layout_origin_y = physical_layouts[index][1];
         workspace.layout_width = physical_layouts[index][2];
@@ -20557,7 +21138,7 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 8, 1, 280, 33 }, .{ 12, 2, 420, 50 }, .{ 16, 2, 560, 66 } } },
         .{ .identity = "workspace-loop-bar:loop", .bounds = .{ .{ 220, 34, 928, 80 }, .{ 330, 51, 1392, 120 }, .{ 440, 68, 1856, 160 } } },
         .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } }, .eligible = false },
-        .{ .identity = "workspace-stop:loop", .bounds = .{ .{ 732, 44, 816, 70 }, .{ 1098, 66, 1224, 105 }, .{ 1464, 88, 1632, 140 } }, .eligible = false },
+        .{ .identity = "workspace-restart-session:loop", .bounds = .{ .{ 704, 44, 816, 70 }, .{ 1056, 66, 1224, 105 }, .{ 1408, 88, 1632, 140 } } },
         .{ .identity = "workspace-toggle-panel:control", .bounds = .{ .{ 1100, 46, 1182, 68 }, .{ 1650, 69, 1773, 102 }, .{ 2200, 92, 2364, 136 } } },
         .{ .identity = "workspace-detail-sparkline:loop", .bounds = .{ .{ 940, 798, 1188, 830 }, .{ 1410, 1197, 1782, 1245 }, .{ 1880, 1596, 2376, 1660 } } },
         .{ .identity = "workspace-detail-start:loop", .bounds = .{ .{ 940, 872, 1188, 890 }, .{ 1410, 1308, 1782, 1335 }, .{ 1880, 1744, 2376, 1780 } } },
@@ -20585,9 +21166,9 @@ test "loop detail UIA rectangles equal painted bounds and omit empty sparklines"
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "workspace-tab:0", .name = "Agent tab", .bounds = .{ .{ 220, 84, 332, 106 }, .{ 330, 124, 442, 146 }, .{ 440, 164, 552, 186 } } },
-        .{ .identity = "workspace-tab:1", .name = "Shell tab", .bounds = .{ .{ 340, 84, 452, 106 }, .{ 450, 124, 562, 146 }, .{ 560, 164, 672, 186 } } },
-        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 428, 84, 452, 106 }, .{ 538, 124, 562, 146 }, .{ 648, 164, 672, 186 } } },
+        .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 84, 462, 106 }, .{ 342, 124, 748, 146 }, .{ 456, 164, 1034, 186 } } },
+        .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 466, 84, 700, 106 }, .{ 754, 124, 1160, 146 }, .{ 1042, 164, 1620, 186 } } },
+        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 676, 84, 700, 106 }, .{ 1124, 124, 1160, 146 }, .{ 1572, 164, 1620, 186 } } },
         .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
         .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
         .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
@@ -20780,6 +21361,7 @@ fn expectSingleActivation(app: *App, project_path: []const u8, node_id: []const 
 }
 
 fn deinitOverviewTestApp(app: *App) void {
+    app.clearSessionRestart();
     app.canvas.deinitLayout();
     app.drainWorktreeInspection();
     app.drainWorktreeReclaim();
@@ -23243,7 +23825,7 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
     try app.model.quick_chats.append(.{
         .id = try allocator.dupe(u8, "chat-b"),
         .title = try allocator.dupe(u8, "Chat B"),
-        .backend = try allocator.dupe(u8, "copilot"),
+        .backend = try allocator.dupe(u8, "copilotCLI"),
         .created_at = 1_791_219_880,
     });
     var temporary = std.testing.tmpDir(.{});
@@ -23279,20 +23861,20 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
         .{
             .identity = "workspace-tab:0",
             .present = true,
-            .name = "Shell tab",
-            .bounds = .{ .{ 0, 4, 112, 26 }, .{ 0, 4, 112, 26 }, .{ 0, 4, 112, 26 } },
+            .name = "Shell",
+            .bounds = .{ .{ 8, 4, 246, 26 }, .{ 8, 4, 246, 26 }, .{ 8, 4, 246, 26 } },
         },
         .{
             .identity = "workspace-tab:1",
             .present = true,
-            .name = "Agent tab",
-            .bounds = .{ .{ 120, 4, 232, 26 }, .{ 120, 4, 232, 26 }, .{ 120, 4, 232, 26 } },
+            .name = "Copilot CLI",
+            .bounds = .{ .{ 250, 4, 489, 26 }, .{ 250, 4, 489, 26 }, .{ 250, 4, 489, 26 } },
         },
         .{
             .identity = "workspace-tab:2",
             .present = true,
-            .name = "Split tab",
-            .bounds = .{ .{ 240, 4, 352, 26 }, .{ 240, 4, 352, 26 }, .{ 240, 4, 352, 26 } },
+            .name = "Copilot CLI",
+            .bounds = .{ .{ 493, 4, 732, 26 }, .{ 493, 4, 732, 26 }, .{ 493, 4, 732, 26 } },
         },
         .{
             .identity = "workspace-restart-session:chat-b",
@@ -23334,7 +23916,8 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
         if (sink.failure) |err| return err;
     }
     const restart_payload = Accessibility.worktreeIdentityPayload("workspace-restart-session:chat-b");
-    try std.testing.expect(app.applyUiaDynamicInvoke(restart_payload));
+    try std.testing.expect(!app.applyUiaDynamicInvoke(restart_payload));
+    try std.testing.expectEqualStrings("Quick Chats do not support session restart", app.status());
     try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
     try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
     try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("workspace-show-graph:show-graph")));
@@ -23461,7 +24044,7 @@ test "missing bound Quick Chat does not suppress remaining workspace UIA" {
         .{ .identity = "workspace-quick-chat-bar:deleted-chat", .present = false },
         .{ .identity = "workspace-restart-session:deleted-chat", .present = false },
         .{ .identity = "workspace-show-graph:show-graph", .present = false },
-        .{ .identity = "workspace-tab:0", .present = true, .name = "Shell tab" },
+        .{ .identity = "workspace-tab:0", .present = true, .name = "Shell" },
     };
     var sink = DpiAccessibilitySink{ .expected = &expected, .dpi_index = 0 };
     app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });

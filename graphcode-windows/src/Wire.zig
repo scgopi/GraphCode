@@ -582,7 +582,9 @@ pub fn commandGraphNodeAction(
         });
     }
 
-    if (std.mem.eql(u8, action, "stopNode") or std.mem.eql(u8, action, "resumeSession")) {
+    if (std.mem.eql(u8, action, "stopNode") or std.mem.eql(u8, action, "resumeSession") or
+        std.mem.eql(u8, action, "restartNode"))
+    {
         return std.mem.concat(allocator, u8, &.{
             "{\"graphCommand\":{\"projectPath\":",
             quoted_path,
@@ -594,6 +596,20 @@ pub fn commandGraphNodeAction(
         });
     }
     return error.UnsupportedGraphAction;
+}
+
+test "lane 9 restart encoding is distinct from stop and resume" {
+    // DaemonProtocol.swift:247 and GraphStore.swift:3242 consume restartNode(UUID).
+    const allocator = std.testing.allocator;
+    const command = try commandGraphNodeAction(allocator, "C:\\owned", "loop", "restartNode", null);
+    defer allocator.free(command);
+    try std.testing.expectEqualStrings(
+        "{\"graphCommand\":{\"projectPath\":\"C:\\\\owned\",\"command\":{\"restartNode\":{\"_0\":\"loop\"}}}}",
+        command,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, command, "stopNode") == null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "resumeSession") == null);
+    try std.testing.expectError(error.UnsupportedGraphAction, commandGraphNodeAction(allocator, "C:\\owned", "loop", "restartEverything", null));
 }
 
 pub fn commandGraphRenameNode(

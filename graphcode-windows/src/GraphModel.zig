@@ -28,6 +28,7 @@ pub const Node = struct {
     metric_samples: [8]f64 = [_]f64{0} ** 8,
     metric_sample_count: u8 = 0,
     token_usage: ?u32 = null,
+    session_restarts: u64 = 0,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
     subgraph_json: []u8 = &.{},
@@ -41,6 +42,36 @@ pub const ActivityEvent = struct {
     node_id: []u8 = &.{},
     timestamp: i64 = 0,
 };
+
+test "restart confirmation model retains the daemon counter through snapshots clones and deltas" {
+    // LoopNode.swift:104-108 and AppFeature+LoopSessions.swift:170-185.
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"revision":1,"project":{"path":"A","name":"A"},"nodes":[{"id":"loop","sessionRestarts":9},{"id":"old"},{"id":"null","sessionRestarts":null},{"id":"nested","metadata":{"sessionRestarts":88}}],"edges":[]}}}
+    );
+    try std.testing.expectEqual(@as(u64, 9), model.graph.?.nodes.items[0].session_restarts);
+    for (model.graph.?.nodes.items[1..]) |node| try std.testing.expectEqual(@as(u64, 0), node.session_restarts);
+    const copied = try cloneNode(std.testing.allocator, model.graph.?.nodes.items[0]);
+    defer freeNode(std.testing.allocator, copied);
+    try std.testing.expectEqual(@as(u64, 9), copied.session_restarts);
+    _ = try model.updateFromFrame(
+        \\{"event":{"nodesChanged":{"revision":2,"projectPath":"A","nodes":[{"id":"loop","sessionRestarts":10}]}}}
+    );
+    try std.testing.expectEqual(@as(u64, 10), model.graph.?.nodes.items[0].session_restarts);
+    try std.testing.expectEqual(@as(u64, 0), model.graph.?.nodes.items[1].session_restarts);
+}
+
+test "restart confirmation model rejects malformed counters rather than confirming a restart" {
+    for ([_][]const u8{ "-1", "1.5", "\"2\"", "true", "18446744073709551616" }) |value| {
+        var model = Model.init(std.testing.allocator);
+        defer model.deinit();
+        const frame = try std.fmt.allocPrint(std.testing.allocator, "{{\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"A\"}},\"nodes\":[{{\"id\":\"loop\",\"sessionRestarts\":{s}}}],\"edges\":[]}}}}}}", .{value});
+        defer std.testing.allocator.free(frame);
+        try std.testing.expectError(error.MalformedSessionRestarts, model.updateFromFrame(frame));
+        try std.testing.expect(model.graph == null);
+    }
+}
 
 pub const QuickChat = struct {
     id: []u8,
@@ -1449,6 +1480,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .metric_samples = node.metric_samples,
         .metric_sample_count = node.metric_sample_count,
         .token_usage = node.token_usage,
+        .session_restarts = node.session_restarts,
         .follows_template = node.follows_template,
     };
     errdefer freeNode(allocator, copy);
@@ -1914,6 +1946,7 @@ fn decodeNodes(
         var binding = try JsonFields.init(allocator, fields.get("worktreeBinding").container('{') orelse "{}");
         defer binding.deinit();
         const samples = try scopedMetricSamples(allocator, fields.get("metricHistory"));
+        const restarts = fields.get("sessionRestarts");
         var node = Node{
             .id = &.{},
             .title = &.{},
@@ -1928,6 +1961,7 @@ fn decodeNodes(
             .metric_samples = samples.values,
             .metric_sample_count = samples.count,
             .token_usage = scopedUsageTotal(if (fields.has("usage")) &usage else &fields),
+            .session_restarts = if (restarts.isNull()) 0 else restarts.canonicalUnsigned() orelse return error.MalformedSessionRestarts,
             .follows_template = !fields.get("templateFollow").isNull(),
         };
         errdefer freeNode(allocator, node);
