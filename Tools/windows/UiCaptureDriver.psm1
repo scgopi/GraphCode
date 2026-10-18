@@ -2557,14 +2557,56 @@ function Get-CapOwnedDescendants {
             if ($known.ContainsKey($pid) -or -not $known.ContainsKey([int]$row.ParentProcessId)) { continue }
             $parent = $known[[int]$row.ParentProcessId]
             $process = $null
-            try { $process = [Diagnostics.Process]::GetProcessById($pid) }
-            catch [ArgumentException] { continue }
             $retained = $false
+            $rawRow = [ordered]@{}
+            foreach ($name in @('ProcessId','ParentProcessId','SessionId','CreationDate','ExecutablePath','CommandLine')) {
+                $property = $row.PSObject.Properties[$name]
+                $rawRow[$name] = if ($null -ne $property) { $property.Value } else { $null }
+            }
+            $context = [pscustomobject]@{
+                ObservedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+                RawRow = [pscustomobject]$rawRow
+                ParentPid = $parent.Pid
+                ParentCreationFileTimeUtc = $parent.CreationFileTimeUtc
+                NativeSnapshot = $null
+                ErrorRecord = $null
+            }
+            $failureCode = 'DescendantNativeIdentityUnavailable'
             try {
-                $identity = Get-CapProcessIdentity -Process $process -ExpectedImagePath ([string]$row.ExecutablePath) `
+                $process = [Diagnostics.Process]::GetProcessById($pid)
+                $access = Read-CapProcessAccess -Process $process -Role 'descendant' `
+                    -CallSite 'Get-CapOwnedDescendants.InitialSnapshot' -ExpectedPid $pid
+                $context.NativeSnapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+                if ($context.NativeSnapshot.IsExited) {
+                    Write-CapTrace -Command 'CapDescendantExited' -Parameters @{
+                        diagnosticJson = ($context | ConvertTo-Json -Depth 10 -Compress)
+                    }
+                    continue
+                }
+                $nativePath = ConvertTo-CapImagePath $context.NativeSnapshot.ImagePath
+                $failureCode = 'DescendantUnrecognizedImage'
+                if ($nativePath -ine (ConvertTo-CapImagePath $ZmxPath) -and
+                    $nativePath -ine (ConvertTo-CapImagePath $CmdPath) -and
+                    $nativePath -ine (ConvertTo-CapImagePath $ConhostPath)) {
+                    throw "Unknown live descendant PID $pid image='$nativePath'; refusing."
+                }
+                $failureCode = 'DescendantMetadataIncomplete'
+                if ([string]::IsNullOrWhiteSpace([string]$rawRow.ExecutablePath) -or
+                    [string]::IsNullOrWhiteSpace([string]$rawRow.CommandLine) -or
+                    $null -eq $rawRow.CreationDate -or $null -eq $rawRow.ParentProcessId -or
+                    $null -eq $rawRow.SessionId) {
+                    throw "Live descendant PID $pid has incomplete candidate CIM metadata; refusing."
+                }
+                $failureCode = 'DescendantMetadataMismatch'
+                if ((ConvertTo-CapImagePath ([string]$rawRow.ExecutablePath)) -ine $nativePath) {
+                    throw "Candidate CIM image differs from held native image for PID $pid; refusing."
+                }
+                $failureCode = 'DescendantMetadataIncomplete'
+                $identity = Get-CapProcessIdentity -Process $process -ExpectedImagePath $nativePath `
                     -Role 'descendant' -ExpectedParentPid $parent.Pid -ExpectedSessionId $parent.SessionId
                 $verified = Assert-CapProcessIdentity -Identity $identity
                 if ($verified.State -eq 'Exited') { continue }
+                $failureCode = 'DescendantIdentityMismatch'
                 $meta = $verified.Metadata
                 $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
                     -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
@@ -2615,6 +2657,7 @@ function Get-CapOwnedDescendants {
                     throw "Descendant PID $pid does not match the saved parent generation/session; refusing."
                 }
                 $imagePath = ConvertTo-CapImagePath -Path ([string]$meta.ImagePath)
+                $failureCode = 'DescendantUnrecognizedCommand'
                 if ($imagePath -ieq (ConvertTo-CapImagePath -Path $ZmxPath)) {
                     $appClient = $AllowGraphCodeRoot -and (Test-CapGraphAppRootRole -Role $parent.Role)
                     $validParentRole = $parent.Role -eq 'zmx-seed' -or $appClient
@@ -2676,8 +2719,27 @@ function Get-CapOwnedDescendants {
                 $OwnedDescendants.Add($identity)
                 $retained = $true
                 $changed = $true
+            } catch {
+                $context.ErrorRecord = [pscustomobject]@{
+                    Type = $_.Exception.GetType().FullName
+                    Message = $_.Exception.Message
+                    Raw = $_.Exception.ToString()
+                    FullyQualifiedErrorId = $_.FullyQualifiedErrorId
+                    Category = [string]$_.CategoryInfo
+                    ScriptStackTrace = $_.ScriptStackTrace
+                    ObservedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+                }
+                $failure = [InvalidOperationException]::new("${failureCode}: $($_.Exception.Message)", $_.Exception)
+                $failure.Data['CapCaptureCode'] = $failureCode
+                $failure.Data['CandidateContext'] = $context
+                $failure.Data['OriginalErrorRecord'] = $_
+                $failure.Data['RawCimRow'] = $row
+                Write-CapTrace -Command 'CapDescendantRefusal' -Parameters @{
+                    diagnosticJson = ($context | ConvertTo-Json -Depth 10 -Compress)
+                }
+                throw $failure
             } finally {
-                if (-not $retained) { $process.Dispose() }
+                if (-not $retained -and $null -ne $process) { $process.Dispose() }
             }
         }
         if (-not $changed) { break }

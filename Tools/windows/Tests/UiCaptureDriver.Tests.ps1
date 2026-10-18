@@ -13,6 +13,7 @@ param(
     [switch]$SelectorRefusalContractOnly,
     [switch]$IdentityContractOnly,
     [switch]$AppChildContractOnly,
+    [switch]$DescendantMetadataContractOnly,
     [switch]$DAdapterContractOnly,
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
@@ -1073,6 +1074,181 @@ function Write-CapPrebuiltFixtureManifest {
     $path = Join-Path $scratch 'fixtures.json'
     Write-JournalContractJson $path $manifest
     return [pscustomobject]@{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; files = $files }
+}
+
+function Invoke-CapDescendantMetadataCase {
+    param([string]$Case)
+    $caseRoot = Join-Path $scratch ('descendant-metadata\' + $Case)
+    $null = New-Item -ItemType Directory -Path $caseRoot
+    $module = Get-Module UiCaptureDriver
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    $run = $null
+    $jobHandle = [CapProcessJob]::Create()
+    $originalAccess = & $module { (Get-Item Function:Read-CapProcessAccess).ScriptBlock }
+    $detail = [ordered]@{ case = $Case; beganUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        candidate = $null; injectedRow = $null; errorRecord = $null; observed = @()
+        jobEmpty = $false; stdoutEof = $false; stderrEof = $false }
+    try {
+        $rootIdentity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName `
+            -Role 'graphcode-app-before-normal'
+        $run = Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') `
+            -ArgumentList @('-NoProfile','-NonInteractive','-Command',
+                '[Console]::Out.WriteLine("OWNED_CIM_READY"); [void][Console]::In.ReadLine(); [Console]::Error.WriteLine("OWNED_CIM_EXIT")') `
+            -WorkingDirectory $caseRoot -Role 'metadata-owned-child' -HoldStdin `
+            -Environment @{ TEMP = $caseRoot; TMP = $caseRoot }
+        [CapProcessJob]::Assign($jobHandle, $run.Identity.Process.Handle)
+        $native = [CapNative]::Snapshot($run.Identity.Process.Handle, $run.Identity.Pid)
+        Assert-CapTest (-not $native.IsExited -and $native.CreationFileTimeUtc -eq $run.Identity.CreationFileTimeUtc -and
+            [CapProcessJob]::Contains($jobHandle, $run.Identity.Process.Handle)) 'Injection target is not the held live owned generation.'
+        $actual = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($run.Identity.Pid)" -ErrorAction Stop
+        $row = [pscustomobject]@{ ProcessId = $actual.ProcessId; ParentProcessId = $actual.ParentProcessId
+            SessionId = $actual.SessionId; CreationDate = $actual.CreationDate
+            ExecutablePath = $actual.ExecutablePath; CommandLine = $actual.CommandLine }
+        switch ($Case) {
+            EmptyImage { $row.ExecutablePath = '' }
+            NullImage { $row.ExecutablePath = $null }
+            MissingCommand { $row.CommandLine = $null }
+            ForeignImage { $row.ExecutablePath = Join-Path $caseRoot 'foreign.exe' }
+            Exited { $row.ExecutablePath = '' }
+        }
+        $detail.candidate = [pscustomobject]@{ pid = $native.ProcessId; creationFileTimeUtc = $native.CreationFileTimeUtc
+            imagePath = $native.ImagePath; nativeInitiallyExited = $native.IsExited; parentPid = $rootIdentity.Pid
+            sessionId = $rootIdentity.SessionId }
+        $detail.injectedRow = $row
+        & $module {
+            param($Row,$Run,$Case,$Original)
+            if (Test-Path Function:Get-CimInstance) { throw 'Unexpected pre-existing candidate metadata seam.' }
+            $script:CapMetadataInjection = @{ Row = $Row; Run = $Run; Case = $Case; OriginalAccess = $Original
+                QueryCount = 0; AccessCount = 0; NativeExitedObserved = $false }
+            function script:Get-CimInstance {
+                param($ClassName,$Filter,$ErrorAction)
+                $state = $script:CapMetadataInjection
+                if ($ClassName -cne 'Win32_Process' -or $Filter -cnotin @(
+                    "ParentProcessId = $($state.Row.ParentProcessId)", "ProcessId = $($state.Row.ProcessId)"
+                )) { throw "Unexpected candidate metadata query: $ClassName $Filter" }
+                $state.QueryCount++
+                if ($state.Case -ceq 'MissingCurrent' -and $Filter -clike 'ProcessId = *') { return @() }
+                return $state.Row
+            }
+            function script:Read-CapProcessAccess {
+                param($Process,$Role,$CallSite,$ExpectedPid)
+                $state = $script:CapMetadataInjection
+                $access = & $state.OriginalAccess @PSBoundParameters
+                if ($access.Pid -eq $state.Run.Identity.Pid -and $CallSite -like 'Get-CapOwnedDescendants.*') {
+                    $state.AccessCount++
+                    if ($state.Case -ceq 'NativeError') {
+                        throw [ComponentModel.Win32Exception]::new(5, 'INJECTED_OWNED_NATIVE_ACCESS_FAILURE')
+                    }
+                    if ($state.Case -ceq 'Exited') {
+                        $state.Run.Identity.Process.StandardInput.Close()
+                        if (-not $state.Run.Identity.Process.WaitForExit(5000)) { throw 'Owned exit barrier failed.' }
+                        $state.NativeExitedObserved = [CapNative]::IsExited($access.Handle, $access.Pid)
+                    }
+                }
+                return $access
+            }
+        } $row $run $Case $originalAccess
+        $captured = $null
+        $owned = [Collections.Generic.List[object]]::new()
+        try {
+            $detail.observed = @(Get-CapOwnedDescendants -Roots @($rootIdentity) `
+                -ZmxPath $(if ($Case -ceq 'UnknownImage') { Join-Path $caseRoot 'other-zmx.exe' } else { $native.ImagePath }) `
+                -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
+                -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
+                -SessionName 'gc-metadata-test-' -CommandMarker 'gc-metadata-test-' `
+                -AllowGraphCodeRoot -OwnedDescendants $owned)
+        } catch {
+            $captured = $_
+            $detail.errorRecord = [pscustomobject]@{ type = $_.Exception.GetType().FullName
+                message = $_.Exception.Message; raw = $_.Exception.ToString()
+                fullyQualifiedErrorId = $_.FullyQualifiedErrorId; stack = $_.ScriptStackTrace
+                category = [string]$_.CategoryInfo
+                data = [pscustomobject]@{ code = $_.Exception.Data['CapCaptureCode']
+                    candidateContext = $_.Exception.Data['CandidateContext'] }
+                observedUtc = [DateTimeOffset]::UtcNow.ToString('o') }
+        }
+        $meter = & $module { [pscustomobject]@{ queryCount = $script:CapMetadataInjection.QueryCount
+            accessCount = $script:CapMetadataInjection.AccessCount
+            nativeExitedObserved = $script:CapMetadataInjection.NativeExitedObserved } }
+        $detail.meter = $meter
+        Assert-CapTest ($owned.Count -eq 0 -and $detail.observed.Count -eq 0) 'An unqualified candidate was adopted.'
+        if ($Case -ceq 'Exited') {
+            Assert-CapTest ($null -eq $captured -and $meter.nativeExitedObserved -and $meter.accessCount -gt 0 -and
+                [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) `
+                'Only a held native exited snapshot may skip the empty-image candidate.' $detail
+        } else {
+            Assert-CapTest (-not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) `
+                'Metadata refusal mutated the live owned candidate.' $detail
+            $code = switch ($Case) {
+                ForeignImage { 'DescendantMetadataMismatch' }
+                UnknownImage { 'DescendantUnrecognizedImage' }
+                NativeError { 'DescendantNativeIdentityUnavailable' }
+                default { 'DescendantMetadataIncomplete' }
+            }
+            Assert-CapTest ($null -ne $captured -and $captured.Exception -is [InvalidOperationException] -and
+                $captured.Exception.Data['CapCaptureCode'] -ceq $code) `
+                "Expected typed $code after native classification, not a binder error or unrelated refusal." $detail
+            $context = $captured.Exception.Data['CandidateContext']
+            Assert-CapTest ($null -ne $context -and $context.RawRow.ProcessId -eq $run.Identity.Pid -and
+                $context.RawRow.ExecutablePath -ceq $row.ExecutablePath -and $context.ErrorRecord -and
+                $captured.Exception.Data['OriginalErrorRecord'] -is [Management.Automation.ErrorRecord] -and
+                [object]::ReferenceEquals($captured.Exception.Data['RawCimRow'], $row) -and
+                $meter.accessCount -gt 0) 'Refusal lost raw candidate data, original ErrorRecord or native-first acquisition.' $detail
+            if ($Case -ceq 'NativeError') {
+                Assert-CapTest ($null -eq $context.NativeSnapshot -and
+                    $captured.Exception.InnerException -is [ComponentModel.Win32Exception] -and
+                    $captured.Exception.InnerException.NativeErrorCode -eq 5) `
+                    'Unknown native failure was treated as absent/exited or lost its original cause.' $detail
+            } else {
+                Assert-CapTest ($context.NativeSnapshot.ProcessId -eq $run.Identity.Pid -and
+                    $context.NativeSnapshot.CreationFileTimeUtc -eq $native.CreationFileTimeUtc -and
+                    -not $context.NativeSnapshot.IsExited -and $context.NativeSnapshot.ImagePath -ceq $native.ImagePath) `
+                    'Typed refusal did not retain the actual held native generation/image/liveness.' $detail
+            }
+        }
+        $observations = @(Get-Content -LiteralPath (Join-Path $scratch 'test-calls.jsonl') |
+            ForEach-Object { ConvertFrom-Json $_ -Depth 20 -DateKind String } |
+            Where-Object command -CEQ $(if ($Case -ceq 'Exited') { 'CapDescendantExited' } else { 'CapDescendantRefusal' }) |
+            ForEach-Object { ConvertFrom-Json $_.parameters.diagnosticJson -Depth 20 -DateKind String } |
+            Where-Object { $_.RawRow.ProcessId -eq $run.Identity.Pid })
+        Assert-CapTest ($observations.Count -eq 1 -and
+            $observations[0].RawRow.ExecutablePath -ceq $row.ExecutablePath -and
+            (($Case -ceq 'Exited' -and $observations[0].NativeSnapshot.IsExited) -or
+                ($Case -cne 'Exited' -and $observations[0].ErrorRecord.Message -ceq $context.ErrorRecord.Message))) `
+            'Persistent candidate observation lost raw values or the native exit/original error context.' $detail
+        $detail.persistentObservation = $observations[0]
+        return $detail
+    } finally {
+        & $module {
+            param($Original)
+            Set-Item Function:Read-CapProcessAccess -Value $Original
+            Remove-Item Function:Get-CimInstance -ErrorAction SilentlyContinue
+            Remove-Variable CapMetadataInjection -Scope Script -ErrorAction SilentlyContinue
+        } $originalAccess
+        try {
+            [CapProcessJob]::Terminate($jobHandle)
+            [CapProcessJob]::WaitForEmpty($jobHandle, 5000)
+            $detail.jobEmpty = [CapProcessJob]::Active($jobHandle) -eq 0
+        } finally { [CapProcessJob]::Close($jobHandle) }
+        if ($run) {
+            $detail.stdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully
+            $detail.stderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully
+            $run.Identity.Process.Dispose()
+        }
+        $self.Dispose()
+        $detail.endedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
+        Assert-CapTest ($detail.jobEmpty -and ($null -eq $run -or ($detail.stdoutEof -and $detail.stderrEof))) `
+            'Metadata injection left an owned job or actual output pipe unclosed.' $detail
+    }
+}
+
+function Invoke-CapDescendantMetadataContracts {
+    foreach ($case in @('EmptyImage','NullImage','MissingCommand','ForeignImage','MissingCurrent','Exited','NativeError','UnknownImage')) {
+        Invoke-CapTest "native-first descendant metadata $case preserves refusal and ownership" {
+            Invoke-CapDescendantMetadataCase $case
+        }
+    }
 }
 
 function Invoke-CapAppChildCase {
@@ -4252,6 +4428,18 @@ if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDire
     Write-CapDContractReport
 }
 
+if ($DescendantMetadataContractOnly) {
+    Invoke-CapDescendantMetadataContracts
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $report = [pscustomobject]@{ suite = 'UiCaptureDescendantMetadataContracts'; executed = $results.Count
+        passed = $passed; failed = $failed; cases = @($results); gui = 'NotExecuted'; images = 0 }
+    $report | ConvertTo-Json -Depth 35 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne 8 -or $passed -ne 8 -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
 if ($PrepareFixturesOnly) {
     if ($ReceiptContractOnly -or $FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or $PrebuiltFixtureManifest) {
         throw 'Fixture preparation cannot also consume or run contract suites.'
@@ -4296,6 +4484,7 @@ try {
     } else {
     $cimRaceTarget = $prebuilt.CimRace
     if (-not $LaunchContractOnly) {
+        Invoke-CapDescendantMetadataContracts
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
         Invoke-CapIdentityContracts
@@ -5306,6 +5495,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 152 } else { 149 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 160 } else { 157 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0
