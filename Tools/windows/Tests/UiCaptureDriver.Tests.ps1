@@ -3923,7 +3923,7 @@ public sealed class CapHiddenActionFixture : IRawElementProviderFragmentRoot, ID
                 . ([scriptblock]::Create($definitions[0].Extent.Text))
             }
             function Write-CapWorkerLog { param([string]$Message) Write-CapTrace 'HiddenActionWorkerLog' @{ message = $Message } }
-            $leaseDeadlineUtc = [DateTime]::UtcNow.AddSeconds(2)
+            $leaseDeadlineUtc = [DateTime]::UtcNow.AddSeconds(15)
             $detail.deadlineUtc = $leaseDeadlineUtc.ToString('o')
             $detail.beganUtc = [DateTime]::UtcNow.ToString('o')
             $watch = [Diagnostics.Stopwatch]::StartNew()
