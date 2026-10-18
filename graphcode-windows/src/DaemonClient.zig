@@ -1633,49 +1633,30 @@ test "a request that cannot be encoded leaves nothing pending" {
     try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
 }
 
-    test "an event that merely carries a requestID does not complete a pending request" {
-        var client = try DaemonClient.initForTesting(std.testing.allocator);
+    test "lane 9 checked node action reports encoding allocation and queue rejection without double freeing" {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var client = try DaemonClient.initForTesting(failing.allocator());
         defer client.deinit();
-        client.publishState(.connected, "");
-        const read = client.sendReadProjectGraph("C:\\work\\A").?;
-        try std.testing.expect(client.trackRequest(&read.request_id));
-        const spoof = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "{{\"version\":2,\"kind\":\"event\",\"sequence\":3,\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
-            .{read.request_id},
-        );
-        defer std.testing.allocator.free(spoof);
-        try std.testing.expect(client.handleFrame(spoof));
-        try std.testing.expectEqual(@as(usize, 1), client.pending_request_count);
-        const response = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"graphChanged\":{{\"project\":{{\"path\":\"C:/work/A\"}},\"nodes\":[]}}}}}}",
-            .{read.request_id},
-        );
-        defer std.testing.allocator.free(response);
-        try std.testing.expect(client.handleFrame(response));
-        try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+        try std.testing.expectError(error.UnsupportedGraphAction, client.sendNodeActionChecked("A", "loop", "restartEverything", null));
+        try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+        failing.fail_index = failing.alloc_index;
+        try std.testing.expectError(error.OutOfMemory, client.sendNodeActionChecked("A", "loop", "restartNode", null));
+        try std.testing.expectEqual(@as(usize, 0), client.outbound_count);
+        failing.fail_index = std.math.maxInt(usize);
+        for (0..outbound_capacity) |_| try client.sendNodeActionChecked("A", "loop", "restartNode", null);
+        try std.testing.expectError(error.OutboundQueueRejected, client.sendNodeActionChecked("A", "loop", "restartNode", null));
+        try std.testing.expectEqual(outbound_capacity, client.outbound_count);
     }
 
-    test "an error envelope for the request correlates and an unknown-command error is not a response" {
+    test "lane 9 checked node action retains the existing composite addressing path" {
         var client = try DaemonClient.initForTesting(std.testing.allocator);
         defer client.deinit();
-        client.publishState(.connected, "");
-        ReadCapture.reset(&client);
-        const read = client.sendReadProjectGraph("C:\\work\\A").?;
-        try std.testing.expect(client.trackRequest(&read.request_id));
-        const failure = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "{{\"version\":2,\"kind\":\"error\",\"requestID\":\"{s}\",\"error\":" ++
-                "{{\"code\":\"malformedEnvelope\",\"message\":\"unknown command\"}}}}",
-            .{read.request_id},
-        );
-        defer std.testing.allocator.free(failure);
-        try std.testing.expect(client.handleFrame(failure));
-        client.poll();
-        try std.testing.expectEqual(@as(usize, 1), ReadCapture.count);
-        try std.testing.expectEqual(Wire.FrameKind.@"error", Wire.frameKind(ReadCapture.at(0)));
-        try std.testing.expectEqualStrings(&read.request_id, Wire.correlatedRequestID(ReadCapture.at(0)).?);
+        client.setSubgraphAddress("group");
+        try client.sendNodeActionChecked("A", "worker", "restartNode", null);
+        try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
+        const command = client.outbound[client.outbound_head];
+        try std.testing.expect(std.mem.indexOf(u8, command, "\"restartNode\":{\"_0\":\"worker\"}") != null);
+        try std.testing.expect(std.mem.indexOf(u8, command, "\"group\"") != null);
     }
 
 test "an event that merely carries a requestID does not complete a pending request" {

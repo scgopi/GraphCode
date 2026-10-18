@@ -4532,13 +4532,27 @@ pub const App = struct {
             std.mem.eql(u8, self.currentProject() orelse "", pending.project_path) and
             std.mem.eql(u8, self.selected_node_id, pending.node_id);
         const panel_visible = pending.panel_visible;
+        if (!reopen) {
+            self.clearSessionRestart();
+            if (owns_workspace) workspace.agent_restart_suspended = false;
+            return;
+        }
+        self.client.sendNodeActionChecked(pending.project_path, pending.node_id, "resumeSession", null) catch |err| {
+            std.log.warn("Unable to resume confirmed session restart: {s}", .{@errorName(err)});
+            self.failSessionRestart("Session restart was confirmed but resume was not queued; reopen the loop");
+            return;
+        };
         self.clearSessionRestart();
-        if (owns_workspace) workspace.agent_restart_suspended = false;
-        if (!reopen) return;
+        workspace.agent_restart_suspended = false;
         self.surface = .workspace;
         self.workspace_controls.panel_visible = panel_visible;
         self.layoutWorkspace();
         self.layoutEmptyStateControls();
+        workspace.openLaunchedNode(0, workspace.loop_id, TerminalWorkspace.Workspace.loop_open_timeout_ms) catch |err| {
+            std.log.warn("Unable to reattach restarted loop: {s}", .{@errorName(err)});
+            self.setStatus("Session restart was confirmed but its terminal could not be reattached");
+            return;
+        };
         self.setStatus("Session restart confirmed; reconnecting its terminal");
     }
 
@@ -14460,7 +14474,10 @@ test "lane 9 restart retires before queueing and remounts only after its daemon 
         try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
         try std.testing.expectEqual(panel_visible, app.workspace_controls.panel_visible);
         try std.testing.expect(workspace.isAwaitingLaunch(0));
-        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        // ZmxSessionLauncher.swift:1124-1152 leaves attended relaunch to the opener.
+        try std.testing.expectEqual(before + 2, app.client.outbound_count);
+        const resumed = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+        try std.testing.expect(std.mem.indexOf(u8, resumed, "\"resumeSession\":{\"_0\":\"loop-b\"}") != null);
     }
 }
 
@@ -14565,6 +14582,25 @@ test "lane 9 restart error timeout and reconnect never remount an unconfirmed se
         try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
         try std.testing.expect(app.status().len != 0);
     }
+}
+
+test "lane 9 confirmed restart with a rejected resume stays retired and reports the second phase failure" {
+    var fixture: ShowGraphFixture = undefined;
+    try fixture.initSized(96, 1200);
+    defer fixture.deinit();
+    const app = &fixture.app;
+    connectSessionRestartFixture(app);
+    try std.testing.expect(app.activateLoop(reopen_fixture_path, "loop-b"));
+    try std.testing.expect(app.restartSelectedSession());
+    const before = app.client.outbound_count;
+    app.client.stop_worker = true;
+    try deliverSessionRestartGraph(app, reopen_fixture_path, "idle", 1);
+    try std.testing.expectEqual(before, app.client.outbound_count);
+    try std.testing.expect(app.pending_session_restart == null);
+    try std.testing.expect(fixture.workspace.agent_restart_suspended);
+    try std.testing.expect(!fixture.workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+    try std.testing.expectEqualStrings("Session restart was confirmed but resume was not queued; reopen the loop", app.status());
 }
 
 test "lane 9 confirmed restart does not take over a workspace the human opened meanwhile" {

@@ -22,7 +22,10 @@ The loop bar's **Restart session** is available for unresolved graph loops and
 sends the daemon's `restartNode` command, not `stopNode` or a local attach-client
 recreation. The shell retires that loop's old agent attachment before queueing
 the request and remounts only after the same connection reports an increased
-`sessionRestarts` counter for that loop. Queue rejection requests reattachment to
+`sessionRestarts` counter for that loop. Only then does it request `resumeSession`
+and wait for the daemon-owned session to exist, including attended loops that
+the restart command deliberately leaves for the opener to launch.
+Queue rejection requests reattachment to
 the unchanged daemon session and reports any local reattachment failure;
 daemon errors, disconnects, and a 30-second confirmation timeout leave it retired
 until an explicit reopen. Opening another workspace while waiting is respected.
