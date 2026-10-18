@@ -45,7 +45,7 @@ pub const QuickChatLayout = struct {
     }
 };
 
-// Every text run in the bar is drawn into a fixed 220px-wide rect when it has room.
+// Maximum width of a live line or progress/spend column before ellipsizing.
 pub const natural_text_width: i32 = 220;
 // Clearance kept between the last text pixel and the leftmost button.
 pub const button_gap: i32 = 8;
@@ -69,6 +69,8 @@ pub const Layout = struct {
     state: ?Rect,
     activity: ?Rect,
     detail: ?Rect,
+    spend: ?Rect = null,
+    divider: ?Rect = null,
     stop: ?Rect,
     show_graph: Rect,
     // Present when the loop detail panel is collapsed: its expand control owns the
@@ -85,9 +87,13 @@ pub const Layout = struct {
 };
 
 fn textRect(x: i32, y: i32, size: i32, limit: i32) ?Rect {
-    const right = @min(x + natural_text_width, limit);
+    return lineRect(x, y, natural_text_width, size + 8, limit);
+}
+
+fn lineRect(x: i32, y: i32, width: i32, height: i32, limit: i32) ?Rect {
+    const right = @min(x + width, limit);
     if (right - x < min_text_width) return null;
-    return .{ .left = x, .top = y, .right = right, .bottom = y + size + 8 };
+    return .{ .left = x, .top = y, .right = right, .bottom = y + height };
 }
 
 pub fn compute(left: i32, top: i32, right: i32, resolved: bool, panel_toggle: bool) Layout {
@@ -98,13 +104,20 @@ pub fn compute(left: i32, top: i32, right: i32, resolved: bool, panel_toggle: bo
     const stop: ?Rect = if (resolved) null else .{ .left = stop_right - stop_width, .top = top + 10, .right = stop_right, .bottom = top + 36 };
     const limit = (if (stop) |value| value.left else show_graph.left) - button_gap;
     const stripe = Rect{ .left = left + 14, .top = top + 11, .right = left + 18, .bottom = top + 35 };
+    // LoopWorkspaceLoopBar.swift:40-65 keeps title + state on one line and the
+    // live line below; :68-101 separates progress/spend from that identity block.
+    const state = lineRect(left + 167, top + 6, 100, 17, limit);
+    const visible_state = if (state != null and state.?.width() >= 80) state else null;
+    const detail = lineRect(left + 284, top + 6, natural_text_width, 17, limit);
     return .{
         .bar = .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height },
         .stripe = if (stripe.right <= limit) stripe else null,
-        .title = textRect(left + 27, top + 5, 13, limit),
-        .state = textRect(left + 190, top + 8, 10, limit),
-        .activity = textRect(left + 27, top + 24, 10, limit),
-        .detail = textRect(left + 260, top + 10, 9, limit),
+        .title = lineRect(left + 27, top + 5, natural_text_width, 17, if (visible_state) |value| value.left - 7 else limit),
+        .state = visible_state,
+        .activity = lineRect(left + 27, top + 25, natural_text_width, 16, limit),
+        .detail = detail,
+        .spend = lineRect(left + 284, top + 25, natural_text_width, 16, limit),
+        .divider = if (detail != null) .{ .left = left + 275, .top = top + 10, .right = left + 276, .bottom = top + 36 } else null,
         .stop = stop,
         .show_graph = show_graph,
         .panel_toggle = toggle,
@@ -150,7 +163,7 @@ pub fn computeQuickChat(left: i32, top: i32, right: i32) QuickChatLayout {
 }
 
 fn expectClearOfButtons(layout: Layout) !void {
-    const runs = [_]?Rect{ layout.stripe, layout.title, layout.state, layout.activity, layout.detail };
+    const runs = [_]?Rect{ layout.stripe, layout.title, layout.state, layout.activity, layout.detail, layout.spend, layout.divider };
     for (runs) |maybe_run| {
         const run = maybe_run orelse continue;
         try std.testing.expect(run.width() > 0);
@@ -165,6 +178,26 @@ fn expectClearOfButtons(layout: Layout) !void {
         try std.testing.expect(toggle.right <= layout.bar.right);
     }
     if (layout.stop) |stop| try std.testing.expect(!stop.intersects(layout.show_graph));
+}
+
+test "workspace chrome loop bar text runs never overprint one another" {
+    for ([_]i32{ 960, 1056, 1280, 1440 }) |width| {
+        for ([_]bool{ false, true }) |resolved| {
+            for ([_]bool{ false, true }) |panel_toggle| {
+                const right = width - if (panel_toggle) @as(i32, 0) else Tokens.loop_detail_width;
+                const layout = compute(Tokens.sidebar_width, Tokens.header_height, right, resolved, panel_toggle);
+                const runs = [_]?Rect{ layout.title, layout.state, layout.activity, layout.detail, layout.spend, layout.divider };
+                for (runs, 0..) |maybe_run, index| {
+                    const run = maybe_run orelse continue;
+                    for (runs[index + 1 ..]) |maybe_other| {
+                        const other = maybe_other orelse continue;
+                        try std.testing.expectEqual(false, run.intersects(other));
+                    }
+                }
+                try expectClearOfButtons(layout);
+            }
+        }
+    }
 }
 
 test "collapsed loop panel's expand control takes the bar's trailing slot and pushes Show in graph and Stop left" {
@@ -199,7 +232,7 @@ test "loop bar metadata stays clear of Stop and Show in graph at 960px with rail
     const right = 960 - Tokens.loop_detail_width;
     const layout = compute(left, Tokens.header_height, right, false, false);
     try expectClearOfButtons(layout);
-    // Only 4px remain between the metadata origin and Stop, so the run is dropped.
+    // The progress/spend column does not fit beside the identity and actions.
     try std.testing.expect(layout.detail == null);
     try std.testing.expect(layout.title != null and layout.state != null and layout.activity != null);
 }
@@ -210,22 +243,24 @@ test "loop bar ellipsizes metadata into the space left of Stop at 1056px with ra
     const layout = compute(left, Tokens.header_height, right, false, false);
     try expectClearOfButtons(layout);
     const detail = layout.detail.?;
-    try std.testing.expectEqual(left + 260, detail.left);
+    try std.testing.expectEqual(left + 284, detail.left);
     try std.testing.expectEqual(layout.stop.?.left - button_gap, detail.right);
     try std.testing.expect(detail.width() < natural_text_width);
 }
 
-test "loop bar keeps the wide 1280px geometry unchanged" {
+test "loop bar preserves wide action geometry while separating identity and progress text" {
     const left = Tokens.sidebar_width;
     const right = 1280 - Tokens.loop_detail_width;
     const top = Tokens.header_height;
     const layout = compute(left, top, right, false, false);
     try expectClearOfButtons(layout);
     try std.testing.expectEqual(Rect{ .left = left + 14, .top = top + 11, .right = left + 18, .bottom = top + 35 }, layout.stripe.?);
-    try std.testing.expectEqual(Rect{ .left = left + 27, .top = top + 5, .right = left + 247, .bottom = top + 26 }, layout.title.?);
-    try std.testing.expectEqual(Rect{ .left = left + 190, .top = top + 8, .right = left + 410, .bottom = top + 26 }, layout.state.?);
-    try std.testing.expectEqual(Rect{ .left = left + 27, .top = top + 24, .right = left + 247, .bottom = top + 42 }, layout.activity.?);
-    try std.testing.expectEqual(Rect{ .left = left + 260, .top = top + 10, .right = left + 480, .bottom = top + 27 }, layout.detail.?);
+    try std.testing.expectEqual(Rect{ .left = left + 27, .top = top + 5, .right = left + 160, .bottom = top + 22 }, layout.title.?);
+    try std.testing.expectEqual(Rect{ .left = left + 167, .top = top + 6, .right = left + 267, .bottom = top + 23 }, layout.state.?);
+    try std.testing.expectEqual(Rect{ .left = left + 27, .top = top + 25, .right = left + 247, .bottom = top + 41 }, layout.activity.?);
+    try std.testing.expectEqual(Rect{ .left = left + 284, .top = top + 6, .right = left + 504, .bottom = top + 23 }, layout.detail.?);
+    try std.testing.expectEqual(Rect{ .left = left + 284, .top = top + 25, .right = left + 504, .bottom = top + 41 }, layout.spend.?);
+    try std.testing.expectEqual(Rect{ .left = left + 275, .top = top + 10, .right = left + 276, .bottom = top + 36 }, layout.divider.?);
     try std.testing.expectEqual(Rect{ .left = right - 196, .top = top + 10, .right = right - 112, .bottom = top + 36 }, layout.stop.?);
     try std.testing.expectEqual(Rect{ .left = right - 104, .top = top + 10, .right = right - 12, .bottom = top + 36 }, layout.show_graph);
 }

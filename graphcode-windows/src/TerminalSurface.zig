@@ -125,34 +125,27 @@ fn paneBounds(
     position: usize,
     pane_count: usize,
 ) c.winghostty_rect {
-    if (width <= 0 or height <= Tokens.tab_bar_height + Tokens.pane_header_height) {
+    if (width <= 0 or height <= Tokens.tab_bar_height + Tokens.pane_header_height or
+        pane_count == 0 or position >= pane_count)
+    {
         return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
     }
-    const available_height = height - Tokens.tab_bar_height - Tokens.pane_header_height;
-    const safe_count = @max(pane_count, 1);
-    const available_width = width;
     const horizontal = direction == .horizontal;
-    const first = if (horizontal)
-        @divTrunc(@as(i64, available_width) * @as(i64, @intCast(position)), @as(i64, @intCast(safe_count)))
-    else
-        0;
-    const next = if (horizontal)
-        @divTrunc(@as(i64, available_width) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(safe_count)))
-    else
-        available_width;
-    const top = if (horizontal)
-        0
-    else
-        @divTrunc(@as(i64, available_height) * @as(i64, @intCast(position)), @as(i64, @intCast(safe_count)));
-    const bottom = if (horizontal)
-        available_height
-    else
-        @divTrunc(@as(i64, available_height) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(safe_count)));
+    const available_height = height - Tokens.tab_bar_height;
+    const span = if (horizontal) width else available_height;
+    const first = @divTrunc(@as(i64, span) * @as(i64, @intCast(position)), @as(i64, @intCast(pane_count)));
+    const next = @divTrunc(@as(i64, span) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(pane_count)));
+    const pane_width = if (horizontal) next - first else width;
+    // LoopWorkspaceView.swift:318-331 puts a header inside each split-tree leaf,
+    // including vertically stacked panes, rather than reserving one per tab.
+    const pane_height = (if (horizontal) available_height else next - first) - Tokens.pane_header_height;
+    if (pane_width <= 0 or pane_height <= 0)
+        return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
     return .{
-        .x = origin_x + @as(i32, @intCast(first)),
-        .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + @as(i32, @intCast(top)),
-        .width = @intCast(@max(1, next - first)),
-        .height = @intCast(@max(1, bottom - top)),
+        .x = origin_x + if (horizontal) @as(i32, @intCast(first)) else 0,
+        .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + if (horizontal) @as(i32, 0) else @as(i32, @intCast(first)),
+        .width = @intCast(pane_width),
+        .height = @intCast(pane_height),
     };
 }
 
@@ -200,6 +193,7 @@ pub fn loopBarActionAt(left: i32, top: i32, right: i32, x: i32, y: i32, resolved
 }
 
 fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
+    if (x < origin_x or x >= origin_x + width) return null;
     for (0..3) |index| {
         const bounds = chromeControlBounds(origin_x, origin_y, width, index);
         if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) {
@@ -589,14 +583,12 @@ pub const Workspace = struct {
             .input_queue = .{ .allocator = allocator_ },
             .layout = try WorkspaceLayout.Layout.init(
                 allocator_,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
             .layout_path = &.{},
             .project_key = try allocator_.dupe(
                 u8,
-                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT")
-                    catch "global",
+                std.process.getEnvVarOwned(allocator_, "GRAPHCODE_WORKSPACE_PROJECT") catch "global",
             ),
         };
         for (&workspace.surfaces) |*surface| {
@@ -836,7 +828,7 @@ pub const Workspace = struct {
             defer self.allocator.free(configured);
             const suffix = WorkspaceLayout.projectSuffix(project);
             return std.fmt.allocPrint(self.allocator, "{s}.{s}.json", .{
-                configured[0 .. if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
+                configured[0..if (std.mem.endsWith(u8, configured, ".json")) configured.len - 5 else configured.len],
                 suffix,
             });
         } else |_| {}
@@ -1933,11 +1925,8 @@ pub const Workspace = struct {
     }
 
     pub fn selectTabAt(self: *Workspace, x: i32, y: i32) bool {
-        if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return false;
-        if (x < self.layout_origin_x or x >= self.chromeControlsLeft()) return false;
-        const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
-        if (index >= self.layout.tabs.items.len) return false;
-        self.selectTab(index) catch return false;
+        const target = self.tabActionAt(x, y) orelse return false;
+        self.selectTab(target.index) catch return false;
         return true;
     }
 
@@ -2071,7 +2060,7 @@ pub const Workspace = struct {
         const controls_left = self.chromeControlsLeft();
         if (x < self.layout_origin_x or x >= controls_left) return null;
         const index = @as(usize, @intCast(@divTrunc(x - self.layout_origin_x, 120)));
-        if (index >= self.layout.tabs.items.len) return null;
+        _ = self.visibleTabBounds(index) orelse return null;
         const action = tabActionForBounds(self.layout_origin_x, self.layout_origin_y, index, x, y) orelse return null;
         return .{ .index = index, .action = action };
     }
@@ -2080,10 +2069,54 @@ pub const Workspace = struct {
         return @max(self.layout_origin_x, self.layout_origin_x + self.layout_width - 220);
     }
 
+    fn visibleTabBounds(self: *const Workspace, index: usize) ?c.RECT {
+        if (self.collapsed or index >= self.layout.tabs.items.len) return null;
+        const bounds = tabBounds(self.layout_origin_x, self.layout_origin_y, index);
+        return if (bounds.right <= self.chromeControlsLeft()) bounds else null;
+    }
+
+    fn paneHeaderChrome(self: *const Workspace, position: usize) ?PaneHeaderChrome {
+        if (self.collapsed) return null;
+        const tab = self.layout.selectedConst() orelse return null;
+        if (position >= tab.panes.items.len) return null;
+        const pane = tab.panes.items[position];
+        const bounds = paneBounds(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            self.layout_height,
+            tab.split_direction,
+            position,
+            tab.panes.items.len,
+        );
+        if (bounds.width == 0 or bounds.height == 0) return null;
+        return .{
+            .bounds = .{
+                .left = bounds.x,
+                .top = bounds.y - Tokens.pane_header_height,
+                .right = bounds.x + @as(i32, @intCast(bounds.width)),
+                .bottom = bounds.y,
+            },
+            .title = if (pane.launches_agent) (if (self.boundQuickChatID() != null) "chat" else "agent") else "shell",
+            .focused = position == tab.focused_pane,
+        };
+    }
+
     /// Draws only product chrome. Winghostty remains responsible for terminal pixels;
     /// keeping this separate prevents renderer/provider lifetimes from leaking into the
     /// tab and pane model.
     pub fn paintChrome(self: *const Workspace, hdc: c.HDC) void {
+        if (self.collapsed or self.layout_width <= 0 or self.layout_height <= 0) return;
+        const saved = c.SaveDC(hdc);
+        if (saved == 0) {
+            std.log.warn("Unable to save workspace chrome paint state", .{});
+            return;
+        }
+        defer _ = c.RestoreDC(hdc, saved);
+        if (c.IntersectClipRect(hdc, self.layout_origin_x, self.layout_origin_y, self.layout_origin_x + self.layout_width, self.layout_origin_y + self.layout_height) == c.ERROR) {
+            std.log.warn("Unable to clip workspace chrome", .{});
+            return;
+        }
         const tab_bar = c.RECT{
             .left = self.layout_origin_x,
             .top = self.layout_origin_y,
@@ -2097,59 +2130,32 @@ pub const Workspace = struct {
         GdiGradient.fillVertical(hdc, tab_bar, Tokens.tab_bar_gloss_top, Tokens.tab_bar_gloss_bottom);
         // Theme.tabBarHighlight -- the one-point specular line along the strip's top edge.
         fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.top, .right = tab_bar.right, .bottom = tab_bar.top + 1 }, Tokens.tab_bar_highlight);
-        const controls_left = self.chromeControlsLeft();
         for (self.layout.tabs.items, 0..) |tab, index| {
-            const left = self.layout_origin_x + @as(i32, @intCast(index)) * 120;
-            if (left + 112 > controls_left) break;
-            const bounds = tabBounds(self.layout_origin_x, self.layout_origin_y, index);
-            // Selected: Theme.tabSelectedBackground. Was previously 0x00345D8C, an
-            // unintentional blue that did not correspond to any Theme.swift value.
-            fillRect(hdc, bounds, if (index == self.layout.selected_tab) Tokens.tab_selected_background else 0x00262626);
-            fillRect(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 9, .right = bounds.left + 14, .bottom = bounds.top + 15 }, tabIndicatorColor(self, tab));
-            drawUtf8(hdc, tabLabel(tab), bounds.left + 19, bounds.top + 4, 10, 0x00E6E6E6);
-            var shortcut: [16]u8 = undefined;
-            const shortcut_text = std.fmt.bufPrint(&shortcut, "Ctrl+{d}", .{index + 1}) catch "";
-            drawUtf8(hdc, shortcut_text, bounds.left + 19, bounds.top + 14, 8, 0x008A8A8A);
-            drawUtf8(hdc, "x", bounds.right - 17, bounds.top + 7, 11, if (self.canCloseTab()) 0x00C8C8CC else 0x005A5A5A);
+            const bounds = self.visibleTabBounds(index) orelse break;
+            const style = tabChromeStyle(index == self.layout.selected_tab);
+            if (style.background) |background| fillRoundedRect(hdc, bounds, background, 6, null);
+            drawChromeText(hdc, tabLabel(tab), .{
+                .left = bounds.left + 10,
+                .top = bounds.top,
+                .right = bounds.right - 24,
+                .bottom = bounds.bottom,
+            }, 12, style.font, style.ink);
+            if (self.canCloseTab()) drawChromeText(hdc, "x", .{
+                .left = bounds.right - 17,
+                .top = bounds.top,
+                .right = bounds.right - 5,
+                .bottom = bounds.bottom,
+            }, 10, .semibold, 0x00999999);
         }
-        const labels = [_][]const u8{ "New Tab", "Split R", "Split D" };
-        for (labels, 0..) |label, index| {
+        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.bottom - 1, .right = tab_bar.right, .bottom = tab_bar.bottom }, Tokens.tab_bar_shadow_line);
+        for (0..3) |index| {
             const bounds = chromeControlBounds(self.layout_origin_x, self.layout_origin_y, self.layout_width, index);
-            // Theme.controlGloss: a small control on the tab strip, lit a step
-            // brighter than the strip itself so it reads as raised off it.
-            GdiGradient.fillVertical(hdc, bounds, Tokens.control_gloss_top, Tokens.control_gloss_bottom);
-            drawUtf8(hdc, label, bounds.left + 7, bounds.top + 5, 10, 0x00D8D8D8);
+            fillRoundedRect(hdc, bounds, Tokens.control_gloss_bottom, 5, Tokens.control_border);
+            paintChromeGlyph(hdc, bounds, chromeGlyph(index));
         }
-        for (self.surfaces, 0..) |slot, index| {
-            if (slot.surface == null) continue;
-            const left = self.layout_origin_x + if (index == 0) 0 else @divTrunc(self.layout_width, 2);
-            const right = if (index == 0 and self.surfaces[1].surface != null)
-                self.layout_origin_x + @divTrunc(self.layout_width, 2)
-            else
-                self.layout_origin_x + self.layout_width;
-            const pane_top = self.layout_origin_y + Tokens.tab_bar_height;
-            fillRect(hdc, .{ .left = left, .top = pane_top, .right = right, .bottom = pane_top + Tokens.pane_header_height }, 0x00212124);
-            const launches_agent = if (self.layout.selectedConst()) |tab|
-                if (self.paneIndex(slot.session_name)) |pane_index|
-                    pane_index < tab.panes.items.len and tab.panes.items[pane_index].launches_agent
-                else
-                    false
-            else
-                false;
-            drawUtf8(
-                hdc,
-                if (launches_agent) "agent" else "shell",
-                left + 8,
-                pane_top + 5,
-                10,
-                if (index == self.active_surface) 0x00E6E6E6 else 0x008A8A8A,
-            );
-            drawUtf8(hdc, "zmx session", left + 54, pane_top + 5, 9, 0x007A7A7A);
-            drawUtf8(hdc, if (launches_agent) "backend: agent" else "backend: shell", left + 142, pane_top + 5, 8, 0x007A7A7A);
-            if (index == self.active_surface) {
-                fillRect(hdc, .{ .left = left, .top = pane_top + Tokens.pane_header_height - 2, .right = right, .bottom = pane_top + Tokens.pane_header_height }, Tokens.pane_focus_tint);
-            }
-        }
+        const selected = self.layout.selectedConst() orelse return;
+        for (selected.panes.items, 0..) |_, position|
+            if (self.paneHeaderChrome(position)) |header| paintPaneHeader(hdc, header);
     }
 
     pub fn paintLoopBar(
@@ -2173,32 +2179,35 @@ pub const Workspace = struct {
         const layout = loopBarLayout(left, right, resolved, panel_toggle);
         // Theme.loopBar: lit like the tab strip, one step lighter.
         GdiGradient.fillVertical(hdc, .{ .left = left, .top = top, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.loop_bar_top, Tokens.loop_bar_bottom);
-        if (layout.stripe) |stripe| {
-            fillRect(hdc, .{ .left = stripe.left, .top = stripe.top, .right = stripe.right, .bottom = stripe.bottom }, loopTypeAccent(loop_type));
-        }
-        if (layout.title) |bounds| drawUtf8Bounded(hdc, title, bounds, 13, 0x00F2F2F7);
-        if (layout.state) |bounds| drawUtf8Bounded(hdc, state, bounds, 10, stateAccent(state));
-        const live_line = if (activity.len != 0) activity else project_name;
-        if (layout.activity) |bounds| drawUtf8Bounded(hdc, live_line, bounds, 10, 0x008E8E93);
-        var usage: [32]u8 = undefined;
-        const usage_text = if (token_usage) |value| std.fmt.bufPrint(&usage, "{d} tokens", .{value}) catch "usage n/a" else "usage n/a";
-        var detail: [256]u8 = undefined;
-        const detail_text = std.fmt.bufPrint(&detail, "{s}  ·  {s}  ·  pass {d}  ·  {s}", .{
-            if (backend.len != 0) backend else "backend n/a",
-            if (created_at != null) elapsedLabel(created_at.?) else "elapsed n/a",
-            metric_passes,
-            usage_text,
-        }) catch "workspace metadata unavailable";
-        if (layout.detail) |bounds| drawUtf8Bounded(hdc, detail_text, bounds, 9, 0x008E8E93);
+        if (layout.stripe) |stripe| fillRoundedRect(hdc, nativeRect(stripe), loopTypeAccent(loop_type), 2, null);
+        if (layout.title) |bounds| drawChromeText(hdc, title, nativeRect(bounds), 13.5, .semibold, 0x00F2F2F7);
+        if (layout.state) |bounds| paintLoopState(hdc, nativeRect(bounds), loopStatePresentation(state, loop_type));
+        if (layout.activity) |bounds| drawChromeText(hdc, activity, nativeRect(bounds), 10, .card_mono, 0x009D9A9A);
+        if (layout.divider) |bounds| fillRect(hdc, nativeRect(bounds), blendChromeColor(0x00FFFFFF, Tokens.loop_bar_bottom, 8));
+        var pass_buffer: [32]u8 = undefined;
+        const passes = loopPassLabel(metric_passes, &pass_buffer);
+        if (layout.detail) |bounds| drawChromeText(hdc, passes, nativeRect(bounds), 10.5, .card_mono, 0x009D9A9A);
+        var spend_buffer: [128]u8 = undefined;
+        const now: u64 = @intCast(@max(0, std.time.timestamp()));
+        const spend = loopSpendLabel(created_at, token_usage, now, &spend_buffer);
+        if (layout.spend) |bounds| drawChromeText(hdc, spend, nativeRect(bounds), 10.5, .card_mono, 0x008E8E93);
         if (layout.stop) |stop| {
-            fillRect(hdc, .{ .left = stop.left, .top = stop.top, .right = stop.right, .bottom = stop.bottom }, 0x00303035);
-            drawUtf8(hdc, "Stop loop", stop.left + 12, top + 17, 10, 0x00D8D8DC);
+            fillRoundedRect(hdc, nativeRect(stop), 0x00303035, 6, 0x00414145);
+            var text = nativeRect(stop);
+            text.left += 12;
+            drawChromeText(hdc, "Stop loop", text, 11.5, .semibold, 0x00D8D8DC);
         }
-        drawUtf8(hdc, "Show in graph", layout.show_graph.left + 4, top + 17, 10, 0x008E8E93);
+        var graph_text = nativeRect(layout.show_graph);
+        graph_text.left += 4;
+        drawChromeText(hdc, "Show in graph", graph_text, 11.5, .regular, 0x008E8E93);
         // Theme.tabBarShadowLine, blended flat over the loop bar's own bottom stop --
         // the edge where the strip's gloss meets the terminal below it.
         fillRect(hdc, .{ .left = left, .top = top + Tokens.loop_bar_height - 1, .right = right, .bottom = top + Tokens.loop_bar_height }, Tokens.tab_bar_shadow_line);
         _ = allocator;
+        // Keep the caller contract; neither a project-name fallback nor raw backend
+        // fields belong in the macOS loop bar's live line or progress/spend column.
+        _ = project_name;
+        _ = backend;
     }
 
     pub fn paintQuickChatBar(
@@ -2324,7 +2333,6 @@ pub const Workspace = struct {
             if (slot.surface) |surface| {
                 _ = set_focus(surface, if (index == other_index) 1 else 0);
             }
-
         }
         self.persistFocusedSurface(index);
     }
@@ -5262,7 +5270,7 @@ test "every function key F1 to F12 reaches a focused terminal exactly once throu
         .target_enabled = true,
     };
     const expected = [_][]const u8{
-        "\x1bOP",  "\x1bOQ",  "\x1bOR",  "\x1bOS",
+        "\x1bOP",   "\x1bOQ",   "\x1bOR",   "\x1bOS",
         "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
         "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
     };
@@ -7185,6 +7193,177 @@ fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {
     _ = c.DeleteObject(brush);
 }
 
+fn nativeRect(bounds: LoopBarLayout.Rect) c.RECT {
+    return .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+}
+
+fn fillRoundedRect(hdc: c.HDC, bounds: c.RECT, color: u32, radius: i32, border: ?u32) void {
+    const brush = c.CreateSolidBrush(color) orelse {
+        std.log.warn("Unable to create workspace chrome brush", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(brush);
+    const pen = c.CreatePen(c.PS_SOLID, 1, border orelse color) orelse {
+        std.log.warn("Unable to create workspace chrome pen", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    if (c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, radius * 2, radius * 2) == 0)
+        std.log.warn("Unable to paint workspace chrome rounded rectangle", .{});
+}
+
+const TabChromeStyle = struct { background: ?u32, ink: u32, font: AppFont.Style };
+
+fn tabChromeStyle(selected: bool) TabChromeStyle {
+    // LoopWorkspacePanes.swift:61-83: only the selected pill has a fill and
+    // semibold title; the unselected pill leaves the strip's gloss visible.
+    return .{
+        .background = if (selected) Tokens.tab_selected_background else null,
+        .ink = if (selected) 0x00E6E6E6 else 0x00999999,
+        .font = if (selected) .semibold else .regular,
+    };
+}
+
+const ChromeGlyph = enum { new_tab, split_right, split_down };
+
+fn chromeGlyph(index: usize) ChromeGlyph {
+    return switch (index) {
+        0 => .new_tab,
+        1 => .split_right,
+        2 => .split_down,
+        else => unreachable,
+    };
+}
+
+fn chromeLine(hdc: c.HDC, x1: i32, y1: i32, x2: i32, y2: i32) void {
+    if (c.MoveToEx(hdc, x1, y1, null) == 0 or c.LineTo(hdc, x2, y2) == 0)
+        std.log.warn("Unable to paint workspace chrome glyph", .{});
+}
+
+fn paintChromeGlyph(hdc: c.HDC, bounds: c.RECT, glyph: ChromeGlyph) void {
+    const pen = c.CreatePen(c.PS_SOLID, 1, 0x00D8D8D8) orelse {
+        std.log.warn("Unable to create workspace glyph pen", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    const old_brush = c.SelectObject(hdc, c.GetStockObject(c.HOLLOW_BRUSH));
+    defer _ = c.SelectObject(hdc, old_brush);
+    const x = @divTrunc(bounds.left + bounds.right, 2);
+    const y = @divTrunc(bounds.top + bounds.bottom, 2);
+    switch (glyph) {
+        .new_tab => {
+            chromeLine(hdc, x - 5, y, x + 6, y);
+            chromeLine(hdc, x, y - 5, x, y + 6);
+        },
+        .split_right, .split_down => {
+            if (c.RoundRect(hdc, x - 7, y - 5, x + 8, y + 6, 3, 3) == 0)
+                std.log.warn("Unable to paint workspace split glyph", .{});
+            if (glyph == .split_right)
+                chromeLine(hdc, x, y - 5, x, y + 6)
+            else
+                chromeLine(hdc, x - 7, y, x + 8, y);
+        },
+    }
+}
+
+const PaneHeaderChrome = struct { bounds: c.RECT, title: []const u8, focused: bool };
+const pane_focus_hint = "Ctrl+Shift+] to focus";
+
+fn paintPaneHeader(hdc: c.HDC, header: PaneHeaderChrome) void {
+    const bounds = header.bounds;
+    const background = blendChromeColor(if (header.focused) Tokens.pane_focus_tint else 0x00FFFFFF, Tokens.window_tone, if (header.focused) 10 else 3);
+    fillRect(hdc, bounds, background);
+    if (bounds.right - bounds.left < 24) return;
+    paintChromeDot(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 8, .right = bounds.left + 13, .bottom = bounds.top + 13 }, if (header.focused) Tokens.pane_focus_tint else blendChromeColor(0x00FFFFFF, background, 30), background, false);
+    drawChromeText(hdc, header.title, .{
+        .left = bounds.left + 19,
+        .top = bounds.top,
+        .right = @min(bounds.left + 62, bounds.right - 8),
+        .bottom = bounds.bottom,
+    }, 10.5, .semibold, if (header.focused) blendChromeColor(0x00FFC58C, background, 90) else blendChromeColor(0x00FFFFFF, background, 45));
+    if (header.focused) {
+        drawChromeText(hdc, "focused", .{
+            .left = bounds.left + 65,
+            .top = bounds.top,
+            .right = @min(bounds.left + 122, bounds.right - 8),
+            .bottom = bounds.bottom,
+        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35));
+    } else if (bounds.right - bounds.left >= 240) {
+        drawChromeText(hdc, pane_focus_hint, .{
+            .left = bounds.right - 144,
+            .top = bounds.top,
+            .right = bounds.right - 8,
+            .bottom = bounds.bottom,
+        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35));
+    }
+}
+
+fn paintChromeDot(hdc: c.HDC, bounds: c.RECT, tint: u32, background: u32, hollow: bool) void {
+    const brush = c.CreateSolidBrush(if (hollow) background else tint) orelse {
+        std.log.warn("Unable to create workspace indicator brush", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(brush);
+    const pen = c.CreatePen(c.PS_SOLID, 1, tint) orelse {
+        std.log.warn("Unable to create workspace indicator pen", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    if (c.Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom) == 0)
+        std.log.warn("Unable to paint workspace indicator", .{});
+}
+
+const chrome_text_format: c.UINT = c.DT_LEFT | c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
+
+fn selectChromeFont(hdc: c.HDC, size: f32, style: AppFont.Style) !c.HGDIOBJ {
+    const font = AppFont.getStyle(size, style) orelse return error.WorkspaceFontUnavailable;
+    return c.SelectObject(hdc, font) orelse error.WorkspaceFontSelectionFailed;
+}
+
+fn chromeTextWidth(hdc: c.HDC, text: []const u8, size: f32, style: AppFont.Style) !i32 {
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text);
+    defer std.heap.page_allocator.free(wide);
+    const old_font = try selectChromeFont(hdc, size, style);
+    defer _ = c.SelectObject(hdc, old_font);
+    var measured: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, wide.ptr, std.math.cast(i32, wide.len) orelse return error.WorkspaceTextTooLong, &measured) == 0)
+        return error.WorkspaceTextMeasurementFailed;
+    return measured.cx;
+}
+
+fn drawChromeText(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32) void {
+    if (text.len == 0 or bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
+    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch |err| {
+        std.log.warn("Unable to prepare workspace text: {s}", .{@errorName(err)});
+        return;
+    };
+    defer std.heap.page_allocator.free(wide);
+    const length = std.math.cast(i32, wide.len) orelse {
+        std.log.warn("Workspace text exceeds native text length", .{});
+        return;
+    };
+    const old_font = selectChromeFont(hdc, size, style) catch |err| {
+        std.log.warn("Unable to select workspace text font: {s}", .{@errorName(err)});
+        return;
+    };
+    defer _ = c.SelectObject(hdc, old_font);
+    _ = c.SetTextColor(hdc, color);
+    _ = c.SetBkMode(hdc, c.TRANSPARENT);
+    var target = bounds;
+    if (c.DrawTextW(hdc, wide.ptr, length, &target, chrome_text_format) == 0)
+        std.log.warn("Unable to paint workspace text", .{});
+}
+
 fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
     defer std.heap.page_allocator.free(wide);
@@ -7197,48 +7376,62 @@ fn drawUtf8(hdc: c.HDC, text: []const u8, x: i32, y: i32, size: i32, color: u32)
     _ = c.SelectObject(hdc, old_font);
 }
 
-// Clipped to `bounds`; a run squeezed narrower than its natural width ends in an
-// ellipsis instead of being cut mid-glyph.
+// Clipped and ellipsized within the supplied rectangle, including long titles.
 fn drawUtf8Bounded(hdc: c.HDC, text: []const u8, bounds: LoopBarLayout.Rect, size: i32, color: u32) void {
-    const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch return;
-    defer std.heap.page_allocator.free(wide);
-    if (wide.len == 0) return;
-    const old_font = AppFont.select(hdc, size, false);
-    _ = c.SetTextColor(hdc, color);
-    _ = c.SetBkMode(hdc, c.TRANSPARENT);
-    var rect = c.RECT{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
-    const ellipsis: c_int = if (bounds.width() < LoopBarLayout.natural_text_width) c.DT_END_ELLIPSIS else 0;
-    const format: c.UINT = @intCast(c.DT_LEFT | c.DT_SINGLELINE | ellipsis);
-    _ = c.DrawTextW(hdc, wide.ptr, @intCast(wide.len), &rect, format);
-    _ = c.SelectObject(hdc, old_font);
+    drawChromeText(hdc, text, nativeRect(bounds), @floatFromInt(size), .regular, color);
 }
 
 fn tabLabel(tab: WorkspaceLayout.Tab) []const u8 {
-    if (tab.panes.items.len > 1) return "split";
     if (tab.panes.items.len != 0 and tab.panes.items[0].launches_agent) return "agent";
     return "shell";
 }
 
-fn tabIndicatorColor(workspace: *const Workspace, tab: WorkspaceLayout.Tab) u32 {
-    for (tab.panes.items) |pane| {
-        for (workspace.surfaces) |surface| {
-            if (!std.mem.eql(u8, surface.session_name, pane.id)) continue;
-            if (surface.destroying or surface.destroyed) return 0x005F5FFF;
-            if (surface.surface != null) return 0x006BD58D;
-        }
-    }
-    return 0x00C8C8CC;
+fn loopPassLabel(count: u32, buffer: *[32]u8) []const u8 {
+    return if (count == 0) "no passes yet" else std.fmt.bufPrint(buffer, "pass {d}", .{count}) catch unreachable;
 }
 
-fn elapsedLabel(created_at: u64) []const u8 {
-    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
-    const now = std.time.milliTimestamp();
-    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
-    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
-    const seconds = elapsed_ms / 1000;
-    if (seconds < 60) return "elapsed <1m";
-    if (seconds < 3600) return "elapsed <1h";
-    return "elapsed >1h";
+fn loopDurationLabel(seconds: u64, buffer: *[64]u8) []const u8 {
+    const days = seconds / 86400;
+    const hours = seconds / 3600 % 24;
+    const minutes = seconds / 60 % 60;
+    if (days > 0) return if (hours > 0)
+        std.fmt.bufPrint(buffer, "{d}d {d}h", .{ days, hours }) catch unreachable
+    else
+        std.fmt.bufPrint(buffer, "{d}d", .{days}) catch unreachable;
+    if (hours > 0) return if (minutes > 0)
+        std.fmt.bufPrint(buffer, "{d}h {d}m", .{ hours, minutes }) catch unreachable
+    else
+        std.fmt.bufPrint(buffer, "{d}h", .{hours}) catch unreachable;
+    if (minutes > 0) return std.fmt.bufPrint(buffer, "{d}m", .{minutes}) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d}s", .{seconds}) catch unreachable;
+}
+
+fn loopTokenLabel(count: u32, buffer: *[32]u8) []const u8 {
+    if (count >= 1_000_000) {
+        // Foundation's "%.1f" rounds the binary Double to nearest, ties to even.
+        // Widen before scaling so a second floating-point rounding cannot erase
+        // which side of a decimal half that Double was actually on.
+        const millions: f64 = @as(f64, @floatFromInt(count)) / 1_000_000;
+        const scaled = @as(f128, millions) * 10;
+        const floor: u32 = @intFromFloat(@floor(scaled));
+        const remainder = scaled - @as(f128, @floatFromInt(floor));
+        const tenths = floor + @intFromBool(remainder > 0.5 or (remainder == 0.5 and floor % 2 != 0));
+        return std.fmt.bufPrint(buffer, "{d}.{d}M tok", .{ tenths / 10, tenths % 10 }) catch unreachable;
+    }
+    if (count >= 1000) return std.fmt.bufPrint(buffer, "{d}k tok", .{count / 1000}) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d} tok", .{count}) catch unreachable;
+}
+
+fn loopSpendLabel(created_at: ?u64, token_usage: ?u32, now: u64, buffer: *[128]u8) []const u8 {
+    var duration_buffer: [64]u8 = undefined;
+    var token_buffer: [32]u8 = undefined;
+    const duration = if (created_at) |created| loopDurationLabel(now -| created, &duration_buffer) else "";
+    const tokens = if (token_usage) |count| loopTokenLabel(count, &token_buffer) else "";
+    return std.fmt.bufPrint(buffer, "{s}{s}{s}", .{
+        duration,
+        if (duration.len != 0 and tokens.len != 0) " · " else "",
+        tokens,
+    }) catch unreachable;
 }
 
 fn quickChatAgeLabel(created_at: ?u64, now_seconds: u64, age_buffer: []u8) ?[]const u8 {
@@ -7259,17 +7452,82 @@ fn quickChatAgeLabel(created_at: ?u64, now_seconds: u64, age_buffer: []u8) ?[]co
 }
 
 fn loopTypeAccent(loop_type: []const u8) u32 {
-    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
-    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
-    if (std.mem.eql(u8, loop_type, "composite")) return 0x00C77DFF;
-    return 0x007AB8FF;
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x00709E19;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x000085C9;
+    if (std.mem.eql(u8, loop_type, "turnBased")) return 0x008151D5;
+    if (std.mem.eql(u8, loop_type, "composite")) return 0x00E98590;
+    return 0x00E3DAD3;
 }
 
-fn stateAccent(state: []const u8) u32 {
-    if (std.mem.eql(u8, state, "failed") or std.mem.eql(u8, state, "stalled")) return 0x005F5FFF;
-    if (std.mem.eql(u8, state, "succeeded")) return 0x006BD58D;
-    if (std.mem.eql(u8, state, "blocked")) return 0x0049B8FF;
-    return 0x00C8C8CC;
+fn blendChromeColor(foreground: u32, background: u32, opacity: u32) u32 {
+    var result: u32 = 0;
+    inline for ([_]u5{ 0, 8, 16 }) |shift| {
+        const front = (foreground >> shift) & 255;
+        const back = (background >> shift) & 255;
+        result |= ((front * opacity + back * (100 - opacity) + 50) / 100) << shift;
+    }
+    return result;
+}
+
+const LoopStatePresentation = struct {
+    word: []const u8,
+    tint: u32,
+    ink: u32,
+    fill: u32,
+    hollow: bool = false,
+    stroke: ?u32 = null,
+};
+
+fn loopStatePresentation(state: []const u8, loop_type: []const u8) LoopStatePresentation {
+    // LoopStateAppearance.swift:31-116 and LoopCardView.swift:354-379.
+    const base = Tokens.loop_bar_bottom;
+    const appearances = [_]struct { state: []const u8, word: []const u8, tint: u32, ink: u32, opacity: u32, hollow: bool = false }{
+        .{ .state = "running", .word = "RUNNING", .tint = 0x00FF840A, .ink = 0x00FFC58C, .opacity = 16 },
+        .{ .state = "waiting", .word = "WAITING", .tint = 0x00FF840A, .ink = 0x00FFC58C, .opacity = 10, .hollow = true },
+        .{ .state = "awaitingInput", .word = "NEEDS YOU", .tint = 0x000A9FFF, .ink = 0x007ACDFF, .opacity = 22 },
+        .{ .state = "blocked", .word = "BLOCKED", .tint = 0x000A9FFF, .ink = 0x007ACDFF, .opacity = 14, .hollow = true },
+        .{ .state = "succeeded", .word = "DONE", .tint = 0x0058D130, .ink = 0x009BE47E, .opacity = 16 },
+        .{ .state = "failed", .word = "FAILED", .tint = 0x003A45FF, .ink = 0x00808AFF, .opacity = 16 },
+        .{ .state = "stalled", .word = "STALLED", .tint = 0x00F25ABF, .ink = 0x00F7A2D9, .opacity = 16 },
+    };
+    for (appearances) |appearance| {
+        if (!std.mem.eql(u8, state, appearance.state)) continue;
+        return .{
+            .word = appearance.word,
+            .tint = appearance.tint,
+            .ink = appearance.ink,
+            .fill = blendChromeColor(appearance.tint, base, appearance.opacity),
+            .hollow = appearance.hollow,
+            .stroke = if (std.mem.eql(u8, state, "blocked")) blendChromeColor(appearance.tint, base, 40) else null,
+        };
+    }
+    const fill = blendChromeColor(0x00FFFFFF, base, 7);
+    return .{
+        .word = if (std.mem.eql(u8, state, "stopped")) "STOPPED" else if (std.mem.eql(u8, state, "idle"))
+            (if (std.mem.eql(u8, loop_type, "timeBased")) "SCHEDULED" else "IDLE")
+        else
+            state,
+        .tint = blendChromeColor(0x00FFFFFF, fill, 35),
+        .ink = blendChromeColor(0x00FFFFFF, fill, 50),
+        .fill = fill,
+        .hollow = std.mem.eql(u8, state, "stopped"),
+    };
+}
+
+fn paintLoopState(hdc: c.HDC, available: c.RECT, presentation: LoopStatePresentation) void {
+    const text_width = chromeTextWidth(hdc, presentation.word, 10, .card_state) catch |err| {
+        std.log.warn("Unable to measure workspace state pill: {s}", .{@errorName(err)});
+        return;
+    };
+    var bounds = available;
+    bounds.right = @min(bounds.right, bounds.left + text_width + 22);
+    fillRoundedRect(hdc, bounds, presentation.fill, 5, presentation.stroke);
+    const dot_top = @divTrunc(bounds.top + bounds.bottom - 6, 2);
+    paintChromeDot(hdc, .{ .left = bounds.left + 5, .top = dot_top, .right = bounds.left + 11, .bottom = dot_top + 6 }, presentation.tint, presentation.fill, presentation.hollow);
+    var text_bounds = bounds;
+    text_bounds.left += 15;
+    text_bounds.right -= 7;
+    drawChromeText(hdc, presentation.word, text_bounds, 10, .card_state, presentation.ink);
 }
 
 fn clearCells(slot: *Surface) void {
@@ -7413,6 +7671,194 @@ test "workspace chrome actions occupy distinct visible buttons" {
     try std.testing.expectEqual(ChromeAction.split_down, chromeActionForBounds(220, 34, 800, 948, 44).?);
     try std.testing.expect(chromeActionForBounds(220, 34, 800, 868, 44) == null);
     try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, 700, 44));
+}
+
+test "workspace chrome hidden partial tabs have no hit target" {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_origin_x = 220,
+        .layout_origin_y = 80,
+        .layout_width = 420,
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("agent", true);
+    try workspace.layout.addTab("shell", false);
+    try std.testing.expectEqual(@as(usize, 0), workspace.tabActionAt(228, 88).?.index);
+    // The second pill extends under the controls and is not painted.
+    try std.testing.expect(workspace.tabActionAt(348, 88) == null);
+    // The gap between fully visible pills is not a tab either.
+    try std.testing.expect(workspace.tabActionAt(336, 88) == null);
+}
+
+test "workspace chrome vertical splits reserve a header above every terminal" {
+    for ([_]usize{ 2, 3, 4 }) |count| {
+        var previous_bottom: i32 = 20 + Tokens.tab_bar_height;
+        for (0..count) |position| {
+            const bounds = paneBounds(10, 20, 801, 401, .vertical, position, count);
+            try std.testing.expect(bounds.width > 0 and bounds.height > 0);
+            try std.testing.expectEqual(previous_bottom, bounds.y - Tokens.pane_header_height);
+            previous_bottom = bounds.y + @as(i32, @intCast(bounds.height));
+        }
+        try std.testing.expectEqual(@as(i32, 421), previous_bottom);
+    }
+}
+
+test "workspace chrome loop stripe uses the macOS type palette" {
+    for ([_]struct { kind: []const u8, accent: u32 }{
+        .{ .kind = "sketch", .accent = 0x00E3DAD3 },
+        .{ .kind = "goalBased", .accent = 0x00709E19 },
+        .{ .kind = "timeBased", .accent = 0x000085C9 },
+        .{ .kind = "turnBased", .accent = 0x008151D5 },
+        .{ .kind = "composite", .accent = 0x00E98590 },
+    }) |case| try std.testing.expectEqual(case.accent, loopTypeAccent(case.kind));
+}
+
+test "workspace chrome split tabs retain their primary pane identity" {
+    var layout = try WorkspaceLayout.Layout.init(std.testing.allocator, "chrome-test");
+    defer layout.deinit();
+    try layout.addTab("agent", true);
+    try layout.splitFocused(.horizontal, "shell");
+    try std.testing.expectEqualStrings("agent", tabLabel(layout.tabs.items[0]));
+    try layout.addTab("plain-shell", false);
+    try layout.splitFocused(.vertical, "another-shell");
+    try std.testing.expectEqualStrings("shell", tabLabel(layout.tabs.items[1]));
+}
+
+test "workspace chrome selected tab is the only filled semibold pill" {
+    const selected = tabChromeStyle(true);
+    const unselected = tabChromeStyle(false);
+    try std.testing.expectEqual(Tokens.tab_selected_background, selected.background.?);
+    try std.testing.expect(unselected.background == null);
+    try std.testing.expectEqual(AppFont.Style.semibold, selected.font);
+    try std.testing.expectEqual(AppFont.Style.regular, unselected.font);
+    try std.testing.expect(selected.ink != unselected.ink);
+    try std.testing.expect(chrome_text_format & c.DT_NOPREFIX != 0);
+    try std.testing.expect(chrome_text_format & c.DT_END_ELLIPSIS != 0);
+    try std.testing.expect(chrome_text_format & c.DT_VCENTER != 0);
+}
+
+test "workspace chrome split glyphs retain their existing action columns" {
+    for ([_]ChromeGlyph{ .new_tab, .split_right, .split_down }, 0..) |glyph, index| {
+        const bounds = chromeControlBounds(220, 80, 800, index);
+        try std.testing.expectEqual(glyph, chromeGlyph(index));
+        const action = chromeActionForBounds(220, 80, 800, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2)).?;
+        try std.testing.expectEqualStrings(@tagName(glyph), @tagName(action));
+    }
+    try std.testing.expect(chromeActionForBounds(220, 80, 100, 400, 90) == null);
+}
+
+test "workspace chrome pane headers follow selected layout and focus instead of surface slots" {
+    const allocator = std.testing.allocator;
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = &.{},
+        .cwd = &.{},
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-test"),
+        .layout_path = &.{},
+        .project_key = &.{},
+        .layout_origin_x = 220,
+        .layout_origin_y = 80,
+        .layout_width = 801,
+        .layout_height = 401,
+        .active_surface = 19,
+    };
+    defer workspace.layout.deinit();
+    try workspace.layout.addTab("hidden-agent", true);
+    try workspace.layout.addTab("showing-shell", false);
+    try workspace.layout.splitFocused(.horizontal, "right-shell");
+    const left = workspace.paneHeaderChrome(0).?;
+    const right = workspace.paneHeaderChrome(1).?;
+    try std.testing.expectEqualStrings("shell", left.title);
+    try std.testing.expectEqualStrings("shell", right.title);
+    try std.testing.expect(!left.focused and right.focused);
+    try std.testing.expectEqual(@as(i32, 220), left.bounds.left);
+    try std.testing.expectEqual(@as(i32, 620), left.bounds.right);
+    try std.testing.expectEqual(left.bounds.right, right.bounds.left);
+    try std.testing.expectEqual(@as(i32, 1021), right.bounds.right);
+    try std.testing.expectEqual(@as(i32, 110), left.bounds.top);
+    try std.testing.expectEqual(@as(i32, Tokens.pane_header_height), left.bounds.bottom - left.bounds.top);
+    try std.testing.expect(workspace.paneHeaderChrome(2) == null);
+    try workspace.layout.selectTab(0);
+    try std.testing.expectEqualStrings("agent", workspace.paneHeaderChrome(0).?.title);
+    try std.testing.expect(workspace.paneHeaderChrome(0).?.focused);
+    try std.testing.expect(workspace.paneHeaderChrome(1) == null);
+    workspace.layout_width = 0;
+    try std.testing.expect(workspace.paneHeaderChrome(0) == null);
+    workspace.layout_width = 801;
+    workspace.collapsed = true;
+    try std.testing.expect(workspace.paneHeaderChrome(0) == null);
+    try std.testing.expect(workspace.tabActionAt(228, 88) == null);
+    try std.testing.expectEqualStrings("Ctrl+Shift+] to focus", pane_focus_hint);
+}
+
+test "workspace chrome state pills preserve words hues and hollow distinctions" {
+    for ([_]struct { state: []const u8, word: []const u8, tint: ?u32 = null, hollow: bool = false }{
+        .{ .state = "idle", .word = "IDLE" },
+        .{ .state = "running", .word = "RUNNING", .tint = 0x00FF840A },
+        .{ .state = "waiting", .word = "WAITING", .tint = 0x00FF840A, .hollow = true },
+        .{ .state = "awaitingInput", .word = "NEEDS YOU", .tint = 0x000A9FFF },
+        .{ .state = "blocked", .word = "BLOCKED", .tint = 0x000A9FFF, .hollow = true },
+        .{ .state = "succeeded", .word = "DONE", .tint = 0x0058D130 },
+        .{ .state = "failed", .word = "FAILED", .tint = 0x003A45FF },
+        .{ .state = "stalled", .word = "STALLED", .tint = 0x00F25ABF },
+        .{ .state = "stopped", .word = "STOPPED", .hollow = true },
+    }) |case| {
+        const presentation = loopStatePresentation(case.state, "goalBased");
+        try std.testing.expectEqualStrings(case.word, presentation.word);
+        try std.testing.expectEqual(case.hollow, presentation.hollow);
+        if (case.tint) |tint| try std.testing.expectEqual(tint, presentation.tint);
+        try std.testing.expectEqual(std.mem.eql(u8, case.state, "blocked"), presentation.stroke != null);
+        try std.testing.expect(presentation.fill != presentation.ink);
+    }
+    try std.testing.expectEqualStrings("SCHEDULED", loopStatePresentation("idle", "timeBased").word);
+    try std.testing.expectEqualStrings("future-state", loopStatePresentation("future-state", "timeBased").word);
+    try std.testing.expect(loopStatePresentation("blocked", "").fill != loopStatePresentation("awaitingInput", "").fill);
+}
+
+test "workspace chrome loop spend reports only known age and actual token usage" {
+    var pass_buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("no passes yet", loopPassLabel(0, &pass_buffer));
+    try std.testing.expectEqualStrings("pass 12", loopPassLabel(12, &pass_buffer));
+    var duration_buffer: [64]u8 = undefined;
+    for ([_]struct { seconds: u64, expected: []const u8 }{
+        .{ .seconds = 0, .expected = "0s" },
+        .{ .seconds = 59, .expected = "59s" },
+        .{ .seconds = 60, .expected = "1m" },
+        .{ .seconds = 3599, .expected = "59m" },
+        .{ .seconds = 3600, .expected = "1h" },
+        .{ .seconds = 3660, .expected = "1h 1m" },
+        .{ .seconds = 86400, .expected = "1d" },
+        .{ .seconds = 90000, .expected = "1d 1h" },
+    }) |case| try std.testing.expectEqualStrings(case.expected, loopDurationLabel(case.seconds, &duration_buffer));
+    var token_buffer: [32]u8 = undefined;
+    for ([_]struct { count: u32, expected: []const u8 }{
+        .{ .count = 0, .expected = "0 tok" },
+        .{ .count = 999, .expected = "999 tok" },
+        .{ .count = 1000, .expected = "1k tok" },
+        .{ .count = 262999, .expected = "262k tok" },
+        .{ .count = 1000000, .expected = "1.0M tok" },
+        .{ .count = 1150000, .expected = "1.1M tok" },
+        .{ .count = 1250000, .expected = "1.2M tok" },
+        .{ .count = 1350000, .expected = "1.4M tok" },
+        .{ .count = std.math.maxInt(u32), .expected = "4295.0M tok" },
+    }) |case| try std.testing.expectEqualStrings(case.expected, loopTokenLabel(case.count, &token_buffer));
+    var buffer: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("", loopSpendLabel(null, null, 100, &buffer));
+    try std.testing.expectEqualStrings("1m", loopSpendLabel(40, null, 100, &buffer));
+    try std.testing.expectEqualStrings("0s", loopSpendLabel(101, null, 100, &buffer));
+    try std.testing.expectEqualStrings("0 tok", loopSpendLabel(null, 0, 100, &buffer));
+    try std.testing.expectEqualStrings("1m · 262k tok", loopSpendLabel(40, 262000, 100, &buffer));
+    try std.testing.expect(loopSpendLabel(0, std.math.maxInt(u32), std.math.maxInt(u64), &buffer).len > 0);
 }
 
 test "pane geometry derives a terminal grid from actual cell metrics" {
@@ -7737,7 +8183,7 @@ test "Quick Chat tab labels preserve saved pane role metadata" {
 
     try std.testing.expectEqualStrings("shell", tabLabel(workspace.layout.tabs.items[0]));
     try std.testing.expectEqualStrings("agent", tabLabel(workspace.layout.tabs.items[1]));
-    try std.testing.expectEqualStrings("split", tabLabel(workspace.layout.tabs.items[2]));
+    try std.testing.expectEqualStrings("agent", tabLabel(workspace.layout.tabs.items[2]));
 }
 
 const AttachOutputProbe = struct {
