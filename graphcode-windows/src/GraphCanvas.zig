@@ -1914,7 +1914,7 @@ pub fn hitTestReclaimOffer(
 }
 
 fn nodePrimaryDetail(node: GraphModel.Node) []const u8 {
-    if (std.mem.trim(u8, node.activity, " \t\r\n").len != 0) return node.activity;
+    if (cardHasText(node.activity)) return node.activity;
     if (std.mem.eql(u8, node.loop_type, "goalBased")) return node.goal_summary;
     if (std.mem.eql(u8, node.loop_type, "timeBased")) return node.trigger_prompt;
     if (std.mem.eql(u8, node.loop_type, "turnBased")) return node.check_description;
@@ -1922,10 +1922,25 @@ fn nodePrimaryDetail(node: GraphModel.Node) []const u8 {
     return node.first_instruction;
 }
 
+fn cardWhitespace(cp: u21) bool {
+    return cp == ' ' or (cp >= 9 and cp <= 13) or cp == 0x85 or cp == 0xa0 or cp == 0x1680 or
+        (cp >= 0x2000 and cp <= 0x200a) or cp == 0x2028 or cp == 0x2029 or cp == 0x202f or cp == 0x205f or cp == 0x3000;
+}
+
+fn cardHasText(text: []const u8) bool {
+    // Keep malformed activity selected so cardLiveLine reports the UTF-8 error.
+    var iterator = (std.unicode.Utf8View.init(text) catch return true).iterator();
+    while (iterator.nextCodepoint()) |cp| {
+        if (!cardWhitespace(cp)) return true;
+    }
+    return false;
+}
+
 fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
-    if (std.mem.trim(u8, node.activity, " \t\r\n").len == 0 and
+    const has_activity = cardHasText(node.activity);
+    if (!has_activity and
         (std.mem.eql(u8, node.loop_type, "composite") or std.mem.eql(u8, node.loop_type, "proactive")))
     {
         const pilot = cardPilotName(node.pilot_state);
@@ -1935,15 +1950,13 @@ fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
         return result.toOwnedSlice();
     }
     const source = nodePrimaryDetail(node);
-    if (std.mem.eql(u8, source, node.activity) and std.mem.trim(u8, source, " \t\r\n").len != 0 and node.metric_passes != 0)
+    if (has_activity and node.metric_passes != 0)
         try result.writer().print("pass {d} · ", .{node.metric_passes});
     var iterator = (try std.unicode.Utf8View.init(source)).iterator();
     var pending_space = false;
     while (iterator.nextCodepointSlice()) |bytes| {
         const cp = try std.unicode.utf8Decode(bytes);
-        const whitespace = cp == ' ' or (cp >= 9 and cp <= 13) or cp == 0x85 or cp == 0xa0 or cp == 0x1680 or
-            (cp >= 0x2000 and cp <= 0x200a) or cp == 0x2028 or cp == 0x2029 or cp == 0x202f or cp == 0x205f or cp == 0x3000;
-        if (whitespace) {
+        if (cardWhitespace(cp)) {
             pending_space = result.items.len != 0;
         } else {
             if (pending_space and result.items.len != 0 and result.items[result.items.len - 1] != ' ') try result.append(' ');
@@ -2011,6 +2024,12 @@ fn nodeMetadata(allocator: std.mem.Allocator, node: GraphModel.Node, branch: []c
 }
 
 fn writeMetricChange(writer: anytype, node: GraphModel.Node) !void {
+    try writeMetricReadings(writer, node);
+    try writer.writeAll(" · ");
+    try writeMetricChangeLabel(writer, cardMetricRatio(node));
+}
+
+fn writeMetricReadings(writer: anytype, node: GraphModel.Node) !void {
     const first = node.metric_samples[0];
     const last = node.metric_samples[@as(usize, node.metric_sample_count) - 1];
     if (!std.math.isFinite(first) or !std.math.isFinite(last)) return error.InvalidCardMetric;
@@ -2018,9 +2037,11 @@ fn writeMetricChange(writer: anytype, node: GraphModel.Node) !void {
     if (whole) try writeMetricNumber(writer, first) else try writer.print("{d:.2}", .{first});
     try writer.writeAll(" → ");
     if (whole) try writeMetricNumber(writer, last) else try writer.print("{d:.2}", .{last});
-    const ratio = cardMetricRatio(node);
+}
+
+fn writeMetricChangeLabel(writer: anytype, ratio: f64) !void {
     const percent: u32 = @intFromFloat(@round(@abs(ratio) * 100));
-    if (percent == 0) try writer.writeAll(" · flat") else try writer.print(" · {d}% {s}", .{ percent, if (ratio > 0) "better" else "worse" });
+    if (percent == 0) try writer.writeAll("flat") else try writer.print("{d}% {s}", .{ percent, if (ratio > 0) "better" else "worse" });
 }
 
 fn cardMetricRatio(node: GraphModel.Node) f64 {
@@ -2032,7 +2053,7 @@ fn cardMetricRatio(node: GraphModel.Node) f64 {
 }
 
 fn writeMetricNumber(writer: anytype, value: f64) !void {
-    if (@abs(value) < 1_000_000 and value == @round(value))
+    if (@abs(value) < 1_000_000_000 and value == @round(value))
         return writer.print("{d}", .{@as(i64, @intFromFloat(value))});
     return writer.print("{d:.2}", .{value});
 }
@@ -2269,6 +2290,7 @@ fn drawCardBody(
     action: ?AttentionAction,
     reclaim: bool,
 ) !void {
+    _ = attention;
     const presentation = cardState(node);
     const pill_width = blk: {
         const old = try selectCardFont(hdc, 10 * zoom, .card_state);
@@ -2289,23 +2311,33 @@ fn drawCardBody(
         },
         else => return err,
     };
-    const metric = try cardMetricDetail(allocator, node);
-    defer allocator.free(metric);
-    if (!attention and !reclaim) {
+    if (action == null and !reclaim and node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
         var detail_bounds = layout.detail;
         if (chip_in_detail) {
             const chip_width = try cardRoleChipWidth(hdc, allocator, role, zoom);
             detail_bounds.left += chip_width + scaledValue(4, zoom);
         }
-        if (action != null) {
-            detail_bounds.right = @min(detail_bounds.right, attentionActionBoundsForZoom(bounds, zoom).left - scaledValue(4, zoom));
-        }
-        if (metric.len != 0) detail_bounds.bottom -= scaledValue(4, zoom);
-        if (metric.len != 0 and detail_bounds.right > detail_bounds.left) {
-            try drawCardText(hdc, allocator, metric, detail_bounds, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
-            const track = rect(detail_bounds.left, layout.detail.bottom - scaledValue(2, zoom), detail_bounds.right, layout.detail.bottom);
+        if (detail_bounds.right > detail_bounds.left) {
+            var readings = std.array_list.Managed(u8).init(allocator);
+            defer readings.deinit();
+            try writeMetricReadings(readings.writer(), node);
+            const ratio = cardMetricRatio(node);
+            var change_buffer: [32]u8 = undefined;
+            var change_stream = std.io.fixedBufferStream(&change_buffer);
+            try writeMetricChangeLabel(change_stream.writer(), ratio);
+            const change = change_stream.getWritten();
+            const change_width = blk: {
+                const old = try selectCardFont(hdc, 10.5 * zoom, .card_mono);
+                defer _ = c.SelectObject(hdc, old);
+                break :blk try measuredText(hdc, allocator, change);
+            };
+            const change_left = @max(detail_bounds.left, detail_bounds.right - change_width);
+            detail_bounds.bottom -= scaledValue(4, zoom);
+            try drawCardText(hdc, allocator, readings.items, rect(detail_bounds.left, detail_bounds.top, @max(detail_bounds.left, change_left - scaledValue(6, zoom)), detail_bounds.bottom), 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+            try drawCardText(hdc, allocator, change, rect(change_left, detail_bounds.top, detail_bounds.right, detail_bounds.bottom), 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+            const track = rect(detail_bounds.left, layout.detail.bottom - scaledValue(3, zoom), detail_bounds.right, layout.detail.bottom);
             fill(hdc, track, 0x00444141);
-            const fraction = std.math.clamp(cardMetricRatio(node), 0, 1);
+            const fraction = std.math.clamp(ratio, 0, 1);
             const end = track.left + @as(i32, @intFromFloat(@as(f64, @floatFromInt(track.right - track.left)) * fraction));
             if (end > track.left) fill(hdc, rect(track.left, track.top, end, track.bottom), loopTypeColor(node.loop_type));
         }
@@ -3661,6 +3693,207 @@ fn parityTestNode() GraphModel.Node {
     };
 }
 
+test "card live detail 764 Unicode whitespace activity falls back to each handed line" {
+    var node = parityTestNode();
+    node.activity = @constCast("\u{a0}\u{2003}\u{2028}\u{3000}");
+    node.metric_passes = 4;
+    node.goal_summary = @constCast(" Ship\n the fixture ");
+    node.trigger_prompt = @constCast(" Run\t the check ");
+    node.check_description = @constCast(" Review\r\n the output ");
+    node.first_instruction = @constCast(" Inspect\u{a0} the graph ");
+    node.pilot_state = @constCast("armed");
+    node.subgraph_json = @constCast("{\"nodes\":[{}]}");
+    for ([_][2][]const u8{
+        .{ "goalBased", "Ship the fixture" },
+        .{ "timeBased", "Run the check" },
+        .{ "turnBased", "Review the output" },
+        .{ "sketch", "Inspect the graph" },
+        .{ "composite", "1 loop · Armed" },
+    }) |sample| {
+        node.loop_type = @constCast(sample[0]);
+        const live = try cardLiveLine(std.testing.allocator, node);
+        defer std.testing.allocator.free(live);
+        try std.testing.expectEqualStrings(sample[1], live);
+    }
+}
+
+test "card live detail 764 whole metric readings keep macOS precision up to a billion" {
+    var node = parityTestNode();
+    node.metric_direction = @constCast("minimize");
+    node.metric_sample_count = 2;
+    node.metric_samples[0] = 2_000_000;
+    node.metric_samples[1] = 1_000_000;
+    const detail = try cardMetricDetail(std.testing.allocator, node);
+    defer std.testing.allocator.free(detail);
+    try std.testing.expectEqualStrings("2000000 → 1000000 · 50% better", detail);
+    node.metric_samples[0] = 0.5;
+    node.metric_samples[1] = 1;
+    node.metric_direction = @constCast("maximize");
+    const fractional = try cardMetricDetail(std.testing.allocator, node);
+    defer std.testing.allocator.free(fractional);
+    try std.testing.expectEqualStrings("0.50 → 1.00 · 50% better", fractional);
+}
+
+test "card live detail 764 metric evidence covers absent flat better worse and negative readings" {
+    var node = parityTestNode();
+    node.metric_direction = @constCast("maximize");
+    for ([_]u8{ 0, 1 }) |count| {
+        node.metric_sample_count = count;
+        const detail = try cardMetricDetail(std.testing.allocator, node);
+        defer std.testing.allocator.free(detail);
+        try std.testing.expectEqualStrings("", detail);
+    }
+    node.metric_sample_count = 2;
+    for ([_]struct { first: f64, last: f64, direction: []const u8, expected: []const u8, fraction: f64 }{
+        .{ .first = 0, .last = 0, .direction = "maximize", .expected = "0 → 0 · flat", .fraction = 0 },
+        .{ .first = 41, .last = 41, .direction = "minimize", .expected = "41 → 41 · flat", .fraction = 0 },
+        .{ .first = 1.42, .last = 1.10, .direction = "minimize", .expected = "1.42 → 1.10 · 23% better", .fraction = 0.32 / 1.42 },
+        .{ .first = 1.42, .last = 1.10, .direction = "maximize", .expected = "1.42 → 1.10 · 23% worse", .fraction = 0 },
+        .{ .first = -1, .last = 1, .direction = "maximize", .expected = "-1 → 1 · 200% better", .fraction = 1 },
+        .{ .first = 1, .last = -1, .direction = "maximize", .expected = "1 → -1 · 200% worse", .fraction = 0 },
+    }) |sample| {
+        node.metric_samples[0] = sample.first;
+        node.metric_samples[1] = sample.last;
+        node.metric_direction = @constCast(sample.direction);
+        const detail = try cardMetricDetail(std.testing.allocator, node);
+        defer std.testing.allocator.free(detail);
+        try std.testing.expectEqualStrings(sample.expected, detail);
+        try std.testing.expectApproxEqAbs(sample.fraction, std.math.clamp(cardMetricRatio(node), 0, 1), 0.000001);
+    }
+    node.metric_direction = @constCast("");
+    const absent = try cardMetricDetail(std.testing.allocator, node);
+    defer std.testing.allocator.free(absent);
+    try std.testing.expectEqualStrings("", absent);
+}
+
+fn cardLiveDetailMetricNode() GraphModel.Node {
+    var node = parityTestNode();
+    node.metric_direction = @constCast("minimize");
+    node.metric_sample_count = 2;
+    node.metric_samples[0] = 1.42;
+    node.metric_samples[1] = 1.10;
+    return node;
+}
+
+test "card live detail 764 production fixtures contain real trends and human-action controls" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    const graph = fixture.model.graphs.items[0];
+    const goal = graph.nodes.items[1];
+    const turn = graph.nodes.items[3];
+    const asking = graph.nodes.items[5];
+    const peer = fixture.model.graphs.items[1].nodes.items[0];
+    for ([_]struct { node: GraphModel.Node, expected: []const u8 }{
+        .{ .node = goal, .expected = "41 → 30 · 27% better" },
+        .{ .node = turn, .expected = "0.50 → 1.00 · 50% better" },
+        .{ .node = asking, .expected = "10 → 5 · 50% better" },
+        .{ .node = peer, .expected = "1.42 → 1.10 · 23% better" },
+    }) |sample| {
+        const detail = try cardMetricDetail(std.testing.allocator, sample.node);
+        defer std.testing.allocator.free(detail);
+        try std.testing.expectEqualStrings(sample.expected, detail);
+    }
+    try std.testing.expectEqual(AttentionAction.reply, primaryCardAction(asking).?);
+    const live = try cardLiveLine(std.testing.allocator, turn);
+    defer std.testing.allocator.free(live);
+    try std.testing.expectEqualStrings("pass 2 · Rendering synthetic content", live);
+}
+
+test "card live detail 764 attention alone does not hide a real metric" {
+    var node = cardLiveDetailMetricNode();
+    node.state = @constCast("failed");
+    node.presence = @constCast("");
+    var dib = try ParityDib.init(320, 160);
+    defer dib.deinit();
+    const bounds = rect(20, 20, 270, 116);
+    const rows = cardTextLayout(bounds, 1, 80);
+    fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
+    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, true, null, false);
+    const track = rect(rows.detail.left, rows.detail.bottom - 3, rows.detail.right, rows.detail.bottom);
+    try std.testing.expect(dib.count(track, loopTypeColor(node.loop_type)) > 0);
+    try std.testing.expect(dib.count(track, 0x00444141) > 0);
+}
+
+test "card live detail 764 human action suppresses progress without attention warmth" {
+    var node = cardLiveDetailMetricNode();
+    node.state = @constCast("blocked");
+    var dib = try ParityDib.init(320, 160);
+    defer dib.deinit();
+    const bounds = rect(20, 20, 270, 116);
+    const rows = cardTextLayout(bounds, 1, 80);
+    fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
+    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, .inspect, false);
+    try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x00444141));
+    try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, loopTypeColor(node.loop_type)));
+}
+
+test "card live detail 764 no history one reading missing direction and reclaim do not invent bars" {
+    var node = cardLiveDetailMetricNode();
+    var dib = try ParityDib.init(320, 160);
+    defer dib.deinit();
+    const bounds = rect(20, 20, 270, 116);
+    const rows = cardTextLayout(bounds, 1, 80);
+    for ([_]struct { count: u8, direction: []const u8, reclaim: bool }{
+        .{ .count = 0, .direction = "minimize", .reclaim = false },
+        .{ .count = 1, .direction = "minimize", .reclaim = false },
+        .{ .count = 2, .direction = "", .reclaim = false },
+        .{ .count = 2, .direction = "minimize", .reclaim = true },
+    }) |sample| {
+        node.metric_sample_count = sample.count;
+        node.metric_direction = @constCast(sample.direction);
+        fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
+        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, null, sample.reclaim);
+        try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x00444141));
+        try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, loopTypeColor(node.loop_type)));
+    }
+}
+
+test "card live detail 764 malformed live text and nonfinite metrics report errors" {
+    var node = cardLiveDetailMetricNode();
+    node.activity = @constCast("\xff");
+    try std.testing.expectError(error.InvalidUtf8, cardLiveLine(std.testing.allocator, node));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64) }) |invalid| {
+        node.metric_samples[1] = invalid;
+        try std.testing.expectError(error.InvalidCardMetric, cardMetricDetail(std.testing.allocator, node));
+    }
+}
+
+test "card live detail 764 change is right aligned and track is three logical points" {
+    const node = cardLiveDetailMetricNode();
+    for ([_]f32{ 0.75, 1, 1.5 }) |zoom| {
+        var dib = try ParityDib.init(480, 240);
+        defer dib.deinit();
+        const bounds = rect(20, 20, 20 + scaledValue(250, zoom), 20 + scaledValue(96, zoom));
+        const rows = cardTextLayout(bounds, zoom, scaledValue(80, zoom));
+        fill(dib.dc, rect(0, 0, 480, 240), Tokens.loop_card_bottom);
+        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, zoom, .interior, false, null, false);
+        const old = try selectCardFont(dib.dc, 10.5 * zoom, .card_mono);
+        defer _ = c.SelectObject(dib.dc, old);
+        const change_width = try measuredText(dib.dc, std.testing.allocator, "23% better");
+        const change = rect(rows.detail.right - change_width, rows.detail.top, rows.detail.right, rows.detail.bottom - scaledValue(4, zoom));
+        var reference = try ParityDib.init(480, 240);
+        defer reference.deinit();
+        fill(reference.dc, rect(0, 0, 480, 240), Tokens.loop_card_bottom);
+        try drawCardText(reference.dc, std.testing.allocator, "23% better", change, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+        var expected_ink: usize = 0;
+        var y = change.top;
+        while (y < change.bottom) : (y += 1) {
+            var x = change.left;
+            while (x < change.right) : (x += 1) {
+                const expected = c.GetPixel(reference.dc, x, y);
+                try std.testing.expect(expected != c.CLR_INVALID);
+                try std.testing.expectEqual(expected, c.GetPixel(dib.dc, x, y));
+                if (expected != Tokens.loop_card_bottom) expected_ink += 1;
+            }
+        }
+        try std.testing.expect(expected_ink > 0);
+        const track_top = rows.detail.bottom - scaledValue(3, zoom);
+        try std.testing.expectEqual(@as(usize, @intCast(rows.detail.right - rows.detail.left)),
+            dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), 0x00444141) +
+                dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), loopTypeColor(node.loop_type)));
+    }
+}
+
 test "loop card parity metrics and rows fit the owning card" {
     const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
     defer _ = c.DeleteDC(dc);
@@ -4440,6 +4673,16 @@ fn verifyPaint764CardPixels(
     }
     if (node.worktree_branch.len != 0) {
         try std.testing.expect(std.mem.indexOf(u8, metadata, node.worktree_branch) != null);
+    }
+    if (node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
+        const track = rect(rows.detail.left, rows.detail.bottom - 3, rows.detail.right, rows.detail.bottom);
+        if (primaryCardAction(node) == null) {
+            try std.testing.expect(dib.count(track, loopTypeColor(node.loop_type)) > 0);
+            try std.testing.expect(dib.count(track, 0x00444141) > 0);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), dib.count(track, loopTypeColor(node.loop_type)));
+            try std.testing.expectEqual(@as(usize, 0), dib.count(track, 0x00444141));
+        }
     }
     if (attention) {
         const action = attentionActionBounds(bounds, &.{ .zoom = 1 });

@@ -18,8 +18,13 @@
           "state": "succeeded",
           "createdAt": 725760000,
           "goal": {
-            "summary": "Show a separate overview lane."
+            "summary": "Show a separate overview lane.",
+            "metricDirection": "minimize"
           },
+          "metricHistory": [
+            { "value": 1.42, "recordedAt": 725760060 },
+            { "value": 1.10, "recordedAt": 725760120 }
+          ],
           "worktreeBinding": {
             "path": "C:\\GraphCodeFixture\\OverviewPeer\\worktrees\\sample",
             "branch": "sample"

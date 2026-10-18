@@ -27,8 +27,13 @@
           "state": "succeeded",
           "createdAt": 725760000,
           "goal": {
-            "summary": "Render the synthetic graph."
+            "summary": "Render the synthetic graph.",
+            "metricDirection": "minimize"
           },
+          "metricHistory": [
+            { "value": 41, "recordedAt": 725760060 },
+            { "value": 30, "recordedAt": 725760120 }
+          ],
           "worktreeBinding": {
             "path": "C:\\GraphCodeFixture\\CardStates\\worktrees\\review",
             "branch": "review"
@@ -55,7 +60,12 @@
           "activity": "Rendering synthetic content",
           "createdAt": 725760000,
           "backend": "copilotCLI",
-          "checkDescription": "Check the fixture output."
+          "checkDescription": "Check the fixture output.",
+          "goal": { "metricDirection": "maximize" },
+          "metricHistory": [
+            { "value": 0.5, "recordedAt": 725760060 },
+            { "value": 1, "recordedAt": 725760120 }
+          ]
         },
         {
           "id": "fixture-timed-stopped",
@@ -78,7 +88,12 @@
           "activity": "Review the synthetic prompt",
           "createdAt": 725760000,
           "backend": "copilotCLI",
-          "checkDescription": "Respond to the local prompt."
+          "checkDescription": "Respond to the local prompt.",
+          "goal": { "metricDirection": "minimize" },
+          "metricHistory": [
+            { "value": 10, "recordedAt": 725760060 },
+            { "value": 5, "recordedAt": 725760120 }
+          ]
         }
       ],
       "edges": [
