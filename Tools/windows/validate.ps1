@@ -1007,8 +1007,9 @@ function Invoke-Task([string] $name) {
         & (Join-Path $repoRoot "Tools\windows\Tests\VisualBaseline.Tests.ps1")
       }
       Write-Host "==> Windows/macOS palette parity contract"
+      . (Join-Path $repoRoot "Tools\windows\Import-PinnedPester.ps1")
       $paletteResults = Invoke-Pester `
-        -Script (Join-Path $repoRoot "Tools\windows\Tests\PaletteParity.Tests.ps1") `
+        -Path (Join-Path $repoRoot "Tools\windows\Tests\PaletteParity.Tests.ps1") `
         -PassThru
       if ($paletteResults.TotalCount -le 0 -or $paletteResults.PassedCount -le 0 -or
           $paletteResults.FailedCount -ne 0) {
@@ -1105,8 +1106,9 @@ function Invoke-Task([string] $name) {
     }
     "windows-shell" {
       Write-Host "==> Windows shell validation isolation contract"
+      . (Join-Path $repoRoot "Tools\windows\Import-PinnedPester.ps1")
       $isolationResults = Invoke-Pester `
-        -Script (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1") `
+        -Path (Join-Path $repoRoot "Tools\windows\Tests\ValidationIsolation.Tests.ps1") `
         -PassThru
       if ($isolationResults.TotalCount -le 0 -or
           $isolationResults.PassedCount -ne $isolationResults.TotalCount -or

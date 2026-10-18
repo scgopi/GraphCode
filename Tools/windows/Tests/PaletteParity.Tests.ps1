@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
 
 BeforeAll {
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")

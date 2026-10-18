@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
 
 Describe "Windows shell validation profile isolation" {
 BeforeAll {

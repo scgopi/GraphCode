@@ -2,6 +2,9 @@
 param()
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "..\Import-PinnedPester.ps1")
+
+BeforeAll {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..")).Path
 $bootstrapPath = Join-Path $repoRoot "Tools\windows\bootstrap.ps1"
 $tokens = $null
@@ -27,6 +30,29 @@ foreach ($name in @(
   } else {
     throw "Bootstrap helper is missing: $name"
   }
+}
+
+function Write-TestArchiveBytes(
+    [string] $Path,
+    [byte[]] $Bytes,
+    [long] $Offset
+  ) {
+  $stream = [IO.File]::Open(
+    $Path,
+    [IO.FileMode]::OpenOrCreate,
+    [IO.FileAccess]::Write,
+    [IO.FileShare]::Read)
+  try {
+    $stream.SetLength($Offset)
+    $stream.Position = $Offset
+    $remaining = $Bytes.Length - [int] $Offset
+    if ($remaining -gt 0) {
+      $stream.Write($Bytes, [int] $Offset, $remaining)
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
 }
 
 Describe "Windows bootstrap provider setup" {
@@ -74,18 +100,18 @@ Describe "Windows bootstrap provider setup" {
     $separator = [char]31
     ($script:gitCalls -contains (
         @("-c", "core.longpaths=true", "clone", "--no-checkout",
-          $script:pin.remoteUrl, $destination) -join $separator)) | Should Be $true
+          $script:pin.remoteUrl, $destination) -join $separator)) | Should -Be $true
     ($script:gitCalls -contains (
         @("-C", $destination, "config", "--local", "core.longpaths", "true") -join $separator)) |
-      Should Be $true
+      Should -Be $true
     ($script:gitCalls -contains (
         @("-c", "core.longpaths=true", "-C", $destination, "fetch", "--quiet",
-          "origin", $script:pin.sha) -join $separator)) | Should Be $true
+          "origin", $script:pin.sha) -join $separator)) | Should -Be $true
     ($script:gitCalls -contains (
         @("-c", "core.longpaths=true", "-C", $destination, "checkout", "--quiet",
-          "--detach", $script:pin.sha) -join $separator)) | Should Be $true
+          "--detach", $script:pin.sha) -join $separator)) | Should -Be $true
     Test-Path -LiteralPath (Join-Path $destination ".git\graphcode-bootstrap-checkout") |
-      Should Be $false
+      Should -Be $false
   }
 
   It "recovers a bootstrap-owned partial provider checkout" {
@@ -93,16 +119,16 @@ Describe "Windows bootstrap provider setup" {
     $marker = Join-Path $destination ".git\graphcode-bootstrap-checkout"
     $script:failNextCheckout = $true
     { Install-Provider $script:pin "winghostty" } |
-      Should Throw "Checking out winghostty pin $($script:pin.sha) failed"
-    Test-Path -LiteralPath $marker -PathType Leaf | Should Be $true
+      Should -Throw -ExpectedMessage "Checking out winghostty pin $($script:pin.sha) failed"
+    Test-Path -LiteralPath $marker -PathType Leaf | Should -Be $true
     $script:statusOutput = @(" D missing-long-path-corpus")
 
-    Install-Provider $script:pin "winghostty" | Should Be $destination
+    Install-Provider $script:pin "winghostty" | Should -Be $destination
 
     ($script:gitCalls -contains (
         @("-c", "core.longpaths=true", "-C", $destination, "checkout", "--force",
-          "--quiet", "--detach", $script:pin.sha) -join [char]31)) | Should Be $true
-    Test-Path -LiteralPath $marker | Should Be $false
+          "--quiet", "--detach", $script:pin.sha) -join [char]31)) | Should -Be $true
+    Test-Path -LiteralPath $marker | Should -Be $false
   }
 
   It "does not overwrite an unmarked dirty provider checkout" {
@@ -111,9 +137,9 @@ Describe "Windows bootstrap provider setup" {
     $script:statusOutput = @(" M contributor-change")
 
     { Install-Provider $script:pin "winghostty" } |
-      Should Throw "winghostty provider checkout is dirty: $destination"
+      Should -Throw -ExpectedMessage "winghostty provider checkout is dirty: $destination"
     @($script:gitCalls | Where-Object { $_ -match ([char]31 + "checkout" + [char]31) }).Count |
-      Should Be 0
+      Should -Be 0
   }
 
   It "warns when pinned provider or worktree fixtures exceed the legacy path budget" {
@@ -126,10 +152,10 @@ Describe "Windows bootstrap provider setup" {
       $warnings.Add($message)
     }
 
-    $warnings.Count | Should Be 1
-    $warnings[0] | Should Match "legacy MAX_PATH"
-    $warnings[0] | Should Match ([regex]::Escape("C:\src\GraphCode"))
-    $warnings[0] | Should Match ([regex]::Escape("-ProviderRoot C:\gc-providers"))
+    $warnings.Count | Should -Be 1
+    $warnings[0] | Should -Match "legacy MAX_PATH"
+    $warnings[0] | Should -Match ([regex]::Escape("C:\src\GraphCode"))
+    $warnings[0] | Should -Match ([regex]::Escape("-ProviderRoot C:\gc-providers"))
   }
 
   It "does not warn for a short checkout and provider root" {
@@ -138,29 +164,7 @@ Describe "Windows bootstrap provider setup" {
       param($message)
       $warnings.Add($message)
     }
-    $warnings.Count | Should Be 0
-  }
-}
-
-function Write-TestArchiveBytes(
-    [string] $Path,
-    [byte[]] $Bytes,
-    [long] $Offset
-  ) {
-  $stream = [IO.File]::Open(
-    $Path,
-    [IO.FileMode]::OpenOrCreate,
-    [IO.FileAccess]::Write,
-    [IO.FileShare]::Read)
-  try {
-    $stream.SetLength($Offset)
-    $stream.Position = $Offset
-    $remaining = $Bytes.Length - [int] $Offset
-    if ($remaining -gt 0) {
-      $stream.Write($Bytes, [int] $Offset, $remaining)
-    }
-  } finally {
-    $stream.Dispose()
+    $warnings.Count | Should -Be 0
   }
 }
 
@@ -252,10 +256,10 @@ Describe "Windows bootstrap Zig downloads" {
 
     $executable = Install-Zig $script:version $script:sha256
 
-    Test-Path -LiteralPath $executable -PathType Leaf | Should Be $true
-    $script:downloadCalls.Count | Should Be 2
-    $script:downloadCalls[0].Offset | Should Be 0
-    $script:downloadCalls[1].Offset | Should Be $split
+    Test-Path -LiteralPath $executable -PathType Leaf | Should -Be $true
+    $script:downloadCalls.Count | Should -Be 2
+    $script:downloadCalls[0].Offset | Should -Be 0
+    $script:downloadCalls[1].Offset | Should -Be $split
   }
 
   It "uses the configured mirror base while retaining the pinned archive name" {
@@ -263,8 +267,8 @@ Describe "Windows bootstrap Zig downloads" {
 
     Install-Zig $script:version $script:sha256 | Out-Null
 
-    $script:downloadCalls.Count | Should Be 1
-    $script:downloadCalls[0].Uri | Should Be (
+    $script:downloadCalls.Count | Should -Be 1
+    $script:downloadCalls[0].Uri | Should -Be (
       "https://mirror.example.invalid/zig/download/$($script:version)/" +
       "$($script:expandedName).zip")
   }
@@ -278,11 +282,11 @@ Describe "Windows bootstrap Zig downloads" {
 
     Install-Zig $script:version $script:sha256 | Out-Null
 
-    $script:downloadCalls.Count | Should Be 1
-    $script:downloadCalls[0].StallTimeoutSeconds | Should Be 7
-    $script:downloadCalls[0].ProgressIntervalSeconds | Should Be 60
-    $script:downloadCalls[0].OverallDeadline | Should BeGreaterThan $started.AddSeconds(10)
-    $script:downloadCalls[0].OverallDeadline | Should BeLessThan $started.AddSeconds(14)
+    $script:downloadCalls.Count | Should -Be 1
+    $script:downloadCalls[0].StallTimeoutSeconds | Should -Be 7
+    $script:downloadCalls[0].ProgressIntervalSeconds | Should -Be 60
+    $script:downloadCalls[0].OverallDeadline | Should -BeGreaterThan $started.AddSeconds(10)
+    $script:downloadCalls[0].OverallDeadline | Should -BeLessThan $started.AddSeconds(14)
   }
 
   It "reuses only a checksum-verified cached archive" {
@@ -294,10 +298,10 @@ Describe "Windows bootstrap Zig downloads" {
 
     $executable = Install-Zig $script:version $script:sha256
 
-    Test-Path -LiteralPath $executable -PathType Leaf | Should Be $true
-    $script:downloadCalls.Count | Should Be 0
-    Test-Path -LiteralPath $archive -PathType Leaf | Should Be $true
-    Test-Path -LiteralPath $partial | Should Be $false
+    Test-Path -LiteralPath $executable -PathType Leaf | Should -Be $true
+    $script:downloadCalls.Count | Should -Be 0
+    Test-Path -LiteralPath $archive -PathType Leaf | Should -Be $true
+    Test-Path -LiteralPath $partial | Should -Be $false
   }
 
   It "removes a corrupt cached archive before downloading its replacement" {
@@ -306,8 +310,8 @@ Describe "Windows bootstrap Zig downloads" {
 
     Install-Zig $script:version $script:sha256 | Out-Null
 
-    $script:downloadCalls.Count | Should Be 1
-    (Get-FileHash $archive -Algorithm SHA256).Hash | Should Be $script:sha256
+    $script:downloadCalls.Count | Should -Be 1
+    (Get-FileHash $archive -Algorithm SHA256).Hash | Should -Be $script:sha256
   }
 
   It "removes checksum-mismatched completed downloads before retrying" {
@@ -324,13 +328,13 @@ Describe "Windows bootstrap Zig downloads" {
       $message = $_.Exception.Message
     }
 
-    $script:downloadCalls.Count | Should Be 3
-    @($script:downloadCalls | Where-Object Offset -ne 0).Count | Should Be 0
-    $message | Should Match "checksum mismatch"
+    $script:downloadCalls.Count | Should -Be 3
+    @($script:downloadCalls | Where-Object Offset -ne 0).Count | Should -Be 0
+    $message | Should -Match "checksum mismatch"
     Test-Path (Join-Path $script:ToolRoot "zig-$($script:version).zip") |
-      Should Be $false
+      Should -Be $false
     Test-Path (Join-Path $script:ToolRoot "zig-$($script:version).zip.partial") |
-      Should Be $false
+      Should -Be $false
   }
 
   It "preserves a partial archive after the bounded retry budget is exhausted" {
@@ -358,12 +362,12 @@ Describe "Windows bootstrap Zig downloads" {
     }
 
     $partial = Join-Path $script:ToolRoot "zig-$($script:version).zip.partial"
-    $script:downloadCalls.Count | Should Be 3
+    $script:downloadCalls.Count | Should -Be 3
     (($script:downloadCalls | ForEach-Object Offset) -join ",") |
-      Should Be "0,1,2"
-    $message | Should Match "failed after 3 attempts"
-    Test-Path -LiteralPath $partial -PathType Leaf | Should Be $true
-    (Get-Item -LiteralPath $partial).Length | Should Be 3
+      Should -Be "0,1,2"
+    $message | Should -Match "failed after 3 attempts"
+    Test-Path -LiteralPath $partial -PathType Leaf | Should -Be $true
+    (Get-Item -LiteralPath $partial).Length | Should -Be 3
   }
 
 }

@@ -350,6 +350,35 @@ assert a positive executed test count; a filter typo is not a pass.
 New Zig test roots must be registered in `Tools/windows/Tests/WindowsShell.Tests.ps1`,
 which derives coverage from literal `& $zig test src\<File>.zig` invocations.
 
+### PowerShell tooling traps
+
+- **Pester:** the validation runner and Pester test entry points load only major
+  5 through `Tools\windows\Import-PinnedPester.ps1`; 4 and 6 are not substitutes.
+  If 5 is missing, follow the loader's `Save-Module` instructions into a
+  worktree-owned directory and prepend it to process-only `PSModulePath`.
+  Start a fresh `pwsh -NoProfile` if another major is already loaded; do not
+  install or replace global modules.
+- **Line endings:** `apply_patch` may leave CRLF on Windows. Check both working
+  files and staged blobs explicitly (`git ls-files --eol`); normalize touched
+  files to LF before committing rather than assuming a patch preserved LF.
+- **UTC deadlines:** use `[DateTimeOffset]` to parse offset/`Z` timestamps and
+  compute time-box differences. A `[datetime]` cast can convert the offset to
+  local time; `Kind` and subsequent conversions can change the intended instant.
+- **Environment:** distinguish a missing variable from an empty value using
+  environment dictionary membership, not truthiness. For child processes,
+  deliberately call `ProcessStartInfo.Environment.Remove("NAME")` when absence
+  is required; assigning `""` is not a portable removal operation.
+- **Ordered dictionaries:** `Select-Object`/`Group-Object -Property` projections
+  can inspect dictionary members instead of the intended entries. Use direct
+  properties/keys (or explicit scriptblocks/`[pscustomobject]` rows), and count
+  original source occurrences when grouping would hide duplicates.
+- **Process evidence:** CIM image/argv observations are advisory, not authority
+  for an owned process's identity. Keep held native identity checks authoritative
+  for capture or termination; this does not forbid CIM queries used elsewhere.
+- **Boolean expressions:** parenthesize command calls before operators:
+  `(Test-Path -LiteralPath $first) -or (Test-Path -LiteralPath $second)`.
+  Otherwise `-or` can be parsed as a `Test-Path` parameter.
+
 ---
 
 ## Cross-platform parity

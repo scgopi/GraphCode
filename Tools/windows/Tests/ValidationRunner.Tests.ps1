@@ -2922,6 +2922,8 @@ function Test-ZigResolverDiagnostics([string] $source) {
   }
 }
 
+& (Join-Path $PSScriptRoot "PesterVersion.Tests.ps1")
+
 $runner = Join-Path $PSScriptRoot "..\validate.ps1"
 if (-not (Test-Path $runner)) {
   throw "RED: validation runner does not exist at $runner"
