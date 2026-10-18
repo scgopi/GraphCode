@@ -1126,6 +1126,19 @@ pub const DaemonClient = struct {
     }
 
     fn pumpIncoming(self: *DaemonClient) bool {
+        return self.pumpIncomingWithWait(.{});
+    }
+
+    const IncomingReadWait = struct {
+        context: ?*anyopaque = null,
+        wait: *const fn (?*anyopaque, c.HANDLE, c.DWORD) c.DWORD = waitForRead,
+
+        fn waitForRead(_: ?*anyopaque, event: c.HANDLE, milliseconds: c.DWORD) c.DWORD {
+            return c.WaitForSingleObject(event, milliseconds);
+        }
+    };
+
+    fn pumpIncomingWithWait(self: *DaemonClient, read_wait: IncomingReadWait) bool {
         if (self.pipe == c.INVALID_HANDLE_VALUE) return true;
         var round: usize = 0;
         while (round < 8) : (round += 1) {
@@ -1148,19 +1161,22 @@ pub const DaemonClient = struct {
             if (!completed) {
                 const read_error = c.GetLastError();
                 if (read_error == c.ERROR_IO_PENDING) {
-                    const wait_result = c.WaitForSingleObject(overlapped.hEvent, 20);
-                    if (wait_result == c.WAIT_TIMEOUT) {
-                        _ = c.CancelIoEx(self.pipe, &overlapped);
-                        _ = c.GetOverlappedResult(self.pipe, &overlapped, &read, 1);
-                        break;
-                    }
-                    if (wait_result != c.WAIT_OBJECT_0 or
-                        c.GetOverlappedResult(self.pipe, &overlapped, &read, 0) == 0)
-                    {
-                        const result_error = c.GetLastError();
-                        if (result_error == c.ERROR_OPERATION_ABORTED) break;
-                        self.markTransportFailure("daemon frame read failed");
+                    const wait_result = read_wait.wait(read_wait.context, overlapped.hEvent, 20);
+                    const cancel = wait_result != c.WAIT_OBJECT_0;
+                    if (cancel) _ = c.CancelIoEx(self.pipe, &overlapped);
+                    // A completion can beat cancellation; join it before using or discarding bytes.
+                    const result = c.GetOverlappedResult(self.pipe, &overlapped, &read, if (cancel) 1 else 0);
+                    const result_error = if (result == 0) c.GetLastError() else c.ERROR_SUCCESS;
+                    if (wait_result != c.WAIT_OBJECT_0 and wait_result != c.WAIT_TIMEOUT) {
+                        self.markTransportFailure("daemon read wait failed");
                         return false;
+                    }
+                    if (result == 0) {
+                        if (result_error == c.ERROR_OPERATION_ABORTED and read == 0) break;
+                        if (result_error != c.ERROR_OPERATION_ABORTED) {
+                            self.markTransportFailure("daemon frame read failed");
+                            return false;
+                        }
                     }
                 } else if (read_error == c.ERROR_NO_DATA or read_error == c.ERROR_BROKEN_PIPE) {
                     self.markTransportFailure("daemon connection closed");
@@ -2051,6 +2067,7 @@ const NegotiationPipeFixture = struct {
     temporary: std.testing.TmpDir,
     old_pipe: ?[]u8,
     old_support: ?[]u8,
+    io_timeout_ms: c.DWORD = 2_000,
 
     fn createServer(name: []const u8) !c.HANDLE {
         const wide = try utf8ToWide(std.testing.allocator, name);
@@ -2116,7 +2133,7 @@ const NegotiationPipeFixture = struct {
             if (code == c.ERROR_PIPE_CONNECTED) return;
             if (code != c.ERROR_IO_PENDING) return error.TestPipeAcceptFailed;
             var transferred: c.DWORD = 0;
-            if (c.WaitForSingleObject(overlapped.hEvent, 2_000) != c.WAIT_OBJECT_0) {
+            if (c.WaitForSingleObject(overlapped.hEvent, self.io_timeout_ms) != c.WAIT_OBJECT_0) {
                 _ = c.CancelIoEx(self.server, &overlapped);
                 _ = c.GetOverlappedResult(self.server, &overlapped, &transferred, 1);
                 return error.TestPipeAcceptTimedOut;
@@ -2136,7 +2153,7 @@ const NegotiationPipeFixture = struct {
             var transferred: c.DWORD = 0;
             if (c.ReadFile(self.server, bytes[offset..].ptr, @intCast(bytes.len - offset), &transferred, &overlapped) == 0) {
                 if (c.GetLastError() != c.ERROR_IO_PENDING) return error.TestPipeReadFailed;
-                if (c.WaitForSingleObject(overlapped.hEvent, 2_000) != c.WAIT_OBJECT_0) {
+                if (c.WaitForSingleObject(overlapped.hEvent, self.io_timeout_ms) != c.WAIT_OBJECT_0) {
                     _ = c.CancelIoEx(self.server, &overlapped);
                     _ = c.GetOverlappedResult(self.server, &overlapped, &transferred, 1);
                     return error.TestPipeReadTimedOut;
@@ -2173,17 +2190,166 @@ const NegotiationPipeFixture = struct {
     }
 };
 
-fn waitForNegotiationState(client: *DaemonClient, state: Wire.ConnectionState) !void {
-    const deadline = nowMilliseconds() + 2_000;
+fn waitForNegotiationState(client: *DaemonClient, state: Wire.ConnectionState, timeout_ms: i64) !void {
+    const deadline = nowMilliseconds() + timeout_ms;
     while (client.connectionState() != state) {
-        if (nowMilliseconds() >= deadline) return error.TestNegotiationStateTimedOut;
+        if (nowMilliseconds() >= deadline) {
+            std.debug.print("expected {s}; observed {s}: {s}\n", .{
+                @tagName(state), @tagName(client.connectionState()), client.statusText(),
+            });
+            return error.TestNegotiationStateTimedOut;
+        }
         std.Thread.sleep(5 * std.time.ns_per_ms);
     }
 }
 
-test "negotiation slow v2 hello after 2500 ms stays v2 and serves a correlated request" {
+test "negotiation cancel boundary retains a completed header and correlates the intact response exactly once" {
     var fixture = try NegotiationPipeFixture.init();
     defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    defer client.closeHandleOnly();
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    try fixture.reply("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}");
+    try std.testing.expect(client.pumpIncoming());
+    try std.testing.expectEqual(Wire.ConnectionState.connected, client.connectionState());
+
+    const request_id = "00000000-0000-4000-8000-000000000042".*;
+    client.sendCommandOnWorker("{\"listRecentProjects\":{}}", request_id, .recent_projects);
+    const request = try fixture.readFrame();
+    defer std.testing.allocator.free(request);
+    try std.testing.expectEqualStrings(&request_id, Wire.topLevelString(request, "requestID").?);
+    const response = "{\"version\":2,\"kind\":\"response\",\"requestID\":\"00000000-0000-4000-8000-000000000042\",\"success\":true}";
+    const Boundary = struct {
+        server: c.HANDLE,
+        header: [4]u8,
+        read_started: std.Thread.ResetEvent = .{},
+        forced: bool = false,
+        write_error: ?anyerror = null,
+
+        fn writeHeader(self: *@This()) void {
+            self.read_started.wait();
+            writeAll(self.server, &self.header) catch |err| {
+                self.write_error = err;
+            };
+        }
+
+        fn wait(context: ?*anyopaque, event: c.HANDLE, milliseconds: c.DWORD) c.DWORD {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (self.forced) return c.WaitForSingleObject(event, milliseconds);
+            self.forced = true;
+            self.read_started.set();
+            const result = c.WaitForSingleObject(event, 5_000);
+            // The actual pending read has completed; force cancellation to lose the race.
+            return if (result == c.WAIT_OBJECT_0) c.WAIT_TIMEOUT else result;
+        }
+    };
+    var boundary = Boundary{ .server = fixture.server, .header = try Wire.frameLength(response, .v2) };
+    const writer = try std.Thread.spawn(.{}, Boundary.writeHeader, .{&boundary});
+    const pumped = client.pumpIncomingWithWait(.{ .context = &boundary, .wait = Boundary.wait });
+    boundary.read_started.set();
+    writer.join();
+    if (boundary.write_error) |err| return err;
+    try std.testing.expect(pumped);
+    try std.testing.expect(boundary.forced);
+    try std.testing.expectEqual(@as(?usize, response.len), client.frame_buffer.expected_length);
+    try std.testing.expectEqual(@as(usize, 0), client.frame_buffer.length);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_request_count);
+    try std.testing.expectEqual(@as(usize, 0), client.inbound_count);
+
+    try writeAll(fixture.server, response);
+    try std.testing.expect(client.pumpIncoming());
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try std.testing.expectEqual(Wire.ConnectionState.connected, client.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), client.pending_request_count);
+    try std.testing.expectEqual(@as(usize, 1), client.inbound_count);
+    try std.testing.expectEqualStrings(response, client.inbound[client.inbound_head]);
+    try std.testing.expectEqual(@as(?usize, null), client.frame_buffer.expected_length);
+    try std.testing.expectEqual(@as(usize, 0), client.frame_buffer.length);
+    client.poll();
+    try std.testing.expect(client.isIdle());
+}
+
+test "negotiation cancel boundary with aborted zero-byte read preserves the connection and next hello" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    defer client.closeHandleOnly();
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    try std.testing.expect(client.pumpIncoming());
+    try std.testing.expectEqual(Wire.ConnectionState.negotiating, client.connectionState());
+    try std.testing.expectEqual(@as(?usize, null), client.frame_buffer.expected_length);
+    try std.testing.expectEqual(@as(usize, 0), client.frame_buffer.length);
+    try fixture.reply("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}");
+    try std.testing.expect(client.pumpIncoming());
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try std.testing.expectEqual(Wire.ConnectionState.connected, client.connectionState());
+}
+
+test "negotiation cancel boundary surfaces a terminal read error instead of treating it as no data" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    defer client.closeHandleOnly();
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    const Boundary = struct {
+        fn wait(context: ?*anyopaque, event: c.HANDLE, _: c.DWORD) c.DWORD {
+            const current: *NegotiationPipeFixture = @ptrCast(@alignCast(context.?));
+            if (c.CloseHandle(current.server) == 0) return c.WAIT_FAILED;
+            current.server = c.INVALID_HANDLE_VALUE;
+            const result = c.WaitForSingleObject(event, 5_000);
+            return if (result == c.WAIT_OBJECT_0) c.WAIT_TIMEOUT else result;
+        }
+    };
+    try std.testing.expect(!client.pumpIncomingWithWait(.{ .context = &fixture, .wait = Boundary.wait }));
+    try std.testing.expectEqual(Wire.ConnectionState.reconnecting, client.connectionState());
+    try std.testing.expectEqualStrings("daemon frame read failed", client.statusText());
+    try std.testing.expectEqual(@as(usize, 0), client.frame_buffer.length);
+}
+
+test "negotiation cancel boundary joins a pending read before surfacing a wait failure" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    defer client.closeHandleOnly();
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    const Boundary = struct {
+        fn wait(_: ?*anyopaque, _: c.HANDLE, _: c.DWORD) c.DWORD {
+            return c.WAIT_FAILED;
+        }
+    };
+    try std.testing.expect(!client.pumpIncomingWithWait(.{ .wait = Boundary.wait }));
+    try std.testing.expectEqual(Wire.ConnectionState.reconnecting, client.connectionState());
+    try std.testing.expectEqualStrings("daemon read wait failed", client.statusText());
+    try std.testing.expectEqual(c.INVALID_HANDLE_VALUE, client.pipe);
+}
+
+test "negotiation slow v2 hello after 2500 ms stays v2 and serves a correlated request" {
+    const hello_delay_ms = 2_500;
+    const negotiation_budget_ms = 4 * hello_delay_ms;
+    const completion_budget_ms = 2 * hello_delay_ms;
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    fixture.io_timeout_ms = completion_budget_ms;
     var client = try DaemonClient.initForTesting(std.testing.allocator);
     defer {
         if (client.worker == null) client.closeHandleOnly();
@@ -2191,16 +2357,19 @@ test "negotiation slow v2 hello after 2500 ms stays v2 and serves a correlated r
     }
     client.connect();
     client.attemptConnection(nowMilliseconds());
+    // Only this test's deadline changes; loaded CI scheduling is not protocol time.
+    try std.testing.expectEqual(@as(i64, 5_000), client.negotiation_deadline_ms - client.negotiation_started_ms);
+    client.negotiation_deadline_ms = client.negotiation_started_ms + negotiation_budget_ms;
     try fixture.accept();
     const hello = try fixture.readFrame();
     defer std.testing.allocator.free(hello);
     try std.testing.expectEqualStrings("hello", Wire.topLevelString(hello, "kind").?);
     try client.start();
-    std.Thread.sleep(2_500 * std.time.ns_per_ms);
+    std.Thread.sleep(hello_delay_ms * std.time.ns_per_ms);
     try std.testing.expectEqual(Wire.ConnectionState.negotiating, client.connectionState());
     try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
     try fixture.reply("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}");
-    try waitForNegotiationState(&client, .connected);
+    try waitForNegotiationState(&client, .connected, completion_budget_ms);
     const request = client.sendReadProjectGraph("C:\\negotiation-fixture") orelse return error.TestRequestNotQueued;
     const command = try fixture.readFrame();
     defer std.testing.allocator.free(command);
@@ -2210,7 +2379,7 @@ test "negotiation slow v2 hello after 2500 ms stays v2 and serves a correlated r
         "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"success\":true}}", .{request.request_id});
     defer std.testing.allocator.free(response);
     try fixture.reply(response);
-    const deadline = nowMilliseconds() + 2_000;
+    const deadline = nowMilliseconds() + completion_budget_ms;
     while (!client.isIdle()) {
         client.poll();
         if (nowMilliseconds() >= deadline) return error.TestRequestNotCompleted;
