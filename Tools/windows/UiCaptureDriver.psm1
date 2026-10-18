@@ -94,6 +94,19 @@ public static class CapNative {
   [StructLayout(LayoutKind.Sequential)]
   private struct NativeFileTime { public uint Low, High; }
 
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ProcessBasicInformation {
+    public IntPtr ExitStatus, PebBaseAddress, AffinityMask, BasePriority, ProcessId, ParentProcessId;
+  }
+
+  [DllImport("ntdll.dll")]
+  private static extern int NtQueryInformationProcess(IntPtr process, int info, out ProcessBasicInformation value, uint size, out uint length);
+  [DllImport("ntdll.dll")]
+  private static extern int NtQueryInformationProcess(IntPtr process, int info, out uint value, uint size, out uint length);
+  [DllImport("shell32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern IntPtr CommandLineToArgvW(string command, out int count);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  private static extern IntPtr LocalFree(IntPtr memory);
   [DllImport("kernel32.dll", SetLastError=true)]
   private static extern uint GetProcessId(IntPtr process);
   [DllImport("kernel32.dll", SetLastError=true)]
@@ -119,6 +132,44 @@ public static class CapNative {
 
   private static long FileTime(NativeFileTime value) {
     return ((long)value.High << 32) | value.Low;
+  }
+
+  public static int ParentProcessId(IntPtr handle, int expectedPid) {
+    if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)expectedPid)
+      throw new InvalidOperationException("Process handle/PID mismatch.");
+    ProcessBasicInformation value;
+    uint length;
+    int status = NtQueryInformationProcess(handle, 0, out value,
+      (uint)Marshal.SizeOf<ProcessBasicInformation>(), out length);
+    if (status != 0 || length != Marshal.SizeOf<ProcessBasicInformation>() ||
+        value.ProcessId.ToInt64() != expectedPid)
+      throw new InvalidOperationException("Native parent query failed for held PID " + expectedPid + ": " + status);
+    return checked((int)value.ParentProcessId.ToInt64());
+  }
+
+  public static int SessionId(IntPtr handle, int expectedPid) {
+    if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)expectedPid)
+      throw new InvalidOperationException("Process handle/PID mismatch.");
+    uint value, length;
+    int status = NtQueryInformationProcess(handle, 24, out value, sizeof(uint), out length);
+    if (status != 0 || length != sizeof(uint))
+      throw new InvalidOperationException("Native session query failed for held PID " + expectedPid + ": " + status);
+    return checked((int)value);
+  }
+
+  public static string[] CommandArguments(string command) {
+    if (String.IsNullOrWhiteSpace(command)) throw new ArgumentException("Empty process command line.");
+    int count;
+    IntPtr memory = CommandLineToArgvW(command, out count);
+    if (memory == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+    try {
+      var result = new string[count];
+      for (int i = 0; i < count; i++)
+        result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory, i * IntPtr.Size));
+      return result;
+    } finally {
+      if (LocalFree(memory) != IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+    }
   }
 
   public static CapProcessSnapshot Snapshot(IntPtr handle, int expectedPid) {
@@ -244,7 +295,9 @@ if (-not ('CapNative' -as [type])) {
         [System.Drawing.Color].Assembly.Location,
         (Join-Path $PSHOME 'System.Private.Windows.Core.dll'),
         (Join-Path $PSHOME 'System.Private.Windows.GdiPlus.dll'),
-        'System.Collections.dll'
+        'System.Collections.dll',
+        'System.ComponentModel.Primitives.dll',
+        'Microsoft.Win32.Primitives.dll'
     )
 }
 
@@ -2430,6 +2483,50 @@ function Resolve-CapPendingLaunches {
     return @($results)
 }
 
+function Test-CapAppZmxCommand {
+    param(
+        [Parameter(Mandatory)][string]$CommandLine,
+        [Parameter(Mandatory)][string]$ZmxPath,
+        [Parameter(Mandatory)][string]$SessionPrefix,
+        [string[]]$ExactSessionNames = @()
+    )
+    $arguments = [CapNative]::CommandArguments($CommandLine)
+    if ($arguments.Count -lt 2 -or
+        (ConvertTo-CapImagePath $arguments[0]) -ine (ConvertTo-CapImagePath $ZmxPath)) { return $false }
+    if ($arguments.Count -eq 2 -and $arguments[1] -ceq 'ls') { return $true }
+    $sessions = @()
+    switch -CaseSensitive ($arguments[1]) {
+        'attach' {
+            if ($arguments.Count -ne 5 -or $arguments[3] -cne '--size' -or
+                $arguments[4] -cnotmatch '^[1-9][0-9]*x[1-9][0-9]*$') { return $false }
+            $sessions = @($arguments[2])
+        }
+        'resize' {
+            if ($arguments.Count -ne 4 -or $arguments[3] -cnotmatch '^[1-9][0-9]*x[1-9][0-9]*$') { return $false }
+            $sessions = @($arguments[2])
+        }
+        'kill' {
+            if ($arguments.Count -lt 4 -or $arguments[-1] -cne '--force') { return $false }
+            $sessions = @($arguments[2..($arguments.Count - 2)])
+        }
+        default { return $false }
+    }
+    if ($ExactSessionNames.Count -gt 0) {
+        # Retain the D adapter's exact declared-session contract.
+        $null = Test-CapDSessionCommand -CommandLine $CommandLine -SessionNames $ExactSessionNames
+    }
+    foreach ($session in $sessions) {
+        if ($ExactSessionNames.Count -gt 0) {
+            if ($session -cnotin $ExactSessionNames) { return $false }
+        } elseif ($session -cne 'graphcode-11111111-1111-4111-8111-000000000001' -and
+            $session -cnotmatch ('^graphcode-' + [regex]::Escape($SessionPrefix) +
+                '-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Get-CapOwnedDescendants {
     [CmdletBinding()]
     param(
@@ -2441,17 +2538,20 @@ function Get-CapOwnedDescendants {
         [Parameter(Mandatory)][string]$CommandMarker,
         [switch]$AllowGraphCodeRoot,
         [switch]$AllowUnmarkedCmd,
-        [string[]]$ExactSessionNames = @()
+        [string[]]$ExactSessionNames = @(),
+        [Collections.Generic.List[object]]$OwnedDescendants
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
 
     $known = [Collections.Generic.Dictionary[int, object]]::new()
     foreach ($root in $Roots) { $known[$root.Pid] = $root }
-    $children = [Collections.Generic.List[object]]::new()
+    if ($null -eq $OwnedDescendants) { $OwnedDescendants = [Collections.Generic.List[object]]::new() }
+    foreach ($child in $OwnedDescendants) { $known.Add($child.Pid, $child) }
     for ($pass = 0; $pass -lt 8; $pass++) {
         $changed = $false
-        $rows = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $filter = (@($known.Keys | ForEach-Object { "ParentProcessId = $_" }) -join ' OR ')
+        $rows = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -ErrorAction Stop)
         foreach ($row in $rows) {
             $pid = [int]$row.ProcessId
             if ($known.ContainsKey($pid) -or -not $known.ContainsKey([int]$row.ParentProcessId)) { continue }
@@ -2459,116 +2559,130 @@ function Get-CapOwnedDescendants {
             $process = $null
             try { $process = [Diagnostics.Process]::GetProcessById($pid) }
             catch [ArgumentException] { continue }
-            $identity = Get-CapProcessIdentity -Process $process -ExpectedImagePath ([string]$row.ExecutablePath) `
-                -Role 'descendant' -ExpectedParentPid $parent.Pid -ExpectedSessionId $parent.SessionId
-            $verified = Assert-CapProcessIdentity -Identity $identity
-            if ($verified.State -eq 'Exited') { $process.Dispose(); continue }
-            $meta = $verified.Metadata
-            $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
-                -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
-            $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
-            $parentExitFileTimeUtc = [long]$parentSnapshot.ExitFileTimeUtc
-            $outsideParentLifetime =
-                ([long]$meta.CreationFileTimeUtc -lt [long]$parent.CreationFileTimeUtc) -or
-                ($parentExitFileTimeUtc -gt 0 -and
-                    [long]$meta.CreationFileTimeUtc -gt $parentExitFileTimeUtc)
-            if ($outsideParentLifetime) {
-                $alreadyRecorded = @($script:CapExcludedDescendants | Where-Object {
-                    $_.Pid -eq $pid -and $_.ParentPid -eq $parent.Pid -and
-                    $_.CandidateCreationFileTimeUtc -eq [long]$meta.CreationFileTimeUtc
-                }).Count -gt 0
-                if (-not $alreadyRecorded) {
-                    $script:CapExcludedDescendants.Add([pscustomobject]@{
-                        Pid = $pid
-                        ParentPid = $parent.Pid
-                        ParentCreationFileTimeUtc = [long]$parent.CreationFileTimeUtc
-                        ParentExitFileTimeUtc = $parentExitFileTimeUtc
-                        CandidateCreationFileTimeUtc = [long]$meta.CreationFileTimeUtc
-                        CandidateImagePath = $meta.ImagePath
-                        CandidateCommandLineSha256 = [Convert]::ToHexString(
-                            [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($meta.CommandLine))
-                        )
-                        Disposition = 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED'
-                    })
+            $retained = $false
+            try {
+                $identity = Get-CapProcessIdentity -Process $process -ExpectedImagePath ([string]$row.ExecutablePath) `
+                    -Role 'descendant' -ExpectedParentPid $parent.Pid -ExpectedSessionId $parent.SessionId
+                $verified = Assert-CapProcessIdentity -Identity $identity
+                if ($verified.State -eq 'Exited') { continue }
+                $meta = $verified.Metadata
+                $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
+                    -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
+                $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
+                if ($parentSnapshot.CreationFileTimeUtc -ne [long]$parent.CreationFileTimeUtc -or
+                    ($parentSnapshot.ImagePath -and (ConvertTo-CapImagePath $parentSnapshot.ImagePath) -ine
+                        (ConvertTo-CapImagePath $parent.ExpectedImagePath))) {
+                    throw "Held parent generation changed for PID $($parent.Pid); refusing."
                 }
-                $process.Dispose()
-                continue
+                $childCreationFileTimeUtc = [long]$verified.Snapshot.CreationFileTimeUtc
+                $parentExitFileTimeUtc = [long]$parentSnapshot.ExitFileTimeUtc
+                $outsideParentLifetime =
+                    ($childCreationFileTimeUtc -lt [long]$parent.CreationFileTimeUtc) -or
+                    ($parentExitFileTimeUtc -gt 0 -and
+                        $childCreationFileTimeUtc -gt $parentExitFileTimeUtc)
+                if ($outsideParentLifetime) {
+                    $alreadyRecorded = @($script:CapExcludedDescendants | Where-Object {
+                        $_.Pid -eq $pid -and $_.ParentPid -eq $parent.Pid -and
+                        $_.CandidateCreationFileTimeUtc -eq $childCreationFileTimeUtc
+                    }).Count -gt 0
+                    if (-not $alreadyRecorded) {
+                        $script:CapExcludedDescendants.Add([pscustomobject]@{
+                            Pid = $pid
+                            ParentPid = $parent.Pid
+                            ParentCreationFileTimeUtc = [long]$parent.CreationFileTimeUtc
+                            ParentExitFileTimeUtc = $parentExitFileTimeUtc
+                            CandidateCreationFileTimeUtc = $childCreationFileTimeUtc
+                            CandidateImagePath = $meta.ImagePath
+                            CandidateCommandLineSha256 = [Convert]::ToHexString(
+                                [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($meta.CommandLine))
+                            )
+                            Disposition = 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED'
+                        })
+                    }
+                    continue
+                }
+                $null = Assert-CapDescendantLifetime `
+                    -ParentCreationFileTimeUtc ([long]$parent.CreationFileTimeUtc) `
+                    -ChildCreationFileTimeUtc $childCreationFileTimeUtc `
+                    -ParentExitFileTimeUtc $parentExitFileTimeUtc
+                # CIM selects candidates; held native generations establish ancestry.
+                $childAccess = Read-CapProcessAccess -Process $process -Role $identity.Role `
+                    -CallSite 'Get-CapOwnedDescendants.ChildParent' -ExpectedPid $identity.Pid
+                if ([CapNative]::ParentProcessId($childAccess.Handle, $childAccess.Pid) -ne $parent.Pid -or
+                    [CapNative]::SessionId($childAccess.Handle, $childAccess.Pid) -ne $parent.SessionId -or
+                    $meta.ParentPid -ne $parent.Pid -or
+                    $meta.SessionId -ne $parent.SessionId) {
+                    throw "Descendant PID $pid does not match the saved parent generation/session; refusing."
+                }
+                $imagePath = ConvertTo-CapImagePath -Path ([string]$meta.ImagePath)
+                if ($imagePath -ieq (ConvertTo-CapImagePath -Path $ZmxPath)) {
+                    $appClient = $AllowGraphCodeRoot -and (Test-CapGraphAppRootRole -Role $parent.Role)
+                    $validParentRole = $parent.Role -eq 'zmx-seed' -or $appClient
+                    $sessionMatches = if ($appClient) {
+                        Test-CapAppZmxCommand -CommandLine $meta.CommandLine -ZmxPath $ZmxPath `
+                            -SessionPrefix $SessionName -ExactSessionNames $ExactSessionNames
+                    } elseif ($ExactSessionNames.Count -gt 0) {
+                        Test-CapDSessionCommand -CommandLine $meta.CommandLine -SessionNames $ExactSessionNames
+                    } else { $meta.CommandLine -like "*$SessionName*" }
+                    if (-not $validParentRole -or -not $sessionMatches) {
+                        throw "Unrecognized live zmx child PID $pid; refusing."
+                    }
+                    $identity.Role = if ($appClient) { 'zmx-client' } else { 'zmx-daemon' }
+                } elseif ($imagePath -ieq (ConvertTo-CapImagePath -Path $CmdPath)) {
+                    $dSeed = $SessionName -cin @('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
+                    $expectedMarker = if ($dSeed -or $ExactSessionNames.Count -gt 0) {'D_OFFLINE_QUICKCHAT_FIXTURE'} else {$CommandMarker}
+                    $commandMatches = $expectedMarker -and $meta.CommandLine -like "*$expectedMarker*"
+                    if ($parent.Role -notin @('zmx-daemon', 'offline-cmd-peer') -or
+                        (-not $commandMatches -and (-not $AllowUnmarkedCmd -or $dSeed -or $ExactSessionNames.Count -gt 0))) {
+                        throw "Unrecognized live cmd child PID $pid; refusing."
+                    }
+                    $identity.Role = 'offline-cmd-peer'
+                } elseif ($imagePath -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) {
+                    $commandLine = $meta.CommandLine.Trim()
+                    if ($commandLine.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
+                        $commandLine = $commandLine.Substring(4)
+                    } elseif ($commandLine.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+                        $commandLine = $commandLine.Substring(4)
+                    }
+                    $commandParts = @($commandLine -split '\s+')
+                    $knownConhostCommand = $false
+                    if ($commandParts.Count -eq 2) {
+                        $knownConhostCommand =
+                            ((ConvertTo-CapImagePath -Path $commandParts[0]) -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) -and
+                            ($commandParts[1] -match '^0x[0-9a-fA-F]+$')
+                    } elseif ($commandParts.Count -eq 10) {
+                        $knownConhostCommand =
+                            ((ConvertTo-CapImagePath -Path $commandParts[0]) -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) -and
+                            ($commandParts[1] -ceq '--headless') -and
+                            ($commandParts[2] -ceq '--width') -and
+                            ($commandParts[3] -match '^[1-9][0-9]*$') -and
+                            ($commandParts[4] -ceq '--height') -and
+                            ($commandParts[5] -match '^[1-9][0-9]*$') -and
+                            ($commandParts[6] -ceq '--signal') -and
+                            ($commandParts[7] -match '^0x[0-9a-fA-F]+$') -and
+                            ($commandParts[8] -ceq '--server') -and
+                            ($commandParts[9] -match '^0x[0-9a-fA-F]+$')
+                    }
+                    $validConhostParent = $parent.Role -in @('zmx-daemon', 'zmx-client') -or
+                        ($AllowUnmarkedCmd -and $parent.Role -eq 'offline-cmd-peer')
+                    if (-not $validConhostParent -or -not $knownConhostCommand) {
+                        throw "Unrecognized live ConPTY conhost child PID $pid; refusing."
+                    }
+                    $identity.Role = 'conpty-conhost'
+                } else {
+                    throw "Unknown live descendant PID $pid image='$($meta.ImagePath)'; refusing."
+                }
+                $known[$pid] = $identity
+                $OwnedDescendants.Add($identity)
+                $retained = $true
+                $changed = $true
+            } finally {
+                if (-not $retained) { $process.Dispose() }
             }
-            $null = Assert-CapDescendantLifetime `
-                -ParentCreationFileTimeUtc ([long]$parent.CreationFileTimeUtc) `
-                -ChildCreationFileTimeUtc ([long]$meta.CreationFileTimeUtc) `
-                -ParentExitFileTimeUtc $parentExitFileTimeUtc
-            if ($meta.ParentPid -ne $parent.Pid -or
-                $meta.SessionId -ne $parent.SessionId) {
-                $process.Dispose()
-                throw "Descendant PID $pid does not match the saved parent generation/session; refusing."
-            }
-            $imagePath = ConvertTo-CapImagePath -Path ([string]$meta.ImagePath)
-            if ($imagePath -ieq (ConvertTo-CapImagePath -Path $ZmxPath)) {
-                $validParentRole = $parent.Role -eq 'zmx-seed' -or
-                    ($AllowGraphCodeRoot -and (Test-CapGraphAppRootRole -Role $parent.Role))
-                $sessionMatches = if ($ExactSessionNames.Count -gt 0) {
-                    Test-CapDSessionCommand -CommandLine $meta.CommandLine -SessionNames $ExactSessionNames
-                } else { $meta.CommandLine -like "*$SessionName*" }
-                if (-not $validParentRole -or -not $sessionMatches) {
-                    $process.Dispose()
-                    throw "Unrecognized live zmx child PID $pid; refusing."
-                }
-                $identity.Role = 'zmx-daemon'
-            } elseif ($imagePath -ieq (ConvertTo-CapImagePath -Path $CmdPath)) {
-                $dSeed = $SessionName -cin @('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')
-                $expectedMarker = if ($dSeed -or $ExactSessionNames.Count -gt 0) {'D_OFFLINE_QUICKCHAT_FIXTURE'} else {$CommandMarker}
-                $commandMatches = $expectedMarker -and $meta.CommandLine -like "*$expectedMarker*"
-                if ($parent.Role -notin @('zmx-daemon', 'offline-cmd-peer') -or
-                    (-not $commandMatches -and (-not $AllowUnmarkedCmd -or $dSeed -or $ExactSessionNames.Count -gt 0))) {
-                    $process.Dispose()
-                    throw "Unrecognized live cmd child PID $pid; refusing."
-                }
-                $identity.Role = 'offline-cmd-peer'
-            } elseif ($imagePath -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) {
-                $commandLine = $meta.CommandLine.Trim()
-                if ($commandLine.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
-                    $commandLine = $commandLine.Substring(4)
-                } elseif ($commandLine.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
-                    $commandLine = $commandLine.Substring(4)
-                }
-                $commandParts = @($commandLine -split '\s+')
-                $knownConhostCommand = $false
-                if ($commandParts.Count -eq 2) {
-                    $knownConhostCommand =
-                        ((ConvertTo-CapImagePath -Path $commandParts[0]) -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) -and
-                        ($commandParts[1] -match '^0x[0-9a-fA-F]+$')
-                } elseif ($commandParts.Count -eq 10) {
-                    $knownConhostCommand =
-                        ((ConvertTo-CapImagePath -Path $commandParts[0]) -ieq (ConvertTo-CapImagePath -Path $ConhostPath)) -and
-                        ($commandParts[1] -ceq '--headless') -and
-                        ($commandParts[2] -ceq '--width') -and
-                        ($commandParts[3] -match '^[1-9][0-9]*$') -and
-                        ($commandParts[4] -ceq '--height') -and
-                        ($commandParts[5] -match '^[1-9][0-9]*$') -and
-                        ($commandParts[6] -ceq '--signal') -and
-                        ($commandParts[7] -match '^0x[0-9a-fA-F]+$') -and
-                        ($commandParts[8] -ceq '--server') -and
-                        ($commandParts[9] -match '^0x[0-9a-fA-F]+$')
-                }
-                $validConhostParent = $parent.Role -eq 'zmx-daemon' -or
-                    ($AllowUnmarkedCmd -and $parent.Role -eq 'offline-cmd-peer')
-                if (-not $validConhostParent -or -not $knownConhostCommand) {
-                    $process.Dispose()
-                    throw "Unrecognized live ConPTY conhost child PID $pid; refusing."
-                }
-                $identity.Role = 'conpty-conhost'
-            } else {
-                $process.Dispose()
-                throw "Unknown live descendant PID $pid image='$($meta.ImagePath)'; refusing."
-            }
-            $known[$pid] = $identity
-            $children.Add($identity)
-            $changed = $true
         }
         if (-not $changed) { break }
     }
-    return @($children)
+    return @($OwnedDescendants.ToArray())
 }
 
 function Test-CapPipeUnserved {

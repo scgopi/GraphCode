@@ -709,6 +709,7 @@ function New-CapAppRunRecord {
         Window = [IntPtr]::Zero
         SessionPrefix = $SessionPrefix
         CleanupComplete = $false
+        Descendants = [Collections.Generic.List[object]]::new()
     }
 }
 
@@ -776,18 +777,21 @@ function Get-CapTreeForApp {
 
     $dSessions=@{}
     if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {$dSessions.ExactSessionNames=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')}
-    $tree = @(Get-CapOwnedDescendants -Roots @($AppRun.Run.Identity) `
-        -ZmxPath (Join-Path $root 'runtime\zmx.exe') `
-        -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
-        -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
-        -SessionName $AppRun.SessionPrefix -CommandMarker $AppRun.SessionPrefix `
-        -AllowGraphCodeRoot -AllowUnmarkedCmd @dSessions)
-    foreach ($identity in $tree) {
-        Write-CapProcessJournal -Identity $identity -Phase $AppRun.Phase
-        if (-not @($descendantIdentities | Where-Object {
-            $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
-        }).Count) {
-            $descendantIdentities.Add($identity)
+    try {
+        $tree = @(Get-CapOwnedDescendants -Roots @($AppRun.Run.Identity) `
+            -ZmxPath (Join-Path $root 'runtime\zmx.exe') `
+            -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
+            -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
+            -SessionName $AppRun.SessionPrefix -CommandMarker $AppRun.SessionPrefix `
+            -AllowGraphCodeRoot -AllowUnmarkedCmd -OwnedDescendants $AppRun.Descendants @dSessions)
+    } finally {
+        foreach ($identity in $AppRun.Descendants) {
+            if (-not @($descendantIdentities | Where-Object {
+                $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
+            }).Count) {
+                $descendantIdentities.Add($identity)
+                Write-CapProcessJournal -Identity $identity -Phase $AppRun.Phase
+            }
         }
     }
     return $tree
@@ -857,11 +861,8 @@ function Close-CapGraphCodeApp {
             })
         } else {
             try {
-                $null = Get-CapTreeForApp -AppRun $AppRun
-                foreach ($identity in @($descendantIdentities | Where-Object {
-                    $_.Role -in @('offline-cmd-peer', 'conpty-conhost', 'zmx-daemon') -and
-                    $_.Process.Id -ne $run.Identity.Pid
-                } | Sort-Object CreationFileTimeUtc -Descending)) {
+                $tree = @(Get-CapTreeForApp -AppRun $AppRun)
+                foreach ($identity in @($tree | Sort-Object CreationFileTimeUtc -Descending)) {
                     $receipt = Stop-CapManagedProcess -Identity $identity -TimeoutMilliseconds 5000
                     $cleanupReceipts.Add($receipt)
                 }
@@ -873,13 +874,17 @@ function Close-CapGraphCodeApp {
         }
     }
     try {
-        $tree = @(Get-CapTreeForApp -AppRun $AppRun)
-        foreach ($identity in @($tree | Sort-Object CreationFileTimeUtc -Descending)) {
-            $receipt = Stop-CapManagedProcess -Identity $identity -TimeoutMilliseconds 5000
-            $cleanupReceipts.Add($receipt)
-        }
+        $null = Get-CapTreeForApp -AppRun $AppRun
     } catch {
         $cleanupFailures.Add("Post-exit descendant discovery failed for PID $($run.Identity.Pid): $($_.Exception.Message)")
+    }
+    foreach ($identity in @($AppRun.Descendants | Sort-Object CreationFileTimeUtc -Descending)) {
+        try {
+            $receipt = Stop-CapManagedProcess -Identity $identity -TimeoutMilliseconds 5000
+            $cleanupReceipts.Add($receipt)
+        } catch {
+            $cleanupFailures.Add("Guarded app descendant stop failed for PID $($identity.Pid): $($_.Exception.Message)")
+        }
     }
     if (-not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) {
         try {

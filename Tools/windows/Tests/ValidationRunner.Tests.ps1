@@ -4731,7 +4731,7 @@ if ($LASTEXITCODE -ne 0) { throw "RED: offline real-launch capture child failed"
 $uiCaptureSummaries = @($uiCaptureOutput | Where-Object { $_ -is [string] -and $_.StartsWith('{"suite":"UiCaptureDriver",') })
 if ($uiCaptureSummaries.Count -ne 1) { throw "RED: offline real-launch capture structured count missing or duplicated" }
 $uiCaptureSummary = ConvertFrom-Json $uiCaptureSummaries[0]
-if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 140 -or
+if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 149 -or
     $uiCaptureSummary.passed -isnot [long] -or $uiCaptureSummary.passed -ne $uiCaptureSummary.executed -or
     $uiCaptureSummary.failed -isnot [long] -or $uiCaptureSummary.failed -ne 0) {
   throw "RED: offline real-launch capture child has no positive executed/passed contract count"

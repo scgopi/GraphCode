@@ -12,6 +12,7 @@ param(
     [switch]$PreflightReportContractOnly,
     [switch]$SelectorRefusalContractOnly,
     [switch]$IdentityContractOnly,
+    [switch]$AppChildContractOnly,
     [switch]$DAdapterContractOnly,
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
@@ -579,6 +580,10 @@ function Assert-CapRejects {
                 'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
                 'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
                 'GraphCodeUiaGateState|GetClassName|user32.dll|GetClassNameW',
+                'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
+                'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
+                'CapNative|CommandLineToArgvW|shell32.dll|CommandLineToArgvW',
+                'CapNative|LocalFree|kernel32.dll|LocalFree',
                 'CapNative|GetProcessId|kernel32.dll|GetProcessId',
                 'CapNative|GetProcessTimes|kernel32.dll|GetProcessTimes',
                 'CapNative|QueryFullProcessImageNameW|kernel32.dll|QueryFullProcessImageNameW',
@@ -603,8 +608,8 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 26 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static26 export contract differs.'
-            return @{ subcases = 26; evidence = 'API export resolution only, no native window or GUI action.' }
+            Assert-CapTest ($actual.Count -eq 30 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static30 export contract differs.'
+            return @{ subcases = 30; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -717,7 +722,7 @@ function Publish-CapCompileLogSnapshot {
 function New-CapHarmlessTarget {
     $fixture = Join-Path $scratch 'fixture'
     $null = New-Item -ItemType Directory -Path $fixture
-    # This source is the entire target: no GUI, descendants, backend, network, or user data.
+    # No GUI, backend, network or user data; descendants require the private app-child fixture gate.
     $source = @'
 #include <windows.h>
 #include <stdio.h>
@@ -727,6 +732,48 @@ int wmain(int argc, wchar_t **argv) {
     char behavior[64] = {0};
     wchar_t output[32768] = {0}, path[32768] = {0};
     int i, c;
+    if (GetEnvironmentVariableW(L"CAP_APP_CHILD_IMAGE", path, 32768) != 0) {
+        if (argc > 1 && wcscmp(argv[1], L"--cap-app-parent") == 0) {
+            STARTUPINFOW startup = {0};
+            PROCESS_INFORMATION child = {0};
+            FILETIME creation, exitTime, kernel, user;
+            ULARGE_INTEGER stamp;
+            wchar_t tail[2048] = {0}, command[32768] = {0}, receipt[32768] = {0}, pending[32768] = {0};
+            char live[8] = {0};
+            FILE *file = NULL;
+            if (!FreeConsole()) return 87;
+            while ((c = getchar()) != EOF) { (void)c; }
+            if (GetEnvironmentVariableW(L"CAP_APP_CHILD_ARGUMENTS", tail, 2048) == 0 ||
+                GetEnvironmentVariableW(L"CAP_APP_CHILD_RECEIPT", receipt, 32768) == 0) return 81;
+            if (swprintf_s(command, 32768, L"\"%ls\" %ls", path, tail) < 0) return 82;
+            startup.cb = sizeof(startup);
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+            startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            if (!CreateProcessW(path, command, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                NULL, NULL, &startup, &child)) return 83;
+            if (!GetProcessTimes(child.hProcess, &creation, &exitTime, &kernel, &user)) return 84;
+            stamp.LowPart = creation.dwLowDateTime;
+            stamp.HighPart = creation.dwHighDateTime;
+            if (swprintf_s(pending, 32768, L"%ls.pending", receipt) < 0 ||
+                _wfopen_s(&file, pending, L"wb") != 0 || file == NULL) return 85;
+            fprintf(file, "{\"pid\":%lu,\"creationFileTimeUtc\":%llu}", child.dwProcessId, stamp.QuadPart);
+            if (fclose(file) != 0 || !MoveFileW(pending, receipt)) return 86;
+            CloseHandle(child.hThread);
+            CloseHandle(child.hProcess);
+            puts("CAP_APP_PARENT_EXIT");
+            fflush(stdout);
+            if (GetEnvironmentVariableA("CAP_APP_PARENT_LIVE", live, 8) != 0 && strcmp(live, "1") == 0)
+                Sleep(30000);
+            return 0;
+        }
+        puts("CAP_APP_CHILD_READY");
+        fputs("CAP_APP_CHILD_STDERR\n", stderr);
+        fflush(stdout); fflush(stderr);
+        Sleep(30000);
+        return 0;
+    }
     GetEnvironmentVariableA("CAP_REHEARSAL_BEHAVIOR", behavior, 64);
     puts("CAP_READY");
     printf("CAP_ARGC:%d\n", argc - 1);
@@ -1026,6 +1073,231 @@ function Write-CapPrebuiltFixtureManifest {
     $path = Join-Path $scratch 'fixtures.json'
     Write-JournalContractJson $path $manifest
     return [pscustomobject]@{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; files = $files }
+}
+
+function Invoke-CapAppChildCase {
+    param(
+        [string]$Name,
+        [string]$Arguments,
+        [string]$Refusal = '',
+        [string]$ParentRole = 'graphcode-app-before-normal',
+        [switch]$WrongImage,
+        [switch]$WrongGeneration,
+        [switch]$UnrelatedRoot,
+        [switch]$AdvisoryParent,
+        [switch]$LiveParent,
+        [switch]$DiscoverBeforeCleanup,
+        [switch]$DAdapter
+    )
+    $caseRoot = Join-Path $scratch ('app-children\' + $Name)
+    $null = New-Item -ItemType Directory -Path (Join-Path $caseRoot 'runtime'),(Join-Path $caseRoot 'output'),(Join-Path $caseRoot 'journal')
+    $childImage = Join-Path $caseRoot ('runtime\' + $(if ($WrongImage) { 'foreign.exe' } else { 'zmx.exe' }))
+    Copy-Item -LiteralPath $target.executable -Destination $childImage
+    $receiptPath = Join-Path $caseRoot 'child.json'
+    . $workerPath -OwnedRoot $caseRoot -DefinitionsOnly
+    $outputDirectory = Join-Path $caseRoot 'output'
+    $job = [pscustomobject]@{ sceneAdapter = $(if ($DAdapter) { 'D_QUICK_CHAT_V1' } else { 'B_CANVAS_V1' })
+        head = 'NO_DESKTOP_NATIVE_CHILD_FIXTURE'; base = 'NO_DESKTOP_NATIVE_CHILD_FIXTURE' }
+    $auth = [pscustomobject]@{ leaseId = [guid]::NewGuid().ToString()
+        supervisorSha256 = $sourceHashesBefore[$supervisorPath]; preflightReceiptSha256 = 'NOT_LIVE_PREFLIGHT' }
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    $run = $null
+    $child = $null
+    $ownedJob = [CapProcessJob]::Create()
+    $detail = [ordered]@{ command = $Arguments; safetyJobEmpty = $false; finalStdoutEof = $false; finalStderrEof = $false }
+    try {
+        $selfIdentity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName -Role 'app-child-test-owner'
+        $binding = New-CapJournalBinding -RunId ([guid]::NewGuid().ToString()) -LeaseId ([guid]::NewGuid().ToString()) `
+            -JobSha256 ('A' * 64) -ModuleSha256 $sourceHashesBefore[$modulePath] `
+            -WorkerSha256 $sourceHashesBefore[$workerPath] -SupervisorSha256 $sourceHashesBefore[$supervisorPath] -Identity $selfIdentity
+        $journalState = New-CapJournalState -Root $caseRoot -Directory (Join-Path $caseRoot 'journal') `
+            -Binding $binding -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(2))
+        $run = Start-CapManagedProcess -FilePath $target.executable -ArgumentList @('--cap-app-parent') `
+            -WorkingDirectory $caseRoot -Role $ParentRole -HoldStdin -Environment @{
+                CAP_APP_CHILD_IMAGE = $childImage; CAP_APP_CHILD_ARGUMENTS = $Arguments
+                CAP_APP_CHILD_RECEIPT = $receiptPath; TEMP = $caseRoot; TMP = $caseRoot
+                CAP_APP_PARENT_LIVE = $(if ($LiveParent) { '1' } else { '0' })
+            }
+        $runs.Add($run)
+        [CapProcessJob]::Assign($ownedJob, $run.Identity.Process.Handle)
+        $run.Identity.Process.StandardInput.Close()
+        if ($LiveParent) {
+            $spawn = Wait-JournalContractFile $receiptPath ([DateTime]::UtcNow.AddSeconds(5))
+            Assert-CapTest (-not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) `
+                'Live-parent recovery fixture exited before cleanup.'
+        } else {
+            Assert-CapTest ($run.Identity.Process.WaitForExit(5000) -and $run.Identity.Process.ExitCode -eq 0) `
+                'Real app-like parent did not spawn and exit zero after the assignment gate.'
+            $spawn = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+        }
+        $child = [Diagnostics.Process]::GetProcessById([int]$spawn.pid)
+        $childSnapshot = [CapNative]::Snapshot($child.Handle, $child.Id)
+        Assert-CapTest (-not $childSnapshot.IsExited -and $childSnapshot.CreationFileTimeUtc -eq $spawn.creationFileTimeUtc -and
+            [CapProcessJob]::Contains($ownedJob, $child.Handle)) 'Spawned child generation is not live inside the test-owned job.'
+        Assert-CapTest (-not $run.StdoutTask.Wait(100) -and -not $run.StderrTask.Wait(100)) `
+            'Fixture did not reproduce a real child retaining both app output pipes.'
+        $detail.parentPid = $run.Identity.Pid
+        $detail.parentCreationFileTimeUtc = $run.Identity.CreationFileTimeUtc
+        $detail.childPid = $child.Id
+        $detail.childCreationFileTimeUtc = $childSnapshot.CreationFileTimeUtc
+        $detail.inheritedBothPipes = $true
+        $detail.parentInitiallyLive = [bool]$LiveParent
+        $app = New-CapAppRunRecord -Run $run -Phase before -SessionPrefix 'gc-cap-test-before-'
+        Write-CapProcessJournal -Identity $run.Identity -Phase before
+        if ($WrongGeneration) { $run.Identity.CreationFileTimeUtc++ }
+        if ($AdvisoryParent) {
+            $metadata = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($child.Id)" -ErrorAction Stop
+            $advisory = [pscustomobject]@{
+                ProcessId = $metadata.ProcessId; ParentProcessId = $selfIdentity.Pid; SessionId = $metadata.SessionId
+                CreationDate = $metadata.CreationDate; ExecutablePath = $metadata.ExecutablePath; CommandLine = $metadata.CommandLine
+            }
+            $module = Get-Module UiCaptureDriver
+            $other = $selfIdentity.PSObject.Copy()
+            $other.Role = 'graphcode-app-before-normal'
+            try {
+                & $module {
+                    param($Row)
+                    if (Test-Path Function:Get-CimInstance) { throw 'Unexpected existing metadata test seam.' }
+                    $script:CapAppChildAdvisoryRow = $Row
+                    function script:Get-CimInstance {
+                        param($ClassName, $Filter, $ErrorAction)
+                        if ($ClassName -cne 'Win32_Process' -or $Filter -cnotin @(
+                            "ProcessId = $($script:CapAppChildAdvisoryRow.ProcessId)",
+                            "ParentProcessId = $($script:CapAppChildAdvisoryRow.ParentProcessId)"
+                        )) { throw "Unexpected advisory-only metadata query: $ClassName $Filter" }
+                        return $script:CapAppChildAdvisoryRow
+                    }
+                } $advisory
+                $detail.refusal = Assert-CapRejects {
+                    Get-CapOwnedDescendants -Roots @($other) -ZmxPath $childImage `
+                        -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
+                        -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
+                        -SessionName $app.SessionPrefix -CommandMarker $app.SessionPrefix -AllowGraphCodeRoot
+                } 'does not match the saved parent generation/session'
+                Assert-CapTest (-not [CapNative]::IsExited($child.Handle, $child.Id)) `
+                    'Advisory metadata caused termination despite native parent mismatch.'
+            } finally {
+                & $module {
+                    Remove-Item Function:Get-CimInstance -ErrorAction SilentlyContinue
+                    Remove-Variable CapAppChildAdvisoryRow -Scope Script -ErrorAction SilentlyContinue
+                }
+            }
+        } elseif ($UnrelatedRoot) {
+            $other = $selfIdentity.PSObject.Copy()
+            $other.Role = 'graphcode-app-before-normal'
+            $found = @(Get-CapOwnedDescendants -Roots @($other) -ZmxPath (Join-Path $caseRoot 'runtime\zmx.exe') `
+                -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
+                -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
+                -SessionName $app.SessionPrefix -CommandMarker $app.SessionPrefix -AllowGraphCodeRoot)
+            Assert-CapTest ($found.Count -eq 0 -and -not [CapNative]::IsExited($child.Handle, $child.Id)) `
+                'A zmx child of a different held parent was adopted or terminated.'
+        } elseif ($Refusal) {
+            $message = Assert-CapRejects { Get-CapTreeForApp -AppRun $app } $Refusal
+            Assert-CapTest (-not [CapNative]::IsExited($child.Handle, $child.Id) -and $descendantIdentities.Count -eq 0) `
+                'Rejected child was mutated or registered as owned.'
+            $detail.refusal = $message
+        } else {
+            if ($DiscoverBeforeCleanup) {
+                $first = @(Get-CapTreeForApp -AppRun $app)
+                $second = @(Get-CapTreeForApp -AppRun $app)
+                Assert-CapTest ($first.Count -gt 0 -and $second.Count -eq $first.Count -and
+                    [object]::ReferenceEquals($first[0], $second[0])) 'Repeated discovery discarded a held guarded generation.'
+            }
+            $null = Close-CapGraphCodeApp -AppRun $app -NormalExit
+            Assert-CapTest ($cleanupFailures.Count -eq 0) ($cleanupFailures -join '; ')
+            Assert-CapTest ($app.CleanupComplete -and [CapNative]::IsExited($child.Handle, $child.Id) -and
+                $run.StdoutTask.IsCompletedSuccessfully -and $run.StderrTask.IsCompletedSuccessfully) `
+                'Production app cleanup did not prove held child exit and both actual app stream EOFs.'
+            $proof = @(Get-CapWorkerProcessReceipts)
+            $clients = @($descendantIdentities | Where-Object Role -CEQ 'zmx-client')
+            Assert-CapTest ($proof.Count -eq (1 + $descendantIdentities.Count) -and @($proof | Where-Object {
+                -not $_.kernelExited -or -not $_.stdoutEof -or -not $_.stderrEof
+            }).Count -eq 0 -and $clients.Count -eq 1 -and $clients[0].Pid -eq $child.Id -and
+                @($descendantIdentities | Where-Object Role -CNotIn @('zmx-client','conpty-conhost')).Count -eq 0 -and
+                $proof[1].streamOwnerPid -eq $run.Identity.Pid -and
+                $proof[1].streamOwnerCreationFileTimeUtc -eq $run.Identity.CreationFileTimeUtc) `
+                'Actual worker receipts do not bind the guarded client to its held app stream owner.'
+            Assert-CapTest ($run.StdoutTask.Result.Contains('CAP_APP_CHILD_READY') -and
+                $run.StderrTask.Result.Contains('CAP_APP_CHILD_STDERR')) 'Inherited app output was not actually drained.'
+            $detail.receipts = $proof
+        }
+    } catch {
+        $detail.primaryFailure = $_.Exception.ToString()
+        throw
+    } finally {
+        try {
+            [CapProcessJob]::Terminate($ownedJob)
+            [CapProcessJob]::WaitForEmpty($ownedJob, 5000)
+            $detail.safetyJobEmpty = [CapProcessJob]::Active($ownedJob) -eq 0
+        } finally { [CapProcessJob]::Close($ownedJob) }
+        if ($run) {
+            $detail.finalStdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully
+            $detail.finalStderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully
+        }
+        foreach ($identity in $descendantIdentities) { $identity.Process.Dispose() }
+        if ($child) { $child.Dispose() }
+        if ($run) { $run.Identity.Process.Dispose() }
+        $self.Dispose()
+        Write-JournalContractJson (Join-Path $caseRoot 'ownership-evidence.json') $detail
+        Assert-CapTest ($detail.safetyJobEmpty -and ($null -eq $run -or ($detail.finalStdoutEof -and $detail.finalStderrEof))) `
+            'Test-owned safety job or inherited pipes remained unclosed.'
+    }
+    return $detail
+}
+
+function Invoke-CapAppChildContracts {
+    Invoke-CapTest 'app seeded zmx attach child exits through guarded production cleanup with actual app EOF' {
+        Invoke-CapAppChildCase 'seeded-attach' 'attach graphcode-11111111-1111-4111-8111-000000000001 --size 80x24'
+    }
+    Invoke-CapTest 'app zmx listing child exits through guarded production cleanup with actual app EOF' {
+        Invoke-CapAppChildCase 'listing' 'ls'
+    }
+    Invoke-CapTest 'live app recovery stops only its guarded zmx tree and drains actual app EOF' {
+        Invoke-CapAppChildCase 'live-parent' 'ls' -LiveParent -DiscoverBeforeCleanup
+    }
+    Invoke-CapTest 'app shell attach resize and kill use exact owned session arguments' {
+        $session = 'graphcode-gc-cap-test-before--01234567-89ab-4cde-8fab-0123456789ab'
+        return @(
+            Invoke-CapAppChildCase 'shell-attach' "attach $session --size 80x24" -DiscoverBeforeCleanup
+            Invoke-CapAppChildCase 'shell-resize' "resize $session 100x30"
+            Invoke-CapAppChildCase 'shell-kill' "kill $session --force"
+        )
+    }
+    Invoke-CapTest 'app zmx command gate refuses foreign sessions malformed options and daemon commands without mutation' {
+        $bad = @(
+            'attach graphcode-foreign --size 80x24',
+            'attach graphcode-11111111-1111-4111-8111-000000000001-foreign --size 80x24',
+            'ls graphcode-gc-cap-test-before--01234567-89ab-4cde-8fab-0123456789ab',
+            'resize graphcode-11111111-1111-4111-8111-000000000001 invalid',
+            'kill graphcode-11111111-1111-4111-8111-000000000001 graphcode-foreign --force',
+            'run graphcode-gc-cap-test-before--01234567-89ab-4cde-8fab-0123456789ab',
+            'attach graphcode-gc-cap-test-before--01234567-89ab-4cde-8fab-0123456789ab --size 0x24'
+        )
+        return @(for ($i = 0; $i -lt $bad.Count; $i++) {
+            Invoke-CapAppChildCase "bad-command-$i" $bad[$i] -Refusal 'Unrecognized live zmx child'
+        })
+    }
+    Invoke-CapTest 'app child gate refuses wrong image parent role and held generation without mutation' {
+        return @(
+            Invoke-CapAppChildCase 'wrong-image' 'ls' -WrongImage -Refusal 'Unknown live descendant'
+            Invoke-CapAppChildCase 'wrong-role' 'ls' -ParentRole 'unrelated-parent' -Refusal 'Unrecognized live zmx child'
+            Invoke-CapAppChildCase 'wrong-generation' 'ls' -WrongGeneration -Refusal 'Held parent generation changed'
+        )
+    }
+    Invoke-CapTest 'app child gate does not adopt a zmx child of an unrelated held parent' {
+        Invoke-CapAppChildCase 'unrelated-parent' 'ls' -UnrelatedRoot
+    }
+    Invoke-CapTest 'app child native ancestry refuses forged advisory parent metadata for a real owned fixture' {
+        Invoke-CapAppChildCase 'advisory-parent' 'ls' -AdvisoryParent
+    }
+    Invoke-CapTest 'D app client cleanup accepts exact declared sessions and rejects prefix lookalikes' {
+        return @(
+            Invoke-CapAppChildCase 'd-primary' 'attach graphcode-33333333-3333-4333-8333-333333333333 --size 80x24' -DAdapter
+            Invoke-CapAppChildCase 'd-history' 'resize graphcode-44444444-4444-4444-8444-444444444444 80x24' -DAdapter
+            Invoke-CapAppChildCase 'd-foreign' 'attach graphcode-33333333-3333-4333-8333-333333333333-foreign --size 80x24' `
+                -DAdapter -Refusal 'Unrecognized live zmx child'
+        )
+    }
 }
 
 function Invoke-CapCaptureCommand {
@@ -3996,6 +4268,17 @@ $target = $null
 try {
     $prebuilt = Read-CapPrebuiltFixtures $PrebuiltFixtureManifest $PrebuiltFixtureManifestSha256
     $target = $prebuilt.Target
+    if ($AppChildContractOnly) {
+        Invoke-CapAppChildContracts
+        $passed = @($results | Where-Object passed -EQ $true).Count
+        $failed = @($results | Where-Object passed -EQ $false).Count
+        $report = [pscustomobject]@{ suite = 'UiCaptureAppChildContracts'; executed = $results.Count; passed = $passed
+            failed = $failed; cases = @($results); gui = 'NotExecuted'; images = 0 }
+        $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'app-child-report.json') -Encoding utf8NoBOM
+        $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+        if ($results.Count -ne 9 -or $passed -ne 9 -or $failed -ne 0) { exit 1 }
+        exit 0
+    }
     if ($DAdapterContractOnly) {
         Invoke-CapDContracts
         Write-CapDContractReport
@@ -4013,6 +4296,7 @@ try {
     } else {
     $cimRaceTarget = $prebuilt.CimRace
     if (-not $LaunchContractOnly) {
+        Invoke-CapAppChildContracts
         Invoke-CapDContracts
         Invoke-CapIdentityContracts
         Invoke-CapSelectorRefusalContracts
@@ -5022,6 +5306,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 143 } else { 140 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 152 } else { 149 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0
