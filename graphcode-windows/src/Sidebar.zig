@@ -208,12 +208,14 @@ pub fn draw(
         const bounds = rowBounds(row);
         switch (row.kind) {
             .local_heading => {
-                drawDisclosureIcon(hdc, rect(18, row.top + 6, 30, row.top + 18), state.local_collapsed, 0x007A7A7A);
-                drawTextRect(hdc, allocator, row.project_name orelse "Local Projects", rect(36, row.top, 198, row.top + 20), 10, 0x007A7A7A, loop_text_format);
+                drawStyledTextRect(hdc, allocator, row.project_name orelse "Local Projects", rect(18, row.top, 198, row.top + 20), 11, .semibold, 0x00909090, loop_text_format);
+                if (hover_y >= bounds.top and hover_y < bounds.bottom)
+                    drawDisclosureIcon(hdc, rect(198, row.top, 220, row.top + 20), state.local_collapsed, 0x00909090);
             },
             .remote_heading => {
-                drawDisclosureIcon(hdc, rect(18, row.top + 6, 30, row.top + 18), state.remote_collapsed, 0x007A7A7A);
-                drawTextRect(hdc, allocator, row.project_name orelse "Remote Repositories", rect(36, row.top, 198, row.top + 20), 10, 0x007A7A7A, loop_text_format);
+                drawStyledTextRect(hdc, allocator, row.project_name orelse "Remote Repositories", rect(18, row.top, 198, row.top + 20), 11, .semibold, 0x00909090, loop_text_format);
+                if (hover_y >= bounds.top and hover_y < bounds.bottom)
+                    drawDisclosureIcon(hdc, rect(198, row.top, 220, row.top + 20), state.remote_collapsed, 0x00909090);
             },
             .project => {
                 const project = model.recent_projects.items[row.index];
@@ -223,8 +225,8 @@ pub fn draw(
             .overview => {
                 if (navigationRowSelected(row, surface, model.selected_project_path))
                     fill(hdc, bounds, 0x003A3A44);
-                drawOutlineIcon(hdc, .graph, rect(18, row.top + 8, 32, row.top + 22), 0x007AB8FF);
-                drawTextRect(hdc, allocator, "Graph", rect(40, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
+                drawOutlineIcon(hdc, .graph, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
+                drawTextRect(hdc, allocator, "Graph", rect(44, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom and row.has_graph) {
                     drawPlusIcon(hdc, newLoopBounds(row), 0x00B8B8B8);
                     if (row.has_children) drawDisclosureIcon(hdc, disclosureBounds(row), state.isProjectCollapsed(global_project_path), 0x00B8B8B8);
@@ -235,13 +237,13 @@ pub fn draw(
                 if (selected) fill(hdc, bounds, 0x003A3A44);
                 const graph = graphForProject(model, path);
                 const remote = if (graph) |value| value.project().isRemote() else std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
-                drawOutlineIcon(hdc, if (remote) .remote_folder else .local_folder, rect(18, row.top + 8, 32, row.top + 22), 0x007A7A7A);
+                drawOutlineIcon(hdc, if (remote) .remote_folder else .local_folder, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
                 drawTextRect(
                     hdc,
                     allocator,
                     row.project_name orelse path,
-                    rect(40, row.top + 5, 172, row.top + 27),
-                    12,
+                    rect(44, row.top + 5, 172, row.top + 27),
+                    13,
                     if (selected) 0x00FFFFFF else 0x00D0D0D0,
                     loop_text_format,
                 );
@@ -254,17 +256,25 @@ pub fn draw(
                 const nodes = graph.nodes();
                 if (row.index < nodes.len) {
                     const node = nodes[row.index];
-                    const indent = @as(i32, @intCast(row.depth * 12));
-                    if (row.depth != 0) drawText(hdc, allocator, ">", 28 + indent, row.top, 9, 0x006A6A6A);
-                    fill(hdc, rect(30 + indent, row.top - 2, 33 + indent, row.top + 17), loopAccent(node.loop_type));
-                    const text = loopRowTextRects(row.top, row.depth);
-                    drawTextRect(hdc, allocator, node.title, text.title, 11, 0x00E6E6E6, loop_text_format);
-                    drawTextRect(hdc, allocator, compactState(node.state), text.state, 9, stateColor(node.state), loop_text_format);
-                    const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch null;
+                    const indent = loopIndent(row.depth);
+                    const elapsed = elapsedText(allocator, @intCast(node.created_at orelse 0), std.time.timestamp()) catch |err| blk: {
+                        std.log.err("Sidebar elapsed label failed: {s}", .{@errorName(err)});
+                        break :blk null;
+                    };
                     defer if (elapsed) |value| allocator.free(value);
-                    if (elapsed) |value| drawTextRect(hdc, allocator, value, text.age, 9, 0x008E8E93, loop_text_format | c.DT_RIGHT);
-                    if (row.has_children and hover_y >= bounds.top and hover_y < bounds.bottom)
-                        drawDisclosureIcon(hdc, rect(198, row.top + 4, 220, row.top + 20), !state.isNodeExpanded(node.id), 0x00B8B8B8);
+                    const age_width = if (elapsed) |value| measuredAgeWidth(hdc, value) catch |err| blk: {
+                        std.log.err("Sidebar age measurement failed: {s}", .{@errorName(err)});
+                        break :blk loop_age_width;
+                    } else loop_age_width;
+                    const text = loopRowTextRectsForAgeWidth(row.top, row.depth, age_width);
+                    // Deep trees elide the title, never the fixed age/state/control columns.
+                    if (37 + indent <= text.age.left - loop_text_gap)
+                        drawLoopStripe(hdc, rect(34 + indent, row.top + 3, 37 + indent, row.top + 17), loopAccent(node.loop_type));
+                    drawStyledTextRect(hdc, allocator, node.title, text.title, 12.5, .regular, 0x00E6E6E6, loop_text_format);
+                    drawStateIndicator(hdc, node.state, text.state);
+                    if (elapsed) |value| drawStyledTextRect(hdc, allocator, value, text.age, 10.5, .card_mono, 0x00908E8E, loop_text_format | c.DT_RIGHT);
+                    if (row.has_children)
+                        drawDisclosureIcon(hdc, rect(198, row.top + 4, 220, row.top + 20), !state.isNodeExpanded(node.id), if (hover_y >= bounds.top and hover_y < bounds.bottom) 0x00B8B8B8 else 0x006A6A6A);
                 }
             },
             .worktree => if (inspection) |value| {
@@ -285,18 +295,15 @@ pub fn draw(
             .quick_chat_overview => {
                 const selected = navigationRowSelected(row, surface, model.selected_project_path);
                 if (selected) fill(hdc, bounds, 0x003A3A44);
-                if (state.chats_collapsed) {
-                    drawDisclosureIcon(hdc, rect(18, row.top + 9, 30, row.top + 21), true, 0x007A7A7A);
-                }
-                drawOutlineIcon(hdc, .chat, rect(34, row.top + 8, 48, row.top + 22), 0x007A7A7A);
-                drawTextRect(hdc, allocator, "Quick Chats", rect(54, row.top + 5, 172, row.top + 27), 13, if (selected) 0x00FFFFFF else 0x00E6E6E6, loop_text_format);
+                drawOutlineIcon(hdc, .chat, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
+                drawTextRect(hdc, allocator, "Quick Chats", rect(44, row.top + 5, 172, row.top + 27), 13, if (selected) 0x00FFFFFF else 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom) {
                     drawPlusIcon(hdc, newChatBounds(row), 0x00B8B8B8);
                     if (row.has_children) drawDisclosureIcon(hdc, chatsDisclosureBounds(row), state.chats_collapsed, 0x00B8B8B8);
                 }
             },
             .quick_chat => if (row.index < model.quick_chats.items.len)
-                drawTextRect(hdc, allocator, model.quick_chats.items[row.index].title, rect(42, row.top + 5, Tokens.sidebar_width - 12, row.top + 27), 11, 0x00E6E6E6, loop_text_format),
+                drawTextRect(hdc, allocator, model.quick_chats.items[row.index].title, rect(34, row.top + 5, Tokens.sidebar_width - 12, row.top + 27), 13, 0x00E6E6E6, loop_text_format),
         }
     }
 
@@ -378,24 +385,35 @@ pub fn draw(
 }
 
 const loop_text_format: c.UINT = c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
-const loop_age_right: i32 = 198;
-const loop_age_width: i32 = 28;
-const loop_state_width: i32 = 44;
+const loop_age_right: i32 = 176;
+const loop_age_width: i32 = 56;
 const loop_text_gap: i32 = 4;
 
 pub const LoopRowText = struct { title: c.RECT, state: c.RECT, age: c.RECT };
 
-/// Disjoint columns for a loop row's title, status label, and age. The age is right-aligned
-/// against the hover disclosure's hit zone (x >= 198), the status sits left of it, and the
-/// title takes the rest, so each label elides inside its own column instead of overlapping
-/// its neighbour at the default sidebar width.
+fn loopIndent(depth: usize) i32 {
+    return @as(i32, @intCast(@min(depth, 9))) * 16;
+}
+
+/// AppSidebarView.nodeRow: title, monospaced age, then a 7pt state indicator.
+/// Keep all three clear of the existing disclosure hit zone (x >= 198).
 pub fn loopRowTextRects(row_top: i32, depth: usize) LoopRowText {
-    const indent = @as(i32, @intCast(depth * 12));
-    const age = rect(loop_age_right - loop_age_width, row_top, loop_age_right, row_top + 17);
-    const state = rect(age.left - loop_text_gap - loop_state_width, row_top, age.left - loop_text_gap, row_top + 17);
-    const title_left = 39 + indent;
-    const title_right = @max(state.left - loop_text_gap, title_left);
-    return .{ .title = rect(title_left, row_top, title_right, row_top + 19), .state = state, .age = age };
+    return loopRowTextRectsForAgeWidth(row_top, depth, loop_age_width);
+}
+
+fn loopRowTextRectsForAgeWidth(row_top: i32, depth: usize, age_width: i32) LoopRowText {
+    const age = rect(loop_age_right - std.math.clamp(age_width, 1, loop_age_width), row_top + 1, loop_age_right, row_top + 20);
+    const state = rect(age.right + 7, row_top + 7, age.right + 14, row_top + 14);
+    const title_right = age.left - loop_text_gap;
+    const title_left = @min(44 + loopIndent(depth), title_right);
+    return .{ .title = rect(title_left, row_top + 1, title_right, row_top + 20), .state = state, .age = age };
+}
+
+fn measuredAgeWidth(hdc: c.HDC, label: []const u8) !i32 {
+    const font = AppFont.getStyle(10.5, .card_mono) orelse return error.AgeFontUnavailable;
+    const previous = c.SelectObject(hdc, font);
+    defer _ = c.SelectObject(hdc, previous);
+    return measuredWidth(hdc, label);
 }
 
 /// Top edge of the scrollable sidebar content, 3 px above the first row's top so a row's
@@ -505,10 +523,11 @@ pub const ActivityViewport = struct {
 };
 
 fn loopAccent(loop_type: []const u8) u32 {
-    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x0048C78E;
-    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x00D6A649;
-    if (std.mem.eql(u8, loop_type, "composite")) return 0x00C77DFF;
-    return 0x007AB8FF;
+    if (std.mem.eql(u8, loop_type, "goalBased")) return 0x00709E19;
+    if (std.mem.eql(u8, loop_type, "timeBased")) return 0x000085C9;
+    if (std.mem.eql(u8, loop_type, "turnBased")) return 0x008151D5;
+    if (std.mem.eql(u8, loop_type, "composite")) return 0x00E98590;
+    return 0x00E3DAD3;
 }
 
 fn compactState(state: []const u8) []const u8 {
@@ -551,8 +570,15 @@ fn elapsedText(allocator: std.mem.Allocator, created_at: i64, now: i64) ![]u8 {
     const seconds = now - created_at;
     if (seconds < 60) return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
     if (seconds < 3600) return std.fmt.allocPrint(allocator, "{d}m", .{@divTrunc(seconds, 60)});
-    if (seconds < 86400) return std.fmt.allocPrint(allocator, "{d}h", .{@divTrunc(seconds, 3600)});
-    return std.fmt.allocPrint(allocator, "{d}d", .{@divTrunc(seconds, 86400)});
+    const hours = @mod(@divTrunc(seconds, 3600), 24);
+    const minutes = @mod(@divTrunc(seconds, 60), 60);
+    if (seconds < 86400) {
+        if (minutes != 0) return std.fmt.allocPrint(allocator, "{d}h {d}m", .{ hours, minutes });
+        return std.fmt.allocPrint(allocator, "{d}h", .{hours});
+    }
+    const days = @divTrunc(seconds, 86400);
+    if (hours != 0) return std.fmt.allocPrint(allocator, "{d}d {d}h", .{ days, hours });
+    return std.fmt.allocPrint(allocator, "{d}d", .{days});
 }
 
 pub const Surface = enum { project, overview, quick_chats, workspace };
@@ -1367,7 +1393,8 @@ test "worktree row hit testing uses generated visible rows" {
         for (rows.items) |row| {
             if (row.kind == .worktree and row.index == 0) break row;
         } else return error.TestUnexpectedResult,
-        for (rows.items) |row| {
+        for (rows.items) |row|
+        {
             if (row.kind == .worktree and row.index == 1) break row;
         } else return error.TestUnexpectedResult,
     };
@@ -2084,8 +2111,221 @@ test "quick chat rows use the navigation row height after graph loops" {
     try std.testing.expectEqual(@as(usize, 1), countRows(rows.items, .quick_chat));
 }
 
+test "sidebar row parity uses the macOS kind stripe palette" {
+    const kinds = [_][]const u8{ "sketch", "goalBased", "timeBased", "turnBased", "composite" };
+    const colors = [_]u32{ 0x00E3DAD3, 0x00709E19, 0x000085C9, 0x008151D5, 0x00E98590 };
+    for (kinds, colors) |kind, color| try std.testing.expectEqual(color, loopAccent(kind));
+}
+
+test "sidebar row parity retains remainder units in elapsed time" {
+    const allocator = std.testing.allocator;
+    const base: i64 = 788918400;
+    const ages = [_]i64{ 3660, 7199, 90000, 172799 };
+    const labels = [_][]const u8{ "1h 1m", "1h 59m", "1d 1h", "1d 23h" };
+    for (ages, labels) |seconds, expected| {
+        const actual = try elapsedText(allocator, base, base + seconds);
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "sidebar row parity orders title age and a seven pixel trailing state" {
+    for (0..5) |depth| {
+        const text = loopRowTextRects(100, depth);
+        try std.testing.expect(text.title.left < text.title.right);
+        try std.testing.expect(text.title.right <= text.age.left);
+        try std.testing.expect(text.age.right < text.state.left);
+        try std.testing.expectEqual(@as(i32, 7), text.state.right - text.state.left);
+        try std.testing.expectEqual(@as(i32, 7), text.state.bottom - text.state.top);
+        try std.testing.expect(text.state.right <= 198);
+    }
+    const root = loopRowTextRects(100, 0);
+    const child = loopRowTextRects(100, 1);
+    try std.testing.expectEqual(@as(i32, 16), child.title.left - root.title.left);
+    for ([_]i32{ 0, 12, 56, 100 }) |width| for (0..32) |depth| {
+        const text = loopRowTextRectsForAgeWidth(100, depth, width);
+        try std.testing.expect(text.title.left <= text.title.right);
+        try std.testing.expect(text.title.right < text.age.left);
+        try std.testing.expect(text.age.left < text.age.right);
+        try std.testing.expect(text.age.right < text.state.left);
+        try std.testing.expectEqual(root.state, text.state);
+    };
+}
+
+test "sidebar row parity paints solid and hollow states on the production draw path" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\parity","name":"Parity"},"nodes":[{"id":"asking","title":"Question","loopType":"turnBased","state":"awaitingInput"},{"id":"blocked","title":"Blocked","loopType":"goalBased","state":"blocked"},{"id":"running","title":"Working","loopType":"sketch","state":"running"},{"id":"waiting","title":"Waiting","loopType":"composite","state":"waiting"},{"id":"done","title":"Finished","loopType":"timeBased","state":"succeeded"},{"id":"failed","title":"Failed","state":"failed"},{"id":"stalled","title":"Stalled","state":"stalled"},{"id":"stopped","title":"Stopped","state":"stopped"},{"id":"idle","title":"Idle","state":"idle"}],"edges":[]}}}
+    );
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    draw(bitmap.hdc, &model, .overview, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    const colors = [_]u32{ 0x000A9FFF, 0x000A9FFF, 0x00FF840A, 0x00FF840A, 0x0058D130, 0x003A45FF, 0x00F25ABF, 0x006F6C6C, 0x006F6C6C };
+    var checked: usize = 0;
+    for (rows.items) |row| {
+        if (row.kind != .loop) continue;
+        const indicator = loopRowTextRects(row.top, row.depth).state;
+        const center = c.GetPixel(bitmap.hdc, 186, row.top + 10);
+        const hollow = row.index == 1 or row.index == 3 or row.index == 7;
+        if (hollow) {
+            try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), center);
+        } else {
+            try std.testing.expectEqual(colors[row.index], center);
+        }
+        var outline_pixels: usize = 0;
+        var y = indicator.top;
+        while (y < indicator.bottom) : (y += 1) {
+            var x = indicator.left;
+            while (x < indicator.right) : (x += 1) {
+                if (c.GetPixel(bitmap.hdc, x, y) != Tokens.workspace_rail) outline_pixels += 1;
+            }
+        }
+        try std.testing.expect(outline_pixels > 0);
+        const node = graphForProject(&model, row.project_path.?).?.nodes()[row.index];
+        const stripe_color = loopAccent(node.loop_type);
+        var stripe_pixels: usize = 0;
+        var stripe_rows: usize = 0;
+        y = row.top - 2;
+        while (y < row.top + 22) : (y += 1) {
+            var pixels_on_row: usize = 0;
+            var x: i32 = 28;
+            while (x < 40) : (x += 1) {
+                if (c.GetPixel(bitmap.hdc, x, y) != stripe_color) continue;
+                try std.testing.expect(x >= 34 and x < 37);
+                try std.testing.expect(y >= row.top + 3 and y < row.top + 17);
+                pixels_on_row += 1;
+                stripe_pixels += 1;
+            }
+            if (pixels_on_row != 0) stripe_rows += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 14), stripe_rows);
+        try std.testing.expect(stripe_pixels >= 28 and stripe_pixels <= 42);
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 9), checked);
+}
+
+test "sidebar row parity keeps section controls trailing and header icons aligned" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendTestOpenProject(allocator, &model, "C:\\local", "Local");
+    try appendTestOpenProject(allocator, &model, "ssh://host/remote", "Remote");
+    var state = State.init(allocator);
+    defer state.deinit();
+    state.chats_collapsed = true;
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    var headers_checked: usize = 0;
+    var sections_checked: usize = 0;
+    for (rows.items) |row| {
+        switch (row.kind) {
+            .overview, .quick_chat_overview, .open_project => {
+                var icon_pixels: usize = 0;
+                var y = row.top + 5;
+                while (y < row.top + 24) : (y += 1) {
+                    var x: i32 = 18;
+                    while (x < 34) : (x += 1) {
+                        if (c.GetPixel(bitmap.hdc, x, y) == 0x00E6E6E6) icon_pixels += 1;
+                    }
+                }
+                try std.testing.expect(icon_pixels >= 10);
+                headers_checked += 1;
+            },
+            .local_heading, .remote_heading => {
+                var y = row.top;
+                while (y < row.top + 20) : (y += 1) {
+                    var x: i32 = 198;
+                    while (x < 220) : (x += 1)
+                        try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, x, y));
+                }
+                draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                var chevron_pixels: usize = 0;
+                y = row.top;
+                while (y < row.top + 20) : (y += 1) {
+                    var x: i32 = 198;
+                    while (x < 220) : (x += 1) {
+                        if (c.GetPixel(bitmap.hdc, x, y) != Tokens.workspace_rail) chevron_pixels += 1;
+                    }
+                }
+                try std.testing.expect(chevron_pixels > 0);
+                sections_checked += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), headers_checked);
+    try std.testing.expectEqual(@as(usize, 2), sections_checked);
+}
+
+test "sidebar row parity gives short elapsed labels spare title space" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const frame = try std.fmt.allocPrint(allocator,
+        \\{{"version":2,"kind":"event","sequence":1,"event":{{"graphChanged":{{"project":{{"path":"C:\\parity","name":"Parity"}},"nodes":[{{"id":"loop","title":"MMMMMMMMM","state":"idle","createdAt":{d}}}],"edges":[]}}}}}}
+    , .{std.time.timestamp() - 978_307_200 - 180});
+    defer allocator.free(frame);
+    _ = try model.updateFromFrame(frame);
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    draw(bitmap.hdc, &model, .overview, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    const loop = for (rows.items) |row| {
+        if (row.kind == .loop) break row;
+    } else return error.TestUnexpectedResult;
+    var title_pixels: usize = 0;
+    var y = loop.top;
+    while (y < loop.top + 20) : (y += 1) {
+        var x: i32 = 120;
+        while (x < 150) : (x += 1) {
+            if (c.GetPixel(bitmap.hdc, x, y) != Tokens.workspace_rail) title_pixels += 1;
+        }
+    }
+    try std.testing.expect(title_pixels > 20);
+}
+
+const TestSidebarBitmap = struct {
+    hdc: c.HDC,
+    bitmap: c.HBITMAP,
+    previous: c.HGDIOBJ,
+
+    fn init() !TestSidebarBitmap {
+        const hdc = c.CreateCompatibleDC(null) orelse return error.CreateMemoryDcFailed;
+        errdefer _ = c.DeleteDC(hdc);
+        var info = std.mem.zeroes(c.BITMAPINFO);
+        info.bmiHeader.biSize = @sizeOf(c.BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 256;
+        info.bmiHeader.biHeight = -800;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = c.BI_RGB;
+        var pixels: ?*anyopaque = null;
+        const bitmap = c.CreateDIBSection(hdc, &info, c.DIB_RGB_COLORS, &pixels, null, 0) orelse return error.CreateMemoryBitmapFailed;
+        return .{ .hdc = hdc, .bitmap = bitmap, .previous = c.SelectObject(hdc, bitmap) };
+    }
+
+    fn deinit(self: *TestSidebarBitmap) void {
+        _ = c.SelectObject(self.hdc, self.previous);
+        _ = c.DeleteObject(self.bitmap);
+        _ = c.DeleteDC(self.hdc);
+    }
+};
+
 test "sidebar loop presentation preserves type and terminal states" {
-    try std.testing.expectEqual(@as(u32, 0x0048C78E), loopAccent("goalBased"));
+    try std.testing.expectEqual(@as(u32, 0x00709E19), loopAccent("goalBased"));
     try std.testing.expectEqualStrings("done", compactState("succeeded"));
     try std.testing.expectEqualStrings("running", compactState("running"));
     try std.testing.expectEqual(@as(u32, 0x005F5FFF), stateColor("failed"));
@@ -2145,16 +2385,16 @@ test "elapsedText renders a compact age and its unit boundaries honestly" {
     defer allocator.free(one_hour);
     try std.testing.expectEqualStrings("1h", one_hour);
 
-    // Hours stay hours up to the 86399s/86400s boundary, where the unit flips to days.
+    // The sidebar shares LoopCardPresentation.duration's remainder units.
     const twenty_three_hours = try elapsedText(allocator, base, base + 86399);
     defer allocator.free(twenty_three_hours);
-    try std.testing.expectEqualStrings("23h", twenty_three_hours);
+    try std.testing.expectEqualStrings("23h 59m", twenty_three_hours);
 
     const one_day = try elapsedText(allocator, base, base + 86400);
     defer allocator.free(one_day);
     try std.testing.expectEqualStrings("1d", one_day);
 
-    // Multi-day ages keep truncating to whole days rather than rolling into weeks.
+    // Multi-day ages keep days and hours, omitting minutes rather than rolling into weeks.
     const ten_days = try elapsedText(allocator, base, base + 86400 * 10 + 3599);
     defer allocator.free(ten_days);
     try std.testing.expectEqualStrings("10d", ten_days);
@@ -2412,7 +2652,7 @@ test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
     draw(hdc, &model, .project, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     // The goalBased accent bar is only ever painted by loop rows.
-    const accent: u32 = 0x0048C78E;
+    const accent: u32 = 0x00709E19;
     var accent_in_header: usize = 0;
     var accent_in_content: usize = 0;
     var y: i32 = Tokens.header_height;
@@ -2427,40 +2667,34 @@ test "scrolled rows are not drawn over the fixed GRAPH/Projects header" {
     try std.testing.expect(accent_in_content > 30);
 }
 
-test "loop row title, status, and age occupy disjoint columns that each label fits" {
+test "loop row title age and state indicator occupy disjoint columns and compound ages fit" {
     for (0..5) |depth| {
         const text = loopRowTextRects(100, depth);
         try std.testing.expect(text.title.left < text.title.right);
-        try std.testing.expect(text.title.right <= text.state.left);
-        try std.testing.expect(text.state.right <= text.age.left);
+        try std.testing.expect(text.title.right <= text.age.left);
+        try std.testing.expect(text.age.right < text.state.left);
         // Clear of the hover disclosure's hit zone and the sidebar rail edge.
-        try std.testing.expect(text.age.right <= 198 and text.age.right <= Tokens.sidebar_width);
+        try std.testing.expect(text.state.right <= 198 and text.state.right <= Tokens.sidebar_width);
     }
     const screen = c.GetDC(null) orelse return error.SkipZigTest;
     defer _ = c.ReleaseDC(null, screen);
     const hdc = c.CreateCompatibleDC(screen) orelse return error.TestUnexpectedResult;
     defer _ = c.DeleteDC(hdc);
-    const previous = AppFont.select(hdc, 9, false);
+    const previous = c.SelectObject(hdc, AppFont.getStyle(10.5, .card_mono));
     defer _ = c.SelectObject(hdc, previous);
     const text = loopRowTextRects(100, 0);
-    var widest_state: i32 = 0;
-    for ([_][]const u8{ "idle", "running", "stopped", "blocked", "failed", "stalled", "waiting", "done", "needs" }) |label| {
-        const width = try measuredWidth(hdc, label);
-        widest_state = @max(widest_state, width);
-        try std.testing.expect(width <= text.state.right - text.state.left);
-    }
     var widest_age: i32 = 0;
-    for ([_][]const u8{ "-", "59s", "59m", "23h", "99d", "365d", "999d" }) |label| {
+    for ([_][]const u8{ "-", "59s", "59m", "23h 59m", "99d 23h", "365d 23h", "999d 23h" }) |label| {
         const width = try measuredWidth(hdc, label);
         widest_age = @max(widest_age, width);
         try std.testing.expect(width <= text.age.right - text.age.left);
     }
     // Guard against vacuous measurements.
-    try std.testing.expect(widest_state > 20 and widest_age > 10);
+    try std.testing.expect(widest_age > 40);
 }
 
 fn measuredWidth(hdc: c.HDC, label: []const u8) !i32 {
-    var wide: [16]u16 = undefined;
+    var wide: [64]u16 = undefined;
     const length = try std.unicode.utf8ToUtf16Le(&wide, label);
     var size: c.SIZE = undefined;
     if (c.GetTextExtentPoint32W(hdc, &wide, @intCast(length), &size) == 0) return error.TestUnexpectedResult;
@@ -2484,7 +2718,7 @@ fn drawOutlineIcon(hdc: c.HDC, icon: SidebarIcon, bounds: c.RECT, color: u32) vo
             _ = c.Ellipse(hdc, bounds.left + 5, bounds.top + 1, bounds.left + 11, bounds.top + 7);
             _ = c.Ellipse(hdc, bounds.left + 9, bounds.top + 7, bounds.left + 15, bounds.top + 13);
         },
-        .local_folder, .remote_folder => {
+        .local_folder => {
             _ = c.MoveToEx(hdc, bounds.left + 1, bounds.top + 4, null);
             _ = c.LineTo(hdc, bounds.left + 6, bounds.top + 4);
             _ = c.LineTo(hdc, bounds.left + 8, bounds.top + 6);
@@ -2492,15 +2726,25 @@ fn drawOutlineIcon(hdc: c.HDC, icon: SidebarIcon, bounds: c.RECT, color: u32) vo
             _ = c.LineTo(hdc, bounds.right - 2, bounds.bottom - 1);
             _ = c.LineTo(hdc, bounds.left + 2, bounds.bottom - 1);
             _ = c.LineTo(hdc, bounds.left + 1, bounds.top + 4);
-            if (icon == .remote_folder) {
-                _ = c.Ellipse(hdc, bounds.left + 8, bounds.top + 8, bounds.left + 13, bounds.top + 13);
-            }
+        },
+        .remote_folder => {
+            _ = c.MoveToEx(hdc, bounds.left + 8, bounds.top + 4, null);
+            _ = c.LineTo(hdc, bounds.left + 8, bounds.top + 9);
+            _ = c.MoveToEx(hdc, bounds.left + 3, bounds.top + 12, null);
+            _ = c.LineTo(hdc, bounds.left + 3, bounds.top + 9);
+            _ = c.LineTo(hdc, bounds.left + 13, bounds.top + 9);
+            _ = c.LineTo(hdc, bounds.left + 13, bounds.top + 12);
+            _ = c.Rectangle(hdc, bounds.left + 6, bounds.top + 1, bounds.left + 11, bounds.top + 6);
+            _ = c.Rectangle(hdc, bounds.left + 1, bounds.top + 11, bounds.left + 6, bounds.top + 16);
+            _ = c.Rectangle(hdc, bounds.left + 11, bounds.top + 11, bounds.left + 16, bounds.top + 16);
         },
         .chat => {
-            _ = c.RoundRect(hdc, bounds.left + 1, bounds.top + 1, bounds.right - 1, bounds.bottom - 3, 4, 4);
-            _ = c.MoveToEx(hdc, bounds.left + 4, bounds.bottom - 3, null);
-            _ = c.LineTo(hdc, bounds.left + 2, bounds.bottom - 1);
-            _ = c.LineTo(hdc, bounds.left + 7, bounds.bottom - 3);
+            _ = c.RoundRect(hdc, bounds.left + 1, bounds.top + 1, bounds.left + 12, bounds.top + 10, 4, 4);
+            _ = c.MoveToEx(hdc, bounds.left + 4, bounds.top + 9, null);
+            _ = c.LineTo(hdc, bounds.left + 2, bounds.top + 12);
+            _ = c.RoundRect(hdc, bounds.left + 5, bounds.top + 5, bounds.right, bounds.top + 14, 4, 4);
+            _ = c.MoveToEx(hdc, bounds.left + 12, bounds.top + 13, null);
+            _ = c.LineTo(hdc, bounds.left + 14, bounds.bottom);
         },
     }
     _ = c.SelectObject(hdc, previous_brush);
@@ -2539,6 +2783,53 @@ fn drawDisclosureIcon(hdc: c.HDC, bounds: c.RECT, collapsed: bool, color: u32) v
     _ = c.DeleteObject(pen);
 }
 
+fn drawLoopStripe(hdc: c.HDC, bounds: c.RECT, color: u32) void {
+    const brush = c.CreateSolidBrush(color) orelse {
+        std.log.err("Sidebar loop stripe brush creation failed", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(brush);
+    const middle = rect(bounds.left, bounds.top + 1, bounds.right, bounds.bottom - 1);
+    const caps = rect(bounds.left + 1, bounds.top, bounds.right - 1, bounds.bottom);
+    _ = c.FillRect(hdc, &middle, brush);
+    _ = c.FillRect(hdc, &caps, brush);
+}
+
+fn drawStateIndicator(hdc: c.HDC, state: []const u8, bounds: c.RECT) void {
+    // GraphModel has no exit-code/dependent metadata for the full macOS displayState.
+    // Show the recorded state, rather than inventing a derived idle/failed state.
+    const color: u32 = if (std.mem.eql(u8, state, "running") or std.mem.eql(u8, state, "waiting"))
+        0x00FF840A
+    else if (std.mem.eql(u8, state, "awaitingInput") or std.mem.eql(u8, state, "blocked"))
+        0x000A9FFF
+    else if (std.mem.eql(u8, state, "succeeded"))
+        0x0058D130
+    else if (std.mem.eql(u8, state, "failed"))
+        0x003A45FF
+    else if (std.mem.eql(u8, state, "stalled"))
+        0x00F25ABF
+    else
+        0x006F6C6C;
+    const hollow = std.mem.eql(u8, state, "blocked") or std.mem.eql(u8, state, "stopped") or std.mem.eql(u8, state, "waiting");
+    const pen = c.CreatePen(c.PS_SOLID, if (hollow) 2 else 1, color) orelse {
+        std.log.err("Sidebar state indicator pen creation failed", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(pen);
+    const brush = if (hollow) null else c.CreateSolidBrush(color) orelse {
+        std.log.err("Sidebar state indicator brush creation failed", .{});
+        return;
+    };
+    defer {
+        if (brush != null) _ = c.DeleteObject(brush);
+    }
+    const previous_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, previous_pen);
+    const previous_brush = c.SelectObject(hdc, if (hollow) c.GetStockObject(c.HOLLOW_BRUSH) else brush);
+    defer _ = c.SelectObject(hdc, previous_brush);
+    _ = c.Ellipse(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+}
+
 fn rect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
 }
@@ -2560,7 +2851,10 @@ fn drawText(
     size: i32,
     color: u32,
 ) void {
-    const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
+    const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch |err| {
+        std.log.err("Sidebar text conversion failed: {s}", .{@errorName(err)});
+        return;
+    };
     defer allocator.free(wide);
     if (wide.len == 0) return;
     const old_font = AppFont.select(hdc, size, false);
@@ -2580,10 +2874,26 @@ fn drawTextRect(
     color: u32,
     format: c.UINT,
 ) void {
-    const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch return;
+    drawStyledTextRect(hdc, allocator, text, bounds_value, @floatFromInt(size), .regular, color, format);
+}
+
+fn drawStyledTextRect(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    bounds_value: c.RECT,
+    size: f32,
+    style: AppFont.Style,
+    color: u32,
+    format: c.UINT,
+) void {
+    const wide = std.unicode.utf8ToUtf16LeAlloc(allocator, text) catch |err| {
+        std.log.err("Sidebar text conversion failed: {s}", .{@errorName(err)});
+        return;
+    };
     defer allocator.free(wide);
     if (wide.len == 0) return;
-    const old_font = AppFont.select(hdc, size, false);
+    const old_font = c.SelectObject(hdc, AppFont.getStyle(size, style));
     _ = c.SetTextColor(hdc, color);
     _ = c.SetBkMode(hdc, c.TRANSPARENT);
     var bounds = bounds_value;
