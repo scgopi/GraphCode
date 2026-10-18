@@ -3,8 +3,11 @@ const FrameBuffer = @import("FrameBuffer.zig").FrameBuffer;
 const Wire = @import("Wire.zig");
 const Forms = @import("Forms.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
+const Diagnostics = @import("Diagnostics.zig");
 const c = @import("Win32.zig").c;
 const ReconnectDecision = enum { none, ready, drain_timeout };
+// statusText's borrowed notice must not change underneath its caller on the worker.
+threadlocal var negotiation_status_buffer: [256]u8 = undefined;
 
 test "sketch promotion real outbound queue matches Swift fixtures for every variant" {
     const allocator = std.testing.allocator;
@@ -152,9 +155,35 @@ pub const EventCallback = *const fn (
 
 pub const DaemonClient = struct {
     const V1Expectation = enum { recent_projects, graph_changed };
+    const LegacyFallbackReason = enum {
+        v1_reply,
+        selected_v1,
+        unsupported_version,
+
+        fn text(self: LegacyFallbackReason) []const u8 {
+            return switch (self) {
+                .v1_reply => "v1-shaped reply",
+                .selected_v1 => "daemon selected v1",
+                .unsupported_version => "daemon refused v2 (unsupportedVersion)",
+            };
+        }
+    };
+    const FallbackNotice = struct {
+        reason: LegacyFallbackReason,
+        elapsed_ms: u64,
+
+        fn text(self: FallbackNotice, buffer: *[256]u8, connected: bool) []const u8 {
+            return std.fmt.bufPrint(
+                buffer,
+                "{s}v2 -> v1: {s} after {d} ms",
+                .{ if (connected) "Connected · protocol v1 · " else "", self.reason.text(), self.elapsed_ms },
+            ) catch unreachable;
+        }
+    };
     const reconnect_initial_ms: i64 = 100;
     const reconnect_max_ms: i64 = 4_000;
-    const negotiation_timeout_ms: i64 = 1_500;
+    const negotiation_timeout_ms: i64 = 5_000;
+    const subscription_drain_timeout_ms: i64 = 1_500;
     const outbound_capacity: usize = 64;
     const inbound_capacity: usize = 128;
 
@@ -201,8 +230,10 @@ pub const DaemonClient = struct {
     frame_buffer: FrameBuffer,
     retry_at_ms: i64 = 0,
     retry_delay_ms: i64 = reconnect_initial_ms,
+    negotiation_started_ms: i64 = 0,
     negotiation_deadline_ms: i64 = 0,
     fallback_to_v1: bool = false,
+    fallback_notice: ?FallbackNotice = null,
     callback: ?EventCallback = null,
     callback_context: ?*anyopaque = null,
     command_recorder: ?*const fn (*DaemonClient, []const u8) void = recordUiaCommand,
@@ -290,7 +321,7 @@ pub const DaemonClient = struct {
         if (self.subscription_path.len != 0) self.allocator.free(self.subscription_path);
         self.subscription_path = copy;
         if (!self.subscription_reconnect_requested) {
-            self.subscription_reconnect_deadline_ms = nowMilliseconds() + negotiation_timeout_ms;
+            self.subscription_reconnect_deadline_ms = nowMilliseconds() + subscription_drain_timeout_ms;
         }
         self.subscription_reconnect_requested = true;
         self.retry_now = true;
@@ -762,6 +793,11 @@ pub const DaemonClient = struct {
         client.mutex.lock();
         defer client.mutex.unlock();
         if (client.last_error.len != 0) return client.last_error;
+        if (client.mode == .v1 and (client.state == .connected or client.state == .reconnecting)) {
+            if (client.fallback_notice) |notice| {
+                return notice.text(&negotiation_status_buffer, client.state == .connected);
+            }
+        }
         return switch (client.state) {
             .disconnected => "Disconnected",
             .connecting => "Connecting…",
@@ -898,7 +934,12 @@ pub const DaemonClient = struct {
             if (self.pipe != c.INVALID_HANDLE_VALUE) {
                 if (!self.pumpIncoming()) continue;
                 if (self.state == .negotiating and nowMilliseconds() >= self.negotiation_deadline_ms) {
-                    self.beginLegacyFallback(nowMilliseconds());
+                    var detail: [128]u8 = undefined;
+                    const message = std.fmt.bufPrint(&detail, "v2 hello timed out after {d} ms; retrying v2", .{
+                        self.negotiationElapsed(nowMilliseconds()),
+                    }) catch unreachable;
+                    Diagnostics.record(self.allocator, "daemon-negotiation", message);
+                    self.markTransportFailure("daemon v2 hello timed out; retrying v2");
                 }
             }
 
@@ -1040,15 +1081,18 @@ pub const DaemonClient = struct {
         self.frame_buffer.reset();
         if (self.fallback_to_v1) {
             self.frame_buffer.setMode(.v1);
+            self.mutex.lock();
             self.mode = .v1;
             self.selected_version = 1;
+            self.mutex.unlock();
             self.publishState(.connected, "");
             self.fallback_to_v1 = false;
             self.retry_delay_ms = reconnect_initial_ms;
             return;
         }
         self.publishState(.negotiating, "");
-        self.negotiation_deadline_ms = now + negotiation_timeout_ms;
+        self.negotiation_started_ms = nowMilliseconds();
+        self.negotiation_deadline_ms = self.negotiation_started_ms + negotiation_timeout_ms;
         const hello = self.helloFrame(self.allocator) catch {
             self.scheduleRetry(now, "daemon hello encoding failed");
             return;
@@ -1074,8 +1118,10 @@ pub const DaemonClient = struct {
     }
 
     fn prepareV2Negotiation(self: *DaemonClient) void {
+        self.mutex.lock();
         self.mode = .v2;
         self.selected_version = Wire.current_version;
+        self.mutex.unlock();
         self.frame_buffer.setMode(.v2);
     }
 
@@ -1170,31 +1216,90 @@ pub const DaemonClient = struct {
         self.retry_delay_ms = @min(self.retry_delay_ms * 2, reconnect_max_ms);
     }
 
-    fn beginLegacyFallback(self: *DaemonClient, now: i64) void {
+    fn negotiationElapsed(self: *const DaemonClient, now: i64) u64 {
+        return @intCast(@max(0, now -| self.negotiation_started_ms));
+    }
+
+    fn beginLegacyFallback(self: *DaemonClient, now: i64, reason: LegacyFallbackReason) void {
         self.closeHandleOnly();
         self.frame_buffer.setMode(.v1);
         self.clearPendingRequests();
+        const notice = FallbackNotice{ .reason = reason, .elapsed_ms = self.negotiationElapsed(now) };
+        self.mutex.lock();
         self.mode = .v1;
         self.selected_version = 1;
+        self.fallback_notice = notice;
+        self.mutex.unlock();
         self.fallback_to_v1 = true;
         self.publishState(.reconnecting, "");
+        var detail: [256]u8 = undefined;
+        Diagnostics.record(self.allocator, "daemon-negotiation", notice.text(&detail, false));
         self.retry_at_ms = now;
+    }
+
+    const NegotiationReply = union(enum) { v2, legacy: LegacyFallbackReason };
+
+    fn negotiationReply(self: *DaemonClient, frame: []const u8) !NegotiationReply {
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, frame, .{});
+        defer parsed.deinit();
+        const root = parsed.value;
+        if (root != .object) return error.InvalidNegotiationReply;
+        if (root.object.get("version")) |version| {
+            if (version != .integer or version.integer != 2) return error.InvalidNegotiationReply;
+            const kind = root.object.get("kind") orelse return error.InvalidNegotiationReply;
+            if (kind != .string) return error.InvalidNegotiationReply;
+            if (std.mem.eql(u8, kind.string, "hello")) {
+                const selected = root.object.get("selectedVersion") orelse return error.InvalidNegotiationReply;
+                if (selected != .integer) return error.InvalidNegotiationReply;
+                return switch (selected.integer) {
+                    2 => .v2,
+                    1 => .{ .legacy = .selected_v1 },
+                    else => error.InvalidNegotiationReply,
+                };
+            }
+            if (std.mem.eql(u8, kind.string, "error")) {
+                const refusal = root.object.get("error") orelse return error.InvalidNegotiationReply;
+                if (refusal != .object) return error.InvalidNegotiationReply;
+                const code = refusal.object.get("code") orelse return error.InvalidNegotiationReply;
+                if (code == .string and std.mem.eql(u8, code.string, "unsupportedVersion"))
+                    return .{ .legacy = .unsupported_version };
+            }
+            return error.InvalidNegotiationReply;
+        }
+        // Swift's v1 DaemonEvent is a single enum-case key, not a v2 envelope.
+        if (root.object.count() == 1) {
+            inline for (.{
+                "recentProjectsListed", "graphChanged", "quickChatsListed", "quickChatChanged",
+                "quickChatDeleted", "quickChatActivity", "errorOccurred", "mailbox", "nodesChanged",
+            }) |name| {
+                if (root.object.get(name)) |payload| {
+                    if (payload == .object) return .{ .legacy = .v1_reply };
+                }
+            }
+        }
+        return error.InvalidNegotiationReply;
     }
 
     fn handleFrame(self: *DaemonClient, frame: []const u8) bool {
         if (self.state == .negotiating) {
-            if (Wire.looksLikeV2(frame) and
-                std.mem.indexOf(u8, frame, "\"kind\":\"hello\"") != null and
-                std.mem.indexOf(u8, frame, "\"selectedVersion\":2") != null)
-            {
-                self.mode = .v2;
-                self.frame_buffer.setModePreservingData(.v2);
-                self.selected_version = 2;
-                self.publishState(.connected, "");
-                self.retry_delay_ms = reconnect_initial_ms;
-                return true;
+            const reply = self.negotiationReply(frame) catch {
+                self.markProtocolFailure("invalid daemon negotiation reply");
+                return false;
+            };
+            switch (reply) {
+                .v2 => {
+                    self.mutex.lock();
+                    self.mode = .v2;
+                    self.selected_version = 2;
+                    self.fallback_notice = null;
+                    self.mutex.unlock();
+                    self.fallback_to_v1 = false;
+                    self.frame_buffer.setModePreservingData(.v2);
+                    self.publishState(.connected, "");
+                    self.retry_delay_ms = reconnect_initial_ms;
+                },
+                .legacy => |reason| self.beginLegacyFallback(nowMilliseconds(), reason),
             }
-            self.beginLegacyFallback(nowMilliseconds());
             return true;
         }
         if (self.mode == .v2) {
@@ -1939,6 +2044,323 @@ test "successful hello switches a coalesced reconnect buffer back to v2" {
     defer allocator.free(payload_frame);
     try std.testing.expectEqualStrings(payload, payload_frame);
     try std.testing.expectEqual(Wire.ProtocolMode.v2, client.mode);
+}
+
+const NegotiationPipeFixture = struct {
+    server: c.HANDLE,
+    temporary: std.testing.TmpDir,
+    old_pipe: ?[]u8,
+    old_support: ?[]u8,
+
+    fn createServer(name: []const u8) !c.HANDLE {
+        const wide = try utf8ToWide(std.testing.allocator, name);
+        defer std.testing.allocator.free(wide);
+        const server = c.CreateNamedPipeW(
+            wide.ptr,
+            c.PIPE_ACCESS_DUPLEX | c.FILE_FLAG_OVERLAPPED | c.FILE_FLAG_FIRST_PIPE_INSTANCE,
+            c.PIPE_TYPE_BYTE | c.PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            64 * 1024,
+            64 * 1024,
+            0,
+            null,
+        );
+        if (server == c.INVALID_HANDLE_VALUE) return error.TestPipeCreationFailed;
+        return server;
+    }
+
+    fn init() !NegotiationPipeFixture {
+        const allocator = std.testing.allocator;
+        var temporary = std.testing.tmpDir(.{});
+        errdefer temporary.cleanup();
+        const support = try temporary.dir.realpathAlloc(allocator, ".");
+        defer allocator.free(support);
+        const name = try std.fmt.allocPrint(allocator, "\\\\.\\pipe\\graphcode-negotiation-test-{d}", .{std.time.nanoTimestamp()});
+        defer allocator.free(name);
+        const server = try createServer(name);
+        errdefer _ = c.CloseHandle(server);
+        const old_pipe = std.process.getEnvVarOwned(allocator, "GRAPHCODE_DAEMON_PIPE") catch null;
+        errdefer if (old_pipe) |value| allocator.free(value);
+        const old_support = std.process.getEnvVarOwned(allocator, "GRAPHCODE_SUPPORT_DIR") catch null;
+        errdefer if (old_support) |value| allocator.free(value);
+        try setEnvironmentChecked("GRAPHCODE_DAEMON_PIPE", name);
+        errdefer setTestEnvironment("GRAPHCODE_DAEMON_PIPE", old_pipe);
+        try setEnvironmentChecked("GRAPHCODE_SUPPORT_DIR", support);
+        return .{ .server = server, .temporary = temporary, .old_pipe = old_pipe, .old_support = old_support };
+    }
+
+    fn deinit(self: *NegotiationPipeFixture) void {
+        setTestEnvironment("GRAPHCODE_DAEMON_PIPE", self.old_pipe);
+        setTestEnvironment("GRAPHCODE_SUPPORT_DIR", self.old_support);
+        if (self.old_pipe) |value| std.testing.allocator.free(value);
+        if (self.old_support) |value| std.testing.allocator.free(value);
+        _ = c.CloseHandle(self.server);
+        self.temporary.cleanup();
+    }
+
+    fn restart(self: *NegotiationPipeFixture) !void {
+        const name = try std.process.getEnvVarOwned(std.testing.allocator, "GRAPHCODE_DAEMON_PIPE");
+        defer std.testing.allocator.free(name);
+        _ = c.CloseHandle(self.server);
+        self.server = c.INVALID_HANDLE_VALUE;
+        self.server = try createServer(name);
+    }
+
+    fn accept(self: *NegotiationPipeFixture) !void {
+        var overlapped = std.mem.zeroes(c.OVERLAPPED);
+        overlapped.hEvent = c.CreateEventW(null, 1, 0, null);
+        if (overlapped.hEvent == null) return error.TestPipeEventFailed;
+        defer _ = c.CloseHandle(overlapped.hEvent);
+        if (c.ConnectNamedPipe(self.server, &overlapped) == 0) {
+            const code = c.GetLastError();
+            if (code == c.ERROR_PIPE_CONNECTED) return;
+            if (code != c.ERROR_IO_PENDING) return error.TestPipeAcceptFailed;
+            var transferred: c.DWORD = 0;
+            if (c.WaitForSingleObject(overlapped.hEvent, 2_000) != c.WAIT_OBJECT_0) {
+                _ = c.CancelIoEx(self.server, &overlapped);
+                _ = c.GetOverlappedResult(self.server, &overlapped, &transferred, 1);
+                return error.TestPipeAcceptTimedOut;
+            }
+            if (c.GetOverlappedResult(self.server, &overlapped, &transferred, 0) == 0)
+                return error.TestPipeAcceptFailed;
+        }
+    }
+
+    fn readAll(self: *NegotiationPipeFixture, bytes: []u8) !void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            var overlapped = std.mem.zeroes(c.OVERLAPPED);
+            overlapped.hEvent = c.CreateEventW(null, 1, 0, null);
+            if (overlapped.hEvent == null) return error.TestPipeEventFailed;
+            defer _ = c.CloseHandle(overlapped.hEvent);
+            var transferred: c.DWORD = 0;
+            if (c.ReadFile(self.server, bytes[offset..].ptr, @intCast(bytes.len - offset), &transferred, &overlapped) == 0) {
+                if (c.GetLastError() != c.ERROR_IO_PENDING) return error.TestPipeReadFailed;
+                if (c.WaitForSingleObject(overlapped.hEvent, 2_000) != c.WAIT_OBJECT_0) {
+                    _ = c.CancelIoEx(self.server, &overlapped);
+                    _ = c.GetOverlappedResult(self.server, &overlapped, &transferred, 1);
+                    return error.TestPipeReadTimedOut;
+                }
+                if (c.GetOverlappedResult(self.server, &overlapped, &transferred, 0) == 0)
+                    return error.TestPipeReadFailed;
+            }
+            if (transferred == 0) return error.TestPipeClosed;
+            offset += transferred;
+        }
+    }
+
+    fn readFrame(self: *NegotiationPipeFixture) ![]u8 {
+        var header: [4]u8 = undefined;
+        try self.readAll(&header);
+        const length = try Wire.decodedLength(header, .v2);
+        const frame = try std.testing.allocator.alloc(u8, length);
+        errdefer std.testing.allocator.free(frame);
+        try self.readAll(frame);
+        return frame;
+    }
+
+    fn reply(self: *NegotiationPipeFixture, frame: []const u8) !void {
+        const header = try Wire.frameLength(frame, .v2);
+        try writeAll(self.server, &header);
+        try writeAll(self.server, frame);
+    }
+
+    fn expectLog(self: *NegotiationPipeFixture, detail: []const u8) !void {
+        const log = try self.temporary.dir.readFileAlloc(std.testing.allocator, "graphcode-windows.log", 16 * 1024);
+        defer std.testing.allocator.free(log);
+        try std.testing.expect(std.mem.indexOf(u8, log, "event=daemon-negotiation") != null);
+        try std.testing.expect(std.mem.indexOf(u8, log, detail) != null);
+    }
+};
+
+fn waitForNegotiationState(client: *DaemonClient, state: Wire.ConnectionState) !void {
+    const deadline = nowMilliseconds() + 2_000;
+    while (client.connectionState() != state) {
+        if (nowMilliseconds() >= deadline) return error.TestNegotiationStateTimedOut;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+}
+
+test "negotiation slow v2 hello after 2500 ms stays v2 and serves a correlated request" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer {
+        if (client.worker == null) client.closeHandleOnly();
+        client.deinit();
+    }
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    try std.testing.expectEqualStrings("hello", Wire.topLevelString(hello, "kind").?);
+    try client.start();
+    std.Thread.sleep(2_500 * std.time.ns_per_ms);
+    try std.testing.expectEqual(Wire.ConnectionState.negotiating, client.connectionState());
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try fixture.reply("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}");
+    try waitForNegotiationState(&client, .connected);
+    const request = client.sendReadProjectGraph("C:\\negotiation-fixture") orelse return error.TestRequestNotQueued;
+    const command = try fixture.readFrame();
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings(&request.request_id, Wire.topLevelString(command, "requestID").?);
+    try std.testing.expectEqualStrings("request", Wire.topLevelString(command, "kind").?);
+    const response = try std.fmt.allocPrint(std.testing.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"success\":true}}", .{request.request_id});
+    defer std.testing.allocator.free(response);
+    try fixture.reply(response);
+    const deadline = nowMilliseconds() + 2_000;
+    while (!client.isIdle()) {
+        client.poll();
+        if (nowMilliseconds() >= deadline) return error.TestRequestNotCompleted;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try std.testing.expectEqual(@as(u64, 1), client.connectionGeneration());
+    try std.testing.expect(!client.hasReconnected());
+}
+
+test "negotiation genuine v1 reply falls back and keeps reason elapsed time and log after connecting" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer {
+        if (client.worker == null) client.closeHandleOnly();
+        client.deinit();
+    }
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    std.Thread.sleep(30 * std.time.ns_per_ms);
+    try fixture.reply("{\"errorOccurred\":{\"_0\":\"unknown command\"}}");
+    try std.testing.expect(client.pumpIncoming());
+    try std.testing.expectEqual(Wire.ProtocolMode.v1, client.protocolMode());
+    const detail = client.statusText();
+    try std.testing.expect(std.mem.indexOf(u8, detail, "v2 -> v1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, "v1-shaped reply") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail, " ms") != null);
+    try std.testing.expect(client.fallback_notice.?.elapsed_ms >= 30);
+    try std.testing.expect(client.fallback_notice.?.elapsed_ms <= @as(u64, @intCast(nowMilliseconds() - client.negotiation_started_ms)));
+    try fixture.expectLog(detail);
+    try fixture.restart();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    try std.testing.expectEqual(Wire.ConnectionState.connected, client.connectionState());
+    try std.testing.expectEqual(Wire.ProtocolMode.v1, client.protocolMode());
+    try std.testing.expect(std.mem.indexOf(u8, client.statusText(), "v1-shaped reply") != null);
+    try client.start();
+    client.sendListProjects();
+    const command = try fixture.readFrame();
+    defer std.testing.allocator.free(command);
+    try std.testing.expectEqualStrings("{\"listRecentProjects\":{}}", command);
+    try fixture.reply("{\"recentProjectsListed\":{\"_0\":[]}}");
+    const deadline = nowMilliseconds() + 2_000;
+    while (!client.isIdle()) {
+        client.poll();
+        if (nowMilliseconds() >= deadline) return error.TestLegacyRequestNotCompleted;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+}
+
+test "negotiation no reply is bounded visible and never selects v1" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer {
+        if (client.worker == null) client.closeHandleOnly();
+        client.deinit();
+    }
+    client.connect();
+    client.attemptConnection(nowMilliseconds());
+    try fixture.accept();
+    const hello = try fixture.readFrame();
+    defer std.testing.allocator.free(hello);
+    client.retry_delay_ms = 4_000;
+    const start = nowMilliseconds();
+    try client.start();
+    while (client.connectionState() == .negotiating) {
+        if (nowMilliseconds() - start > 6_000) return error.TestHelloWaitNotBounded;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try std.testing.expect(nowMilliseconds() - start >= 4_900);
+    try std.testing.expect(std.mem.indexOf(u8, client.statusText(), "v2 hello timed out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, client.statusText(), "retrying v2") != null);
+    try fixture.expectLog("retrying v2");
+}
+
+test "negotiation explicit v1 selection and unsupported version refusal report distinct reasons" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    const frames = [_][]const u8{
+        "{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":1}",
+        "{\"version\":2,\"kind\":\"error\",\"error\":{\"code\":\"unsupportedVersion\",\"message\":\"no supported version\"}}",
+    };
+    const reasons = [_][]const u8{ "daemon selected v1", "daemon refused v2 (unsupportedVersion)" };
+    for (frames, reasons) |frame, reason| {
+        var client = try DaemonClient.initForTesting(std.testing.allocator);
+        defer client.deinit();
+        client.state = .negotiating;
+        client.negotiation_started_ms = nowMilliseconds() - 75;
+        client.negotiation_deadline_ms = client.negotiation_started_ms + DaemonClient.negotiation_timeout_ms;
+        try std.testing.expect(client.handleFrame(frame));
+        try std.testing.expectEqual(Wire.ProtocolMode.v1, client.protocolMode());
+        try std.testing.expect(client.fallback_notice.?.elapsed_ms >= 75);
+        try std.testing.expect(std.mem.indexOf(u8, client.statusText(), reason) != null);
+        try fixture.expectLog(reason);
+    }
+}
+
+test "negotiation invalid unrelated or nested replies cannot select legacy framing" {
+    const frames = [_][]const u8{
+        "not json",
+        "{}",
+        "{\"kind\":\"event\",\"version\":2,\"event\":{\"graphChanged\":{}}}",
+        "{\"version\":2,\"kind\":\"error\",\"error\":{\"code\":\"malformedEnvelope\",\"message\":\"invalid hello\"}}",
+        "{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":3}",
+        "{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":12}",
+        "{\"version\":2,\"kind\":\"hello\",\"event\":{\"selectedVersion\":2}}",
+        "{\"version\":2,\"kind\":\"event\",\"event\":{\"kind\":\"hello\",\"selectedVersion\":2}}",
+        "{\"unknown\":{\"_0\":\"not a daemon event\"}}",
+    };
+    for (frames) |frame| {
+        var client = try DaemonClient.initForTesting(std.testing.allocator);
+        defer client.deinit();
+        client.state = .negotiating;
+        try std.testing.expect(!client.handleFrame(frame));
+        try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+        try std.testing.expectEqual(Wire.ConnectionState.protocol_error, client.connectionState());
+        try std.testing.expect(!client.fallback_to_v1);
+    }
+}
+
+test "negotiation accepts whitespace in an actual v2 hello without fallback" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    client.state = .negotiating;
+    try std.testing.expect(client.handleFrame("{ \"version\" : 2, \"kind\" : \"hello\", \"selectedVersion\" : 2 }"));
+    try std.testing.expectEqual(Wire.ProtocolMode.v2, client.protocolMode());
+    try std.testing.expectEqual(Wire.ConnectionState.connected, client.connectionState());
+}
+
+test "negotiation successful v2 reconnect clears the previous fallback notice" {
+    var fixture = try NegotiationPipeFixture.init();
+    defer fixture.deinit();
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    client.state = .negotiating;
+    client.negotiation_started_ms = nowMilliseconds();
+    try std.testing.expect(client.handleFrame("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":1}"));
+    try std.testing.expect(client.fallback_notice != null);
+    client.prepareV2Negotiation();
+    client.state = .negotiating;
+    try std.testing.expect(client.handleFrame("{\"version\":2,\"kind\":\"hello\",\"selectedVersion\":2}"));
+    try std.testing.expect(client.fallback_notice == null);
+    try std.testing.expect(!client.fallback_to_v1);
+    try std.testing.expectEqualStrings("Connected · protocol v2", client.statusText());
 }
 
 test "settings validation rejects missing directories, invalid secrets, and pipe syntax" {
