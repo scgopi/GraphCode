@@ -7455,7 +7455,7 @@ fn loopTypeAccent(loop_type: []const u8) u32 {
     if (std.mem.eql(u8, loop_type, "goalBased")) return 0x00709E19;
     if (std.mem.eql(u8, loop_type, "timeBased")) return 0x000085C9;
     if (std.mem.eql(u8, loop_type, "turnBased")) return 0x008151D5;
-    if (std.mem.eql(u8, loop_type, "composite")) return 0x00E98590;
+    if (std.mem.eql(u8, loop_type, "composite") or std.mem.eql(u8, loop_type, "proactive")) return 0x00E98590;
     return 0x00E3DAD3;
 }
 
@@ -7718,6 +7718,7 @@ test "workspace chrome loop stripe uses the macOS type palette" {
         .{ .kind = "timeBased", .accent = 0x000085C9 },
         .{ .kind = "turnBased", .accent = 0x008151D5 },
         .{ .kind = "composite", .accent = 0x00E98590 },
+        .{ .kind = "proactive", .accent = 0x00E98590 },
     }) |case| try std.testing.expectEqual(case.accent, loopTypeAccent(case.kind));
 }
 
