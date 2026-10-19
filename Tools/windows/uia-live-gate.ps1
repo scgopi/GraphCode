@@ -10692,6 +10692,38 @@ try {
     }
     throw "sketch/custody child card did not converge after attempts=$attemptsExecuted/$maximumAttempts expectedChildUUID=$expectedNodeId expectedAutomationId=$expectedAutomationId expectedTitle='$title' graphSequence=$graphSequence positiveBaselineGraphCardCount=$baselineCount graphCardCount=$($lastSnapshot.Count) matchingTitleCount=$lastTitleCount matchingIdentityCount=$lastIdentityCount graphCards=$($lastSnapshot | ConvertTo-Json -Compress -Depth 4)"
   }
+  function Get-SketchCardPan([double[]] $canvas, [double[]] $card, [object[]] $obstacles) {
+    Require ($canvas.Count -eq 4 -and $card.Count -eq 4 -and
+      $canvas[2] - $canvas[0] -gt 48 -and $canvas[3] - $canvas[1] -gt 48 -and
+      $card[2] -gt $card[0] -and $card[3] -gt $card[1] -and
+      $card[2] - $card[0] -lt $canvas[2] - $canvas[0] - 48 -and
+      $card[3] - $card[1] -lt $canvas[3] - $canvas[1] - 48) `
+      "sketch/custody card cannot fit inside the observed canvas"
+    if ($card[0] -ge $canvas[0] + 24 -and $card[1] -ge $canvas[1] + 24 -and
+        $card[2] -le $canvas[2] - 24 -and $card[3] -le $canvas[3] - 24) { return $null }
+    $wantedX = if ($card[0] -lt $canvas[0] + 24) { $canvas[0] + 24 - $card[0] }
+      elseif ($card[2] -gt $canvas[2] - 24) { $canvas[2] - 24 - $card[2] } else { 0 }
+    $wantedY = if ($card[1] -lt $canvas[1] + 24) { $canvas[1] + 24 - $card[1] }
+      elseif ($card[3] -gt $canvas[3] - 24) { $canvas[3] - 24 - $card[3] } else { 0 }
+    foreach ($yFraction in @(0.85, 0.5, 0.15)) {
+      foreach ($xFraction in @(0.85, 0.5, 0.15)) {
+        $x = [int]($canvas[0] + ($canvas[2] - $canvas[0]) * $xFraction)
+        $y = [int]($canvas[1] + ($canvas[3] - $canvas[1]) * $yFraction)
+        $covered = @($obstacles | Where-Object {
+          $_[0] - 8 -le $x -and $_[2] + 8 -gt $x -and
+          $_[1] - 8 -le $y -and $_[3] + 8 -gt $y
+        }).Count -gt 0
+        if ($covered) { continue }
+        $dx = [int][Math]::Max($canvas[0] + 24 - $x,
+          [Math]::Min($wantedX, $canvas[2] - 24 - $x))
+        $dy = [int][Math]::Max($canvas[1] + 24 - $y,
+          [Math]::Min($wantedY, $canvas[3] - 24 - $y))
+        if (($wantedX -ne 0 -and $dx -eq 0) -or ($wantedY -ne 0 -and $dy -eq 0)) { continue }
+        return [ordered]@{ start = @($x, $y); end = @(($x + $dx), ($y + $dy)); delta = @($dx, $dy) }
+      }
+    }
+    throw "sketch/custody card reveal has no owned blank-sheet pan point"
+  }
   function Open-SketchNodeMenu(
     [string] $title, [switch] $SkipActualSize, [string] $ExpectedCardId = ""
   ) {
@@ -10706,8 +10738,48 @@ try {
       Require ([string]$cards[0].Current.AutomationId -ceq $ExpectedCardId) `
         "sketch/custody '$title' fresh card UUID identity differs: expected=$ExpectedCardId actual=$($cards[0].Current.AutomationId)"
     }
-    $rect = $cards[0].Current.BoundingRectangle
-    $graphBounds = $graph.Current.BoundingRectangle
+    $cardIdentity = [string]$cards[0].Current.AutomationId
+    $pans = [Collections.Generic.List[object]]::new()
+    for ($panAttempt = 0; $panAttempt -le 8; $panAttempt++) {
+      $rect = $cards[0].Current.BoundingRectangle
+      $graphBounds = $graph.Current.BoundingRectangle
+      $canvasRect = @($graphBounds.Left, $graphBounds.Top, $graphBounds.Right, $graphBounds.Bottom)
+      $cardRect = @($rect.Left, $rect.Top, $rect.Right, $rect.Bottom)
+      $obstacles = @(Get-DirectChildren $graph $rawWalker | ForEach-Object {
+        $bounds = $_.Current.BoundingRectangle
+        ,@($bounds.Left, $bounds.Top, $bounds.Right, $bounds.Bottom)
+      })
+      $pan = Get-SketchCardPan $canvasRect $cardRect $obstacles
+      if ($null -eq $pan) { break }
+      Require ($panAttempt -lt 8) "sketch/custody '$title' did not become visible after eight measured pans"
+      $panX = 0; $panY = 0
+      Require ([GraphCodeUiaGateState]::ScreenToClientPoint($renameShellWindow,
+        $pan.start[0], $pan.start[1], [ref]$panX, [ref]$panY)) `
+        "sketch/custody card reveal could not map its owned canvas"
+      Require (Ensure-ShellForeground $renameShellWindow "sketch/custody card reveal") `
+        "sketch/custody card reveal lost foreground"
+      Require ([GraphCodeUiaGateState]::PostMouseButtonAt($renameShellWindow, 0x0201, $panX, $panY)) `
+        "sketch/custody card reveal pan down failed"
+      Require ([GraphCodeUiaGateState]::PostMouseMoveAt($renameShellWindow,
+        $panX + $pan.delta[0], $panY + $pan.delta[1])) "sketch/custody card reveal pan move failed"
+      Require ([GraphCodeUiaGateState]::PostMouseButtonAt($renameShellWindow, 0x0202,
+        $panX + $pan.delta[0], $panY + $pan.delta[1])) "sketch/custody card reveal pan up failed"
+      Start-Sleep -Milliseconds 100
+      $graph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
+      Require ($null -ne $graph) "sketch/custody graph disappeared after card reveal pan"
+      $cards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+        $_.Current.AutomationId -ceq $cardIdentity -and $_.Current.Name -ceq $title
+      })
+      Require ($cards.Count -eq 1) "sketch/custody card identity changed during reveal"
+      $after = $cards[0].Current.BoundingRectangle
+      Require (($pan.delta[0] -eq 0 -or ($after.Left - $rect.Left) * $pan.delta[0] -gt 0) -and
+        ($pan.delta[1] -eq 0 -or ($after.Top - $rect.Top) * $pan.delta[1] -gt 0)) `
+        "sketch/custody card reveal made no measured progress"
+      $pans.Add([ordered]@{ attempt = $panAttempt + 1; cardId = $cardIdentity
+        before = $cardRect; canvas = $canvasRect; input = $pan
+        after = @($after.Left, $after.Top, $after.Right, $after.Bottom) })
+      Write-Host ("UIA_SKETCH_CARD_PAN=" + ($pans[$pans.Count - 1] | ConvertTo-Json -Depth 5 -Compress))
+    }
     $left = [Math]::Max($rect.Left, $graphBounds.Left)
     $top = [Math]::Max($rect.Top, $graphBounds.Top)
     $right = [Math]::Min($rect.Right, $graphBounds.Right)
@@ -10730,6 +10802,7 @@ try {
     return [ordered]@{
       popup = $popup; items = $items; point = @($x, $y)
       cardId = $cards[0].Current.AutomationId; cardTitle = $cards[0].Current.Name
+      cardBounds = $cardRect; canvasBounds = $canvasRect; pans = $pans.ToArray()
     }
   }
   function Sketch-ClickMenu($menu, [int] $id) {
@@ -11170,7 +11243,9 @@ try {
       republishedNode = $custodyGraphNode[0]
       renderedCardWait = $custodyRenderWait
       expectedAutomationId = $custodyExpectedAutomationId
-      renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId }
+      renderedHitTest = @{ point = $custodyRendered.point; cardId = $custodyRendered.cardId
+        cardBounds = $custodyRendered.cardBounds; canvasBounds = $custodyRendered.canvasBounds
+        pans = $custodyRendered.pans }
     }
     renderedHitTests = 4
     limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts. The recorder covers only commands on its recorded path. The hosted first-instruction entry attempt reported zero expected and sent text events after clearing the field, so editing is not validated and that result does not establish a dropped key. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
