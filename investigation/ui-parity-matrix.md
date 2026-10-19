@@ -949,3 +949,127 @@ Quick Chats absence is unit-only, selected/Composite/blocked topologies lack
 exact paired states, remote is unqualified, and STOPPED/Main versus DONE/Goal
 resolution/bytes copy remains incomparable. Review-time images and verdict
 stay private. No second paired visual review was performed.
+
+## Combined C6R and C7 capture qualification 2026-10-19
+
+This additive record preserves the canonical rows, statuses, dated evidence
+and source-only finish above. All **17 affected canonical rows stay Partial**;
+closing a captured visual subgap does not close its whole gap or row. The
+per-annotation SHA-256 citations identify the private, sealed Markdown reports,
+not public images or permission to publish them.
+
+**Product and review boundaries.** C6R captured BEFORE
+`112d458303891f87af6c1dc6beaf7e48073fd65c` -> AFTER
+`54123da52ef6c45b003789b2e44421adff8ae0f4` (AFTER541, excluding
+[#888](https://github.com/scgopi/GraphCode/pull/888)). C7 captured BEFORE541 ->
+AFTER `a8b09434fe41a61030fd290f7d065ec6d0db8005` (AFTERa8b, the #888
+merge). Both used capture TOOLING
+`c4d5cc32aa986e67155e1ef0bb5140a52f46b454`; this newer tooling tree is
+not the product rendered in either capture.
+
+Each was **one actual capture of ten private PNGs, five BEFORE/AFTER pairs,
+96 DPI, canvas 100% where applicable**; workspace canvas zoom is not applicable.
+C6R had one fresh v12 review of ten Windows and twelve selected Mac originals.
+C7 had one AFTER-only review of five C7 AFTER originals, five C6R AFTER
+baseline originals and six qualified v12 Mac originals: **no C7
+BEFORE-versus-v12 comparison**. Mac source remains
+`2ccf303a04f995184aae1d4b738a9eca0f71b79e`, final authority
+`macos-groundtruth-2ccf303a-completed-v12`; neither review established an
+equivalent full-frame Mac/Windows fixture pair. The C6R overview reference
+at 65% supplies structure only, never pitch or warmth equivalence.
+
+**Owned release, not global-host-zero.** The official C6R release at
+`2026-10-19T09:36:59.7504391Z` and C7 release at
+`2026-10-19T10:45:06.7138842Z` each record
+`RELEASED_ZERO_SURVIVORS` / `KERNEL_EXIT_AND_EOF_PROVEN`: worker exit 0,
+both stdout/stderr EOF, owned containment job active count 0 before handle
+close, and no recorded failure, cleanup or trace errors or owned survivors.
+Separate producer receipts record clean owned outer-host closure. These are
+producer-reported owned-containment facts, not new execution by this ledger
+writer. Historical C4/C5 UNPROVEN, original C6 REFUSED with zero images,
+first C6R qualification (168 checks, 166 passed, 2 failed), and initial
+stopped/invalid C7 preparation records are unchanged; later clean results do
+not upgrade them.
+
+### C6RC7 limits 2026-10-19
+
+**L applies to both chronological annotations in every row that explicitly
+binds it below: still Partial. Real Restart was NOT executed**, so no
+provider/session replacement, PTY continuity or restart outcome is established.
+**G10 warmth is UNASSESSABLE on mismatched states**: type, wiring, selection
+and attention reason are not jointly matched. Visible warm faces are not a
+blanket pass, and a comparatively flat selected Composite is not a blanket
+failure; **no blanket pass or blanket failure** follows. **G11 Goal DONE
+versus Main STOPPED resolution/bytes/outcome copy remains unmatched**; common
+Reclaim/Keep control finish is not full-card or action-result equivalence.
+New Chat, remote/narrow states, native focus/input, action outcomes,
+pan/zoom/higher DPI, full tab states, glyph rendering, accessibility
+conformance, provider behavior and daemon persistence remain unqualified by
+these captures/reviews. Each C7 annotation also binds the
+[C7 admission and regression caveat](#c7-admission-and-regression-caveat)
+below: visual retention and clean capture do not clear native-provider CI.
+
+### C7 admission and regression caveat
+
+C7 was admitted by **PINNED EXTERNAL operator EXCEPTION ONLY**, not green CI,
+for scheduled run `39225497920`, attempts 1 and 2. Both full pinned
+native-provider stages failed **`Native accessibility provider tests failed: 255`**
+without `cl` or underlying native-test output explaining the result. The same
+255 twice is **DETERMINISTIC ON HOSTED CI** at AFTERa8b. The operator reports
+the exact local script returned **204 checks, 0 failures, exit 0** at BOTH
+AFTER541 and AFTERa8b, and reports green PR-required checks; neither local
+passes nor those required checks establish full scheduled coverage. These
+are attributed operator results, not commands run by this documentation owner.
+
+**Historical caveat at C7 review time:** the same-workflow baseline541
+discrimination was **last reported PENDING**.
+**If baseline541 is green, #888 becomes suspect for
+[#890](https://github.com/scgopi/GraphCode/issues/890) despite both local
+passes.** The earlier categorical "not an #888 regression" ruling is
+**superseded**. There is **no host-cause attribution** and **no
+native-provider regression clearance**. C7's G01/G02/G03/G05/G08 result means
+only `NO_NEW_VISIBLE_REGRESSION_IN_CAPTURED_SUBCASE` versus C6R AFTER541,
+not fresh Mac comparison, behavioral/all-state clearance or provider
+qualification. The clean capture does not alter that boundary.
+
+**2026-10-19 operator resolution, additive to that historical caveat.** The
+operator reports baseline probe `39237125011` at pre-#888 AFTER541 failed
+with the identical **`Native accessibility provider tests failed: 255`**.
+On that baseline discrimination, the operator explicitly **clears #888**
+and **rules a hosted-environment cause on both trees**, as recorded in
+[#890](https://github.com/scgopi/GraphCode/issues/890). This is new attributed
+operator evidence, not a probe queried or test run by this documentation
+owner or the visual reviewers. It resolves the earlier pending/if-green
+discrimination, without rewriting the private reports or their review-time
+limits. The two failed scheduled attempts and the exact external-exception
+capture admission remain historical facts: admission was not green CI,
+and this cause ruling does not fix the script/CI failure or establish green
+full-provider coverage. Separate script/workflow attribution and PR-coverage
+work is planned, not yet green. Clean capture or visual retention still
+provides no native-provider qualification.
+
+### Seventeen append-only row annotations
+
+Each status/limits cell explicitly binds **both** adjacent annotations to L.
+C6R describes AFTER541 only; C7 supplies the later, bounded qualification
+without rewriting that history or the earlier source/offscreen evidence.
+
+| Exact canonical row | Status and limits for both annotations | C6R chronological evidence / private report SHA-256 | C7 chronological evidence / private report SHA-256 |
+| --- | --- | --- | --- |
+| Connector handles | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G01 observes ports and ENTRY routing against qualified v12; outgoing hover-plus, drag and all connector states remain unassessed. This predates #888. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 retains visible ports and ENTRY origins in the captured project/overview/action scenes with no new visible regression; hover-plus, drag, hit targets and custody were not exercised. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Edge presentation | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G01 improves bright green routes to subdued routed lines and a dashed action-fixture connection; prominent green labels and unmatched selected/fired/guard states remain. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 retains routed curves, dashed action edge, labels and route dots without new visible loss or overlap; complete selected/fired/guard styling and interaction remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Cross-project global graph | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G02 shows simultaneous Alpha/Beta connected full-card lanes, paired structurally with v12 overview references (the 65% frame is structure only). Global START, complete filtering and scoped actions remain unqualified. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 retains both named bands, connected full cards and visible branch relationships without new visible regression; complete START/filtering/global actions remain unqualified, and offscreen content is not diagnosed absent. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Folder lanes/bands | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G02 closes the old opaque-band/simplified-disconnected-grid subgap with translucent outlined bands and folder/count captions. Worktree/reclaimable-chip/count states and current folder actions remain unmatched. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 retains outlined folder bands, captions/counts and ENTRY structure without new visible regression; matched worktree/reclaimable chips and lane-action outcomes remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Local/remote sections | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G03 closes the old GRAPH/Projects/CHATS framing subgap for populated local scenes against v12. Remote sections and independent collapse remain unqualified; the Needs-you extra remains outside parity scope. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves populated-local framing and Local Projects caption without new visible regression; remote and independent-collapse states were not captured. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Graph row | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G03 shows the Graph glyph and rounded selected Graph destination in the actual overview, closing the named old local visual defect, not all states or navigation outcomes. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves the Graph glyph and rounded selected overview row without new visible regression; navigation outcomes and other states remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Quick Chats group | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G03 shows the icon/header above Local Projects and populated action-fixture chat children; selected/hover/disclosure states and chat actions are not qualified by these images. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves that icon/header and populated action-fixture children without new visible regression; selected/hover/disclosure states and chat actions remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Project rows | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G03 closes the old populated-local framing subgap with folder glyphs, compact rows and rounded Alpha/Beta selection. Hover-plus, disclosure, collapse and remote variants remain unqualified. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves those folder glyphs, compact rows and rounded selection without new visible regression; remote, hover-plus, disclosure, collapse and navigation outcomes remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Canvas attention rail | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G04 retains the broad navy count/Review/oldest-title band rather than the compact amber v12 component. The later #888 rail was not captured in C6R; Review was not executed. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G04 closes only that captured finish subgap: compact rounded amber count/precise-oldest/filled Review and Ctrl+Shift+R are contained in shown one/many states against qualified v12. Zero/narrow states, all count/age combinations and actual Review results remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Loop bar | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G05 closes the Main IDLE Stop-versus-Restart wording subgap against v12 Main IDLE, with improved type/state chrome. Real Restart was not executed; provider/session/PTY results and other lifecycle/detail states remain unqualified. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves Main IDLE Restart session, title/type stripe, elapsed/pass information and Show in graph containment without new visible regression. This is wording/containment only, not restart execution or all-state clearance. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Notebook grid | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G06 remains visibly denser than qualified v12 100% canvas references; no new raster-pitch measurement or pan/zoom interaction was performed. The later #888 pitch is not in this capture. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G06 closes only the captured static 100% pitch mismatch: original-raster samples have 16 positive C7 gaps and 15 positive Mac gaps, all 48 pixels. This is actual capture evidence, not the earlier offscreen result; pan/zoom anchoring, input, fit, other zooms, higher DPI and antialiasing-kernel equivalence remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| New Loop canvas button | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G07 retains white New Loop rather than dark + New Node; #888's later owner-drawn finish is not captured in C6R, and creation was not exercised. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G07 closes only the shown dark compact + New Node finish subgap against qualified v12, without visible new occlusion. + New Chat is not shown; native focus/hover and creation/keyboard outcomes remain unqualified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Zoom controls | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G07 retains separated text-heavy zoom/Fit furniture and permanent help text rather than the compact v12 capsule. The later #888 finish is not captured; actions remain unqualified. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G07 closes only the shown compact icon-capsule/permanent-help-line subgap: zoom-out/100%/zoom-in/fit regions and divider fit their shown bounds. Zoom, actual-size, fit, shortcuts and native focus/hover outcomes were not executed. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Tab pills | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G08 improves the small fixed tab/second-line hint to one broad rounded backend-named selected tab with inline trailing Ctrl+1. Two/many-tab sizing, focus/state, close, safety and overflow remain unassessed. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 versus C6R AFTER541 preserves that one broad selected named tab and inline hint without new visible loss or clipping. Two/many tabs, alternate focus/state, hover close, last-tab safety, overflow and actions remain unassessed; no fresh Mac review of G08 was performed. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Folder toolbar identity | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G09 retains tiny upper-left two-line project/local identity rather than the v12 workspace-detail folder/name hierarchy. #888's later shared-header finish is not captured in C6R. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G09 closes only the captured local common-header hierarchy subgap: filled blue folder glyph and semibold project name on the detail axis, separate from actions/loop bar. Remote/global/Quick Chat, sidebar-hidden and narrow states remain unqualified; differing tabs/panel/Goal state do not establish full workspace equivalence. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Loop card attention | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G10 improves amber status/actions. Wired Goal, selected blocked Composite and wired Composite do not match qualified v12 unwired Goal/Main-blocked states; equivalent warmth is unassessable, not blanket absent or passed. #888 fallback work is not captured in C6R. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G10 shows warm faces/amber boundaries in cited wired attention frames, but equivalent warmth stays UNASSESSABLE because type/wiring/selection/reason are not jointly matched. Neither those warm frames nor the flat selected Composite support a blanket pass/failure; native-AA/fallback path or runtime halo/kernel equivalence is not identified. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |
+| Worktree reclaim offer | Still Partial; both annotations bind [L](#c6rc7-limits-2026-10-19). | C6R G11 retains common Reclaim/Keep controls but not qualified v12 rounded/bordered Reclaim finish. Goal DONE versus Main STOPPED resolution/bytes copy is unmatched; neither action was executed, and #888's later finish is not captured in C6R. SHA-256: `7E3FBF5C98EA96189A9701167B5D6A746D2F3625B0AAB2CF2D36E35F1381C5BE`. | C7 G11 closes only common-control finish/row containment: rounded bordered legible Reclaim and adjacent legible Keep fit without metadata collision. Goal DONE versus Main STOPPED resolution/bytes/outcome copy remains unmatched; neither Reclaim nor Keep outcome or full-card closure is established. SHA-256: `5A4C6BE0A6C74DF2819037218228F04468AD092E7D711A1351273CADA61DEC2C`. |

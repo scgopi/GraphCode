@@ -3,6 +3,27 @@ const Wire = @import("Wire.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 pub const WorktreeSummary = WorktreeStatus.Summary;
 
+pub const LoopResolution = struct {
+    pub const Basis = enum { predicate, nativeGoal, agentReported, human, sessionExited, workers };
+
+    basis: Basis,
+    detail: ?[]u8 = null,
+    /// Preserve Swift Date's fractional seconds since 2001, including dates before it.
+    resolved_at: f64,
+
+    fn clone(self: LoopResolution, allocator: std.mem.Allocator) !LoopResolution {
+        return .{
+            .basis = self.basis,
+            .detail = if (self.detail) |detail| try allocator.dupe(u8, detail) else null,
+            .resolved_at = self.resolved_at,
+        };
+    }
+
+    fn deinit(self: LoopResolution, allocator: std.mem.Allocator) void {
+        if (self.detail) |detail| allocator.free(detail);
+    }
+};
+
 pub const Node = struct {
     id: []u8,
     title: []u8,
@@ -29,6 +50,8 @@ pub const Node = struct {
     metric_sample_count: u8 = 0,
     token_usage: ?u32 = null,
     session_restarts: u64 = 0,
+    resolution: ?LoopResolution = null,
+    pending_completion: ?LoopResolution = null,
     worktree_path: []u8 = @constCast(""),
     worktree_branch: []u8 = &.{},
     subgraph_json: []u8 = &.{},
@@ -42,6 +65,153 @@ pub const ActivityEvent = struct {
     node_id: []u8 = &.{},
     timestamp: i64 = 0,
 };
+
+test "loop outcome decoding retains daemon evidence rather than silently dropping it" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"A"},"nodes":[{"id":"main","loopType":"sketch","state":"stopped","resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":813000000.25}}],"edges":[]}}}
+    );
+    const retained = try std.json.Stringify.valueAlloc(std.testing.allocator, model.graph.?.nodes.items[0], .{});
+    defer std.testing.allocator.free(retained);
+    try std.testing.expect(std.mem.indexOf(u8, retained, "sessionExited") != null);
+    try std.testing.expect(std.mem.indexOf(u8, retained, "exit 0") != null);
+}
+
+test "loop outcome decoding covers every basis optional detail dates and field scope" {
+    var nodes = std.array_list.Managed(Node).init(std.testing.allocator);
+    defer {
+        for (nodes.items) |node| freeNode(std.testing.allocator, node);
+        nodes.deinit();
+    }
+    try decodeNodes(std.testing.allocator,
+        \\[{"id":"predicate","resolution":{"basis":"predicate","resolvedAt":0}},{"id":"native","resolution":{"basis":"nativeGoal","detail":null,"resolvedAt":-1.25}},{"id":"reported","resolution":{"basis":"agentReported","detail":"","resolvedAt":813000000.25}},{"id":"human","resolution":{"basis":"human","detail":" \u96ea \"done\"\n ","resolvedAt":8.13e8}},{"id":"exited","resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":123}},{"id":"workers","resolution":{"basis":"workers","detail":"3 of 3","resolvedAt":124},"pendingCompletion":{"basis":"human","detail":"held","resolvedAt":125}},{"id":"missing","metadata":{"resolution":{"basis":"human","resolvedAt":1}}},{"id":"null","resolution":null,"pendingCompletion":null},{"id":"escaped","resol\u0075tion":{"basis":"native\u0047oal","resolvedAt":126}}]
+    , &nodes);
+    try std.testing.expectEqual(@as(usize, 9), nodes.items.len);
+    for (nodes.items[0..6], std.enums.values(LoopResolution.Basis)) |node, basis|
+        try std.testing.expectEqual(basis, node.resolution.?.basis);
+    try std.testing.expect(nodes.items[0].resolution.?.detail == null);
+    try std.testing.expect(nodes.items[1].resolution.?.detail == null);
+    try std.testing.expectEqualStrings("", nodes.items[2].resolution.?.detail.?);
+    try std.testing.expectEqualStrings(" \u{96ea} \"done\"\n ", nodes.items[3].resolution.?.detail.?);
+    try std.testing.expectEqual(@as(f64, 0), nodes.items[0].resolution.?.resolved_at);
+    try std.testing.expectEqual(@as(f64, -1.25), nodes.items[1].resolution.?.resolved_at);
+    try std.testing.expectEqual(@as(f64, 813000000.25), nodes.items[2].resolution.?.resolved_at);
+    try std.testing.expectEqualStrings("held", nodes.items[5].pending_completion.?.detail.?);
+    for (nodes.items[6..8]) |node| {
+        try std.testing.expect(node.resolution == null);
+        try std.testing.expect(node.pending_completion == null);
+    }
+    try std.testing.expectEqual(LoopResolution.Basis.nativeGoal, nodes.items[8].resolution.?.basis);
+}
+
+const outcomeGraphFrame =
+    \\{"event":{"graphChanged":{"revision":1,"project":{"path":"A","name":"A"},"nodes":[{"id":"loop","state":"stopped","resolution":{"basis":"sessionExited","detail":"owned \u96ea","resolvedAt":813000000.25},"pendingCompletion":{"basis":"agentReported","detail":"held","resolvedAt":812999999}},{"id":"other"}],"edges":[]}}}
+;
+const outcomeDeltaFrame =
+    \\{"event":{"nodesChanged":{"revision":2,"projectPath":"A","nodes":[{"id":"loop","state":"succeeded","resolution":{"basis":"predicate","detail":"exit 0","resolvedAt":813000001}},{"id":"unknown","resolution":{"basis":"human","detail":"not added","resolvedAt":1}}]}}}
+;
+
+test "loop outcome decoding rejects malformed evidence without replacing a held graph" {
+    for ([_][]const u8{ "resolution", "pendingCompletion" }) |field| {
+        for ([_][]const u8{
+            "true",                                                 "1",                                         "\"done\"",                                "[]",                                         "{}",
+            "{\"basis\":\"future\",\"resolvedAt\":1}",              "{\"basis\":null,\"resolvedAt\":1}",         "{\"basis\":{},\"resolvedAt\":1}",         "{\"basis\":\"human\"}",                      "{\"basis\":\"human\",\"resolvedAt\":null}",
+            "{\"basis\":\"human\",\"resolvedAt\":\"1\"}",           "{\"basis\":\"human\",\"resolvedAt\":true}", "{\"basis\":\"human\",\"resolvedAt\":{}}", "{\"basis\":\"human\",\"resolvedAt\":1e999}", "{\"basis\":\"human\",\"detail\":7,\"resolvedAt\":1}",
+            "{\"basis\":\"human\",\"detail\":{},\"resolvedAt\":1}",
+        }) |bad| {
+            var model = Model.init(std.testing.allocator);
+            defer model.deinit();
+            _ = try model.updateFromFrame(outcomeGraphFrame);
+            const frame = try std.fmt.allocPrint(std.testing.allocator, "{{\"graphChanged\":{{\"project\":{{\"path\":\"A\"}},\"nodes\":[{{\"id\":\"loop\",\"{s}\":{s}}}],\"edges\":[]}}}}", .{ field, bad });
+            defer std.testing.allocator.free(frame);
+            try std.testing.expectError(error.MalformedLoopResolution, model.updateFromFrame(frame));
+            try std.testing.expectEqualStrings("owned \u{96ea}", model.graphFor("A").?.nodes.items[0].resolution.?.detail.?);
+            try std.testing.expectEqual(@as(?u64, 1), model.graphFor("A").?.revision);
+        }
+    }
+}
+
+test "loop outcome decoding clones and full node deltas replace and clear owned evidence" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(outcomeGraphFrame);
+    const source = model.graphFor("A").?.nodes.items[0];
+    const copy = try cloneNode(std.testing.allocator, source);
+    defer freeNode(std.testing.allocator, copy);
+    try std.testing.expect(copy.resolution.?.detail.?.ptr != source.resolution.?.detail.?.ptr);
+    try std.testing.expect(copy.pending_completion.?.detail.?.ptr != source.pending_completion.?.detail.?.ptr);
+    try std.testing.expect(model.graph.?.nodes.items[0].resolution.?.detail.?.ptr != source.resolution.?.detail.?.ptr);
+    _ = try model.updateFromFrame(outcomeDeltaFrame);
+    try std.testing.expectEqual(@as(usize, 2), model.graphFor("A").?.nodes.items.len);
+    try std.testing.expectEqualStrings("exit 0", model.graph.?.nodes.items[0].resolution.?.detail.?);
+    try std.testing.expect(model.graph.?.nodes.items[0].pending_completion == null);
+    try std.testing.expectEqualStrings("owned \u{96ea}", copy.resolution.?.detail.?);
+    try std.testing.expectEqualStrings("held", copy.pending_completion.?.detail.?);
+    _ = try model.updateFromFrame(
+        \\{"event":{"nodesChanged":{"revision":3,"projectPath":"A","nodes":[{"id":"loop","state":"running","resolution":null,"pendingCompletion":null}]}}}
+    );
+    try std.testing.expect(model.graph.?.nodes.items[0].resolution == null);
+    try std.testing.expect(model.graphFor("A").?.nodes.items[0].pending_completion == null);
+}
+
+test "loop outcome decoding every allocation failure unwinds decode clone replacement and delta" {
+    const Probe = struct {
+        fn decode(allocator: std.mem.Allocator) !void {
+            var nodes = std.array_list.Managed(Node).init(allocator);
+            defer {
+                for (nodes.items) |node| freeNode(allocator, node);
+                nodes.deinit();
+            }
+            try decodeNodes(allocator,
+                \\[{"id":"a","resolution":{"basis":"human","detail":"owned","resolvedAt":1},"pendingCompletion":{"basis":"workers","detail":"held","resolvedAt":2}},{"id":"b","resolution":{"basis":"predicate","detail":"","resolvedAt":0}}]
+            , &nodes);
+            try std.testing.expectEqualStrings("held", nodes.items[0].pending_completion.?.detail.?);
+        }
+
+        fn clone(allocator: std.mem.Allocator) !void {
+            const node = Node{
+                .id = @constCast("a"),
+                .title = @constCast("A"),
+                .loop_type = @constCast("sketch"),
+                .state = @constCast("stopped"),
+                .activity = &.{},
+                .presence = &.{},
+                .resolution = .{ .basis = .human, .detail = @constCast("owned"), .resolved_at = 1 },
+                .pending_completion = .{ .basis = .workers, .detail = @constCast("held"), .resolved_at = 2 },
+            };
+            const copy = try cloneNode(allocator, node);
+            defer freeNode(allocator, copy);
+            try std.testing.expectEqualStrings("held", copy.pending_completion.?.detail.?);
+        }
+
+        fn lifecycle(allocator: std.mem.Allocator) !void {
+            var model = Model.init(allocator);
+            defer model.deinit();
+            _ = try model.updateFromFrame(outcomeGraphFrame);
+            _ = try model.updateFromFrame(outcomeDeltaFrame);
+            _ = try model.updateFromFrame(outcomeGraphFrame);
+            try std.testing.expectEqualStrings("owned \u{96ea}", model.graph.?.nodes.items[0].resolution.?.detail.?);
+        }
+
+        fn sweep(comptime operation: anytype, name: []const u8) !void {
+            var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            try operation(counting.allocator());
+            try std.testing.expect(counting.alloc_index > 0);
+            try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+            for (0..counting.alloc_index) |index| {
+                var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+                try std.testing.expectError(error.OutOfMemory, operation(failing.allocator()));
+                try std.testing.expect(failing.has_induced_failure);
+                try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+            }
+            std.debug.print("loop outcome {s}: {d}/{d} allocation failures propagated; allocated_bytes == freed_bytes\n", .{ name, counting.alloc_index, counting.alloc_index });
+        }
+    };
+    try Probe.sweep(Probe.decode, "decode");
+    try Probe.sweep(Probe.clone, "clone");
+    try Probe.sweep(Probe.lifecycle, "snapshot-replacement-delta");
+}
 
 test "restart confirmation model retains the daemon counter through snapshots clones and deltas" {
     // LoopNode.swift:104-108 and AppFeature+LoopSessions.swift:170-185.
@@ -1503,6 +1673,8 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
     copy.worktree_path = try allocator.dupe(u8, node.worktree_path);
     copy.worktree_branch = try allocator.dupe(u8, node.worktree_branch);
     copy.subgraph_json = try allocator.dupe(u8, node.subgraph_json);
+    copy.resolution = if (node.resolution) |resolution| try resolution.clone(allocator) else null;
+    copy.pending_completion = if (node.pending_completion) |pending| try pending.clone(allocator) else null;
     return copy;
 }
 
@@ -1929,6 +2101,30 @@ fn unixSecondsFromReferenceDate(value: JsonValue) ?u64 {
     return @as(u64, @intFromFloat(@floor(seconds))) + reference_date_unix_offset;
 }
 
+fn decodeLoopResolution(allocator: std.mem.Allocator, value: JsonValue) !?LoopResolution {
+    if (value.isNull()) return null;
+    const object = value.container('{') orelse return error.MalformedLoopResolution;
+    var fields = try JsonFields.init(allocator, object);
+    defer fields.deinit();
+    const basis_value = fields.get("basis");
+    if (basis_value.container('"') == null) return error.MalformedLoopResolution;
+    const basis = basis: {
+        for (std.enums.values(LoopResolution.Basis)) |candidate| {
+            if (jsonStringEquals(basis_value.raw, @tagName(candidate))) break :basis candidate;
+        }
+        return error.MalformedLoopResolution;
+    };
+    const resolved_at = fields.get("resolvedAt").float() orelse return error.MalformedLoopResolution;
+    if (!std.math.isFinite(resolved_at)) return error.MalformedLoopResolution;
+    const detail = fields.get("detail");
+    if (!detail.isNull() and detail.container('"') == null) return error.MalformedLoopResolution;
+    return .{
+        .basis = basis,
+        .resolved_at = resolved_at,
+        .detail = if (detail.isNull()) null else try detail.duplicateString(allocator, ""),
+    };
+}
+
 fn decodeNodes(
     allocator: std.mem.Allocator,
     bytes: []const u8,
@@ -1993,6 +2189,8 @@ fn decodeNodes(
         node.worktree_path = try path.duplicateString(allocator, "");
         node.worktree_branch = try binding.get("branch").duplicateString(allocator, "");
         node.subgraph_json = try allocator.dupe(u8, fields.get("subGraph").container('{') orelse "");
+        node.resolution = try decodeLoopResolution(allocator, fields.get("resolution"));
+        node.pending_completion = try decodeLoopResolution(allocator, fields.get("pendingCompletion"));
         try nodes.append(node);
     }
 }
@@ -2404,6 +2602,8 @@ fn freeNode(allocator: std.mem.Allocator, node: Node) void {
     allocator.free(node.worktree_path);
     allocator.free(node.worktree_branch);
     allocator.free(node.subgraph_json);
+    if (node.resolution) |resolution| resolution.deinit(allocator);
+    if (node.pending_completion) |pending| pending.deinit(allocator);
 }
 
 test "sketch promotion first instruction survives decode clones and source replacement" {

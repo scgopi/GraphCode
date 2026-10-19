@@ -1231,6 +1231,50 @@ fn isResolvedLoopState(state: []const u8) bool {
         std.mem.eql(u8, state, "stopped");
 }
 
+fn workspaceOutcomeLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
+    const has_outcome = if (isResolvedLoopState(node.state)) node.resolution != null else node.pending_completion != null;
+    return if (has_outcome) GraphCanvas.cardLiveLine(allocator, node) else allocator.dupe(u8, node.activity);
+}
+
+test "workspace loop outcome line shares card evidence without changing legacy activity" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A"},"nodes":[{"id":"main","state":"stopped","activity":"old","resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":1}},{"id":"goal","state":"succeeded","activity":"old","resolution":{"basis":"nativeGoal","resolvedAt":2}},{"id":"leader","state":"running","pendingCompletion":{"basis":"agentReported","resolvedAt":3}},{"id":"legacy","state":"running","activity":" raw\n activity ","metricHistory":[{"value":1},{"value":2}]},{"id":"followup","state":"succeeded","activity":"new work","presence":"busy","resolution":{"basis":"nativeGoal","resolvedAt":4}}],"edges":[]}}
+    );
+    for (model.graph.?.nodes.items, [_][]const u8{
+        "session exited · exit 0", "goal met", "reported done · waiting on the loops it created", " raw\n activity ", "new work",
+    }) |node, expected| {
+        const line = try workspaceOutcomeLine(std.testing.allocator, node);
+        defer std.testing.allocator.free(line);
+        try std.testing.expectEqualStrings(expected, line);
+    }
+}
+
+test "workspace loop outcome line propagates every copy allocation failure" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var node = GraphModel.Node{
+                .id = @constCast("loop"),
+                .title = @constCast("Loop"),
+                .loop_type = @constCast("goalBased"),
+                .state = @constCast("succeeded"),
+                .activity = @constCast("raw activity"),
+                .presence = &.{},
+                .resolution = .{ .basis = .predicate, .detail = @constCast("exit 0"), .resolved_at = 1 },
+            };
+            const outcome = try workspaceOutcomeLine(allocator, node);
+            defer allocator.free(outcome);
+            try std.testing.expectEqualStrings("predicate passed · exit 0", outcome);
+            node.resolution = null;
+            const legacy = try workspaceOutcomeLine(allocator, node);
+            defer allocator.free(legacy);
+            try std.testing.expectEqualStrings("raw activity", legacy);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+}
+
 fn loopBarRect(rect: LoopBarLayout.Rect) c.RECT {
     return .{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = rect.bottom };
 }
@@ -9729,6 +9773,11 @@ fn onWindowMessage(
                         const index = app.model.selectedIndex() orelse 0;
                         if (index < graph.nodes.items.len) {
                             const node = graph.nodes.items[index];
+                            const outcome_line: ?[]u8 = workspaceOutcomeLine(app.allocator, node) catch |err| blk: {
+                                std.log.warn("Loop {s} workspace outcome unavailable: {s}", .{ node.id, @errorName(err) });
+                                break :blk null;
+                            };
+                            defer if (outcome_line) |line| app.allocator.free(line);
                             TerminalWorkspace.Workspace.paintLoopBar(
                                 hdc,
                                 app.allocator,
@@ -9738,7 +9787,7 @@ fn onWindowMessage(
                                 node.title,
                                 node.loop_type,
                                 node.state,
-                                node.activity,
+                                outcome_line orelse "Outcome unavailable",
                                 node.backend,
                                 node.created_at,
                                 node.metric_passes,
