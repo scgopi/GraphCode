@@ -94,6 +94,17 @@ TEMP root, with the same file types and `.git` exclusions. A filesystem-only
 contract requires positive current/legacy file selection and refuses unrelated
 roots; it is not proof of an actual hosted upload.
 
+Artifact path parsing accepts both LF and CRLF workflow text without including
+the CR terminator in a literal path. It does not trim path whitespace or alter
+`!`, case or wildcard characters. Each line-ending variant must contain the
+exact same inclusion/exclusion multiset; duplicate, private-path, missing-`!`
+and trailing-path-space mutations refuse. Fixture inventories are derived from
+explicit files written under current, legacy and unrelated roots, including
+root-level and nested `.git` sentinels. They assert exact included and excluded
+relative-path sets with no missing or extra files. This is a literal-pattern,
+PowerShell root-wildcard and explicit `.git` partition contract, **not** a
+translation or execution of the Actions glob engine or proof of hosted upload.
+
 Default test scratch leaves and the registered capture scratch leaf are short
 `g` plus eight hex characters to leave room for the unchanged 240-character
 zmx lease-path guard. Existing roots refuse rather than being adopted or

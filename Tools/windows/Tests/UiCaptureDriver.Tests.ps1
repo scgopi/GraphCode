@@ -2786,48 +2786,96 @@ function Invoke-CapSeedPathCase {
     }
 }
 
+function Read-CapSeedArtifactPatterns {
+    param([string]$Source)
+    $patterns = @([regex]::Matches($Source,'(?m)^[ \t]+(?<exclude>!)?\$\{\{ steps\.capture_temp\.outputs\.root \}\}\\(?<relative>[^\r\n]+)\r?$'))
+    $suffixes = @('suite\**\*.json','suite\**\*.jsonl','suite\**\*.log',
+        'prebuilt\fixtures.json','prebuilt\**\provenance.json','prebuilt\**\compile*.log')
+    $expected = @(foreach ($rootPattern in @('gc-ui-capture-*',('g' + ('[0-9a-f]' * 8)))) {
+        foreach ($suffix in $suffixes) { "$rootPattern\$suffix" }
+        "!$rootPattern\suite\**\.git\**"
+    })
+    $actual = @($patterns | ForEach-Object {
+        $(if ($_.Groups['exclude'].Success) {'!'} else {''}) + $_.Groups['relative'].Value
+    })
+    $detail = @{ expected = $expected; actual = $actual; expectedCount = $expected.Count; actualCount = $actual.Count }
+    Assert-CapTest ($actual.Count -eq $expected.Count) 'Capture artifact exact pattern count differs.' $detail
+    foreach ($pattern in $expected) {
+        Assert-CapTest (@($actual | Where-Object { $_ -ceq $pattern }).Count -eq 1) `
+            'Capture artifact exact inclusion/exclusion set differs.' $detail
+    }
+    return $actual
+}
+
 function Invoke-CapSeedArtifactSelectionContract {
+    param([string]$WorkflowDirectory = (Join-Path (Split-Path -Parent (Split-Path -Parent $driverDirectory)) '.github\workflows'))
     $artifactRoot = Join-Path $scratch ('artifacts-' + [guid]::NewGuid().ToString('N').Substring(0,8))
     $positiveRoots = @('g0123abcd','gc-ui-capture-legacy')
     $negativeRoots = @('gnothexzz','g0123abcdextra','unrelated')
+    $includedFiles = @('suite\case\report.json','suite\case\calls.jsonl','suite\case\output.log',
+        'prebuilt\fixtures.json','prebuilt\case\provenance.json','prebuilt\case\compile-stdout.log')
+    $privateFiles = @('suite\.git\private.json','suite\case\.git\private.log')
+    $manifest = [Collections.Generic.List[object]]::new()
     foreach ($name in @($positiveRoots) + @($negativeRoots)) {
-        $directory = Join-Path $artifactRoot "$name\suite\case"
-        $null = New-Item -ItemType Directory -Path $directory
-        [IO.File]::WriteAllText((Join-Path $directory 'report.json'),'{"synthetic":true}')
+        foreach ($relative in @($includedFiles) + @($privateFiles)) {
+            $path = Join-Path $artifactRoot "$name\$relative"
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force
+            [IO.File]::WriteAllText($path,'SYNTHETIC_ARTIFACT_SELECTION_FIXTURE')
+            $manifest.Add([pscustomobject]@{ relativePath = "$name\$relative"; root = $name
+                private = $relative -cin $privateFiles; intended = $name -cin $positiveRoots -and $relative -cin $includedFiles })
+        }
     }
-    $repoRoot = Split-Path -Parent (Split-Path -Parent $driverDirectory)
     $results = @(foreach ($workflow in @('windows-hardening.yml','windows-port-validation.yml')) {
-        $source = [IO.File]::ReadAllText((Join-Path $repoRoot ".github\workflows\$workflow"))
-        $patterns = @([regex]::Matches($source,'(?m)^\s+(?<exclude>!)?\$\{\{ steps\.capture_temp\.outputs\.root \}\}\\(?<relative>.+)$'))
-        Assert-CapTest ($patterns.Count -eq 14) 'Capture artifact patterns are missing or broadened.'
-        $expectedSuffixes = @('suite\**\*.json','suite\**\*.jsonl','suite\**\*.log',
-            'prebuilt\fixtures.json','prebuilt\**\provenance.json','prebuilt\**\compile*.log')
-        $rootPatterns = @($patterns | ForEach-Object { $_.Groups['relative'].Value.Split('\')[0] } | Select-Object -Unique)
-        Assert-CapTest ($rootPatterns.Count -eq 2 -and $rootPatterns -ccontains 'gc-ui-capture-*' -and
-            $rootPatterns -ccontains ('g' + ('[0-9a-f]' * 8))) 'Capture artifact roots escaped the exact current/legacy names.'
-        foreach ($rootPattern in $rootPatterns) {
-            $matching = @($patterns | Where-Object { $_.Groups['relative'].Value.StartsWith($rootPattern+'\',[StringComparison]::Ordinal) })
-            $include = @($matching | Where-Object { -not $_.Groups['exclude'].Success })
-            $exclude = @($matching | Where-Object { $_.Groups['exclude'].Success })
-            Assert-CapTest ($include.Count -eq 6 -and $exclude.Count -eq 1 -and
-                $exclude[0].Groups['relative'].Value -ceq "$rootPattern\suite\**\.git\**") `
-                'Capture artifact privacy exclusion or inclusion count differs.'
-            foreach ($suffix in $expectedSuffixes) {
-                Assert-CapTest (@($include | Where-Object { $_.Groups['relative'].Value -ceq "$rootPattern\$suffix" }).Count -eq 1) `
-                    'Capture artifact scope or legacy suffix was changed.'
+        $source = [IO.File]::ReadAllText((Join-Path $WorkflowDirectory $workflow))
+        $variants = @(foreach ($ending in @('LF','CRLF')) {
+            $text = $source.Replace("`r`n","`n")
+            if ($ending -ceq 'CRLF') { $text = $text.Replace("`n","`r`n") }
+            $patterns = @(Read-CapSeedArtifactPatterns -Source $text)
+            foreach ($mutation in @('duplicate','private-extra','missing-exclusion','path-space')) {
+                $changed = switch ($mutation) {
+                    'duplicate' { $text + "`n            " + '${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\suite\**\*.json' }
+                    'private-extra' { $text.Replace('\suite\**\*.json','\suite\**\*.private') }
+                    'missing-exclusion' { $text.Replace('!${{ steps.capture_temp.outputs.root }}','${{ steps.capture_temp.outputs.root }}') }
+                    'path-space' { $text.Replace('\suite\**\.git\**',('\suite\**\.git\**' + ' ')) }
+                }
+                $null = Assert-CapRejects { Read-CapSeedArtifactPatterns -Source $changed } 'Capture artifact exact'
             }
+            @{ lineEnding = $ending; exactPatternCount = $patterns.Count; mutationRefusals = 4 }
+        })
+        $patterns = @(Read-CapSeedArtifactPatterns -Source $source)
+        $rootPatterns = @($patterns | Where-Object { -not $_.StartsWith('!') } |
+            ForEach-Object { $_.Split('\')[0] } | Select-Object -Unique)
+        foreach ($rootPattern in $rootPatterns) {
+            Assert-CapTest (@($patterns | Where-Object { $_ -ceq "!$rootPattern\suite\**\.git\**" }).Count -eq 1) `
+                'Exact privacy exclusion was lost before fixture partition.'
         }
         $selected = @(Get-ChildItem -LiteralPath $artifactRoot -Directory | Where-Object {
             $name = $_.Name
             @($rootPatterns | Where-Object { $name -like $_ }).Count -eq 1
         })
-        $files = @($selected | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter report.json -File -Recurse })
-        Assert-CapTest ($selected.Count -eq 2 -and $files.Count -eq 2 -and
+        $files = @($selected | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Force -Recurse } |
+            ForEach-Object { [IO.Path]::GetRelativePath($artifactRoot,$_.FullName) })
+        $excluded = @($files | Where-Object { $_.Split('\') -ccontains '.git' })
+        $included = @($files | Where-Object { -not ($_.Split('\') -ccontains '.git') })
+        $expectedIncluded = @($manifest | Where-Object intended | ForEach-Object relativePath)
+        $expectedExcluded = @($manifest | Where-Object { $_.root -cin $positiveRoots -and $_.private } | ForEach-Object relativePath)
+        $detail = @{ selected = $files; included = $included; excluded = $excluded
+            expectedIncluded = $expectedIncluded; expectedExcluded = $expectedExcluded }
+        Assert-CapTest ($expectedIncluded.Count -gt 0 -and $expectedExcluded.Count -gt 0 -and
+            $included.Count -eq $expectedIncluded.Count -and $excluded.Count -eq $expectedExcluded.Count -and
+            @($included | Where-Object { $_ -cnotin $expectedIncluded }).Count -eq 0 -and
+            @($expectedIncluded | Where-Object { $_ -cnotin $included }).Count -eq 0 -and
+            @($excluded | Where-Object { $_ -cnotin $expectedExcluded }).Count -eq 0 -and
+            @($expectedExcluded | Where-Object { $_ -cnotin $excluded }).Count -eq 0) `
+            'Fixture artifact inclusion/privacy inventory differs from its explicit writes.' $detail
+        Assert-CapTest ($selected.Count -eq $positiveRoots.Count -and
             @($selected | Where-Object { $_.Name -cin $negativeRoots }).Count -eq 0 -and
-            @($selected | Where-Object { $_.Name -cin $positiveRoots }).Count -eq 2) `
+            @($selected | Where-Object { $_.Name -cin $positiveRoots }).Count -eq $positiveRoots.Count) `
             'Actual workflow root patterns lost current/legacy evidence or selected an unrelated root.'
-        @{ workflow = $workflow; selectedRoots = @($selected.Name); selectedFiles = $files.Count; unrelatedRootsRefused = 3
-            evidence = 'FILESYSTEM_ROOT_PATTERN_CONTRACT_NOT_HOSTED_UPLOAD' }
+        @{ workflow = $workflow; selectedRoots = @($selected.Name); includedFiles = $included; excludedFiles = $excluded
+            selectedFiles = $included.Count; privateFilesExcluded = $excluded.Count; unrelatedRootsRefused = $negativeRoots.Count
+            variants = $variants; fixtureManifest = @($manifest.ToArray())
+            evidence = 'EXACT_LITERAL_PATTERNS_POWERSHELL_ROOT_WILDCARDS_AND_EXPLICIT_GIT_PARTITION_NOT_ACTIONS_GLOB_UPLOAD' }
     })
     return $results
 }
