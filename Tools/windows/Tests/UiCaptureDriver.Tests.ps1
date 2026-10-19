@@ -1807,6 +1807,7 @@ function Invoke-CapCaptureCommand {
         'expired' { $lease.grantedUtc = $now.AddMinutes(-6).ToString('o'); $lease.expiresUtc = $now.AddSeconds(-1).ToString('o') }
         'future' { $lease.grantedUtc = $now.AddMinutes(1).ToString('o') }
         'over-15' { $lease.expiresUtc = $now.AddMinutes(16).ToString('o') }
+        'over-30' { $lease.maxMinutes = 30; $lease.expiresUtc = $now.AddMinutes(31).ToString('o') }
         'missing-offset' { $lease.grantedUtc = $now.AddSeconds(-1).ToString('yyyy-MM-ddTHH:mm:ss') }
         'traversal-id' { $lease.leaseId = '..\foreign-output' }
         'hash' { $lease.moduleSha256 = '0' * 64 }
@@ -2396,13 +2397,20 @@ function Invoke-CapMatchedContracts {
         $job=New-CapMatchedTestJob
         Assert-CapSceneContract -Job $job
         Assert-CapTest ($job.scenes.Count -eq 18) 'Expected eighteen bounded matched scenes.'
+        foreach ($seconds in @(810,1710)) {
+            $job.captureContract.estimatedSeconds=[long]$seconds
+            Assert-CapSceneContract -Job $job
+        }
+        $job.captureContract.estimatedSeconds=1711L
+        $null=Assert-CapRejects {Assert-CapSceneContract -Job $job} 'Matched scene'
         $names=@($job.scenes | ForEach-Object name)
         foreach ($name in $names) {
             $changed=New-CapMatchedTestJob
             $changed.scenes=@($changed.scenes | Where-Object name -CNE $name)
             $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} 'Matched scene'
         }
-        return @{positive=1;negative=$names.Count;names=$names;routing=(Invoke-CapMatchedSceneRoutingContract)}
+        return @{positive=3;negative=($names.Count+1);budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
+            names=$names;routing=(Invoke-CapMatchedSceneRoutingContract)}
     }
     Invoke-CapTest 'matched tab observations preserve exact owned IDs parents selection and close bounds' {
         Invoke-CapMatchedTabContracts
@@ -2858,7 +2866,14 @@ function Invoke-CapDContracts {
                 binaries = @{offlineZmx=@{sha256=('D'*64);seedCommand=@('/Q','/K','echo D_OFFLINE_QUICKCHAT_FIXTURE')}}
             } | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
             Assert-CapSceneContract -Job $job
-            return 'Shared production scene predicate only; no launch, native call, fixture or image.'
+            foreach ($seconds in @(810,1710)) {
+                $job.captureContract.estimatedSeconds=[long]$seconds
+                Assert-CapSceneContract -Job $job
+            }
+            $job.captureContract.estimatedSeconds=1711L
+            $null=Assert-CapRejects {Assert-CapSceneContract -Job $job} 'D scene, geometry'
+            return @{budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
+                mode='Shared production scene predicate only; no launch, native call, fixture or image.'}
         }
     }
     if ($DAdapterCase -in @('All','ActualAdmission')) {
@@ -2952,10 +2967,12 @@ function Invoke-CapDContracts {
     }
     foreach ($mutation in @('malformed','expired','future','over-15','missing-offset','traversal-id','hash')) {
         Invoke-CapTest "D scene-marked actual command refuses $mutation lease" {
-            $run=Invoke-CapCaptureCommand -Name "d-lease-$mutation" -AdmissionMutation 'lane-d' -DSceneMutation 'valid' -LeaseMutation $mutation
-            Assert-CapTest ($run.child.exitCode -ne 0 -and $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and
-                -not $run.receipt.workerStarted -and $run.receipt.captures -eq 0 -and $run.receipt.cleanupFailures.Count -eq 0) 'D invalid lease did not refuse with official release.'
-            return @{release=$run.receiptPath;status=$run.receipt.status;reason=$run.receipt.primaryFailure}
+            foreach ($leaseCase in @($mutation) + $(if ($mutation -ceq 'over-15') {@('over-30')} else {@()})) {
+                $run=Invoke-CapCaptureCommand -Name "d-lease-$leaseCase" -AdmissionMutation 'lane-d' -DSceneMutation 'valid' -LeaseMutation $leaseCase
+                Assert-CapTest ($run.child.exitCode -ne 0 -and $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and
+                    -not $run.receipt.workerStarted -and $run.receipt.captures -eq 0 -and $run.receipt.cleanupFailures.Count -eq 0) 'D invalid lease did not refuse with official release.'
+                @{release=$run.receiptPath;status=$run.receipt.status;reason=$run.receipt.primaryFailure}
+            }
         }
     }
     foreach ($behavior in @('nonzero','timeout','primary-cleanup','receipt-block','trace-readonly')) {
@@ -5595,7 +5612,51 @@ try {
                 -LeaseWindow $window -NowUtc $fixedNow
             Assert-CapTest ($window.DurationMinutes -eq 15 -and $deadline.Kind -eq [DateTimeKind]::Utc -and
                 $deadline -eq $window.ExpiresUtc.AddSeconds(-90)) 'Exact cleanup reserve changed.'
-            return [ordered]@{ fixedNow = $fixedNow.ToString('o'); durationMinutes = 15; reserveSeconds = 90 }
+            foreach ($minutes in @(15,16,20,30)) {
+                $expires=$window.GrantedUtc.AddMinutes($minutes)
+                $boundary=Get-CapLeaseWindow -GrantedUtc $window.GrantedUtc.ToString('o') `
+                    -ExpiresUtc $expires.ToString('o') -MaximumMinutes $minutes -NowUtc $fixedNow
+                $authorized=Get-CapAuthorizedWorkerDeadline -WorkerDeadlineUtc $expires.AddSeconds(-90).ToString('o') `
+                    -LeaseWindow $boundary -NowUtc $fixedNow
+                Assert-CapTest ($boundary.DurationMinutes -eq $minutes -and $boundary.MaximumMinutes -eq $minutes -and
+                    $boundary.GrantedUtc -eq $window.GrantedUtc -and $boundary.ExpiresUtc -eq $expires -and
+                    $authorized -eq $expires.AddSeconds(-90)) "Lease $minutes changed its allocation or cleanup reserve."
+                $null=Assert-CapRejects {
+                    Get-CapLeaseWindow -GrantedUtc $window.GrantedUtc.ToString('o') -ExpiresUtc $expires.ToString('o') `
+                        -MaximumMinutes $minutes -NowUtc $window.GrantedUtc.AddTicks(-1)
+                } 'Coordinator lease is expired'
+                $null=Assert-CapRejects {
+                    Get-CapLeaseWindow -GrantedUtc $window.GrantedUtc.ToString('o') -ExpiresUtc $expires.ToString('o') `
+                        -MaximumMinutes $minutes -NowUtc $expires
+                } 'Coordinator lease is expired'
+                $null=Assert-CapRejects {
+                    Get-CapAuthorizedWorkerDeadline -WorkerDeadlineUtc $authorized.ToString('o') `
+                        -LeaseWindow $boundary -NowUtc $authorized
+                } 'already expired'
+            }
+            $refusals=@(
+                @{duration=16;maximum=15},
+                @{duration=30.001;maximum=30},
+                @{duration=31;maximum=30},
+                @{duration=30;maximum=30.001},
+                @{duration=30;maximum=31},
+                @{duration=31;maximum=31},
+                @{duration=31;maximum=[double]::NaN},
+                @{duration=31;maximum=[double]::PositiveInfinity},
+                @{duration=30;maximum=0},
+                @{duration=30;maximum=-1},
+                @{duration=0;maximum=30},
+                @{duration=-1;maximum=30}
+            )
+            foreach ($refusal in $refusals) {
+                $null=Assert-CapRejects {
+                    Get-CapLeaseWindow -GrantedUtc $window.GrantedUtc.ToString('o') `
+                        -ExpiresUtc $window.GrantedUtc.AddMinutes($refusal.duration).ToString('o') `
+                        -MaximumMinutes $refusal.maximum -NowUtc $fixedNow
+                } 'Coordinator lease is expired'
+            }
+            return [ordered]@{ fixedNow = $fixedNow.ToString('o'); durationMinutes = 15; reserveSeconds = 90
+                acceptedMinutes=@(15,16,20,30);refusedAllocations=$refusals.Count;refusedClockBoundaries=12 }
         }
         foreach ($mutation in @('expired-boundary', 'future-boundary', 'over-duration', 'over-allocation',
             'missing-offset', 'clock-kind', 'deadline-mismatch', 'deadline-expired')) {
@@ -5609,7 +5670,7 @@ try {
                     'expired-boundary' { $parameters.NowUtc = $window.ExpiresUtc }
                     'future-boundary' { $parameters.NowUtc = $window.GrantedUtc.AddSeconds(-1) }
                     'over-duration' { $parameters.ExpiresUtc = '2026-10-14T21:40:02Z' }
-                    'over-allocation' { $parameters.MaximumMinutes = 16 }
+                    'over-allocation' { $parameters.MaximumMinutes = 31 }
                     'missing-offset' { $parameters.GrantedUtc = '2026-10-14T21:25:01'; $expected = 'explicit UTC marker' }
                     'clock-kind' { $parameters.NowUtc = [DateTime]::SpecifyKind($fixedNow, [DateTimeKind]::Unspecified); $expected = 'explicitly UTC' }
                     'deadline-mismatch' { $expected = 'does not match' }
@@ -5626,14 +5687,16 @@ try {
         }
         foreach ($mutation in @('malformed', 'expired', 'future', 'over-15', 'missing-offset', 'traversal-id', 'hash')) {
             Invoke-CapTest "same capture command refuses $mutation lease and writes release" {
-                $run = Invoke-CapCaptureCommand -Name "lease-$mutation" -LeaseMutation $mutation
-                Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
-                    $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and -not $run.receipt.workerStarted -and
-                    -not [string]::IsNullOrWhiteSpace($run.receipt.primaryFailure) -and
-                    $run.receipt.leaseReceiptSha256 -ceq $run.leaseSha256 -and
-                    $run.receipt.cleanupState -ceq 'NO_WORKER_STARTED') 'Invalid lease did not fail closed with an actual release file.'
-                return [ordered]@{ exit = $run.child.exitCode; release = $run.receiptPath
-                    sha256 = $run.receiptSha256; status = $run.receipt.status; primary = $run.receipt.primaryFailure }
+                foreach ($leaseCase in @($mutation) + $(if ($mutation -ceq 'over-15') {@('over-30')} else {@()})) {
+                    $run = Invoke-CapCaptureCommand -Name "lease-$leaseCase" -LeaseMutation $leaseCase
+                    Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt -and
+                        $run.receipt.status -ceq 'REFUSED_NO_WORKER' -and -not $run.receipt.workerStarted -and
+                        -not [string]::IsNullOrWhiteSpace($run.receipt.primaryFailure) -and
+                        $run.receipt.leaseReceiptSha256 -ceq $run.leaseSha256 -and
+                        $run.receipt.cleanupState -ceq 'NO_WORKER_STARTED') 'Invalid lease did not fail closed with an actual release file.'
+                    [ordered]@{ exit = $run.child.exitCode; release = $run.receiptPath
+                        sha256 = $run.receiptSha256; status = $run.receipt.status; primary = $run.receipt.primaryFailure }
+                }
             }
         }
         foreach ($behavior in @('nonzero', 'timeout', 'primary-cleanup', 'receipt-block', 'trace-readonly')) {

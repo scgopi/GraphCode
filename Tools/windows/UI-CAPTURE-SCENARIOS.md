@@ -6,6 +6,29 @@ a desktop lease, replace the B/D adapters, or change the product. Preparation,
 fresh builds, current CI admission, a separately warned capture lease, individual
 image privacy checks, and one subsequent paired review remain required.
 
+## Lease ceiling and scene budget
+
+The production lease ceiling is **30 minutes**, not a new lease grant or an
+extension of an existing allocation. A caller's smaller `maxMinutes` still
+limits its lease, and future-dated or expired leases still refuse. The worker
+deadline remains exactly the declared expiry minus **90 seconds**; validation
+never restarts that clock. Per-scene timeouts and strict deadline clipping are
+unchanged, so even an admitted planning estimate does not guarantee completion.
+
+Both matched S and D scene contracts accept at most **1710 estimated seconds**
+(`30 * 60 - 90`). They still require the exact 90-second cleanup reserve.
+The matched job still requires all eighteen scenes per phase, thirty-six
+images, twenty-two cmd-only seeds and two real-daemon Restart scenes.
+
+Lane T extends existing lease and scene-budget contract groups without adding
+or removing a top-level group: **delta 0 default / 0 real-seed**. On its combined
+base the registered totals remain **175 default / 178 with `-RequireRealSeed`**,
+including all eight S groups and the unchanged fourteen-subcase G group once.
+The historical standalone Lane S totals below describe its own delta, not the
+current combined-tree qualification. A later C8 preparation must re-pin merged
+tooling and rerun its exact declared qualification count before preflight and
+a separately granted capture window. No subset or skipped-scene support is added.
+
 ## Counts and registration
 
 The standalone Lane S change adds **eight top-level groups exactly once**:

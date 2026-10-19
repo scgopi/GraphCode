@@ -3364,7 +3364,7 @@ function Assert-CapSceneContract {
             ($contract.windowOuterXYWH -join ',') -cne '30,30,1456,959' -or
             ($contract.expectedClientWH -join ',') -cne '1440,900' -or $contract.dpi -ne 96 -or
             $contract.canvasZoomPercent -ne 100 -or $contract.cleanupReserveSeconds -ne 90 -or
-            $contract.estimatedSeconds -lt 1 -or $contract.estimatedSeconds -gt 810 -or
+            $contract.estimatedSeconds -lt 1 -or $contract.estimatedSeconds -gt 1710 -or
             ($Job.scenes.name -join ',') -cne ((Get-CapMatchedSceneNames) -join ',')) {throw 'Matched scene inventory, geometry or non-authority differs.'}
         foreach ($scene in $Job.scenes) {
             Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'Matched scene width'
@@ -3394,7 +3394,7 @@ function Assert-CapSceneContract {
             ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 10 -or
             ($contract.expectedClientWH -join ',') -cne '1440,952' -or $contract.dpi -ne 96 -or
             $contract.canvasZoomPercent -ne 100 -or $contract.placement -cne 'MEASURED_FIT_WORKAREA' -or
-            $contract.estimatedSeconds -le 0 -or $contract.estimatedSeconds -gt 810 -or $contract.cleanupReserveSeconds -ne 90 -or
+            $contract.estimatedSeconds -le 0 -or $contract.estimatedSeconds -gt 1710 -or $contract.cleanupReserveSeconds -ne 90 -or
             $Job.scenes.Count -ne 10 -or (($Job.scenes | ForEach-Object name) -join ',') -cne ((Get-CapDSceneNames) -join ',')) {
             throw 'D scene, geometry, budget or non-authority contract differs from the closed adapter.'
         }
@@ -4113,10 +4113,10 @@ function Get-CapLeaseWindow {
     $granted = ConvertTo-CapUtcInstant -Value $GrantedUtc -Field 'grantedUtc'
     $expires = ConvertTo-CapUtcInstant -Value $ExpiresUtc -Field 'expiresUtc'
     $durationMinutes = ($expires - $granted).TotalMinutes
-    if ($MaximumMinutes -le 0 -or $MaximumMinutes -gt 15 -or
+    if ($MaximumMinutes -le 0 -or $MaximumMinutes -gt 30 -or
         $durationMinutes -le 0 -or $durationMinutes -gt $MaximumMinutes -or
-        $durationMinutes -gt 15 -or $granted -gt $NowUtc -or $expires -le $NowUtc) {
-        throw 'Coordinator lease is expired, future-dated, or exceeds the 15-minute allocation ceiling.'
+        $durationMinutes -gt 30 -or $granted -gt $NowUtc -or $expires -le $NowUtc) {
+        throw 'Coordinator lease is expired, future-dated, or exceeds the 30-minute allocation ceiling.'
     }
     return [pscustomobject]@{
         GrantedUtc = $granted
