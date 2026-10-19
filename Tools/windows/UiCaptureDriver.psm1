@@ -2527,6 +2527,62 @@ function Test-CapAppZmxCommand {
     return $true
 }
 
+function Get-CapAdvisoryOlderExclusion {
+    param($Parent, $Context, [Management.Automation.ErrorRecord]$NativeFailure)
+    $errorData = $NativeFailure.Exception.Data
+    if ($errorData['CapCaptureCode'] -cne 'ProcessIdentityUnavailable' -or
+        $errorData['CallSite'] -cne 'Get-CapOwnedDescendants.InitialSnapshot' -or
+        $errorData['HandleState'] -cne 'GetterException' -or $errorData['IdState'] -cne 'Available' -or
+        $errorData['AcquiredPid'] -isnot [int] -or
+        $errorData['AcquiredPid'] -ne $Context.RawRow.ProcessId -or
+        $errorData['ExpectedPid'] -ne $Context.RawRow.ProcessId) { return $null }
+    $nativeError = $NativeFailure.Exception
+    while ($null -ne $nativeError -and $nativeError -isnot [ComponentModel.Win32Exception]) {
+        $nativeError = $nativeError.InnerException
+    }
+    if ($null -eq $nativeError -or $nativeError.NativeErrorCode -ne 5) { return $null }
+
+    $parentAccess = Read-CapProcessAccess -Process $Parent.Process -Role $Parent.Role `
+        -CallSite 'Get-CapOwnedDescendants.AdvisoryParentSnapshot' -ExpectedPid $Parent.Pid
+    $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
+    $Context.ParentNativeSnapshot = $parentSnapshot
+    if ($Context.ParentCreationFileTimeUtc -isnot [long] -or $Context.ParentCreationFileTimeUtc -le 0 -or
+        $parentSnapshot.CreationFileTimeUtc -le 0 -or
+        $parentSnapshot.CreationFileTimeUtc -ne $Context.ParentCreationFileTimeUtc -or
+        [string]::IsNullOrWhiteSpace($parentSnapshot.ImagePath) -or
+        (ConvertTo-CapImagePath $parentSnapshot.ImagePath) -ine (ConvertTo-CapImagePath $Parent.ExpectedImagePath)) {
+        throw "Advisory exclusion requires the saved held parent native generation for PID $($Parent.Pid); refusing."
+    }
+    $value = $Context.RawRow.CreationDate
+    if ($value -is [DateTime] -and $value.Kind -ne [DateTimeKind]::Unspecified) {
+        $creation = $value.ToFileTimeUtc()
+    } elseif ($value -is [DateTimeOffset]) {
+        $creation = $value.UtcDateTime.ToFileTimeUtc()
+    } elseif ($value -is [string] -and $value -cmatch '^\d{14}\.\d{6}[+-]\d{3}$') {
+        $creation = Convert-CapCimCreationTime $value
+    } else {
+        throw "Advisory candidate creation time is missing, unparseable or lacks an explicit time zone for PID $($Context.RawRow.ProcessId); refusing."
+    }
+    if ($creation -le 0) { throw "Advisory candidate creation time is nonpositive for PID $($Context.RawRow.ProcessId); refusing." }
+    if ($creation -ge $parentSnapshot.CreationFileTimeUtc) { return $null }
+    return [pscustomobject]@{
+        Pid = [int]$Context.RawRow.ProcessId
+        ParentPid = $Parent.Pid
+        ParentCreationFileTimeUtc = $parentSnapshot.CreationFileTimeUtc
+        ParentExitFileTimeUtc = $parentSnapshot.ExitFileTimeUtc
+        CandidateCreationFileTimeUtc = $creation
+        CandidateCreationSource = 'ADVISORY_CIM_NOT_NATIVE'
+        ParentCreationSource = 'HELD_NATIVE_SNAPSHOT'
+        RawCimRow = $Context.RawRow
+        ParentNativeSnapshot = $parentSnapshot
+        NativeWin32Error = $nativeError.NativeErrorCode
+        NativeFailure = $NativeFailure.Exception.ToString()
+        OriginalErrorRecord = $NativeFailure
+        Reason = 'predates held parent generation (advisory, native unavailable)'
+        Disposition = 'EXCLUDED_ADVISORY_PREDATES_NATIVE_PARENT_NATIVE_UNAVAILABLE'
+    }
+}
+
 function Get-CapOwnedDescendants {
     [CmdletBinding()]
     param(
@@ -2571,13 +2627,32 @@ function Get-CapOwnedDescendants {
                 ParentCreationFileTimeUtc = if ($null -ne $parentCreation) { $parentCreation.Value } else { $null }
                 NativeSnapshot = $null
                 ParentNativeSnapshot = $null
+                InitialNativeFailure = $null
                 ErrorRecord = $null
             }
             $failureCode = 'DescendantNativeIdentityUnavailable'
             try {
                 $process = [Diagnostics.Process]::GetProcessById($pid)
-                $access = Read-CapProcessAccess -Process $process -Role 'descendant' `
-                    -CallSite 'Get-CapOwnedDescendants.InitialSnapshot' -ExpectedPid $pid
+                try {
+                    $access = Read-CapProcessAccess -Process $process -Role 'descendant' `
+                        -CallSite 'Get-CapOwnedDescendants.InitialSnapshot' -ExpectedPid $pid
+                } catch {
+                    $context.InitialNativeFailure = $_
+                    $exclusion = Get-CapAdvisoryOlderExclusion -Parent $parent -Context $context -NativeFailure $_
+                    if ($null -eq $exclusion) { throw }
+                    $alreadyRecorded = @($script:CapExcludedDescendants | Where-Object {
+                        $_.Pid -eq $pid -and $_.ParentPid -eq $parent.Pid -and
+                        $_.CandidateCreationFileTimeUtc -eq $exclusion.CandidateCreationFileTimeUtc -and
+                        $_.Disposition -ceq $exclusion.Disposition
+                    }).Count -gt 0
+                    if (-not $alreadyRecorded) {
+                        $script:CapExcludedDescendants.Add($exclusion)
+                        Write-CapTrace -Command 'CapDescendantAdvisoryExcluded' -Parameters @{
+                            diagnosticJson = ($exclusion | ConvertTo-Json -Depth 12 -Compress)
+                        }
+                    }
+                    continue
+                }
                 $context.NativeSnapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
                 if ($context.NativeSnapshot.IsExited) {
                     Write-CapTrace -Command 'CapDescendantExited' -Parameters @{

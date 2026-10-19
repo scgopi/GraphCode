@@ -17,6 +17,7 @@ param(
     [switch]$AppChildContractOnly,
     [switch]$DescendantMetadataContractOnly,
     [switch]$DescendantLifetimeContractOnly,
+    [switch]$AdvisoryOlderContractOnly,
     [switch]$DAdapterContractOnly,
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
@@ -1367,6 +1368,140 @@ function Invoke-CapDescendantLifetimeContract {
         $self.Dispose()
         Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
         Assert-CapTest ($detail.jobEmpty -and $detail.stdoutEof -and $detail.stderrEof) 'Lifetime fixture left owned processes or output pipes open.'
+    }
+}
+
+function Invoke-CapAdvisoryOlderContract {
+    $caseRoot = Join-Path $scratch 'advisory-older'
+    $null = New-Item -ItemType Directory -Path $caseRoot
+    $module = Get-Module UiCaptureDriver
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    $run = $null
+    $jobHandle = [CapProcessJob]::Create()
+    $originalAccess = & $module { (Get-Item Function:Read-CapProcessAccess).ScriptBlock }
+    $detail = [ordered]@{ subcases = @(); jobEmpty = $false; stdoutEof = $false; stderrEof = $false }
+    try {
+        $parent = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName `
+            -Role 'graphcode-app-before-normal'
+        $run = Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') `
+            -ArgumentList @('-NoProfile','-NonInteractive','-Command','[void][Console]::In.ReadLine()') `
+            -WorkingDirectory $caseRoot -Role 'advisory-older-fixture' -HoldStdin `
+            -Environment @{ TEMP = $caseRoot; TMP = $caseRoot }
+        [CapProcessJob]::Assign($jobHandle, $run.Identity.Process.Handle)
+        $candidate = [CapNative]::Snapshot($run.Identity.Process.Handle, $run.Identity.Pid)
+        Assert-CapTest (-not $candidate.IsExited -and [CapProcessJob]::Contains($jobHandle, $run.Identity.Process.Handle)) `
+            'Advisory fault injection requires a live held fixture inside its owned job.'
+        $parentTime = [DateTime]::FromFileTimeUtc($parent.CreationFileTimeUtc)
+        $row = [pscustomobject]@{ ProcessId = $run.Identity.Pid; ParentProcessId = $parent.Pid
+            SessionId = 0; CreationDate = $parentTime.AddSeconds(-1); ExecutablePath = $null; CommandLine = $null }
+        & $module {
+            param($Row,$Run,$Original)
+            if (Test-Path Function:Get-CimInstance) { throw 'Unexpected existing advisory-older CIM seam.' }
+            $script:CapAdvisoryInjection = @{ Row = $Row; Run = $Run; Original = $Original
+                Win32Code = 5; IdAvailable = $true; NativeError = $true; Failures = @() }
+            function script:Get-CimInstance {
+                param($ClassName,$Filter,$ErrorAction)
+                if ($ClassName -cne 'Win32_Process' -or $Filter -cne "ParentProcessId = $($script:CapAdvisoryInjection.Row.ParentProcessId)") {
+                    throw "Unexpected advisory-older candidate query: $ClassName $Filter"
+                }
+                return $script:CapAdvisoryInjection.Row
+            }
+            function script:Read-CapProcessAccess {
+                param($Process,$Role,$CallSite,$ExpectedPid)
+                $state = $script:CapAdvisoryInjection
+                if ($CallSite -ceq 'Get-CapOwnedDescendants.InitialSnapshot' -and $ExpectedPid -eq $state.Run.Identity.Pid) {
+                    $inner = if ($state.NativeError) { [ComponentModel.Win32Exception]::new($state.Win32Code, 'INJECTED_CANDIDATE_HANDLE_GETTER') }
+                        else { [InvalidOperationException]::new('INJECTED_NON_NATIVE_GETTER_FAILURE') }
+                    $failure = [InvalidOperationException]::new(
+                        'ProcessIdentityUnavailable: injected candidate Handle=GetterException; kernel exit is UNPROVEN.', $inner)
+                    $failure.Data['CapCaptureCode'] = 'ProcessIdentityUnavailable'
+                    $failure.Data['CallSite'] = $CallSite
+                    $failure.Data['HandleState'] = 'GetterException'
+                    $failure.Data['IdState'] = if ($state.IdAvailable) { 'Available' } else { 'GetterException' }
+                    $failure.Data['AcquiredPid'] = if ($state.IdAvailable) { $ExpectedPid } else { $null }
+                    $failure.Data['ExpectedPid'] = $ExpectedPid
+                    $state.Failures += $failure
+                    throw $failure
+                }
+                return & $state.Original @PSBoundParameters
+            }
+        } $row $run $originalAccess
+        $owned = [Collections.Generic.List[object]]::new()
+        $arguments = @{ ZmxPath = (Join-Path $caseRoot 'unrecognized.exe')
+            CmdPath = (Join-Path ([Environment]::SystemDirectory) 'cmd.exe')
+            ConhostPath = (Join-Path ([Environment]::SystemDirectory) 'conhost.exe')
+            SessionName = 'advisory-test'; CommandMarker = 'advisory-test'; OwnedDescendants = $owned }
+        $found = @(Get-CapOwnedDescendants -Roots @($parent) @arguments)
+        $records = @(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid })
+        Assert-CapTest ($found.Count -eq 0 -and $owned.Count -eq 0 -and $records.Count -eq 1) `
+            'Access-denied advisory-older candidate was not excluded without adoption.'
+        $record = $records[0]
+        Assert-CapTest ($record.Disposition -ceq 'EXCLUDED_ADVISORY_PREDATES_NATIVE_PARENT_NATIVE_UNAVAILABLE' -and
+            $record.CandidateCreationSource -ceq 'ADVISORY_CIM_NOT_NATIVE' -and
+            $record.ParentCreationSource -ceq 'HELD_NATIVE_SNAPSHOT' -and
+            $record.NativeWin32Error -eq 5 -and $record.CandidateCreationFileTimeUtc -eq $row.CreationDate.ToFileTimeUtc() -and
+            $record.ParentCreationFileTimeUtc -eq $parent.CreationFileTimeUtc -and
+            $record.ParentNativeSnapshot.CreationFileTimeUtc -eq $parent.CreationFileTimeUtc -and
+            $null -eq $record.RawCimRow.ExecutablePath -and $record.RawCimRow.SessionId -eq 0 -and
+            $record.OriginalErrorRecord -is [Management.Automation.ErrorRecord]) `
+            'Advisory exclusion lost raw row, original native failure, timestamp sources or actual held parent proof.'
+        $detail.subcases += @{ name = 'strictly older advisory time and native getter access-denied excluded'; evidence = $record }
+        $null = Get-CapOwnedDescendants -Roots @($parent) @arguments
+        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid }).Count -eq 1) `
+            'Repeated advisory-older observation duplicated exclusion evidence.'
+        $detail.subcases += @{ name = 'identical excluded observation deduplicated' }
+        foreach ($case in @('equal','later','null','unparseable','unspecified','parent-not-native',
+            'parent-generation-mismatch','parent-time-null','other-native-error','missing-id','non-native-error','nonpositive')) {
+            $testParent = $parent.PSObject.Copy()
+            $row.CreationDate = $parentTime.AddSeconds(-1)
+            & $module { $script:CapAdvisoryInjection.Win32Code = 5
+                $script:CapAdvisoryInjection.IdAvailable = $true; $script:CapAdvisoryInjection.NativeError = $true }
+            switch ($case) {
+                equal { $row.CreationDate = $parentTime }
+                later { $row.CreationDate = $parentTime.AddSeconds(1) }
+                null { $row.CreationDate = $null }
+                unparseable { $row.CreationDate = 'unparseable' }
+                unspecified { $row.CreationDate = [DateTime]::SpecifyKind($parentTime.AddSeconds(-1), [DateTimeKind]::Unspecified) }
+                parent-not-native { $testParent.Process = $null }
+                parent-generation-mismatch { $testParent.CreationFileTimeUtc++ }
+                parent-time-null { $testParent.CreationFileTimeUtc = $null }
+                other-native-error { & $module { $script:CapAdvisoryInjection.Win32Code = 87 } }
+                missing-id { & $module { $script:CapAdvisoryInjection.IdAvailable = $false } }
+                non-native-error { & $module { $script:CapAdvisoryInjection.NativeError = $false } }
+                nonpositive { $row.CreationDate = [DateTime]::FromFileTimeUtc(0) }
+            }
+            $caught = $null
+            try { $null = Get-CapOwnedDescendants -Roots @($testParent) @arguments } catch { $caught = $_ }
+            Assert-CapTest ($null -ne $caught -and
+                $caught.Exception.Data['CapCaptureCode'] -ceq 'DescendantNativeIdentityUnavailable') `
+                "Expected loud typed refusal for $case, not an advisory exclusion."
+            $detail.subcases += @{ name = "$case remains a typed refusal"; message = $caught.Exception.Message }
+        }
+        Assert-CapTest ($detail.subcases.Count -eq 14 -and $owned.Count -eq 0 -and
+            -not [CapNative]::IsExited($run.Identity.Process.Handle, $run.Identity.Pid)) `
+            'Advisory controls omitted a subcase, adopted or terminated the actual live fixture.'
+        return $detail
+    } finally {
+        & $module {
+            param($Original)
+            Set-Item Function:Read-CapProcessAccess -Value $Original
+            Remove-Item Function:Get-CimInstance -ErrorAction SilentlyContinue
+            Remove-Variable CapAdvisoryInjection -Scope Script -ErrorAction SilentlyContinue
+        } $originalAccess
+        try {
+            [CapProcessJob]::Terminate($jobHandle)
+            [CapProcessJob]::WaitForEmpty($jobHandle, 5000)
+            $detail.jobEmpty = [CapProcessJob]::Active($jobHandle) -eq 0
+        } finally { [CapProcessJob]::Close($jobHandle) }
+        if ($run) {
+            $detail.stdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully
+            $detail.stderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully
+            $run.Identity.Process.Dispose()
+        }
+        $self.Dispose()
+        Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
+        Assert-CapTest ($detail.jobEmpty -and ($null -eq $run -or ($detail.stdoutEof -and $detail.stderrEof))) `
+            'Advisory fixture left an owned job or actual output pipe open.'
     }
 }
 
@@ -4641,6 +4776,18 @@ if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDire
     Write-CapDContractReport
 }
 
+if ($AdvisoryOlderContractOnly) {
+    Invoke-CapTest 'advisory older candidate excludes only with unavailable native access and proved native parent' { Invoke-CapAdvisoryOlderContract }
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    [pscustomobject]@{ suite = 'UiCaptureAdvisoryOlderContract'; executed = $results.Count
+        passed = $passed; failed = $failed; cases = @($results); gui = 'NotExecuted'; images = 0 } |
+        ConvertTo-Json -Depth 35 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    [ordered]@{ suite = 'UiCaptureAdvisoryOlderContract'; executed = $results.Count; passed = $passed; failed = $failed } | ConvertTo-Json -Compress
+    if ($results.Count -ne 1 -or $passed -ne 1 -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
 if ($DescendantLifetimeContractOnly) {
     Invoke-CapTest 'held native lifetime excludes reused-parent unknown images before image refusal' { Invoke-CapDescendantLifetimeContract }
     $passed = @($results | Where-Object passed -EQ $true).Count
@@ -4711,6 +4858,7 @@ try {
     if (-not $LaunchContractOnly) {
         Invoke-CapLiveNativeBindingContracts
         Invoke-CapTest 'held native lifetime excludes reused-parent unknown images before image refusal' { Invoke-CapDescendantLifetimeContract }
+        Invoke-CapTest 'advisory older candidate excludes only with unavailable native access and proved native parent' { Invoke-CapAdvisoryOlderContract }
         Invoke-CapDescendantMetadataContracts
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
@@ -5722,6 +5870,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 169 } else { 166 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 170 } else { 167 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

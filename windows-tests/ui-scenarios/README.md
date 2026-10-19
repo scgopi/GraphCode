@@ -236,7 +236,7 @@ pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
 ```
 
 These eight contracts also run in the full suite registered by
-`ValidationRunner.Tests.ps1` (166 default cases, or 169 with the three real-seed
+`ValidationRunner.Tests.ps1` (167 default cases, or 170 with the three real-seed
 cases). This establishes the live native-export admission guard, not an actual
 live capture, geometry, UIA interaction, pixel result or broader native
 compatibility. Rehearsal child commands still do not authorize desktop use.
@@ -262,6 +262,30 @@ not replaced. It checks exclusion/deduplication, the same-generation unknown
 image, five invalid saved creation values, changed saved generation and native
 acquisition failure. Its owned fixture job and actual output EOF are checked
 separately; this is not a global-host cleanup or live capture result.
+
+When initial candidate handle acquisition specifically reports access denied
+with its PID still available, discovery may also exclude a strictly older
+**advisory CIM** creation time against the saved parent's **held native**
+generation. This narrow exclusion does not prove that the candidate exited,
+identify its image, adopt it or authorize termination. Raw CIM fields, the
+original native failure/code, timestamp sources and parent snapshot are retained.
+Equal/later, missing, unparseable, timezone-unspecified or nonpositive candidate
+times, unproved/changed native parents, missing identity and other native errors
+still refuse loudly. Advisory time never replaces job-zero or actual EOF proof.
+
+The additional grouped contract invokes actual `Get-CapOwnedDescendants` with
+an injected candidate getter failure and fourteen explicit exclusion/refusal
+subcases, including a real live owned candidate that remains untouched:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -AdvisoryOlderContractOnly -ScratchRoot C:\owned\fresh-advisory-older
+```
+
+The original hosted access-denied artifact did **not** establish an exit race.
+This advisory-only exclusion is a distinct rule, not an invented native
+absence/recycled-generation observation. All earlier native metadata,
+named-binding and native-lifetime contracts remain registered.
 
 Run the offline regression with existing PowerShell 7.5+ and installed MSVC:
 
