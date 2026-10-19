@@ -1075,7 +1075,7 @@ fn drawOverview(
                 needsAttention(node, graph.nodes.items, graph.edges.items),
                 primaryCardAction(node),
                 false,
-                false,
+                null,
                 false,
             );
         }
@@ -2275,7 +2275,7 @@ fn drawNode(
     const bounds = nodeBounds(index, state);
     const attention = needsAttention(node, nodes, edges);
     const selected_card = selected == index;
-    const reclaim_offer = hasReclaimOffer(node, inspection, kept_worktrees);
+    const reclaim_offer = reclaimOffer(node, inspection, kept_worktrees);
     drawLoopCard(
         hdc,
         allocator,
@@ -2347,7 +2347,7 @@ fn drawLoopCard(
     attention: bool,
     action: ?AttentionAction,
     selected: bool,
-    reclaim: bool,
+    reclaim: ?ReclaimOffer,
     show_reclaim: bool,
 ) void {
     GdiplusAA.drawLoopCardChrome(hdc, bounds, loopCardChrome(node, state, role, attention, selected)) catch |err| {
@@ -2371,7 +2371,7 @@ fn drawLoopCard(
         drawTextRect(hdc, allocator, attentionActionLabelFor(primary_action), action_bounds, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
     }
 
-    if (show_reclaim and reclaim) {
+    if (show_reclaim and reclaim != null) {
         const offer = reclaimOfferBounds(bounds);
         roundedControl(hdc, offer.reclaim, scaled(5, state), 0x003A3535, 0x00534F4F);
         drawCardText(hdc, allocator, "Reclaim", rect(offer.reclaim.left + scaled(9, state), offer.reclaim.top, offer.reclaim.right, offer.reclaim.bottom), 11 * state.zoom, .semibold, 0x00D7D7D7, false) catch |err| {
@@ -2459,14 +2459,42 @@ pub fn hasReclaimOffer(
     inspection: ?*const WorktreeStatus.Inspection,
     kept_worktrees: []const []const u8,
 ) bool {
-    if (!std.mem.eql(u8, node.state, "succeeded") or node.worktree_path.len == 0) return false;
-    for (kept_worktrees) |path| if (std.mem.eql(u8, path, node.worktree_path)) return false;
-    const value = inspection orelse return false;
+    return reclaimOffer(node, inspection, kept_worktrees) != null;
+}
+
+const ReclaimOffer = struct {
+    default_branch: []const u8,
+    size_bytes: ?u64 = null,
+};
+
+fn cardIsResolved(node: GraphModel.Node) bool {
+    return std.mem.eql(u8, node.state, "succeeded") or std.mem.eql(u8, node.state, "failed") or
+        std.mem.eql(u8, node.state, "stalled") or std.mem.eql(u8, node.state, "stopped");
+}
+
+fn reclaimOffer(
+    node: GraphModel.Node,
+    inspection: ?*const WorktreeStatus.Inspection,
+    kept_worktrees: []const []const u8,
+) ?ReclaimOffer {
+    if (!cardIsResolved(node) or node.worktree_path.len == 0) return null;
+    for (kept_worktrees) |path| if (std.mem.eql(u8, path, node.worktree_path)) return null;
+    const value = inspection orelse return null;
     for (value.entries.items) |entry| {
-        if (std.mem.eql(u8, entry.path, node.worktree_path))
-            return WorktreeStatus.decision(entry) == .reclaimable;
+        if (std.mem.eql(u8, entry.path, node.worktree_path)) {
+            if (WorktreeStatus.decision(entry) != .reclaimable) return null;
+            return .{
+                .default_branch = if (std.mem.startsWith(u8, value.default_branch, "refs/remotes/origin/"))
+                    value.default_branch["refs/remotes/origin/".len..]
+                else if (std.mem.startsWith(u8, value.default_branch, "origin/"))
+                    value.default_branch["origin/".len..]
+                else
+                    value.default_branch,
+                .size_bytes = if (entry.sizeCoverage().complete) entry.size_bytes else null,
+            };
+        }
     }
-    return false;
+    return null;
 }
 
 pub fn hitTestReclaimOffer(
@@ -2511,7 +2539,16 @@ fn cardHasText(text: []const u8) bool {
     return false;
 }
 
-fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
+pub fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
+    if (cardIsResolved(node)) {
+        if (node.resolution) |resolution| {
+            if (std.mem.eql(u8, node.presence, "busy") and cardHasText(node.activity))
+                return collapsedCardLine(allocator, node.activity);
+            return resolutionLine(allocator, resolution, false);
+        }
+    } else if (node.pending_completion) |pending| {
+        return resolutionLine(allocator, pending, true);
+    }
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
     const has_activity = cardHasText(node.activity);
@@ -2527,6 +2564,18 @@ fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
     const source = nodePrimaryDetail(node);
     if (has_activity and node.metric_passes != 0)
         try result.writer().print("pass {d} · ", .{node.metric_passes});
+    try appendCollapsedCardLine(&result, source);
+    return result.toOwnedSlice();
+}
+
+fn collapsedCardLine(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var result = std.array_list.Managed(u8).init(allocator);
+    errdefer result.deinit();
+    try appendCollapsedCardLine(&result, source);
+    return result.toOwnedSlice();
+}
+
+fn appendCollapsedCardLine(result: *std.array_list.Managed(u8), source: []const u8) !void {
     var iterator = (try std.unicode.Utf8View.init(source)).iterator();
     var pending_space = false;
     while (iterator.nextCodepointSlice()) |bytes| {
@@ -2539,7 +2588,359 @@ fn cardLiveLine(allocator: std.mem.Allocator, node: GraphModel.Node) ![]u8 {
             pending_space = false;
         }
     }
-    return result.toOwnedSlice();
+}
+
+fn resolutionLine(allocator: std.mem.Allocator, resolution: GraphModel.LoopResolution, pending: bool) ![]u8 {
+    const phrase = switch (resolution.basis) {
+        .predicate => "predicate passed",
+        .nativeGoal => "goal met",
+        .agentReported => "reported done",
+        .human => "marked done",
+        .sessionExited => "session exited",
+        .workers => "workers rolled up",
+    };
+    var text = std.array_list.Managed(u8).init(allocator);
+    defer text.deinit();
+    try text.appendSlice(phrase);
+    if (resolution.detail) |detail| if (detail.len != 0) {
+        try text.appendSlice(" · ");
+        try text.appendSlice(detail);
+    };
+    if (pending) try text.appendSlice(" · waiting on the loops it created");
+    return collapsedCardLine(allocator, text.items);
+}
+
+fn reclaimLine(allocator: std.mem.Allocator, offer: ReclaimOffer) ![]u8 {
+    var text = std.array_list.Managed(u8).init(allocator);
+    errdefer text.deinit();
+    try text.writer().print("landed in {s} · ", .{offer.default_branch});
+    if (offer.size_bytes) |bytes| {
+        if (bytes > 0) {
+            try writeReclaimFileSize(text.writer(), bytes);
+            try text.appendSlice(" left behind");
+            return text.toOwnedSlice();
+        }
+    }
+    try text.appendSlice("worktree left behind");
+    return text.toOwnedSlice();
+}
+
+fn writeReclaimFileSize(writer: anytype, bytes: u64) !void {
+    if (bytes > std.math.maxInt(i64)) return error.ReclaimSizeOverflow;
+    // Match ByteCountFormatter's .file decimal units and adaptive, unpadded precision.
+    const units = [_][]const u8{ "bytes", "KB", "MB", "GB", "TB", "PB", "EB" };
+    var unit: usize = 0;
+    var divisor: u64 = 1;
+    while (unit + 1 < units.len and bytes / divisor >= 1000) {
+        divisor *= 1000;
+        unit += 1;
+    }
+    const precision: u64 = if (unit < 2) 1 else if (unit == 2) 10 else 100;
+    const scaled_bytes = @as(u128, bytes) * precision;
+    var rounded = scaled_bytes / divisor;
+    const remainder = scaled_bytes % divisor;
+    if (remainder * 2 > divisor or (remainder * 2 == divisor and rounded % 2 != 0)) rounded += 1;
+    const whole = rounded / precision;
+    if (whole >= 1000) {
+        try writer.print("{d},{d:0>3}", .{ whole / 1000, whole % 1000 });
+    } else try writer.print("{d}", .{whole});
+    const fraction = rounded % precision;
+    if (fraction != 0) {
+        if (precision == 100 and fraction % 10 != 0) {
+            try writer.print(".{d:0>2}", .{fraction});
+        } else try writer.print(".{d}", .{if (precision == 100) fraction / 10 else fraction});
+    }
+    try writer.print(" {s}", .{if (bytes == 1) "byte" else units[unit]});
+}
+
+test "loop outcome live line renders decoded Main STOPPED and Goal DONE evidence" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"event":{"graphChanged":{"project":{"path":"A"},"nodes":[{"id":"main","loopType":"sketch","state":"stopped","firstInstruction":"old instruction","resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":813000000.25}},{"id":"goal","loopType":"goalBased","state":"succeeded","goal":{"summary":"old goal"},"resolution":{"basis":"predicate","detail":"exit 0","resolvedAt":813000001}}],"edges":[]}}}
+    );
+    for (model.graph.?.nodes.items, [_][]const u8{ "session exited · exit 0", "predicate passed · exit 0" }) |node, expected| {
+        const line = try cardLiveLine(std.testing.allocator, node);
+        defer std.testing.allocator.free(line);
+        try std.testing.expectEqualStrings(expected, line);
+    }
+}
+
+test "loop outcome Main STOPPED receives the same safe reclaim offer as Goal DONE" {
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .default_branch = @constCast("main"),
+        .project_path = @constCast("A"),
+    };
+    defer inspection.entries.deinit();
+    try inspection.entries.append(.{ .path = @constCast("tree"), .branch = @constCast("topic"), .pushed = true, .landed = true, .size_bytes = 312_000_000, .size_complete = true });
+    const node = GraphModel.Node{ .id = @constCast("main"), .title = @constCast("Main"), .loop_type = @constCast("sketch"), .state = @constCast("stopped"), .activity = &.{}, .presence = &.{}, .worktree_path = @constCast("tree") };
+    try std.testing.expect(hasReclaimOffer(node, &inspection, &.{}));
+}
+
+test "loop outcome live line follows Mac basis pending completion and active followup precedence" {
+    var node = GraphModel.Node{
+        .id = @constCast("loop"),
+        .title = @constCast("Loop"),
+        .loop_type = @constCast("goalBased"),
+        .state = @constCast("succeeded"),
+        .activity = @constCast("old activity"),
+        .presence = &.{},
+        .goal_summary = @constCast("old goal"),
+        .metric_passes = 4,
+    };
+    for (std.enums.values(GraphModel.LoopResolution.Basis), [_][]const u8{
+        "predicate passed", "goal met", "reported done", "marked done", "session exited", "workers rolled up",
+    }) |basis, phrase| {
+        node.resolution = .{ .basis = basis, .resolved_at = 1 };
+        const line = try cardLiveLine(std.testing.allocator, node);
+        defer std.testing.allocator.free(line);
+        try std.testing.expectEqualStrings(phrase, line);
+    }
+    node.resolution = .{ .basis = .human, .detail = @constCast(" \u{96ea}\n  done "), .resolved_at = 1 };
+    const detailed = try cardLiveLine(std.testing.allocator, node);
+    defer std.testing.allocator.free(detailed);
+    try std.testing.expectEqualStrings("marked done · \u{96ea} done", detailed);
+    node.presence = @constCast("busy");
+    node.activity = @constCast(" reading\n GraphStore.swift ");
+    const followup = try cardLiveLine(std.testing.allocator, node);
+    defer std.testing.allocator.free(followup);
+    try std.testing.expectEqualStrings("reading GraphStore.swift", followup);
+    node.activity = @constCast(" \n");
+    const no_activity = try cardLiveLine(std.testing.allocator, node);
+    defer std.testing.allocator.free(no_activity);
+    try std.testing.expectEqualStrings("marked done · \u{96ea} done", no_activity);
+    node.state = @constCast("running");
+    node.pending_completion = .{ .basis = .agentReported, .detail = @constCast("all green"), .resolved_at = 2 };
+    const pending = try cardLiveLine(std.testing.allocator, node);
+    defer std.testing.allocator.free(pending);
+    try std.testing.expectEqualStrings("reported done · all green · waiting on the loops it created", pending);
+    node.pending_completion = null;
+    node.resolution = null;
+    node.activity = @constCast("still working");
+    const unchanged = try cardLiveLine(std.testing.allocator, node);
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings("pass 4 · still working", unchanged);
+}
+
+test "loop outcome reclaim keeps all safety gates and complete inspection facts" {
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(std.testing.allocator),
+        .default_branch = @constCast("release"),
+        .project_path = @constCast("A"),
+    };
+    defer inspection.entries.deinit();
+    const safe = WorktreeStatus.Entry{ .path = @constCast("tree"), .branch = @constCast("topic"), .pushed = true, .landed = true, .size_bytes = 312_000_000, .size_complete = true };
+    try inspection.entries.append(safe);
+    var node = GraphModel.Node{
+        .id = @constCast("loop"),
+        .title = @constCast("Loop"),
+        .loop_type = @constCast("sketch"),
+        .state = @constCast("stopped"),
+        .activity = &.{},
+        .presence = &.{},
+        .worktree_path = @constCast("tree"),
+    };
+    for ([_][]const u8{ "succeeded", "failed", "stalled", "stopped" }) |state| {
+        node.state = @constCast(state);
+        const offer = reclaimOffer(node, &inspection, &.{}).?;
+        try std.testing.expectEqualStrings("release", offer.default_branch);
+        try std.testing.expectEqual(@as(?u64, 312_000_000), offer.size_bytes);
+        try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{"tree"}));
+        try std.testing.expect(!hasReclaimOffer(node, null, &.{}));
+        inline for (.{ "primary", "locked", "prunable", "dirty", "untracked", "conflicted", "bound_running" }) |flag| {
+            inspection.entries.items[0] = safe;
+            @field(inspection.entries.items[0], flag) = true;
+            try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{}));
+        }
+        inline for (.{ "pushed", "landed" }) |flag| {
+            inspection.entries.items[0] = safe;
+            @field(inspection.entries.items[0], flag) = false;
+            try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{}));
+        }
+        inspection.entries.items[0] = safe;
+        inspection.entries.items[0].size_complete = false;
+        try std.testing.expect(reclaimOffer(node, &inspection, &.{}).?.size_bytes == null);
+        inspection.entries.items[0] = safe;
+        inspection.entries.items[0].size_error = error.AccessDenied;
+        try std.testing.expect(reclaimOffer(node, &inspection, &.{}).?.size_bytes == null);
+        inspection.entries.items[0] = safe;
+    }
+    for ([_][]const u8{ "idle", "running", "awaitingInput", "blocked", "waiting" }) |state| {
+        node.state = @constCast(state);
+        try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{}));
+    }
+    node.state = @constCast("stopped");
+    node.worktree_path = @constCast("other");
+    try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{}));
+    node.worktree_path = @constCast("tree");
+    for ([_][]const u8{ "release", "origin/release", "refs/remotes/origin/release" }) |branch| {
+        inspection.default_branch = @constCast(branch);
+        try std.testing.expectEqualStrings("release", reclaimOffer(node, &inspection, &.{}).?.default_branch);
+    }
+}
+
+test "loop outcome reclaim sentence matches file sizes without binary units or invented bytes" {
+    for ([_]struct { bytes: ?u64, expected: []const u8 }{
+        .{ .bytes = null, .expected = "worktree left behind" },
+        .{ .bytes = 0, .expected = "worktree left behind" },
+        .{ .bytes = 1, .expected = "1 byte left behind" },
+        .{ .bytes = 999, .expected = "999 bytes left behind" },
+        .{ .bytes = 1_000, .expected = "1 KB left behind" },
+        .{ .bytes = 1_234_567, .expected = "1.2 MB left behind" },
+        .{ .bytes = 312_000_000, .expected = "312 MB left behind" },
+        .{ .bytes = 1_230_000_000, .expected = "1.23 GB left behind" },
+        .{ .bytes = 1_200_000_000, .expected = "1.2 GB left behind" },
+        .{ .bytes = 999_999, .expected = "1,000 KB left behind" },
+    }) |sample| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "landed in release · {s}", .{sample.expected});
+        defer std.testing.allocator.free(expected);
+        const line = try reclaimLine(std.testing.allocator, .{ .default_branch = "release", .size_bytes = sample.bytes });
+        defer std.testing.allocator.free(line);
+        try std.testing.expectEqualStrings(expected, line);
+    }
+    try std.testing.expectError(error.ReclaimSizeOverflow, reclaimLine(std.testing.allocator, .{ .default_branch = "main", .size_bytes = std.math.maxInt(u64) }));
+}
+
+test "loop outcome copy partial allocation failures and invalid Unicode propagate" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var node = GraphModel.Node{
+                .id = @constCast("loop"),
+                .title = @constCast("Loop"),
+                .loop_type = @constCast("goalBased"),
+                .state = @constCast("succeeded"),
+                .activity = &.{},
+                .presence = &.{},
+                .resolution = .{ .basis = .workers, .detail = @constCast("3 of 3 \u{96ea}"), .resolved_at = 1 },
+            };
+            const resolved = try cardLiveLine(allocator, node);
+            defer allocator.free(resolved);
+            node.state = @constCast("running");
+            node.pending_completion = node.resolution;
+            const pending = try cardLiveLine(allocator, node);
+            defer allocator.free(pending);
+            const reclaim = try reclaimLine(allocator, .{ .default_branch = "main", .size_bytes = 312_000_000 });
+            defer allocator.free(reclaim);
+            try std.testing.expectEqualStrings("workers rolled up · 3 of 3 \u{96ea}", resolved);
+            try std.testing.expectEqualStrings("landed in main · 312 MB left behind", reclaim);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+    try std.testing.expectError(error.InvalidUtf8, resolutionLine(std.testing.allocator, .{ .basis = .human, .detail = @constCast("\xff"), .resolved_at = 1 }, false));
+}
+
+test "loop outcome production paint uses outcome and reclaim text in the existing live row" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A"},"nodes":[{"id":"main","title":"Main","loopType":"sketch","state":"stopped","resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":813000000}},{"id":"goal","title":"Goal","loopType":"goalBased","state":"succeeded","resolution":{"basis":"nativeGoal","resolvedAt":813000001}}],"edges":[]}}
+    );
+    for (model.graph.?.nodes.items, [_][]const u8{ "session exited · exit 0", "goal met" }) |node, expected| {
+        for ([_]?ReclaimOffer{ null, .{ .default_branch = "main", .size_bytes = 312_000_000 } }) |offer| {
+            const actual = try ParityDib.init(400, 140);
+            defer actual.deinit();
+            const reference = try ParityDib.init(400, 140);
+            defer reference.deinit();
+            const bounds = rect(20, 20, 380, 120);
+            fill(actual.dc, rect(0, 0, 400, 140), Tokens.loop_card_bottom);
+            fill(reference.dc, rect(0, 0, 400, 140), Tokens.loop_card_bottom);
+            try drawCardBody(actual.dc, allocator, node, bounds, 1, .entry, false, null, offer);
+            const old = try selectCardFont(actual.dc, 10, .card_state);
+            const pill_width = (try measuredText(actual.dc, allocator, cardState(node).word)) + 22;
+            _ = c.SelectObject(actual.dc, old);
+            const live_bounds = cardTextLayout(bounds, 1, pill_width).live;
+            try drawCardText(reference.dc, allocator, if (offer != null) "landed in main · 312 MB left behind" else expected, live_bounds, 10.5, .card_mono, 0x009F9C9C, true);
+            try std.testing.expect(actual.count(live_bounds, 0x009F9C9C) > 0);
+            var y = live_bounds.top;
+            while (y < live_bounds.bottom) : (y += 1) {
+                var x = live_bounds.left;
+                while (x < live_bounds.right) : (x += 1)
+                    try std.testing.expectEqual(c.GetPixel(reference.dc, x, y), c.GetPixel(actual.dc, x, y));
+            }
+        }
+    }
+}
+
+const outcomePaintFrame =
+    \\{"graphChanged":{"project":{"path":"A","name":"Outcome fixture"},"nodes":[{"id":"main","title":"Main","loopType":"sketch","state":"stopped","worktreeBinding":{"path":"main-tree","branch":"loop/main"},"resolution":{"basis":"sessionExited","detail":"exit 0","resolvedAt":813000000}},{"id":"goal","title":"Goal","loopType":"goalBased","state":"succeeded","goal":{"summary":"the suite is green"},"worktreeBinding":{"path":"goal-tree","branch":"loop/goal"},"resolution":{"basis":"nativeGoal","detail":"the suite is green","resolvedAt":813000001}}],"edges":[]}}
+;
+
+test "paint export: loop-outcomes" {
+    const allocator = std.testing.allocator;
+    const root = std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_EXPORT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer allocator.free(root);
+    if (root.len == 0) return error.PaintExportDirectoryEmpty;
+    const commit = try std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_SOURCE_COMMIT");
+    defer allocator.free(commit);
+    if (commit.len != 40) return error.PaintExportSourceCommitInvalid;
+    for (commit) |character| if (!std.ascii.isHex(character)) return error.PaintExportSourceCommitInvalid;
+    var directory = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer directory.close();
+    var iterator = directory.iterate();
+    if (try iterator.next() != null) return error.PaintExportRootNotEmpty;
+    try chrome764Native();
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(outcomePaintFrame);
+    var inspection = WorktreeStatus.Inspection{
+        .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+        .default_branch = @constCast("main"),
+        .project_path = @constCast("A"),
+    };
+    defer inspection.entries.deinit();
+    for ([_][]const u8{ "main-tree", "goal-tree" }) |path|
+        try inspection.entries.append(.{ .path = @constCast(path), .branch = @constCast("topic"), .pushed = true, .landed = true, .size_bytes = 312_000_000, .size_complete = true });
+    var receipt = std.array_list.Managed(u8).init(allocator);
+    defer receipt.deinit();
+    var fixture_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(outcomePaintFrame, &fixture_hash, .{});
+    try receipt.writer().print(
+        "{{\"evidenceClass\":\"offscreen production card paint only\",\"sourceCommit\":\"{s}\",\"fixtureSha256\":\"{x}\",\"logicalDpi\":96,\"width\":640,\"height\":240,\"zoom\":1,\"role\":\"entry\",\"selected\":false,\"attention\":false,\"scenes\":[",
+        .{ commit, &fixture_hash },
+    );
+    const scenes = [_]struct { name: []const u8, node: usize, reclaim: bool }{
+        .{ .name = "main-stopped-resolution", .node = 0, .reclaim = false },
+        .{ .name = "main-stopped-reclaim", .node = 0, .reclaim = true },
+        .{ .name = "goal-done-resolution", .node = 1, .reclaim = false },
+        .{ .name = "goal-done-reclaim", .node = 1, .reclaim = true },
+    };
+    for (scenes, 0..) |scene, index| {
+        var first_rgb: [32]u8 = undefined;
+        const node = model.graph.?.nodes.items[scene.node];
+        const offer = if (scene.reclaim) reclaimOffer(node, &inspection, &.{}) else null;
+        for (0..3) |repeat| {
+            const dib = try ParityDib.init(640, 240);
+            defer dib.deinit();
+            fill(dib.dc, rect(0, 0, 640, 240), Tokens.canvas_tone);
+            const bounds = rect(180, 70, 180 + Tokens.loop_card_width, 70 + Tokens.loop_card_height);
+            drawLoopCardShadow(dib.dc, allocator, node, bounds, &.{}, .entry, false, false);
+            drawLoopCard(dib.dc, allocator, node, bounds, &.{}, .entry, false, null, false, offer, true);
+            const rgb = try dib.rgbSha256(allocator);
+            if (repeat == 0) first_rgb = rgb else try std.testing.expectEqualSlices(u8, &first_rgb, &rgb);
+            const name = try std.fmt.allocPrint(allocator, "{s}-{d}.bmp", .{ scene.name, repeat + 1 });
+            defer allocator.free(name);
+            const path = try std.fs.path.join(allocator, &.{ root, name });
+            defer allocator.free(path);
+            const digest = try dib.writeBmp(allocator, path);
+            if (repeat == 0) {
+                if (index != 0) try receipt.append(',');
+                try receipt.writer().print("{{\"scene\":\"{s}\",\"nodeId\":\"{s}\",\"state\":\"{s}\",\"file\":\"{s}\",\"repeats\":3,\"bmpSha256\":\"{x}\",\"rgbSha256\":\"{x}\"}}", .{ scene.name, node.id, node.state, name, &digest, &rgb });
+            }
+        }
+    }
+    try receipt.appendSlice("]}\n");
+    var file = try directory.createFile("loop-outcomes-receipt.json", .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(receipt.items);
+    var fixture_file = try directory.createFile("loop-outcomes-frame.json", .{ .exclusive = true });
+    defer fixture_file.close();
+    try fixture_file.writeAll(outcomePaintFrame);
+    std.debug.print("loop outcome export: 4 scenes x 3 repeats, matching RGB hashes; production decoder/card paint; no desktop capture\n", .{});
 }
 
 fn cardPilotName(pilot: []const u8) []const u8 {
@@ -2851,7 +3252,7 @@ fn drawCardBody(
     role: NodeRole,
     attention: bool,
     action: ?AttentionAction,
-    reclaim: bool,
+    reclaim: ?ReclaimOffer,
 ) !void {
     _ = attention;
     const presentation = cardState(node);
@@ -2863,7 +3264,7 @@ fn drawCardBody(
     const layout = cardTextLayout(bounds, zoom, pill_width);
     try drawCardText(hdc, allocator, node.title, layout.title, 14.5 * zoom, .card_title, 0x00F4F4F4, true);
     try drawCardPill(hdc, allocator, presentation, layout.pill, zoom);
-    const live = try cardLiveLine(allocator, node);
+    const live = if (reclaim) |offer| try reclaimLine(allocator, offer) else try cardLiveLine(allocator, node);
     defer allocator.free(live);
     try drawCardText(hdc, allocator, live, layout.live, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
     const chip_in_detail = drawCardMetaRow(hdc, allocator, node, layout, zoom, role) catch |err| switch (err) {
@@ -2874,7 +3275,7 @@ fn drawCardBody(
         },
         else => return err,
     };
-    if (action == null and !reclaim and node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
+    if (action == null and reclaim == null and node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
         var detail_bounds = layout.detail;
         if (chip_in_detail) {
             const chip_width = try cardRoleChipWidth(hdc, allocator, role, zoom);
@@ -4700,7 +5101,7 @@ test "canvas visual finish attention warmth survives the non AA fallback" {
     node.presence = @constCast("awaitingInput");
     for ([_]bool{ false, true }) |selected| {
         fill(dib.dc, rect(0, 0, 640, 240), Tokens.canvas_tone);
-        drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &.{}, .interior, true, .reply, selected, false, true);
+        drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &.{}, .interior, true, .reply, selected, null, true);
         try std.testing.expectEqual(Tokens.loop_card_attention_bottom, c.GetPixel(dib.dc, bounds.right - 8, bounds.top + 45));
         try std.testing.expect(dib.count(bounds, if (selected) Tokens.canvas_selection else Tokens.loop_card_attention_border) > 20);
     }
@@ -4919,7 +5320,7 @@ test "card live detail 764 attention alone does not hide a real metric" {
     const bounds = rect(20, 20, 270, 116);
     const rows = cardTextLayout(bounds, 1, 80);
     fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
-    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, true, null, false);
+    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, true, null, null);
     const track = rect(rows.detail.left, rows.detail.bottom - 3, rows.detail.right, rows.detail.bottom);
     try std.testing.expect(dib.count(track, loopTypeColor(node.loop_type)) > 0);
     try std.testing.expect(dib.count(track, 0x00444141) > 0);
@@ -4933,7 +5334,7 @@ test "card live detail 764 human action suppresses progress without attention wa
     const bounds = rect(20, 20, 270, 116);
     const rows = cardTextLayout(bounds, 1, 80);
     fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
-    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, .inspect, false);
+    try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, .inspect, null);
     try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x00444141));
     try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, loopTypeColor(node.loop_type)));
 }
@@ -4953,7 +5354,7 @@ test "card live detail 764 no history one reading missing direction and reclaim 
         node.metric_sample_count = sample.count;
         node.metric_direction = @constCast(sample.direction);
         fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
-        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, null, sample.reclaim);
+        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, 1, .interior, false, null, if (sample.reclaim) .{ .default_branch = "main" } else null);
         try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x00444141));
         try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, loopTypeColor(node.loop_type)));
     }
@@ -4977,7 +5378,7 @@ test "card live detail 764 change is right aligned and track is three logical po
         const bounds = rect(20, 20, 20 + scaledValue(250, zoom), 20 + scaledValue(96, zoom));
         const rows = cardTextLayout(bounds, zoom, scaledValue(80, zoom));
         fill(dib.dc, rect(0, 0, 480, 240), Tokens.loop_card_bottom);
-        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, zoom, .interior, false, null, false);
+        try drawCardBody(dib.dc, std.testing.allocator, node, bounds, zoom, .interior, false, null, null);
         const old = try selectCardFont(dib.dc, 10.5 * zoom, .card_mono);
         defer _ = c.SelectObject(dib.dc, old);
         const change_width = try measuredText(dib.dc, std.testing.allocator, "23% better");
@@ -6609,7 +7010,7 @@ fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: Visual
                 const x: i32 = 280 + @as(i32, @intCast(index)) * 340;
                 const card = rect(x, 200, x + scaledValue(250, zoom), 200 + scaledValue(96, zoom));
                 drawLoopCardShadow(dib.dc, allocator, node, card, &.{ .zoom = zoom }, .interior, false, false);
-                drawLoopCard(dib.dc, allocator, node, card, &.{ .zoom = zoom }, .interior, false, null, false, true, true);
+                drawLoopCard(dib.dc, allocator, node, card, &.{ .zoom = zoom }, .interior, false, null, false, .{ .default_branch = "main" }, true);
             }
             drawZoomControls(dib.dc, allocator, bounds, &.{});
         } else {
@@ -6646,7 +7047,7 @@ fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: Visual
                     else
                         (if (selected) "Wired / selected" else "Wired / unselected"), rect(x, y - 25, x + 250, y - 5), 11, 0x00B0B0B0, c.DT_LEFT | c.DT_SINGLELINE);
                     drawLoopCardShadow(dib.dc, allocator, node, card, &.{}, role, warm, selected);
-                    drawLoopCard(dib.dc, allocator, node, card, &.{}, role, warm, primaryCardAction(node), selected, false, true);
+                    drawLoopCard(dib.dc, allocator, node, card, &.{}, role, warm, primaryCardAction(node), selected, null, true);
                 }
             }
         }
@@ -8028,7 +8429,7 @@ test "loop card parity production long text and hollow pills paint across zoom a
             const bounds = nodeBounds(0, &state);
             fill(dib.dc, rect(0, 0, 1000, 450), 0);
             roundedCard(dib.dc, bounds, Tokens.loop_card_bottom, false);
-            try drawCardBody(dib.dc, allocator, node, bounds, zoom, .interior, false, null, false);
+            try drawCardBody(dib.dc, allocator, node, bounds, zoom, .interior, false, null, null);
             const old = try selectCardFont(dib.dc, 10 * zoom, .card_state);
             const pill_width = try measuredText(dib.dc, allocator, "STOPPED") + scaledValue(22, zoom);
             _ = c.SelectObject(dib.dc, old);
@@ -8053,7 +8454,7 @@ test "loop card parity compact composite metadata never blanks title or state" {
     node.created_at = @intCast(@max(0, std.time.timestamp() - 3900));
     const bounds = rect(20, 20, 270, 116);
     fill(dib.dc, rect(0, 0, 600, 240), 0);
-    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, null, false);
+    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, null, null);
     try std.testing.expect(c.GdiFlush() != 0);
     try std.testing.expect(dib.count(rect(31, 28, 170, 46), 0x00F4F4F4) > 0);
     try std.testing.expect(dib.count(rect(170, 28, 259, 46), cardState(node).fill) > 0);
@@ -8076,7 +8477,7 @@ test "loop card parity compact composite metadata never blanks title or state" {
     try std.testing.expectError(error.CardMetadataTooWide, cardMetaForWidth(dib.dc, allocator, node, node.created_at.? + 3900, fixed_width - 1));
     node.backend = @constCast("a backend identifier too wide to fit without lying");
     fill(dib.dc, rect(0, 0, 600, 240), 0);
-    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, null, false);
+    try drawCardBody(dib.dc, allocator, node, bounds, 1, .interior, false, null, null);
     try std.testing.expect(c.GdiFlush() != 0);
     try std.testing.expect(dib.count(rect(31, 28, 170, 46), 0x00F4F4F4) > 0);
     try std.testing.expect(dib.count(rect(31, 52, 259, 65), 0x009F9C9C) > 0);
@@ -8507,7 +8908,7 @@ test "card roles use Mac sequencing reachability including spawn but not message
     const node = graphRoleTestNode("cycle-chip");
     const bounds = rect(20, 20, 270, 116);
     fill(dib.dc, rect(0, 0, 480, 180), 0);
-    try drawCardBody(dib.dc, allocator, node, bounds, 1, .cycle_only, false, null, false);
+    try drawCardBody(dib.dc, allocator, node, bounds, 1, .cycle_only, false, null, null);
     try std.testing.expect(c.GdiFlush() != 0);
 
     const presentation = cardState(node);

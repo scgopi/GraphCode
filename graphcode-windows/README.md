@@ -226,6 +226,42 @@ newer than the held `revision`) and then applies like a `graphChanged`, matching
 macOS `AppFeature.foldDelta`. Unit tests cover the hello and the delta fold; the
 Dev Box multi-project and Needs-you walkthroughs are the runtime evidence.
 
+Resolved cards retain the daemon's `resolution` evidence (`basis`, optional
+`detail`, and the fractional Swift-reference-date `resolvedAt`) and use the
+macOS basis phrases instead of repeating the original instruction or goal.
+The workspace loop bar reuses this outcome line, as macOS does, while retaining
+its existing raw activity for nodes without outcome evidence.
+An unresolved `pendingCompletion` says what was reported and that it is waiting
+on the loops it created. A resolved loop doing a busy follow-up still quotes its
+current activity, without a stale pass prefix. Missing or null evidence preserves
+the existing fallback; malformed evidence rejects the event through the existing
+malformed-event status path rather than inventing an outcome.
+
+A safe inspected worktree on any resolved state (including Main **STOPPED**, not
+only Goal **DONE**) uses the Mac's reclaim live line: `landed in main · 312 MB
+left behind`, or `worktree left behind` when its size is zero or not completely
+known. This overrides the resolution line while the existing Reclaim/Keep offer
+is present. The default branch and complete size come from the held inspection;
+the existing reclaim safety and kept-worktree gates remain authoritative.
+The card uses decimal file-size units with adaptive, unpadded precision, matching
+the English macOS reference, rather than the worktree list's binary size labels.
+No layout, action routing, metric precedence, or restart behavior changes here.
+The source authority is `LoopResolution.swift` and `LoopCardPresentation.swift`
+at macOS commit `2ccf303a04f995184aae1d4b738a9eca0f71b79e`.
+
+`zig test src\GraphModel.zig` includes outcome decoding, owned clone/delta
+replacement, malformed-data rejection and allocation-failure sweeps.
+The GraphCanvas `loop outcome` tests exercise the production live-line and
+reclaim consumers, including live-row pixels. Its opt-in
+`paint export: loop-outcomes` test uses the existing `ParityDib` exporter and
+`GRAPHCODE_PAINT_EXPORT_DIR` / `GRAPHCODE_PAINT_SOURCE_COMMIT` variables for
+four 100%-zoom, 96-logical-DPI production card scenes, three identical RGB
+renders each. This is offscreen component evidence, not a live daemon,
+Reclaim/Keep execution, whole-window composition, locale parity, keyboard,
+accessibility, or cross-platform runtime proof. The parity ledger stays
+**Partial**; scenario fixture qualifications are updated separately by the
+operator, not by the product lane.
+
 The shell exposes a native File/Loop/Terminal/View/Help menu bar. Menu items
 share the same application action router as keyboard shortcuts, and project
 actions use the Windows `IFileOpenDialog` folder picker. The no-project state
