@@ -29,14 +29,82 @@ current combined-tree qualification. A later C8 preparation must re-pin merged
 tooling and rerun its exact declared qualification count before preflight and
 a separately granted capture window. No subset or skipped-scene support is added.
 
+## Scene-bound seed receipts
+
+Lane S2 adds **two top-level groups**, taking the combined registered totals
+from **175 to 177 default**, or **178 to 180 with `-RequireRealSeed`**.
+`Tests\ValidationRunner.Tests.ps1` requires exactly 177 passing groups and the
+unique presence of the original eight S groups plus both S2 groups. The live
+matched preflight requires exactly 180 passing groups, zero skips, and the same
+unique groups; a higher count is not accepted.
+
+Matched S seed receipts use the initialized `Roots.Root\zmx-seed.json`, not a
+path rebuilt from the diagnostic phase label. B and D retain their existing
+normal and per-session receipt layouts (D seeds share an app root). That directory is
+ensured before launch; initial, exit and final writes retain the same owned
+path. Final cleanup records `NOT_CREATED` and `CLEANUP_UNPROVEN` if the initial
+receipt was never published, without inventing a file or a clean result.
+Native job closure and receipt/stream publication remain distinct.
+
+The worker performs a **post-termination held-handle exit wait** after the
+existing owned-job termination/empty proof and before the unchanged kernel-live
+refusal. Its original live-image attestation is bound to the same retained
+handle, PID and creation time; the wait rechecks native PID and creation time
+without querying a terminating image or looking up a PID. Termination, `WaitForEmpty` and this signal wait
+share the original **5000 ms** monotonic window, started immediately before
+`Terminate`; no new timeout is added. Receipt `launcherExitWait` records the
+remaining wait budget, actual signal observation latency and timestamp. A
+timeout retains null signal latency and still refuses; the observed latency is
+not an exact kernel exit instant. The existing daemon-descendant held-pipe
+design still terminates its owned job; there is no pre-close natural-exit wait.
+
+The first new group runs the actual worker seed writer and cleanup for
+`before-s-tabs-goal-needs-you`, plus an actual blocked-first-write refusal.
+The second walks all **18 scene names x 2 phases = 36** through real directory
+creation, actual worker receipt writes, owned job cleanup and scene-local
+filesystem removal, preserving a sibling sentinel. Both use a hidden harmless
+native target deliberately exiting 23 before daemon readiness, not real seeds,
+Restart, UI actions, capture or parity proof. Only journal payload construction
+is narrowed; the seed launcher, atomic writer and cleanup functions are not
+replaced.
+
+Within the first group, deterministic delayed-signal and spent-budget refusal
+controls invoke actual worker `Close-CapOfflineSeed` with a real held fixture
+process. Only its close-job return boundary is injected and explicitly labelled
+as **not native job-empty/termination evidence**. Those controls have real,
+separate owned safety-job/EOF teardown. The matrix and full registered suites
+use the unmodified actual job closer, not that injection.
+
+Default test scratch leaves and the registered capture scratch leaf are short
+`g` plus eight hex characters to leave room for the unchanged 240-character
+zmx lease-path guard. Existing roots refuse rather than being adopted or
+overwritten; both allocation entry points have marker-preservation negatives.
+Explicitly supplied overlong scratch paths still refuse.
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -PrepareFixturesOnly -ScratchRoot D:\owned\seed-fixtures
+
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -SeedPathContractOnly -ScratchRoot D:\owned\seed-paths `
+  -PrebuiltFixtureManifest D:\owned\seed-fixtures\fixtures.json `
+  -PrebuiltFixtureManifestSha256 ACTUAL_64_HEX_SHA256
+```
+
+Use a short, fresh owned scratch root and the actual manifest hash. Frozen C8
+remains `CLEANUP_UNPROVEN`, with 6/36 images; this repair neither reviews those
+images nor upgrades that historical result. C8R requires fresh authorization
+and qualification.
+
 ## Counts and registration
 
 The standalone Lane S change adds **eight top-level groups exactly once**:
 **166 + 8 = 174 default**, or **169 + 8 = 177 with `-RequireRealSeed`**.
 The three existing actual-zmx rehearsal cases are unchanged; the real-seed
 top-level delta is **zero**. No old group or negative case was removed or
-relabelled. `Tests\ValidationRunner.Tests.ps1` requires 174 and the unique
-presence of all eight names. A different total is a failure, not an empty-filter
+relabelled. Its original registration required 174 and the unique
+presence of all eight names; the current S2 totals above supersede that total.
+A different total is a failure, not an empty-filter
 pass. A later merged change with its own declared delta requires an explicit
 combined-tree count update and registered-runner rerun.
 

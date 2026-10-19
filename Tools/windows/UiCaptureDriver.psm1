@@ -213,6 +213,23 @@ public static class CapNative {
     throw new InvalidOperationException("Kernel wait failed for PID " + pid + ": " + Marshal.GetLastWin32Error());
   }
 
+  public static bool WaitForExit(IntPtr handle, int pid, long creationFileTimeUtc, long deadlineTimestamp, out int waitMilliseconds) {
+    waitMilliseconds = 0;
+    if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)pid)
+      throw new InvalidOperationException("Process handle/PID mismatch.");
+    NativeFileTime creation, exit, kernel, user;
+    if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
+      throw new InvalidOperationException("GetProcessTimes failed: " + Marshal.GetLastWin32Error());
+    if (FileTime(creation) != creationFileTimeUtc)
+      throw new InvalidOperationException("Process handle/generation mismatch.");
+    waitMilliseconds = (int)Math.Max(0, Math.Floor(
+      (deadlineTimestamp - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000.0 / System.Diagnostics.Stopwatch.Frequency));
+    uint wait = WaitForSingleObject(handle, (uint)waitMilliseconds);
+    if (wait == WAIT_OBJECT_0) return true;
+    if (wait == WAIT_TIMEOUT) return false;
+    throw new InvalidOperationException("Kernel wait failed for PID " + pid + ": " + Marshal.GetLastWin32Error());
+  }
+
   public static bool Terminate(IntPtr handle, int pid, uint exitCode, int timeoutMilliseconds) {
     if (IsExited(handle, pid)) return false;
     bool terminated = TerminateProcess(handle, exitCode);
@@ -696,8 +713,14 @@ function Close-CapJobLauncher {
     try { $null = Get-CapJobMembers -Run $Run }
     catch { $censusFailure = $_ }
     if ($null -ne $Run.TargetExit) { $null = $Run.Identity.Process.WaitForExit(250) }
+    $terminationStartedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    $terminationStartedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
     [CapProcessJob]::Terminate($Run.Job)
-    [CapProcessJob]::WaitForEmpty($Run.Job, 5000)
+    $remaining = [int][Math]::Max(0,[Math]::Floor(5000 -
+        ([Diagnostics.Stopwatch]::GetTimestamp()-$terminationStartedTimestamp) * 1000.0 / [Diagnostics.Stopwatch]::Frequency))
+    [CapProcessJob]::WaitForEmpty($Run.Job, $remaining)
+    $jobEmptyObservedElapsedMilliseconds = ([Diagnostics.Stopwatch]::GetTimestamp()-$terminationStartedTimestamp) *
+        1000.0 / [Diagnostics.Stopwatch]::Frequency
     $active = [CapProcessJob]::Active($Run.Job)
     if ($active -ne 0) { throw 'Contained job Active=0 was not observed before handle close.' }
     if (-not $Run.StdoutTask.Wait(2000) -or -not $Run.StderrTask.Wait(2000)) {
@@ -724,6 +747,10 @@ function Close-CapJobLauncher {
         censusProven = $null -eq $censusFailure
         transport = 'PRIVATE_TARGET_PIPE_PUMPS_TO_OWNED_FILES'
         targetPipeEofClaimed = $false
+        terminationStartedUtc = $terminationStartedUtc
+        terminationStartedTimestamp = $terminationStartedTimestamp
+        terminationBudgetMilliseconds = 5000L
+        jobEmptyObservedElapsedMilliseconds = $jobEmptyObservedElapsedMilliseconds
     }
     [CapProcessJob]::Close($Run.Job)
     $Run.Job = [IntPtr]::Zero

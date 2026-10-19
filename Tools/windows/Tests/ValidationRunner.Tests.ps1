@@ -4764,7 +4764,7 @@ if ($uiScenarioSummary.executed -isnot [long] -or $uiScenarioSummary.executed -l
 }
 $uiScenarioOutput | ForEach-Object { Write-Host $_ }
 
-$uiCaptureRoot = Join-Path ([IO.Path]::GetTempPath()) ("gc-ui-capture-" + [guid]::NewGuid().ToString("N"))
+$uiCaptureRoot = Join-Path ([IO.Path]::GetTempPath()) ("g" + [guid]::NewGuid().ToString("N").Substring(0,8))
 $null = New-Item -ItemType Directory -Path $uiCaptureRoot
 $uiCapturePrebuilt = Join-Path $uiCaptureRoot "prebuilt"
 $uiCapturePrepareOutput = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "UiCaptureDriver.Tests.ps1") `
@@ -4780,7 +4780,7 @@ if ($LASTEXITCODE -ne 0) { throw "RED: offline real-launch capture child failed"
 $uiCaptureSummaries = @($uiCaptureOutput | Where-Object { $_ -is [string] -and $_.StartsWith('{"suite":"UiCaptureDriver",') })
 if ($uiCaptureSummaries.Count -ne 1) { throw "RED: offline real-launch capture structured count missing or duplicated" }
 $uiCaptureSummary = ConvertFrom-Json $uiCaptureSummaries[0]
-if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 175 -or
+if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 177 -or
     $uiCaptureSummary.passed -isnot [long] -or $uiCaptureSummary.passed -ne $uiCaptureSummary.executed -or
     $uiCaptureSummary.failed -isnot [long] -or $uiCaptureSummary.failed -ne 0) {
   throw "RED: offline real-launch capture child has no positive executed/passed contract count"
@@ -4791,6 +4791,8 @@ $matchedGroups=@(
   'matched v12 fixture binds exact node type wiring reason and outcome fields',
   'matched v12 fixture refuses identity type wiring selection reason and outcome mutations',
   'matched v12 complete scene inventory is admitted and missing scenes refuse',
+  'matched S tab actual worker seed write preserves scene path and not-created cleanup',
+  'matched all eighteen scenes across both phases create write and clean isolated seed paths',
   'matched tab observations preserve exact owned IDs parents selection and close bounds',
   'real restart transcript requires daemon confirmation resume and new owned attach',
   'real restart scene invokes existing UIA route and refuses offline peer authority',

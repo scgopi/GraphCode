@@ -427,6 +427,9 @@ function Start-CapOfflineSeed {
         $arguments[6] -cne 'echo Offline card fixture - no backend')) {
         throw 'The B job does not contain the exact seven-argument offline cmd-only zmx seed.'
     }
+    $seedReceiptRoot = if ($isS) { $Roots.Root } else { Join-Path $runDirectory "phases\$Phase\normal" }
+    $seedReceiptPath = Assert-CapOwnedPath (Join-Path $seedReceiptRoot 'zmx-seed.json')
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $seedReceiptPath) -Force
     $zmxRoot = Assert-CapOwnedPath $Roots.Zmx
     $zmxWorking = Assert-CapOwnedPath (Join-Path $Roots.Peer 'zmx-cwd')
     New-Item -ItemType Directory -Path $zmxWorking -Force | Out-Null
@@ -442,8 +445,20 @@ function Start-CapOfflineSeed {
     $run | Add-Member -NotePropertyName Phase -NotePropertyValue $Phase
     $run | Add-Member -NotePropertyName SessionName -NotePropertyValue $arguments[1]
     $run | Add-Member -NotePropertyName Descendants -NotePropertyValue @()
+    $run | Add-Member -NotePropertyName SeedReceiptPath -NotePropertyValue $seedReceiptPath
+    $run | Add-Member -NotePropertyName SeedCleanupComplete -NotePropertyValue $false
     $runs.Add($run)
     $seedRuns.Add($run)
+    $launcherHandle = $run.Identity.Process.Handle
+    $launcherSnapshot = [CapNative]::Snapshot($launcherHandle,$run.Identity.Pid)
+    if ($launcherSnapshot.IsExited -or $launcherSnapshot.CreationFileTimeUtc -ne $run.Identity.CreationFileTimeUtc -or
+        $launcherSnapshot.ImagePath -ine $run.Identity.ExpectedImagePath) {
+        throw 'Seed launcher original image attestation differs.'
+    }
+    $run | Add-Member -NotePropertyName LauncherImageAttestation -NotePropertyValue ([pscustomobject]@{
+        pid = $launcherSnapshot.ProcessId; creationFileTimeUtc = $launcherSnapshot.CreationFileTimeUtc
+        imagePath = $launcherSnapshot.ImagePath; heldHandle = $launcherHandle.ToInt64()
+    })
     Write-CapProcessJournal -Identity $run.Identity -Phase $Phase
     $target = Release-CapJobLauncher -Run $run -JournalState $journalState
     $receipt = [pscustomobject]@{
@@ -469,12 +484,18 @@ function Start-CapOfflineSeed {
         stdoutEof = $false
         stderrEof = $false
         cleanupStatus = 'PENDING'
+        receiptPublicationStatus = 'NOT_CREATED'
+        launcherExitWait = $null
         cleanup = @()
     }
     $run | Add-Member -NotePropertyName SeedReceipt -NotePropertyValue $receipt
     $zmxSeedReceipts.Add($receipt)
-    $seedReceiptPath = Join-Path $runDirectory "phases\$Phase\normal\zmx-seed.json"
-    Write-CapJsonAtomic -Path $seedReceiptPath -Value $receipt
+    $receipt.receiptPublicationStatus = 'CREATED'
+    try { Write-CapJsonAtomic -Path $seedReceiptPath -Value $receipt }
+    catch {
+        $receipt.receiptPublicationStatus = 'NOT_CREATED'
+        throw
+    }
 
     $seedDeadline = [DateTime]::UtcNow.AddSeconds(20)
     if ($seedDeadline -gt $leaseDeadlineUtc) { $seedDeadline = $leaseDeadlineUtc }
@@ -1000,13 +1021,62 @@ function Close-CapGraphCodeApp {
     $AppRun.CleanupComplete = $true
 }
 
+function Write-CapSeedCleanupReceipt {
+    param([Parameter(Mandatory)]$SeedRun)
+    if ($SeedRun.SeedReceipt.receiptPublicationStatus -ceq 'NOT_CREATED') {
+        $SeedRun.SeedReceipt.cleanupStatus = 'CLEANUP_UNPROVEN'
+        $cleanupFailures.Add("Seed receipt not created: $($SeedRun.SeedReceiptPath)")
+        return
+    }
+    try { Write-CapJsonAtomic -Path $SeedRun.SeedReceiptPath -Value $SeedRun.SeedReceipt }
+    catch {
+        $SeedRun.SeedReceipt.cleanupStatus = 'CLEANUP_UNPROVEN'
+        throw
+    }
+}
+
+function Wait-CapSeedLauncherExit {
+    param([Parameter(Mandatory)]$SeedRun, [Parameter(Mandatory)]$Proof)
+    $identity = $SeedRun.Identity
+    $handle = $identity.Process.Handle
+    if (-not $SeedRun.PSObject.Properties['LauncherImageAttestation']) {
+        throw 'Seed launcher original image attestation is missing.'
+    }
+    $attestation = $SeedRun.LauncherImageAttestation
+    if ($attestation.pid -ne $identity.Pid -or $attestation.creationFileTimeUtc -ne $identity.CreationFileTimeUtc -or
+        $attestation.heldHandle -ne $handle.ToInt64() -or [string]::IsNullOrWhiteSpace($attestation.imagePath) -or
+        $attestation.imagePath -ine $identity.ExpectedImagePath) {
+        throw 'Seed launcher original image attestation differs from the held registration.'
+    }
+    $now = [Diagnostics.Stopwatch]::GetTimestamp()
+    if ($Proof.terminationBudgetMilliseconds -ne 5000 -or $Proof.terminationStartedTimestamp -le 0 -or
+        $Proof.terminationStartedTimestamp -gt $now) { throw 'Seed launcher termination-window evidence differs.' }
+    $deadlineTimestamp = $Proof.terminationStartedTimestamp + 5L * [Diagnostics.Stopwatch]::Frequency
+    $remaining = 0
+    $signalled = [CapNative]::WaitForExit($handle,$identity.Pid,$identity.CreationFileTimeUtc,$deadlineTimestamp,[ref]$remaining)
+    $observed = [Diagnostics.Stopwatch]::GetTimestamp()
+    return [pscustomobject]@{
+        kind = 'POST_TERMINATION_HELD_HANDLE_EXIT_WAIT'
+        pid = $identity.Pid; creationFileTimeUtc = $identity.CreationFileTimeUtc
+        heldHandle = $handle.ToInt64(); signalled = $signalled
+        waitBudgetRemainingMilliseconds = $remaining
+        terminationToSignalledMilliseconds = if ($signalled) {
+            ($observed-$Proof.terminationStartedTimestamp) * 1000.0 / [Diagnostics.Stopwatch]::Frequency
+        } else { $null }
+        observedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    }
+}
+
 function Close-CapOfflineSeed {
     param([Parameter(Mandatory)]$SeedRun)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    if ($SeedRun.CleanupComplete) { return }
     if ($SeedRun.PSObject.Properties['JobId']) {
+        if ($SeedRun.SeedCleanupComplete) { return }
         $proof = Close-CapJobLauncher -Run $SeedRun
+        $launcherExitWait = Wait-CapSeedLauncherExit -SeedRun $SeedRun -Proof $proof
+        if ($SeedRun.PSObject.Properties['SeedReceipt']) { $SeedRun.SeedReceipt.launcherExitWait = $launcherExitWait }
+        if (-not $launcherExitWait.signalled) { throw 'Job member remains kernel-live.' }
         foreach ($identity in $SeedRun.Members) {
             if (-not @($descendantIdentities | Where-Object {
                 $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
@@ -1024,12 +1094,13 @@ function Close-CapOfflineSeed {
             $SeedRun.SeedReceipt.cleanupStatus = 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED'
             # Target files are not raw redirected-stream EOF.
             $SeedRun.SeedReceipt.stdoutEof = $false; $SeedRun.SeedReceipt.stderrEof = $false
-            $path = Join-Path $runDirectory "phases\$($SeedRun.Phase)\normal\zmx-seed.json"
-            Write-CapJsonAtomic -Path $path -Value $SeedRun.SeedReceipt
+            Write-CapSeedCleanupReceipt -SeedRun $SeedRun
         }
         Write-CapRunStreams -Run $SeedRun -Label "$($SeedRun.Phase)-zmx-launcher"
+        $SeedRun.SeedCleanupComplete = $true
         return
     }
+    if ($SeedRun.CleanupComplete) { return }
     $failureCountBefore = $cleanupFailures.Count
     $tree = @()
     try {
@@ -1094,8 +1165,7 @@ function Close-CapOfflineSeed {
         $cleanupFailures.Count -eq $failureCountBefore -and
         $SeedRun.SeedReceipt.stdoutEof -and $SeedRun.SeedReceipt.stderrEof
     ) { 'CLEAN_ZERO_SURVIVORS_EOF' } else { 'CLEANUP_UNPROVEN' }
-    $seedReceiptPath = Join-Path $runDirectory "phases\$($SeedRun.Phase)\normal\zmx-seed.json"
-    try { Write-CapJsonAtomic -Path $seedReceiptPath -Value $SeedRun.SeedReceipt }
+    try { Write-CapSeedCleanupReceipt -SeedRun $SeedRun }
     catch { $cleanupFailures.Add("Private zmx receipt update failed: $($_.Exception.Message)") }
     if ($cleanupFailures.Count -eq $failureCountBefore) { $SeedRun.CleanupComplete = $true }
 }

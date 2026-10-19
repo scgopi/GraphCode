@@ -257,13 +257,15 @@ function Assert-CapPreflightReport {
             }
         }
         if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
-            if ($preflight.executed -ne 178 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
-                throw 'Matched scene preflight requires exactly 178 passing current contracts and zero skips.'
+            if ($preflight.executed -ne 180 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
+                throw 'Matched scene preflight requires exactly 180 passing current contracts and zero skips.'
             }
             foreach ($name in @(
                 'matched v12 fixture binds exact node type wiring reason and outcome fields',
                 'matched v12 fixture refuses identity type wiring selection reason and outcome mutations',
                 'matched v12 complete scene inventory is admitted and missing scenes refuse',
+                'matched S tab actual worker seed write preserves scene path and not-created cleanup',
+                'matched all eighteen scenes across both phases create write and clean isolated seed paths',
                 'matched tab observations preserve exact owned IDs parents selection and close bounds',
                 'real restart transcript requires daemon confirmation resume and new owned attach',
                 'real restart scene invokes existing UIA route and refuses offline peer authority',
