@@ -11748,10 +11748,10 @@ test "sidebar UIA bounds clip hidden rows instead of sharing visible hit rectang
             400,
         ),
     );
-    // A row scrolled under the fixed GRAPH/Projects header is not published at all.
+    // A row wholly above the sidebar content inset is not published at all.
     try std.testing.expectEqualDeep(
         c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-        clipSidebarAccessibilityBounds(.{ .left = 12, .top = Tokens.header_height + 10, .right = 232, .bottom = Tokens.header_height + 34 }, 400),
+        clipSidebarAccessibilityBounds(.{ .left = 12, .top = Sidebar.content_top - 24, .right = 232, .bottom = Sidebar.content_top }, 400),
     );
     try std.testing.expectEqualDeep(
         c.RECT{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
@@ -11900,7 +11900,7 @@ fn expectSidebarNavigationElement(
     const expected = c.RECT{
         .left = physicalCoordinate(12, dpi),
         .top = physicalCoordinate(row.top - 3, dpi),
-        .right = physicalCoordinate(Tokens.sidebar_width, dpi),
+        .right = physicalCoordinate(Tokens.sidebar_width - 12, dpi),
         .bottom = physicalCoordinate(row.top + 29, dpi),
     };
     try std.testing.expectEqualDeep(expected, sink.rects[index]);
@@ -12573,6 +12573,7 @@ test "sidebar footer is not a click target for rows beneath it" {
     for (footer_layout_controls) |controls| {
         var app = try footerLayoutApp(case, controls, false, false);
         defer deinitFooterLayoutApp(&app);
+        try loadManySidebarLoops(&app, 40);
         const client = logicalClientRect(app.window.hwnd, app.dpi);
         const sidebar_bottom = GraphCanvas.sidebarBottom(client.bottom, app.workspace_controls, app.surface);
         const content_bottom = app.sidebarContentBottom(client.bottom);
@@ -12628,7 +12629,7 @@ fn expectedSidebarRowRect(row: Sidebar.Row, region_top: i32, region_bottom: i32)
     const top = @max(row_top, region_top);
     const bottom = @min(row_bottom, region_bottom);
     if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    return .{ .left = 12, .top = top, .right = Tokens.sidebar_width, .bottom = bottom };
+    return .{ .left = 12, .top = top, .right = Tokens.sidebar_width - 12, .bottom = bottom };
 }
 
 test "sidebar UIA bounds are the drawn rect clipped to the scroll region at short heights, 96 and 144 DPI" {
@@ -13027,7 +13028,8 @@ test "the minimum window height keeps a 52 px sidebar scroll region and at least
         try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
         // The test window is a frameless popup, so its outer height is its client height.
         try std.testing.expectEqual(physicalCoordinate(min_client_height, dpi), info.ptMinTrackSize.y);
-        try std.testing.expectEqual(@as(i32, 517), min_client_height);
+        // Header + list inset + minimum rows + status + panel + activity strip.
+        try std.testing.expectEqual(@as(i32, 34 + 8 + 52 + 58 + 250 + 48), min_client_height);
         // A larger system minimum is never reduced.
         info.ptMinTrackSize.y = physicalCoordinate(min_client_height, dpi) + 50;
         try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
@@ -13090,7 +13092,13 @@ test "banner click and the UIA dynamic invoke command open the same update offer
     defer update_offer_observer = null;
     var offers: usize = 0;
     var collapsed: usize = 0;
-    for (footer_layout_cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
+    // Compact framing lets the original sixteen cases fit. Explicit minimum-height
+    // cases retain collapsed-banner clicks at both DPI scales with the panel shown.
+    const cases = footer_layout_cases ++ [_]FooterLayoutCase{
+        .{ .dpi = 96, .width = 960, .height = min_client_height },
+        .{ .dpi = 144, .width = 1440, .height = physicalCoordinate(min_client_height, 144) },
+    };
+    for (cases) |case| for (footer_layout_controls) |controls| for ([_]bool{ false, true }) |ingress| {
         var app = try footerLayoutApp(case, controls, true, ingress);
         defer deinitFooterLayoutApp(&app);
         const client = logicalClientRect(app.window.hwnd, app.dpi);
@@ -13126,8 +13134,8 @@ test "banner click and the UIA dynamic invoke command open the same update offer
         try std.testing.expectEqual(@as(usize, 2), OfferProbe.count);
         offers += 1;
     };
-    try std.testing.expectEqual(@as(usize, 14), offers);
-    try std.testing.expectEqual(@as(usize, 2), collapsed);
+    try std.testing.expectEqual(@as(usize, 16 + 4), offers);
+    try std.testing.expectEqual(@as(usize, 4), collapsed);
 }
 
 test "every scrolling sidebar element advertises scroll-into-view and the fixed footer and header do not" {
@@ -13219,10 +13227,11 @@ test "UIA scroll requests move the one sidebar offset and refuse what they canno
     const operations = Accessibility.SidebarScrollOperation;
     var app = try footerLayoutApp(footer_layout_cases[0], footer_layout_controls[0], true, false);
     defer deinitFooterLayoutApp(&app);
-    try loadManySidebarLoops(&app, 40);
     const client = logicalClientRect(app.window.hwnd, app.dpi);
     const content_bottom = app.sidebarContentBottom(client.bottom);
     const viewport = content_bottom - Sidebar.content_top;
+    // Three pages of 24px loop slots keep two full increments away from the tail.
+    try loadManySidebarLoops(&app, @intCast(@divTrunc(viewport * 3, 24) + 1));
     const maximum = Sidebar.maxScroll(&app.model, app.currentWorktreeInspection(), content_bottom, &app.sidebar_state);
     try std.testing.expect(maximum > viewport * 2);
 
@@ -20461,7 +20470,8 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 288, 5, 400, 29 }, .{ 432, 8, 600, 44 }, .{ 576, 10, 800, 58 } } },
         .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
         .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
-        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 229, 220, 253 }, .{ 18, 344, 330, 380 }, .{ 24, 458, 440, 506 } } },
+        // 42px content inset + Graph/Quick Chats/chat slots + 18px caption gap.
+        .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 156, 208, 180 }, .{ 18, 234, 312, 270 }, .{ 24, 312, 416, 360 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
     };
     // The footer is anchored to the sidebar's visible bottom, which the workspace panel
