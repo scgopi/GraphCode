@@ -4780,10 +4780,28 @@ if ($LASTEXITCODE -ne 0) { throw "RED: offline real-launch capture child failed"
 $uiCaptureSummaries = @($uiCaptureOutput | Where-Object { $_ -is [string] -and $_.StartsWith('{"suite":"UiCaptureDriver",') })
 if ($uiCaptureSummaries.Count -ne 1) { throw "RED: offline real-launch capture structured count missing or duplicated" }
 $uiCaptureSummary = ConvertFrom-Json $uiCaptureSummaries[0]
-if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 167 -or
+if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 175 -or
     $uiCaptureSummary.passed -isnot [long] -or $uiCaptureSummary.passed -ne $uiCaptureSummary.executed -or
     $uiCaptureSummary.failed -isnot [long] -or $uiCaptureSummary.failed -ne 0) {
   throw "RED: offline real-launch capture child has no positive executed/passed contract count"
+}
+if ($uiCaptureSummary.skipped -isnot [long] -or $uiCaptureSummary.skipped -ne 0) {throw 'RED: capture contract skips are not permitted'}
+$uiCaptureReport=Get-Content -LiteralPath (Join-Path $uiCaptureRoot 'suite\report.json') -Raw | ConvertFrom-Json
+$matchedGroups=@(
+  'matched v12 fixture binds exact node type wiring reason and outcome fields',
+  'matched v12 fixture refuses identity type wiring selection reason and outcome mutations',
+  'matched v12 complete scene inventory is admitted and missing scenes refuse',
+  'matched tab observations preserve exact owned IDs parents selection and close bounds',
+  'real restart transcript requires daemon confirmation resume and new owned attach',
+  'real restart scene invokes existing UIA route and refuses offline peer authority',
+  'matched transparent proxy relays unchanged real pipe frames with connection identity',
+  'matched manifest seals scene inventory and refuses premature restart success'
+)
+foreach ($name in $matchedGroups) {
+  $group=@($uiCaptureReport.cases | Where-Object name -CEQ $name)
+  if ($group.Count -ne 1 -or $group[0].passed -cne $true) {
+    throw "RED: matched capture group must pass exactly once: $name"
+  }
 }
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))

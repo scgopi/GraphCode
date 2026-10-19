@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "sceneAdapter": "S_MATCHED_V12_V1",
+  "macSource": "2ccf303a04f995184aae1d4b738a9eca0f71b79e",
+  "fixtureUtc": "2026-10-19T11:00:00Z",
+  "graphs": [
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "project": { "path": "C:\\fixture\\Matched", "name": "Matched" },
+      "revision": 1,
+      "nodes": [
+        { "id": "10000000-0000-4000-8000-000000000001", "title": "Goal", "loopType": "goalBased", "backend": "claudeCode", "state": "awaitingInput", "createdAt": 814011000, "goal": { "summary": "Offline goal awaiting a response", "predicate": "exit 1", "pollIntervalSeconds": 86400, "metricDirection": "maximize", "skipsUnchangedWorkspace": false }, "sessionRestarts": 0 },
+        { "id": "20000000-0000-4000-8000-000000000001", "title": "Main", "loopType": "sketch", "backend": "copilotCLI", "state": "blocked", "createdAt": 814011000, "firstInstruction": "Offline closed cycle", "sessionRestarts": 0 },
+        { "id": "20000000-0000-4000-8000-000000000002", "title": "Cycle peer", "loopType": "sketch", "backend": "copilotCLI", "state": "blocked", "createdAt": 814011000, "firstInstruction": "Offline closed cycle peer", "sessionRestarts": 0 },
+        { "id": "30000000-0000-4000-8000-000000000001", "title": "Main stopped", "loopType": "sketch", "backend": "copilotCLI", "state": "stopped", "createdAt": 814011000, "firstInstruction": "Offline stopped session", "resolution": null, "worktreeBinding": { "id": "fixture-stopped", "worktreePath": "C:\\fixture\\Matched\\stopped-tree", "branch": "fixture-stopped", "repositoryPath": "C:\\fixture\\Matched" }, "sessionRestarts": 0 },
+        { "id": "30000000-0000-4000-8000-000000000002", "title": "Goal done", "loopType": "goalBased", "backend": "claudeCode", "state": "succeeded", "createdAt": 814011000, "goal": { "summary": "Offline predicate-completed goal", "predicate": "exit 0", "pollIntervalSeconds": 86400, "metricDirection": "maximize", "skipsUnchangedWorkspace": false }, "resolution": { "basis": "predicate", "detail": "Offline predicate passed", "resolvedAt": 814011600 }, "worktreeBinding": { "id": "fixture-done", "worktreePath": "C:\\fixture\\Matched\\done-tree", "branch": "fixture-done", "repositoryPath": "C:\\fixture\\Matched" }, "sessionRestarts": 0 },
+        { "id": "11111111-1111-4111-8111-000000000001", "title": "Restart Main", "loopType": "sketch", "backend": "copilotCLI", "state": "idle", "createdAt": 814011000, "firstInstruction": "Offline restart fixture; no agent or network", "sessionRestarts": 4 },
+        { "id": "40000000-0000-4000-8000-000000000001", "title": "Timed loop", "loopType": "timeBased", "backend": "codex", "state": "running", "createdAt": 814011000, "triggerPrompt": "Offline timed fixture", "pollIntervalSeconds": 86400, "sessionRestarts": 0 },
+        { "id": "40000000-0000-4000-8000-000000000002", "title": "Unknown agent", "loopType": "turnBased", "state": "idle", "createdAt": 814011000, "checkDescription": "Offline absent backend metadata", "sessionRestarts": 0 }
+      ],
+      "edges": [
+        { "id": "50000000-0000-4000-8000-000000000001", "from": "20000000-0000-4000-8000-000000000001", "to": "20000000-0000-4000-8000-000000000002", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": false, "fireCount": 0 },
+        { "id": "50000000-0000-4000-8000-000000000002", "from": "20000000-0000-4000-8000-000000000002", "to": "20000000-0000-4000-8000-000000000001", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": false, "fireCount": 0 }
+      ]
+    }
+  ],
+  "states": [
+    { "scene": "s-goal-unwired-selected", "nodeId": "10000000-0000-4000-8000-000000000001", "type": "goalBased", "state": "awaitingInput", "selected": true, "wiring": "unwired", "reason": "awaitingInput", "reference": "M6", "copyQualification": "state-only" },
+    { "scene": "s-goal-unwired-unselected", "nodeId": "10000000-0000-4000-8000-000000000001", "type": "goalBased", "state": "awaitingInput", "selected": false, "wiring": "unwired", "reason": "awaitingInput", "reference": "M6", "copyQualification": "state-only" },
+    { "scene": "s-main-cycle-selected", "nodeId": "20000000-0000-4000-8000-000000000001", "type": "sketch", "state": "blocked", "selected": true, "wiring": "closed-handoff-cycle", "reason": "cycle-no-entry", "reference": "M1", "copyQualification": "state-only" },
+    { "scene": "s-main-cycle-unselected", "nodeId": "20000000-0000-4000-8000-000000000001", "type": "sketch", "state": "blocked", "selected": false, "wiring": "closed-handoff-cycle", "reason": "cycle-no-entry", "reference": "M1", "copyQualification": "state-only" },
+    { "scene": "s-main-stopped-reclaim", "nodeId": "30000000-0000-4000-8000-000000000001", "type": "sketch", "state": "stopped", "selected": true, "wiring": "unwired", "reason": "stopped", "reference": "M4", "copyQualification": "unassessable: product lacks LoopResolution/reclaim live-line consumer" },
+    { "scene": "s-goal-done-reclaim", "nodeId": "30000000-0000-4000-8000-000000000002", "type": "goalBased", "state": "succeeded", "selected": true, "wiring": "unwired", "reason": "predicate", "reference": "M4-control-context-only", "copyQualification": "unassessable: product lacks LoopResolution/reclaim live-line consumer" }
+  ],
+  "worktrees": [
+    { "nodeId": "30000000-0000-4000-8000-000000000001", "path": "C:\\fixture\\Matched\\stopped-tree", "branch": "fixture-stopped", "defaultBranch": "main", "sizeBytes": 327155712, "policy": "ask", "qualification": "EXPECTED_FIXTURE_FACTS_NOT_INSPECTED" },
+    { "nodeId": "30000000-0000-4000-8000-000000000002", "path": "C:\\fixture\\Matched\\done-tree", "branch": "fixture-done", "defaultBranch": "main", "sizeBytes": 327155712, "policy": "ask", "qualification": "EXPECTED_FIXTURE_FACTS_NOT_INSPECTED" }
+  ]
+}

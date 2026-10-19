@@ -1,0 +1,156 @@
+# Matched v12 capture scenarios
+
+`S_MATCHED_V12_V1` is an additive adapter in the existing
+`Invoke-UiCapture.ps1` / `Invoke-UiCaptureWorker.ps1` pipeline. It does not grant
+a desktop lease, replace the B/D adapters, or change the product. Preparation,
+fresh builds, current CI admission, a separately warned capture lease, individual
+image privacy checks, and one subsequent paired review remain required.
+
+## Counts and registration
+
+The standalone Lane S change adds **eight top-level groups exactly once**:
+**166 + 8 = 174 default**, or **169 + 8 = 177 with `-RequireRealSeed`**.
+The three existing actual-zmx rehearsal cases are unchanged; the real-seed
+top-level delta is **zero**. No old group or negative case was removed or
+relabelled. `Tests\ValidationRunner.Tests.ps1` requires 174 and the unique
+presence of all eight names. A different total is a failure, not an empty-filter
+pass. A later merged change with its own declared delta requires an explicit
+combined-tree count update and registered-runner rerun.
+
+| New group | Bounded subcases |
+| --- | --- |
+| Typed fixture inventory | Eight wire nodes, six qualified card-state records; unchanged graph publication through the actual B peer on a real local pipe |
+| Fixture refusals | Twelve identity/type/status/wiring/reason/selection/resolution/size/branch/source/date/duplicate mutations |
+| Scene inventory | One accepted complete inventory; eighteen omission refusals; actual worker's seventeen static-scene/eleven seed/one Restart dispatches with simulated dependencies |
+| Tab observations | Eight positive shapes and seventy-two negative mutations of exact owned IDs, parents, selection, close bounds, final-tab eligibility and visibility |
+| Restart evidence | Two simulated positive transcripts (including UUID casing and response-embedded graph data) and nineteen strict refusal mutations |
+| Restart route | Actual worker function, one simulated positive and one offline-authority refusal |
+| Transparent recorder | Four unchanged framed messages on actual local pipes, one connection, a simulated echo upstream; no daemon or UI |
+| Manifest | One simulated thirty-six-image/two-Restart shape and six refusal mutations |
+
+These are component/scenario contracts, not executed UI actions. The original
+registered runner still performs its existing owned hidden native process,
+generation, launcher, EOF, journal, selector and cleanup contracts. The
+`-RequireRealSeed` extension runs the pinned **real zmx**, not a real Restart.
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -MatchedScenarioContractOnly -ScratchRoot D:\owned\matched-contracts
+
+pwsh -NoProfile -File Tools\windows\Tests\ValidationRunner.Tests.ps1
+
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -RequireRealSeed -RealSeedZmxPath D:\owned\runtime\zmx.exe `
+  -RealSeedZmxSha256 ACTUAL_64_HEX_SHA256 -ScratchRoot D:\owned\real-seed-contracts
+```
+
+Use fresh owned paths. Bootstrap and load the repository-pinned environment
+before resolving or building zmx. Retain failing logs separately from passing
+runs. The placeholder hash above is documentation only; the command refuses it.
+
+## Matched fixture and scene matrix
+
+`fixtures\matched-v12.json` is synthetic, offline data derived from the qualified
+macOS source `2ccf303a04f995184aae1d4b738a9eca0f71b79e`. The source root
+`C:\fixture` is rewritten in full through the existing hash-bound mapping.
+One graph contains eight nodes and a real closed two-node handoff cycle.
+Node types are not changed by renaming a Goal to Main. Selection is a separate,
+observed UI state, not a `selected` property invented on the daemon's node.
+
+| Scene names | State and comparison boundary |
+| --- | --- |
+| `s-goal-unwired-selected`, `s-goal-unwired-unselected` | Goal / `goalBased` / `awaitingInput`, no inbound or outbound edge; M6 unwired NEEDS YOU context. Both selection variants are recorded. Recovery-control equivalence is **not** inferred from the fixture or a warm face. |
+| `s-main-cycle-selected`, `s-main-cycle-unselected` | Main / `sketch` / `blocked`, two unfired blocking handoff edges form a closed cycle with no external entry; M1 Main-cycle context. |
+| `s-main-stopped-reclaim` | Actual Main / `sketch` / `stopped`, null resolution, separate worktree binding; M4 Main STOPPED context. `GraphStore.swift:4955` clears resolution outside succeeded/failed. |
+| `s-goal-done-reclaim` | Actual Goal / `goalBased` / `succeeded`, predicate resolution and separate worktree binding; controls/context only against M4, **not** an equivalent Main outcome. |
+| `s-tabs-goal-needs-you` | One Goal tab, agent asks state, selected focused pane. |
+| `s-tabs-loop-running` | One Loop tab, running indicator. |
+| `s-tabs-backend-idle` | One recorded-backend Copilot CLI tab, quiet state. |
+| `s-tabs-agent-unknown` | Missing backend metadata produces Agent, never an assumed Claude Code backend. Compatibility coverage, not a new Mac requirement. |
+| `s-tabs-two-agent-selected` | Two tabs; blocked agent selected, Shell unselected; the agent's attention indicator remains contextual. |
+| `s-tabs-two-shell-selected` | Two actual Shell tabs after closing the agent tab, second selected. |
+| `s-tabs-split-right-focused` | Two Shell tabs, selected tab split horizontally with the right pane explicitly focused; safe M3 context only. |
+| `s-tabs-many-first`, `s-tabs-overflow-last` | Twelve tabs; first-selected and last-selected overflow windows. Hidden IDs may not appear in the UIA roster. Ctrl+1 through Ctrl+9 have inline hints; later indexes do not invent one. |
+| `s-tabs-hover-close` | Two tabs; posted owned-window hover over Shell, close geometry retained. This is not physical mouse input. |
+| `s-tabs-last-guard` | One selected tab; Windows' existing disabled final-tab close guard is observed without attempting to close it. |
+| `s-restart-confirmed` | Existing Restart session UIA route against an actual isolated daemon, with same-connection protocol and new owned-attach evidence described below. |
+
+The adapter requests eighteen scenes for each before/after phase: **36 original
+images**, **22 cmd-only seed lifecycles**, and **two real-daemon Restart scenes**.
+Every static workspace uses its own profile, zmx state, layout and contained app
+job. Card scenes share no live backend. Actual tab and pane ownership, selected
+state, bounds and focus are read before capture; the terminal text/glyphs are
+not an acceptance criterion. No pane ID is invented when a provider exposes none.
+
+The source-derived four tab presentations are quiet, running, blocked attention,
+and awaiting-input asks. See macOS `LoopWorkspaceView.swift:230-248,281-295`
+and `LoopWorkspacePanes.swift:40-115`, and Windows
+`TerminalSurface.zig:2054-2080,2143-2200`.
+Mac allows closing its last tab to end a loop; Windows' guard remains a known
+behavioral difference, not a fabricated macOS requirement.
+
+## Outcome-copy qualification remains blocked
+
+The wire fixture retains genuine `LoopResolution` (`basis`, `detail`,
+`resolvedAt`) and `WorktreeRef` (`id`, `repositoryPath`, `worktreePath`, `branch`)
+fields. Worktree branch, default branch, Ask policy and expected size are
+separate fixture facts. The live preparation creates actual owned git
+worktrees; declaring bytes in JSON does not claim they were inspected.
+Main STOPPED deliberately has no invented session-exit verdict; Goal DONE has
+the predicate verdict. The reclaim branch/bytes line comes from an assessment,
+not from renaming either type or injecting a renderer string.
+
+**G11 remains `unassessable: product lacks LoopResolution/reclaim live-line
+consumer`.** Neither the fixture contract nor this PR claims visible full-copy
+equivalence. `GraphModel.zig` does not retain the resolution fields at this
+source, and `GraphCanvas.zig:2850-2877` draws its existing node live line without
+the reclaim assessment. macOS `LoopCardPresentation.swift:63-84,108-120` chooses
+the reclaim branch/bytes line or resolved evidence, and
+`GraphcodeKit\Sources\Domain\LoopResolution.swift:37-58` defines the resolution
+copy. A separate product change and runtime evidence are needed; do not flip
+this qualification merely because a later product branch exists.
+
+## Real Restart, not offline-peer acknowledgement
+
+The static B peer is reused only for fixed card/tab states. The Restart scene
+launches **actual `runtime\graphcoded.exe`**, pinned `runtime\zmx.exe`, and a
+hash-bound harmless `runtime\copilot.exe` fixture inside an owned job. The
+fixture's canonical C source comes from `Get-CapMatchedBackendSource`; it prints
+one fixed offline notice and waits, with no networking or agent behavior.
+The job also binds the exact UTF-8 `inputs\offline-backend.c` source hash.
+Build this fixture in the owned preparation root using the pinned toolchain,
+and retain its compile command and output. No real provider credentials or
+backend installation are needed or authorized.
+
+A transparent local named-pipe recorder forwards the original framed bytes to
+the actual daemon. It does **not** answer requests, change model counters, or
+publish fabricated graph events. It records ordered direction, connection,
+monotonic elapsed time and original frame bytes. Before invoking Restart the
+worker holds the daemon and old attachment's native generations. Acceptance
+requires all of:
+
+- The existing `workspace-restart-session` ID and `Restart session` name target
+  the exact declared Main, not Stop or a direct protocol-only substitute.
+- One correlated daemon Restart request/response, an increased counter for
+  that exact project/node on the **same recorded connection**, checked
+  `resumeSession` request/response, and a subsequent owned attachment.
+- Old attachment retirement, a different later attach generation, a live
+  fixture backend in the daemon's owned job and one bounded owned terminal
+  pane. Queue acceptance, process exit or peer acknowledgement alone fails.
+- Counter confirmation within 30 seconds and the bounded attach wait within
+  the capture deadline, preserving a 90-second cleanup reserve.
+- Launcher job active-zero, held process exits and owned output-file closure;
+  raw target pipe EOF is not invented from those file proofs.
+
+The shell's production sequence is source-derived from
+`App.zig:4427-4565`, `GraphStore.swift:3242-3294`,
+`ZmxSessionLauncher.swift:1124-1152`, and
+`GraphStore.swift:2660-2698`: retire, daemon restart, counter advance, resume,
+then bounded daemon-owned attach. Stop remains separate.
+
+The current lane executes **no visible Restart, desktop capture, physical input,
+authenticated backend, glyph, accessibility-conformance or paired visual test**.
+The real-pipe unit contract uses an explicitly simulated upstream. C8 must run
+the real scene only after merged tooling, fresh preparation and an explicit
+capture lease, and then obtain one review of the matched states. A green
+174/177 report is not that evidence.

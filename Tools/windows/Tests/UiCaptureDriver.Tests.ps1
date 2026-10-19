@@ -19,6 +19,7 @@ param(
     [switch]$DescendantLifetimeContractOnly,
     [switch]$AdvisoryOlderContractOnly,
     [switch]$DAdapterContractOnly,
+    [switch]$MatchedScenarioContractOnly,
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
     [string]$PrebuiltFixtureManifestSha256 = '',
@@ -2314,6 +2315,408 @@ function Invoke-CapPeerWireCase {
     }
 }
 
+function New-CapMatchedTestJob {
+    return @{
+        lane='S';sceneAdapter='S_MATCHED_V12_V1'
+        authority=@{centralCaptureLeaseGrantedByThisArtifact=$false;sWorkerMayLaunchGui=$false}
+        captureContract=@{phases=@('before','after');sceneCountPerPhase=18;windowOuterXYWH=@(30,30,1456,959)
+            expectedClientWH=@(1440,900);dpi=96;canvasZoomPercent=100;cleanupReserveSeconds=90;estimatedSeconds=600}
+        scenes=@(Get-CapMatchedSceneNames | ForEach-Object {@{name=$_;naturalWidthBeforeAfter=@(250,250)}})
+        fixture=@{sha256=('A'*64);mappingSha256=('B'*64);originalRoot='C:\fixture'
+            offlinePeerReference=@{sha256=('C'*64)}}
+        binaries=@{offlineZmx=@{sha256=('D'*64);seedArgumentOrder=@('run',
+            'graphcode-11111111-1111-4111-8111-000000000001','-d','cmd.exe','/Q','/K','echo Offline card fixture - no backend')}
+            daemon=@{sha256=('E'*64)};backendFixture=@{sha256=('F'*64);networkAllowed=$false
+                sourceSha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                    [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))}}
+    } | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+}
+
+function New-CapRestartTestEvidence {
+    $project='C:\owned\Matched'
+    $node='11111111-1111-4111-8111-000000000001'
+    $rows=@(
+        @{connection=1;direction='daemon';frame=@{kind='event';event=@{graphChanged=@{
+            project=@{path=$project};nodes=@(@{id=$node;state='idle';sessionRestarts=4})}}}},
+        @{connection=1;direction='shell';frame=@{kind='request';requestID='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';command=@{graphCommand=@{projectPath=$project;command=@{restartNode=@{_0=$node}}}}}},
+        @{connection=1;direction='daemon';frame=@{kind='response';requestID='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';success=$true}},
+        @{connection=1;direction='daemon';frame=@{kind='event';event=@{nodesChanged=@{
+            projectPath=$project;nodes=@(@{id=$node;state='idle';sessionRestarts=5})}}}},
+        @{connection=1;direction='shell';frame=@{kind='request';requestID='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2';command=@{graphCommand=@{projectPath=$project;command=@{resumeSession=@{_0=$node}}}}}},
+        @{connection=1;direction='daemon';frame=@{kind='response';requestID='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2';success=$true}}
+    )
+    for ($i=0;$i -lt $rows.Count;$i++) {$rows[$i].ordinal=$i+1;$rows[$i].elapsedMs=100*($i+1)}
+    return @{
+        projectPath=$project;nodeId=$node;connection=1;counter=4;rows=$rows
+        beforeAttach=@{pid=100;creationFileTimeUtc=1000;session="graphcode-$node";retired=$true}
+        afterAttach=@{pid=101;creationFileTimeUtc=2000;session="graphcode-$node";held=$true;jobOwned=$true
+            daemonSessionReady=$true;uiaPaneOwned=$true;observedAfterOrdinal=6
+            oldBackendPid=103;oldBackendCreationFileTimeUtc=1100;backendPid=104;backendCreationFileTimeUtc=2100;oldBackendExited=$true}
+        daemon=@{pid=102;creationFileTimeUtc=3000;held=$true;jobOwned=$true;imageSha256=('E'*64)}
+    } | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+}
+
+function Invoke-CapMatchedContracts {
+    Invoke-CapTest 'matched v12 fixture binds exact node type wiring reason and outcome fields' {
+        $fixture=Get-Content (Join-Path $driverDirectory 'fixtures\matched-v12.json') -Raw | ConvertFrom-Json -DateKind String
+        $proof=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot 'C:\fixture'
+        Assert-CapTest ($proof.states.Count -eq 6 -and $proof.nodes -eq 8 -and $proof.macSource -ceq
+            '2ccf303a04f995184aae1d4b738a9eca0f71b79e') 'Matched fixture typed inventory differs.'
+        $wire=Invoke-CapPeerWireCase -Peer B -Case clean -Source (Get-CapBPeerSource) `
+            -FixturePath (Join-Path $driverDirectory 'fixtures\matched-v12.json') -CaseRoot (Join-Path $scratch 'matched-fixture-wire')
+        return @{fixture=$proof;wire=$wire;qualifiedStates=$proof.states.Count;nodes=$proof.nodes}
+    }
+    Invoke-CapTest 'matched v12 fixture refuses identity type wiring selection reason and outcome mutations' {
+        $cases=@('id','type','status','wiring','reason','selection','resolution','bytes','branch','source','date','duplicate')
+        foreach ($case in $cases) {
+            $fixture=Get-Content (Join-Path $driverDirectory 'fixtures\matched-v12.json') -Raw | ConvertFrom-Json -DateKind String
+            switch ($case) {
+                'id' {$fixture.graphs[0].nodes[0].id='foreign'}
+                'type' {$fixture.graphs[0].nodes[0].loopType='sketch'}
+                'status' {$fixture.graphs[0].nodes[0].state='running'}
+                'wiring' {$fixture.graphs[0].edges[0].to=$fixture.graphs[0].nodes[0].id}
+                'reason' {$fixture.states[0].reason='backend-health'}
+                'selection' {$fixture.states[0].selected=$false}
+                'resolution' {$fixture.graphs[0].nodes[4].resolution.basis='nativeGoal'}
+                'bytes' {$fixture.worktrees[0].sizeBytes=-1}
+                'branch' {$fixture.worktrees[0].defaultBranch='foreign'}
+                'source' {$fixture.macSource='0'*40}
+                'date' {$fixture.graphs[0].nodes[0].createdAt=0}
+                'duplicate' {$fixture.graphs[0].nodes[1].id=$fixture.graphs[0].nodes[0].id}
+            }
+            $null=Assert-CapRejects {Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot 'C:\fixture'} 'Matched fixture'
+        }
+        return @{subcases=$cases.Count;mutations=$cases;evidence='DATA_CONTRACT_NOT_RENDERED_STATE'}
+    }
+    Invoke-CapTest 'matched v12 complete scene inventory is admitted and missing scenes refuse' {
+        $job=New-CapMatchedTestJob
+        Assert-CapSceneContract -Job $job
+        Assert-CapTest ($job.scenes.Count -eq 18) 'Expected eighteen bounded matched scenes.'
+        $names=@($job.scenes | ForEach-Object name)
+        foreach ($name in $names) {
+            $changed=New-CapMatchedTestJob
+            $changed.scenes=@($changed.scenes | Where-Object name -CNE $name)
+            $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} 'Matched scene'
+        }
+        return @{positive=1;negative=$names.Count;names=$names;routing=(Invoke-CapMatchedSceneRoutingContract)}
+    }
+    Invoke-CapTest 'matched tab observations preserve exact owned IDs parents selection and close bounds' {
+        Invoke-CapMatchedTabContracts
+    }
+    Invoke-CapTest 'real restart transcript requires daemon confirmation resume and new owned attach' {
+        $evidence=New-CapRestartTestEvidence
+        $proof=Assert-CapRestartEvidence -Evidence $evidence -ExpectedDaemonSha256 ('E'*64)
+        Assert-CapTest ($proof.restartRequestId -ceq 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1' -and $proof.counterAfter -eq 5) 'Positive restart transcript not recognized.'
+        $responseGraph=New-CapRestartTestEvidence
+        $responseGraph.rows[2].frame=[pscustomobject]@{kind='response';requestID=$responseGraph.rows[1].frame.requestID.ToUpperInvariant()
+            event=$responseGraph.rows[3].frame.event}
+        $responseGraph.rows[5].frame.requestID=$responseGraph.rows[5].frame.requestID.ToUpperInvariant()
+        $null=Assert-CapRestartEvidence -Evidence $responseGraph -ExpectedDaemonSha256 ('e'*64)
+        $cases=@('ack-only','wrong-owner','connection','generation','duplicate','unrelated-counter','error','timeout',
+            'resume-error','no-resume','old-attach','unowned-attach','no-daemon-session','no-pane','stop','early-resume','counter-type',
+            'old-backend','untyped-ownership')
+        foreach ($case in $cases) {
+            $e=New-CapRestartTestEvidence
+            switch ($case) {
+                'ack-only' {$e.rows=@($e.rows[0..2])}
+                'wrong-owner' {$e.rows[3].frame.event.nodesChanged.projectPath='C:\foreign'}
+                'connection' {$e.rows[3].connection=2}
+                'generation' {$e.daemon.creationFileTimeUtc=0}
+                'duplicate' {$e.rows+= $e.rows[3]}
+                'unrelated-counter' {$e.rows[3].frame.event.nodesChanged.nodes[0].id='foreign'}
+                'error' {$e.rows[2].frame.success=$false}
+                'timeout' {$e.rows[3].elapsedMs=30001}
+                'resume-error' {$e.rows[5].frame.success=$false}
+                'no-resume' {$e.rows=@($e.rows[0..3])}
+                'old-attach' {$e.afterAttach.pid=$e.beforeAttach.pid;$e.afterAttach.creationFileTimeUtc=$e.beforeAttach.creationFileTimeUtc}
+                'unowned-attach' {$e.afterAttach.jobOwned=$false}
+                'no-daemon-session' {$e.afterAttach.daemonSessionReady=$false}
+                'no-pane' {$e.afterAttach.uiaPaneOwned=$false}
+                'stop' {$e.rows[1].frame.command.graphCommand.command=[pscustomobject]@{stopNode=[pscustomobject]@{_0=$e.nodeId}}}
+                'early-resume' {$e.rows[4].ordinal=3}
+                'counter-type' {$e.rows[3].frame.event.nodesChanged.nodes[0].sessionRestarts='5'}
+                'old-backend' {$e.afterAttach.backendCreationFileTimeUtc=$e.afterAttach.oldBackendCreationFileTimeUtc}
+                'untyped-ownership' {$e.afterAttach.held=1}
+            }
+            $null=Assert-CapRejects {Assert-CapRestartEvidence -Evidence $e -ExpectedDaemonSha256 ('E'*64)} 'Restart evidence'
+        }
+        return @{positive=2;negative=$cases.Count;mutations=$cases;evidence='SIMULATED_TRANSCRIPT_NOT_DAEMON_EXECUTION'}
+    }
+    Invoke-CapTest 'real restart scene invokes existing UIA route and refuses offline peer authority' {
+        Invoke-CapMatchedRestartRouteContract
+    }
+    Invoke-CapTest 'matched transparent proxy relays unchanged real pipe frames with connection identity' {
+        Invoke-CapMatchedProxyContract
+    }
+    Invoke-CapTest 'matched manifest seals scene inventory and refuses premature restart success' {
+        Invoke-CapMatchedManifestContract
+    }
+}
+
+function Invoke-CapMatchedTabContracts {
+    foreach ($vector in @(
+        @('workspace-tab:0','workspace-tab-2015407614065646652'),
+        @('workspace-tab-close:0','workspace-tab-close-1342659205128842605'),
+        @('workspace-restart-session:11111111-1111-4111-8111-000000000001','workspace-restart-session-1939427967037594082')
+    )) {
+        Assert-CapTest ((Get-CapMatchedAutomationId $vector[0]) -ceq $vector[1]) 'Native row-prefix/hash reference vector differs.'
+    }
+    $positive=0;$negative=0
+    foreach ($shape in @(
+        @{total=1;selected=0;title='Goal';visible=@(0)},
+        @{total=1;selected=0;title='Loop';visible=@(0)},
+        @{total=1;selected=0;title='Copilot CLI';visible=@(0)},
+        @{total=1;selected=0;title='Agent';visible=@(0)},
+        @{total=2;selected=0;title='Copilot CLI';visible=@(0,1)},
+        @{total=2;selected=1;title='Copilot CLI';visible=@(0,1)},
+        @{total=12;selected=0;title='Copilot CLI';visible=@(0..9)},
+        @{total=12;selected=11;title='Copilot CLI';visible=@(2..11)}
+    )) {
+        $rows=@(foreach ($position in 0..($shape.visible.Count-1)) {
+            $index=$shape.visible[$position];$x=250+110*$position
+            @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$index")
+                Name=$(if ($index -eq 0) {$shape.title} else {'Shell'});ProcessId=4242
+                ParentAutomationId='graph';Selected=($index -eq $shape.selected);IsEnabled=$true;IsOffscreen=$false
+                Bounds=@($x,100,($x+106),124)}
+            @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$index");Name='Close tab';ProcessId=4242
+                ParentAutomationId='graph';Selected=$false;IsEnabled=($shape.total -gt 1);IsOffscreen=$false
+                Bounds=@(($x+82),100,($x+106),124)}
+        }) | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $arguments=@{Rows=$rows;ExpectedProcessId=4242;TotalTabs=$shape.total;SelectedTab=$shape.selected
+            AgentTitle=$shape.title;VisibleIndexes=$shape.visible}
+        $proof=Get-CapMatchedTabObservation @arguments
+        Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected) 'Tab shape omitted a visible state.'
+        $positive++
+        foreach ($mutation in @('foreign-pid','wrong-parent','name-as-id','wrong-selection','escaped-close','guard','duplicate','hidden','offscreen')) {
+            $changed=$rows | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            switch ($mutation) {
+                'foreign-pid' {$changed[0].ProcessId=7777}
+                'wrong-parent' {$changed[0].ParentAutomationId='foreign'}
+                'name-as-id' {$changed[0].AutomationId=$changed[0].Name}
+                'wrong-selection' {$changed[0].Selected=-not $changed[0].Selected}
+                'escaped-close' {$changed[1].Bounds[0]=$changed[0].Bounds[0]-1}
+                'guard' {$changed[1].IsEnabled=-not $changed[1].IsEnabled}
+                'duplicate' {$changed+= $changed[0]}
+                'hidden' {$changed[0].AutomationId=Get-CapMatchedAutomationId 'workspace-tab:99'}
+                'offscreen' {$changed[0].IsOffscreen=$true}
+            }
+            $arguments.Rows=$changed
+            $null=Assert-CapRejects {Get-CapMatchedTabObservation @arguments} 'Matched tabs'
+            $negative++
+        }
+    }
+    return @{positiveShapes=$positive;negativeMutations=$negative;nativeHover='NotExecuted';paneFocus='NotExecuted'
+        evidence='SYNTHETIC_UIA_RECORDS_NOT_NATIVE_OBSERVATION'}
+}
+
+function Invoke-CapMatchedSceneRoutingContract {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-CapMatchedScenes'},$true)
+    Assert-CapTest ($null -ne $function) 'Actual matched scene executor is missing.'
+    & {
+        param($Definition)
+        . ([scriptblock]::Create($Definition))
+        $root=Join-Path $scratch 'matched-route-component'
+        $runDirectory=Join-Path $root 'runs'
+        $fixturePath=Join-Path $root 'fixture.json'
+        $null=New-Item -ItemType Directory -Path $root
+        $text=[IO.File]::ReadAllText((Join-Path $driverDirectory 'fixtures\matched-v12.json')).Replace(
+            'C:\\fixture',((Join-Path $root 'fixtures\projects' | ConvertTo-Json -Compress).Trim('"')))
+        [IO.File]::WriteAllText($fixturePath,$text)
+        $fixture=$text | ConvertFrom-Json -DateKind String
+        $job=New-CapMatchedTestJob
+        $leaseDeadlineUtc=[DateTime]::UtcNow.AddMinutes(5)
+        $captured=[Collections.Generic.List[object]]::new()
+        $seeded=[Collections.Generic.List[string]]::new()
+        $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0}
+        function Assert-CapWorkerDeadline {param($Label)}
+        function Initialize-CapPhaseRoot {param($PhaseRoot) [pscustomobject]@{Root=$PhaseRoot}}
+        function Start-CapOfflinePeer {param($Roots,$PipeName,$Phase) [pscustomobject]@{mode='SIMULATED_PEER'}}
+        function Start-CapOfflineSeed {param($Roots,$Phase,$SessionName) $seeded.Add($SessionName);[pscustomobject]@{mode='SIMULATED_SEED'}}
+        function Start-CapGraphCodeApp {
+            param($Roots,$Phase,$PipeName,$SessionPrefix)
+            $model.total=1;$model.selected=0;$model.node=$null;$model.removed=$false
+            [pscustomobject]@{Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}};Window=[IntPtr]1;Phase=$Phase}
+        }
+        function Invoke-CapSceneAction {
+            param($AppRun,$Action,$Name,$SubjectId)
+            switch ($Action) {
+                'open-loop' {$model.node=@($fixture.graphs[0].nodes | Where-Object title -CEQ $Name)[0]}
+                'workspace-new-tab' {$model.total++;$model.selected=$model.total-1}
+                'workspace-close-tab' {$model.total--;$model.selected=0;$model.removed=$true}
+                'workspace-select-tab' {$model.selected=[int]$SubjectId}
+            }
+        }
+        function Read-CapMatchedRows {
+            param($AppRun)
+            if ($scene -cnotmatch '^s-tabs-') {
+                return @($fixture.graphs[0].nodes | ForEach-Object {
+                    [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId ("project-card:"+$fixture.graphs[0].project.path+":"+$_.id));Name=$_.title;ProcessId=4242L
+                        ParentAutomationId='graph';Selected=($_.id -ceq $model.node.id);IsEnabled=$true;IsOffscreen=$false
+                        Bounds=@(250,100,500,196)}
+                })
+            }
+            $count=[Math]::Min(10,$model.total)
+            $first=if ($model.selected -ge $count) {$model.selected-$count+1} else {0}
+            $title=if ($model.removed) {'Shell'} else {switch ($model.node.loopType) {
+                'goalBased' {'Goal'};'timeBased' {'Loop'};default {if ($model.node.PSObject.Properties['backend']) {'Copilot CLI'} else {'Agent'}}
+            }}
+            return @(foreach ($position in 0..($count-1)) {
+                $i=$first+$position;$x=250+110*$position
+                [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$i");Name=$(if ($i -eq 0) {$title} else {'Shell'})
+                    ProcessId=4242L;ParentAutomationId='graph';Selected=($i -eq $model.selected);IsEnabled=$true;IsOffscreen=$false
+                    Bounds=@($x,100,($x+106),124)}
+                [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$i");Name='Close tab'
+                    ProcessId=4242L;ParentAutomationId='graph';Selected=$false;IsEnabled=($model.total -gt 1);IsOffscreen=$false
+                    Bounds=@(($x+82),100,($x+106),124)}
+            })
+        }
+        function Read-CapMatchedPanes {
+            param($AppRun,$ExpectedCount,$FocusedIndex)
+            @(foreach ($i in 0..($ExpectedCount-1)) {[pscustomobject]@{focused=($i -eq $FocusedIndex);index=$i;mode='SIMULATED_PANE'}})
+        }
+        function Set-CapMatchedTabHover {param($AppRun,$Bounds) $model.hover++}
+        function Measure-CapSceneZoom {param($AppRun,$Scene,$NaturalWidth) [pscustomobject]@{ZoomPercent=100;mode='SIMULATED_ZOOM'}}
+        function Save-CapSceneImage {
+            param($AppRun,$SceneName,$ZoomEvidence,$Phase)
+            Assert-CapTest ($AppRun.SObservation.readSucceeded -and $AppRun.SObservation.evidenceMode -ceq
+                'OWNED_UIA_READ_NOT_VISUAL_PARITY') 'Actual executor skipped its state predicate before capture.'
+            $captured.Add([pscustomobject]@{scene=$SceneName;phase=$Phase;observation=$AppRun.SObservation;image='NOT_CAPTURED_COMPONENT_ONLY'})
+        }
+        function Close-CapGraphCodeApp {param($AppRun,[switch]$NormalExit)}
+        function Close-CapOfflineSeed {param($SeedRun)}
+        function Close-CapPeer {param($PeerRun,$Label)}
+        function Invoke-CapMatchedRestartCapture {param($Phase,$Fixture) $model.restart++}
+        Invoke-CapMatchedScenes -Phase 'after'
+        Assert-CapTest ($captured.Count -eq 17 -and $seeded.Count -eq 11 -and $model.restart -eq 1 -and $model.hover -eq 1 -and
+            ($captured.scene -join ',') -ceq (((Get-CapMatchedSceneNames)[0..16]) -join ',')) 'Actual executor lost a scene, seed, Restart dispatch or hover.'
+        return @{scenes=$captured.Count;seedDispatches=$seeded.Count;realRestartDispatches=$model.restart;hoverDispatches=$model.hover
+            evidence='ACTUAL_WORKER_FUNCTION_SIMULATED_DEPENDENCIES_NO_GUI_NO_PROVIDER_NO_IMAGES'}
+    } $function.Extent.Text
+}
+
+function Invoke-CapMatchedRestartRouteContract {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-CapMatchedRestartScene'},$true)
+    Assert-CapTest ($null -ne $function) 'Actual matched live Restart scene is missing.'
+    & {
+        param($Definition)
+        . ([scriptblock]::Create($Definition))
+        $script:restartRouteCalls=[Collections.Generic.List[string]]::new()
+        $job=New-CapMatchedTestJob
+        $leaseDeadlineUtc=[DateTime]::UtcNow.AddSeconds(10)
+        function Assert-CapWorkerDeadline {param($Name)}
+        function Invoke-CapSceneAction {
+            param($AppRun,$Action,$Name,$SubjectId)
+            Assert-CapTest ($SubjectId -ceq '11111111-1111-4111-8111-000000000001') 'Restart targeted another loop.'
+            $script:restartRouteCalls.Add($Action)
+        }
+        function Get-CapMatchedRestartEvidence {param($AppRun,$Context) New-CapRestartTestEvidence}
+        $context=[pscustomobject]@{mode='REAL_DAEMON';transcript='component-only';nodeId='11111111-1111-4111-8111-000000000001'}
+        $result=Invoke-CapMatchedRestartScene -AppRun ([pscustomobject]@{Phase='after'}) -Context $context
+        Assert-CapTest ($result.status -ceq 'CONFIRMED_DAEMON_ROUNDTRIP_AND_OWNED_REATTACH' -and
+            ($script:restartRouteCalls -join ',') -ceq 'workspace-restart-session') 'Live scene substituted the wrong action or skipped checked evidence.'
+        $context.mode='OFFLINE_PEER'
+        $null=Assert-CapRejects {Invoke-CapMatchedRestartScene -AppRun ([pscustomobject]@{Phase='after'}) -Context $context} 'real owned daemon'
+        Assert-CapTest ($script:restartRouteCalls.Count -eq 1) 'Offline mode reached the real UIA action.'
+        return @{positive=1;negative=1;evidence='ACTUAL_WORKER_FUNCTION_WITH_SIMULATED_IO_NO_UIA_OR_DAEMON'}
+    } $function.Extent.Text
+}
+
+function Invoke-CapMatchedProxyContract {
+    Initialize-CapMatchedProxy
+    if (-not ('CapMatchedContractEcho' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Threading;
+using System.Threading.Tasks;
+public static class CapMatchedContractEcho {
+    public static Task Start(string name) {return Task.Run(async () => {
+        using(var timeout=new CancellationTokenSource(10000))
+        using(var server=new NamedPipeServerStream(name,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous)) {
+            await server.WaitForConnectionAsync(timeout.Token);
+            for(int i=0;i<2;i++) {
+                var header=new byte[4];int offset=0;
+                while(offset<4) {int n=await server.ReadAsync(header,offset,4-offset,timeout.Token);
+                    if(n==0)throw new IOException("Contract header EOF");offset+=n;}
+                int length=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];
+                if(length<1||length>4096)throw new IOException("Contract length");
+                var body=new byte[length];offset=0;
+                while(offset<length) {int n=await server.ReadAsync(body,offset,length-offset,timeout.Token);
+                    if(n==0)throw new IOException("Contract body EOF");offset+=n;}
+                await server.WriteAsync(header,0,4,timeout.Token);
+                await server.WriteAsync(body,0,length,timeout.Token);await server.FlushAsync(timeout.Token);
+            }
+        }
+    });}
+}
+'@
+    }
+    $token=[guid]::NewGuid().ToString('N')
+    $upstream="gc-s-echo-$token";$listen="gc-s-proxy-$token"
+    $path=Join-Path $scratch 'matched-proxy.jsonl'
+    $echo=[CapMatchedContractEcho]::Start($upstream)
+    $proxy=[CapMatchedProxy]::new($listen,$upstream,$path,15000)
+    $client=[IO.Pipes.NamedPipeClientStream]::new('.',$listen,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
+    $timeout=[Threading.CancellationTokenSource]::new(10000)
+    try {
+        $client.Connect(5000)
+        foreach ($text in @('{"version":2,"kind":"hello","supportedVersions":[1,2]}',
+            '{"version":2,"kind":"request","requestID":"real-pipe-only","command":{"listRecentProjects":{}}}')) {
+            $body=[Text.Encoding]::UTF8.GetBytes($text)
+            $bytes=[byte[]]([byte[]]@(0,0,0,$body.Length)+$body)
+            $client.Write($bytes,0,$bytes.Length);$client.Flush()
+            $reply=[byte[]]::new($bytes.Length);$offset=0
+            while ($offset -lt $reply.Length) {
+                $count=$client.ReadAsync($reply,$offset,$reply.Length-$offset,$timeout.Token).GetAwaiter().GetResult()
+                Assert-CapTest ($count -gt 0) 'Transparent proxy lost a real frame.'
+                $offset+=$count
+            }
+            Assert-CapTest ([Linq.Enumerable]::SequenceEqual[byte]($bytes,$reply)) 'Proxy altered raw framed bytes.'
+        }
+        $client.Dispose()
+        Assert-CapTest ($echo.Wait(5000)) 'Owned echo task failed to finish.'
+        $rows=@(Read-CapRestartTranscript -Path $path)
+        Assert-CapTest ($rows.Count -eq 4 -and (@($rows.connection | Sort-Object -Unique) -join ',') -ceq '1' -and
+            ($rows.direction -join ',') -ceq 'shell,daemon,shell,daemon') 'Real pipe recorder lost direction or connection binding.'
+        return @{frames=$rows.Count;connections=1;upstream='SIMULATED_ECHO_NOT_GRAPHCoded';nativeProcesses=0;gui='NotExecuted'}
+    } finally {
+        $client.Dispose();$timeout.Dispose();$proxy.Dispose()
+        Assert-CapTest ($proxy.Completion.IsCompleted -and $echo.IsCompleted) 'Owned proxy tasks survived cleanup.'
+    }
+}
+
+function Invoke-CapMatchedManifestContract {
+    $job=New-CapMatchedTestJob
+    $manifest=@{sceneAdapter='S_MATCHED_V12_V1';lane='S';status='COMPLETE';executionMode='LIVE_CAPTURE';backendTurns=0
+        g11Qualification='unassessable: product lacks LoopResolution/reclaim live-line consumer'
+        images=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {
+            @{phase=$phase;scene=$scene;captureMode='PRINTWINDOW';observedState=@{
+                readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}}
+        }})
+        realRestarts=@(foreach ($phase in @('before','after')) {@{phase=$phase;evidence=(New-CapRestartTestEvidence)}})
+    } | ConvertTo-Json -Depth 35 | ConvertFrom-Json -DateKind String
+    Assert-CapMatchedManifest -Manifest $manifest -Job $job
+    $base=$manifest | ConvertTo-Json -Depth 35
+    foreach ($case in @('missing-scene','duplicate-scene','mock-image','unread-state','ack-only','copy-overclaim')) {
+        $m=$base | ConvertFrom-Json -DateKind String
+        switch ($case) {
+            'missing-scene' {$m.images=@($m.images[1..35])}
+            'duplicate-scene' {$m.images[0].scene=$m.images[1].scene}
+            'mock-image' {$m.images[0].captureMode='MOCK_NO_IMAGE'}
+            'unread-state' {$m.images[0].observedState.readSucceeded=$false}
+            'ack-only' {$m.realRestarts[0].evidence.rows=@($m.realRestarts[0].evidence.rows[0..2])}
+            'copy-overclaim' {$m.g11Qualification='Matched full outcome copy'}
+        }
+        $null=Assert-CapRejects {Assert-CapMatchedManifest -Manifest $m -Job $job} $(if ($case -ceq 'ack-only') {'Restart evidence'} else {'Matched manifest'})
+    }
+    return @{positive=1;negative=6;images=36;realRestarts=2;evidence='SIMULATED_MANIFEST_NOT_CAPTURE'}
+}
+
 function Invoke-CapDContracts {
     if ($DAdapterCase -ceq 'All') {
         Invoke-CapTest 'D real pipe clean session answers an empty project-list payload without fault injection' {
@@ -2420,6 +2823,7 @@ function Invoke-CapDContracts {
                 $job=[pscustomobject]@{sceneAdapter='D_QUICK_CHAT_V1'}
                 $rehearsal=$false
                 $isD=$true
+                $isS=$false
                 $roots=[pscustomobject]@{Root=$root;Profile=(Join-Path $root 'profile');Local=(Join-Path $root 'local')
                     Temp=(Join-Path $root 'temp');Support=(Join-Path $root 'support');Zmx=(Join-Path $root 'zmx')}
                 $errors=$null
@@ -4771,6 +5175,18 @@ if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenCon
     exit 0
 }
 
+if ($MatchedScenarioContractOnly) {
+    Invoke-CapMatchedContracts
+    $passed=@($results | Where-Object passed -EQ $true).Count
+    $failed=@($results | Where-Object passed -EQ $false).Count
+    $report=[pscustomobject][ordered]@{suite='UiCaptureMatchedScenarios';executed=$results.Count;passed=$passed;failed=$failed;skipped=0
+        gui='NotExecuted';images=0;realDaemonRestart='NotExecuted';cases=@($results)}
+    $report | ConvertTo-Json -Depth 35 | Set-Content (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne 8 -or $passed -ne 8 -or $failed -ne 0) {exit 1}
+    exit 0
+}
+
 if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDirectory')) {
     Invoke-CapDContracts
     Write-CapDContractReport
@@ -4862,6 +5278,7 @@ try {
         Invoke-CapDescendantMetadataContracts
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
+        Invoke-CapMatchedContracts
         Invoke-CapIdentityContracts
         Invoke-CapSelectorRefusalContracts
         Invoke-CapTest 'prebuilt fixture binder accepts exact artifacts and refuses missing or tampered bytes' { Invoke-CapPrebuiltFixtureContract }
@@ -5858,7 +6275,7 @@ try {
     $passed = @($results | Where-Object passed -EQ $true).Count
     $failed = @($results | Where-Object passed -EQ $false).Count
     $suiteName = if ($JournalContractOnly) { 'UiCaptureJournalContracts' } else { 'UiCaptureDriver' }
-    $report = [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed
+    $report = [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; skipped = 0
         mode = $mode; gui = 'NotExecuted'; nativeCompatibilityPreflight = 'NotExecuted'; images = 0
         backendTurns = 0; fixture = $target; sourceHashesBeforeImport = $sourceHashesBefore
         prebuiltFixtureManifest = $PrebuiltFixtureManifest
@@ -5868,8 +6285,8 @@ try {
         cases = @($results) }
     $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
 }
-[ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
+[ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; skipped = 0; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 170 } else { 167 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 178 } else { 175 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

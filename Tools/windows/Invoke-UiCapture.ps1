@@ -145,6 +145,11 @@ function Assert-CapGreenJob {
         before = @((Join-Path $root 'inputs\graphcode-before.exe'), $job.binaries.before.sha256)
         after = @((Join-Path $root 'inputs\graphcode-after.exe'), $job.binaries.after.sha256)
     }
+    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        $inputHashes.daemon=@((Join-Path $root 'runtime\graphcoded.exe'),$job.binaries.daemon.sha256)
+        $inputHashes.backendFixture=@((Join-Path $root 'runtime\copilot.exe'),$job.binaries.backendFixture.sha256)
+        $inputHashes.backendSource=@((Join-Path $root 'inputs\offline-backend.c'),$job.binaries.backendFixture.sourceSha256)
+    }
     foreach ($key in $inputHashes.Keys) {
         $null = Assert-CapArtifactPath -Root $root -Path $inputHashes[$key][0]
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputHashes[$key][0]).Hash
@@ -249,6 +254,23 @@ function Assert-CapPreflightReport {
                 $case.detail.providerCommit -cne '785b3fd15dcafd1882b495c831a10f98c201b908' -or
                 $case.detail.evidenceMode -cne 'EXECUTED_CURRENT_REAL_ZMX' -or $case.detail.phases -ne 2) {
                 throw 'Real seed preflight case does not bind the current pinned provider.'
+            }
+        }
+        if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+            if ($preflight.executed -ne 177 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
+                throw 'Matched scene preflight requires exactly 177 passing current contracts and zero skips.'
+            }
+            foreach ($name in @(
+                'matched v12 fixture binds exact node type wiring reason and outcome fields',
+                'matched v12 fixture refuses identity type wiring selection reason and outcome mutations',
+                'matched v12 complete scene inventory is admitted and missing scenes refuse',
+                'matched tab observations preserve exact owned IDs parents selection and close bounds',
+                'real restart transcript requires daemon confirmation resume and new owned attach',
+                'real restart scene invokes existing UIA route and refuses offline peer authority',
+                'matched transparent proxy relays unchanged real pipe frames with connection identity',
+                'matched manifest seals scene inventory and refuses premature restart success'
+            )) {
+                if (@($preflight.cases | Where-Object name -CEQ $name).Count -ne 1) {throw "Matched scene preflight lacks its unique group: $name"}
             }
         }
         return
@@ -653,6 +675,58 @@ function Assert-CapNoTrackedSurvivors {
     if ($survivors.Count) { throw "Kernel-live owned process survivors remain: $($survivors | ConvertTo-Json -Compress)." }
 }
 
+function Assert-CapMatchedWorkerManifest {
+    Assert-CapMatchedManifest -Manifest $manifest -Job $job
+    if ($manifest.head -cne $job.head -or $manifest.base -cne $job.base -or
+        $manifest.moduleSha256 -ne $moduleHash -or $manifest.workerSha256 -ne $workerHash -or
+        $manifest.supervisorSha256 -ne $supervisorHash -or $manifest.jobManifestSha256 -ne $jobHash -or
+        $manifest.leaseReceiptSha256 -ne $leaseHash -or $manifest.preflightReceiptSha256 -ne $preflightHash -or
+        $manifest.fixtureSourceSha256 -ne $job.fixture.sha256 -or $manifest.fixtureSha256 -ne $fixtureHashExpected -or
+        $manifest.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or $manifest.failures.Count -ne 0) {
+        throw 'Matched manifest provenance differs from its lease-bound job.'
+    }
+    foreach ($field in @('cleanupFailures','ownedProcessSurvivors','pendingLaunchesRemaining')) {
+        if ($manifest.$field -isnot [array] -or $manifest.$field.Count -ne 0) {throw "Matched manifest has unproved $field."}
+    }
+    foreach ($image in $manifest.images) {
+        $binary=$job.binaries.($image.phase)
+        if ($image.sceneAdapter -cne $job.sceneAdapter -or $image.sourceHead -cne $binary.source -or
+            $image.binaryBuiltAtSource -cne $binary.binaryBuiltAtSource -or $image.binarySha256 -ne $binary.sha256 -or
+            $image.fixtureSha256 -ne $fixtureHashExpected -or $image.fixtureSourceSha256 -ne $job.fixture.sha256 -or
+            $image.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or
+            $image.privacyStatus -cne 'CAPTURED_PENDING_INDIVIDUAL_REVIEW' -or
+            ($image.clientBounds -join ',') -cne '0,0,1440,900' -or $image.dpi -ne 96 -or
+            $image.sampledColors -lt 4 -or $image.nonMagentaSamples -lt 20 -or
+            $image.width -ne ($image.outerBounds[2]-$image.outerBounds[0]) -or
+            $image.height -ne ($image.outerBounds[3]-$image.outerBounds[1])) {throw 'Matched image geometry, state or provenance differs.'}
+        if ($image.scene -cmatch '^s-(?:goal-unwired|main-cycle|main-stopped|goal-done)' -and
+            ($null -eq $image.zoom -or [Math]::Abs($image.zoom.ZoomPercent-100) -gt 1)) {throw 'Matched card scene lacks actual-size evidence.'}
+        $path=Assert-CapSupervisorPath $image.path
+        if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $image.sha256) {throw 'Matched image bytes changed.'}
+    }
+    $expectedSeeds=@(foreach ($phase in @('before','after')) {foreach ($scene in (Get-CapMatchedSceneNames)[6..16]) {"$phase-$scene"}})
+    $actualSeeds=@($manifest.zmxSeeds | ForEach-Object phase)
+    if ($actualSeeds.Count -ne 22 -or @($actualSeeds | Sort-Object -Unique).Count -ne 22 -or
+        (($actualSeeds | Sort-Object) -join ',') -cne (($expectedSeeds | Sort-Object) -join ',')) {throw 'Matched seed inventory differs.'}
+    foreach ($seed in $manifest.zmxSeeds) {
+        if ($seed.exitCode -ne 0 -or -not $seed.daemonReady -or $seed.cmdCount -lt 1 -or
+            $seed.cleanupStatus -cne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
+            $seed.stdoutEof -or $seed.stderrEof) {throw 'Matched cmd seed readiness/cleanup is unproved.'}
+        $null=Assert-CapJobOutputProof -Root $root -Proof $seed.outputProof
+    }
+    foreach ($restart in $manifest.realRestarts) {
+        $matchedFixture=Get-Content -LiteralPath (Join-Path $root 'fixtures\fixture.json') -Raw | ConvertFrom-Json -DateKind String
+        if ($restart.evidence.projectPath -cne $matchedFixture.graphs[0].project.path.Replace('\','/')) {throw 'Matched restart owner differs from the admitted fixture project.'}
+        $path=Assert-CapSupervisorPath $restart.transcriptPath
+        if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $restart.transcriptSha256) {throw 'Matched restart transcript bytes changed.'}
+        $rows=@(Read-CapRestartTranscript -Path $path)
+        if ($rows.Count -lt $restart.evidence.rows.Count -or
+            (ConvertTo-Json -InputObject @($rows[0..($restart.evidence.rows.Count-1)]) -Depth 40 -Compress) -cne
+            (ConvertTo-Json -InputObject @($restart.evidence.rows) -Depth 40 -Compress)) {throw 'Matched restart evidence differs from its real recorded frame prefix.'}
+        $null=Assert-CapJobOutputProof -Root $root -Proof $restart.daemonCleanup
+    }
+}
+
 function Assert-CapWorkerManifest {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
@@ -686,6 +760,10 @@ function Assert-CapWorkerManifest {
             }).Count -ne 0) { throw 'Real seed rehearsal lacks two ready, job-empty, closed-file phases.' }
             foreach ($seed in $manifest.zmxSeeds) { $null = Assert-CapJobOutputProof -Root $root -Proof $seed.outputProof }
         }
+        return
+    }
+    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        Assert-CapMatchedWorkerManifest
         return
     }
     if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {

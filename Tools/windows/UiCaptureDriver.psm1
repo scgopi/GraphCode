@@ -48,6 +48,9 @@ public static class GraphCodeUiaGateState {
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
   }
+  public static bool PostHover(IntPtr window, int x, int y) {
+    return PostMessage(window, 0x0200, UIntPtr.Zero, (IntPtr)((y << 16) | (x & 0xffff)));
+  }
 }
 '@
 if (-not ('GraphCodeUiaGateState' -as [type])) {
@@ -874,8 +877,10 @@ function Get-CapActionSpec {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
-            'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')][string]$Action,
-        [string]$Name
+            'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
+            'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')][string]$Action,
+        [string]$Name,
+        [string]$SubjectId
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -897,6 +902,25 @@ function Get-CapActionSpec {
             if ($Name -cnotin @('Expand loop panel','Collapse loop panel')) { throw 'Normal panel action requires its exact current state.' }
             return [pscustomobject]@{AutomationId=$null;AutomationIdPrefix='workspace-toggle-panel-';Name=$Name;CommandId=$null}
         }
+        'workspace-restart-session' {
+            if ($SubjectId -cne '11111111-1111-4111-8111-000000000001') {throw 'Matched Restart requires its exact declared loop owner.'}
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-restart-session:$SubjectId")
+                AutomationIdPrefix=$null;Name='Restart session';CommandId=$null}
+        }
+        'workspace-new-tab' {return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId 'workspace-new-tab:control')
+            AutomationIdPrefix=$null;Name='New Tab';CommandId=$null}}
+        'workspace-split-right' {return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId 'workspace-split-right:control')
+            AutomationIdPrefix=$null;Name='Split Right';CommandId=$null}}
+        'workspace-select-tab' {
+            if ($SubjectId -cnotmatch '^(?:[0-9]|1[01])$' -or [string]::IsNullOrWhiteSpace($Name)) {throw 'Matched tab selection requires its bounded index and actual name.'}
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$SubjectId")
+                AutomationIdPrefix=$null;Name=$Name;CommandId=$null}
+        }
+        'workspace-close-tab' {
+            if ($SubjectId -cnotmatch '^(?:[0-9]|1[01])$') {throw 'Matched tab close requires its bounded index.'}
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$SubjectId")
+                AutomationIdPrefix=$null;Name='Close tab';CommandId=$null}
+        }
         'open-loop' {
             if ([string]::IsNullOrWhiteSpace($Name)) { throw 'open-loop requires a loop name.' }
             return [pscustomobject]@{ AutomationId = $null; AutomationIdPrefix = 'canvas-card-'; Name = $Name; CommandId = $null }
@@ -915,7 +939,7 @@ function Assert-CapFixtureMapping {
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedMappingSha256,
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSourceSha256,
         [Parameter(Mandatory)][string]$OriginalRoot,
-        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1')][string]$SceneAdapter = 'B_FIVE_SCENES_V1',
+        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1','S_MATCHED_V12_V1')][string]$SceneAdapter = 'B_FIVE_SCENES_V1',
         [string]$ExpectedPeerSha256
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -930,8 +954,9 @@ function Assert-CapFixtureMapping {
     }
     $mapping = Get-Content -LiteralPath $MappingPath -Raw | ConvertFrom-Json -DateKind String
     $isD = $SceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $graphCount = if ($isD) {1} else {2}
-    $nodeCount = if ($isD) {2} else {10}
+    $isS = $SceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $graphCount = if ($isD -or $isS) {1} else {2}
+    $nodeCount = if ($isS) {8} elseif ($isD) {2} else {10}
     if ($mapping.sourcePath -cne (Join-Path $OriginalRoot 'fixture.json') -or
         $mapping.sourceSha256 -ne $ExpectedSourceSha256 -or
         $mapping.copiedSourcePath -cne $SourcePath -or $mapping.rewrittenFixturePath -cne $FixturePath -or
@@ -988,6 +1013,7 @@ function Assert-CapFixtureMapping {
         if ($mapping.quickChats -ne 2 -or $mapping.layouts -ne 3) { throw 'D fixture mapping requires two chats and three layouts.' }
         Assert-CapDFixture -Fixture $fixture -ProjectRoot $projectsRoot
     }
+    if ($isS) {$null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot $projectsRoot}
     $peerPath = Assert-CapArtifactPath -Root $Root -Path (Join-Path $Root 'inputs\offline-peer-source.ps1')
     $peerBytes = [IO.File]::ReadAllBytes($peerPath)
     $canonicalPeer = [Text.UTF8Encoding]::new($false).GetBytes($(if ($isD) {Get-CapDPeerSource} else {Get-CapBPeerSource}))
@@ -1560,7 +1586,8 @@ function Invoke-CapAction {
 
     if ($Action -in @('reply', 'reclaim', 'keep')) { throw "Mutating graph action '$Action' is prohibited by the capture contract." }
     if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
-        'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')) {
+        'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')) {
         throw "Unsupported capture action '$Action'."
     }
     if ($WindowProcessResolver -and -not $Invoker) { throw 'A custom HWND resolver is allowed only with the action mock.' }
@@ -1569,7 +1596,7 @@ function Invoke-CapAction {
         throw 'UIA action mocks must exercise the production candidate resolver.'
     }
     $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
-    $spec = Get-CapActionSpec -Action $Action -Name $Name
+    $spec = Get-CapActionSpec -Action $Action -Name $Name -SubjectId $SubjectId
     if ($Action -eq 'file-exit') {
         if ($Invoker) { return & $Invoker $spec }
         $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
@@ -1599,7 +1626,8 @@ function Invoke-CapAction {
     $current = if ($element.PSObject.Properties['Current']) { $element.Current } else { $element }
     $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
     $null = Assert-CapUiaProcessIds -ExpectedProcessId $ProcessIdentity.Pid -ObservedProcessIds @([int]$current.ProcessId)
-    if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel')) {
+    if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')) {
         if (-not $current.IsEnabled) { throw 'D action target is disabled.' }
         if ($current.ControlType -ne [System.Windows.Automation.ControlType]::Button -and
             $current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { throw 'D action target has an unexpected control type.' }
@@ -2977,8 +3005,363 @@ function Assert-CapDataRecord {
     }
 }
 
+function Get-CapMatchedSceneNames {
+    return @('s-goal-unwired-selected','s-goal-unwired-unselected','s-main-cycle-selected','s-main-cycle-unselected',
+        's-main-stopped-reclaim','s-goal-done-reclaim','s-tabs-goal-needs-you','s-tabs-loop-running',
+        's-tabs-backend-idle','s-tabs-agent-unknown','s-tabs-two-agent-selected','s-tabs-two-shell-selected',
+        's-tabs-split-right-focused','s-tabs-many-first','s-tabs-overflow-last','s-tabs-hover-close',
+        's-tabs-last-guard','s-restart-confirmed')
+}
+
+function Assert-CapMatchedFixture {
+    param([Parameter(Mandatory)]$Fixture,[Parameter(Mandatory)][string]$ProjectRoot)
+    Assert-CapDataRecord $Fixture @{schemaVersion=[long];sceneAdapter=[string];macSource=[string]
+        fixtureUtc=[string];graphs=[array];states=[array];worktrees=[array]} 'Matched fixture'
+    $canonicalPath=Join-Path $PSScriptRoot 'fixtures\matched-v12.json'
+    $canonical=[IO.File]::ReadAllText($canonicalPath).Replace('C:\\fixture',
+        (($ProjectRoot | ConvertTo-Json -Compress).Trim('"')))
+    if (-not [Text.Json.Nodes.JsonNode]::DeepEquals(
+        [Text.Json.Nodes.JsonNode]::Parse(($Fixture | ConvertTo-Json -Depth 40 -Compress)),
+        [Text.Json.Nodes.JsonNode]::Parse($canonical))) {
+        throw 'Matched fixture identity, type, wiring, selection, attention reason, resolution or worktree facts differ.'
+    }
+    $null=ConvertTo-CapUtcInstant $Fixture.fixtureUtc 'Matched fixture UTC'
+    return [pscustomobject]@{states=@($Fixture.states);nodes=$Fixture.graphs[0].nodes.Count
+        macSource=$Fixture.macSource;mode='TYPED_WIRE_FIXTURE_NOT_RENDERED_PARITY'
+        g11='unassessable: product lacks LoopResolution/reclaim live-line consumer'}
+}
+
+function Get-CapMatchedAutomationId {
+    param([Parameter(Mandatory)][string]$Identity)
+    $kind=($Identity -split ':',2)[0]
+    [bigint]$hash=1469598103934665603
+    foreach ($value in [Text.Encoding]::UTF8.GetBytes($Identity)) {
+        $hash=(($hash -bxor [bigint]$value)*1099511628211) -band [bigint]::Parse('18446744073709551615')
+    }
+    $prefix=if ($kind -cin @('project-card','overview-card')) {'canvas-card'} else {$kind}
+    $rowKey=($hash -band [bigint]::Parse('1152921504606846975')) -bor [bigint]::Parse('1152921504606846976')
+    return "$prefix-$rowKey"
+}
+
+function Get-CapMatchedBackendSource {
+    return @'
+#include <windows.h>
+#include <stdio.h>
+int main(void) {
+    puts("GraphCode offline capture fixture; not an AI agent");
+    fflush(stdout);
+    Sleep(INFINITE);
+    return 0;
+}
+'@
+}
+
+function Get-CapMatchedTabObservation {
+    param([Parameter(Mandatory)][object[]]$Rows,[Parameter(Mandatory)][int]$ExpectedProcessId,
+        [Parameter(Mandatory)][int]$TotalTabs,[Parameter(Mandatory)][int]$SelectedTab,
+        [Parameter(Mandatory)][string]$AgentTitle,[Parameter(Mandatory)][int[]]$VisibleIndexes)
+    if ($TotalTabs -lt 1 -or $SelectedTab -lt 0 -or $SelectedTab -ge $TotalTabs -or
+        $VisibleIndexes.Count -lt 1 -or $SelectedTab -notin $VisibleIndexes -or
+        @($VisibleIndexes | Sort-Object -Unique).Count -ne $VisibleIndexes.Count) {throw 'Matched tabs invalid declared topology.'}
+    foreach ($row in $Rows) {
+        if ($row.ProcessId -isnot [long] -or $row.ProcessId -ne $ExpectedProcessId -or
+            $row.ParentAutomationId -cne 'graph' -or $row.IsOffscreen -isnot [bool] -or $row.IsOffscreen -or
+            $row.Bounds -isnot [array] -or $row.Bounds.Count -ne 4 -or
+            $row.Bounds[2] -le $row.Bounds[0] -or $row.Bounds[3] -le $row.Bounds[1]) {
+            throw 'Matched tabs require bounded direct children of the owned Graph fragment.'
+        }
+    }
+    $expected=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $observed=[Collections.Generic.List[object]]::new()
+    foreach ($index in $VisibleIndexes) {
+        $id=Get-CapMatchedAutomationId "workspace-tab:$index"
+        $closeId=Get-CapMatchedAutomationId "workspace-tab-close:$index"
+        $null=$expected.Add($id);$null=$expected.Add($closeId)
+        $tabs=@($Rows | Where-Object AutomationId -CEQ $id)
+        $closes=@($Rows | Where-Object AutomationId -CEQ $closeId)
+        $title=if ($index -eq 0) {$AgentTitle} else {'Shell'}
+        if ($tabs.Count -ne 1 -or $closes.Count -ne 1 -or $tabs[0].Name -cne $title -or
+            $tabs[0].Selected -isnot [bool] -or $tabs[0].Selected -ne ($index -eq $SelectedTab) -or
+            $closes[0].Name -cne 'Close tab' -or $closes[0].IsEnabled -isnot [bool] -or
+            $closes[0].IsEnabled -ne ($TotalTabs -gt 1)) {throw 'Matched tabs identity, name, selection or last-tab guard differs.'}
+        $tab=$tabs[0].Bounds;$close=$closes[0].Bounds
+        if ($close[0] -lt $tab[0] -or $close[1] -ne $tab[1] -or $close[2] -ne $tab[2] -or
+            $close[3] -ne $tab[3] -or $close[2]-$close[0] -ne 24) {throw 'Matched tabs close bounds escape their exact tab.'}
+        $observed.Add([pscustomobject]@{index=$index;automationId=$id;name=$title;selected=$tabs[0].Selected
+            bounds=$tab;closeBounds=$close;closeEnabled=$closes[0].IsEnabled
+            shortcut=if ($index -lt 9) {"Ctrl+$($index+1)"} else {$null}})
+    }
+    $tabRows=@($Rows | Where-Object {$_.AutomationId -cmatch '^workspace-tab(?:-close)?-'})
+    if ($tabRows.Count -ne $expected.Count -or @($tabRows | Where-Object {-not $expected.Contains($_.AutomationId)}).Count) {
+        throw 'Matched tabs roster contains hidden, duplicate or foreign tab identities.'
+    }
+    $ordered=@($observed | Sort-Object index)
+    for ($i=1;$i -lt $ordered.Count;$i++) {
+        if ($ordered[$i].bounds[0] -le $ordered[$i-1].bounds[2]) {throw 'Matched tabs overlap or are out of order.'}
+    }
+    return [pscustomobject]@{total=$TotalTabs;selected=$SelectedTab;visible=@($observed)
+        evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
+}
+
+function Assert-CapRestartEvidence {
+    param([Parameter(Mandatory)]$Evidence,[Parameter(Mandatory)][string]$ExpectedDaemonSha256)
+    $fail={param($Reason) throw "Restart evidence: $Reason"}
+    foreach ($field in @('projectPath','nodeId','connection','counter','rows','beforeAttach','afterAttach','daemon')) {
+        if (-not $Evidence.PSObject.Properties[$field]) {& $fail "missing $field"}
+    }
+    $daemon=$Evidence.daemon;$before=$Evidence.beforeAttach;$after=$Evidence.afterAttach
+    foreach ($pair in @(@($daemon,'held'),@($daemon,'jobOwned'),@($before,'retired'),
+        @($after,'held'),@($after,'jobOwned'),@($after,'daemonSessionReady'),@($after,'uiaPaneOwned'),@($after,'oldBackendExited'))) {
+        if ($pair[0].($pair[1]) -isnot [bool] -or -not $pair[0].($pair[1])) {& $fail 'typed native ownership/retirement flag is unproved'}
+    }
+    if ($daemon.pid -isnot [long] -or $daemon.pid -le 0 -or $daemon.creationFileTimeUtc -isnot [long] -or
+        $daemon.creationFileTimeUtc -le 0 -or $daemon.held -cne $true -or $daemon.jobOwned -cne $true -or
+        $daemon.imageSha256 -ne $ExpectedDaemonSha256 -or $Evidence.connection -isnot [long] -or
+        $Evidence.connection -le 0 -or $Evidence.counter -isnot [long] -or $Evidence.counter -lt 0 -or
+        $Evidence.rows -isnot [array] -or $Evidence.rows.Count -lt 5) {& $fail 'invalid held daemon or transcript authority'}
+    $session="graphcode-$($Evidence.nodeId)"
+    if ($before.retired -cne $true -or $before.pid -isnot [long] -or $before.pid -le 0 -or
+        $before.creationFileTimeUtc -isnot [long] -or $before.creationFileTimeUtc -le 0 -or
+        $before.session -cne $session -or $after.session -cne $session -or $after.held -cne $true -or
+        $after.jobOwned -cne $true -or $after.daemonSessionReady -cne $true -or $after.uiaPaneOwned -cne $true -or
+        $after.pid -isnot [long] -or $after.pid -le 0 -or $after.creationFileTimeUtc -isnot [long] -or
+        $after.creationFileTimeUtc -le $before.creationFileTimeUtc -or
+        ($after.pid -eq $before.pid -and $after.creationFileTimeUtc -eq $before.creationFileTimeUtc)) {
+        & $fail 'old attachment retirement or new owned daemon-session attachment is unproved'
+    }
+    if ($after.oldBackendPid -isnot [long] -or $after.oldBackendPid -le 0 -or
+        $after.backendPid -isnot [long] -or $after.backendPid -le 0 -or
+        $after.oldBackendCreationFileTimeUtc -isnot [long] -or $after.oldBackendCreationFileTimeUtc -le 0 -or
+        $after.backendCreationFileTimeUtc -isnot [long] -or
+        $after.backendCreationFileTimeUtc -le $after.oldBackendCreationFileTimeUtc) {& $fail 'offline backend generation was not replaced'}
+    $restart=$null;$restartResponse=$null;$advance=$null;$resume=$null;$resumeResponse=$null;$baseline=$false
+    $ordinal=0L;$elapsed=0L
+    foreach ($row in $Evidence.rows) {
+        if ($row.ordinal -isnot [long] -or $row.ordinal -le $ordinal -or $row.elapsedMs -isnot [long] -or
+            $row.elapsedMs -lt $elapsed -or $row.connection -ne $Evidence.connection -or
+            $row.direction -cnotin @('shell','daemon')) {& $fail 'connection, ordering, duplicate or clock mismatch'}
+        $ordinal=$row.ordinal;$elapsed=$row.elapsedMs;$frame=$row.frame
+        if ($row.direction -ceq 'daemon' -and $frame.kind -ceq 'error') {& $fail 'daemon error envelope is not confirmation'}
+        if ($frame.kind -ceq 'request' -and $row.direction -ceq 'shell') {
+            if (-not $frame.command.PSObject.Properties['graphCommand']) {continue}
+            $graphCommand=$frame.command.graphCommand
+            if ($graphCommand.command.PSObject.Properties['stopNode']) {& $fail 'Stop is not Restart'}
+            foreach ($action in @('restartNode','resumeSession')) {
+                if (-not $graphCommand.command.PSObject.Properties[$action]) {continue}
+                if ($action -ceq 'resumeSession' -and -not $restart) {continue}
+                $requestId=[guid]::Empty
+                if ($graphCommand.projectPath -cne $Evidence.projectPath -or $graphCommand.command.$action._0 -cne $Evidence.nodeId -or
+                    $frame.requestID -isnot [string] -or -not [guid]::TryParseExact($frame.requestID,'D',[ref]$requestId)) {& $fail 'request owner or UUID differs'}
+                if ($action -ceq 'restartNode') {
+                    if ($null -ne $restart -or -not $baseline) {& $fail 'duplicate restart or missing prior owner counter'}
+                    $restart=$row
+                } else {
+                    if ($null -eq $advance -or $null -ne $resume) {& $fail 'resume precedes counter confirmation or is duplicated'}
+                    $resume=$row
+                }
+            }
+        }
+        if ($frame.kind -ceq 'response' -and $row.direction -ceq 'daemon') {
+            if ($restart -and $frame.requestID -ieq $restart.frame.requestID) {
+                if (($frame.PSObject.Properties['success'] -and $frame.success -cne $true) -or
+                    (-not $frame.PSObject.Properties['event'] -and -not $frame.PSObject.Properties['success']) -or
+                    $restartResponse) {& $fail 'restart response failed or duplicated'}
+                $restartResponse=$row
+            }
+            if ($resume -and $frame.requestID -ieq $resume.frame.requestID) {
+                if (($frame.PSObject.Properties['success'] -and $frame.success -cne $true) -or
+                    (-not $frame.PSObject.Properties['event'] -and -not $frame.PSObject.Properties['success']) -or
+                    $resumeResponse) {& $fail 'resume response failed or duplicated'}
+                $resumeResponse=$row
+            }
+        }
+        if ($row.direction -cne 'daemon' -or -not $frame.PSObject.Properties['event']) {continue}
+        if ($frame.event.PSObject.Properties['errorOccurred']) {& $fail 'daemon error is not confirmation'}
+        $graph=$null;$path=$null
+        if ($frame.event.PSObject.Properties['graphChanged']) {$graph=$frame.event.graphChanged;$path=$graph.project.path}
+        elseif ($frame.event.PSObject.Properties['nodesChanged']) {$graph=$frame.event.nodesChanged;$path=$graph.projectPath}
+        if ($null -eq $graph -or $path -cne $Evidence.projectPath) {continue}
+        $nodes=@($graph.nodes | Where-Object id -CEQ $Evidence.nodeId)
+        if ($nodes.Count -gt 1) {& $fail 'ambiguous owner'}
+        if ($nodes.Count -ne 1) {continue}
+        $counter=$nodes[0].sessionRestarts
+        if ($counter -isnot [long] -or $counter -lt 0) {& $fail 'malformed owner counter'}
+        if (-not $restart -and $counter -eq $Evidence.counter) {$baseline=$true}
+        if ($restart -and $counter -gt $Evidence.counter) {
+            if ($row.elapsedMs-$restart.elapsedMs -gt 30000 -or
+                $nodes[0].state -cnotin @('idle','running','awaitingInput','blocked','waiting')) {& $fail 'counter confirmation timed out or loop is not unresolved'}
+            if (-not $advance) {$advance=$row}
+        }
+    }
+    if (-not $restart -or -not $restartResponse -or -not $advance -or -not $resume -or -not $resumeResponse -or
+        $after.observedAfterOrdinal -isnot [long] -or $after.observedAfterOrdinal -lt $resumeResponse.ordinal) {
+        & $fail 'complete correlated restart, counter advance, checked resume and subsequent attach required'
+    }
+    return [pscustomobject]@{restartRequestId=$restart.frame.requestID;resumeRequestId=$resume.frame.requestID
+        connection=$Evidence.connection;counterBefore=$Evidence.counter;counterAfter=($advance.frame.event.PSObject.Properties |
+            Where-Object {$_.Name -cin @('graphChanged','nodesChanged')} | ForEach-Object {$_.Value.nodes |
+                Where-Object id -CEQ $Evidence.nodeId | ForEach-Object sessionRestarts})
+        status='CONFIRMED_DAEMON_ROUNDTRIP_AND_OWNED_REATTACH';backend='OFFLINE_FIXTURE_NOT_AUTHENTICATED_AGENT'}
+}
+
+function Initialize-CapMatchedProxy {
+    if ('CapMatchedProxy' -as [type]) {return}
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class CapMatchedProxy : IDisposable {
+    readonly string listen, upstream, log;
+    readonly CancellationTokenSource cancel;
+    readonly object gate = new object();
+    readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+    long ordinal;
+    public Task Completion { get; private set; }
+    public CapMatchedProxy(string listen, string upstream, string log, int milliseconds) {
+        this.listen=listen; this.upstream=upstream; this.log=log;
+        using (File.Open(log,FileMode.CreateNew,FileAccess.Write,FileShare.Read)) {}
+        cancel=new CancellationTokenSource(milliseconds);
+        Completion=Task.Run(Run);
+    }
+    async Task<byte[]> Read(Stream stream,int count,CancellationToken token) {
+        byte[] bytes=new byte[count];int offset=0;
+        while(offset<count) {
+            int n=await stream.ReadAsync(bytes,offset,count-offset,token).ConfigureAwait(false);
+            if(n==0) {if(offset==0)return null;throw new InvalidDataException("Truncated proxy frame");}
+            offset+=n;
+        }
+        return bytes;
+    }
+    async Task Pump(Stream from,Stream to,string direction,int connection,CancellationToken token) {
+        while(true) {
+            byte[] header=await Read(from,4,token).ConfigureAwait(false);if(header==null)return;
+            int count=(header[0]<<24)|(header[1]<<16)|(header[2]<<8)|header[3];
+            if(count<1||count>2097152)throw new InvalidDataException("Invalid proxy frame length");
+            byte[] body=await Read(from,count,token).ConfigureAwait(false);
+            if(body==null)throw new InvalidDataException("Missing proxy frame body");
+            lock(gate) {
+                string line="{\"ordinal\":"+(++ordinal)+",\"connection\":"+connection+
+                    ",\"elapsedMs\":"+clock.ElapsedMilliseconds+",\"direction\":\""+direction+
+                    "\",\"frameBase64\":\""+Convert.ToBase64String(body)+"\"}\n";
+                File.AppendAllText(log,line,new UTF8Encoding(false));
+            }
+            await to.WriteAsync(header,0,4,token).ConfigureAwait(false);
+            await to.WriteAsync(body,0,body.Length,token).ConfigureAwait(false);
+            await to.FlushAsync(token).ConfigureAwait(false);
+        }
+    }
+    async Task Run() {
+        int connection=0;
+        try {
+            while(!cancel.IsCancellationRequested) {
+                using(var server=new NamedPipeServerStream(listen,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.Asynchronous|PipeOptions.CurrentUserOnly))
+                using(var client=new NamedPipeClientStream(".",upstream,PipeDirection.InOut,PipeOptions.Asynchronous)) {
+                    await server.WaitForConnectionAsync(cancel.Token).ConfigureAwait(false);
+                    await client.ConnectAsync(5000,cancel.Token).ConfigureAwait(false);
+                    connection++;
+                    using(var pair=CancellationTokenSource.CreateLinkedTokenSource(cancel.Token)) {
+                        var a=Pump(server,client,"shell",connection,pair.Token);
+                        var b=Pump(client,server,"daemon",connection,pair.Token);
+                        var first=await Task.WhenAny(a,b).ConfigureAwait(false);
+                        pair.Cancel();
+                        try {await Task.WhenAll(a,b).ConfigureAwait(false);}
+                        catch(OperationCanceledException) {if(first.IsFaulted)await first.ConfigureAwait(false);}
+                        catch(IOException) {if(first.IsFaulted)await first.ConfigureAwait(false);}
+                    }
+                }
+            }
+        } catch(OperationCanceledException) {if(!cancel.IsCancellationRequested)throw;}
+    }
+    public void Dispose() {
+        cancel.Cancel();
+        if(!Completion.Wait(5000))throw new TimeoutException("Proxy did not stop");
+        cancel.Dispose();
+    }
+}
+'@
+}
+
+function Read-CapRestartTranscript {
+    param([Parameter(Mandatory)][string]$Path)
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try {
+        if ($stream.Length -gt 16MB) {throw 'Restart evidence: bounded transcript exceeded 16 MiB'}
+        $reader=[IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false,$true))
+        try {$text=$reader.ReadToEnd()} finally {$reader.Dispose()}
+    } finally {$stream.Dispose()}
+    if (-not $text.EndsWith("`n",[StringComparison]::Ordinal)) {
+        $failure=[IO.InvalidDataException]::new('Restart evidence: transcript publication pending')
+        $failure.Data['CapCaptureCode']='RestartTranscriptPending'
+        throw $failure
+    }
+    return @($text -split "`n" | Where-Object {$_} | ForEach-Object {
+        $row=$_ | ConvertFrom-Json -DateKind String
+        $frame=[Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64String($row.frameBase64)) |
+            ConvertFrom-Json -DateKind String
+        [pscustomobject]@{ordinal=$row.ordinal;connection=$row.connection;elapsedMs=$row.elapsedMs;direction=$row.direction;frame=$frame}
+    })
+}
+
+function Assert-CapMatchedManifest {
+    param([Parameter(Mandatory)]$Manifest,[Parameter(Mandatory)]$Job)
+    $expected=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {"${phase}:$scene"}})
+    $actual=@($Manifest.images | ForEach-Object {"$($_.phase):$($_.scene)"})
+    if ($Manifest.sceneAdapter -cne 'S_MATCHED_V12_V1' -or $Manifest.lane -cne 'S' -or
+        $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne 'LIVE_CAPTURE' -or
+        $actual.Count -ne 36 -or @($actual | Sort-Object -Unique).Count -ne 36 -or
+        (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
+        $Manifest.g11Qualification -cne 'unassessable: product lacks LoopResolution/reclaim live-line consumer' -or
+        $Manifest.backendTurns -ne 0 -or $Manifest.realRestarts.Count -ne 2) {throw 'Matched manifest inventory or evidence qualification differs.'}
+    foreach ($phase in @('before','after')) {
+        $restarts=@($Manifest.realRestarts | Where-Object phase -CEQ $phase)
+        if ($restarts.Count -ne 1) {throw 'Matched manifest must retain one real restart per phase.'}
+        $null=Assert-CapRestartEvidence -Evidence $restarts[0].evidence -ExpectedDaemonSha256 $Job.binaries.daemon.sha256
+    }
+    foreach ($image in $Manifest.images) {
+        if ($image.captureMode -cne 'PRINTWINDOW' -or $image.observedState.readSucceeded -cne $true -or
+            $image.observedState.evidenceMode -cne 'OWNED_UIA_READ_NOT_VISUAL_PARITY') {
+            throw 'Matched manifest requires actual images with owned state observations.'
+        }
+    }
+}
+
 function Assert-CapSceneContract {
     param([Parameter(Mandatory)]$Job)
+    if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array]
+            fixture=[pscustomobject];binaries=[pscustomobject]} 'Matched scene'
+        Assert-CapDataRecord $Job.authority @{centralCaptureLeaseGrantedByThisArtifact=[bool];sWorkerMayLaunchGui=[bool]} 'Matched scene authority'
+        $contract=$Job.captureContract
+        Assert-CapDataRecord $contract @{phases=[array];sceneCountPerPhase=[long];windowOuterXYWH=[array]
+            expectedClientWH=[array];dpi=[long];canvasZoomPercent=[long];cleanupReserveSeconds=[long];estimatedSeconds=[long]} 'Matched scene geometry'
+        Assert-CapDataRecord $Job.binaries.backendFixture @{sha256=[string];sourceSha256=[string];networkAllowed=[bool]} 'Matched scene backend fixture'
+        if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -cne $false -or
+            $Job.authority.sWorkerMayLaunchGui -cne $false -or
+            ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 18 -or
+            ($contract.windowOuterXYWH -join ',') -cne '30,30,1456,959' -or
+            ($contract.expectedClientWH -join ',') -cne '1440,900' -or $contract.dpi -ne 96 -or
+            $contract.canvasZoomPercent -ne 100 -or $contract.cleanupReserveSeconds -ne 90 -or
+            $contract.estimatedSeconds -lt 1 -or $contract.estimatedSeconds -gt 810 -or
+            ($Job.scenes.name -join ',') -cne ((Get-CapMatchedSceneNames) -join ',')) {throw 'Matched scene inventory, geometry or non-authority differs.'}
+        foreach ($scene in $Job.scenes) {
+            Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'Matched scene width'
+            if ($scene.naturalWidthBeforeAfter.Count -ne 2 -or
+                @($scene.naturalWidthBeforeAfter | Where-Object {$_ -isnot [long] -or $_ -ne 250}).Count) {throw 'Matched scene requires exact 250px source widths.'}
+        }
+        foreach ($binary in @('daemon','backendFixture')) {
+            if ($Job.binaries.$binary.sha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {throw 'Matched scene requires hash-bound real daemon and offline backend fixture.'}
+        }
+        if ($Job.binaries.backendFixture.networkAllowed -cne $false) {throw 'Matched scene backend fixture must prohibit network.'}
+        $seed=@('run','graphcode-11111111-1111-4111-8111-000000000001','-d','cmd.exe','/Q','/K','echo Offline card fixture - no backend')
+        if (($Job.binaries.offlineZmx.seedArgumentOrder -join [char]0) -cne ($seed -join [char]0)) {throw 'Matched scene requires the exact cmd-only seed vector.'}
+        $sourceHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))
+        if ($Job.binaries.backendFixture.sourceSha256 -ne $sourceHash) {throw 'Matched scene requires its canonical harmless backend source hash.'}
+        return
+    }
     if ($Job.lane -ceq 'D' -and $Job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
         Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
         Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array];fixture=[pscustomobject]} 'D scene job'
@@ -3562,7 +3945,7 @@ function Assert-CapJobIdentity {
             $productRoot = $path -match '^(graphcode-windows|graphcode|graphcoded|graphcode-cli|GraphcodeKit|ThirdParty|Tuist)/'
             $nonProduct = -not $productRoot -and ($path -cmatch '\.md$' -or
                 $path -cmatch '^(windows-tests/|Tools/[^/]+/Tests/)' -or
-                $path -cmatch '^Tools/windows/(UiCaptureDriver\.psm1|Invoke-UiCapture(?:Worker)?\.ps1)$')
+                $path -cmatch '^Tools/windows/(UiCaptureDriver\.psm1|Invoke-UiCapture(?:Worker)?\.ps1|fixtures/matched-v12\.json)$')
             if (-not $nonProduct) { throw "Non-equivalent product/provider/build input diff: $path" }
         }
     }
@@ -4558,6 +4941,9 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
+    'Get-CapMatchedSceneNames','Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
+    'Get-CapMatchedTabObservation','Assert-CapRestartEvidence','Initialize-CapMatchedProxy',
+    'Read-CapRestartTranscript','Assert-CapMatchedManifest','Get-CapMatchedBackendSource',
     'Get-CapDSceneNames',
     'Assert-CapDFixture',
     'Get-CapDLayoutPath',

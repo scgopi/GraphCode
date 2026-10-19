@@ -33,6 +33,7 @@ $images = [Collections.Generic.List[object]]::new()
 $runs = [Collections.Generic.List[object]]::new()
 $seedRuns = [Collections.Generic.List[object]]::new()
 $applicationRuns = [Collections.Generic.List[object]]::new()
+$realRestarts = [Collections.Generic.List[object]]::new()
 $descendantIdentities = [Collections.Generic.List[object]]::new()
 $journalEntries = [Collections.Generic.List[object]]::new()
 $manifestPath = $null
@@ -236,6 +237,14 @@ function Assert-CapAcceptedInputs {
         zmx = (Join-Path $root 'runtime\zmx.exe'); before = (Join-Path $root 'inputs\graphcode-before.exe')
         after = (Join-Path $root 'inputs\graphcode-after.exe')
     }
+    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        foreach ($item in @(@('daemon','graphcoded.exe'),@('backendFixture','copilot.exe'))) {
+            $expectedHashes[$item[0]]=$job.binaries.($item[0]).sha256
+            $paths[$item[0]]=Join-Path $root "runtime\$($item[1])"
+        }
+        $expectedHashes.backendSource=$job.binaries.backendFixture.sourceSha256
+        $paths.backendSource=Join-Path $root 'inputs\offline-backend.c'
+    }
     $actual = @{}
     foreach ($key in $expectedHashes.Keys) {
         $path = Assert-CapArtifactPath -Root $root -Path $paths[$key]
@@ -306,6 +315,19 @@ function Get-CapBaseEnvironment {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\Matched')
+        $null=New-Item -ItemType Directory -Path $project -Force
+        return @{
+            APPDATA=(Join-Path $Roots.Profile 'AppData\Roaming');HOME=$Roots.Profile;USERPROFILE=$Roots.Profile
+            LOCALAPPDATA=$Roots.Local;TEMP=$Roots.Temp;TMP=$Roots.Temp;GRAPHCODE_SUPPORT_DIR=$Roots.Support
+            GRAPHCODE_DAEMON_PIPE="\\.\pipe\$PipeName";GRAPHCODE_ZMX=(Join-Path $root 'runtime\zmx.exe')
+            ZMX_DIR=$Roots.Zmx;GRAPHCODE_SHELL_SESSION_PREFIX=$SessionPrefix;GRAPHCODE_UIA_GATE='1'
+            GRAPHCODE_WORKSPACE_LAYOUT=(Join-Path $Roots.Root 'workspace.json')
+            PATH=((Join-Path $root 'runtime')+';'+(Split-Path -Parent (Get-Command git -ErrorAction Stop).Source)+';'+$PSHOME+';'+[Environment]::SystemDirectory+';'+
+                (Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0'))
+        }
+    }
     if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
         if ($ActionsFixture) { throw 'D does not support builtin UIA fixture actions.' }
         $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\D Offline Capture Fixture')
@@ -388,11 +410,17 @@ function Start-CapOfflineSeed {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     $isD=$job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $arguments=if ($isD) {
+    $isS=$job.sceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $arguments=if ($isS) {
+        $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
+        $null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
+        if ($SessionName -cnotin @($fixture.graphs[0].nodes | ForEach-Object {"graphcode-$($_.id)"})) {throw 'Unknown matched fixture session.'}
+        @('run',$SessionName,'-d',(Join-Path ([Environment]::SystemDirectory) 'cmd.exe'),'/Q','/K','echo Offline card fixture - no backend')
+    } elseif ($isD) {
         if ($SessionName -cnotin @('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')) {throw 'Unknown D seed session.'}
         @('run',$SessionName,'-d',(Join-Path ([Environment]::SystemDirectory) 'cmd.exe'))+@($job.binaries.offlineZmx.seedCommand)
     } else {@($job.binaries.offlineZmx.seedArgumentOrder | ForEach-Object {[string]$_})}
-    if (-not $isD -and ($arguments.Count -ne 7 -or $arguments[0] -cne 'run' -or
+    if (-not $isD -and -not $isS -and ($arguments.Count -ne 7 -or $arguments[0] -cne 'run' -or
         $arguments[1] -cne 'graphcode-11111111-1111-4111-8111-000000000001' -or
         $arguments[2] -cne '-d' -or $arguments[3] -cne 'cmd.exe' -or
         $arguments[4] -cne '/Q' -or $arguments[5] -cne '/K' -or
@@ -552,6 +580,7 @@ function Invoke-CapSceneAction {
         -ProcessIdentity $AppRun.Run.Identity -DeadlineUtc $leaseDeadlineUtc `
         -BeforeElementPoll { Assert-CapWorkerDeadline "UIA element for action $Action" }
     if ($AppRun.PSObject.Properties['DActions']) {$AppRun.DActions.Add($result)}
+    if ($AppRun.PSObject.Properties['SActions']) {$AppRun.SActions.Add($result)}
     Write-CapWorkerLog "ACTION phase=$($AppRun.Phase) action=$Action name=$Name result=$($result | ConvertTo-Json -Compress)"
     Start-Sleep -Milliseconds 250
     Assert-CapWorkerDeadline "after action $Action"
@@ -643,6 +672,13 @@ function Save-CapSceneImage {
         $record | Add-Member -NotePropertyName sceneLabel -NotePropertyValue $(if ($SceneName -ceq 'd-chat-history-roles') {'Observed production-restored history chat Shell state; actual baseline UIA role recorded'} else {$SceneName})
         $AppRun.DActions.Clear()
     }
+    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        $record | Add-Member -NotePropertyName sceneAdapter -NotePropertyValue $job.sceneAdapter
+        $record | Add-Member -NotePropertyName observedState -NotePropertyValue $AppRun.SObservation
+        $record | Add-Member -NotePropertyName actions -NotePropertyValue @($AppRun.SActions)
+        $record | Add-Member -NotePropertyName captureUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o'))
+        $AppRun.SActions.Clear()
+    }
     Write-CapWorkerJournalSnapshot -Kind 'Progress'
     Write-CapWorkerLog "IMAGE phase=$Phase scene=$SceneName sha256=$($capture.Sha256) size=$($capture.Width)x$($capture.Height) dpi=$($capture.Dpi) colors=$($capture.SampledColors)"
 }
@@ -691,6 +727,11 @@ function New-CapManifest {
         $result.uncoveredLiveObligations=@(
             @{name='missing-bound-chat-workspace-tabs';status='NotExecuted';reason='Production events route away; component coverage only'},
             @{name='saved-Agent-Split-role-labels';status='NotExecuted';reason='Production listing prunes absent panes; only two chat seeds authorized'})
+    }
+    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        $result.sceneAdapter=$job.sceneAdapter;$result.lane='S';$result.requiredSceneNames=@(Get-CapMatchedSceneNames)
+        $result.g11Qualification='unassessable: product lacks LoopResolution/reclaim live-line consumer'
+        $result.backendTurns=0;$result.realRestarts=@($realRestarts)
     }
     return $result
 }
@@ -741,16 +782,43 @@ function Start-CapGraphCodeApp {
     $arguments = if ($rehearsal) { [string[]]@($job.rehearsalTarget.arguments) } else { [string[]]@() }
     if ($rehearsal) { $role = 'rehearsal-target' }
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
+    $isS=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isS) {Join-Path $root 'fixtures\projects\Matched'} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
     if (-not $rehearsal) {
         $shellSession = 'graphcode-' + $SessionPrefix + '-' + [guid]::Empty.ToString('D')
         $null = Assert-CapZmxLeasePath -ZmxDir $Roots.Zmx -SessionName $shellSession `
             -Sid ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
     }
-    $run = Start-CapManagedProcess -FilePath $binaryPath -ArgumentList ([string[]]@($arguments)) `
-        -WorkingDirectory $workingDirectory -Role $role -Environment $envMap -CloseStdin:$rehearsal
-    $runs.Add($run)
+    $ownedJob=$null
+    if ($isS -and -not $rehearsal) {
+        $ownedJob=Start-CapJobLauncher -Root $root -OutputDirectory $Roots.Peer -FilePath $binaryPath `
+            -ArgumentList @() -WorkingDirectory $workingDirectory -Role "matched-app-launcher-$Phase" -Environment $envMap
+        $runs.Add($ownedJob);Write-CapProcessJournal -Identity $ownedJob.Identity -Phase $Phase
+        $process=$null
+        try {
+            $target=Release-CapJobLauncher -Run $ownedJob -JournalState $journalState
+            $process=[Diagnostics.Process]::GetProcessById([int]$target.pid)
+            $identity=Get-CapProcessIdentity -Process $process -ExpectedImagePath $binaryPath -Role $role `
+                -ExpectedParentPid $ownedJob.Identity.Pid
+            if ($identity.CreationFileTimeUtc -ne $target.creationFileTimeUtc -or
+                -not [CapProcessJob]::Contains($ownedJob.Job,$process.Handle)) {throw 'Matched app target generation/job differs.'}
+            $identity | Add-Member -NotePropertyName JobId -NotePropertyValue $ownedJob.JobId
+            $ownedJob.Members.Add($identity)
+            $descendantIdentities.Add($identity)
+            $run=[pscustomobject]@{Identity=$identity;StartedUtc=$ownedJob.StartedUtc}
+        } catch {
+            $primary=$_
+            $null=Close-CapMatchedJob -Run $ownedJob -Phase $Phase
+            if ($process) {$process.Dispose()}
+            throw $primary
+        }
+    } else {
+        $run = Start-CapManagedProcess -FilePath $binaryPath -ArgumentList ([string[]]@($arguments)) `
+            -WorkingDirectory $workingDirectory -Role $role -Environment $envMap -CloseStdin:$rehearsal
+        $runs.Add($run)
+    }
     $appRun = New-CapAppRunRecord -Run $run -Phase $Phase -SessionPrefix $SessionPrefix
+    if ($ownedJob) {$appRun | Add-Member -NotePropertyName OwnedJob -NotePropertyValue $ownedJob}
     $applicationRuns.Add($appRun)
     Write-CapProcessJournal -Identity $run.Identity -Phase $Phase
     if ($rehearsal) { return $appRun }
@@ -775,6 +843,19 @@ function Get-CapTreeForApp {
     param([Parameter(Mandatory)]$AppRun)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($AppRun.PSObject.Properties['OwnedJob']) {
+        if ($AppRun.OwnedJob.CleanupComplete) {return @($AppRun.Descendants)}
+        $members=@(Get-CapJobMembers -Run $AppRun.OwnedJob)
+        foreach ($member in $members) {
+            if ($member.Pid -eq $AppRun.Run.Identity.Pid) {continue}
+            if (-not @($AppRun.Descendants | Where-Object {$_.Pid -eq $member.Pid -and
+                $_.CreationFileTimeUtc -eq $member.CreationFileTimeUtc}).Count) {
+                $AppRun.Descendants.Add($member);$descendantIdentities.Add($member)
+                Write-CapProcessJournal -Identity $member -Phase $AppRun.Phase
+            }
+        }
+        return @($AppRun.Descendants | Where-Object {-not [CapNative]::IsExited($_.Process.Handle,$_.Pid)})
+    }
     $dSessions=@{}
     if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {$dSessions.ExactSessionNames=@('graphcode-33333333-3333-4333-8333-333333333333','graphcode-44444444-4444-4444-8444-444444444444')}
     try {
@@ -828,6 +909,23 @@ function Close-CapGraphCodeApp {
 
     if ($AppRun.CleanupComplete) { return }
     $run = $AppRun.Run
+    if ($AppRun.PSObject.Properties['OwnedJob']) {
+        $exitFailure=$null
+        try {
+            if (-not [CapNative]::IsExited($run.Identity.Process.Handle,$run.Identity.Pid) -and $AppRun.Window -ne [IntPtr]::Zero) {
+                $null=Invoke-CapAction -Action 'file-exit' -RootHandle $AppRun.Window -ProcessIdentity $run.Identity
+                $wait=Wait-CapJobTarget -Run $AppRun.OwnedJob -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(10))
+                if ($NormalExit -and $wait.exitCode -ne 0) {throw 'Matched app did not exit normally after File Exit.'}
+            }
+            $null=Get-CapTreeForApp -AppRun $AppRun
+        } catch {$exitFailure=$_}
+        finally {
+            $null=Close-CapMatchedJob -Run $AppRun.OwnedJob -Phase $AppRun.Phase
+            $AppRun.CleanupComplete=$true
+        }
+        if ($exitFailure) {throw $exitFailure}
+        return
+    }
     if ($rehearsal) {
         $receipt = Stop-CapManagedProcess -Identity $run.Identity -TimeoutMilliseconds 5000
         $cleanupReceipts.Add($receipt)
@@ -1250,6 +1348,372 @@ function Invoke-CapRealLaunchRehearsal {
     } finally { Close-CapGraphCodeApp -AppRun $app }
 }
 
+function Close-CapMatchedJob {
+    param($Run,[string]$Phase)
+    $proof=Close-CapJobLauncher -Run $Run
+    foreach ($identity in $Run.Members) {
+        if (-not @($descendantIdentities | Where-Object {$_.Pid -eq $identity.Pid -and
+            $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc}).Count) {
+            $descendantIdentities.Add($identity)
+            Write-CapProcessJournal -Identity $identity -Phase $Phase
+        }
+    }
+    $cleanupReceipts.Add($proof)
+    return $proof
+}
+
+function Read-CapMatchedRows {
+    param($AppRun)
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $graph=Find-CapAutomationElement -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+    return @(Get-CapDirectChildren -Parent $graph | Where-Object {
+        $_.Current.AutomationId -cmatch '^(?:canvas-card|workspace-tab(?:-close)?)-'
+    } | ForEach-Object {
+        $current=$_.Current
+        $parent=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($_)
+        $selection=$_.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern)
+        [pscustomobject]@{AutomationId=[string]$current.AutomationId;Name=[string]$current.Name
+            ProcessId=[long]$current.ProcessId;ParentAutomationId=[string]$parent.Current.AutomationId
+            Selected=[bool]$selection.Current.IsSelected;IsEnabled=[bool]$current.IsEnabled
+            IsOffscreen=[bool]$current.IsOffscreen;Bounds=@($current.BoundingRectangle.Left,
+                $current.BoundingRectangle.Top,$current.BoundingRectangle.Right,$current.BoundingRectangle.Bottom)}
+    })
+}
+
+function Read-CapMatchedPanes {
+    param($AppRun,[int]$ExpectedCount,[int]$FocusedIndex=-1)
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $rootElement=[Windows.Automation.AutomationElement]::FromHandle($AppRun.Window)
+    $condition=[Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty,$true)
+    $deadline=[DateTime]::UtcNow.AddSeconds(5)
+    if ($deadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$deadline=$leaseDeadlineUtc.AddSeconds(-90)}
+    do {
+        $panes=@($rootElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition) |
+            Where-Object {-not $_.Current.IsOffscreen -and $_.Current.BoundingRectangle.Width -gt 0 -and
+                $_.Current.BoundingRectangle.Height -gt 0} | Sort-Object {$_.Current.BoundingRectangle.Left})
+        if ($panes.Count -ge $ExpectedCount) {break}
+        Assert-CapWorkerDeadline 'matched terminal provider publication';Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($panes.Count -ne $ExpectedCount) {throw "Matched panes expected $ExpectedCount bounded terminals; found=$($panes.Count)."}
+    if ($FocusedIndex -ge 0) {
+        if ($FocusedIndex -ge $panes.Count) {throw 'Matched pane focus index is outside the owned topology.'}
+        $panes[$FocusedIndex].SetFocus()
+        Start-Sleep -Milliseconds 100
+    }
+    return @($panes | ForEach-Object {
+        $current=$_.Current
+        $null=Assert-CapUiaProcessIds -ExpectedProcessId $AppRun.Run.Identity.Pid -ObservedProcessIds @($current.ProcessId)
+        $parent=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($_)
+        if ($null -eq $parent -or $parent.Current.ProcessId -ne $AppRun.Run.Identity.Pid) {throw 'Matched pane has a foreign or missing direct parent.'}
+        [pscustomobject]@{processId=$current.ProcessId;automationId=$current.AutomationId
+            parentAutomationId=$parent.Current.AutomationId;nativeWindowHandle=$current.NativeWindowHandle
+            focused=$current.HasKeyboardFocus;bounds=@($current.BoundingRectangle.Left,$current.BoundingRectangle.Top,
+                $current.BoundingRectangle.Right,$current.BoundingRectangle.Bottom)}
+    })
+}
+
+function Get-CapMatchedAttach {
+    param($AppRun,[string]$NodeId)
+    $tree=@(Get-CapTreeForApp -AppRun $AppRun)
+    $session="graphcode-$NodeId"
+    $found=@(foreach ($candidate in $tree) {
+        if ($candidate.ExpectedImagePath -ine (ConvertTo-CapImagePath (Join-Path $root 'runtime\zmx.exe'))) {continue}
+        $verified=Assert-CapProcessIdentity -Identity $candidate
+        if ($verified.State -ceq 'Exited') {continue}
+        $arguments=@([CapNative]::CommandArguments($verified.Metadata.CommandLine))
+        if ($arguments.Count -ge 3 -and $arguments[1] -ceq 'attach' -and $arguments[2] -ceq $session) {$candidate}
+    })
+    if ($found.Count -gt 1) {throw 'Restart evidence: ambiguous live attach owner'}
+    if ($found.Count -eq 0) {return $null}
+    $null=Assert-CapProcessIdentity -Identity $found[0]
+    return $found[0]
+}
+
+function Get-CapMatchedRestartEvidence {
+    param($AppRun,$Context)
+    try {$rows=@(Read-CapRestartTranscript -Path $Context.transcript)}
+    catch {
+        if ($_.Exception.Data['CapCaptureCode'] -cne 'RestartTranscriptPending') {throw}
+        Write-CapWorkerLog 'RESTART_PENDING transcript publication is incomplete; retaining original deadline'
+        return $null
+    }
+    $restartRows=@($rows | Where-Object {
+        $_.direction -ceq 'shell' -and $_.frame.kind -ceq 'request' -and
+        $_.frame.command.PSObject.Properties['graphCommand'] -and
+        $_.frame.command.graphCommand.command.PSObject.Properties['restartNode']
+    })
+    if ($restartRows.Count -eq 0) {return $null}
+    if ($restartRows.Count -ne 1) {throw 'Restart evidence: duplicate real restart requests'}
+    $daemonSnapshot=[CapNative]::Snapshot($Context.daemonProcess.Handle,$Context.daemonProcess.Id)
+    if ($daemonSnapshot.IsExited -or $daemonSnapshot.CreationFileTimeUtc -ne $Context.daemonTarget.creationFileTimeUtc -or
+        -not [CapProcessJob]::Contains($Context.daemonRun.Job,$Context.daemonProcess.Handle)) {throw 'Restart evidence: held daemon generation changed'}
+    $after=Get-CapMatchedAttach -AppRun $AppRun -NodeId $Context.nodeId
+    if ($null -eq $after -or -not [CapNative]::IsExited($Context.oldAttach.Process.Handle,$Context.oldAttach.Pid)) {return $null}
+    $members=@(Get-CapJobMembers -Run $Context.daemonRun)
+    $backend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\copilot.exe')))
+    $zmx=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\zmx.exe')))
+    if ($backend.Count -ne 1 -or $zmx.Count -lt 1) {return $null}
+    if ($backend[0].CreationFileTimeUtc -le $Context.oldBackend.CreationFileTimeUtc -or
+        -not [CapNative]::IsExited($Context.oldBackend.Process.Handle,$Context.oldBackend.Pid)) {return $null}
+    $panes=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 1)
+    $evidence=[pscustomobject]@{
+        projectPath=$Context.projectPath;nodeId=$Context.nodeId;connection=[long]$restartRows[0].connection
+        counter=[long]$Context.counter;rows=$rows
+        daemon=[pscustomobject]@{pid=[long]$daemonSnapshot.ProcessId;creationFileTimeUtc=[long]$daemonSnapshot.CreationFileTimeUtc
+            held=$true;jobOwned=$true;imageSha256=(Get-FileHash (Join-Path $root 'runtime\graphcoded.exe') -Algorithm SHA256).Hash}
+        beforeAttach=[pscustomobject]@{pid=[long]$Context.oldAttach.Pid;creationFileTimeUtc=[long]$Context.oldAttach.CreationFileTimeUtc
+            session="graphcode-$($Context.nodeId)";retired=$true}
+        afterAttach=[pscustomobject]@{pid=[long]$after.Pid;creationFileTimeUtc=[long]$after.CreationFileTimeUtc
+            session="graphcode-$($Context.nodeId)";held=$true;jobOwned=[CapProcessJob]::Contains($AppRun.OwnedJob.Job,$after.Process.Handle)
+            daemonSessionReady=$true;uiaPaneOwned=($panes.Count -eq 1);observedAfterOrdinal=[long]$rows[-1].ordinal
+            panes=$panes;backendPid=[long]$backend[0].Pid;backendCreationFileTimeUtc=[long]$backend[0].CreationFileTimeUtc
+            oldBackendPid=[long]$Context.oldBackend.Pid;oldBackendCreationFileTimeUtc=[long]$Context.oldBackend.CreationFileTimeUtc
+            oldBackendExited=$true;appJobId=$AppRun.OwnedJob.JobId}
+    }
+    $resumeReplies=@($rows | Where-Object {$_.direction -ceq 'daemon' -and $_.frame.kind -ceq 'response'})
+    if ($resumeReplies.Count -lt 1) {return $null}
+    try {$null=Assert-CapRestartEvidence -Evidence $evidence -ExpectedDaemonSha256 $job.binaries.daemon.sha256}
+    catch {
+        if ($_.Exception.Message -ceq 'Restart evidence: complete correlated restart, counter advance, checked resume and subsequent attach required') {return $null}
+        throw
+    }
+    return $evidence
+}
+
+function Invoke-CapMatchedRestartScene {
+    param($AppRun,$Context)
+    if ($Context.mode -cne 'REAL_DAEMON') {throw 'Matched Restart requires a real owned daemon, never offline peer authority.'}
+    Assert-CapWorkerDeadline 'real Restart action'
+    $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-restart-session' -SubjectId $Context.nodeId
+    $deadline=[DateTime]::UtcNow.AddSeconds(40)
+    if ($deadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$deadline=$leaseDeadlineUtc.AddSeconds(-90)}
+    do {
+        Assert-CapWorkerDeadline 'real Restart confirmation and reattach'
+        $evidence=Get-CapMatchedRestartEvidence -AppRun $AppRun -Context $Context
+        if ($null -ne $evidence) {
+            $proof=Assert-CapRestartEvidence -Evidence $evidence -ExpectedDaemonSha256 $job.binaries.daemon.sha256
+            $Context | Add-Member -NotePropertyName evidence -NotePropertyValue $evidence
+            return $proof
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Restart evidence: bounded daemon round-trip/resume/owned reattach was not confirmed'
+}
+
+function Initialize-CapMatchedWorktrees {
+    param($Fixture)
+    $project=Assert-CapOwnedPath $Fixture.graphs[0].project.path
+    if (Test-Path -LiteralPath (Join-Path $project '.git')) {throw 'Matched project must be a fresh owned git fixture.'}
+    $null=New-Item -ItemType Directory -Path $project -Force
+    $env:GIT_CONFIG_NOSYSTEM='1';$env:GIT_CONFIG_GLOBAL=Join-Path $project 'empty-gitconfig'
+    [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+    [IO.File]::WriteAllText((Join-Path $project '.gitignore'),"fixture-payload.bin`nempty-gitconfig`n.graphcode/`n")
+    foreach ($arguments in @(
+        @('init','--quiet','-b','main',$project),
+        @('-C',$project,'add','.gitignore'),
+        @('-C',$project,'-c','user.name=Capture Fixture','-c','user.email=capture-fixture@invalid',
+            'commit','--quiet','-s','-m','Seed offline capture worktree')
+    )) {
+        $output=@(& git @arguments 2>&1)
+        if ($LASTEXITCODE -ne 0) {throw "Matched worktree fixture failed: $($output -join ' ')"}
+    }
+    foreach ($tree in $Fixture.worktrees) {
+        $path=Assert-CapOwnedPath $tree.path
+        $output=@(& git -C $project worktree add --quiet -b $tree.branch $path main 2>&1)
+        if ($LASTEXITCODE -ne 0) {throw "Matched worktree add failed: $($output -join ' ')"}
+        $file=[IO.File]::Open((Join-Path $path 'fixture-payload.bin'),[IO.FileMode]::CreateNew)
+        try {$file.SetLength($tree.sizeBytes)} finally {$file.Dispose()}
+    }
+    $policyRoot=Join-Path $project '.graphcode'
+    $null=New-Item -ItemType Directory -Path $policyRoot
+    [IO.File]::WriteAllText((Join-Path $policyRoot 'worktree-policy.json'),
+        '{"allowReclaim":true,"confirmEachReclaim":true,"onResolveLanded":"ask","noticeSizeGB":20,"noticeCount":10}')
+}
+
+function Invoke-CapMatchedRestartCapture {
+    param([string]$Phase,$Fixture)
+    $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\real-restart")
+    $node=$Fixture.graphs[0].nodes | Where-Object id -CEQ '11111111-1111-4111-8111-000000000001'
+    $project=Assert-CapOwnedPath $Fixture.graphs[0].project.path
+    $wirePath=$project.Replace('\','/')
+    $graph=$Fixture.graphs[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+    $graph.project.path=$wirePath;$graph.nodes=@($node);$graph.edges=@()
+    $projects=Join-Path $roots.Support 'projects'
+    $null=New-Item -ItemType Directory -Path $projects
+    $key='v1-'+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($wirePath))).ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path $projects "$key.json"),($graph | ConvertTo-Json -Depth 30))
+    [IO.File]::WriteAllText((Join-Path $roots.Support 'recent-projects.json'),(ConvertTo-Json -InputObject @($graph.project)))
+    [IO.File]::WriteAllText((Join-Path $roots.Support 'open-projects.json'),(ConvertTo-Json -InputObject @($wirePath)))
+    $nonce=[guid]::NewGuid().ToString('N')
+    $daemonPipe="gc-s-daemon-$nonce";$shellPipe="gc-s-record-$nonce"
+    $environment=Get-CapBaseEnvironment -Roots $roots -PipeName $daemonPipe -SessionPrefix "s-$Phase"
+    $environment.GRAPHCODE_SOCKET="\\.\pipe\$daemonPipe"
+    $daemon=$null;$proxy=$null;$app=$null;$daemonProcess=$null;$daemonIdentity=$null
+    try {
+        $daemon=Start-CapJobLauncher -Root $root -OutputDirectory $roots.Peer -FilePath (Join-Path $root 'runtime\graphcoded.exe') `
+            -ArgumentList @() -WorkingDirectory $project -Role "matched-daemon-$Phase" -Environment $environment
+        $runs.Add($daemon);Write-CapProcessJournal -Identity $daemon.Identity -Phase $Phase
+        $target=Release-CapJobLauncher -Run $daemon -JournalState $journalState
+        $daemonProcess=[Diagnostics.Process]::GetProcessById([int]$target.pid)
+        $native=[CapNative]::Snapshot($daemonProcess.Handle,$daemonProcess.Id)
+        if ($native.CreationFileTimeUtc -ne $target.creationFileTimeUtc -or
+            -not [CapProcessJob]::Contains($daemon.Job,$daemonProcess.Handle)) {throw 'Matched real daemon target generation/job differs.'}
+        $daemonIdentity=Get-CapProcessIdentity -Process $daemonProcess -ExpectedImagePath (Join-Path $root 'runtime\graphcoded.exe') `
+            -Role "matched-daemon-target-$Phase" -ExpectedParentPid $daemon.Identity.Pid
+        $daemonIdentity | Add-Member -NotePropertyName JobId -NotePropertyValue $daemon.JobId
+        $daemon.Members.Add($daemonIdentity)
+        $ready=$false
+        for ($i=0;$i -lt 100;$i++) {
+            if ([CapNative]::ProbePipe($daemonPipe,100) -eq 0) {$ready=$true;break}
+            Assert-CapWorkerDeadline 'real daemon listener readiness';Start-Sleep -Milliseconds 100
+        }
+        if (-not $ready) {throw 'Matched real daemon never published its owned listener.'}
+        Initialize-CapMatchedProxy
+        $transcript=Join-Path $roots.Peer 'restart-frames.jsonl'
+        $proxy=[CapMatchedProxy]::new($shellPipe,$daemonPipe,$transcript,120000)
+        $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $shellPipe -SessionPrefix "s-$Phase"
+        $app | Add-Member -NotePropertyMembers @{SActions=[Collections.Generic.List[object]]::new();SObservation=$null}
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'Matched'
+        $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
+        $old=$null;$oldBackend=@()
+        for ($i=0;$i -lt 100;$i++) {
+            $old=Get-CapMatchedAttach -AppRun $app -NodeId $node.id
+            $members=@(Get-CapJobMembers -Run $daemon)
+            $oldBackend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\copilot.exe')))
+            if ($old -and $oldBackend.Count -eq 1) {break}
+            Assert-CapWorkerDeadline 'initial daemon-owned attach';Start-Sleep -Milliseconds 100
+        }
+        if ($null -eq $old -or $oldBackend.Count -ne 1) {throw 'Matched real daemon did not provide the initial owned attach and offline backend.'}
+        $context=[pscustomobject]@{mode='REAL_DAEMON';transcript=$transcript;nodeId=$node.id;projectPath=$wirePath
+            counter=[long]$node.sessionRestarts;oldAttach=$old;oldBackend=$oldBackend[0];daemonRun=$daemon;daemonTarget=$target;daemonProcess=$daemonProcess}
+        $proof=Invoke-CapMatchedRestartScene -AppRun $app -Context $context
+        $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
+            restart=$proof;panes=$context.evidence.afterAttach.panes}
+        Save-CapSceneImage -AppRun $app -SceneName 's-restart-confirmed' -ZoomEvidence $null -Phase $Phase
+        Close-CapGraphCodeApp -AppRun $app -NormalExit
+        $proxy.Dispose();$proxy=$null
+        $cleanup=Close-CapMatchedJob -Run $daemon -Phase $Phase
+        $realRestarts.Add([pscustomobject]@{phase=$Phase;evidence=$context.evidence
+            transcriptPath=$transcript;transcriptSha256=(Get-FileHash $transcript -Algorithm SHA256).Hash
+            daemonCleanup=$cleanup;mode='REAL_GRAPHCoded_AND_ZMX_WITH_OFFLINE_BACKEND_FIXTURE'})
+    } finally {
+        if ($app) {Close-CapGraphCodeApp -AppRun $app}
+        if ($proxy) {$proxy.Dispose()}
+        if ($daemon -and -not $daemon.CleanupComplete) {$null=Close-CapMatchedJob -Run $daemon -Phase $Phase}
+        if ($daemonProcess -and -not $daemonIdentity) {$daemonProcess.Dispose()}
+    }
+}
+
+function Invoke-CapMatchedScenes {
+    param([string]$Phase)
+    $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
+    $null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
+    foreach ($scene in @((Get-CapMatchedSceneNames)[0..16])) {
+        Assert-CapWorkerDeadline "matched scene $scene"
+        if ([DateTime]::UtcNow -ge $leaseDeadlineUtc.AddSeconds(-90)) {throw 'Matched scenes reached the required cleanup reserve.'}
+        $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\$scene")
+        $pipe="gc-s-$([guid]::NewGuid().ToString('N'))"
+        $peer=Start-CapOfflinePeer -Roots $roots -PipeName $pipe -Phase "$Phase-$scene"
+        $app=$null;$seed=$null
+        try {
+            $state=@($fixture.states | Where-Object scene -CEQ $scene)
+            $workspace=$state.Count -eq 0
+            $nodeIndex=switch ($scene) {
+                's-tabs-goal-needs-you' {0}
+                's-tabs-loop-running' {6}
+                's-tabs-agent-unknown' {7}
+                's-tabs-two-agent-selected' {1}
+                default {5}
+            }
+            if ($workspace) {
+                $node=$fixture.graphs[0].nodes[$nodeIndex]
+                $seed=Start-CapOfflineSeed -Roots $roots -Phase "$Phase-$scene" -SessionName "graphcode-$($node.id)"
+            }
+            $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $pipe -SessionPrefix "s-$Phase"
+            $app | Add-Member -NotePropertyMembers @{SActions=[Collections.Generic.List[object]]::new();SObservation=$null}
+            $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'Matched'
+            if (-not $workspace) {
+                $targetId=if ($state[0].selected) {$state[0].nodeId} else {$fixture.graphs[0].nodes[5].id}
+                $target=@($fixture.graphs[0].nodes | Where-Object id -CEQ $targetId)[0]
+                $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $target.title
+                $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-show-graph'
+                $null=Invoke-CapSceneAction -AppRun $app -Action 'actual-size'
+                $rows=@(Read-CapMatchedRows -AppRun $app)
+                $cardId=Get-CapMatchedAutomationId ("project-card:"+$fixture.graphs[0].project.path+":"+$state[0].nodeId)
+                $card=@($rows | Where-Object {$_.AutomationId -ceq $cardId -and
+                    $_.Name -ceq ($fixture.graphs[0].nodes | Where-Object id -CEQ $state[0].nodeId).title})
+                if ($card.Count -ne 1 -or $card[0].Selected -ne $state[0].selected) {throw 'Matched card selection was not observed on its actual owned UIA card.'}
+                $probe=[pscustomobject]@{zoomProbe=("Name "+$target.title+" / AutomationId prefix canvas-card-")}
+                $zoom=Measure-CapSceneZoom -AppRun $app -Scene $probe -NaturalWidth 250
+                $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
+                    fixtureState=$state[0];card=$card[0];wireState='HASH_BOUND_STATIC_PEER_NOT_LIVE_BACKEND'}
+                if ($scene -cmatch '^s-goal-unwired-') {
+                    $app.SObservation | Add-Member -NotePropertyName recoveryControls -NotePropertyValue `
+                        'REFERENCE_ONLY: Wire it up / Mark as entry; Windows control equivalence requires C8 review'
+                }
+                Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $zoom -Phase $Phase
+            } else {
+                $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
+                $total=1;$selected=0;$title=switch ($nodeIndex) {0 {'Goal'};6 {'Loop'};7 {'Agent'};default {'Copilot CLI'}}
+                $newTabs=if ($scene -cin @('s-tabs-many-first','s-tabs-overflow-last')) {11}
+                    elseif ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {2}
+                    elseif ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close')) {1} else {0}
+                for ($i=0;$i -lt $newTabs;$i++) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-new-tab';$total++;$selected=$total-1}
+                if ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-close-tab' -SubjectId '0'
+                    $total=2;$selected=0;$title='Shell'
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
+                    $selected=1
+                }
+                if ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close','s-tabs-many-first')) {
+                    if ($total -eq 12) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '2' -Name 'Shell'}
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '0' -Name $title
+                    $selected=0
+                }
+                if ($scene -ceq 's-tabs-split-right-focused') {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-split-right'}
+                $rows=@(Read-CapMatchedRows -AppRun $app)
+                $visibleCount=[Math]::Min(10,$total)
+                $first=if ($selected -ge $visibleCount) {$selected-$visibleCount+1} else {0}
+                $visible=@($first..($first+$visibleCount-1))
+                $tabs=Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $app.Run.Identity.Pid `
+                    -TotalTabs $total -SelectedTab $selected -AgentTitle $title -VisibleIndexes $visible
+                if ($scene -ceq 's-tabs-hover-close') {
+                    $tab=@($tabs.visible | Where-Object index -EQ 1)[0]
+                    Set-CapMatchedTabHover -AppRun $app -Bounds $tab.bounds
+                }
+                $panes=@(Read-CapMatchedPanes -AppRun $app -ExpectedCount $(if ($scene -ceq 's-tabs-split-right-focused') {2} else {1}) `
+                    -FocusedIndex $(if ($scene -ceq 's-tabs-split-right-focused') {1} else {0}))
+                if (@($panes | Where-Object focused).Count -ne 1) {throw 'Matched selected pane did not acquire the reported UIA focus.'}
+                $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
+                    tabs=$tabs;panes=$panes;nodeId=$node.id;nodeState=$node.state
+                    hover=if ($scene -ceq 's-tabs-hover-close') {'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'} else {'NOT_REQUESTED'}}
+                Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $null -Phase $Phase
+            }
+            Close-CapGraphCodeApp -AppRun $app -NormalExit
+        } finally {
+            if ($app) {Close-CapGraphCodeApp -AppRun $app}
+            if ($seed) {Close-CapOfflineSeed -SeedRun $seed}
+            Close-CapPeer -PeerRun $peer -Label $pipe
+        }
+    }
+    Invoke-CapMatchedRestartCapture -Phase $Phase -Fixture $fixture
+}
+
+function Set-CapMatchedTabHover {
+    param($AppRun,[double[]]$Bounds)
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $metrics=Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $border=($metrics.OuterBounds[2]-$metrics.OuterBounds[0]-$metrics.ClientBounds[2])/2
+    $topFrame=$metrics.OuterBounds[3]-$metrics.OuterBounds[1]-$metrics.ClientBounds[3]-$border
+    $x=[int](($Bounds[0]+$Bounds[2])/2-$metrics.OuterBounds[0]-$border)
+    $y=[int](($Bounds[1]+$Bounds[3])/2-$metrics.OuterBounds[1]-$topFrame)
+    if ($x -lt 0 -or $y -lt 0 -or $x -ge $metrics.ClientBounds[2] -or $y -ge $metrics.ClientBounds[3]) {throw 'Matched hover escaped the owned client area.'}
+    if (-not [GraphCodeUiaGateState]::PostHover($AppRun.Window,$x,$y)) {throw 'Posting owned tab hover failed.'}
+    Start-Sleep -Milliseconds 150
+}
+
 function Invoke-CapRealSeedRehearsal {
     if (-not $job.PSObject.Properties['seedDependencies']) { return }
     $dependencies = $job.seedDependencies
@@ -1416,13 +1880,23 @@ try {
         Invoke-CapRealSeedRehearsal
         Invoke-CapRealLaunchRehearsal
     } else {
+    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+        foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','COPILOT_GITHUB_TOKEN','COPILOT_API_KEY','ANTHROPIC_API_KEY',
+            'OPENAI_API_KEY','AZURE_OPENAI_API_KEY','CODEX_API_KEY','SSH_AUTH_SOCK','SSH_AGENT_PID',
+            'AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')) {
+            [Environment]::SetEnvironmentVariable($name,$null,'Process')
+        }
+        $matchedFixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
+        Initialize-CapMatchedWorktrees -Fixture $matchedFixture
+    }
     foreach ($phase in @('before', 'after')) {
         Assert-CapWorkerDeadline "starting phase $phase"
-        if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
+        if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {Invoke-CapMatchedScenes -Phase $phase}
+        elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
         else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    $expectedImages=if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
-    $expectedSeeds=if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
+    $expectedImages=if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedSeeds=if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {22} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
     if ($images.Count -ne $expectedImages) { throw "Expected $expectedImages images across before/after; captured $($images.Count)." }
     if ($zmxSeedReceipts.Count -ne $expectedSeeds -or @($zmxSeedReceipts | Where-Object {
         $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.cmdCount -lt 1 -or
@@ -1501,7 +1975,7 @@ try {
     if ($manifestPath -and $job -and $auth -and $journalState) {
         $finalStatus = if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
             (($rehearsal -and $rehearsalLaunches.Count -eq 1 -and $images.Count -eq 0) -or
-            (-not $rehearsal -and $images.Count -eq 10))) {
+            (-not $rehearsal -and $images.Count -eq $(if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {36} else {10})))) {
             'COMPLETE'
         } else { 'FAILED' }
         try {
@@ -1526,7 +2000,7 @@ if ($journalFinalLine) {
         try { Write-CapWorkerLog "WORKER_COMPLETE images=$($images.Count) lease=$($auth.leaseId)" }
         catch { $cleanupFailures.Add("Completion logging failed: $($_.Exception.Message)") }
     }
-    foreach ($run in $seedRuns) {
+    foreach ($run in $runs) {
         if ($run.PSObject.Properties['OutputPins']) {
             foreach ($pin in @($run.OutputPins) + @($run.ClosedOutputPins)) { $pin.Dispose() }
         }
