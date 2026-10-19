@@ -236,10 +236,32 @@ pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
 ```
 
 These eight contracts also run in the full suite registered by
-`ValidationRunner.Tests.ps1` (165 default cases, or 168 with the three real-seed
+`ValidationRunner.Tests.ps1` (166 default cases, or 169 with the three real-seed
 cases). This establishes the live native-export admission guard, not an actual
 live capture, geometry, UIA interaction, pixel result or broader native
 compatibility. Rehearsal child commands still do not authorize desktop use.
+
+Descendant discovery proves the held candidate and saved-parent native
+generation/lifetime before classifying an image. A candidate proved older than
+the parent (or newer than its proved exit) is excluded as parent-PID reuse,
+with raw advisory and native evidence retained, never adopted or terminated.
+Nonpositive, missing or unprovable creation times remain loud refusals, as do
+same-generation unknown images and missing native identity. The existing
+metadata, command, ancestry and named-binding guards remain in force.
+
+One additional registered contract contains ten explicit lifetime subcases:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -DescendantLifetimeContractOnly -ScratchRoot C:\owned\fresh-lifetime
+```
+
+It invokes the actual `Get-CapOwnedDescendants` with real held owned processes
+and deterministic advisory parent-PID injection. Native snapshot returns are
+not replaced. It checks exclusion/deduplication, the same-generation unknown
+image, five invalid saved creation values, changed saved generation and native
+acquisition failure. Its owned fixture job and actual output EOF are checked
+separately; this is not a global-host cleanup or live capture result.
 
 Run the offline regression with existing PowerShell 7.5+ and installed MSVC:
 

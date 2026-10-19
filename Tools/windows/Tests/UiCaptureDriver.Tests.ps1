@@ -16,6 +16,7 @@ param(
     [switch]$IdentityContractOnly,
     [switch]$AppChildContractOnly,
     [switch]$DescendantMetadataContractOnly,
+    [switch]$DescendantLifetimeContractOnly,
     [switch]$DAdapterContractOnly,
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
     [string]$PrebuiltFixtureManifest = '',
@@ -1242,6 +1243,130 @@ function Invoke-CapDescendantMetadataCase {
         Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
         Assert-CapTest ($detail.jobEmpty -and ($null -eq $run -or ($detail.stdoutEof -and $detail.stderrEof))) `
             'Metadata injection left an owned job or actual output pipe unclosed.' $detail
+    }
+}
+
+function Invoke-CapDescendantLifetimeContract {
+    $caseRoot = Join-Path $scratch 'descendant-lifetime'
+    $null = New-Item -ItemType Directory -Path $caseRoot
+    $module = Get-Module UiCaptureDriver
+    $self = [Diagnostics.Process]::GetCurrentProcess()
+    $runs = [Collections.Generic.List[object]]::new()
+    $jobHandle = [CapProcessJob]::Create()
+    $originalAccess = & $module { (Get-Item Function:Read-CapProcessAccess).ScriptBlock }
+    $detail = [ordered]@{ subcases = @(); jobEmpty = $false; stdoutEof = $false; stderrEof = $false }
+    try {
+        $selfIdentity = Get-CapProcessIdentity -Process $self -ExpectedImagePath $self.MainModule.FileName `
+            -Role 'graphcode-app-before-normal'
+        foreach ($role in @('older-candidate','newer-parent')) {
+            $run = Start-CapManagedProcess -FilePath (Join-Path $PSHOME 'pwsh.exe') `
+                -ArgumentList @('-NoProfile','-NonInteractive','-Command','[void][Console]::In.ReadLine()') `
+                -WorkingDirectory $caseRoot -Role 'graphcode-app-before-normal' -HoldStdin `
+                -Environment @{ TEMP = $caseRoot; TMP = $caseRoot }
+            $runs.Add($run)
+            [CapProcessJob]::Assign($jobHandle, $run.Identity.Process.Handle)
+        }
+        $candidate = $runs[0]
+        $newParent = $runs[1].Identity
+        $native = [CapNative]::Snapshot($candidate.Identity.Process.Handle, $candidate.Identity.Pid)
+        Assert-CapTest (-not $native.IsExited -and $native.CreationFileTimeUtc -gt 0 -and
+            $native.CreationFileTimeUtc -lt $newParent.CreationFileTimeUtc -and
+            $native.CreationFileTimeUtc -gt $selfIdentity.CreationFileTimeUtc) `
+            'Real held candidate must be older than the injected parent and younger than its actual parent.'
+        $actual = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($candidate.Identity.Pid)" -ErrorAction Stop
+        $row = [pscustomobject]@{ ProcessId = $actual.ProcessId; ParentProcessId = $newParent.Pid
+            SessionId = $actual.SessionId; CreationDate = $actual.CreationDate
+            ExecutablePath = $actual.ExecutablePath; CommandLine = $actual.CommandLine }
+        & $module {
+            param($Row,$Original)
+            if (Test-Path Function:Get-CimInstance) { throw 'Unexpected existing lifetime metadata seam.' }
+            $script:CapLifetimeInjection = @{ Row = $Row; OriginalAccess = $Original; FailNative = $false; NativeReads = 0 }
+            function script:Get-CimInstance {
+                param($ClassName,$Filter,$ErrorAction)
+                if ($ClassName -cne 'Win32_Process' -or $Filter -cne "ParentProcessId = $($script:CapLifetimeInjection.Row.ParentProcessId)") {
+                    throw "Unexpected lifetime candidate query: $ClassName $Filter"
+                }
+                return $script:CapLifetimeInjection.Row
+            }
+            function script:Read-CapProcessAccess {
+                param($Process,$Role,$CallSite,$ExpectedPid)
+                $state = $script:CapLifetimeInjection
+                $access = & $state.OriginalAccess @PSBoundParameters
+                if ($CallSite -ceq 'Get-CapOwnedDescendants.InitialSnapshot') {
+                    $state.NativeReads++
+                    if ($state.FailNative) { throw [ComponentModel.Win32Exception]::new(5, 'INJECTED_LIFETIME_NATIVE_ACCESS_FAILURE') }
+                }
+                return $access
+            }
+        } $row $originalAccess
+        $owned = [Collections.Generic.List[object]]::new()
+        $arguments = @{ ZmxPath = (Join-Path $caseRoot 'unknown-zmx.exe')
+            CmdPath = (Join-Path ([Environment]::SystemDirectory) 'cmd.exe')
+            ConhostPath = (Join-Path ([Environment]::SystemDirectory) 'conhost.exe')
+            SessionName = 'lifetime-test'; CommandMarker = 'lifetime-test'; OwnedDescendants = $owned }
+        $excluded = @(Get-CapOwnedDescendants -Roots @($newParent) @arguments)
+        Assert-CapTest ($excluded.Count -eq 0 -and $owned.Count -eq 0) 'Older unknown image was adopted instead of excluded.'
+        $records = @(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $candidate.Identity.Pid -and $_.ParentPid -eq $newParent.Pid })
+        Assert-CapTest ($records.Count -eq 1 -and
+            $records[0].CandidateCreationFileTimeUtc -eq $native.CreationFileTimeUtc -and
+            $records[0].ParentCreationFileTimeUtc -eq $newParent.CreationFileTimeUtc -and
+            $records[0].Disposition -ceq 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED') 'Older native generation exclusion evidence differs.'
+        $detail.subcases += @{ name = 'older unknown image excluded through actual function'; record = $records[0] }
+        $row.ExecutablePath = $null; $row.CommandLine = $null; $row.CreationDate = $null
+        $null = Get-CapOwnedDescendants -Roots @($newParent) @arguments
+        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $candidate.Identity.Pid -and $_.ParentPid -eq $newParent.Pid }).Count -eq 1) `
+            'Repeated proved-foreign exclusion duplicated evidence or required advisory image/time fields.'
+        $detail.subcases += @{ name = 'older native proof ignores incomplete advisory fields without duplicate evidence' }
+        $row.ExecutablePath = $actual.ExecutablePath; $row.CommandLine = $actual.CommandLine; $row.CreationDate = $actual.CreationDate
+        $row.ParentProcessId = $selfIdentity.Pid
+        $detail.subcases += @{ name = 'same-generation unknown image remains refused'
+            refusal = (Assert-CapRejects { Get-CapOwnedDescendants -Roots @($selfIdentity) @arguments } 'DescendantUnrecognizedImage') }
+        foreach ($invalid in @('zero','negative','null','missing','text')) {
+            $parent = $selfIdentity.PSObject.Copy()
+            switch ($invalid) {
+                zero { $parent.CreationFileTimeUtc = 0L }
+                negative { $parent.CreationFileTimeUtc = -1L }
+                null { $parent.CreationFileTimeUtc = $null }
+                missing { $parent.PSObject.Properties.Remove('CreationFileTimeUtc') }
+                text { $parent.CreationFileTimeUtc = 'unprovable' }
+            }
+            $detail.subcases += @{ name = "unprovable $invalid parent creation remains refused"
+                refusal = (Assert-CapRejects { Get-CapOwnedDescendants -Roots @($parent) @arguments } 'Unprovable descendant or held parent creation time') }
+        }
+        $changedParent = $selfIdentity.PSObject.Copy()
+        $changedParent.CreationFileTimeUtc++
+        $detail.subcases += @{ name = 'saved parent generation mismatch remains refused'
+            refusal = (Assert-CapRejects { Get-CapOwnedDescendants -Roots @($changedParent) @arguments } 'Held parent generation changed') }
+        & $module { $script:CapLifetimeInjection.FailNative = $true }
+        $detail.subcases += @{ name = 'missing native identity remains refused'
+            refusal = (Assert-CapRejects { Get-CapOwnedDescendants -Roots @($selfIdentity) @arguments } 'INJECTED_LIFETIME_NATIVE_ACCESS_FAILURE') }
+        Assert-CapTest ($detail.subcases.Count -eq 10 -and $owned.Count -eq 0 -and
+            -not [CapNative]::IsExited($candidate.Identity.Process.Handle, $candidate.Identity.Pid)) `
+            'Lifetime controls omitted a subcase, adopted or terminated the candidate.'
+        $detail.nativeReads = & $module { $script:CapLifetimeInjection.NativeReads }
+        Assert-CapTest ($detail.nativeReads -eq 10) 'Each lifetime subcase must acquire actual native identity first.'
+        return $detail
+    } finally {
+        & $module {
+            param($Original)
+            Set-Item Function:Read-CapProcessAccess -Value $Original
+            Remove-Item Function:Get-CimInstance -ErrorAction SilentlyContinue
+            Remove-Variable CapLifetimeInjection -Scope Script -ErrorAction SilentlyContinue
+        } $originalAccess
+        try {
+            [CapProcessJob]::Terminate($jobHandle)
+            [CapProcessJob]::WaitForEmpty($jobHandle, 5000)
+            $detail.jobEmpty = [CapProcessJob]::Active($jobHandle) -eq 0
+        } finally { [CapProcessJob]::Close($jobHandle) }
+        $detail.stdoutEof = $true; $detail.stderrEof = $true
+        foreach ($run in $runs) {
+            $detail.stdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully -and $detail.stdoutEof
+            $detail.stderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully -and $detail.stderrEof
+            $run.Identity.Process.Dispose()
+        }
+        $self.Dispose()
+        Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
+        Assert-CapTest ($detail.jobEmpty -and $detail.stdoutEof -and $detail.stderrEof) 'Lifetime fixture left owned processes or output pipes open.'
     }
 }
 
@@ -4516,6 +4641,18 @@ if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDire
     Write-CapDContractReport
 }
 
+if ($DescendantLifetimeContractOnly) {
+    Invoke-CapTest 'held native lifetime excludes reused-parent unknown images before image refusal' { Invoke-CapDescendantLifetimeContract }
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    [pscustomobject]@{ suite = 'UiCaptureDescendantLifetimeContract'; executed = $results.Count
+        passed = $passed; failed = $failed; cases = @($results); gui = 'NotExecuted'; images = 0 } |
+        ConvertTo-Json -Depth 35 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    [ordered]@{ suite = 'UiCaptureDescendantLifetimeContract'; executed = $results.Count; passed = $passed; failed = $failed } | ConvertTo-Json -Compress
+    if ($results.Count -ne 1 -or $passed -ne 1 -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
 if ($DescendantMetadataContractOnly) {
     Invoke-CapDescendantMetadataContracts
     $passed = @($results | Where-Object passed -EQ $true).Count
@@ -4573,6 +4710,7 @@ try {
     $cimRaceTarget = $prebuilt.CimRace
     if (-not $LaunchContractOnly) {
         Invoke-CapLiveNativeBindingContracts
+        Invoke-CapTest 'held native lifetime excludes reused-parent unknown images before image refusal' { Invoke-CapDescendantLifetimeContract }
         Invoke-CapDescendantMetadataContracts
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
@@ -5584,6 +5722,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 168 } else { 165 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 169 } else { 166 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0
