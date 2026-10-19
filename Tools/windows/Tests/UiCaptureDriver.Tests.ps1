@@ -2901,7 +2901,9 @@ function Assert-CapSeedWaitBudget {
 }
 
 function Invoke-CapSeedExitWaitControl {
-    param([switch]$PastBudget, [int]$ObservationDelayMilliseconds = 0)
+    param([switch]$PastBudget, [int]$ObservationDelayMilliseconds = 0,
+        [ValidateRange(0,5000)][int]$InjectedElapsedMilliseconds = 4000,
+        [ValidateRange(0,1000)][int]$ConfigurationDelayMilliseconds = 200)
     $caseRoot = Join-Path $scratch ('exit-' + [guid]::NewGuid().ToString('N').Substring(0,8))
     $null = New-Item -ItemType Directory -Path $caseRoot
     . $workerPath -OwnedRoot $caseRoot -DefinitionsOnly
@@ -2930,11 +2932,14 @@ public static class CapSeedDelayedExit {
     $gate = [Threading.ManualResetEventSlim]::new($false)
     $cancel = [Threading.CancellationTokenSource]::new()
     $delayedExit = $null
-    $state = [pscustomobject]@{ stamp = 0L }
+    $state = [pscustomobject]@{ stamp = 0L; testBudgetTimestamp = 0L; testBudgetRemainingMilliseconds = 0 }
     $detail = [ordered]@{
         evidence = 'INJECTED_CLOSE_JOB_RETURN_BOUNDARY_REAL_HELD_PROCESS_NOT_NATIVE_JOB_TERMINATION_PROOF'
-        pastBudget = $PastBudget.IsPresent; nativeSafetyJobEmpty = $false; actualStdoutEof = $false; actualStderrEof = $false
+        pastBudget = $PastBudget.IsPresent; nativeSafetyJobEmpty = $false; nativeSafetyRootExited = $false
+        actualStdoutEof = $false; actualStderrEof = $false
         injectedObservationDelayMilliseconds = $ObservationDelayMilliseconds
+        injectedElapsedMilliseconds = if ($PastBudget) { $InjectedElapsedMilliseconds } else { 0 }
+        injectedConfigurationDelayMilliseconds = if ($PastBudget) { $ConfigurationDelayMilliseconds } else { 0 }
     }
     try {
         $run = Start-CapManagedProcess -FilePath $target.executable -ArgumentList @() `
@@ -2952,18 +2957,29 @@ public static class CapSeedDelayedExit {
             stdoutEof = $false; stderrEof = $false; receiptPublicationStatus = 'CREATED'; launcherExitWait = $null
         })
         $snapshot = [CapNative]::Snapshot($run.Identity.Process.Handle,$run.Identity.Pid)
+        Assert-CapTest (-not $snapshot.IsExited -and $snapshot.CreationFileTimeUtc -eq $run.Identity.CreationFileTimeUtc) `
+            'Exit control lacks its live held generation before the injected gate.'
+        $detail.heldGenerationBeforeGate = $snapshot
+        $detail.nativeSafetyJobContainsHeldGeneration = [CapProcessJob]::Contains($jobHandle,$run.Identity.Process.Handle)
         $run | Add-Member -NotePropertyName LauncherImageAttestation -NotePropertyValue ([pscustomobject]@{
             pid = $snapshot.ProcessId; creationFileTimeUtc = $snapshot.CreationFileTimeUtc
             imagePath = $snapshot.ImagePath; heldHandle = $run.Identity.Process.Handle.ToInt64()
         })
         $delayedExit = [CapSeedDelayedExit]::Start($run.Identity.Process.StandardInput,
             $(if ($PastBudget) {60000} else {400}),$gate,$cancel.Token)
-        # Only the close-job return is injected. The original held process and worker kernel checks are real.
+        # The close-job boundary and its elapsed clock are injected; held-process kernel checks remain real.
         function Close-CapJobLauncher {
             param($Run)
-            $state.stamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            $state.testBudgetTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            $state.stamp = $state.testBudgetTimestamp
+            if ($PastBudget) {
+                $state.stamp -= [long]$InjectedElapsedMilliseconds * [Diagnostics.Stopwatch]::Frequency / 1000L
+            }
+            $state.testBudgetRemainingMilliseconds = [int][Math]::Max(0,[Math]::Floor(
+                ($state.stamp + 5L * [Diagnostics.Stopwatch]::Frequency - $state.testBudgetTimestamp) * 1000.0 /
+                    [Diagnostics.Stopwatch]::Frequency))
             $gate.Set()
-            if ($PastBudget) { Start-Sleep -Milliseconds 4900 }
+            if ($PastBudget) { Start-Sleep -Milliseconds $ConfigurationDelayMilliseconds }
             return [pscustomobject]@{
                 kind = 'INJECTED_CLOSED_JOB_BOUNDARY_NOT_NATIVE_TERMINATION_PROOF'
                 terminationStartedTimestamp = $state.stamp; terminationBudgetMilliseconds = 5000L
@@ -2980,6 +2996,8 @@ public static class CapSeedDelayedExit {
         $detail.identity = [pscustomobject]@{ pid = $run.Identity.Pid; creationFileTimeUtc = $run.Identity.CreationFileTimeUtc
             image = $run.Identity.ExpectedImagePath; heldHandle = $run.Identity.Process.Handle.ToInt64() }
         $detail.receipt = $run.SeedReceipt
+        $detail.testBudgetTimestamp = $state.testBudgetTimestamp
+        $detail.testBudgetRemainingMilliseconds = $state.testBudgetRemainingMilliseconds
         $detail.nativeBudget = Assert-CapSeedWaitBudget -Wait $run.SeedReceipt.launcherExitWait `
             -TerminationStartedTimestamp $state.stamp
         foreach ($mutation in @('fresh-window','fresh-argument','overspend','changed-origin')) {
@@ -3005,8 +3023,15 @@ public static class CapSeedDelayedExit {
                 'A held launcher still live past the original window was accepted.' $detail
             Assert-CapTest ($run.SeedReceipt.launcherExitWait.signalled -eq $false -and
                 $null -eq $run.SeedReceipt.launcherExitWait.terminationToSignalledMilliseconds -and
-                $run.SeedReceipt.launcherExitWait.waitBudgetRemainingMilliseconds -le 100) `
+                $run.SeedReceipt.launcherExitWait.waitBudgetRemainingMilliseconds -eq $detail.nativeBudget.expectedSuppliedMilliseconds -and
+                $run.SeedReceipt.launcherExitWait.waitBudgetRemainingMilliseconds -le 5000) `
                 'Spent-window native wait did not preserve its supplied remaining budget.' $detail
+            if ($InjectedElapsedMilliseconds -eq 5000) {
+                Assert-CapTest ($run.SeedReceipt.launcherExitWait.waitConfiguredTimestamp -ge
+                    $run.SeedReceipt.launcherExitWait.deadlineTimestamp -and
+                    $run.SeedReceipt.launcherExitWait.waitBudgetRemainingMilliseconds -eq 0) `
+                    'Fully spent original window did not configure a zero-millisecond native wait.' $detail
+            }
             $detail.observationalSchedulingToleranceMilliseconds = 5000
             $detail.observationalLimitMilliseconds = 5000 + $ObservationDelayMilliseconds +
                 $detail.observationalSchedulingToleranceMilliseconds
@@ -3040,19 +3065,40 @@ public static class CapSeedDelayedExit {
     } finally {
         $cancel.Cancel()
         $gate.Set()
+        $safetyTerminationTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+        $safetyDeadlineTimestamp = $safetyTerminationTimestamp + 5L * [Diagnostics.Stopwatch]::Frequency
         [CapProcessJob]::Terminate($jobHandle)
-        [CapProcessJob]::WaitForEmpty($jobHandle,5000)
+        $safetyRemaining = [int][Math]::Max(0,[Math]::Floor(
+            ($safetyDeadlineTimestamp-[Diagnostics.Stopwatch]::GetTimestamp()) * 1000.0 /
+                [Diagnostics.Stopwatch]::Frequency))
+        [CapProcessJob]::WaitForEmpty($jobHandle,$safetyRemaining)
         $detail.nativeSafetyJobEmpty = [CapProcessJob]::Active($jobHandle) -eq 0
         [CapProcessJob]::Close($jobHandle)
-        if ($delayedExit -and -not $delayedExit.Wait(2000)) { throw 'Exit-control delay task did not close.' }
         if ($run) {
+            $safetyConfiguredTimestamp = 0L
+            $safetySignalled = [CapNative]::WaitForExit($run.Identity.Process.Handle,$run.Identity.Pid,
+                $run.Identity.CreationFileTimeUtc,$safetyDeadlineTimestamp,[ref]$safetyRemaining,[ref]$safetyConfiguredTimestamp)
+            $detail.nativeSafetyExitWait = [pscustomobject]@{
+                kind = 'ACTUAL_OWNED_SAFETY_CLEANUP_NOT_INJECTED_WORKER_WINDOW'
+                pid = $run.Identity.Pid; creationFileTimeUtc = $run.Identity.CreationFileTimeUtc
+                heldHandle = $run.Identity.Process.Handle.ToInt64(); signalled = $safetySignalled
+                terminationStartedTimestamp = $safetyTerminationTimestamp; deadlineTimestamp = $safetyDeadlineTimestamp
+                stopwatchFrequency = [Diagnostics.Stopwatch]::Frequency
+                waitConfiguredTimestamp = $safetyConfiguredTimestamp; waitBudgetRemainingMilliseconds = $safetyRemaining
+            }
+            $detail.nativeSafetyBudget = Assert-CapSeedWaitBudget -Wait $detail.nativeSafetyExitWait `
+                -TerminationStartedTimestamp $safetyTerminationTimestamp
+            $detail.nativeSafetyRootExited = $safetySignalled -and
+                [CapNative]::IsExited($run.Identity.Process.Handle,$run.Identity.Pid)
+            if ($delayedExit -and -not $delayedExit.Wait(2000)) { throw 'Exit-control delay task did not close.' }
             $detail.actualStdoutEof = $run.StdoutTask.Wait(2000)
             $detail.actualStderrEof = $run.StderrTask.Wait(2000)
             $run.Identity.Process.Dispose()
         }
         $gate.Dispose(); $cancel.Dispose()
         Write-JournalContractJson (Join-Path $caseRoot 'evidence.json') $detail
-        Assert-CapTest ($detail.nativeSafetyJobEmpty -and $detail.actualStdoutEof -and $detail.actualStderrEof) `
+        Assert-CapTest ($detail.nativeSafetyJobEmpty -and $detail.nativeSafetyRootExited -and
+            $detail.actualStdoutEof -and $detail.actualStderrEof) `
             'Deterministic exit control left its real owned fixture or streams open.' $detail
     }
 }
@@ -3061,12 +3107,15 @@ function Invoke-CapSeedPathContracts {
     param([switch]$ExitWaitOnly)
     Invoke-CapTest 'matched S tab actual worker seed write preserves scene path and not-created cleanup' {
         if ($ExitWaitOnly) {
-            return @(Invoke-CapSeedExitWaitControl; Invoke-CapSeedExitWaitControl -PastBudget -ObservationDelayMilliseconds 1500)
+            return @(Invoke-CapSeedExitWaitControl
+                Invoke-CapSeedExitWaitControl -PastBudget -ObservationDelayMilliseconds 1500
+                Invoke-CapSeedExitWaitControl -PastBudget -InjectedElapsedMilliseconds 5000)
         }
         return @{ scratch = (Invoke-CapSeedScratchContract)
             artifactSelection = @(Invoke-CapSeedArtifactSelectionContract)
             postTerminationControls = @(Invoke-CapSeedExitWaitControl
-                Invoke-CapSeedExitWaitControl -PastBudget -ObservationDelayMilliseconds 1500)
+                Invoke-CapSeedExitWaitControl -PastBudget -ObservationDelayMilliseconds 1500
+                Invoke-CapSeedExitWaitControl -PastBudget -InjectedElapsedMilliseconds 5000)
             lifecycles = @(
             Invoke-CapSeedPathCase -Phase before -Scene s-tabs-goal-needs-you
             Invoke-CapSeedPathCase -Phase before -Scene s-tabs-goal-needs-you -BlockFirstWrite

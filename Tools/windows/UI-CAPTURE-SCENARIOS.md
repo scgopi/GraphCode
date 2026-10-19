@@ -70,10 +70,13 @@ replaced.
 
 Within the first group, deterministic delayed-signal and spent-budget refusal
 controls invoke actual worker `Close-CapOfflineSeed` with a real held fixture
-process. Only its close-job return boundary is injected and explicitly labelled
-as **not native job-empty/termination evidence**. Those controls have real,
-separate owned safety-job/EOF teardown. The matrix and full registered suites
-use the unmodified actual job closer, not that injection.
+process. Its close-job return boundary and elapsed clock are injected and
+explicitly labelled as **not native job-empty/termination evidence**. Those
+controls have real, separate owned safety-job/EOF teardown, including a held
+PID/creation exit wait sharing the safety cleanup's own five-second deadline,
+anchored before its actual job termination, not the injected worker clock.
+The matrix and seed-path lifecycle cases use the unmodified actual job closer,
+not that injection.
 
 The budget contract compares the **actual milliseconds passed to the native
 `WaitForSingleObject`** with the original Terminate timestamp, unchanged
@@ -82,6 +85,14 @@ after identity validation. It requires exactly
 `max(0, floor((deadline - configuredTimestamp) * 1000 / frequency))`, with no
 reset or extra budget; fresh-window, changed-origin, fresh-5000 and one-ms
 overspend mutations must refuse. The receipt retains these native arguments.
+The spent-window control injects 4000 ms already elapsed at its test timestamp,
+then delays 200 ms before the actual worker/native configuration. Its earlier
+test-budget sample is diagnostic only: neither that separately sampled value
+nor an arbitrary `<=100` cap defines the native argument. A second control
+injects a fully spent 5000 ms window and requires an actual zero-millisecond
+wait, an unsignalled held root, null signal latency and the unchanged kernel-live
+refusal. These controls remain inside the existing first S2 group: **delta 0**,
+with registered totals still **177 default / 180 real-seed**.
 Wall observation is separate: a deterministic 1500 ms delay after actual Close
 reproduces the old strict wall-time assertion, and a documented 5000 ms
 observational scheduling tolerance applies only to that wall measurement
