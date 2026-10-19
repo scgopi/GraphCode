@@ -64,7 +64,11 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     return "Literal narrow/wide and once-only 144-DPI source geometry"
   }
   Invoke-MultiCase "compact overview rejects obsolete 220x86 card geometry" -Negative {
-    return Reject-MultiCase { Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204) } "MULTIPROJECT_BOUNDS"
+    $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204) } "MULTIPROJECT_BOUNDS"
+    $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(358,215,1402,942) @(19,210,268,306) } "MULTIPROJECT_BOUNDS"
+    $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(358,215,1402,942) @(19,315,268,400) } "MULTIPROJECT_BOUNDS"
+    $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(358,215,1402,942) @(19,315,267,411) } "MULTIPROJECT_BOUNDS"
+    return "Old card, vertical clipping, wrong scale/aspect, and a greater-than-one-pixel width discrepancy rejected"
   }
   Invoke-MultiCase "compact overview rejects the obsolete 760-pixel lane floor" -Negative {
     $geometry = Get-MultiProjectLaneGeometry @(220,34,1028,900) @(382,134,632,230)

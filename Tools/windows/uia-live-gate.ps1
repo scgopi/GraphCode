@@ -4252,6 +4252,11 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
       $canvas[3] -le $canvas[1] -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
     throw "MULTIPROJECT_BOUNDS: positive live canvas/card rectangles required"
   }
+  # These callers reset actual-size, then pan horizontally only. An uncontained
+  # vertical extent cannot calibrate the scale, even if it has a positive size.
+  if ($card[1] -lt $canvas[1] -or $card[3] -gt $canvas[3]) {
+    throw "MULTIPROJECT_BOUNDS: vertically clipped card cannot establish scale"
+  }
   $scale = ($card[3] - $card[1]) / 96
   if ([Math]::Abs(($card[2] - $card[0]) / $scale - 250) -gt 1) {
     throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
