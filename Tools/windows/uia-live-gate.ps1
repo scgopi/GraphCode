@@ -3559,7 +3559,8 @@ function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
         "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
         "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
         "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
-      if ($staticIds -ccontains $identity.value -or @($chromePrefixes | Where-Object {
+      if ($identity.value -cmatch '^workspace-restart-session-[0-9]+$' -or
+          $staticIds -ccontains $identity.value -or @($chromePrefixes | Where-Object {
           Test-MultiProjectAutomationPrefix $identity.value $_
         }).Count -gt 0) { $family = "source-supported-chrome" }
     }

@@ -1427,6 +1427,32 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase ($metadata.observationReady -and $metadata.family -ceq "source-supported-chrome") "known static source chrome rejected"
     return "Provider static Graph control, not semantic card"
   }
+  Invoke-MultiCase "owned restart session chrome remains in the complete workspace metadata batch" {
+    $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock 4242 "workspace-restart-session-2140902926206787169") 4242
+    Assert-MultiCase ($metadata.observationReady -and $metadata.ownership -ceq "owned" -and
+      $metadata.family -ceq "source-supported-chrome" -and (Test-MultiProjectMetadataBatch @($metadata)) -and
+      ($global:multiMetadataAccessOrder -join "|") -ceq "PID|ID|PID") `
+      "source-published restart action is unresolved despite stable owned PID and exact numeric identity"
+    return "App workspace-restart-session action retained and classified without Name or invented owner metadata"
+  }
+  foreach ($case in @(
+      @{ name = "foreign restart"; pid = 7777; after = 7777; id = "workspace-restart-session-2140902926206787169" },
+      @{ name = "changed restart owner"; pid = 4242; after = 7777; id = "workspace-restart-session-2140902926206787169" },
+      @{ name = "missing restart PID"; pid = 0; after = 0; id = "workspace-restart-session-2140902926206787169" },
+      @{ name = "missing restart ID"; pid = 4242; after = 4242; id = $null },
+      @{ name = "invalid typed restart ID"; pid = 4242; after = 4242; id = 7 },
+      @{ name = "empty restart suffix"; pid = 4242; after = 4242; id = "workspace-restart-session-" },
+      @{ name = "nonnumeric restart suffix"; pid = 4242; after = 4242; id = "workspace-restart-session-foreign" },
+      @{ name = "restart extra suffix"; pid = 4242; after = 4242; id = "workspace-restart-session-2140902926206787169-extra" }
+    )) {
+    Invoke-MultiCase ("restart metadata rejects " + $case.name) -Negative {
+      $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock $case.pid $case.id $case.after) 4242
+      Assert-MultiCase (-not $metadata.observationReady -and -not (Test-MultiProjectMetadataBatch @($metadata)) -and
+        -not ($global:multiMetadataAccessOrder -contains "FORBIDDEN_NAME")) `
+        "restart taxonomy weakened exact owned identity: $($case.name)"
+      return "Unresolved or foreign restart stays counted and cannot make its metadata batch ready"
+    }
+  }
   foreach ($case in @(
       @{ name = "null native candidate"; pid = 0; id = $null; after = 0; state = "unavailable"; owner = "unavailable" },
       @{ name = "foreign null ID"; pid = 7777; id = $null; after = 7777; state = "unavailable"; owner = "foreign" },
@@ -1579,6 +1605,13 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (Test-MultiProjectObservedSurface "workspace" $true (New-MultiWorkspaceProjection) $workspaceOwner 4242) `
       "literal expected workspace marker shape rejected"
     return "Functional mock only: exact node-bound constant loop bar and project-bound named toolbar"
+  }
+  Invoke-MultiCase "classified restart chrome alone cannot prove workspace owner identity" -Negative {
+    $metadata = Get-MultiProjectFragmentMetadata (New-MultiMetadataMock 4242 "workspace-restart-session-2140902926206787169") 4242
+    Assert-MultiCase ($metadata.observationReady -and -not (Test-MultiProjectObservedSurface "workspace" $true `
+      ([ordered]@{ loopBars = @(); toolbars = @(); foreignWorkspaceFragmentCount = 0 }) $workspaceOwner 4242)) `
+      "restart action replaced the exact node-bound loop bar and project-bound toolbar proof"
+    return "Classified action is not an owner/node/project marker; both exact source markers remain mandatory"
   }
   foreach ($mutation in @("project-only", "missing-loop", "missing-toolbar", "wrong-prefix", "wrong-node", "wrong-project",
       "wrong-pid", "pid-type", "loop-name", "toolbar-name", "loop-duplicate", "toolbar-duplicate",
