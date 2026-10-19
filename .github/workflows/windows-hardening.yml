@@ -28,6 +28,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       windows: ${{ steps.classify.outputs.windows }}
+      native_a11y: ${{ steps.classify.outputs.native_a11y }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -106,6 +107,21 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  native-accessibility:
+    name: "Native accessibility provider"
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.native_a11y != 'false') }}
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Verify native accessibility harness failure attribution
+        shell: pwsh
+        run: ./Tools/windows/Tests/AccessibilityProvider.Native.Tests.Harness.Tests.ps1
+      - name: Run native accessibility provider tests
+        shell: pwsh
+        run: ./Tools/windows/Tests/AccessibilityProvider.Native.Tests.ps1
+
   full-pinned:
     name: "Full pinned Windows validation"
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -113,6 +129,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Verify native accessibility harness failure attribution
+        shell: pwsh
+        run: ./Tools/windows/Tests/AccessibilityProvider.Native.Tests.Harness.Tests.ps1
       - uses: compnerd/gha-setup-swift@397094e75494a93fa8d81db0268dbc8f5d6cf7c6 # v0.4.1
         with:
           swift-version: swift-6.3.3-release

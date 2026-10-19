@@ -2,7 +2,7 @@
 # Decide which expensive CI suites a change needs.
 #
 # Prints (and appends to $GITHUB_OUTPUT when set) one line per suite:
-#   windows=true|false  macos=true|false  linux=true|false
+#   windows=true|false  macos=true|false  linux=true|false  native_a11y=true|false
 #
 # Only pull_request events are narrowed. Every other event (push, merge_group,
 # workflow_dispatch, schedule) gets full validation. Anything the classifier cannot
@@ -33,10 +33,11 @@ done
 windows=false
 macos=false
 linux=false
+native_a11y=false
 
 emit() {
   local line
-  for line in "windows=$windows" "macos=$macos" "linux=$linux"; do
+  for line in "windows=$windows" "macos=$macos" "linux=$linux" "native_a11y=$native_a11y"; do
     echo "$line"
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
       echo "$line" >>"$GITHUB_OUTPUT"
@@ -48,6 +49,7 @@ all() {
   windows=true
   macos=true
   linux=true
+  native_a11y=true
 }
 
 if [[ "$event" != "pull_request" ]]; then
@@ -95,6 +97,16 @@ for path in "${paths[@]}"; do
   # The classifier governs every gated suite, so a change to it re-runs them all.
   case "$path" in
     Tools/ci/*) all; matched=1 ;;
+  esac
+
+  # Run the native provider independently on PRs touching its implementation,
+  # fixture, harness, or workflow; it needs only the hosted MSVC/Windows SDK.
+  case "$path" in
+    graphcode-windows/src/AccessibilityProvider.cpp | \
+      graphcode-windows/src/AccessibilityProvider.h | \
+      Tools/windows/Tests/AccessibilityProvider.Native.Tests.* | \
+      .github/workflows/windows-hardening.yml)
+      native_a11y=true; matched=1 ;;
   esac
 
   # Windows: the Zig shell, its validation/bootstrap/packaging tooling, the Windows

@@ -24,6 +24,8 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Standalone setup under PowerShell 5.1 and 7 | `pwsh Tools\windows\Tests\Packaging.Standalone.Tests.ps1` |
 | Release publishing: signing gates, asset labeling, workflow contract | `pwsh Tools\windows\Tests\Release.Tests.ps1` |
 | Product/investigation provider pin consistency | `pwsh Tools\windows\Tests\ProviderPins.Tests.ps1` |
+| Native accessibility provider (MSVC and Windows SDK) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1` |
+| Native accessibility harness failure attribution (mock tools, no native fixture) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1` |
 | Native release feed, URL handoff, and allocation safety | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes updater tests) |
 | Real-product packaging and source/standalone install/upgrade/rollback/uninstall | `pwsh Tools\windows\validate.ps1 -Task packaging` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
@@ -42,6 +44,32 @@ This deliberately trades additional CI usage for reliable branch protection.
 Full-pinned and owned-environment hardening remain dispatch/schedule-gated as
 defined in the workflow; they are separate evidence, not required PR contexts.
 No merge-queue support is introduced.
+
+The hardening workflow also runs **Native accessibility provider** on
+`windows-2022` for pull requests changing `AccessibilityProvider.cpp`/`.h`,
+`AccessibilityProvider.Native.Tests.*`, the hardening workflow, or the
+classifier. The existing classifier emits `native_a11y`; documentation-only
+changes skip this job, while unknown paths and classification failures run it.
+This standalone native job does not install Zig or Swift and is separate from
+the manually dispatched full-pinned gate. Its log reports the resolved vcvars
+path and separate setup, compiler discovery, compilation, and executable exits.
+An abrupt command exit names the last entered stage; success requires exactly
+one `204 checks, 0 failures` summary. Both PR-native and full-pinned jobs first
+run the mock-tool harness regression, which injects exit 255 at setup, discovery,
+and compiler entry without compiling or running the native fixture.
+The provider test itself exercises the native fixture, not physical keyboard input, a screen reader,
+or visual/platform parity.
+
+Repeated Swift environment initialization can grow inherited `PATH` until
+vcvars fails with `The input line is too long` and abruptly exits cmd with 255.
+The native harness removes duplicate entries case-insensitively, retaining the
+first occurrence and order; it does not truncate unique entries. It restores the
+exact original process `PATH` on success and failure. Logs measure its inherited
+and deduplicated lengths and, after successful native execution, the actual
+post-vcvars length including setup additions. Both launch boundaries must remain
+below 8191 characters. The original hosted failure did not record a length.
+[Issue #893](https://github.com/scgopi/GraphCode/issues/893) tracks the upstream
+repeated-prepend problem; this defense does not change `validate.ps1`.
 
 ### Parallel CI layout
 
