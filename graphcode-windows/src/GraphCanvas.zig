@@ -5,6 +5,7 @@ const Sidebar = @import("Sidebar.zig");
 const WorktreeStatus = @import("WorktreeStatus.zig");
 const WorkspaceControls = @import("WorkspaceControls.zig");
 const LoopBarLayout = @import("LoopBarLayout.zig");
+const LaneLayout = @import("LaneLayout.zig");
 const c = @import("Win32.zig").c;
 const AppFont = @import("AppFont.zig");
 const GdiplusAA = @import("GdiplusAA.zig");
@@ -43,6 +44,8 @@ pub const CanvasState = struct {
     node_drag_x: i32 = 0,
     node_drag_y: i32 = 0,
     node_drag_origin: NodeOffset = .{},
+    node_drag_pan_x: f32 = 0,
+    node_drag_pan_y: f32 = 0,
     hovered_connector: ?usize = null,
     /// Native touchscreen pinch (WM_GESTURE/GID_ZOOM) state. `pinch_base_distance`
     /// and `pinch_base_zoom` are captured once at GF_BEGIN and every subsequent
@@ -61,6 +64,72 @@ pub const CanvasState = struct {
     /// whatever is now on screen, rather than silently continuing to scale
     /// it.
     pinch_context: u64 = 0,
+    project_layout: ?LaneLayout.Layout = null,
+    overview_layout: ?LaneLayout.Overview = null,
+    layout_fingerprint: ?u64 = null,
+    layout_bounds: c.RECT = .{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = 1280, .bottom = 720 },
+
+    pub fn syncLayout(self: *CanvasState, allocator: std.mem.Allocator, model: *const GraphModel.Model, bounds: c.RECT, order: []const []const u8, declared: []const []const u8) !void {
+        self.layout_bounds = bounds;
+        const fingerprint = layoutFingerprint(model, bounds, order, declared);
+        if (self.layout_fingerprint == fingerprint) return;
+        // A failed refresh must not leave yesterday's indices under today's nodes.
+        self.deinitLayout();
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const temp = scratch.allocator();
+        const sidebar_order = try sidebarLayoutOrder(temp, model, order);
+        var project: ?LaneLayout.Layout = null;
+        errdefer if (project) |*layout| layout.deinit();
+        const height: f32 = @floatFromInt(@max(1, bounds.bottom - bounds.top));
+        if (model.graph) |graph| {
+            var row_height = LaneLayout.MacMetrics.row_height;
+            for (graph.nodes.items) |node| {
+                if (GraphModel.subgraphNodeCount(node.subgraph_json) > 0)
+                    row_height = LaneLayout.SubGraphMetrics.row_pitch;
+            }
+            project = try LaneLayout.init(allocator, graph.nodes.items, graph.edges.items, .{
+                .row_budget = LaneLayout.MacMetrics.rowBudget(height),
+                .row_height = row_height,
+                .order = sidebar_order,
+                .declared_entries = declared,
+            });
+        }
+        const graphs = try temp.alloc(LaneLayout.OverviewGraph, model.graphs.items.len);
+        for (model.graphs.items, graphs) |graph, *input| {
+            const nodes = try temp.alloc(LaneLayout.Node, graph.nodes.items.len);
+            for (graph.nodes.items, nodes) |node, *value| value.* = .{ .id = node.id, .loop_type = node.loop_type };
+            const edges = try temp.alloc(LaneLayout.Edge, graph.edges.items.len);
+            for (graph.edges.items, edges) |edge, *value| value.* = .{
+                .id = edge.id,
+                .from = edge.from,
+                .to = edge.to,
+                .kind = edge.kind,
+                .fired = edge.fired,
+            };
+            input.* = .{
+                .graph = .{ .nodes = nodes, .edges = edges },
+                .is_global = graph.project.isGlobal(),
+                .order = sidebar_order,
+                .declared_entries = if (model.graph) |active|
+                    if (std.mem.eql(u8, active.project.path, graph.project.path)) declared else &.{}
+                else
+                    &.{},
+            };
+        }
+        const overview = try LaneLayout.initOverview(allocator, graphs, height);
+        self.project_layout = project;
+        self.overview_layout = overview;
+        self.layout_fingerprint = fingerprint;
+    }
+
+    pub fn deinitLayout(self: *CanvasState) void {
+        if (self.project_layout) |*layout| layout.deinit();
+        if (self.overview_layout) |*layout| layout.deinit();
+        self.project_layout = null;
+        self.overview_layout = null;
+        self.layout_fingerprint = null;
+    }
 
     pub fn beginPan(self: *CanvasState, x: i32, y: i32) void {
         self.dragging = true;
@@ -118,6 +187,10 @@ pub const CanvasState = struct {
         self.edge_drag_source_id = "";
         if (self.node_dragging and self.node_drag_index < self.node_offsets.len)
             self.node_offsets[self.node_drag_index] = self.node_drag_origin;
+        if (self.node_dragging) {
+            self.pan_x = self.node_drag_pan_x;
+            self.pan_y = self.node_drag_pan_y;
+        }
         self.node_dragging = false;
         self.node_drag_started = false;
         self.node_drag_key = 0;
@@ -137,26 +210,26 @@ pub const CanvasState = struct {
     }
 
     pub fn beginNodeDrag(self: *CanvasState, node_id: []const u8, index: usize, x: i32, y: i32) void {
-        if (index >= self.node_offsets.len) return;
         self.node_dragging = true;
         self.node_drag_started = false;
         self.node_drag_index = index;
         self.node_drag_key = nodeKey(node_id);
         self.node_drag_x = x;
         self.node_drag_y = y;
-        self.node_drag_origin = self.node_offsets[index];
+        self.node_drag_origin = if (index < self.node_offsets.len) self.node_offsets[index] else .{};
+        self.node_drag_pan_x = self.pan_x;
+        self.node_drag_pan_y = self.pan_y;
     }
 
     pub fn updateNodeDrag(self: *CanvasState, x: i32, y: i32) void {
-        if (!self.node_dragging or self.node_drag_index >= self.node_offsets.len) return;
+        if (!self.node_dragging) return;
         if (!self.node_drag_started) {
             if (@abs(x - self.node_drag_x) < 6 and @abs(y - self.node_drag_y) < 6) return;
             self.node_drag_started = true;
         }
-        self.node_offsets[self.node_drag_index] = .{
-            .x = self.node_drag_origin.x + @as(f32, @floatFromInt(x - self.node_drag_x)) / self.zoom,
-            .y = self.node_drag_origin.y + @as(f32, @floatFromInt(y - self.node_drag_y)) / self.zoom,
-        };
+        // ProjectCanvasView's parent DragGesture pans the sheet, not one card.
+        self.pan_x = self.node_drag_pan_x + @as(f32, @floatFromInt(x - self.node_drag_x));
+        self.pan_y = self.node_drag_pan_y + @as(f32, @floatFromInt(y - self.node_drag_y));
     }
 
     pub fn endNodeDrag(self: *CanvasState) void {
@@ -210,8 +283,8 @@ pub const CanvasState = struct {
         }
 
         if (self.node_dragging) {
-            for (self.node_offset_keys, self.node_offset_used, 0..) |key, used, index| {
-                if (used and key == self.node_drag_key) {
+            for (nodes, 0..) |node, index| {
+                if (nodeKey(node.id) == self.node_drag_key) {
                     self.node_drag_index = index;
                     return;
                 }
@@ -374,13 +447,87 @@ pub const CanvasState = struct {
         self.zoom = std.math.clamp(@min(
             @as(f32, @floatFromInt(viewport_width)) / @as(f32, @floatFromInt(content_width)),
             @as(f32, @floatFromInt(viewport_height)) / @as(f32, @floatFromInt(content_height)),
-        ), 0.55, 1.8);
+        ), 0.55, 1);
         self.pan_x = @as(f32, @floatFromInt(bounds.left + 24)) +
-            (@as(f32, @floatFromInt(viewport_width)) - @as(f32, @floatFromInt(content_width)) * self.zoom) / 2;
+            (@as(f32, @floatFromInt(viewport_width)) - @as(f32, @floatFromInt(content_width)) * self.zoom) / 2 -
+            @as(f32, @floatFromInt(bounds.left)) * self.zoom;
         self.pan_y = @as(f32, @floatFromInt(bounds.top + 24)) +
-            (@as(f32, @floatFromInt(viewport_height)) - @as(f32, @floatFromInt(content_height)) * self.zoom) / 2;
+            (@as(f32, @floatFromInt(viewport_height)) - @as(f32, @floatFromInt(content_height)) * self.zoom) / 2 -
+            @as(f32, @floatFromInt(bounds.top)) * self.zoom;
     }
 };
+
+fn sidebarLayoutOrder(allocator: std.mem.Allocator, model: *const GraphModel.Model, roots: []const []const u8) ![]const []const u8 {
+    var expanded = Sidebar.State.init(allocator);
+    const root_order = try allocator.alloc([]u8, roots.len);
+    for (roots, root_order) |id, *owned| owned.* = try allocator.dupe(u8, id);
+    expanded.root_order = .{ .items = root_order, .capacity = root_order.len };
+    // The enclosing arena owns traversal storage; node IDs remain borrowed.
+    // Expansion never changes the canvas's order, only the sidebar's visibility.
+    for (model.graphs.items) |graph| {
+        for (graph.nodes.items) |node| try expanded.expanded_nodes.put(allocator, node.id, {});
+    }
+    if (model.graph) |graph| {
+        for (graph.nodes.items) |node| try expanded.expanded_nodes.put(allocator, node.id, {});
+    }
+    const rows = try Sidebar.appendRows(allocator, model, null, 0, &expanded);
+    var order = std.array_list.Managed([]const u8).init(allocator);
+    for (rows.items) |row| {
+        if (row.kind != .loop) continue;
+        const graph = Sidebar.graphForProject(model, row.project_path orelse return error.InvalidSidebarLayout) orelse return error.InvalidSidebarLayout;
+        if (row.index >= graph.nodes().len) return error.InvalidSidebarLayout;
+        try order.append(graph.nodes()[row.index].id);
+    }
+    return order.items;
+}
+
+fn layoutFingerprint(model: *const GraphModel.Model, bounds: c.RECT, order: []const []const u8, declared: []const []const u8) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hash, bounds.bottom - bounds.top);
+    std.hash.autoHash(&hash, model.graph != null);
+    if (model.graph) |graph| {
+        std.hash.autoHash(&hash, graph.project.path.len);
+        hash.update(graph.project.path);
+        hashLayoutGraph(&hash, graph.nodes.items, graph.edges.items);
+    }
+    std.hash.autoHash(&hash, model.graphs.items.len);
+    for (model.graphs.items) |graph| {
+        std.hash.autoHash(&hash, graph.project.path.len);
+        hash.update(graph.project.path);
+        hashLayoutGraph(&hash, graph.nodes.items, graph.edges.items);
+    }
+    for (order) |id| {
+        std.hash.autoHash(&hash, id.len);
+        hash.update(id);
+    }
+    std.hash.autoHash(&hash, order.len);
+    for (declared) |id| {
+        std.hash.autoHash(&hash, id.len);
+        hash.update(id);
+    }
+    std.hash.autoHash(&hash, declared.len);
+    return hash.final();
+}
+
+fn hashLayoutGraph(hash: *std.hash.Wyhash, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) void {
+    std.hash.autoHash(hash, nodes.len);
+    for (nodes) |node| {
+        std.hash.autoHash(hash, node.id.len);
+        hash.update(node.id);
+        std.hash.autoHash(hash, node.subgraph_json.len);
+        hash.update(node.subgraph_json);
+    }
+    std.hash.autoHash(hash, edges.len);
+    for (edges) |edge| {
+        std.hash.autoHash(hash, edge.from.len);
+        hash.update(edge.from);
+        std.hash.autoHash(hash, edge.to.len);
+        hash.update(edge.to);
+        std.hash.autoHash(hash, edge.kind.len);
+        hash.update(edge.kind);
+        std.hash.autoHash(hash, edge.blocks_target);
+    }
+}
 
 fn nodeKey(id: []const u8) u64 {
     return std.hash.Wyhash.hash(0, id);
@@ -692,6 +839,7 @@ pub fn paint(
     switch (surface) {
         .overview => drawOverview(hdc, allocator, model, graph_bounds, state, declared_entries) catch |err| {
             std.log.warn("Overview card role resolution failed: {s}", .{@errorName(err)});
+            drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
         },
         .quick_chats => drawQuickChats(hdc, allocator, model, graph_bounds, state),
         .project => if (model.graph) |graph| {
@@ -699,9 +847,11 @@ pub fn paint(
             drawCompositeBreadcrumb(hdc, allocator, model, graph_bounds);
             if (graph.nodes.items.len == 0) {
                 emptyGraph(hdc, allocator, graph, graph_bounds);
+            } else if (state.project_layout == null) {
+                drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
             } else {
-                if (resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, declared_entries)) |roles| {
-                    defer allocator.free(roles);
+                if (state.project_layout) |layout| {
+                    const roles = layout.roles;
                     const geometry = GraphGeometry{ .state = state };
                     if (graphBand(graph.nodes.items.len, geometry)) |band| {
                         drawLaneBand(hdc, band, state.zoom);
@@ -728,8 +878,6 @@ pub fn paint(
                             state,
                         );
                     }
-                } else |err| {
-                    std.log.warn("Project card role resolution failed: {s}", .{@errorName(err)});
                 }
             }
         } else {
@@ -842,21 +990,20 @@ fn drawOverview(
     state: *const CanvasState,
     declared_entries: []const []const u8,
 ) !void {
+    _ = declared_entries;
     if (model.graphs.items.len == 0) {
         const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
         drawTextRect(hdc, allocator, "Nothing running yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
         drawTextRect(hdc, allocator, "Loops from every folder you open show up here, wired to how they run.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
         return;
     }
-    for (model.graphs.items, 0..) |graph, graph_index| {
-        const active_declared_entries: []const []const u8 = if (model.graph) |active_graph|
-            if (std.mem.eql(u8, active_graph.project.path, graph.project.path)) declared_entries else &.{}
-        else
-            &.{};
-        const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, active_declared_entries);
-        defer allocator.free(roles);
+    const overview = state.overview_layout orelse return error.GraphLayoutUnavailable;
+    for (overview.lanes) |laid_out| {
+        const graph_index = laid_out.graph_index;
+        const graph = model.graphs.items[graph_index];
+        const roles = laid_out.layout.roles;
         const lane = overviewLaneBounds(model, graph_index, bounds, state);
-        drawLaneBand(hdc, rect(lane.left - scaledValue(18, state.zoom), lane.top, lane.right, lane.bottom), state.zoom);
+        drawLaneBand(hdc, lane, state.zoom);
         const caption = overviewLaneCaption(model, graph_index, bounds, state);
         const title = try std.fmt.allocPrint(allocator, "{s} · {d} loop{s}", .{
             graph.project.name, graph.nodes.items.len, if (graph.nodes.items.len == 1) "" else "s",
@@ -936,25 +1083,15 @@ fn drawQuickChats(
     }
 }
 
-fn overviewLaneHeight(node_count: usize) i32 {
-    return @max(@as(i32, 96), @as(i32, @intCast(((node_count + 2) / 3) * 128 + 48)));
-}
-
 fn overviewLaneBounds(
     model: *const GraphModel.Model,
     graph_index: usize,
     bounds: c.RECT,
     state: *const CanvasState,
 ) c.RECT {
-    var top: i32 = 38;
-    for (model.graphs.items[0..@min(graph_index, model.graphs.items.len)]) |graph| {
-        top += overviewLaneHeight(graph.nodes.items.len) + 20;
-    }
-    const height = if (graph_index < model.graphs.items.len)
-        overviewLaneHeight(model.graphs.items[graph_index].nodes.items.len)
-    else
-        0;
-    return transformedRect(bounds, state, 24, top, @max(806, bounds.right - bounds.left - 48), height);
+    _ = model;
+    const lane = cachedOverviewLane(state, graph_index) orelse return rect(0, 0, 0, 0);
+    return transformedRect(bounds, state, @intFromFloat(LaneLayout.MacMetrics.band_x), @intFromFloat(lane.top), @intFromFloat(lane.width), @intFromFloat(lane.height));
 }
 
 pub fn overviewCardBounds(
@@ -964,15 +1101,18 @@ pub fn overviewCardBounds(
     bounds: c.RECT,
     state: *const CanvasState,
 ) c.RECT {
-    const lane = overviewLaneBounds(model, graph_index, bounds, state);
-    const column = @as(i32, @intCast(node_index % 3));
-    const row = @as(i32, @intCast(node_index / 3));
-    return rect(
-        lane.left + scaledValue(18 + column * 260, state.zoom),
-        lane.top + scaledValue(46 + row * 122, state.zoom),
-        lane.left + scaledValue(18 + column * 260, state.zoom) + scaledValue(Tokens.loop_card_width, state.zoom),
-        lane.top + scaledValue(46 + row * 122, state.zoom) + scaledValue(Tokens.loop_card_height, state.zoom),
-    );
+    _ = model;
+    const lane = cachedOverviewLane(state, graph_index) orelse return rect(0, 0, 0, 0);
+    if (node_index >= lane.layout.positions.len) return rect(0, 0, 0, 0);
+    return cardBoundsAt(lane.layout.positions[node_index], bounds, state);
+}
+
+fn cachedOverviewLane(state: *const CanvasState, graph_index: usize) ?*const LaneLayout.OverviewLane {
+    const overview = &(state.overview_layout orelse return null);
+    for (overview.lanes) |*lane| {
+        if (lane.graph_index == graph_index) return lane;
+    }
+    return null;
 }
 
 pub const OverviewLaneCaption = struct {
@@ -1074,23 +1214,28 @@ pub fn hitTestZoomControl(x: i32, y: i32, bounds: c.RECT) ?ZoomControl {
     return null;
 }
 
-pub fn contentSize(model: *const GraphModel.Model, surface: Surface) struct { width: i32, height: i32 } {
+pub fn contentSize(model: *const GraphModel.Model, surface: Surface, state: *const CanvasState) struct { width: i32, height: i32 } {
     return switch (surface) {
-        .overview => blk: {
-            var height: i32 = 38;
-            for (model.graphs.items) |graph| height += overviewLaneHeight(graph.nodes.items.len) + 20;
-            break :blk .{ .width = 854, .height = @max(1, height) };
-        },
+        .overview => if (state.overview_layout) |overview|
+            .{ .width = @intFromFloat(@max(1, overview.size.x)), .height = @intFromFloat(@max(1, overview.size.y)) }
+        else
+            .{ .width = 1, .height = 1 },
         .quick_chats => .{
             .width = 808,
             .height = @max(1, @as(i32, @intCast(((model.quick_chats.items.len + 2) / 3) * 104 + 66))),
         },
-        .project => if (model.graph) |graph| .{
-            .width = @max(1, @as(i32, @intCast(@min(graph.nodes.items.len, 3))) * 260 + 64),
-            .height = @max(1, @as(i32, @intCast((graph.nodes.items.len + 2) / 3)) * 140 + 100),
+        .project => if (state.project_layout) |layout| .{
+            .width = @intFromFloat(LaneLayout.MacMetrics.band_x * 2 + LaneLayout.MacMetrics.bandWidth(layout.content_width)),
+            .height = projectContentHeight(layout),
         } else .{ .width = 1, .height = 1 },
         .workspace => .{ .width = 1, .height = 1 },
     };
+}
+
+fn projectContentHeight(layout: LaneLayout.Layout) i32 {
+    var bottom = LaneLayout.MacMetrics.origin.y;
+    for (layout.positions) |position| bottom = @max(bottom, position.y);
+    return @intFromFloat(bottom + LaneLayout.MacMetrics.card_height / 2 + LaneLayout.MacMetrics.padding + LaneLayout.MacMetrics.lane_top);
 }
 
 pub fn hitTestOverview(
@@ -1353,25 +1498,27 @@ test "worktree notice lane geometry preserves old actions and shares the new chi
         ,
     };
     for (frames) |frame| _ = try model.updateFromFrame(frame);
-    const bounds = rect(220, 34, 1200, 900);
-    const state = CanvasState{};
+    const bounds = rect(220, 34, 3200, 1400);
+    var state = try modelTestState(&model, .{}, bounds);
+    defer state.deinitLayout();
     const a = overviewLaneCaption(&model, 0, bounds, &state);
     const b = overviewLaneCaption(&model, 1, bounds, &state);
-    try std.testing.expectEqualDeep(rect(1044, 82, 1100, 102), a.open);
-    try std.testing.expectEqualDeep(rect(1104, 82, 1158, 102), a.worktrees);
-    try std.testing.expectEqualDeep(rect(750, 82, 1036, 102), a.notice.?);
-    try std.testing.expectEqualDeep(rect(750, 198, 1036, 218), b.notice.?);
+    try std.testing.expectEqualDeep(rect(1690, 106, 1746, 126), a.open);
+    try std.testing.expectEqualDeep(rect(1750, 106, 1804, 126), a.worktrees);
+    try std.testing.expectEqualDeep(rect(1396, 106, 1682, 126), a.notice.?);
+    try std.testing.expectEqualDeep(rect(1396, 284, 1682, 304), b.notice.?);
     try std.testing.expect(a.title.right < a.notice.?.left);
     try std.testing.expect(a.notice.?.right < a.open.left);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 760, 92, bounds, &state).?);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 760, 208, bounds, &state).?);
-    try std.testing.expect(overviewLaneActionAt(&model, 0, 760, 208, bounds, &state) == null);
-    try std.testing.expect(overviewLaneActionAt(&model, 0, 740, 92, bounds, &state) == null);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1406, 116, bounds, &state).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 1406, 294, bounds, &state).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 1406, 294, bounds, &state) == null);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 1386, 116, bounds, &state) == null);
     try std.testing.expect(overviewLaneCaption(&model, 2, bounds, &state).notice == null);
-    const transformed = CanvasState{ .zoom = 1.5, .pan_x = 17, .pan_y = -9 };
-    try std.testing.expectEqualDeep(rect(1142, 114, 1571, 144), overviewLaneCaption(&model, 0, bounds, &transformed).notice.?);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1150, 120, bounds, &transformed).?);
-    try std.testing.expect(overviewLaneActionAt(&model, 0, 1300, 120, bounds, &transformed) == null);
+    var transformed = try modelTestState(&model, .{ .zoom = 1.5, .pan_x = 17, .pan_y = -9 }, bounds);
+    defer transformed.deinitLayout();
+    try std.testing.expectEqualDeep(rect(2111, 150, 2540, 180), overviewLaneCaption(&model, 0, bounds, &transformed).notice.?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 2120, 156, bounds, &transformed).?);
+    try std.testing.expect(overviewLaneActionAt(&model, 0, 2300, 190, bounds, &transformed) == null);
     const identity_a = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\a");
     defer std.testing.allocator.free(identity_a);
     const identity_b = try overviewWorktreeNoticeIdentity(std.testing.allocator, "C:\\b");
@@ -1420,8 +1567,11 @@ test "worktree notice lane uses production observations for exact count and size
     inspection.entries.clearRetainingCapacity();
     try model.recordWorktreeInspection(&inspection, policy);
     try std.testing.expect(overviewWorktreeNotice(model.graphFor("C:\\a").?) == null);
-    try std.testing.expect(overviewLaneCaption(&model, 0, rect(220, 34, 1200, 900), &.{}).notice == null);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1130, 92, rect(220, 34, 1200, 900), &.{}).?);
+    const bounds = rect(220, 34, 2200, 900);
+    var state = try modelTestState(&model, .{}, bounds);
+    defer state.deinitLayout();
+    try std.testing.expect(overviewLaneCaption(&model, 0, bounds, &state).notice == null);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1770, 116, bounds, &state).?);
 }
 
 fn attentionRail(
@@ -1845,10 +1995,11 @@ fn graphBand(node_count: usize, geometry: GraphGeometry) ?c.RECT {
         bounds.right = @max(bounds.right, card.right);
         bounds.bottom = @max(bounds.bottom, card.bottom);
     }
-    return rect(bounds.left - scaledValue(30, geometry.state.zoom), bounds.top - scaledValue(20, geometry.state.zoom), bounds.right + scaledValue(20, geometry.state.zoom), bounds.bottom + scaledValue(20, geometry.state.zoom));
+    return rect(bounds.left - scaledValue(82, geometry.state.zoom), bounds.top - scaledValue(20, geometry.state.zoom), bounds.right + scaledValue(20, geometry.state.zoom), bounds.bottom + scaledValue(20, geometry.state.zoom));
 }
 
 fn drawEntryOrigin(hdc: c.HDC, allocator: std.mem.Allocator, node_count: usize, roles: []const NodeRole, geometry: GraphGeometry, band: c.RECT, overview: bool) void {
+    _ = overview;
     var has_entry = false;
     for (roles) |role| {
         if (role == .entry or role == .unwired) has_entry = true;
@@ -1856,10 +2007,9 @@ fn drawEntryOrigin(hdc: c.HDC, allocator: std.mem.Allocator, node_count: usize, 
     if (!has_entry) return;
     const zoom = geometry.state.zoom;
     const enclosing = graphBand(node_count, geometry) orelse return;
-    const first_left = enclosing.left + scaledValue(30, zoom);
-    // Keep the existing public card/hit/UIA layout; its gutter is narrower than macOS's 62pt origin lane.
+    const first_left = enclosing.left + scaledValue(82, zoom);
     const origin = Connector{
-        .x = first_left - scaledValue(if (overview) 26 else 16, zoom),
+        .x = band.left + scaledValue(31, zoom),
         .y = @divTrunc(band.top + band.bottom, 2),
     };
     const color = blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 22);
@@ -2740,11 +2890,14 @@ fn drawCardMetaRow(
 }
 
 pub fn nodeBounds(index: usize, state: *const CanvasState) c.RECT {
-    const column = @as(i32, @intCast(index % 3));
-    const row = @as(i32, @intCast(index / 3));
-    const offset = if (index < state.node_offsets.len) state.node_offsets[index] else CanvasState.NodeOffset{};
-    const x = @as(i32, @intFromFloat(((@as(f32, @floatFromInt(Tokens.sidebar_width + 32 + column * 260)) + offset.x) * state.zoom) + state.pan_x));
-    const y = @as(i32, @intFromFloat(((@as(f32, @floatFromInt(Tokens.header_height + 50 + row * 140)) + offset.y) * state.zoom) + state.pan_y));
+    const layout = state.project_layout orelse return rect(0, 0, 0, 0);
+    if (index >= layout.positions.len) return rect(0, 0, 0, 0);
+    return cardBoundsAt(layout.positions[index], state.layout_bounds, state);
+}
+
+fn cardBoundsAt(point: LaneLayout.Point, bounds: c.RECT, state: *const CanvasState) c.RECT {
+    const x: i32 = @intFromFloat((@as(f32, @floatFromInt(bounds.left)) + point.x - LaneLayout.MacMetrics.card_width / 2) * state.zoom + state.pan_x);
+    const y: i32 = @intFromFloat((@as(f32, @floatFromInt(bounds.top)) + point.y - LaneLayout.MacMetrics.card_height / 2) * state.zoom + state.pan_y);
     return rect(x, y, x + scaled(Tokens.loop_card_width, state), y + scaled(Tokens.loop_card_height, state));
 }
 
@@ -2798,7 +2951,7 @@ fn needsAttention(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: 
     return false;
 }
 
-const NodeRole = enum { interior, entry, cycle_only, unwired };
+const NodeRole = LaneLayout.Role;
 
 fn graphRoleTestNode(id: []const u8) GraphModel.Node {
     return .{
@@ -2816,6 +2969,7 @@ fn graphRoleTestEdge(from: []const u8, to: []const u8, kind: []const u8) GraphMo
         .from = @constCast(from),
         .to = @constCast(to),
         .kind = @constCast(kind),
+        .blocks_target = !std.mem.eql(u8, kind, "message"),
     };
 }
 
@@ -2825,84 +2979,9 @@ fn resolveCardRoles(
     edges: []const GraphModel.Edge,
     declared_entries: []const []const u8,
 ) ![]NodeRole {
-    const no_edge = std.math.maxInt(usize);
-    const roles = try allocator.alloc(NodeRole, nodes.len);
-    errdefer allocator.free(roles);
-    const touched = try allocator.alloc(bool, nodes.len);
-    defer allocator.free(touched);
-    const has_handoff_incoming = try allocator.alloc(bool, nodes.len);
-    defer allocator.free(has_handoff_incoming);
-    const first_handoff = try allocator.alloc(usize, nodes.len);
-    defer allocator.free(first_handoff);
-    const next_handoff = try allocator.alloc(usize, edges.len);
-    defer allocator.free(next_handoff);
-    const handoff_targets = try allocator.alloc(usize, edges.len);
-    defer allocator.free(handoff_targets);
-    const reached = try allocator.alloc(bool, nodes.len);
-    defer allocator.free(reached);
-    const queue = try allocator.alloc(usize, nodes.len);
-    defer allocator.free(queue);
-    @memset(touched, false);
-    @memset(has_handoff_incoming, false);
-    @memset(first_handoff, no_edge);
-    @memset(reached, false);
-
-    var indices = std.StringHashMap(usize).init(allocator);
-    defer indices.deinit();
-    for (nodes, 0..) |node, index| {
-        const result = try indices.getOrPut(node.id);
-        if (result.found_existing) return error.DuplicateGraphNodeID;
-        result.value_ptr.* = index;
-    }
-    var declared = std.StringHashMap(void).init(allocator);
-    defer declared.deinit();
-    for (declared_entries) |id| try declared.put(id, {});
-
-    var handoff_count: usize = 0;
-    for (edges) |edge| {
-        const source = indices.get(edge.from) orelse continue;
-        const target = indices.get(edge.to) orelse continue;
-        touched[source] = true;
-        touched[target] = true;
-        if (!std.mem.eql(u8, edge.kind, "handoff")) continue;
-        has_handoff_incoming[target] = true;
-        next_handoff[handoff_count] = first_handoff[source];
-        handoff_targets[handoff_count] = target;
-        first_handoff[source] = handoff_count;
-        handoff_count += 1;
-    }
-
-    var queue_head: usize = 0;
-    var queue_tail: usize = 0;
-    for (nodes, 0..) |node, index| {
-        if (declared.contains(node.id)) {
-            roles[index] = .entry;
-            reached[index] = true;
-            queue[queue_tail] = index;
-            queue_tail += 1;
-        } else if (!touched[index]) {
-            roles[index] = .unwired;
-        } else if (!has_handoff_incoming[index]) {
-            roles[index] = .entry;
-            reached[index] = true;
-            queue[queue_tail] = index;
-            queue_tail += 1;
-        } else {
-            roles[index] = .cycle_only;
-        }
-    }
-    while (queue_head < queue_tail) : (queue_head += 1) {
-        var edge_index = first_handoff[queue[queue_head]];
-        while (edge_index != no_edge) : (edge_index = next_handoff[edge_index]) {
-            const target = handoff_targets[edge_index];
-            if (reached[target]) continue;
-            reached[target] = true;
-            roles[target] = .interior;
-            queue[queue_tail] = target;
-            queue_tail += 1;
-        }
-    }
-    return roles;
+    var layout = try LaneLayout.init(allocator, nodes, edges, .{ .declared_entries = declared_entries });
+    defer layout.deinit();
+    return allocator.dupe(NodeRole, layout.roles);
 }
 
 pub fn hitTest(nodes: []const GraphModel.Node, x: i32, y: i32, state: *const CanvasState, graph_bounds: c.RECT) ?usize {
@@ -3433,7 +3512,8 @@ test "edge connectors resolve reordered node IDs to card positions" {
         .{ .id = @constCast("node-z"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
         .{ .id = @constCast("node-a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
     };
-    var state = CanvasState{};
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     const from = connectorPosition(&nodes, "node-a", true, &state) orelse return error.MissingConnector;
     const to = connectorPosition(&nodes, "node-z", false, &state) orelse return error.MissingConnector;
     const expected_from = nodeBounds(1, &state);
@@ -3451,7 +3531,8 @@ test "connected canvas entry ports straddle the leading edge on both surfaces" {
     defer fixture.model.deinit();
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     for ([_]Paint764Scene{ .project, .overview }) |scene| {
         try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
         const card = chrome764Card(&fixture, scene, 0, &state);
@@ -3479,10 +3560,11 @@ test "connected canvas reverse curves share the source-derived horizontal contro
 test "connected canvas facing anchors retain endpoint identity and shared hit geometry" {
     const nodes = [_]GraphModel.Node{ graphRoleTestNode("target"), graphRoleTestNode("source") };
     var edge = graphRoleTestEdge("source", "target", "handoff");
-    const state = CanvasState{ .zoom = 0.75, .pan_x = 120, .pan_y = 30 };
+    var state = try cardTestState(.{ .zoom = 0.75, .pan_x = 120, .pan_y = 30 });
+    defer state.deinitLayout();
     const route = graphEdgeRoute(&nodes, edge, .{ .state = &state }) orelse return error.MissingConnector;
-    try std.testing.expectEqual(nodeBounds(1, &state).left, route.from.x);
-    try std.testing.expectEqual(nodeBounds(0, &state).right, route.to.x);
+    try std.testing.expectEqual(nodeBounds(1, &state).right, route.from.x);
+    try std.testing.expectEqual(nodeBounds(0, &state).left, route.to.x);
     const middle = route.point(0.5);
     try std.testing.expectEqual(@as(?usize, 0), hitTestEdge(&nodes, &.{edge}, middle.x, middle.y, &state, rect(220, 34, 1280, 720)));
     edge.to = @constCast("missing");
@@ -3537,7 +3619,8 @@ test "connected canvas overview paints actual graph edges between card middles" 
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
     try paint764TestSurface(dib, &fixture, std.testing.allocator, .overview);
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     const first = overviewCardBounds(&fixture.model, 0, 0, chrome764GraphBounds(), &state);
     const next = overviewCardBounds(&fixture.model, 0, 1, chrome764GraphBounds(), &state);
     const cy = @divTrunc(first.top + first.bottom, 2);
@@ -3557,11 +3640,17 @@ test "connected canvas root furniture includes a distinct twelve point ENTRY ori
     defer fixture.model.deinit();
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     for ([_]Paint764Scene{ .project, .overview }) |scene| {
-        try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
-        const cy: i32 = if (scene == .project) 202 else 224;
-        const marker = rect(230, cy - 6, 242, cy + 6);
-        const caption = rect(221, cy + 8, 251, cy + 23);
+        try chrome764Paint(dib, &fixture, scene, &state, null, &.{});
+        const geometry = GraphGeometry{ .state = &state, .overview = if (scene == .overview) .{ .model = &fixture.model, .graph_index = 0, .bounds = chrome764GraphBounds() } else null };
+        const band = if (scene == .project) graphBand(6, geometry).? else overviewLaneBounds(&fixture.model, 0, chrome764GraphBounds(), &state);
+        const cy = @divTrunc(band.top + band.bottom, 2);
+        const cx = band.left + scaledValue(31, state.zoom);
+        const radius = @divTrunc(scaledValue(12, state.zoom), 2);
+        const marker = rect(cx - radius, cy - radius, cx + radius, cy + radius);
+        const caption = rect(cx - scaledValue(15, state.zoom), cy + scaledValue(8, state.zoom), cx + scaledValue(15, state.zoom), cy + scaledValue(23, state.zoom));
         try std.testing.expect(dib.count(marker, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 22)) > 20);
         try std.testing.expect(dib.count(caption, blendCardColor(0x00FFFFFF, Tokens.canvas_tone, 42)) > 0);
     }
@@ -3575,8 +3664,10 @@ test "connected canvas hover continuation is a circular fourteen point handle" {
     defer normal.deinit();
     var hover = try ParityDib.init(1280, 720);
     defer hover.deinit();
-    const state = CanvasState{};
-    const hovered = CanvasState{ .hovered_connector = 0 };
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
+    var hovered = try modelTestState(&fixture.model, .{ .hovered_connector = 0 }, chrome764GraphBounds());
+    defer hovered.deinitLayout();
     try chrome764Paint(normal, &fixture, .project, &state, null, &.{"chrome-isolated"});
     try chrome764Paint(hover, &fixture, .project, &hovered, null, &.{"chrome-isolated"});
     const graph = fixture.model.graph.?;
@@ -3773,6 +3864,222 @@ test "loop card stripe follows loop type rather than lifecycle state" {
     try std.testing.expectEqual(@as(u32, 0x00E98590), loopTypeColor("composite"));
 }
 
+fn laneRectanglesIntersect(a: c.RECT, b: c.RECT) bool {
+    return a.left < b.right and b.left < a.right and a.top < b.bottom and b.top < a.bottom;
+}
+
+fn modelTestState(model: *const GraphModel.Model, initial: CanvasState, bounds: c.RECT) !CanvasState {
+    var state = initial;
+    state.project_layout = null;
+    state.overview_layout = null;
+    state.layout_fingerprint = null;
+    try state.syncLayout(std.testing.allocator, model, bounds, &.{}, &.{});
+    return state;
+}
+
+fn cardTestState(initial: CanvasState) !CanvasState {
+    var state = initial;
+    const nodes = [_]LaneLayout.Node{ .{ .id = "0" }, .{ .id = "1" }, .{ .id = "2" }, .{ .id = "3" }, .{ .id = "4" }, .{ .id = "5" } };
+    state.project_layout = try LaneLayout.init(std.testing.allocator, &nodes, &[_]LaneLayout.Edge{}, .{});
+    return state;
+}
+
+test "lane integration production project and overview read edges rather than arrival index" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"id":"lane","project":{"path":"lane","name":"Lane"},"nodes":[{"id":"c","title":"Third"},{"id":"a","title":"First"},{"id":"b","title":"Second"}],"edges":[{"id":"ab","from":"a","to":"b","kind":"handoff"},{"id":"bc","from":"b","to":"c","kind":"handoff"}]}}
+    );
+    var state = CanvasState{};
+    defer state.deinitLayout();
+    const viewport = rect(220, 34, 1800, 900);
+    try state.syncLayout(allocator, &model, viewport, &.{}, &.{});
+    const a = nodeBounds(1, &state);
+    const b = nodeBounds(2, &state);
+    const c_card = nodeBounds(0, &state);
+    try std.testing.expectEqual(a.top, b.top);
+    try std.testing.expectEqual(b.top, c_card.top);
+    try std.testing.expect(b.left > a.right);
+    try std.testing.expect(c_card.left > b.right);
+    try std.testing.expectEqualDeep(a, overviewCardBounds(&model, 0, 1, viewport, &state));
+    try std.testing.expectEqualDeep(b, overviewCardBounds(&model, 0, 2, viewport, &state));
+    try std.testing.expectEqualDeep(c_card, overviewCardBounds(&model, 0, 0, viewport, &state));
+}
+
+test "lane integration stale restored offsets cannot overlap production card rectangles" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"id":"lane","project":{"path":"lane","name":"Lane"},"nodes":[{"id":"a","title":"First"},{"id":"b","title":"Second"}],"edges":[]}}
+    );
+    var state = CanvasState{};
+    state.syncNodeOffsets(model.graph.?.nodes.items);
+    state.node_offsets[1] = .{ .x = -260 };
+    const encoded = try state.encodeNodeOffsets(allocator);
+    defer allocator.free(encoded);
+    var restored = CanvasState{};
+    defer restored.deinitLayout();
+    try restored.decodeNodeOffsets(encoded);
+    restored.syncNodeOffsets(model.graph.?.nodes.items);
+    try restored.syncLayout(allocator, &model, rect(220, 34, 1800, 900), &.{}, &.{});
+    try std.testing.expect(!laneRectanglesIntersect(nodeBounds(0, &restored), nodeBounds(1, &restored)));
+}
+
+test "lane integration fit uses full derived content rather than three-column grid dimensions" {
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    const viewport = chrome764GraphBounds();
+    for ([_]Surface{ .project, .overview }) |surface| {
+        var state = try modelTestState(&fixture.model, .{}, viewport);
+        defer state.deinitLayout();
+        const content = contentSize(&fixture.model, surface, &state);
+        try std.testing.expectEqual(@as(i32, if (surface == .project) 1472 else 1682), content.width);
+        state.fit(viewport, content.width, content.height);
+        try std.testing.expect(state.zoom <= 1);
+        var cards: usize = 0;
+        if (surface == .project) {
+            for (fixture.model.graph.?.nodes.items, 0..) |_, index| {
+                const card = nodeBounds(index, &state);
+                try std.testing.expect(card.left >= viewport.left and card.right <= viewport.right and card.top >= viewport.top and card.bottom <= viewport.bottom);
+                cards += 1;
+            }
+        } else {
+            for (fixture.model.graphs.items, 0..) |graph, graph_index| {
+                for (graph.nodes.items, 0..) |_, index| {
+                    const card = overviewCardBounds(&fixture.model, graph_index, index, viewport, &state);
+                    try std.testing.expect(card.left >= viewport.left and card.right <= viewport.right and card.top >= viewport.top and card.bottom <= viewport.bottom);
+                    cards += 1;
+                }
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (surface == .project) 6 else 8), cards);
+    }
+}
+
+fn expectLaneRectangles(model: *const GraphModel.Model, state: *const CanvasState) !usize {
+    var pairs: usize = 0;
+    if (model.graph) |graph| {
+        for (graph.nodes.items, 0..) |_, i| {
+            const a = nodeBounds(i, state);
+            try std.testing.expect(a.right > a.left and a.bottom > a.top);
+            for (i + 1..graph.nodes.items.len) |j| {
+                try std.testing.expect(!laneRectanglesIntersect(a, nodeBounds(j, state)));
+                pairs += 1;
+            }
+        }
+    }
+    for (model.graphs.items, 0..) |graph, lane| {
+        for (graph.nodes.items, 0..) |_, i| {
+            const a = overviewCardBounds(model, lane, i, state.layout_bounds, state);
+            try std.testing.expect(a.right > a.left and a.bottom > a.top);
+            for (model.graphs.items[lane..], lane..) |other_graph, other_lane| {
+                const first = if (lane == other_lane) i + 1 else 0;
+                for (first..other_graph.nodes.items.len) |j| {
+                    try std.testing.expect(!laneRectanglesIntersect(a, overviewCardBounds(model, other_lane, j, state.layout_bounds, state)));
+                    pairs += 1;
+                }
+            }
+        }
+    }
+    return pairs;
+}
+
+test "lane integration fixture rectangles never intersect within projects or across overview lanes" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var state = CanvasState{};
+    defer state.deinitLayout();
+    var pairs: usize = 0;
+    var frames: usize = 0;
+    for ([_][]const u8{
+        "fixtures\\paint-project-v1.json",
+        "fixtures\\paint-764-project.json",
+        "fixtures\\paint-764-overview-peer.json",
+        "fixtures\\daemon-v2-graph-event.json",
+        "fixtures\\daemon-v2-graph-reordered-edges.json",
+        "fixtures\\daemon-v2-graph-attention.json",
+    }) |path| {
+        const frame = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+        defer allocator.free(frame);
+        _ = try model.updateFromFrame(frame);
+        try state.syncLayout(allocator, &model, rect(220, 34, 2400, 1600), &.{}, &.{});
+        pairs += try expectLaneRectangles(&model, &state);
+        frames += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), frames);
+    try std.testing.expect(pairs > 40);
+}
+
+test "lane integration reorder insertion deletion switch and legacy restoration keep one geometry source" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var state = CanvasState{ .zoom = 0.8, .pan_x = 18, .pan_y = 9 };
+    defer state.deinitLayout();
+    const frames = [_][]const u8{
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"c","title":"C"},{"id":"a","title":"A"},{"id":"b","title":"B"}],"edges":[{"id":"ab","from":"a","to":"b","kind":"handoff"},{"id":"bc","from":"b","to":"c","kind":"handoff"}]}}
+        ,
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"b","title":"B"},{"id":"new","title":"New"},{"id":"c","title":"C"},{"id":"a","title":"A"}],"edges":[{"id":"ab","from":"a","to":"b","kind":"handoff"},{"id":"bc","from":"b","to":"c","kind":"handoff"}]}}
+        ,
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"c","title":"C"},{"id":"new","title":"New"},{"id":"a","title":"A"}],"edges":[{"id":"ac","from":"a","to":"c","kind":"handoff"}]}}
+        ,
+        \\{"graphChanged":{"project":{"path":"B","name":"B"},"nodes":[{"id":"cycle-b","title":"B"},{"id":"cycle-a","title":"A"}],"edges":[{"id":"ba","from":"cycle-b","to":"cycle-a","kind":"handoff"},{"id":"ab","from":"cycle-a","to":"cycle-b","kind":"handoff"}]}}
+        ,
+    };
+    var checked: usize = 0;
+    for (frames) |frame| {
+        _ = try model.updateFromFrame(frame);
+        state.syncNodeOffsets(model.graph.?.nodes.items);
+        state.node_offsets[0] = .{ .x = 5000, .y = -5000 };
+        const encoded = try state.encodeNodeOffsets(allocator);
+        defer allocator.free(encoded);
+        try state.decodeNodeOffsets(encoded);
+        try state.syncLayout(allocator, &model, rect(220, 34, 2400, 1600), &.{}, &.{});
+        checked += try expectLaneRectangles(&model, &state);
+        const graph = model.graph.?;
+        for (graph.nodes.items, 0..) |node, index| {
+            const bounds = nodeBounds(index, &state);
+            const center = Connector{ .x = @divTrunc(bounds.left + bounds.right, 2), .y = @divTrunc(bounds.top + bounds.bottom, 2) };
+            try std.testing.expectEqual(@as(?usize, index), hitTest(graph.nodes.items, center.x, center.y, &state, state.layout_bounds));
+            const port = connectorPosition(graph.nodes.items, node.id, true, &state).?;
+            try std.testing.expectEqual(bounds.right, port.x);
+            try std.testing.expectEqual(center.y, port.y);
+        }
+        const positions = state.project_layout.?.positions.ptr;
+        try state.syncLayout(allocator, &model, state.layout_bounds, &.{}, &.{});
+        try std.testing.expectEqual(positions, state.project_layout.?.positions.ptr);
+    }
+    try std.testing.expect(model.selectProject("B"));
+    try state.syncLayout(allocator, &model, state.layout_bounds, &.{}, &.{});
+    checked += try expectLaneRectangles(&model, &state);
+    try std.testing.expectEqual(@as(usize, 2), state.project_layout.?.positions.len);
+    try std.testing.expect(checked > 20);
+}
+
+fn layoutAllocationFixture(allocator: std.mem.Allocator, model: *const GraphModel.Model) !void {
+    var state = CanvasState{};
+    defer state.deinitLayout();
+    try state.syncLayout(allocator, model, rect(220, 34, 1280, 720), &.{}, &.{});
+}
+
+test "lane integration cache allocation failures release every project and overview result" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"a","title":"A"},{"id":"b","title":"B"}],"edges":[{"id":"ab","from":"a","to":"b","kind":"handoff"}]}}
+    );
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, layoutAllocationFixture, .{&model});
+    var state = try modelTestState(&model, .{}, rect(220, 34, 1280, 720));
+    defer state.deinitLayout();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, state.syncLayout(failing.allocator(), &model, rect(220, 34, 1280, 400), &.{}, &.{}));
+    try std.testing.expectEqualDeep(rect(0, 0, 0, 0), nodeBounds(0, &state));
+    try std.testing.expect(state.overview_layout == null and state.layout_fingerprint == null);
+}
+
 test "dense edge labels move away from already placed labels" {
     const first = rect(100, 100, 248, 120);
     try std.testing.expect(overlapsPlaced(rect(120, 110, 200, 118), &.{first}));
@@ -3780,7 +4087,8 @@ test "dense edge labels move away from already placed labels" {
 }
 
 test "canvas hit testing follows pan and zoom" {
-    var state = CanvasState{};
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     state.pan_x = 20;
     state.pan_y = 10;
     state.zoom = 1.2;
@@ -3793,8 +4101,9 @@ test "canvas hit testing follows pan and zoom" {
     try std.testing.expectEqual(@as(?usize, 0), point);
 }
 
-test "direct node movement follows zoom and cancels safely" {
-    var state = CanvasState{ .zoom = 2 };
+test "card drag pans the whole sheet without overriding derived placement and cancels safely" {
+    var state = try cardTestState(.{ .zoom = 2 });
+    defer state.deinitLayout();
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
     };
@@ -3805,6 +4114,8 @@ test "direct node movement follows zoom and cancels safely" {
     const moved = nodeBounds(0, &state);
     try std.testing.expectEqual(before.left + 40, moved.left);
     try std.testing.expectEqual(before.top + 20, moved.top);
+    try std.testing.expectEqual(@as(f32, 0), state.node_offsets[0].x);
+    try std.testing.expectEqual(@as(f32, 0), state.node_offsets[0].y);
     state.cancelInteraction();
     const restored = nodeBounds(0, &state);
     try std.testing.expectEqual(before.left, restored.left);
@@ -3815,8 +4126,9 @@ test "direct node movement follows zoom and cancels safely" {
     try std.testing.expectEqual(before.left + 30, nodeBounds(0, &state).left);
 }
 
-test "node card release activates below drag threshold and movement only drags" {
-    var state = CanvasState{};
+test "node card release activates below drag threshold and movement never repositions" {
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
     };
@@ -3834,8 +4146,9 @@ test "node card release activates below drag threshold and movement only drags" 
     try std.testing.expectEqual(before.left + 10, nodeBounds(0, &state).left);
 }
 
-test "direct node movement follows stable node identity across daemon reorder" {
-    var state = CanvasState{};
+test "legacy offsets rekey across daemon reorder without changing derived rectangles" {
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     const initial = [_]GraphModel.Node{
         .{ .id = @constCast("a"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
         .{ .id = @constCast("b"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
@@ -3850,14 +4163,15 @@ test "direct node movement follows stable node identity across daemon reorder" {
     state.syncNodeOffsets(&reordered);
     const moved_a = nodeBounds(1, &state);
     const unmoved_b = nodeBounds(0, &state);
-    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width + 32 + 260 + 30), moved_a.left);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 50 + 10), moved_a.top);
-    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width + 32), unmoved_b.left);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 50), unmoved_b.top);
+    try std.testing.expectEqual(before_a.left + 30, moved_a.left);
+    try std.testing.expectEqual(before_a.top + 120 + 10, moved_a.top);
+    try std.testing.expectEqual(before_a.left + 30, unmoved_b.left);
+    try std.testing.expectEqual(before_a.top + 10, unmoved_b.top);
 }
 
-test "node movement persists by stable identity across canvas state reload" {
-    var state = CanvasState{};
+test "legacy offset reload never restores free card positioning" {
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("persisted"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
     };
@@ -3869,15 +4183,17 @@ test "node movement persists by stable identity across canvas state reload" {
     const encoded = try state.encodeNodeOffsets(std.testing.allocator);
     defer std.testing.allocator.free(encoded);
 
-    var restored = CanvasState{};
+    var restored = try cardTestState(.{});
+    defer restored.deinitLayout();
     try restored.decodeNodeOffsets(encoded);
     restored.syncNodeOffsets(&nodes);
-    try std.testing.expectEqual(before.left + 45, nodeBounds(0, &restored).left);
-    try std.testing.expectEqual(before.top + 25, nodeBounds(0, &restored).top);
+    try std.testing.expectEqual(before.left, nodeBounds(0, &restored).left);
+    try std.testing.expectEqual(before.top, nodeBounds(0, &restored).top);
 }
 
 test "invalid persisted node movement is rejected without replacing valid state" {
-    var state = CanvasState{};
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("valid"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
     };
@@ -3887,8 +4203,10 @@ test "invalid persisted node movement is rejected without replacing valid state"
         error.InvalidCanvasLayout,
         state.decodeNodeOffsets("1\tnan\t4\n"),
     );
-    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width + 32 + 12), nodeBounds(0, &state).left);
-    try std.testing.expectEqual(@as(i32, Tokens.header_height + 50 + 8), nodeBounds(0, &state).top);
+    try std.testing.expectEqual(@as(f32, 12), state.node_offsets[0].x);
+    try std.testing.expectEqual(@as(f32, 8), state.node_offsets[0].y);
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width + 162), nodeBounds(0, &state).left);
+    try std.testing.expectEqual(@as(i32, Tokens.header_height + 100), nodeBounds(0, &state).top);
 }
 
 test "overview and quick chat hit testing follows rendered cards" {
@@ -3901,6 +4219,8 @@ test "overview and quick chat hit testing follows rendered cards" {
     _ = try model.updateFromFrame(frame);
     var state = CanvasState{ .pan_y = 17 };
     const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
+    defer state.deinitLayout();
+    try state.syncLayout(allocator, &model, bounds, &.{}, &.{});
     const card = overviewCardBounds(&model, 0, 0, bounds, &state);
     const hit = hitTestOverview(&model, card.left + 4, card.top + 4, &state, bounds) orelse
         return error.TestUnexpectedResult;
@@ -3928,18 +4248,21 @@ test "cross-project overview stacks every open folder as its own lane" {
     );
     try std.testing.expectEqual(@as(usize, 2), model.graphs.items.len);
     try std.testing.expect(model.graphFor("C") == null);
-    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 900);
-    const identity = CanvasState{};
-    try std.testing.expectEqualDeep(rect(244, 72, 1176, 376), overviewLaneBounds(&model, 0, bounds, &identity));
-    try std.testing.expectEqualDeep(rect(244, 396, 1176, 572), overviewLaneBounds(&model, 1, bounds, &identity));
-    try std.testing.expectEqualDeep(rect(262, 240, 512, 336), overviewCardBounds(&model, 0, 3, bounds, &identity));
-    try std.testing.expectEqualDeep(rect(262, 442, 512, 538), overviewCardBounds(&model, 1, 0, bounds, &identity));
+    const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 2600, 2000);
+    var identity = try modelTestState(&model, .{}, bounds);
+    defer identity.deinitLayout();
+    try std.testing.expectEqualDeep(rect(300, 96, 1822, 610), overviewLaneBounds(&model, 0, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(300, 634, 1822, 908), overviewLaneBounds(&model, 1, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(382, 494, 632, 590), overviewCardBounds(&model, 0, 3, bounds, &identity));
+    try std.testing.expectEqualDeep(rect(382, 672, 632, 768), overviewCardBounds(&model, 1, 0, bounds, &identity));
 
     for ([_]CanvasState{
         .{},
         .{ .zoom = 0.75, .pan_x = 100, .pan_y = 17 },
         .{ .zoom = 1.25, .pan_x = -30, .pan_y = -12 },
-    }) |state| {
+    }) |initial| {
+        var state = try modelTestState(&model, initial, bounds);
+        defer state.deinitLayout();
         const lane_a = overviewLaneBounds(&model, 0, bounds, &state);
         const lane_b = overviewLaneBounds(&model, 1, bounds, &state);
         try std.testing.expect(lane_a.bottom < lane_b.top);
@@ -3973,11 +4296,12 @@ test "cross-project overview stacks every open folder as its own lane" {
     _ = try model.updateFromFrame(
         \\{"version":2,"kind":"event","sequence":4,"event":{"graphChanged":{"id":"b","project":{"path":"B","name":"Beta"},"nodes":[],"edges":[]}}}
     );
+    try identity.syncLayout(allocator, &model, bounds, &.{}, &.{});
     const empty_lane = overviewLaneBounds(&model, 1, bounds, &identity);
-    try std.testing.expectEqualDeep(rect(244, 396, 1176, 492), empty_lane);
-    try std.testing.expectEqual(OverviewLaneAction.open_project, overviewLaneActionAt(&model, 1, 1072, 416, bounds, &identity).?);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 1131, 416, bounds, &identity).?);
-    try std.testing.expect(hitTestOverview(&model, 264, 444, &identity, bounds) == null);
+    try std.testing.expectEqualDeep(rect(300, 634, 1822, 788), empty_lane);
+    try std.testing.expectEqual(OverviewLaneAction.open_project, overviewLaneActionAt(&model, 1, 1710, 654, bounds, &identity).?);
+    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 1, 1770, 654, bounds, &identity).?);
+    try std.testing.expect(hitTestOverview(&model, 382, 672, &identity, bounds) == null);
 }
 
 test "overview and quick chat geometry applies pan and zoom consistently" {
@@ -4002,6 +4326,8 @@ test "overview and quick chat geometry applies pan and zoom consistently" {
     try model.graphs.append(graph);
     const bounds = rect(240, 42, 1200, 800);
     var state = CanvasState{ .pan_x = 25, .pan_y = -12, .zoom = 1.25 };
+    defer state.deinitLayout();
+    try state.syncLayout(std.testing.allocator, &model, bounds, &.{}, &.{});
     const card = overviewCardBounds(&model, 0, 0, bounds, &state);
     try std.testing.expectEqual(@as(?OverviewHit, .{ .graph_index = 0, .node_index = 0 }), hitTestOverview(&model, card.left + 2, card.top + 2, &state, bounds));
     const chat = quickChatCardBounds(0, bounds, &state);
@@ -4020,7 +4346,9 @@ test "zoom controls expose every action and fit content" {
 }
 
 test "loop card parity project metrics match the shipping card" {
-    const bounds = nodeBounds(0, &.{});
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
+    const bounds = nodeBounds(0, &state);
     try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
     try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
 }
@@ -4028,7 +4356,12 @@ test "loop card parity project metrics match the shipping card" {
 test "loop card parity overview metrics match the project card" {
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
-    const bounds = overviewCardBounds(&model, 0, 0, rect(220, 34, 1200, 900), &.{});
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"a","title":"A"}],"edges":[]}}
+    );
+    var state = try modelTestState(&model, .{}, rect(220, 34, 1200, 900));
+    defer state.deinitLayout();
+    const bounds = overviewCardBounds(&model, 0, 0, rect(220, 34, 1200, 900), &state);
     try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
     try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
 }
@@ -4065,7 +4398,8 @@ test "loop card parity meta uses type and backend display name without tokens" {
 
 test "loop card parity existing actions stay above the bottom meta row" {
     for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
-        const state = CanvasState{ .zoom = zoom, .pan_x = 1200, .pan_y = -20 };
+        var state = try cardTestState(.{ .zoom = zoom, .pan_x = 1200, .pan_y = -20 });
+        defer state.deinitLayout();
         const bounds = nodeBounds(0, &state);
         const meta_top = bounds.bottom - scaledValue(21, zoom);
         const action = attentionActionBounds(bounds, &state);
@@ -4297,8 +4631,12 @@ test "loop card parity metrics and rows fit the owning card" {
     defer _ = c.DeleteDC(dc);
     var model = GraphModel.Model.init(std.testing.allocator);
     defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"a","title":"A"},{"id":"b","title":"B"},{"id":"c","title":"C"},{"id":"d","title":"D"},{"id":"e","title":"E"},{"id":"f","title":"F"}],"edges":[]}}
+    );
     for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
-        const state = CanvasState{ .zoom = zoom, .pan_x = 1300, .pan_y = -17 };
+        var state = try modelTestState(&model, .{ .zoom = zoom, .pan_x = 1300, .pan_y = -17 }, rect(220, 34, 1200, 900));
+        defer state.deinitLayout();
         const project = nodeBounds(0, &state);
         const overview = overviewCardBounds(&model, 0, 0, rect(220, 34, 1200, 900), &state);
         for ([_][]const u8{ "NEEDS YOU", "SCHEDULED" }) |word| {
@@ -4320,8 +4658,8 @@ test "loop card parity metrics and rows fit the owning card" {
                 try std.testing.expect(rows.detail.bottom < rows.meta.top);
             }
         }
-        const adjacent = overviewCardBounds(&model, 0, 1, rect(220, 34, 1200, 900), &state);
-        const next_row = overviewCardBounds(&model, 0, 3, rect(220, 34, 1200, 900), &state);
+        const adjacent = overviewCardBounds(&model, 0, 5, rect(220, 34, 1200, 900), &state);
+        const next_row = overviewCardBounds(&model, 0, 1, rect(220, 34, 1200, 900), &state);
         try std.testing.expect(overview.right < adjacent.left);
         try std.testing.expect(overview.bottom < next_row.top);
     }
@@ -4337,28 +4675,34 @@ test "loop card parity overview narrow client retains action hits and pannable c
     _ = try model.updateFromFrame(
         \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"B","name":"Beta"},"nodes":[{"id":"e","title":"E"}],"edges":[]}}}
     );
-    try std.testing.expectEqual(@as(i32, 854), contentSize(&model, .overview).width);
+    var identity = CanvasState{};
+    defer identity.deinitLayout();
+    try identity.syncLayout(allocator, &model, rect(220, 34, 1028, 900), &.{}, &.{});
+    try std.testing.expectEqual(@as(i32, 1682), contentSize(&model, .overview, &identity).width);
     for ([_]i32{ 1028, 1440 }) |right| {
         const viewport = rect(220, 34, right, 900);
-        for ([_]CanvasState{ .{}, .{ .zoom = 0.75, .pan_x = 15, .pan_y = -12 }, .{ .zoom = 1.25, .pan_x = -120, .pan_y = 20 } }) |state| {
+        for ([_]CanvasState{ .{}, .{ .zoom = 0.75, .pan_x = 15, .pan_y = -12 }, .{ .zoom = 1.25, .pan_x = -120, .pan_y = 20 } }) |initial| {
+            var state = try modelTestState(&model, initial, viewport);
+            defer state.deinitLayout();
             const lane = overviewLaneBounds(&model, 0, viewport, &state);
             const next_lane = overviewLaneBounds(&model, 1, viewport, &state);
             const first = overviewCardBounds(&model, 0, 0, viewport, &state);
             const second = overviewCardBounds(&model, 0, 1, viewport, &state);
             const third = overviewCardBounds(&model, 0, 2, viewport, &state);
             const fourth = overviewCardBounds(&model, 0, 3, viewport, &state);
-            try std.testing.expect(first.right < second.left and second.right < third.left);
+            try std.testing.expect(first.left == second.left and second.left == third.left);
+            try std.testing.expect(first.bottom < second.top and second.bottom < third.top);
             try std.testing.expect(first.bottom < fourth.top and fourth.bottom < lane.bottom);
             try std.testing.expect(third.right < lane.right and lane.bottom < next_lane.top);
         }
     }
     const narrow = rect(220, 34, 1028, 900);
-    const caption = overviewLaneCaption(&model, 0, narrow, &.{});
-    try std.testing.expectEqualDeep(rect(918, 82, 974, 102), caption.open);
-    try std.testing.expectEqualDeep(rect(978, 82, 1032, 102), caption.worktrees);
-    try std.testing.expect(caption.worktrees.left < narrow.right and caption.worktrees.right > narrow.right);
-    try std.testing.expectEqual(OverviewLaneAction.inspect_worktrees, overviewLaneActionAt(&model, 0, 1005, 92, narrow, &.{}).?);
-    const panned = CanvasState{ .pan_x = -30 };
+    const caption = overviewLaneCaption(&model, 0, narrow, &identity);
+    try std.testing.expectEqualDeep(rect(1690, 106, 1746, 126), caption.open);
+    try std.testing.expectEqualDeep(rect(1750, 106, 1804, 126), caption.worktrees);
+    try std.testing.expect(caption.worktrees.left > narrow.right);
+    var panned = try modelTestState(&model, .{ .pan_x = -800 }, narrow);
+    defer panned.deinitLayout();
     const shifted = overviewLaneCaption(&model, 0, narrow, &panned);
     const third = overviewCardBounds(&model, 0, 2, narrow, &panned);
     try std.testing.expect(shifted.worktrees.right <= narrow.right);
@@ -4786,7 +5130,8 @@ fn paintExportFixture(
     if (c.SetMapMode(dib.dc, c.MM_ANISOTROPIC) == 0) return error.PaintFixtureMapModeFailed;
     if (c.SetWindowExtEx(dib.dc, 96, 96, null) == 0 or c.SetViewportExtEx(dib.dc, 96, 96, null) == 0)
         return error.PaintFixtureDpiMappingFailed;
-    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    var state = try modelTestState(model, .{ .zoom = if (std.mem.eql(u8, header_context, "Alpha")) 1 else paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     var sidebar_state = Sidebar.State.init(allocator);
     defer sidebar_state.deinit();
     const controls = WorkspaceControls.State{
@@ -4880,7 +5225,8 @@ fn verifyPaintContract(dib: ParityDib, fixture: *const PaintExportFixture, alloc
         .panel_visible = false,
         .activity_enabled = false,
     });
-    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    var state = try modelTestState(model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     for (graph.nodes.items, 0..) |node, index| {
         const bounds = nodeBounds(index, &state);
         try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
@@ -5032,6 +5378,8 @@ fn paint764AgeEvidence(
     return result.toOwnedSlice();
 }
 
+const paint764_zoom = LaneLayout.MacMetrics.default_fit_floor;
+
 fn verifyPaint764CardPixels(
     dib: ParityDib,
     allocator: std.mem.Allocator,
@@ -5040,21 +5388,23 @@ fn verifyPaint764CardPixels(
     role: NodeRole,
     attention: bool,
     now: u64,
+    zoom: f32,
 ) !void {
-    try std.testing.expectEqual(@as(i32, 250), bounds.right - bounds.left);
-    try std.testing.expectEqual(@as(i32, 96), bounds.bottom - bounds.top);
+    try std.testing.expectEqual(scaledValue(250, zoom), bounds.right - bounds.left);
+    try std.testing.expectEqual(scaledValue(96, zoom), bounds.bottom - bounds.top);
     const presentation = cardState(node);
     const pill_width = blk: {
-        const old = try selectCardFont(dib.dc, 10, .card_state);
+        const old = try selectCardFont(dib.dc, 10 * zoom, .card_state);
         defer _ = c.SelectObject(dib.dc, old);
-        break :blk try measuredText(dib.dc, allocator, presentation.word) + 22;
+        break :blk try measuredText(dib.dc, allocator, presentation.word) + scaledValue(22, zoom);
     };
-    const rows = cardTextLayout(bounds, 1, pill_width);
+    const rows = cardTextLayout(bounds, zoom, pill_width);
     try std.testing.expect(dib.count(rows.pill, presentation.fill) > 20);
     try std.testing.expect(dib.count(rows.title, 0x00F4F4F4) > 0);
-    try std.testing.expectEqual(@as(usize, 36), dib.count(rows.meta, loopTypeColor(node.loop_type)));
-    const meta_bounds = rect(rows.meta.left + 11, rows.meta.top, rows.meta.right, rows.meta.bottom);
-    const old_font = try selectCardFont(dib.dc, 10.5, .card_mono);
+    const square: usize = @intCast(scaledValue(6, zoom));
+    try std.testing.expectEqual(square * square, dib.count(rows.meta, loopTypeColor(node.loop_type)));
+    const meta_bounds = rect(rows.meta.left + scaledValue(11, zoom), rows.meta.top, rows.meta.right, rows.meta.bottom);
+    const old_font = try selectCardFont(dib.dc, 10.5 * zoom, .card_mono);
     defer _ = c.SelectObject(dib.dc, old_font);
     const metadata = try cardMetaForWidth(
         dib.dc,
@@ -5073,7 +5423,7 @@ fn verifyPaint764CardPixels(
         try std.testing.expect(std.mem.indexOf(u8, metadata, node.worktree_branch) != null);
     }
     if (node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
-        const track = rect(rows.detail.left, rows.detail.bottom - 3, rows.detail.right, rows.detail.bottom);
+        const track = rect(rows.detail.left, rows.detail.bottom - scaledValue(3, zoom), rows.detail.right, rows.detail.bottom);
         if (primaryCardAction(node) == null) {
             try std.testing.expect(dib.count(track, loopTypeColor(node.loop_type)) > 0);
             try std.testing.expect(dib.count(track, 0x00444141) > 0);
@@ -5083,15 +5433,15 @@ fn verifyPaint764CardPixels(
         }
     }
     if (attention) {
-        const action = attentionActionBounds(bounds, &.{ .zoom = 1 });
+        const action = attentionActionBounds(bounds, &.{ .zoom = zoom });
         try std.testing.expect(dib.count(action, 0x000A9FFF) > 0);
     }
     if (!attention and role == .entry) {
         const chip = cardRoleChip(role) orelse return error.Paint764EntryRoleChipMissing;
-        const role_presentation = try cardMetaPresentation(dib.dc, allocator, node, rows, 1, role);
+        const role_presentation = try cardMetaPresentation(dib.dc, allocator, node, rows, zoom, role);
         defer allocator.free(role_presentation.text);
-        const chip_width = try cardRoleChipWidth(dib.dc, allocator, role, 1);
-        const chip_height = scaledValue(14, 1);
+        const chip_width = try cardRoleChipWidth(dib.dc, allocator, role, zoom);
+        const chip_height = scaledValue(14, zoom);
         const chip_row = if (role_presentation.chip_in_detail) rows.detail else rows.meta;
         const chip_top = @divTrunc(chip_row.top + chip_row.bottom - chip_height, 2);
         const chip_left = if (role_presentation.chip_in_detail) chip_row.left else chip_row.right - chip_width;
@@ -5120,26 +5470,34 @@ fn paint764RgbL1(a: u32, b: u32) u32 {
     return distance;
 }
 
-fn verifyPaint764StrokeVisibility(dib: ParityDib, sample: c.RECT, expected: u32, edge_id: []const u8) !void {
-    try std.testing.expectEqual(@as(i32, 7), sample.right - sample.left);
+fn verifyPaint764StrokeVisibility(dib: ParityDib, mask: ParityDib, sample: c.RECT, expected: u32, edge_id: []const u8) !void {
+    try std.testing.expectEqual(@as(i32, 41), sample.right - sample.left);
     try std.testing.expectEqual(@as(i32, 7), sample.bottom - sample.top);
     const stroke_y = sample.top + 3;
-    // Sealed A6C523 has 42 pairs with minimum contrast/edge-distance advantage 80.
-    // Freeze half that minimum (40 RGB L1) for BOTH predicates, before any runs.
+    // Keep the fixed 40-point contrast/edge-distance margin. A wider hand-off
+    // exposes real dash gaps: the independent route mask identifies ink, not
+    // observed output pixels. Also assert those gaps actually remain gaps.
     const margin: u32 = 40;
     var comparisons: usize = 0;
     var failures: usize = 0;
+    var gaps: usize = 0;
     var x = sample.left;
     while (x < sample.right) : (x += 1) {
         const stroke = c.GetPixel(dib.dc, x, stroke_y);
+        const mask_pixel = c.GetPixel(mask.dc, x, stroke_y);
         for ([_]i32{ -1, 1 }) |offset| {
             const neighbor = c.GetPixel(dib.dc, x, stroke_y + offset);
-            if (stroke == c.CLR_INVALID or neighbor == c.CLR_INVALID) {
+            if (stroke == c.CLR_INVALID or neighbor == c.CLR_INVALID or mask_pixel == c.CLR_INVALID) {
                 std.debug.print("paint764 edge visibility unreadable edge={s} x={d} stroke-y={d} offset={d}\n",
                     .{ edge_id, x, stroke_y, offset });
                 return error.Paint764EdgeStrokeSampleUnreadable;
             }
             const contrast = paint764RgbL1(stroke, neighbor);
+            if (mask_pixel != 0x00FFFFFF) {
+                gaps += 1;
+                try std.testing.expect(contrast < margin);
+                continue;
+            }
             const stroke_distance = paint764RgbL1(stroke, expected);
             const neighbor_distance = paint764RgbL1(neighbor, expected);
             const advantage = @as(i32, @intCast(neighbor_distance)) - @as(i32, @intCast(stroke_distance));
@@ -5152,8 +5510,23 @@ fn verifyPaint764StrokeVisibility(dib: ParityDib, sample: c.RECT, expected: u32,
     }
     std.debug.print("paint764 edge visibility summary edge={s} region=({d},{d},{d},{d}) comparisons={d} failures={d} margin={d}\n",
         .{ edge_id, sample.left, sample.top, sample.right, sample.bottom, comparisons, failures, margin });
-    try std.testing.expectEqual(@as(usize, 14), comparisons);
+    try std.testing.expect(comparisons >= 14);
+    try std.testing.expect(gaps >= 2);
     if (failures != 0) return error.Paint764EdgeStrokeNotVisible;
+}
+
+test "lane visibility mask rejects absent strokes and retains positive ink and dash-gap controls" {
+    var actual = try ParityDib.init(64, 16);
+    defer actual.deinit();
+    var mask = try ParityDib.init(64, 16);
+    defer mask.deinit();
+    fill(actual.dc, rect(0, 0, 64, 16), 0);
+    fill(mask.dc, rect(0, 0, 64, 16), 0);
+    fill(mask.dc, rect(4, 6, 13, 7), 0x00FFFFFF);
+    const sample = rect(2, 3, 43, 10);
+    try std.testing.expectError(error.Paint764EdgeStrokeNotVisible, verifyPaint764StrokeVisibility(actual, mask, sample, 0x00FFFFFF, "negative-no-stroke"));
+    fill(actual.dc, rect(4, 6, 13, 7), 0x00FFFFFF);
+    try verifyPaint764StrokeVisibility(actual, mask, sample, 0x00FFFFFF, "positive-stroke-and-gaps");
 }
 
 fn verifyPaint764Contract(
@@ -5172,7 +5545,8 @@ fn verifyPaint764Contract(
     };
     const viewport = renderBounds(1280, 720, controls);
     const graph_bounds = rect(viewport.left, viewport.top, viewport.right, viewport.bottom);
-    const state = CanvasState{ .zoom = 1, .pan_x = 0, .pan_y = 0 };
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, graph_bounds);
+    defer state.deinitLayout();
     if (scene == .project) {
         const graph = fixture.model.graph orelse return error.Paint764ActiveGraphMissing;
         const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, &.{});
@@ -5189,6 +5563,7 @@ fn verifyPaint764Contract(
                 roles[index],
                 needsAttention(node, graph.nodes.items, graph.edges.items),
                 age_observed_at,
+                state.zoom,
             );
         }
         var placed_edge_labels: [128]c.RECT = undefined;
@@ -5206,10 +5581,15 @@ fn verifyPaint764Contract(
             try std.testing.expectEqual(nodeBounds(to_index, &state).left, to.x);
             const center_x = @divTrunc(from.x + to.x, 2);
             const center_y = @divTrunc(from.y + to.y, 2);
-            const stroke_sample = rect(center_x - 3, center_y - 3, center_x + 4, center_y + 4);
-            // All three 7x7 fixture windows lie 2..8 points from adjacent cards,
-            // inside their finite 36/54-point halo support; none is an exact-color control.
-            try verifyPaint764StrokeVisibility(dib, stroke_sample, edgeKindColor(edge.kind), edge.id);
+            try std.testing.expectEqual(from.y, to.y);
+            const stroke_sample = rect(from.x + 8, center_y - 3, from.x + 49, center_y + 4);
+            var mask = try ParityDib.init(1280, 720);
+            defer mask.deinit();
+            fill(mask.dc, rect(0, 0, 1280, 720), 0);
+            const route = graphEdgeRoute(graph.nodes.items, edge, .{ .state = &state }) orelse return error.Paint764EdgeSourceMissing;
+            const dash = graphEdgeDash(edge).?;
+            drawRoute(mask.dc, route, 0x00FFFFFF, 1.5 * state.zoom, .{ scaledValue(dash[0], state.zoom), scaledValue(dash[1], state.zoom) });
+            try verifyPaint764StrokeVisibility(dib, mask, stroke_sample, edgeKindColor(edge.kind), edge.id);
             const label = try edgeLabel(allocator, edge);
             defer allocator.free(label);
             try std.testing.expectEqualStrings("handoff", label);
@@ -5229,22 +5609,44 @@ fn verifyPaint764Contract(
             }
         }
     } else {
+        var painted_edges: usize = 0;
         for (fixture.model.graphs.items, 0..) |graph, graph_index| {
             const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, &.{});
             defer allocator.free(roles);
             const lane = overviewLaneBounds(&fixture.model, graph_index, graph_bounds, &state);
-            try std.testing.expect(lane.left >= viewport.left and lane.right <= viewport.right);
+            try std.testing.expectEqual(@as(i32, 1457), lane.right);
+            try std.testing.expect(lane.left >= viewport.left and lane.left < viewport.right);
             try std.testing.expect(lane.top >= viewport.top and lane.bottom <= viewport.bottom);
             const caption = overviewLaneCaption(&fixture.model, graph_index, graph_bounds, &state);
-            try std.testing.expect(dib.count(caption.worktrees, 0x00352B1C) > 0);
+            try std.testing.expectEqual(@as(usize, 0), dib.count(caption.worktrees, 0x00352B1C));
+            var panned = try ParityDib.init(1280, 720);
+            defer panned.deinit();
+            state.pan_x = @floatFromInt(viewport.right - lane.right - 18);
+            try chrome764Paint(panned, fixture, .overview, &state, null, &.{});
+            const panned_caption = overviewLaneCaption(&fixture.model, graph_index, graph_bounds, &state);
+            try std.testing.expect(panned_caption.worktrees.right < viewport.right);
+            try std.testing.expect(panned.count(panned_caption.worktrees, 0x00352B1C) > 0);
+            state.pan_x = 0;
             for (graph.nodes.items, 0..) |node, node_index| {
                 const bounds = overviewCardBounds(&fixture.model, graph_index, node_index, graph_bounds, &state);
                 try std.testing.expect(bounds.left >= lane.left and bounds.top > lane.top);
                 try std.testing.expect(bounds.right <= lane.right and bounds.bottom < lane.bottom);
-                try verifyPaint764CardPixels(dib, allocator, node, bounds, roles[node_index],
-                    needsAttention(node, graph.nodes.items, graph.edges.items), age_observed_at);
+                try verifyPaint764CardPixels(dib, allocator, node, bounds, roles[node_index], needsAttention(node, graph.nodes.items, graph.edges.items), age_observed_at, state.zoom);
+            }
+            for (graph.edges.items) |edge| {
+                const geometry = GraphGeometry{ .state = &state, .overview = .{ .model = &fixture.model, .graph_index = graph_index, .bounds = graph_bounds } };
+                const route = graphEdgeRoute(graph.nodes.items, edge, geometry) orelse return error.Paint764EdgeSourceMissing;
+                try std.testing.expectEqual(route.from.y, route.to.y);
+                var mask = try ParityDib.init(1280, 720);
+                defer mask.deinit();
+                fill(mask.dc, rect(0, 0, 1280, 720), 0);
+                const dash = graphEdgeDash(edge).?;
+                drawRoute(mask.dc, route, 0x00FFFFFF, 1.5 * state.zoom, .{ scaledValue(dash[0], state.zoom), scaledValue(dash[1], state.zoom) });
+                try verifyPaint764StrokeVisibility(dib, mask, rect(route.from.x + 8, route.from.y - 3, route.from.x + 49, route.from.y + 4), edgeKindColor(edge.kind), edge.id);
+                painted_edges += 1;
             }
         }
+        try std.testing.expectEqual(@as(usize, 4), painted_edges);
     }
     try std.testing.expect(c.GdiFlush() != 0);
     try std.testing.expect(dib.nonBackgroundPixels(Tokens.canvas_tone) > 10_000);
@@ -5471,7 +5873,7 @@ fn writePaint764Receipt(
         \\  "renderer": "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB",
         \\  "dimensions": {{"width": 1280, "height": 720, "logicalWidth": 1280, "logicalHeight": 720}},
         \\  "dpiMapping": {{"windowExtX": 96, "windowExtY": 96, "viewportExtX": 96, "viewportExtY": 96, "deviceDpiX": {d}, "deviceDpiY": {d}}},
-        \\  "canvas": {{"surface": "{s}", "zoom": 1, "panX": 0, "panY": 0, "selectedIndex": 0, "railVisible": true, "panelVisible": false, "activityEnabled": false}},
+        \\  "canvas": {{"surface": "{s}", "zoom": 0.8, "panX": 0, "panY": 0, "selectedIndex": 0, "railVisible": true, "panelVisible": false, "activityEnabled": false}},
         \\  "model": {{"nodes": {d}, "edges": {d}, "paintedEdges": {d}, "activityHistory": 0, "createdAtValues": {d}}},
         \\  "ageEvidence": {s},
         \\  "header": {{"title": "GraphCode", "context": "{s}", "reachabilityClaim": "declared fixture/test value only; not App reachability"}},
@@ -5596,9 +5998,9 @@ fn paint764Export(scene: Paint764Scene) !void {
         height: i32,
         weight: i32,
     }{
-        .{ .font = AppFont.getStyle(14.5, .card_title), .face = "Segoe UI", .height = -15, .weight = c.FW_SEMIBOLD },
-        .{ .font = AppFont.getStyle(10, .card_state), .face = "Segoe UI", .height = -10, .weight = c.FW_BOLD },
-        .{ .font = AppFont.getStyle(10.5, .card_mono), .face = "Consolas", .height = -11, .weight = c.FW_NORMAL },
+        .{ .font = AppFont.getStyle(14.5 * paint764_zoom, .card_title), .face = "Segoe UI", .height = -12, .weight = c.FW_SEMIBOLD },
+        .{ .font = AppFont.getStyle(10 * paint764_zoom, .card_state), .face = "Segoe UI", .height = -8, .weight = c.FW_BOLD },
+        .{ .font = AppFont.getStyle(10.5 * paint764_zoom, .card_mono), .face = "Consolas", .height = -8, .weight = c.FW_NORMAL },
         .{ .font = AppFont.get(11, false), .face = "Segoe UI", .height = -11, .weight = c.FW_NORMAL },
     };
     var rgb_hashes: [3][32]u8 = undefined;
@@ -5932,11 +6334,31 @@ fn chrome764Paint(
     inspection: ?*const WorktreeStatus.Inspection,
     entries: []const []const u8,
 ) !void {
+    const owns_layout = state.layout_fingerprint == null or entries.len > 0;
+    var prepared = if (owns_layout) try modelTestState(&fixture.model, state.*, chrome764GraphBounds()) else state.*;
+    defer if (owns_layout) prepared.deinitLayout();
+    if (entries.len > 0) try prepared.syncLayout(std.testing.allocator, &fixture.model, chrome764GraphBounds(), &.{}, entries);
     var sidebar = Sidebar.State.init(std.testing.allocator);
     defer sidebar.deinit();
     paint(
-        dib.dc, 1280, 720, &fixture.model, inspection, "", 0, "", "", "", false, "",
-        entries, &.{}, std.testing.allocator, state, &sidebar, -1,
+        dib.dc,
+        1280,
+        720,
+        &fixture.model,
+        inspection,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        entries,
+        &.{},
+        std.testing.allocator,
+        &prepared,
+        &sidebar,
+        -1,
         .{ .graph_visible = true, .rail_visible = true, .panel_visible = false, .activity_enabled = false },
         if (scene == .project) .project else .overview,
     );
@@ -5975,10 +6397,11 @@ test "loop card parity chrome 764 normal gradient and shared surfaces" {
     defer project.deinit();
     var overview = try ParityDib.init(1280, 720);
     defer overview.deinit();
-    try paint764TestSurface(project, &fixture, std.testing.allocator, .project);
-    try paint764TestSurface(overview, &fixture, std.testing.allocator, .overview);
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
+    try chrome764Paint(project, &fixture, .project, &state, null, &.{});
+    try chrome764Paint(overview, &fixture, .overview, &state, null, &.{});
     var checks = Chrome764Checks{};
-    const state = CanvasState{};
     for ([_]usize{ 0, 1, 3, 4 }) |index| {
         const node = fixture.model.graphs.items[0].nodes.items[index];
         const pb = chrome764Card(&fixture, .project, index, &state);
@@ -6014,7 +6437,8 @@ test "loop card parity chrome 764 warmth remains independent of primary actions"
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
     var checks = Chrome764Checks{};
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     for (0..2) |variant| {
         if (variant == 1) {
             try chrome764State(&fixture, 0, "failed", "idle");
@@ -6027,8 +6451,12 @@ test "loop card parity chrome 764 warmth remains independent of primary actions"
             [_]bool{ true, false, false, true, false, true };
         const graph = fixture.model.graphs.items[0];
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
-            try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
             for (graph.nodes.items, 0..) |node, index| {
+                state.pan_x = 0;
+                state.pan_y = 0;
+                const unpanned = chrome764Card(&fixture, scene, index, &state);
+                if (unpanned.right > 1280) state.pan_x = @floatFromInt(1200 - unpanned.right);
+                try chrome764Paint(dib, &fixture, scene, &state, null, &.{});
                 const warm = needsAttention(node, graph.nodes.items, graph.edges.items);
                 checks.expect(warm == expected_warm[index], "preserved-attention-classification", scene, node.id);
                 const bounds = chrome764Card(&fixture, scene, index, &state);
@@ -6057,7 +6485,8 @@ test "loop card parity chrome 764 tinted falloff and offset black lift on both g
     var background = try ParityDib.init(1280, 720);
     defer background.deinit();
     var checks = Chrome764Checks{};
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     for ([_]Paint764Scene{ .project, .overview }) |scene| {
         try chrome764State(&fixture, 0, "idle", "idle");
         try chrome764Paint(normal, &fixture, scene, &state, null, &.{"chrome-isolated"});
@@ -6110,12 +6539,13 @@ test "loop card parity chrome 764 rounded stripe alpha hairline and unwired dash
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
     var checks = Chrome764Checks{};
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     const accent: u32 = 0x008151D5;
     for ([_]bool{ false, true }) |attention| {
         try chrome764State(&fixture, 5, if (attention) "running" else "idle", if (attention) "awaitingInput" else "idle");
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
-            try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
+            try chrome764Paint(dib, &fixture, scene, &state, null, &.{});
             const bounds = chrome764Card(&fixture, scene, 5, &state);
             const face = chrome764Face(attention, 40, 96);
             checks.pixel(c.GetPixel(dib.dc, bounds.left + 2, bounds.top + 40), chrome764Blend(accent, face, 35), "unwired-alpha-over-local-gradient", scene, "fixture-turn-needs-you");
@@ -6136,7 +6566,7 @@ test "loop card parity chrome 764 rounded stripe alpha hairline and unwired dash
             checks.expect(!chrome764ColorNear(upper, lower, 1), "alpha-hairline-preserves-local-face-variation", scene, "fixture-turn-needs-you");
         }
         if (!fixture.model.setSelectedIndex(5)) return error.Chrome764SelectionFailed;
-        try paint764TestSurface(dib, &fixture, std.testing.allocator, .project);
+        try chrome764Paint(dib, &fixture, .project, &state, null, &.{});
         const bounds = nodeBounds(5, &state);
         checks.expect(dib.count(rect(bounds.left + 20, bounds.top, bounds.left + 220, bounds.top + 1),
             Tokens.canvas_selection) >= 190, "selected-unwired-solid-blue-precedence", .project, "fixture-turn-needs-you");
@@ -6165,7 +6595,8 @@ test "loop card parity chrome 764 zoom mapping and graph viewport clip" {
                 fill(dib.dc, rect(0, 0, 1280, 720), sentinel);
                 if (c.IntersectClipRect(dib.dc, graph_bounds.left, graph_bounds.top, graph_bounds.right, graph_bounds.bottom) == c.ERROR)
                     return error.Chrome764ClipFailed;
-                var state = CanvasState{ .zoom = zoom };
+                var state = try modelTestState(&fixture.model, .{ .zoom = zoom }, graph_bounds);
+                defer state.deinitLayout();
                 const unshifted = chrome764Card(&fixture, scene, 0, &state);
                 state.pan_x = @floatFromInt(300 - unshifted.left);
                 state.pan_y = @floatFromInt(200 - unshifted.top);
@@ -6206,38 +6637,38 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
     var dib = try ParityDib.init(1280, 720);
     defer dib.deinit();
     var checks = Chrome764Checks{};
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{}, chrome764GraphBounds());
+    defer state.deinitLayout();
     const graph_bounds = chrome764GraphBounds();
     try verifyPaint764Inventory(&fixture, .overview);
-    const project_size = contentSize(&fixture.model, .project);
-    const overview_size = contentSize(&fixture.model, .overview);
-    checks.expect(project_size.width == 844 and project_size.height == 380,
-        "project-fit-excludes-noninteractive-halo", .project, "fixture-main-idle");
-    checks.expect(overview_size.width == 854 and overview_size.height == 558,
-        "overview-fit-excludes-noninteractive-halo", .overview, "fixture-main-idle");
+    const project_size = contentSize(&fixture.model, .project, &state);
+    const overview_size = contentSize(&fixture.model, .overview, &state);
+    checks.expect(project_size.width == 1472 and project_size.height == 518, "project-fit-excludes-noninteractive-halo", .project, "fixture-main-idle");
+    checks.expect(overview_size.width == 1682 and overview_size.height == 696, "overview-fit-excludes-noninteractive-halo", .overview, "fixture-main-idle");
     for ([_]usize{ 0, 5 }) |selected| {
         if (!fixture.model.setSelectedIndex(selected)) return error.Chrome764SelectionFailed;
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
-            try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
             const graph = fixture.model.graphs.items[0];
             const roles = try resolveCardRoles(std.testing.allocator, graph.nodes.items, graph.edges.items, &.{});
             defer std.testing.allocator.free(roles);
             checks.expect(roles[0] == .entry and roles[5] == .unwired, "entry-and-unwired-roles-preserved", scene, "fixture-main-idle");
             for (graph.nodes.items, 0..) |node, index| {
+                state.pan_x = 0;
+                state.pan_y = 0;
+                const unpanned = chrome764Card(&fixture, scene, index, &state);
+                if (unpanned.right > 1280) state.pan_x = @floatFromInt(1200 - unpanned.right);
+                try chrome764Paint(dib, &fixture, scene, &state, null, &.{});
                 const bounds = chrome764Card(&fixture, scene, index, &state);
-                try verifyPaint764CardPixels(dib, std.testing.allocator, node, bounds, roles[index],
-                    needsAttention(node, graph.nodes.items, graph.edges.items), @intCast(std.time.timestamp()));
-                checks.expect(bounds.right - bounds.left == 250 and bounds.bottom - bounds.top == 96,
-                    "250-by-96-hit-geometry-preserved", scene, node.id);
+                try verifyPaint764CardPixels(dib, std.testing.allocator, node, bounds, roles[index], needsAttention(node, graph.nodes.items, graph.edges.items), @intCast(std.time.timestamp()), state.zoom);
+                checks.expect(bounds.right - bounds.left == scaledValue(250, state.zoom) and bounds.bottom - bounds.top == scaledValue(96, state.zoom), "250-by-96-logical-hit-geometry-preserved", scene, node.id);
                 const live = try cardLiveLine(std.testing.allocator, node);
                 defer std.testing.allocator.free(live);
                 if (live.len != 0) {
-                    const rows = cardTextLayout(bounds, 1, 80);
-                    checks.expect(dib.count(rows.live, 0x009F9C9C) > 0,
-                        "description-or-activity-ink-preserved", scene, node.id);
+                    const rows = cardTextLayout(bounds, state.zoom, scaledValue(80, state.zoom));
+                    checks.expect(dib.count(rows.live, 0x009F9C9C) > 0, "description-or-activity-ink-preserved", scene, node.id);
                 }
-                const x = bounds.left + 125;
-                const y = bounds.top + 48;
+                const x = bounds.left + scaledValue(125, state.zoom);
+                const y = bounds.top + scaledValue(48, state.zoom);
                 if (scene == .project) {
                     checks.expect(hitTest(graph.nodes.items, x, y, &state, graph_bounds) == index,
                         "project-hit-and-activation-identity", scene, node.id);
@@ -6263,8 +6694,11 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
         &(fixture.model.graph orelse return error.Chrome764ProjectMissing).edges.items[1],
         &fixture.model.graphs.items[0].edges.items[1],
     }) |edge| try chrome764Replace(&edge.to, "fixture-main-idle");
+    state.pan_x = 0;
+    state.pan_y = 0;
+    try state.syncLayout(std.testing.allocator, &fixture.model, graph_bounds, &.{}, &.{});
     for ([_]Paint764Scene{ .project, .overview }) |scene| {
-        try paint764TestSurface(dib, &fixture, std.testing.allocator, scene);
+        try chrome764Paint(dib, &fixture, scene, &state, null, &.{});
         const graph = fixture.model.graphs.items[0];
         const roles = try resolveCardRoles(std.testing.allocator, graph.nodes.items, graph.edges.items, &.{});
         defer std.testing.allocator.free(roles);
@@ -6306,6 +6740,19 @@ fn label858Fixture() !Paint764Fixture {
     );
     if (!fixture.model.setSelectedIndex(1)) return error.Label858SelectionFailed;
     return fixture;
+}
+
+fn label858State(fixture: *const Paint764Fixture, initial: CanvasState) !CanvasState {
+    const state = try modelTestState(&fixture.model, initial, chrome764GraphBounds());
+    // These frozen 1x glyph/occlusion controls deliberately inject the old
+    // synthetic scene. Production lane geometry is covered separately above.
+    for (state.project_layout.?.positions, 0..) |*point, index| {
+        point.* = .{
+            .x = 157 + @as(f32, @floatFromInt(index % 3)) * 260,
+            .y = 98 + @as(f32, @floatFromInt(index / 3)) * 140,
+        };
+    }
+    return state;
 }
 
 fn label858RgbDistance(a: u32, b: u32) !u32 {
@@ -6401,7 +6848,8 @@ test "loop card parity edge-label chrome 858 backing preserves lower-layer pixel
     var checks = Label858Checks{};
     const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
     for (0..3) |variant| {
-        const state = CanvasState{ .selected_edge = if (variant == 1) 0 else null };
+        var state = try label858State(&fixture, .{ .selected_edge = if (variant == 1) 0 else null });
+        defer state.deinitLayout();
         graph.edges.items[0].fired = variant == 2;
         fill(lower.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
         var x: i32 = 303;
@@ -6446,7 +6894,8 @@ test "loop card parity edge-label chrome 858 text is below normal and attention 
     var above = try ParityDib.init(1280, 720);
     defer above.deinit();
     var checks = Label858Checks{};
-    const state = CanvasState{};
+    var state = try label858State(&fixture, .{});
+    defer state.deinitLayout();
     for (0..2) |warm| {
         const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
         for ([_]usize{ 0, 3 }) |index|
@@ -6477,8 +6926,10 @@ test "loop card parity edge-label chrome 858 card face occludes overlapping labe
     var above = try ParityDib.init(1280, 720);
     defer above.deinit();
     var checks = Label858Checks{};
-    var state = CanvasState{};
-    state.node_offsets[1] = .{ .x = -182, .y = 106 };
+    var state = try label858State(&fixture, .{});
+    defer state.deinitLayout();
+    state.project_layout.?.positions[1].x -= 182;
+    state.project_layout.?.positions[1].y += 106;
     for ([_]usize{ 2, 1 }) |selected| {
         if (!fixture.model.setSelectedIndex(selected)) return error.Label858SelectionFailed;
         try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
@@ -6509,7 +6960,8 @@ test "loop card parity edge-label chrome 858 placement and viewport boundaries r
             defer expected.deinit();
             try chrome764Map(actual, dpi);
             try chrome764Map(expected, dpi);
-            const state = CanvasState{ .zoom = zoom, .pan_x = 17, .pan_y = 9 };
+            var state = try label858State(&fixture, .{ .zoom = zoom, .pan_x = 17, .pan_y = 9 });
+            defer state.deinitLayout();
             const left: i32 = @intFromFloat(252 * zoom + 17);
             const width: i32 = @intFromFloat(250 * zoom);
             const top0: i32 = @intFromFloat(84 * zoom + 9);
@@ -6534,8 +6986,9 @@ test "loop card parity edge-label chrome 858 placement and viewport boundaries r
     var expected = try ParityDib.init(1280, 720);
     defer expected.deinit();
     for ([_]i32{ 39, 40 }) |delta| {
-        var state = CanvasState{};
-        state.node_offsets[3].y = @floatFromInt(delta - 140);
+        var state = try label858State(&fixture, .{});
+        defer state.deinitLayout();
+        state.project_layout.?.positions[3].y += @as(f32, @floatFromInt(delta - 140));
         fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
         fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
         drawEdgeLabels(actual.dc, std.testing.allocator, graph, &state);
@@ -6546,12 +6999,14 @@ test "loop card parity edge-label chrome 858 placement and viewport boundaries r
     }
     var edges: [130]GraphModel.Edge = undefined;
     @memset(&edges, graph.edges.items[0]);
+    var crowded_state = try label858State(&fixture, .{});
+    defer crowded_state.deinitLayout();
     for ([_]usize{ 2, 128, 129, 130 }) |count| {
         var crowded = graph;
         crowded.edges.items = edges[0..count];
         fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
         fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        drawEdgeLabels(actual.dc, std.testing.allocator, crowded, &CanvasState{});
+        drawEdgeLabels(actual.dc, std.testing.allocator, crowded, &crowded_state);
         for (0..count) |index| {
             const y: i32 = 192 + @as(i32, @intCast(@min(index, 12))) * 24;
             label858Text(expected.dc, edgeKindColor("handoff"), rect(303, y, 451, y + 20));
@@ -6592,7 +7047,8 @@ test "loop card parity edge-label chrome 858 project-only change preserves the c
         for ([_]usize{ 0, 3 }) |index|
             try chrome764Replace(&graph.nodes.items[index].state, if (warm == 0) "idle" else "failed");
         for (0..3) |variant| {
-            const state = CanvasState{ .selected_edge = if (variant == 1) 0 else null };
+            var state = try label858State(&fixture, .{ .selected_edge = if (variant == 1) 0 else null });
+            defer state.deinitLayout();
             graph.edges.items[0].fired = variant == 2;
             try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
             try label858Composition(omitted, &fixture, &state, .omitted);
@@ -6616,10 +7072,11 @@ test "loop card parity edge-label chrome 858 project-only change preserves the c
                 .{ warm, variant, ink, pairs, minimum });
         }
     }
-    const state = CanvasState{};
+    var state = try label858State(&fixture, .{});
+    defer state.deinitLayout();
     const graph = fixture.model.graph orelse return error.Label858GraphMissing;
     checks.expect(hitTest(graph.nodes.items, 377, 132, &state, chrome764GraphBounds()) == 0);
-    checks.expect(contentSize(&fixture.model, .project).width > 0);
+    checks.expect(contentSize(&fixture.model, .project, &state).width > 0);
     const label = try edgeLabel(std.testing.allocator, graph.edges.items[0]);
     defer std.testing.allocator.free(label);
     checks.expect(std.mem.eql(u8, label, "handoff"));
@@ -6657,7 +7114,8 @@ test "loop card parity paint 764 accents match Mac COLORREFs on both surfaces" {
     try paint764TestSurface(project, &fixture, allocator, .project);
     try paint764TestSurface(overview, &fixture, allocator, .overview);
 
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     const viewport_bounds = renderBounds(1280, 720, .{
         .rail_visible = true,
         .panel_visible = false,
@@ -6713,12 +7171,12 @@ test "loop card parity paint 764 accents match Mac COLORREFs on both surfaces" {
 
         const presentation = cardState(node);
         const pill_width = blk: {
-            const old = try selectCardFont(project.dc, 10, .card_state);
+            const old = try selectCardFont(project.dc, 10 * state.zoom, .card_state);
             defer _ = c.SelectObject(project.dc, old);
-            break :blk try measuredText(project.dc, allocator, presentation.word) + 22;
+            break :blk try measuredText(project.dc, allocator, presentation.word) + scaledValue(22, state.zoom);
         };
-        const project_rows = cardTextLayout(bounds, 1, pill_width);
-        const overview_rows = cardTextLayout(overview_bounds, 1, pill_width);
+        const project_rows = cardTextLayout(bounds, state.zoom, pill_width);
+        const overview_rows = cardTextLayout(overview_bounds, state.zoom, pill_width);
         const project_square_top = @divTrunc(
             project_rows.meta.top + project_rows.meta.bottom - scaledValue(6, state.zoom),
             2,
@@ -6841,7 +7299,8 @@ test "loop card parity paint 764 overview preserves entry role content" {
     const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, &.{});
     defer allocator.free(roles);
     try std.testing.expectEqual(NodeRole.entry, roles[0]);
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     const viewport_bounds = renderBounds(1280, 720, .{
         .rail_visible = true,
         .panel_visible = false,
@@ -6857,21 +7316,21 @@ test "loop card parity paint 764 overview preserves entry role content" {
     const overview_bounds = overviewCardBounds(&fixture.model, 0, 0, graph_bounds, &state);
     const presentation = cardState(node);
     const pill_width = blk: {
-        const old = try selectCardFont(project.dc, 10, .card_state);
+        const old = try selectCardFont(project.dc, 10 * state.zoom, .card_state);
         defer _ = c.SelectObject(project.dc, old);
-        break :blk try measuredText(project.dc, allocator, presentation.word) + 22;
+        break :blk try measuredText(project.dc, allocator, presentation.word) + scaledValue(22, state.zoom);
     };
-    const project_layout = cardTextLayout(project_bounds, 1, pill_width);
-    const overview_layout = cardTextLayout(overview_bounds, 1, pill_width);
+    const project_layout = cardTextLayout(project_bounds, state.zoom, pill_width);
+    const overview_layout = cardTextLayout(overview_bounds, state.zoom, pill_width);
     const project_detail = project_layout.detail;
     const overview_detail = overview_layout.detail;
-    const project_role = try cardMetaPresentation(project.dc, allocator, node, project_layout, 1, .entry);
+    const project_role = try cardMetaPresentation(project.dc, allocator, node, project_layout, state.zoom, .entry);
     defer allocator.free(project_role.text);
-    const overview_role = try cardMetaPresentation(overview.dc, allocator, node, overview_layout, 1, .entry);
+    const overview_role = try cardMetaPresentation(overview.dc, allocator, node, overview_layout, state.zoom, .entry);
     defer allocator.free(overview_role.text);
-    const project_chip_width = try cardRoleChipWidth(project.dc, allocator, .entry, 1);
-    const overview_chip_width = try cardRoleChipWidth(overview.dc, allocator, .entry, 1);
-    const chip_height = scaledValue(14, 1);
+    const project_chip_width = try cardRoleChipWidth(project.dc, allocator, .entry, state.zoom);
+    const overview_chip_width = try cardRoleChipWidth(overview.dc, allocator, .entry, state.zoom);
+    const chip_height = scaledValue(14, state.zoom);
     const project_chip_row = if (project_role.chip_in_detail) project_detail else project_layout.meta;
     const overview_chip_row = if (overview_role.chip_in_detail) overview_detail else overview_layout.meta;
     const project_chip_top = @divTrunc(project_chip_row.top + project_chip_row.bottom - chip_height, 2);
@@ -6921,7 +7380,8 @@ test "loop card parity paint 764 overview paints primary action within owning ca
         return error.Paint764AttentionNodeMissing;
     const node = graph.nodes.items[node_index];
     try std.testing.expect(needsAttention(node, graph.nodes.items, graph.edges.items));
-    const state = CanvasState{};
+    var state = try modelTestState(&fixture.model, .{ .zoom = paint764_zoom }, chrome764GraphBounds());
+    defer state.deinitLayout();
     const viewport_bounds = renderBounds(1280, 720, .{
         .rail_visible = true,
         .panel_visible = false,
@@ -6973,8 +7433,9 @@ test "loop card parity both production renderers paint named pill and mono meta 
         \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"id":"parity","project":{"path":"A","name":"Alpha"},"nodes":[{"id":"parity-card","title":"A long title must yield to NEEDS YOU","loopType":"goalBased","state":"succeeded","presence":"awaitingInput","activity":"reading tools","backend":"copilotCLI","createdAt":0}],"edges":[]}}}
     );
     const node = model.graphs.items[0].nodes.items[0];
-    const state = CanvasState{ .pan_x = 1200 };
     const viewport = rect(220, 34, 2200, 500);
+    var state = try modelTestState(&model, .{ .pan_x = 1200 }, viewport);
+    defer state.deinitLayout();
     fill(dib.dc, rect(0, 0, 2200, 500), 0);
     drawNode(dib.dc, allocator, node, 0, null, &.{node}, &.{}, .unwired, null, &.{}, &state);
     const project = nodeBounds(0, &state);
@@ -7023,7 +7484,8 @@ test "loop card parity production long text and hollow pills paint across zoom a
         _ = c.SetWindowExtEx(dib.dc, 96, 96, null);
         _ = c.SetViewportExtEx(dib.dc, @intCast(dpi), @intCast(dpi), null);
         for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
-            const state = CanvasState{ .zoom = zoom, .pan_x = 25, .pan_y = 19 };
+            var state = try cardTestState(.{ .zoom = zoom, .pan_x = 25 - 130 * zoom, .pan_y = 19 - 50 * zoom });
+            defer state.deinitLayout();
             const bounds = nodeBounds(0, &state);
             fill(dib.dc, rect(0, 0, 1000, 450), 0);
             roundedCard(dib.dc, bounds, Tokens.loop_card_bottom, false);
@@ -7118,7 +7580,8 @@ test "loop card parity existing action fills use hit bounds and never paint over
     defer inspection.entries.deinit();
     try inspection.entries.append(.{ .path = @constCast("fixture-safe"), .branch = @constCast("main"), .pushed = true, .landed = true });
     for ([_]f32{ 0.55, 0.75, 1, 1.25, 1.8 }) |zoom| {
-        const state = CanvasState{ .zoom = zoom };
+        var state = try cardTestState(.{ .zoom = zoom, .pan_x = 252 - 382 * zoom, .pan_y = 84 - 134 * zoom });
+        defer state.deinitLayout();
         fill(dib.dc, rect(0, 0, 1200, 500), 0);
         for (nodes, 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &.{}, .unwired, &inspection, &.{}, &state);
         const attention = attentionActionBounds(nodeBounds(0, &state), &state);
@@ -7137,7 +7600,9 @@ test "loop card parity existing action fills use hit bounds and never paint over
 }
 
 test "minimum zoom keeps compact rows separated inside a 96 point card" {
-    const bounds = nodeBounds(0, &.{ .zoom = 0.55 });
+    var state = try cardTestState(.{ .zoom = 0.55 });
+    defer state.deinitLayout();
+    const bounds = nodeBounds(0, &state);
     const layout = cardTextLayout(bounds, 0.55, 48);
     try std.testing.expect(layout.title.bottom <= layout.live.top);
     try std.testing.expect(layout.live.bottom <= layout.detail.top);
@@ -7440,7 +7905,7 @@ test "attention cards expose reason-specific primary actions" {
     try std.testing.expect(!attentionActionVisible(failed, &.{failed}, &.{}));
 }
 
-test "card roles use all-edge touchedness and handoff-only entry reachability" {
+test "card roles use Mac sequencing reachability including spawn but not message edges" {
     const allocator = std.testing.allocator;
     const nodes = [_]GraphModel.Node{
         graphRoleTestNode("root"),
@@ -7482,7 +7947,7 @@ test "card roles use all-edge touchedness and handoff-only entry reachability" {
     try std.testing.expectEqual(NodeRole.entry, roles[2]);
     try std.testing.expectEqual(NodeRole.entry, roles[3]);
     try std.testing.expectEqual(NodeRole.entry, roles[4]);
-    try std.testing.expectEqual(NodeRole.entry, roles[5]);
+    try std.testing.expectEqual(NodeRole.interior, roles[5]);
     try std.testing.expectEqual(NodeRole.cycle_only, roles[6]);
     try std.testing.expectEqual(NodeRole.cycle_only, roles[7]);
     try std.testing.expectEqual(NodeRole.cycle_only, roles[8]);
@@ -7554,9 +8019,11 @@ test "safe resolved worktrees expose distinct reclaim and keep targets" {
     try std.testing.expect(hasReclaimOffer(node, &inspection, &.{}));
     try std.testing.expect(!hasReclaimOffer(node, &inspection, &.{"C:\\safe"}));
     const nodes = [_]GraphModel.Node{node};
-    const offer = reclaimOfferBounds(nodeBounds(0, &.{}));
-    try std.testing.expectEqual(ReclaimAction.reclaim, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &.{}).?.action);
-    try std.testing.expectEqual(ReclaimAction.keep, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.keep.left + 1, offer.keep.top + 1, &.{}).?.action);
+    var state = try cardTestState(.{});
+    defer state.deinitLayout();
+    const offer = reclaimOfferBounds(nodeBounds(0, &state));
+    try std.testing.expectEqual(ReclaimAction.reclaim, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state).?.action);
+    try std.testing.expectEqual(ReclaimAction.keep, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.keep.left + 1, offer.keep.top + 1, &state).?.action);
 }
 
 test "attention follows awaiting input and stranded blocked semantics" {
@@ -7602,7 +8069,8 @@ test "hit testing rejects cards outside the graph viewport" {
 }
 
 test "edge hit testing follows reordered endpoint IDs and zoom pan" {
-    var state = CanvasState{ .pan_x = 18, .pan_y = -7, .zoom = 1.15 };
+    var state = try cardTestState(.{ .pan_x = 18, .pan_y = -7, .zoom = 1.15 });
+    defer state.deinitLayout();
     const nodes = [_]GraphModel.Node{
         .{ .id = @constCast("target"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },
         .{ .id = @constCast("source"), .title = @constCast(""), .loop_type = @constCast(""), .state = @constCast(""), .activity = @constCast(""), .presence = @constCast("") },

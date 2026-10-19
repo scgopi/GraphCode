@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 $sourceFilesV1 = @(
   "graphcode-windows\src\GraphCanvas.zig",
+  "graphcode-windows\src\LaneLayout.zig",
   "graphcode-windows\src\GdiplusAA.zig",
   "graphcode-windows\fixtures\paint-project-v1.json",
   "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -28,6 +29,7 @@ $profiles = @{
     nodes = 2
     edges = 1
     createdAtValues = 0
+    zoom = 1
     surface = $null
     headerContext = "Alpha"
     transportNames = @("project-paint-v1.bmp", "project-paint-v1-repeat-2.bmp", "project-paint-v1-repeat-3.bmp")
@@ -38,6 +40,7 @@ $profiles = @{
     fixturePaths = @("graphcode-windows\fixtures\paint-764-project.json")
     sourceFiles = @(
       "graphcode-windows\src\GraphCanvas.zig",
+      "graphcode-windows\src\LaneLayout.zig",
       "graphcode-windows\src\GdiplusAA.zig",
       "graphcode-windows\fixtures\paint-764-project.json",
       "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -49,6 +52,7 @@ $profiles = @{
     edges = 3
     paintedEdges = 3
     createdAtValues = 6
+    zoom = 0.8
     surface = "project"
     headerContext = "Card States"
     transportNames = @("project-paint-764.bmp", "project-paint-764-repeat-2.bmp", "project-paint-764-repeat-3.bmp")
@@ -59,6 +63,7 @@ $profiles = @{
     fixturePaths = @("graphcode-windows\fixtures\paint-764-project.json", "graphcode-windows\fixtures\paint-764-overview-peer.json")
     sourceFiles = @(
       "graphcode-windows\src\GraphCanvas.zig",
+      "graphcode-windows\src\LaneLayout.zig",
       "graphcode-windows\src\GdiplusAA.zig",
       "graphcode-windows\fixtures\paint-764-project.json",
       "graphcode-windows\fixtures\paint-764-overview-peer.json",
@@ -71,6 +76,7 @@ $profiles = @{
     edges = 4
     paintedEdges = 4
     createdAtValues = 8
+    zoom = 0.8
     surface = "overview"
     headerContext = "Overview"
     transportNames = @("overview-paint-764.bmp", "overview-paint-764-repeat-2.bmp", "overview-paint-764-repeat-3.bmp")
@@ -507,7 +513,7 @@ if ($receipt.dimensions.width -ne 1280 -or $receipt.dimensions.height -ne 720 -o
     $receipt.dimensions.logicalWidth -ne 1280 -or $receipt.dimensions.logicalHeight -ne 720 -or
     $receipt.dpiMapping.windowExtX -ne 96 -or $receipt.dpiMapping.windowExtY -ne 96 -or
     $receipt.dpiMapping.viewportExtX -ne 96 -or $receipt.dpiMapping.viewportExtY -ne 96 -or
-    $receipt.canvas.zoom -ne 1 -or $receipt.canvas.panX -ne 0 -or $receipt.canvas.panY -ne 0 -or
+    $receipt.canvas.zoom -ne $profile.zoom -or $receipt.canvas.panX -ne 0 -or $receipt.canvas.panY -ne 0 -or
     $receipt.canvas.selectedIndex -ne 0 -or -not $receipt.canvas.railVisible -or
     $receipt.canvas.panelVisible -or $receipt.canvas.activityEnabled) {
   Stop-Artifact "RenderConfigurationInvalid" "Receipt does not match the fixed 1280x720 canvas configuration."
@@ -593,9 +599,9 @@ if ($Scene -eq "project-paint-v1") {
 }
 
 $expectedFontRoles = @(
-  @{ role = "card-title"; face = "Segoe UI"; height = -15; weight = 600 },
-  @{ role = "card-state"; face = "Segoe UI"; height = -10; weight = 700 },
-  @{ role = "card-mono"; face = "Consolas"; height = -11; weight = 400 },
+  @{ role = "card-title"; face = "Segoe UI"; height = $(if ($Scene -eq "project-paint-v1") { -15 } else { -12 }); weight = 600 },
+  @{ role = "card-state"; face = "Segoe UI"; height = $(if ($Scene -eq "project-paint-v1") { -10 } else { -8 }); weight = 700 },
+  @{ role = "card-mono"; face = "Consolas"; height = $(if ($Scene -eq "project-paint-v1") { -11 } else { -8 }); weight = 400 },
   @{ role = "header"; face = "Segoe UI"; height = -11; weight = 400 }
 )
 if (@($receipt.fonts).Count -ne $expectedFontRoles.Count) {

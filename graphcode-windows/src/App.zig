@@ -1603,6 +1603,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.canvas.deinitLayout();
         self.freeLoopProbes();
         self.freeLoopHeld();
         self.workspace_summary_work.drain();
@@ -7028,7 +7029,8 @@ pub const App = struct {
             .fit_canvas => {
                 const client = logicalClientRect(self.window.hwnd, self.dpi);
                 const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
-                const content = GraphCanvas.contentSize(&self.model, self.surface);
+                if (!self.refreshCanvasLayout(client)) return;
+                const content = GraphCanvas.contentSize(&self.model, self.surface, &self.canvas);
                 self.canvas.fit(
                     .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
                     content.width,
@@ -7719,7 +7721,38 @@ pub const App = struct {
         return true;
     }
 
+    fn refreshCanvasLayout(self: *App, client: c.RECT) bool {
+        const viewport = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
+        self.canvas.syncLayout(
+            self.allocator,
+            &self.model,
+            .{ .left = viewport.left, .top = viewport.top, .right = viewport.right, .bottom = viewport.bottom },
+            self.sidebar_state.root_order.items,
+            self.declared_entry_ids.items,
+        ) catch |err| {
+            Diagnostics.record(self.allocator, "canvas-layout", @errorName(err));
+            std.log.warn("Graph layout refresh failed: {s}", .{@errorName(err)});
+            const message = self.allocator.dupe(u8, "Graph layout unavailable") catch return false;
+            // replaceStatus republishes accessibility and would retry this failure.
+            self.workspace_recovery.active = false;
+            if (self.status_override.len != 0) self.allocator.free(self.status_override);
+            self.status_override = message;
+            return false;
+        };
+        if (std.mem.eql(u8, self.status_override, "Graph layout unavailable")) {
+            self.allocator.free(self.status_override);
+            self.status_override = &.{};
+        }
+        return true;
+    }
+
     fn syncAccessibility(self: *App) void {
+        if ((self.window.hwnd != null or self.accessibility != null) and
+            !self.refreshCanvasLayout(logicalClientRect(self.window.hwnd, self.dpi)))
+        {
+            if (self.accessibility) |*provider| provider.syncElements("Graph layout unavailable", &.{}, .{}, .{});
+            return;
+        }
         // The canvas's native New Loop / Open Folder buttons follow the same state UIA
         // publishes, so a project switch or graph arrival never leaves one stale.
         self.layoutEmptyStateControls();
@@ -7730,6 +7763,10 @@ pub const App = struct {
     }
 
     fn syncAccessibilityTo(self: *App, provider: anytype, client: c.RECT) void {
+        if (!self.refreshCanvasLayout(client)) {
+            provider.syncElements("Graph layout unavailable", &.{}, .{}, .{});
+            return;
+        }
         var elements = std.array_list.Managed(Accessibility.DynamicElement).init(self.allocator);
         defer elements.deinit();
         var owned_identities = std.array_list.Managed([]u8).init(self.allocator);
@@ -9259,7 +9296,11 @@ fn onWindowMessage(
                 Accessibility.uia_fit_command => {
                     const client = logicalClientRect(hwnd, app.dpi);
                     const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                    const content = GraphCanvas.contentSize(&app.model, app.surface);
+                    if (!app.refreshCanvasLayout(client)) {
+                        result.* = 0;
+                        return true;
+                    }
+                    const content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
                     app.canvas.fit(
                         .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
                         content.width,
@@ -9396,6 +9437,7 @@ fn onWindowMessage(
             const inspection = app.currentWorktreeInspection();
             app.update_lock.lock();
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
+            _ = app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = logical_right, .bottom = logical_bottom });
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
             GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
             app.update_lock.unlock();
@@ -9859,7 +9901,7 @@ fn onWindowMessage(
                             .actual => app.canvas.actualSize(),
                             .in => app.canvas.zoomBy(center_x, center_y, 1.1),
                             .fit => {
-                                const content = GraphCanvas.contentSize(&app.model, app.surface);
+                                const content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
                                 app.canvas.fit(bounds, content.width, content.height);
                             },
                         }
@@ -19766,6 +19808,7 @@ fn noticeTestApp() !App {
 }
 
 fn deinitNoticeTestApp(app: *App) void {
+    app.canvas.deinitLayout();
     if (app.worktree_dialog) |*dialog| dialog.deinit();
     if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
     if (app.selected_worktree_path.len != 0) app.allocator.free(app.selected_worktree_path);
@@ -20324,28 +20367,28 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
         .{
             .identity = "overview-worktree-notice:C:\\notice-a",
             .name = "Last inspected: 8 worktrees - 7 reclaimable",
-            .bounds = .{ .{ 750, 82, 1036, 102 }, .{ 1125, 123, 1554, 153 }, .{ 1500, 164, 2072, 204 } },
+            .bounds = .{ .{ 1396, 106, 1682, 126 }, .{ 2094, 159, 2523, 189 }, .{ 2792, 212, 3364, 252 } },
             .eligible = true,
             .invokable = true,
         },
         .{
             .identity = "overview-worktree-notice:C:\\notice-b",
             .name = "Last inspected: 1 worktree",
-            .bounds = .{ .{ 750, 198, 1036, 218 }, .{ 1125, 297, 1554, 327 }, .{ 1500, 396, 2072, 436 } },
+            .bounds = .{ .{ 1396, 284, 1682, 304 }, .{ 2094, 426, 2523, 456 }, .{ 2792, 568, 3364, 608 } },
             .eligible = true,
             .invokable = true,
         },
         .{
             .identity = "overview-worktree-notice:C:\\notice-c",
             .name = "Worktrees not inspected",
-            .bounds = .{ .{ 750, 314, 1036, 334 }, .{ 1125, 471, 1554, 501 }, .{ 1500, 628, 2072, 668 } },
+            .bounds = .{ .{ 1396, 462, 1682, 482 }, .{ 2094, 693, 2523, 723 }, .{ 2792, 924, 3364, 964 } },
             .eligible = true,
             .invokable = true,
         },
         .{
             .identity = "overview-worktree-notice:ssh://host/repo",
             .name = "Worktrees not inspected",
-            .bounds = .{ .{ 750, 430, 1036, 450 }, .{ 1125, 645, 1554, 675 }, .{ 1500, 860, 2072, 900 } },
+            .bounds = .{ .{ 1396, 640, 1682, 660 }, .{ 2094, 960, 2523, 990 }, .{ 2792, 1280, 3364, 1320 } },
             .eligible = true,
             .invokable = true,
         },
@@ -20395,6 +20438,7 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
         .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
     };
     defer app.client.deinit();
+    defer app.canvas.deinitLayout();
     defer app.model.deinit();
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
@@ -20493,11 +20537,11 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         });
     }
     try expectDpiAccessibility(.project, null, &.{
-        .{ .identity = "project-card:A:loop", .bounds = .{ .{ 252, 84, 502, 180 }, .{ 378, 126, 753, 270 }, .{ 504, 168, 1004, 360 } } },
+        .{ .identity = "project-card:A:loop", .bounds = .{ .{ 382, 134, 632, 230 }, .{ 573, 201, 948, 345 }, .{ 764, 268, 1264, 460 } } },
         .{ .identity = "canvas-alert:ingress", .bounds = .{ .{ 244, 556, 1176, 612 }, .{ 366, 834, 1764, 918 }, .{ 488, 1112, 2352, 1224 } } },
     });
     try expectDpiAccessibility(.overview, null, &.{
-        .{ .identity = "overview-card:A:loop", .bounds = .{ .{ 262, 118, 512, 214 }, .{ 393, 177, 768, 321 }, .{ 524, 236, 1024, 428 } } },
+        .{ .identity = "overview-card:A:loop", .bounds = .{ .{ 382, 134, 632, 230 }, .{ 573, 201, 948, 345 }, .{ 764, 268, 1264, 460 } } },
     });
     try expectDpiAccessibility(.quick_chats, null, &.{
         .{ .identity = "quick-chat-card:chat", .bounds = .{ .{ 262, 88, 482, 152 }, .{ 393, 132, 723, 228 }, .{ 524, 176, 964, 304 } } },
@@ -20730,6 +20774,7 @@ fn expectSingleActivation(app: *App, project_path: []const u8, node_id: []const 
 }
 
 fn deinitOverviewTestApp(app: *App) void {
+    app.canvas.deinitLayout();
     app.drainWorktreeInspection();
     app.drainWorktreeReclaim();
     if (app.worktree_dialog) |*dialog| dialog.deinit();
@@ -20751,6 +20796,118 @@ fn deinitOverviewTestApp(app: *App) void {
     app.declared_entry_ids.deinit();
     app.kept_worktree_paths.deinit();
     if (app.window.hwnd != null) _ = c.DestroyWindow(app.window.hwnd);
+}
+
+test "lane geometry UIA shares edge-derived project overview and panned card rectangles" {
+    const Sink = struct {
+        app: *App,
+        checked: bool = false,
+        seen: usize = 0,
+        failure: ?anyerror = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.checked = true;
+            self.check(elements) catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+            const prefix = if (self.app.surface == .project) "project-card:A:" else "overview-card:A:";
+            const graph = self.app.model.graph.?;
+            for (elements) |element| {
+                if (!std.mem.startsWith(u8, element.identity, prefix)) continue;
+                const id = element.identity[prefix.len..];
+                const index = GraphModel.findNodeIndexByID(graph.nodes.items, id) orelse return error.UnknownLayoutCard;
+                const logical = if (self.app.surface == .project)
+                    GraphCanvas.nodeBounds(index, &self.app.canvas)
+                else
+                    GraphCanvas.overviewCardBounds(&self.app.model, 0, index, self.app.canvas.layout_bounds, &self.app.canvas);
+                try std.testing.expectEqual(physicalCoordinate(logical.left, self.app.dpi), element.left);
+                try std.testing.expectEqual(physicalCoordinate(logical.top, self.app.dpi), element.top);
+                try std.testing.expectEqual(physicalCoordinate(logical.right, self.app.dpi), element.right);
+                try std.testing.expectEqual(physicalCoordinate(logical.bottom, self.app.dpi), element.bottom);
+                self.seen += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 3), self.seen);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var app: App = .{
+        .allocator = allocator,
+        .client = .{ .allocator = allocator, .frame_buffer = try @import("FrameBuffer.zig").FrameBuffer.init(allocator, .v2) },
+        .daemon = undefined,
+        .model = GraphModel.Model.init(allocator),
+        .sidebar_state = Sidebar.State.init(allocator),
+        .declared_entry_ids = std.array_list.Managed([]u8).init(allocator),
+        .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
+        .workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false },
+        .canvas = .{ .zoom = 0.75, .pan_x = 17, .pan_y = 9 },
+    };
+    defer deinitOverviewTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"c","title":"C"},{"id":"a","title":"A"},{"id":"b","title":"B"}],"edges":[{"id":"ab","from":"a","to":"b","kind":"handoff"},{"id":"bc","from":"b","to":"c","kind":"handoff"}]}}
+    );
+    app.canvas.node_offsets[0] = .{ .x = -5000, .y = 5000 };
+    for ([_]u32{ 96, 144 }) |dpi| {
+        app.dpi = dpi;
+        for ([_]GraphCanvas.Surface{ .project, .overview }) |surface| {
+            app.surface = surface;
+            var sink = Sink{ .app = &app };
+            app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1280, .bottom = 900 });
+            try std.testing.expect(sink.checked);
+            if (sink.failure) |err| return err;
+        }
+    }
+    const before = GraphCanvas.nodeBounds(1, &app.canvas);
+    app.canvas.beginNodeDrag("a", 1, before.left, before.top);
+    app.canvas.updateNodeDrag(before.left + 40, before.top + 20);
+    var sink = Sink{ .app = &app };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1280, .bottom = 900 });
+    try std.testing.expect(sink.checked);
+    if (sink.failure) |err| return err;
+    const after = GraphCanvas.nodeBounds(1, &app.canvas);
+    try std.testing.expectEqual(before.left + 40, after.left);
+    try std.testing.expectEqual(before.top + 20, after.top);
+    const FailureSink = struct {
+        publications: usize = 0,
+        cleared: bool = false,
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+        fn syncElements(self: *@This(), status: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.publications += 1;
+            self.cleared = elements.len == 0 and std.mem.eql(u8, status, "Graph layout unavailable");
+        }
+    };
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    app.allocator = failing.allocator();
+    var failure_sink = FailureSink{};
+    app.syncAccessibilityTo(&failure_sink, .{ .left = 0, .top = 0, .right = 1280, .bottom = 400 });
+    app.allocator = allocator;
+    try std.testing.expectEqual(@as(usize, 1), failure_sink.publications);
+    try std.testing.expect(failure_sink.cleared);
+    try std.testing.expect(app.canvas.project_layout == null);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"duplicate","title":"A"},{"id":"duplicate","title":"B"}],"edges":[]}}
+    );
+    failure_sink = .{};
+    app.syncAccessibilityTo(&failure_sink, .{ .left = 0, .top = 0, .right = 1280, .bottom = 900 });
+    try std.testing.expectEqual(@as(usize, 1), failure_sink.publications);
+    try std.testing.expect(failure_sink.cleared);
+    try std.testing.expectEqualStrings("Graph layout unavailable", app.status_override);
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"root","title":"Root"},{"id":"a","title":"A"},{"id":"b","title":"B"}],"edges":[{"id":"rb","from":"root","to":"b","kind":"handoff"},{"id":"ra","from":"root","to":"a","kind":"handoff"}]}}
+    );
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1280, .bottom = 900 }));
+    try std.testing.expectEqual(@as(usize, 1), app.canvas.project_layout.?.slots[1].row);
+    try std.testing.expectEqual(@as(usize, 0), app.canvas.project_layout.?.slots[2].row);
+    try std.testing.expectEqual(@as(usize, 1), app.canvas.overview_layout.?.lanes[0].layout.slots[1].row);
+    try std.testing.expectEqual(@as(usize, 0), app.status_override.len);
+    const before_expansion = GraphCanvas.nodeBounds(2, &app.canvas);
+    try app.sidebar_state.toggleNode("root");
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1280, .bottom = 900 }));
+    try std.testing.expectEqualDeep(before_expansion, GraphCanvas.nodeBounds(2, &app.canvas));
 }
 
 fn loadOverviewTestGraphs(app: *App, alpha: []const u8, beta: []const u8) !void {

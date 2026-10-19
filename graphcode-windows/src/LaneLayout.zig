@@ -31,12 +31,13 @@ pub const MacMetrics = struct {
     pub const caption_height: f32 = 18;
     pub const origin_lane: f32 = 62;
     pub const lane_gap: f32 = 24;
+    pub const default_fit_floor: f32 = 0.8;
     pub const first_loop_x = band_x + padding + origin_lane + card_width / 2;
     pub const first_row_inset = caption_height + padding + card_height / 2;
     pub const origin = Point{ .x = first_loop_x, .y = lane_top + first_row_inset };
 
     pub fn rowBudget(height: f32) usize {
-        const usable = height / 0.8 - (lane_top + caption_height + padding * 2);
+        const usable = height / default_fit_floor - (lane_top + caption_height + padding * 2);
         return @intFromFloat(@max(minimum_row_budget, @trunc(usable / row_height)));
     }
 

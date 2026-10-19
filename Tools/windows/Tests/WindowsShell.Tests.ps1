@@ -1005,6 +1005,10 @@ Invoke-Native "Graph model executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\GraphModel.zig } finally { Pop-Location }
 }
+Invoke-Native "Graph lane layout executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\LaneLayout.zig } finally { Pop-Location }
+}
 Invoke-Native "Graph canvas input executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")

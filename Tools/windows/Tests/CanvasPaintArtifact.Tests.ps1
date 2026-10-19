@@ -11,6 +11,7 @@ $fixturePath = Join-Path $repoRoot "graphcode-windows\fixtures\paint-project-v1.
 $fixtureHash = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $sourcePathsV1 = @(
   "graphcode-windows\src\GraphCanvas.zig",
+  "graphcode-windows\src\LaneLayout.zig",
   "graphcode-windows\src\GdiplusAA.zig",
   "graphcode-windows\fixtures\paint-project-v1.json",
   "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -110,6 +111,7 @@ function Get-SceneSourcePaths([string] $Scene) {
     "project-paint-764" {
       return @(
         "graphcode-windows\src\GraphCanvas.zig",
+        "graphcode-windows\src\LaneLayout.zig",
         "graphcode-windows\src\GdiplusAA.zig",
         "graphcode-windows\fixtures\paint-764-project.json",
         "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -121,6 +123,7 @@ function Get-SceneSourcePaths([string] $Scene) {
     "overview-paint-764" {
       return @(
         "graphcode-windows\src\GraphCanvas.zig",
+        "graphcode-windows\src\LaneLayout.zig",
         "graphcode-windows\src\GdiplusAA.zig",
         "graphcode-windows\fixtures\paint-764-project.json",
         "graphcode-windows\fixtures\paint-764-overview-peer.json",
@@ -260,16 +263,16 @@ function New-Receipt(
     renderer = "GraphCanvas.paint + GraphCanvas.paintHeader -> memory DIB"
     dimensions = [ordered]@{ width = 1280; height = 720; logicalWidth = 1280; logicalHeight = 720 }
     dpiMapping = [ordered]@{ windowExtX = 96; windowExtY = 96; viewportExtX = 96; viewportExtY = 96; deviceDpiX = 96; deviceDpiY = 96 }
-    canvas = [ordered]@{ zoom = 1; panX = 0; panY = 0; selectedIndex = 0; railVisible = $true; panelVisible = $false; activityEnabled = $false }
+    canvas = [ordered]@{ zoom = $(if ($is764) { 0.8 } else { 1 }); panX = 0; panY = 0; selectedIndex = 0; railVisible = $true; panelVisible = $false; activityEnabled = $false }
     model = [ordered]@{ nodes = $nodes; edges = $edges; activityHistory = 0; createdAtValues = $createdAtValues }
     header = [ordered]@{ title = "GraphCode"; context = $headerContext; reachabilityClaim = "declared fixture/test value only; not App reachability" }
     gdiPlusReady = $true
     colorAssumption = "SDR RGB; unused DIB alpha is normalized to opaque in BMP transport"
     fontEvidenceScope = "Sampled card title, state, metadata, and header title font selections only; not a census of every text draw"
     fonts = @(
-      [ordered]@{ role = "card-title"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = -15; weight = 600; quality = "CLEARTYPE_QUALITY" },
-      [ordered]@{ role = "card-state"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = -10; weight = 700; quality = "CLEARTYPE_QUALITY" },
-      [ordered]@{ role = "card-mono"; logicalFace = "Consolas"; actualFace = "Consolas"; height = -11; weight = 400; quality = "CLEARTYPE_QUALITY" },
+      [ordered]@{ role = "card-title"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = $(if ($is764) { -12 } else { -15 }); weight = 600; quality = "CLEARTYPE_QUALITY" },
+      [ordered]@{ role = "card-state"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = $(if ($is764) { -8 } else { -10 }); weight = 700; quality = "CLEARTYPE_QUALITY" },
+      [ordered]@{ role = "card-mono"; logicalFace = "Consolas"; actualFace = "Consolas"; height = $(if ($is764) { -8 } else { -11 }); weight = 400; quality = "CLEARTYPE_QUALITY" },
       [ordered]@{ role = "header"; logicalFace = "Segoe UI"; actualFace = "Segoe UI"; height = -11; weight = 400; quality = "CLEARTYPE_QUALITY" }
     )
     transport = @(
@@ -836,8 +839,8 @@ Invoke-ContractCase "valid round-trip" {
     "Manifest must limit the GDI+ readiness claim."
   Assert-Contract ($manifest.fontFileEvidenceScope -match "lookup candidates") `
     "Manifest must distinguish selected font-face evidence from font-file lookup candidates."
-  Assert-Contract (@($manifest.sourceFiles).Count -eq 7) `
-    "Manifest must carry all seven source hashes from the native run receipt."
+  Assert-Contract (@($manifest.sourceFiles).Count -eq 8) `
+    "Manifest must carry all eight source hashes, including the derived layout."
   $currentSourceHashes = Get-ContractSourceHashes
   foreach ($sourceFact in $manifest.sourceFiles) {
     $relativePath = $sourceFact.path.Replace("/", "\")
@@ -1057,11 +1060,32 @@ foreach ($scene in @("project-paint-764", "overview-paint-764")) {
       "Manifest must bind the exact fixture set in order."
     $expectedSourcePaths = @(Get-SceneSourcePaths $scene | ForEach-Object { $_.Replace("\", "/") } | Sort-Object -CaseSensitive)
     $actualSourcePaths = @($manifest.sourceFiles | ForEach-Object { $_.path } | Sort-Object -CaseSensitive)
-    Assert-Contract ($expectedSourcePaths.Count -eq (6 + $expectedFixturePaths.Count) -and
+    Assert-Contract ($receipt.canvas.zoom -eq 0.8) `
+      "The lane-layout scene must use exactly the macOS opening fit floor."
+    Assert-Contract ($expectedSourcePaths.Count -eq (7 + $expectedFixturePaths.Count) -and
       ($actualSourcePaths -join "`n") -ceq ($expectedSourcePaths -join "`n")) `
       "Manifest must bind the exact scene-specific leased source paths."
     Assert-Contract ((Get-ChildItem -LiteralPath $run.OutputDirectory -Force).Count -eq 2) `
       "Scene publication must contain exactly the PNG and manifest."
+  }
+}
+
+foreach ($scene in @("project-paint-764", "overview-paint-764")) {
+  Invoke-SceneContractCase "$scene old 1x zoom refusal" {
+    $run = New-SyntheticRun "scene-$scene-old-zoom" -Scene $scene
+    $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    $receipt.canvas.zoom = 1
+    [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    Update-SyntheticArtifactHash $run "paintReceipt"
+    Assert-ConverterFailure $run "RenderConfigurationInvalid"
+  }
+  Invoke-SceneContractCase "$scene old 1x font refusal" {
+    $run = New-SyntheticRun "scene-$scene-old-font" -Scene $scene
+    $receipt = Get-Content -LiteralPath $run.ReceiptPath -Raw | ConvertFrom-Json -AsHashtable
+    $receipt.fonts[0].height = -15
+    [IO.File]::WriteAllText($run.ReceiptPath, ($receipt | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    Update-SyntheticArtifactHash $run "paintReceipt"
+    Assert-ConverterFailure $run "FontFactsInvalid"
   }
 }
 
@@ -1198,6 +1222,10 @@ Invoke-SceneContractCase "project-paint-764 timestamp census refusal" {
 $expectedSceneNames = @(
   "project-paint-764 valid round-trip",
   "overview-paint-764 valid round-trip",
+  "project-paint-764 old 1x zoom refusal",
+  "project-paint-764 old 1x font refusal",
+  "overview-paint-764 old 1x zoom refusal",
+  "overview-paint-764 old 1x font refusal",
   "project-paint-764 fixture digest refusal",
   "overview-paint-764 source inventory refusal",
   "project-paint-764 wrong surface refusal",
@@ -1221,9 +1249,9 @@ $sceneFailed = $sceneCaseResults.Count - $scenePassed
 $sceneNamesMatch = ($sceneNames.Count -eq $expectedSceneNames.Count) -and
   (($sceneNames -join "`n") -ceq ($expectedSceneNames -join "`n"))
 Write-Host "CANVAS_PAINT_SCENE_CASES executed=$($sceneCaseResults.Count) passed=$scenePassed failed=$sceneFailed names=$($sceneNames -join '|')"
-if (-not $sceneNamesMatch -or $sceneCaseResults.Count -ne 18 -or $scenePassed -ne 18 -or $sceneFailed -ne 0) {
+if (-not $sceneNamesMatch -or $sceneCaseResults.Count -ne 22 -or $scenePassed -ne 22 -or $sceneFailed -ne 0) {
   foreach ($failure in $sceneCaseResults | Where-Object { -not $_.Passed }) {
     Write-Error "Scene profile contract $($failure.Name) failed: $($failure.Error)" -ErrorAction Continue
   }
-  throw "Canvas paint scene profile contracts did not execute the exact 18/18/0 suite."
+  throw "Canvas paint scene profile contracts did not execute the exact 22/22/0 suite."
 }

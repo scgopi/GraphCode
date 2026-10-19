@@ -343,12 +343,29 @@ told nothing, and the user's own later release of such a button is swallowed
 still does nothing: scrollback is not wired to it.
 
 Canvas and pointer actions still have no visible gesture hints: clicking
-selects/opens canvas items; dragging blank canvas pans, dragging a node moves
-it, and dragging a connector to another node creates an edge; wheel and
+selects/opens canvas items; dragging blank canvas or a node pans the sheet,
+and dragging a connector to another node creates an edge; wheel and
 touchscreen pinch zoom the canvas; right-click opens item-specific context
 menus; and dragging a top-level sidebar loop reorders it. Closing this gap
 requires hints in the owning `GraphCanvas.zig` and `Sidebar.zig` rendering
 surfaces, both outside this change's scope.
+
+Project and overview card placement now share the edge-derived macOS
+`LaneLayout` rules, not arrival-index grid slots. Beginnings start chains,
+children follow sidebar order, each level wraps at the pane's row budget
+(at most five), and unwired cards occupy a separate block below the chains.
+Overview lanes share a width and never overlap vertically; expanded project
+composites reserve taller rows. Painting, connectors, hit targets, accessibility,
+and fit extents read the same cached positions. Legacy offset files remain
+readable for compatibility but cannot reposition cards or restore overlaps.
+
+The pure port also covers nested composite chip placement and overflow.
+It deliberately does not reproduce macOS's eight-column coordinate clamp,
+which aliases cards beyond capacity: additional columns preserve order without
+reusing rectangles. The capped depth walk otherwise follows the actual Swift
+implementation, including its depth-zero fallback beyond the fourth level.
+Pure and memory-DIB tests are component evidence, not a live macOS/Windows
+parity walkthrough.
 
 Custom canvas, sidebar, header, and detail layout use 96-DPI logical units.
 UI Automation receives physical client pixels: logical bounds, including the
@@ -902,10 +919,16 @@ memory DIBs, then writes BMP transport files and a paint receipt. It runs only
 when `GRAPHCODE_PAINT_EXPORT_DIR` and `GRAPHCODE_PAINT_SOURCE_COMMIT` are set;
 the export directory must be fresh and empty. Run one scene per fresh run root.
 The default `project-paint-v1` scene retains its original fixture, export names,
-seven-file source binding, and converter profile. The two closed #764 profiles
+1x scale, and converter profile; its source binding now also includes the
+shared `LaneLayout.zig` dependency. The two closed #764 profiles
 are `project-paint-764` (the six-card project canvas fixture) and
 `overview-paint-764` (that project plus a synthetic peer lane); the latter
-binds both fixture JSON files. The #764 export requires a valid
+binds both fixture JSON files. Both #764 profiles render at exactly 0.8, the
+macOS opening fit floor, and record the corresponding scaled card-font selections.
+Their 1280x720 dimensions and exact node/edge inventories remain unchanged;
+old 1x zoom or font receipts are rejected, not accepted as an alternative.
+This scale is not a claim of pixel-equivalence to a 100% macOS capture.
+The #764 export requires a valid
 `GRAPHCODE_PAINT_SOURCE_COMMIT` before it creates any BMPs. These neutral
 fixtures exercise the real paint path but do not reproduce the macOS reference
 content or establish whole-window parity. From a bootstrapped checkout:
@@ -930,6 +953,7 @@ $sourcePaths = switch ($scene) {
  "project-paint-v1" {
    @(
      "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\LaneLayout.zig",
      "graphcode-windows\src\GdiplusAA.zig",
      "graphcode-windows\fixtures\paint-project-v1.json",
      "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -941,6 +965,7 @@ $sourcePaths = switch ($scene) {
  "project-paint-764" {
    @(
      "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\LaneLayout.zig",
      "graphcode-windows\src\GdiplusAA.zig",
      "graphcode-windows\fixtures\paint-764-project.json",
      "Tools\windows\Convert-CanvasPaintArtifact.ps1",
@@ -952,6 +977,7 @@ $sourcePaths = switch ($scene) {
  "overview-paint-764" {
    @(
      "graphcode-windows\src\GraphCanvas.zig",
+     "graphcode-windows\src\LaneLayout.zig",
      "graphcode-windows\src\GdiplusAA.zig",
      "graphcode-windows\fixtures\paint-764-project.json",
      "graphcode-windows\fixtures\paint-764-overview-peer.json",
@@ -1084,7 +1110,7 @@ drawing operation used GDI+ rather than the existing GDI
 fallback. Font evidence samples the card-title, card-state, card-metadata,
 and header-title selections; it is not a census of every text draw. Font-file
 facts are lookup candidates, not proof of the physical font file selected by
-GDI. The converter's original eight contract cases and sixteen additional closed
+GDI. The converter's original eight contract cases and twenty-two additional closed
 scene-profile cases use synthetic codec BMPs and receipts, not product paint
 scenes; they include refusal controls for
 post-run test-binary, native-log, and paint-receipt substitutions. The
