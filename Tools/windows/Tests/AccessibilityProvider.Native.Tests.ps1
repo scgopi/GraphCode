@@ -30,12 +30,37 @@ try {
   # vcvars can exit non-zero when an optional extension (for example the Linux
   # ConnectionManager) is absent even though the MSVC environment is usable, so
   # require a resolvable cl instead of trusting its exit code.
-  $command = 'cd /d "' + $scratch + '" && call "' + $VcVars + '" >nul 2>&1 & ' +
-    'where cl >nul 2>&1 && cl /nologo /EHsc /std:c++17 ' +
-    '/Fe:uia-native.exe "' + $test + '" "' + $provider + '" ' +
-    'oleaut32.lib uiautomationcore.lib user32.lib && .\uia-native.exe'
-  & $env:ComSpec /d /s /c $command
-  if ($LASTEXITCODE -ne 0) { throw "Native accessibility provider tests failed: $LASTEXITCODE" }
+  Write-Host "[native-uia] vcvars path: $VcVars"
+  $command = @"
+@echo off
+cd /d "$scratch"
+if errorlevel 1 exit /b %errorlevel%
+echo [native-uia] stage=vcvars start
+call "$VcVars"
+set "vcvars_exit=%errorlevel%"
+echo [native-uia] stage=vcvars exit=%vcvars_exit%
+echo [native-uia] stage=where-cl start
+where cl
+set "where_exit=%errorlevel%"
+echo [native-uia] stage=where-cl exit=%where_exit%
+if not "%where_exit%"=="0" exit /b %where_exit%
+echo [native-uia] stage=compile start
+cl /nologo /EHsc /std:c++17 /Fe:uia-native.exe "$test" "$provider" oleaut32.lib uiautomationcore.lib user32.lib
+set "compile_exit=%errorlevel%"
+echo [native-uia] stage=compile exit=%compile_exit%
+if not "%compile_exit%"=="0" exit /b %compile_exit%
+echo [native-uia] stage=test-exe start
+.\uia-native.exe
+set "test_exit=%errorlevel%"
+echo [native-uia] stage=test-exe exit=%test_exit%
+exit /b %test_exit%
+"@
+  $commandPath = Join-Path $scratch "run-native.cmd"
+  [IO.File]::WriteAllText($commandPath, $command, [Text.Encoding]::Default)
+  & $env:ComSpec /d /s /c "`"$commandPath`""
+  $nativeExit = $LASTEXITCODE
+  Write-Host "[native-uia] cmd exit=$nativeExit"
+  if ($nativeExit -ne 0) { throw "Native accessibility provider tests failed: $nativeExit (see [native-uia] stage exits above)" }
 } finally {
   $env:TEMP = $savedTemp
   $env:TMP = $savedTmp
