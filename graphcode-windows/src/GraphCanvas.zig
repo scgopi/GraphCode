@@ -1122,12 +1122,25 @@ pub const OverviewLaneCaption = struct {
     notice: ?c.RECT,
 };
 
+pub const OverviewCaptionMetrics = struct {
+    pub const open_trailing = 76;
+    pub const open_width = 56;
+    pub const worktrees_trailing = 18;
+    pub const worktrees_width = 54;
+    pub const notice_gap = 8;
+    pub const notice_width = 286;
+    pub const open_notice_offset = notice_gap + open_width / 2;
+    pub const worktrees_notice_offset = notice_gap + open_trailing + open_width - worktrees_trailing - worktrees_width / 2;
+    pub const actions_right_notice_offset = notice_gap + open_trailing + open_width - worktrees_trailing;
+};
+
 pub fn overviewLaneCaption(model: *const GraphModel.Model, graph_index: usize, bounds: c.RECT, state: *const CanvasState) OverviewLaneCaption {
     const lane = overviewLaneBounds(model, graph_index, bounds, state);
-    const open = rect(lane.right - scaledValue(132, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(76, state.zoom), lane.top + scaledValue(30, state.zoom));
-    const worktrees = rect(lane.right - scaledValue(72, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(18, state.zoom), lane.top + scaledValue(30, state.zoom));
+    const metrics = OverviewCaptionMetrics;
+    const open = rect(lane.right - scaledValue(metrics.open_trailing + metrics.open_width, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(metrics.open_trailing, state.zoom), lane.top + scaledValue(30, state.zoom));
+    const worktrees = rect(lane.right - scaledValue(metrics.worktrees_trailing + metrics.worktrees_width, state.zoom), lane.top + scaledValue(10, state.zoom), lane.right - scaledValue(metrics.worktrees_trailing, state.zoom), lane.top + scaledValue(30, state.zoom));
     const notice = if (graph_index < model.graphs.items.len and overviewWorktreeNotice(&model.graphs.items[graph_index]) != null)
-        rect(open.left - scaledValue(294, state.zoom), open.top, open.left - scaledValue(8, state.zoom), open.bottom)
+        rect(open.left - scaledValue(metrics.notice_gap + metrics.notice_width, state.zoom), open.top, open.left - scaledValue(metrics.notice_gap, state.zoom), open.bottom)
     else
         null;
     return .{
@@ -1136,6 +1149,49 @@ pub fn overviewLaneCaption(model: *const GraphModel.Model, graph_index: usize, b
         .worktrees = worktrees,
         .notice = notice,
     };
+}
+
+test "lane gate caption anchor projects to actual action hit bounds across zoom and DPI" {
+    const Dpi = @import("Dpi.zig");
+    var fixture = try paint764FixtureModel(std.testing.allocator, .overview);
+    defer fixture.model.deinit();
+    const consumer = try std.fs.cwd().readFileAlloc(std.testing.allocator, "..\\Tools\\windows\\uia-live-gate.ps1", 2 * 1024 * 1024);
+    defer std.testing.allocator.free(consumer);
+    inline for (.{
+        .{ "laneOpenNoticeOffset", OverviewCaptionMetrics.open_notice_offset },
+        .{ "laneWorktreesNoticeOffset", OverviewCaptionMetrics.worktrees_notice_offset },
+        .{ "laneActionsRightNoticeOffset", OverviewCaptionMetrics.actions_right_notice_offset },
+        .{ "minimumLaneWidth", @as(i32, @intFromFloat(LaneLayout.MacMetrics.bandWidth(3 * LaneLayout.MacMetrics.depth_width + LaneLayout.MacMetrics.card_width))) },
+        .{ "laneCardInset", @as(i32, @intFromFloat(LaneLayout.MacMetrics.padding + LaneLayout.MacMetrics.origin_lane)) },
+        .{ "captionCardTop", @as(i32, @intFromFloat(LaneLayout.MacMetrics.caption_height + LaneLayout.MacMetrics.padding)) },
+        .{ "oneRowLaneHeight", @as(i32, @intFromFloat(LaneLayout.MacMetrics.bandHeight(1))) },
+    }) |binding| {
+        const expected = try std.fmt.allocPrint(std.testing.allocator, "${s} = {d}", .{ binding[0], binding[1] });
+        defer std.testing.allocator.free(expected);
+        try std.testing.expect(std.mem.indexOf(u8, consumer, expected) != null);
+    }
+    var cases: usize = 0;
+    for ([_]f32{ 0.55, 0.75, 0.8, 1, 1.25, 1.8 }) |zoom| {
+        var state = try modelTestState(&fixture.model, .{ .zoom = zoom, .pan_x = -713, .pan_y = 17 }, chrome764GraphBounds());
+        defer state.deinitLayout();
+        const caption = overviewLaneCaption(&fixture.model, 0, state.layout_bounds, &state);
+        const card = overviewCardBounds(&fixture.model, 0, 0, state.layout_bounds, &state);
+        for ([_]u32{ 96, 144, 192 }) |dpi| {
+            const notice_right = Dpi.scale(caption.notice.?.right, dpi);
+            const scale = @as(f32, @floatFromInt(Dpi.scale(card.right, dpi) - Dpi.scale(card.left, dpi))) / LaneLayout.MacMetrics.card_width;
+            for ([_]struct { bounds: c.RECT, offset: i32 }{
+                .{ .bounds = caption.open, .offset = OverviewCaptionMetrics.open_notice_offset },
+                .{ .bounds = caption.worktrees, .offset = OverviewCaptionMetrics.worktrees_notice_offset },
+            }) |action| {
+                const x = notice_right + @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(action.offset)) * scale)));
+                try std.testing.expect(x >= Dpi.scale(action.bounds.left, dpi) and x < Dpi.scale(action.bounds.right, dpi));
+                try std.testing.expectEqual(Dpi.scale(caption.notice.?.top, dpi), Dpi.scale(action.bounds.top, dpi));
+                try std.testing.expectEqual(Dpi.scale(caption.notice.?.bottom, dpi), Dpi.scale(action.bounds.bottom, dpi));
+            }
+            cases += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 18), cases);
 }
 
 pub fn overviewLaneActionAt(model: *const GraphModel.Model, graph_index: usize, x: i32, y: i32, bounds: c.RECT, state: *const CanvasState) ?OverviewLaneAction {

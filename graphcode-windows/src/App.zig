@@ -13483,6 +13483,7 @@ test "attended activation routes canvas card click and command through one exact
     try std.testing.expect(pointer_app.selectNodeIndex(0));
     pointer_app.surface = .project;
     pointer_app.workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = true };
+    try std.testing.expect(pointer_app.refreshCanvasLayout(logicalClientRect(pointer_app.window.hwnd, pointer_app.dpi)));
     const card = GraphCanvas.nodeBounds(1, &pointer_app.canvas);
     const x: u32 = @intCast(card.left + 20);
     const y: u32 = @intCast(card.top + 20);
@@ -18914,6 +18915,7 @@ test "Show in Graph shared action publishes project UIA after native effects com
         .workspace_controls = .{ .rail_visible = true, .panel_visible = true, .activity_enabled = false },
     };
     defer app.client.deinit();
+    defer app.canvas.deinitLayout();
     defer app.model.deinit();
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
@@ -18988,6 +18990,7 @@ test "graphChanged republishes renamed project card and sidebar accessibility na
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
     defer app.client.deinit();
+    defer app.canvas.deinitLayout();
     defer app.model.deinit();
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
@@ -19044,6 +19047,7 @@ test "nodesChanged presence delta republishes Needs you for a non-selected proje
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
     defer app.client.deinit();
+    defer app.canvas.deinitLayout();
     defer app.model.deinit();
     defer app.sidebar_state.deinit();
     defer app.declared_entry_ids.deinit();
@@ -19304,6 +19308,7 @@ const GraphPublicationTest = struct {
     }
 
     fn deinit(app: *App) void {
+        app.canvas.deinitLayout();
         app.client.deinit();
         app.model.deinit();
         app.sidebar_state.deinit();
@@ -20152,6 +20157,7 @@ test "worktree notice Reclaim and Keep hit targets require the same inspection o
     for (frames) |frame| _ = try app.model.updateFromFrame(frame);
     try installNoticeTestInspection(&app, "C:\\notice-a", 2, 1024);
     try std.testing.expect(app.model.selectProject("C:\\notice-a"));
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1200, .bottom = 900 }));
     const geometry = GraphCanvas.reclaimOfferBounds(GraphCanvas.nodeBounds(0, &app.canvas));
     const targets = [_]struct { bounds: c.RECT, action: GraphCanvas.ReclaimAction }{
         .{ .bounds = geometry.reclaim, .action = .reclaim },
@@ -21000,6 +21006,9 @@ fn applyOverviewTestLaneAction(app: *App, x: i32, y: i32, expected: OverviewTest
     const foreground = c.GetForegroundWindow();
     const focus = c.GetFocus();
     const capture = c.GetCapture();
+    const zoom = app.canvas.zoom;
+    const pan_x = app.canvas.pan_x;
+    const pan_y = app.canvas.pan_y;
     // This is the production lane action, not an OS input or mounted-terminal test.
     const bounds = try overviewTestPreflight(app, x, y, expected);
     try std.testing.expect(app.applyOverviewLaneAction(x, y, bounds));
@@ -21007,6 +21016,11 @@ fn applyOverviewTestLaneAction(app: *App, x: i32, y: i32, expected: OverviewTest
     try std.testing.expectEqual(foreground, c.GetForegroundWindow());
     try std.testing.expectEqual(focus, c.GetFocus());
     try std.testing.expectEqual(capture, c.GetCapture());
+    if (expected.action == .open_project) {
+        try std.testing.expectEqual(zoom, app.canvas.zoom);
+        try std.testing.expectEqual(pan_x, app.canvas.pan_x);
+        try std.testing.expectEqual(pan_y, app.canvas.pan_y);
+    }
     if (expected.action == .inspect_worktrees) {
         const deadline = std.time.milliTimestamp() + 30000;
         while (app.worktree_inspection_thread != null and std.time.milliTimestamp() < deadline) {
@@ -21015,6 +21029,25 @@ fn applyOverviewTestLaneAction(app: *App, x: i32, y: i32, expected: OverviewTest
         }
         if (app.worktree_inspection_thread != null) return error.WorktreeInspectionTimeout;
     }
+}
+
+fn overviewTestActionPoint(app: *App, target: OverviewTestTarget) !c.POINT {
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    if (!app.refreshCanvasLayout(client)) return error.OverviewTestLayoutUnavailable;
+    const routing = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+    const bounds = c.RECT{ .left = routing.left, .top = routing.top, .right = routing.right, .bottom = routing.bottom };
+    const index = for (app.model.graphs.items, 0..) |graph, index| {
+        if (std.mem.eql(u8, graph.project.path, target.project)) break index;
+    } else return error.OverviewTestProjectMissing;
+    var caption = GraphCanvas.overviewLaneCaption(&app.model, index, bounds, &app.canvas);
+    if (caption.worktrees.right > bounds.right - 18) {
+        app.canvas.pan_x += @floatFromInt(bounds.right - 18 - caption.worktrees.right);
+        caption = GraphCanvas.overviewLaneCaption(&app.model, index, bounds, &app.canvas);
+    }
+    const action = if (target.action == .open_project) caption.open else caption.worktrees;
+    const point = c.POINT{ .x = @divTrunc(action.left + action.right, 2), .y = @divTrunc(action.top + action.bottom, 2) };
+    _ = try overviewTestPreflight(app, point.x, point.y, target);
+    return point;
 }
 
 test "cross-project overview Open actions select exact projects and emit DPI scoped cards" {
@@ -21027,9 +21060,9 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         app.openGlobalOverview();
         try expectOverviewSelection(&app, .overview, "A", "a4");
         const beta_bounds: [4]i32 = switch (dpi) {
-            96 => .{ 262, 442, 512, 538 },
-            144 => .{ 393, 663, 768, 807 },
-            else => .{ 524, 884, 1024, 1076 },
+            96 => .{ 382, 672, 632, 768 },
+            144 => .{ 573, 1008, 948, 1152 },
+            else => .{ 764, 1344, 1264, 1536 },
         };
         var overview = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
             .{ .identity = "open-project:A" },
@@ -21043,7 +21076,8 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         } };
         try overview.expect(&app);
 
-        try applyOverviewTestLaneAction(&app, 1072, 416, .{ .project = "B", .action = .open_project });
+        const beta_point = try overviewTestActionPoint(&app, .{ .project = "B", .action = .open_project });
+        try applyOverviewTestLaneAction(&app, beta_point.x, beta_point.y, .{ .project = "B", .action = .open_project });
         try expectOverviewSelection(&app, .project, "B", "b1");
         try std.testing.expect(!app.workspace_controls.panel_visible);
         var beta_canvas = OverviewAccessibilitySink{ .card_count = 2, .expected = &.{
@@ -21055,7 +21089,8 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         try beta_canvas.expect(&app);
 
         app.openGlobalOverview();
-        try applyOverviewTestLaneAction(&app, 1072, 92, .{ .project = "A", .action = .open_project });
+        const alpha_point = try overviewTestActionPoint(&app, .{ .project = "A", .action = .open_project });
+        try applyOverviewTestLaneAction(&app, alpha_point.x, alpha_point.y, .{ .project = "A", .action = .open_project });
         try expectOverviewSelection(&app, .project, "A", "a1");
         var alpha_canvas = OverviewAccessibilitySink{ .card_count = 4, .expected = &.{
             .{ .identity = "open-project:A", .selected = true },
@@ -21068,6 +21103,7 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         try alpha_canvas.expect(&app);
 
         app.openGlobalOverview();
+        app.canvas.actualSize();
         try expectOverviewSelection(&app, .overview, "A", "a1");
         try overview.expect(&app);
         try std.testing.expect(app.workspace == null);
@@ -21080,11 +21116,12 @@ test "cross-project overview preflight rejects wrong identities and geometry bef
     try loadOverviewTestGraphs(&app, "A", "B");
     app.openGlobalOverview();
     try expectOverviewSelection(&app, .overview, "A", "a1");
-    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, 1072, 416, .{
+    const point = try overviewTestActionPoint(&app, .{ .project = "B", .action = .open_project });
+    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, point.x, point.y, .{
         .project = "A",
         .action = .open_project,
     }));
-    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, 1072, 416, .{
+    try std.testing.expectError(error.UnexpectedOverviewTestTarget, overviewTestPreflight(&app, point.x, point.y, .{
         .project = "B",
         .action = .inspect_worktrees,
     }));
@@ -21114,11 +21151,11 @@ test "cross-project overview refresh emits both projects without changing the se
     var sink = OverviewAccessibilitySink{ .card_count = 6, .expected = &.{
         .{ .identity = "open-project:A" },
         .{ .identity = "open-project:B" },
-        .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 262, 118, 512, 214 } },
-        .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 522, 118, 772, 214 } },
+        .{ .identity = "overview-card:A:a4", .name = "Alpha refreshed", .bounds = .{ 382, 134, 632, 230 } },
+        .{ .identity = "overview-card:A:a1", .name = "Alpha 1", .bounds = .{ 382, 254, 632, 350 } },
         .{ .identity = "overview-card:A:a2" },
         .{ .identity = "overview-card:A:a3" },
-        .{ .identity = "overview-card:B:b1", .bounds = .{ 262, 442, 512, 538 } },
+        .{ .identity = "overview-card:B:b1", .bounds = .{ 382, 672, 632, 768 } },
         .{ .identity = "overview-card:B:b2", .name = "Beta 2" },
     } };
     try sink.expect(&app);
@@ -21266,9 +21303,9 @@ fn exerciseOverviewWorktreesFixture() !void {
     }
     try temporary.dir.writeFile(.{ .sub_path = "alpha\\sentinel.txt", .data = "alpha preserved" });
     try temporary.dir.writeFile(.{ .sub_path = "beta\\sentinel.txt", .data = "beta preserved" });
-    for ([_]struct { path: []const u8, other: []const u8, y: i32, node: []const u8 }{
-        .{ .path = beta, .other = alpha, .y = 416, .node = "b1" },
-        .{ .path = alpha, .other = beta, .y = 92, .node = "a1" },
+    for ([_]struct { path: []const u8, other: []const u8, node: []const u8 }{
+        .{ .path = beta, .other = alpha, .node = "b1" },
+        .{ .path = alpha, .other = beta, .node = "a1" },
     }) |target| {
         var app = try overviewTestApp(96);
         defer deinitOverviewTestApp(&app);
@@ -21276,7 +21313,8 @@ fn exerciseOverviewWorktreesFixture() !void {
         try std.testing.expect(app.selectProject(target.other));
         app.openGlobalOverview();
         try std.testing.expect(app.worktree_inspection == null and app.worktree_dialog == null);
-        try applyOverviewTestLaneAction(&app, 1131, target.y, .{ .project = target.path, .action = .inspect_worktrees });
+        const point = try overviewTestActionPoint(&app, .{ .project = target.path, .action = .inspect_worktrees });
+        try applyOverviewTestLaneAction(&app, point.x, point.y, .{ .project = target.path, .action = .inspect_worktrees });
         try expectOverviewSelection(&app, .overview, target.path, target.node);
         const inspection = app.worktree_inspection orelse return error.MissingScopedInspection;
         const dialog = app.worktree_dialog orelse return error.MissingScopedWorktreeDialog;
@@ -23504,6 +23542,7 @@ test "Worktrees inspection action does not block the UI thread on provider work"
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
     defer {
+        app.canvas.deinitLayout();
         app.drainWorktreeInspection();
         if (app.status_override.len != 0) allocator.free(app.status_override);
         app.model.deinit();
@@ -23615,6 +23654,7 @@ test "Worktrees rows publish before blocked sizing and UIA moves from pending to
         .kept_worktree_paths = std.array_list.Managed([]u8).init(allocator),
     };
     defer {
+        app.canvas.deinitLayout();
         app.drainWorktreeInspection();
         if (app.worktree_dialog) |*dialog| dialog.deinit();
         if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(allocator, inspection);
