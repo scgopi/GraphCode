@@ -153,6 +153,33 @@ function Assert-CapGreenJob {
     return $jobIdentity.sourceRepository
 }
 
+function Assert-CapLiveNativeBindings {
+    if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
+
+    $requiredNames = @(Get-CapRequiredNativeBindingNames)
+    $required = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in $requiredNames) {
+        if ([string]::IsNullOrWhiteSpace($name) -or -not $required.Add($name)) {
+            throw 'Required native binding declarations must have distinct nonempty names.'
+        }
+    }
+    if ($required.Count -eq 0) { throw 'No required native binding declarations were found.' }
+    $native = @(Test-CapNativeBindings)
+    $observed = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($binding in $native) {
+        Assert-CapDataRecord $binding @{ Name = [string] } 'Native binding'
+        if (-not $required.Contains($binding.Name)) { throw "Unknown native binding '$($binding.Name)'." }
+        if (-not $observed.Add($binding.Name)) { throw "Duplicate native binding '$($binding.Name)'." }
+        $entryPoint = $binding.PSObject.Properties['EntryPoint']
+        if ($null -eq $entryPoint -or $entryPoint.Value -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($entryPoint.Value)) { throw "Unresolved native binding '$($binding.Name)'." }
+    }
+    foreach ($name in $requiredNames) {
+        if (-not $observed.Contains($name)) { throw "Missing required native binding '$name'." }
+    }
+    return @($native)
+}
+
 function Assert-CapPreflightReport {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
@@ -887,8 +914,7 @@ try {
     $exports = @(Get-Command -Module UiCaptureDriver | Sort-Object Name)
     if ($exports.Count -lt 30) { throw "Capture driver exports unavailable: count=$($exports.Count)." }
     if (-not $rehearsal) {
-        $native = @(Test-CapNativeBindings)
-        if ($native.Count -ne 26) { throw "Required native binding export probe incomplete: count=$($native.Count)." }
+        $native = @(Assert-CapLiveNativeBindings)
     }
     if (@(Get-CapPendingLaunches).Count -ne 0) { throw 'Unreturned capture worker launches remain before run authorization.' }
 

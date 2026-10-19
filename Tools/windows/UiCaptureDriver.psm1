@@ -2759,48 +2759,69 @@ function Test-CapPipeUnserved {
     throw "Pipe '$PipeName' probe is ambiguous or failed with Win32 error $errorCode."
 }
 
-function Test-CapNativeBindings {
-    [CmdletBinding()]
-    param()
-    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
-
-
+function Get-CapNativeBindingDeclarations {
     $types = @([CapNative], [GraphCodeUiaGateState], [CapProcessJob])
-    $bindings = [Collections.Generic.List[object]]::new()
+    $declarations = [Collections.Generic.List[object]]::new()
     foreach ($type in $types) {
         foreach ($method in $type.GetMethods([Reflection.BindingFlags]'Static,Public,NonPublic')) {
             $import = $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false) |
                 Select-Object -First 1
             if ($null -eq $import) { continue }
-            $libraryHandle = [IntPtr]::Zero
-            try {
-                $libraryHandle = [Runtime.InteropServices.NativeLibrary]::Load($import.Value)
-                $entryPoint = if ([string]::IsNullOrWhiteSpace($import.EntryPoint)) { $method.Name } else { $import.EntryPoint }
-                $candidates = [Collections.Generic.List[string]]::new()
-                if (-not $import.ExactSpelling) {
-                    switch ($import.CharSet) {
-                        ([Runtime.InteropServices.CharSet]::Unicode) { $candidates.Add($entryPoint + 'W') }
-                        ([Runtime.InteropServices.CharSet]::Auto) { $candidates.Add($entryPoint + 'W') }
-                        default { $candidates.Add($entryPoint + 'A') }
-                    }
+            $parameters = @($method.GetParameters() | ForEach-Object { $_.ParameterType.FullName })
+            $declarations.Add([pscustomobject]@{
+                Name = "$($type.FullName).$($method.Name)($($parameters -join ','))"
+                Method = $method
+                Import = $import
+            })
+        }
+    }
+    return @($declarations.ToArray())
+}
+
+function Get-CapRequiredNativeBindingNames {
+    [CmdletBinding()]
+    param()
+    foreach ($declaration in Get-CapNativeBindingDeclarations) { $declaration.Name }
+}
+
+function Test-CapNativeBindings {
+    [CmdletBinding()]
+    param()
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    $bindings = [Collections.Generic.List[object]]::new()
+    foreach ($declaration in Get-CapNativeBindingDeclarations) {
+        $method = $declaration.Method
+        $import = $declaration.Import
+        $libraryHandle = [IntPtr]::Zero
+        try {
+            $libraryHandle = [Runtime.InteropServices.NativeLibrary]::Load($import.Value)
+            $entryPoint = if ([string]::IsNullOrWhiteSpace($import.EntryPoint)) { $method.Name } else { $import.EntryPoint }
+            $candidates = [Collections.Generic.List[string]]::new()
+            if (-not $import.ExactSpelling) {
+                switch ($import.CharSet) {
+                    ([Runtime.InteropServices.CharSet]::Unicode) { $candidates.Add($entryPoint + 'W') }
+                    ([Runtime.InteropServices.CharSet]::Auto) { $candidates.Add($entryPoint + 'W') }
+                    default { $candidates.Add($entryPoint + 'A') }
                 }
-                $candidates.Add($entryPoint)
-                $resolvedEntryPoint = $null
-                foreach ($candidate in $candidates) {
-                    $address = [IntPtr]::Zero
-                    if ([Runtime.InteropServices.NativeLibrary]::TryGetExport($libraryHandle, $candidate, [ref]$address) -and
-                        $address -ne [IntPtr]::Zero) {
-                        $resolvedEntryPoint = $candidate
-                        break
-                    }
-                }
-                if ($null -eq $resolvedEntryPoint) {
-                    throw "Native export '$entryPoint' (candidates=$($candidates -join ', ')) is missing from '$($import.Value)' for $($type.FullName)."
-                }
-                $bindings.Add([pscustomobject]@{ Type = $type.FullName; Method = $method.Name; Library = $import.Value; EntryPoint = $resolvedEntryPoint })
-            } finally {
-                if ($libraryHandle -ne [IntPtr]::Zero) { [Runtime.InteropServices.NativeLibrary]::Free($libraryHandle) }
             }
+            $candidates.Add($entryPoint)
+            $resolvedEntryPoint = $null
+            foreach ($candidate in $candidates) {
+                $address = [IntPtr]::Zero
+                if ([Runtime.InteropServices.NativeLibrary]::TryGetExport($libraryHandle, $candidate, [ref]$address) -and
+                    $address -ne [IntPtr]::Zero) {
+                    $resolvedEntryPoint = $candidate
+                    break
+                }
+            }
+            if ($null -eq $resolvedEntryPoint) {
+                throw "Native export '$entryPoint' (candidates=$($candidates -join ', ')) is missing from '$($import.Value)' for $($method.DeclaringType.FullName)."
+            }
+            $bindings.Add([pscustomobject]@{ Name = $declaration.Name; Type = $method.DeclaringType.FullName
+                Method = $method.Name; Library = $import.Value; EntryPoint = $resolvedEntryPoint })
+        } finally {
+            if ($libraryHandle -ne [IntPtr]::Zero) { [Runtime.InteropServices.NativeLibrary]::Free($libraryHandle) }
         }
     }
     if ($bindings.Count -eq 0) { throw 'No native P/Invoke bindings were inspected.' }
@@ -4509,6 +4530,7 @@ Export-ModuleMember -Function @(
     'Resolve-CapPendingLaunches',
     'Get-CapOwnedDescendants',
     'Test-CapNativeBindings',
+    'Get-CapRequiredNativeBindingNames',
     'Test-CapPipeUnserved',
     'Test-CapFixtureIsolation',
     'Get-CapLeaseWindow',

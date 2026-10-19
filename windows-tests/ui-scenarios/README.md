@@ -218,6 +218,29 @@ attempts `lease-release.json` from `finally`, including refused malformed leases
 and preserves primary, cleanup, serialization, and write failures separately.
 A blocked receipt write remains a nonzero tooling failure, not successful release.
 
+Live native admission uses `Get-CapRequiredNativeBindingNames` from the module's
+P/Invoke declarations, shared with the actual export resolver. Fully qualified
+method signatures distinguish overloaded declarations. The supervisor's
+`Assert-CapLiveNativeBindings` requires exact, case-sensitive name-set equality
+and a resolved entry point for every binding; missing, duplicate, renamed,
+unknown-extra and unresolved bindings refuse admission. There is no fixed
+native-binding count to become stale when declarations change.
+
+The focused contracts execute the actual supervisor non-rehearsal branch and
+its production guard function without launching the capture command or using
+the desktop:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
+  -NativeBindingsContractOnly -ScratchRoot C:\owned\fresh-native-bindings
+```
+
+These eight contracts also run in the full suite registered by
+`ValidationRunner.Tests.ps1` (165 default cases, or 168 with the three real-seed
+cases). This establishes the live native-export admission guard, not an actual
+live capture, geometry, UIA interaction, pixel result or broader native
+compatibility. Rehearsal child commands still do not authorize desktop use.
+
 Run the offline regression with existing PowerShell 7.5+ and installed MSVC:
 
 ```powershell

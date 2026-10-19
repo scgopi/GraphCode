@@ -10,6 +10,8 @@ param(
     [switch]$JournalFirstOpenContractOnly,
     [switch]$JournalObservationContractOnly,
     [switch]$PreflightReportContractOnly,
+    [switch]$NativeBindingsContractOnly,
+    [ValidateSet('All','Accepted')][string]$NativeBindingCase = 'All',
     [switch]$SelectorRefusalContractOnly,
     [switch]$IdentityContractOnly,
     [switch]$AppChildContractOnly,
@@ -3213,6 +3215,78 @@ function Invoke-CapFirstOpenGroups {
     }
 }
 
+function Invoke-CapLiveNativeGuard {
+    param([object[]]$Bindings, [switch]$InjectBindings)
+    $ast = [Management.Automation.Language.Parser]::ParseFile($supervisorPath,[ref]$null,[ref]$null)
+    $guards = @($ast.FindAll({ param($node)
+        if ($node -isnot [Management.Automation.Language.IfStatementAst] -or $node.Clauses.Count -ne 1 -or
+            $node.Clauses[0].Item1.Extent.Text -cne '-not $rehearsal') { return $false }
+        $calls = @($node.Clauses[0].Item2.FindAll({ param($command)
+            $command -is [Management.Automation.Language.CommandAst] -and
+            $command.GetCommandName() -cin @('Test-CapNativeBindings','Assert-CapLiveNativeBindings')
+        },$true))
+        return $calls.Count -eq 1
+    },$true))
+    Assert-CapTest ($guards.Count -eq 1) 'Actual non-rehearsal native admission branch is missing or duplicated.'
+    $definitions = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Assert-CapLiveNativeBindings'
+    },$true))
+    Assert-CapTest ($definitions.Count -le 1) 'Actual live native guard function is duplicated.'
+    foreach ($definition in $definitions) { . ([scriptblock]::Create($definition.Extent.Text)) }
+    if ($InjectBindings) { function Test-CapNativeBindings { return @($Bindings) } }
+    $body = $guards[0].Clauses[0].Item2.Extent.Text
+    . ([scriptblock]::Create($body.Substring(1, $body.Length - 2)))
+    return @($native)
+}
+
+function Invoke-CapLiveNativeBindingContracts {
+    Invoke-CapTest 'actual live native guard accepts all resolved declared binding names' {
+        $bindings = @(Invoke-CapLiveNativeGuard)
+        Assert-CapTest ($bindings.Count -gt 0) 'Actual live native guard returned an empty binding set.'
+        return @{ resolved = $bindings.Count; actualNonRehearsalBranch = $true; desktop = 'NotExecuted' }
+    }
+    if ($NativeBindingCase -ceq 'Accepted') { return }
+    $resolved = @(Test-CapNativeBindings)
+    Invoke-CapTest 'actual live native guard refuses a missing required binding' {
+        $missing = @($resolved | Select-Object -Skip 1)
+        Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings $missing -InjectBindings } 'Missing required native binding'
+    }
+    Invoke-CapTest 'actual live native guard refuses an unresolved required binding' {
+        $rows = @($resolved | ForEach-Object { $_.PSObject.Copy() })
+        $rows[0].EntryPoint = ''
+        Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings $rows -InjectBindings } 'Unresolved native binding'
+    }
+    Invoke-CapTest 'actual live native guard refuses renamed and case-changed bindings' {
+        foreach ($name in @(($resolved[0].Name + '-renamed'), $resolved[0].Name.ToUpperInvariant())) {
+            $rows = @($resolved | ForEach-Object { $_.PSObject.Copy() })
+            $rows[0].Name = $name
+            $null = Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings $rows -InjectBindings } 'Unknown native binding'
+        }
+        return @{ subcases = 2 }
+    }
+    Invoke-CapTest 'actual live native guard refuses an unknown extra binding' {
+        $extra = $resolved[0].PSObject.Copy()
+        $extra.Name += '-unknown'
+        Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings (@($resolved) + @($extra)) -InjectBindings } 'Unknown native binding'
+    }
+    Invoke-CapTest 'actual live native guard refuses duplicate binding names' {
+        Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings (@($resolved) + @($resolved[0])) -InjectBindings } 'Duplicate native binding'
+    }
+    Invoke-CapTest 'actual live native guard refuses an empty binding set' {
+        Assert-CapRejects { Invoke-CapLiveNativeGuard -Bindings @() -InjectBindings } 'Missing required native binding'
+    }
+    Invoke-CapTest 'required native binding names distinguish overloaded declarations' {
+        $names = @(Get-CapRequiredNativeBindingNames)
+        $unique = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($name in $names) { Assert-CapTest ($unique.Add($name)) 'Required declaration names are duplicated.' }
+        Assert-CapTest ($names.Count -gt 0 -and $names.Count -eq $resolved.Count -and
+            @($resolved | Where-Object { -not $unique.Contains($_.Name) }).Count -eq 0) 'Required declarations differ from resolved names.'
+        $overloads = @($resolved | Group-Object Type,Method | Where-Object Count -GT 1)
+        Assert-CapTest ($overloads.Count -gt 0) 'Actual overloaded native methods were not exercised.'
+        return @{ required = $names.Count; overloadedMethods = $overloads.Count }
+    }
+}
+
 function Invoke-CapPreflightReportContract {
     $ast = [Management.Automation.Language.Parser]::ParseFile($supervisorPath,[ref]$null,[ref]$null)
     $definitions = @($ast.FindAll({ param($node)
@@ -4384,6 +4458,20 @@ if ($SelectorRefusalContractOnly) {
     exit 0
 }
 
+if ($NativeBindingsContractOnly) {
+    Invoke-CapLiveNativeBindingContracts
+    $passed = @($results | Where-Object passed -EQ $true).Count
+    $failed = @($results | Where-Object passed -EQ $false).Count
+    $expected = if ($NativeBindingCase -ceq 'Accepted') { 1 } else { 8 }
+    $report = [pscustomobject]@{ suite = 'UiCaptureLiveNativeBindingContracts'; executed = $results.Count
+        passed = $passed; failed = $failed; cases = @($results)
+        mode = 'ACTUAL_LIVE_NATIVE_ADMISSION_GUARD_NO_DESKTOP'; gui = 'NotExecuted'; images = 0 }
+    $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne $expected -or $passed -ne $expected -or $failed -ne 0) { exit 1 }
+    exit 0
+}
+
 if ($PreflightReportContractOnly) {
     Invoke-CapTest 'actual rehearsal data satisfies the repaired report gate and refuses stale proof' { Invoke-CapPreflightReportContract }
     $passed = @($results | Where-Object passed -EQ $true).Count
@@ -4484,6 +4572,7 @@ try {
     } else {
     $cimRaceTarget = $prebuilt.CimRace
     if (-not $LaunchContractOnly) {
+        Invoke-CapLiveNativeBindingContracts
         Invoke-CapDescendantMetadataContracts
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
@@ -5495,6 +5584,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 160 } else { 157 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 168 } else { 165 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0
