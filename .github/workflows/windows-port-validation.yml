@@ -129,6 +129,13 @@ jobs:
             ${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\prebuilt\**\provenance.json
             ${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\prebuilt\**\compile*.log
             !${{ steps.capture_temp.outputs.root }}\gc-ui-capture-*\suite\**\.git\**
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\suite\**\*.json
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\suite\**\*.jsonl
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\suite\**\*.log
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\prebuilt\fixtures.json
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\prebuilt\**\provenance.json
+            ${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\prebuilt\**\compile*.log
+            !${{ steps.capture_temp.outputs.root }}\g[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\suite\**\.git\**
           if-no-files-found: warn
           retention-days: 7
 

@@ -214,7 +214,13 @@ public static class CapNative {
   }
 
   public static bool WaitForExit(IntPtr handle, int pid, long creationFileTimeUtc, long deadlineTimestamp, out int waitMilliseconds) {
+    long configuredTimestamp;
+    return WaitForExit(handle, pid, creationFileTimeUtc, deadlineTimestamp, out waitMilliseconds, out configuredTimestamp);
+  }
+
+  public static bool WaitForExit(IntPtr handle, int pid, long creationFileTimeUtc, long deadlineTimestamp, out int waitMilliseconds, out long configuredTimestamp) {
     waitMilliseconds = 0;
+    configuredTimestamp = 0;
     if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)pid)
       throw new InvalidOperationException("Process handle/PID mismatch.");
     NativeFileTime creation, exit, kernel, user;
@@ -222,8 +228,9 @@ public static class CapNative {
       throw new InvalidOperationException("GetProcessTimes failed: " + Marshal.GetLastWin32Error());
     if (FileTime(creation) != creationFileTimeUtc)
       throw new InvalidOperationException("Process handle/generation mismatch.");
+    configuredTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
     waitMilliseconds = (int)Math.Max(0, Math.Floor(
-      (deadlineTimestamp - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000.0 / System.Diagnostics.Stopwatch.Frequency));
+      (deadlineTimestamp - configuredTimestamp) * 1000.0 / System.Diagnostics.Stopwatch.Frequency));
     uint wait = WaitForSingleObject(handle, (uint)waitMilliseconds);
     if (wait == WAIT_OBJECT_0) return true;
     if (wait == WAIT_TIMEOUT) return false;

@@ -1053,13 +1053,19 @@ function Wait-CapSeedLauncherExit {
         $Proof.terminationStartedTimestamp -gt $now) { throw 'Seed launcher termination-window evidence differs.' }
     $deadlineTimestamp = $Proof.terminationStartedTimestamp + 5L * [Diagnostics.Stopwatch]::Frequency
     $remaining = 0
-    $signalled = [CapNative]::WaitForExit($handle,$identity.Pid,$identity.CreationFileTimeUtc,$deadlineTimestamp,[ref]$remaining)
+    $configuredTimestamp = 0L
+    $signalled = [CapNative]::WaitForExit($handle,$identity.Pid,$identity.CreationFileTimeUtc,$deadlineTimestamp,
+        [ref]$remaining,[ref]$configuredTimestamp)
     $observed = [Diagnostics.Stopwatch]::GetTimestamp()
     return [pscustomobject]@{
         kind = 'POST_TERMINATION_HELD_HANDLE_EXIT_WAIT'
         pid = $identity.Pid; creationFileTimeUtc = $identity.CreationFileTimeUtc
         heldHandle = $handle.ToInt64(); signalled = $signalled
         waitBudgetRemainingMilliseconds = $remaining
+        terminationStartedTimestamp = $Proof.terminationStartedTimestamp
+        deadlineTimestamp = $deadlineTimestamp
+        stopwatchFrequency = [Diagnostics.Stopwatch]::Frequency
+        waitConfiguredTimestamp = $configuredTimestamp
         terminationToSignalledMilliseconds = if ($signalled) {
             ($observed-$Proof.terminationStartedTimestamp) * 1000.0 / [Diagnostics.Stopwatch]::Frequency
         } else { $null }

@@ -75,6 +75,25 @@ as **not native job-empty/termination evidence**. Those controls have real,
 separate owned safety-job/EOF teardown. The matrix and full registered suites
 use the unmodified actual job closer, not that injection.
 
+The budget contract compares the **actual milliseconds passed to the native
+`WaitForSingleObject`** with the original Terminate timestamp, unchanged
+five-second deadline and native monotonic configuration timestamp captured
+after identity validation. It requires exactly
+`max(0, floor((deadline - configuredTimestamp) * 1000 / frequency))`, with no
+reset or extra budget; fresh-window, changed-origin, fresh-5000 and one-ms
+overspend mutations must refuse. The receipt retains these native arguments.
+Wall observation is separate: a deterministic 1500 ms delay after actual Close
+reproduces the old strict wall-time assertion, and a documented 5000 ms
+observational scheduling tolerance applies only to that wall measurement
+(5000 ms window + injected delay + tolerance). It never changes the native
+argument check, kernel-live refusal or production window.
+
+CI artifact patterns retain the legacy `gc-ui-capture-*` paths and additionally
+match exactly `g` plus eight lowercase hex characters under the declared capture
+TEMP root, with the same file types and `.git` exclusions. A filesystem-only
+contract requires positive current/legacy file selection and refuses unrelated
+roots; it is not proof of an actual hosted upload.
+
 Default test scratch leaves and the registered capture scratch leaf are short
 `g` plus eight hex characters to leave room for the unchanged 240-character
 zmx lease-path guard. Existing roots refuse rather than being adopted or
