@@ -1081,6 +1081,31 @@ function Write-CapPrebuiltFixtureManifest {
     return [pscustomobject]@{ path = $path; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; files = $files }
 }
 
+function Assert-CapDescendantObservation {
+    param([object[]]$TraceRecords, [string]$Case, $Identity, $Row, $Context, $Detail)
+    $observations = @($TraceRecords |
+        Where-Object command -CEQ $(if ($Case -ceq 'Exited') { 'CapDescendantExited' } else { 'CapDescendantRefusal' }) |
+        ForEach-Object { ConvertFrom-Json $_.parameters.diagnosticJson -Depth 20 -DateKind String } |
+        Where-Object {
+            if ($_.RawRow.ProcessId -ne $Identity.Pid) { return $false }
+            if ($Case -ceq 'NativeError') {
+                # This refusal has no native snapshot; correlate the original caught context instead.
+                return $null -ne $Context -and -not [string]::IsNullOrWhiteSpace($Context.ObservedUtc) -and
+                    $_.ObservedUtc -ceq $Context.ObservedUtc -and $null -eq $_.NativeSnapshot
+            }
+            return $null -ne $_.NativeSnapshot -and
+                $_.NativeSnapshot.ProcessId -eq $Identity.Pid -and
+                $Identity.CreationFileTimeUtc -gt 0 -and
+                $_.NativeSnapshot.CreationFileTimeUtc -eq $Identity.CreationFileTimeUtc
+        })
+    Assert-CapTest ($observations.Count -eq 1 -and
+        $observations[0].RawRow.ExecutablePath -ceq $Row.ExecutablePath -and
+        (($Case -ceq 'Exited' -and $observations[0].NativeSnapshot.IsExited) -or
+            ($Case -cne 'Exited' -and $observations[0].ErrorRecord.Message -ceq $Context.ErrorRecord.Message))) `
+        "Persistent candidate observation lost raw values or the native exit/original error context (matches=$($observations.Count))." $Detail
+    return $observations[0]
+}
+
 function Invoke-CapDescendantMetadataCase {
     param([string]$Case)
     $caseRoot = Join-Path $scratch ('descendant-metadata\' + $Case)
@@ -1120,6 +1145,15 @@ function Invoke-CapDescendantMetadataCase {
             imagePath = $native.ImagePath; nativeInitiallyExited = $native.IsExited; parentPid = $rootIdentity.Pid
             sessionId = $rootIdentity.SessionId }
         $detail.injectedRow = $row
+        $foreignObservation = [pscustomobject]@{ ObservedUtc = '2000-01-01T00:00:00.0000000Z'; RawRow = $row
+            NativeSnapshot = [pscustomobject]@{ ProcessId = $native.ProcessId
+                CreationFileTimeUtc = $native.CreationFileTimeUtc - 1L; IsExited = ($Case -ceq 'Exited') }
+            ErrorRecord = [pscustomobject]@{ Message = 'PRIOR_GENERATION_REFUSAL' } }
+        $foreignTrace = [pscustomobject]@{
+            command = if ($Case -ceq 'Exited') { 'CapDescendantExited' } else { 'CapDescendantRefusal' }
+            parameters = @{ diagnosticJson = ($foreignObservation | ConvertTo-Json -Depth 20 -Compress) }
+        }
+        & $module { param($Trace) Write-CapTrace -Command $Trace.command -Parameters $Trace.parameters } $foreignTrace
         & $module {
             param($Row,$Run,$Case,$Original)
             if (Test-Path Function:Get-CimInstance) { throw 'Unexpected pre-existing candidate metadata seam.' }
@@ -1154,6 +1188,7 @@ function Invoke-CapDescendantMetadataCase {
             }
         } $row $run $Case $originalAccess
         $captured = $null
+        $context = $null
         $owned = [Collections.Generic.List[object]]::new()
         try {
             $detail.observed = @(Get-CapOwnedDescendants -Roots @($rootIdentity) `
@@ -1211,17 +1246,33 @@ function Invoke-CapDescendantMetadataCase {
                     'Typed refusal did not retain the actual held native generation/image/liveness.' $detail
             }
         }
-        $observations = @(Get-Content -LiteralPath (Join-Path $scratch 'test-calls.jsonl') |
-            ForEach-Object { ConvertFrom-Json $_ -Depth 20 -DateKind String } |
-            Where-Object command -CEQ $(if ($Case -ceq 'Exited') { 'CapDescendantExited' } else { 'CapDescendantRefusal' }) |
-            ForEach-Object { ConvertFrom-Json $_.parameters.diagnosticJson -Depth 20 -DateKind String } |
-            Where-Object { $_.RawRow.ProcessId -eq $run.Identity.Pid })
-        Assert-CapTest ($observations.Count -eq 1 -and
-            $observations[0].RawRow.ExecutablePath -ceq $row.ExecutablePath -and
-            (($Case -ceq 'Exited' -and $observations[0].NativeSnapshot.IsExited) -or
-                ($Case -cne 'Exited' -and $observations[0].ErrorRecord.Message -ceq $context.ErrorRecord.Message))) `
-            'Persistent candidate observation lost raw values or the native exit/original error context.' $detail
-        $detail.persistentObservation = $observations[0]
+        $journal = @(Get-Content -LiteralPath (Join-Path $scratch 'test-calls.jsonl') |
+            ForEach-Object { ConvertFrom-Json $_ -Depth 20 -DateKind String })
+        $observation = Assert-CapDescendantObservation $journal $Case $run.Identity $row $context $detail
+        $detail.persistentObservation = $observation
+        $ownTrace = [pscustomobject]@{ command = $foreignTrace.command
+            parameters = @{ diagnosticJson = ($observation | ConvertTo-Json -Depth 20 -Compress) } }
+        $unknown = $observation | ConvertTo-Json -Depth 20 -Compress | ConvertFrom-Json -Depth 20 -DateKind String
+        if ($Case -ceq 'NativeError') { $unknown.ObservedUtc = $null }
+        else { $unknown.NativeSnapshot.CreationFileTimeUtc = $null }
+        $unknownTrace = [pscustomobject]@{ command = $foreignTrace.command
+            parameters = @{ diagnosticJson = ($unknown | ConvertTo-Json -Depth 20 -Compress) } }
+        $detail.journalIsolation = [ordered]@{
+            priorGeneration = $foreignObservation.NativeSnapshot.CreationFileTimeUtc
+            missingOwn = (Assert-CapRejects {
+                Assert-CapDescendantObservation @($foreignTrace) $Case $run.Identity $row $context $detail
+            } 'matches=0')
+            duplicateOwn = (Assert-CapRejects {
+                Assert-CapDescendantObservation @($foreignTrace,$ownTrace,$ownTrace) $Case $run.Identity $row $context $detail
+            } 'matches=2')
+            unknownIdentity = (Assert-CapRejects {
+                Assert-CapDescendantObservation @($foreignTrace,$unknownTrace) $Case $run.Identity $row $context $detail
+            } 'matches=0')
+        }
+        Assert-CapTest (@($journal | Where-Object {
+            $_.command -ceq $foreignTrace.command -and
+            $_.parameters.diagnosticJson -ceq $foreignTrace.parameters.diagnosticJson
+        }).Count -eq 1) 'Prior-generation journal history was changed or discarded.' $detail
         return $detail
     } finally {
         & $module {
@@ -1306,9 +1357,19 @@ function Invoke-CapDescendantLifetimeContract {
             CmdPath = (Join-Path ([Environment]::SystemDirectory) 'cmd.exe')
             ConhostPath = (Join-Path ([Environment]::SystemDirectory) 'conhost.exe')
             SessionName = 'lifetime-test'; CommandMarker = 'lifetime-test'; OwnedDescendants = $owned }
+        $foreignExclusion = [pscustomobject]@{ Pid = $candidate.Identity.Pid; ParentPid = $newParent.Pid
+            CandidateCreationFileTimeUtc = $native.CreationFileTimeUtc - 1L
+            ParentCreationFileTimeUtc = $newParent.CreationFileTimeUtc
+            Disposition = 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED' }
+        & $module { param($Record) $script:CapExcludedDescendants.Add($Record) } $foreignExclusion
+        $ownExclusion = {
+            $_.Pid -eq $candidate.Identity.Pid -and $_.ParentPid -eq $newParent.Pid -and
+                $_.CandidateCreationFileTimeUtc -eq $native.CreationFileTimeUtc -and
+                $_.ParentCreationFileTimeUtc -eq $newParent.CreationFileTimeUtc
+        }
         $excluded = @(Get-CapOwnedDescendants -Roots @($newParent) @arguments)
         Assert-CapTest ($excluded.Count -eq 0 -and $owned.Count -eq 0) 'Older unknown image was adopted instead of excluded.'
-        $records = @(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $candidate.Identity.Pid -and $_.ParentPid -eq $newParent.Pid })
+        $records = @(Get-CapExcludedDescendants | Where-Object $ownExclusion)
         Assert-CapTest ($records.Count -eq 1 -and
             $records[0].CandidateCreationFileTimeUtc -eq $native.CreationFileTimeUtc -and
             $records[0].ParentCreationFileTimeUtc -eq $newParent.CreationFileTimeUtc -and
@@ -1316,8 +1377,13 @@ function Invoke-CapDescendantLifetimeContract {
         $detail.subcases += @{ name = 'older unknown image excluded through actual function'; record = $records[0] }
         $row.ExecutablePath = $null; $row.CommandLine = $null; $row.CreationDate = $null
         $null = Get-CapOwnedDescendants -Roots @($newParent) @arguments
-        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $candidate.Identity.Pid -and $_.ParentPid -eq $newParent.Pid }).Count -eq 1) `
+        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object $ownExclusion).Count -eq 1) `
             'Repeated proved-foreign exclusion duplicated evidence or required advisory image/time fields.'
+        Assert-CapTest (@($foreignExclusion | Where-Object $ownExclusion).Count -eq 0 -and
+            @($records[0],$records[0] | Where-Object $ownExclusion).Count -eq 2 -and
+            @(Get-CapExcludedDescendants | Where-Object { [object]::ReferenceEquals($_, $foreignExclusion) }).Count -eq 1) `
+            'Exclusion isolation accepted foreign history, hid own duplicates or discarded history.'
+        $detail.exclusionIsolation = @{ missingOwnMatches = 0; duplicateOwnMatches = 2; foreignHistoryRetained = $true }
         $detail.subcases += @{ name = 'older native proof ignores incomplete advisory fields without duplicate evidence' }
         $row.ExecutablePath = $actual.ExecutablePath; $row.CommandLine = $actual.CommandLine; $row.CreationDate = $actual.CreationDate
         $row.ParentProcessId = $selfIdentity.Pid
@@ -1399,7 +1465,8 @@ function Invoke-CapAdvisoryOlderContract {
             param($Row,$Run,$Original)
             if (Test-Path Function:Get-CimInstance) { throw 'Unexpected existing advisory-older CIM seam.' }
             $script:CapAdvisoryInjection = @{ Row = $Row; Run = $Run; Original = $Original
-                Win32Code = 5; IdAvailable = $true; NativeError = $true; Failures = @() }
+                Win32Code = 5; IdAvailable = $true; NativeError = $true
+                Failures = [Collections.Generic.List[Exception]]::new() }
             function script:Get-CimInstance {
                 param($ClassName,$Filter,$ErrorAction)
                 if ($ClassName -cne 'Win32_Process' -or $Filter -cne "ParentProcessId = $($script:CapAdvisoryInjection.Row.ParentProcessId)") {
@@ -1421,7 +1488,7 @@ function Invoke-CapAdvisoryOlderContract {
                     $failure.Data['IdState'] = if ($state.IdAvailable) { 'Available' } else { 'GetterException' }
                     $failure.Data['AcquiredPid'] = if ($state.IdAvailable) { $ExpectedPid } else { $null }
                     $failure.Data['ExpectedPid'] = $ExpectedPid
-                    $state.Failures += $failure
+                    $state.Failures.Add($failure)
                     throw $failure
                 }
                 return & $state.Original @PSBoundParameters
@@ -1432,8 +1499,23 @@ function Invoke-CapAdvisoryOlderContract {
             CmdPath = (Join-Path ([Environment]::SystemDirectory) 'cmd.exe')
             ConhostPath = (Join-Path ([Environment]::SystemDirectory) 'conhost.exe')
             SessionName = 'advisory-test'; CommandMarker = 'advisory-test'; OwnedDescendants = $owned }
+        $foreignExclusion = [pscustomobject]@{ Pid = $run.Identity.Pid; ParentPid = $parent.Pid
+            CandidateCreationFileTimeUtc = $row.CreationDate.ToFileTimeUtc() - 1L
+            ParentCreationFileTimeUtc = $parent.CreationFileTimeUtc
+            Disposition = 'EXCLUDED_ADVISORY_PREDATES_NATIVE_PARENT_NATIVE_UNAVAILABLE'
+            OriginalErrorRecord = [Management.Automation.ErrorRecord]::new(
+                [InvalidOperationException]::new('PRIOR_CANDIDATE_FAILURE'), 'PriorCandidate',
+                [Management.Automation.ErrorCategory]::NotSpecified, $null) }
+        & $module { param($Record) $script:CapExcludedDescendants.Add($Record) } $foreignExclusion
         $found = @(Get-CapOwnedDescendants -Roots @($parent) @arguments)
-        $records = @(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid })
+        $ownFailures = & $module { ,$script:CapAdvisoryInjection.Failures }
+        $ownExclusion = {
+            $_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid -and
+                $_.ParentCreationFileTimeUtc -eq $parent.CreationFileTimeUtc -and
+                $null -ne $_.OriginalErrorRecord -and
+                $ownFailures.Contains($_.OriginalErrorRecord.Exception)
+        }
+        $records = @(Get-CapExcludedDescendants | Where-Object $ownExclusion)
         Assert-CapTest ($found.Count -eq 0 -and $owned.Count -eq 0 -and $records.Count -eq 1) `
             'Access-denied advisory-older candidate was not excluded without adoption.'
         $record = $records[0]
@@ -1444,12 +1526,21 @@ function Invoke-CapAdvisoryOlderContract {
             $record.ParentCreationFileTimeUtc -eq $parent.CreationFileTimeUtc -and
             $record.ParentNativeSnapshot.CreationFileTimeUtc -eq $parent.CreationFileTimeUtc -and
             $null -eq $record.RawCimRow.ExecutablePath -and $record.RawCimRow.SessionId -eq 0 -and
-            $record.OriginalErrorRecord -is [Management.Automation.ErrorRecord]) `
+            $record.OriginalErrorRecord -is [Management.Automation.ErrorRecord] -and
+            [object]::ReferenceEquals($record.OriginalErrorRecord.Exception, $ownFailures[0])) `
             'Advisory exclusion lost raw row, original native failure, timestamp sources or actual held parent proof.'
         $detail.subcases += @{ name = 'strictly older advisory time and native getter access-denied excluded'; evidence = $record }
         $null = Get-CapOwnedDescendants -Roots @($parent) @arguments
-        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object { $_.Pid -eq $run.Identity.Pid -and $_.ParentPid -eq $parent.Pid }).Count -eq 1) `
+        Assert-CapTest (@(Get-CapExcludedDescendants | Where-Object $ownExclusion).Count -eq 1) `
             'Repeated advisory-older observation duplicated exclusion evidence.'
+        $duplicateRecord = $record.PSObject.Copy()
+        $duplicateRecord.OriginalErrorRecord = [Management.Automation.ErrorRecord]::new(
+            $ownFailures[1], 'RepeatedCandidate', [Management.Automation.ErrorCategory]::NotSpecified, $null)
+        Assert-CapTest (@($foreignExclusion | Where-Object $ownExclusion).Count -eq 0 -and
+            @($record,$duplicateRecord | Where-Object $ownExclusion).Count -eq 2 -and
+            @(Get-CapExcludedDescendants | Where-Object { [object]::ReferenceEquals($_, $foreignExclusion) }).Count -eq 1) `
+            'Advisory isolation accepted foreign history, hid repeated own failures or discarded history.'
+        $detail.exclusionIsolation = @{ missingOwnMatches = 0; duplicateOwnMatches = 2; foreignHistoryRetained = $true }
         $detail.subcases += @{ name = 'identical excluded observation deduplicated' }
         foreach ($case in @('equal','later','null','unparseable','unspecified','parent-not-native',
             'parent-generation-mismatch','parent-time-null','other-native-error','missing-id','non-native-error','nonpositive')) {
