@@ -170,10 +170,19 @@ function Assert-WorkspaceTabSelectors {
       $node -is [Management.Automation.Language.BinaryExpressionAst] -and
         $node.Operator -eq [Management.Automation.Language.TokenKind]::Imatch -and
         $node.Left.Extent.Text -match '\.Current\.AutomationId$' -and
-        $node.Right.Extent.Text -match 'workspace-tab-'
+        $node.Right.Extent.Text -ceq "'^workspace-tab-[0-9]+$'"
     }, $true))
   Assert-Contract ($predicates.Count -eq 7) `
     "expected seven actual-tab selectors in the UIA live gate, found $($predicates.Count)"
+  $graphWait = $ast.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Wait-ForGraphChildren"
+    }, $true)
+  Assert-Contract ($null -ne $graphWait -and
+    $graphWait.Body.Extent.Text.Contains('Find-FragmentById $root "graph" $walker') -and
+    $graphWait.Body.Extent.Text.Contains('Get-DirectChildren $liveGraph $walker')) `
+    "tab waits must enumerate the live graph's direct children, not descendants or another parent"
 
   $cases = @(
     @{ Label = "interleaved"; Ids = @("workspace-tab-0", "workspace-tab-close-0", "workspace-tab-1", "workspace-tab-close-1"); Expected = @("workspace-tab-0", "workspace-tab-1") },
@@ -182,15 +191,27 @@ function Assert-WorkspaceTabSelectors {
     @{ Label = "no closes"; Ids = @("workspace-tab-0", "workspace-tab-1"); Expected = @("workspace-tab-0", "workspace-tab-1") },
     @{ Label = "close only"; Ids = @("workspace-tab-close-0", "workspace-tab-close-1"); Expected = @() },
     @{ Label = "empty"; Ids = @(); Expected = @() },
-    @{ Label = "split tab"; Ids = @("workspace-tab-close-0", "workspace-tab-0"); Expected = @("workspace-tab-0") }
+    @{ Label = "split tab"; Ids = @("workspace-tab-close-0", "workspace-tab-0"); Expected = @("workspace-tab-0") },
+    @{ Label = "actual names"; Ids = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789"); Names = @("Goal", "Copilot CLI", "Shell"); Expected = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789") },
+    @{ Label = "loop backend"; Ids = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789"); Names = @("Loop", "Claude Code", "Codex"); Expected = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789") },
+    @{ Label = "other backends"; Ids = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789"); Names = @("OpenCode", "Pi", "Nod"); Expected = @("workspace-tab-123", "workspace-tab-456", "workspace-tab-789") },
+    @{ Label = "unknown backend"; Ids = @("workspace-tab-123", "workspace-tab-456"); Names = @("Agent", "future-provider"); Expected = @("workspace-tab-123", "workspace-tab-456") },
+    @{ Label = "named decoys"; Ids = @("workspace-tab-close-123", "canvas-card-123", "attention-action-123", "workspace-tab-123-extra", "workspace-tab-", "foreign-workspace-tab-123"); Names = @("Goal", "Shell", "Agent tab", "Shell", "Goal", "Loop"); Expected = @() },
+    @{ Label = "non-numeric and absent ids"; Ids = @("workspace-tab-Shell", "workspace-tab--1", "workspace-tab-1.0", ""); Names = @("Shell", "Goal", "Agent tab", "Loop"); Expected = @() }
   )
   foreach ($predicate in $predicates) {
-    $selector = [scriptblock]::Create($predicate.Extent.Text)
+    $wholePredicate = $predicate
+    while ($wholePredicate.Parent -is [Management.Automation.Language.BinaryExpressionAst] -and
+           $wholePredicate.Parent.Operator -eq [Management.Automation.Language.TokenKind]::And) {
+      $wholePredicate = $wholePredicate.Parent
+    }
+    $selector = [scriptblock]::Create($wholePredicate.Extent.Text)
     foreach ($case in $cases) {
+      $nameIndex = 0
       $children = @($case.Ids | ForEach-Object {
         [pscustomobject]@{ Current = [pscustomobject]@{
           AutomationId = $_
-          Name = if ($_ -match 'close') { "Close tab" } elseif ($case.Label -eq "split tab") { "Split tab" } else { "Agent tab" }
+          Name = if ($case.ContainsKey("Names")) { $case.Names[$nameIndex++] } elseif ($_ -match 'close') { "Close tab" } elseif ($case.Label -eq "split tab") { "Split tab" } else { "Agent tab" }
         } }
       })
       $selected = @($children | Where-Object $selector | ForEach-Object { $_.Current.AutomationId })
@@ -198,7 +219,7 @@ function Assert-WorkspaceTabSelectors {
         "UIA actual-tab selector $($predicate.Extent.StartLineNumber) selected wrong controls for $($case.Label): $($selected -join ',')"
     }
   }
-  Write-Host "UIA actual-tab selector contract: 7 predicates, 7 fixtures passed"
+  Write-Host "UIA actual-tab selector contract: $($predicates.Count) whole predicates, $($cases.Count) fixtures passed"
 }
 
 Assert-WorkspaceTabSelectors

@@ -6585,7 +6585,7 @@ try {
       $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -eq "Show in Graph"
     }) | Select-Object -First 1
     $workspaceTabs = @($workspaceChildren | Where-Object {
-      $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$'
+      $_.Current.AutomationId -match '^workspace-tab-[0-9]+$'
     })
     $workspaceControls = @($workspaceChildren | Where-Object {
       $_.Current.AutomationId -match '^workspace-(new-tab|split-right|split-down)-' -and
@@ -6622,6 +6622,13 @@ try {
     "workspace chrome omitted a split control (found $($workspaceControls.Count) of 3: $(@($workspaceControls | ForEach-Object { $_.Current.Name }) -join '|'))"
   Require ($workspaceTabs.Count -ge 1) `
     "workspace chrome exposed no tab children; found $(@($workspaceChildren | ForEach-Object { $_.Current.AutomationId }) -join '|')"
+  Require ($workspaceTabs[0].Current.Name -ceq "Goal") `
+    "workspace's primary Goal tab did not expose its source-derived title"
+  foreach ($tabChild in $workspaceTabs) {
+    $tabRect = $tabChild.Current.BoundingRectangle
+    Require (($tabRect.Width -gt 0) -and ($tabRect.Height -gt 0)) `
+      "workspace tab $($tabChild.Current.AutomationId) has empty bounds"
+  }
   Require ($null -ne $workspacePanelToggle) "workspace right panel omitted collapse control"
   Require ($null -ne $workspaceSparkline) "workspace right panel omitted metric sparkline child"
   Require ($null -ne $workspaceStart) "workspace right panel omitted start-time child"
@@ -6713,7 +6720,7 @@ try {
   # another $null and pass vacuously.
   $newTabProbe = Wait-ForGraphChildren $root $rawWalker `
     { ($_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab") -or
-      ($_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$') } `
+      ($_.Current.AutomationId -match '^workspace-tab-[0-9]+$') } `
     { param($items)
       (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-new-tab-' }).Count -ge 1) -and
       (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' }).Count -ge 1) } 30
@@ -6722,25 +6729,43 @@ try {
     $_.Current.AutomationId -match '^workspace-new-tab-' -and $_.Current.Name -eq "New Tab"
   }) | Select-Object -First 1
   $workspaceTabs = @($newTabProbe.Items | Where-Object {
-    $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$'
+    $_.Current.AutomationId -match '^workspace-tab-[0-9]+$'
   })
   Require ($workspaceTabs.Count -ge 1) "workspace omitted its initial terminal tab before the mounted-tab preservation check"
   $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
   Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
   $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $mountedProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $mountedProbe.Graph
   $workspaceTabs = @($mountedProbe.Items)
   Require ($workspaceTabs.Count -ge 2) "New Tab did not expose a mounted background tab"
+  Require (($workspaceTabs[0].Current.Name -ceq "Goal") -and
+           ($workspaceTabs[1].Current.Name -ceq "Shell")) `
+    "New Tab did not retain the Goal title and expose the new Shell title"
+  $workspaceCloseButtons = @($mountedProbe.Children | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-close-[0-9]+$'
+  })
+  Require ($workspaceCloseButtons.Count -eq $workspaceTabs.Count) `
+    "mounted workspace tabs did not expose exactly one close child per visible tab"
+  foreach ($closeChild in $workspaceCloseButtons) {
+    $closeRect = $closeChild.Current.BoundingRectangle
+    $owners = @($workspaceTabs | Where-Object {
+      $tabRect = $_.Current.BoundingRectangle
+      $closeRect.Width -gt 0 -and $closeRect.Height -gt 0 -and
+        $tabRect.Contains($closeRect)
+    })
+    Require (($closeChild.Current.Name -ceq "Close tab") -and ($owners.Count -eq 1)) `
+      "workspace close child $($closeChild.Current.AutomationId) was not inside exactly one actual tab"
+  }
   $newWorkspaceTabId = $workspaceTabs[1].Current.AutomationId
   $workspaceTabs[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   # Wait for both tabs to be present again after the switch remounts them, then assert
   # identity. The wait covers only the precondition (two tabs exist); it deliberately
   # does not wait on the ids matching, so a genuine identity change still fails here.
   $switchProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $switchProbe.Graph
   $workspaceTabs = @($switchProbe.Items)
@@ -6749,13 +6774,24 @@ try {
     "switching to the mounted background tab changed terminal tab identity"
   $workspaceTabs[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $switchBackProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' -and $_.Current.Name -match 'tab$' } `
+    { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $switchBackProbe.Graph
   $workspaceTabs = @($switchBackProbe.Items)
   Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
            ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
     "switching back from the mounted background tab changed terminal tab identity"
+  Write-Host ("UIA_WORKSPACE_TAB_EVIDENCE=" + ([ordered]@{
+    owner = $expectedWorkspaceLoopBarId
+    parent = "graph"
+    tabs = @($workspaceTabs | ForEach-Object {
+      $rect = $_.Current.BoundingRectangle
+      Require (($rect.Width -gt 0) -and ($rect.Height -gt 0)) `
+        "mounted workspace tab $($_.Current.AutomationId) has empty bounds"
+      [ordered]@{ id = $_.Current.AutomationId; name = $_.Current.Name
+        bounds = @($rect.X, $rect.Y, $rect.Width, $rect.Height) }
+    })
+  } | ConvertTo-Json -Depth 5 -Compress))
 
   # Resolve the current workspace generation after the tab round trip, then invoke
   # Show in Graph once. Poll only for the positive destination precondition: the
