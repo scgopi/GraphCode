@@ -1790,21 +1790,52 @@ function Invoke-CapAppChildCase {
         $detail.primaryFailure = $_.Exception.ToString()
         throw
     } finally {
+        $cleanupStartedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+        $cleanupDeadlineTimestamp = $cleanupStartedTimestamp + 5L * [Diagnostics.Stopwatch]::Frequency
+        $remainingCleanupMilliseconds = {
+            [int][Math]::Max(0, [Math]::Floor(
+                ($cleanupDeadlineTimestamp - [Diagnostics.Stopwatch]::GetTimestamp()) *
+                    1000.0 / [Diagnostics.Stopwatch]::Frequency))
+        }
+        $detail.cleanupStartedTimestamp = $cleanupStartedTimestamp
+        $detail.cleanupDeadlineTimestamp = $cleanupDeadlineTimestamp
         try {
             [CapProcessJob]::Terminate($ownedJob)
-            [CapProcessJob]::WaitForEmpty($ownedJob, 5000)
+            [CapProcessJob]::WaitForEmpty($ownedJob, (& $remainingCleanupMilliseconds))
             $detail.safetyJobEmpty = [CapProcessJob]::Active($ownedJob) -eq 0
         } finally { [CapProcessJob]::Close($ownedJob) }
+        if ($otherRun) {
+            $waitMilliseconds = 0
+            $configuredTimestamp = 0L
+            $detail.unrelatedRoot.heldWaitSignalled = [CapNative]::WaitForExit(
+                $otherRun.Identity.Process.Handle, $otherRun.Identity.Pid, $otherRun.Identity.CreationFileTimeUtc,
+                $cleanupDeadlineTimestamp, [ref]$waitMilliseconds, [ref]$configuredTimestamp)
+            $detail.unrelatedRoot.waitMilliseconds = $waitMilliseconds
+            $detail.unrelatedRoot.configuredTimestamp = $configuredTimestamp
+            $snapshot = [CapNative]::Snapshot($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid)
+            $detail.unrelatedRoot.kernelObservedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            $detail.unrelatedRoot.finalSnapshot = $snapshot
+            $detail.unrelatedRoot.kernelExited = $detail.unrelatedRoot.heldWaitSignalled -and $snapshot.IsExited -and
+                $snapshot.CreationFileTimeUtc -eq $otherRun.Identity.CreationFileTimeUtc
+        }
         if ($run) {
-            $detail.finalStdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully
-            $detail.finalStderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully
+            $detail.finalStdoutEof = $run.StdoutTask.Wait([Math]::Min(2000, (& $remainingCleanupMilliseconds))) -and
+                $run.StdoutTask.IsCompletedSuccessfully
+            $detail.finalStderrEof = $run.StderrTask.Wait([Math]::Min(2000, (& $remainingCleanupMilliseconds))) -and
+                $run.StderrTask.IsCompletedSuccessfully
         }
         if ($otherRun) {
-            $detail.unrelatedRoot.kernelExited = [CapNative]::IsExited($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid)
-            $detail.unrelatedRoot.stdoutEof = $otherRun.StdoutTask.Wait(2000) -and $otherRun.StdoutTask.IsCompletedSuccessfully
-            $detail.unrelatedRoot.stderrEof = $otherRun.StderrTask.Wait(2000) -and $otherRun.StderrTask.IsCompletedSuccessfully
+            $detail.unrelatedRoot.stdoutWaitMilliseconds = [Math]::Min(2000, (& $remainingCleanupMilliseconds))
+            $detail.unrelatedRoot.stdoutEof = $otherRun.StdoutTask.Wait($detail.unrelatedRoot.stdoutWaitMilliseconds) -and
+                $otherRun.StdoutTask.IsCompletedSuccessfully
+            $detail.unrelatedRoot.stdoutObservedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+            $detail.unrelatedRoot.stderrWaitMilliseconds = [Math]::Min(2000, (& $remainingCleanupMilliseconds))
+            $detail.unrelatedRoot.stderrEof = $otherRun.StderrTask.Wait($detail.unrelatedRoot.stderrWaitMilliseconds) -and
+                $otherRun.StderrTask.IsCompletedSuccessfully
+            $detail.unrelatedRoot.stderrObservedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
             $otherRun.Identity.Process.Dispose()
         }
+        $detail.cleanupFinishedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
         foreach ($identity in $descendantIdentities) { $identity.Process.Dispose() }
         if ($child) { $child.Dispose() }
         if ($run) { $run.Identity.Process.Dispose() }
