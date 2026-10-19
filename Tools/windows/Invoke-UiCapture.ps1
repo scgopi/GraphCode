@@ -257,8 +257,8 @@ function Assert-CapPreflightReport {
             }
         }
         if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
-            if ($preflight.executed -ne 177 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
-                throw 'Matched scene preflight requires exactly 177 passing current contracts and zero skips.'
+            if ($preflight.executed -ne 178 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
+                throw 'Matched scene preflight requires exactly 178 passing current contracts and zero skips.'
             }
             foreach ($name in @(
                 'matched v12 fixture binds exact node type wiring reason and outcome fields',
