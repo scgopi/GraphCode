@@ -922,7 +922,7 @@ native-AA groups**, not one unfiltered native-AA process. GDI+ `initWith` has a
 process-global startup latch: the existing gated-readiness test must run in a
 fresh process that has not initialized card painting. Use stock compile-time
 `--test-filter` partitions, serial fresh processes, and a bound name inventory
-whose union executes each test exactly once, with only the three export cases
+whose union executes each test exactly once, with only the four export cases
 skipped. Record actual named positive native-AA cases separately from suite
 totals; a zero-match filter or initialization alone is not native-paint evidence.
 
@@ -1163,6 +1163,57 @@ panel is hidden and cannot be validated from these scenes. The three
 matching RGB hashes establish same-host/build/fixture repeatability only, not
 a cross-machine golden. Artifacts are for local agent visual review; there is
 no screenshot fallback, golden-image baseline, or CI visual gate.
+
+### Source-only canvas visual finish
+
+The canvas rail is a compact amber 30-logical-pixel cluster with a separate
+Review button and `Ctrl+Shift+R` hint. Its oldest age uses the same duration
+formatter as the cards, without a title or coarse age bucket. Project and
+overview own the rail; Quick Chats and loop workspaces do not. Paint, pointer
+routing, and the published Review rectangle share `attentionRailLayout`.
+The notebook pitch is 48 logical pixels at 100%, from macOS
+`NotebookGrid.defaultCellSize`; pan/zoom math and shortcuts are unchanged.
+
+The existing native canvas add button now owner-draws the dark `+ New Node`
+control (or `+ New Chat`), keeping its native command, focus, and invocation
+path. The zoom widget is a 136x30 icon capsule without the permanent help
+line; shortcuts remain in the View menu. Fixed UIA canvas controls receive
+the actual native add-button rectangle and the shared zoom rectangles, rather
+than a second copy of the old geometry. Workspace folder identity is a filled
+blue folder plus 13-point semibold name on the detail axis. Quick Chat identity
+is unchanged; remote/global glyph distinctions are source-derived, not new
+paired-reference qualification.
+
+Reason-aware native-AA card warmth and recovery/action/metric precedence are
+preserved. The explicitly degraded non-AA path now retains the warm face and
+amber hairline too, while selected outlines remain independent; it still has
+no blur/glow equivalence claim. Reclaim/Keep keeps its existing eligibility
+and suppression rules, with a rounded bordered Reclaim button and 11-point
+semibold action labels in the shared 21-point row. No unavailable resolution
+or bytes copy is invented.
+
+The `canvas visual finish` GraphCanvas and App test filters cover geometry,
+queue counts, duration boundaries, fallback warmth, and 96/144/192-DPI
+publication through a recording sink. The font contract additionally queries
+actual selected Segoe UI semibold and Consolas faces; that is not a claim of
+macOS glyph or weight equivalence. They are not live UIA integration.
+The existing live gate now targets the published Review rectangle and retains
+its pointer/selection/link assertions; a source-only run does not execute it.
+
+The supplementary `paint export: canvas-visual-finish` test uses the same
+memory-DIB/BMP helpers as the existing export. Set
+`GRAPHCODE_VISUAL_FINISH_EXPORT_DIR` to a fresh empty owned directory,
+`GRAPHCODE_PAINT_SOURCE_COMMIT` to the base HEAD, and
+`GRAPHCODE_NATIVE_PAINT_TESTS=1`, then select that exact test. It emits seven
+1280x720 scenes, three repeated BMPs each, and `visual-finish-receipt.json`.
+Project zero/one/many, overview, local workspace header, control states, and
+a type/topology/selection attention matrix are at 100%; the control scene also
+contains a separately qualified 55% reclaim example. This supplementary receipt
+is not accepted by the closed `Convert-CanvasPaintArtifact.ps1` profiles.
+Keep source hashes, raw test exit, binary/log hashes and lossless conversion
+evidence alongside any private PNGs. All affected parity rows stay **Partial**:
+offscreen components do not establish live composition, input, native UIA,
+backend continuity, physical DPI, or whole-window macOS parity.
 
 ## Build
 

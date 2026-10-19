@@ -3555,7 +3555,7 @@ function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
         "overview-destination", "quick-chats-destination")
       $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
         "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
-        "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-",
+        "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-", "canvas-attention-review-",
         "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
         "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
         "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
@@ -5983,29 +5983,24 @@ try {
            ($keepOffer.Current.BoundingRectangle.Height -gt 0)) "Keep descendant had empty bounds"
   $null = $reclaimOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $null = $keepOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  $railReviews = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-attention-review-'
+  })
+  Require ($railReviews.Count -eq 1) "attention rail omitted its single Review button"
+  $null = $railReviews[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   # The Reclaim/Keep descendants for a resolved card are siblings placed immediately
   # after that card, so derive the expected order from the live tree (as with Loops
   # and Projects above) instead of assuming cards and the offer are contiguous blocks.
   $graphChildIds = @(Get-DirectChildren $graph $rawWalker |
     ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
-  $expectedGraphIds = @($projectCardIds + @($attentionAction.Current.AutomationId, $connectionAlert.Current.AutomationId, $reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId) + $canvasActionIds)
+  $expectedGraphIds = @($projectCardIds + @($attentionAction.Current.AutomationId, $connectionAlert.Current.AutomationId, $reclaimOffer.Current.AutomationId, $keepOffer.Current.AutomationId, $railReviews[0].Current.AutomationId) + $canvasActionIds)
   Require ((@($graphChildIds | Sort-Object) -join ",") -eq (@($expectedGraphIds | Sort-Object) -join ",")) `
     "Graph exposed unexpected or missing children: $($graphChildIds -join ',')"
   $null = Assert-FragmentLinks $graph $rawWalker $graphChildIds "RawView Graph"
   $null = Assert-FragmentLinks $graph $controlWalker $graphChildIds "ControlView Graph"
 
-  # Canvas attention rail: GraphCanvas.hitTestAttentionRail covers a full-width band
-  # with no dedicated UIA element of its own (only the per-card "Reply" action above
-  # is exposed to UIA). Its client rect is
-  # (sidebar_width+20, header_height+12, width-20, header_height+43); since the graph
-  # fragment's own bounds already start at client (sidebar_width, header_height) and
-  # extend to client (width, ...), that reduces to the screen rect
-  # (graph.Left+20, graph.Top+12, graph.Right-20, graph.Top+43) with no sidebar_width
-  # or header_height constants needed. This posts a real WM_LBUTTONDOWN+UP inside
-  # that rect and verifies the resulting selection change through the same
-  # SelectionItemPattern already exercised for the loop cards, exercising the exact
-  # App.zig .review_attention -> selectNextAttention() routing a physical mouse click
-  # on the rail would drive.
+  # Click the published Review bounds, not the old full-width band's centre.
+  # Selection readback below remains the assertion that the pointer route acted.
   # Refresh the cached top-level window handle immediately before issuing any raw
   # PostMessage-based mouse synthesis below: $shellWindow was captured once right
   # after launch (line ~902) via $process.MainWindowHandle, which .NET does not
@@ -6022,8 +6017,8 @@ try {
   Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
     "could not establish a deterministic starting selection before the attention rail check"
 
-  # Selecting a card opens its loop workspace, whose loop bar is painted over the rail's
-  # strip; the bar's Show in Graph button lies inside the rail rect. A real click on that
+  # Selecting a card opens its loop workspace, whose loop bar replaces the canvas rail.
+  # A real click on its Show in Graph
   # button must show the graph with the open loop still selected - never act as the
   # hidden rail and cycle onto the NEEDS YOU card while the pane stays put (Dev Box
   # beta16, Section 6B, LoopActivation).
@@ -6070,9 +6065,14 @@ try {
   Require ($attentionSelection0.Current.IsSelected -and (-not $attentionSelection1.Current.IsSelected)) `
     "Show in Graph over the hidden attention rail moved the selection onto the NEEDS YOU card"
 
-  # On the graph surface the rail is visible and owns its strip.
-  $railScreenX = [int](($graph.Current.BoundingRectangle.Left + $graph.Current.BoundingRectangle.Right) / 2)
-  $railScreenY = [int]$graph.Current.BoundingRectangle.Top + 27
+  $railReviews = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -match '^canvas-attention-review-'
+  })
+  Require ($railReviews.Count -eq 1) "graph did not re-expose the Review button"
+  $reviewBounds = $railReviews[0].Current.BoundingRectangle
+  Require (($reviewBounds.Width -gt 0) -and ($reviewBounds.Height -gt 0)) "Review button had empty bounds"
+  $railScreenX = [int](($reviewBounds.Left + $reviewBounds.Right) / 2)
+  $railScreenY = [int](($reviewBounds.Top + $reviewBounds.Bottom) / 2)
   $railClientX = 0
   $railClientY = 0
   Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -7601,8 +7601,8 @@ try {
   $emptyOverviewLoopButton = Find-FragmentById $root "4602" $rawWalker
   Require (($null -ne $openFolderButton) -and ($openFolderButton.Current.Name -eq "Open Folder...")) `
     "empty global graph omitted its Open Folder action"
-  Require (($null -ne $emptyOverviewLoopButton) -and ($emptyOverviewLoopButton.Current.Name -eq "New Loop")) `
-    "empty global graph omitted its New Loop action"
+  Require (($null -ne $emptyOverviewLoopButton) -and ($emptyOverviewLoopButton.Current.Name -eq "New Node")) `
+    "empty global graph omitted its New Node action"
   Require ((-not $openFolderButton.Current.IsOffscreen) -and
            (-not $emptyOverviewLoopButton.Current.IsOffscreen)) `
     "empty global graph actions were not visible"
@@ -7696,9 +7696,9 @@ try {
   Start-Sleep -Milliseconds 200
   $emptyProjectLoopButton = Find-FragmentById $root "4602" $rawWalker
   Require (($null -ne $emptyProjectLoopButton) -and
-           ($emptyProjectLoopButton.Current.Name -eq "New Loop") -and
+           ($emptyProjectLoopButton.Current.Name -eq "New Node") -and
            (-not $emptyProjectLoopButton.Current.IsOffscreen)) `
-    "empty project canvas omitted its visible New Loop action"
+    "empty project canvas omitted its visible New Node action"
   $emptyProjectEvidence = [ordered]@{
     newLoopAction = [string]$emptyProjectLoopButton.Current.Name
     newLoopOffscreen = [bool]$emptyProjectLoopButton.Current.IsOffscreen

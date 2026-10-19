@@ -108,7 +108,7 @@ pub const loop_bar_height: i32 = 46;
 pub const loop_detail_width: i32 = 272;
 pub const pane_header_height: i32 = 22;
 pub const tab_bar_height: i32 = 30;
-pub const canvas_grid_cell: i32 = 24;
+pub const canvas_grid_cell: i32 = 48;
 
 // Shared dark dialog/sheet palette. Values match the already-validated
 // WindowsProductSettings.zig sheet (settingsRgb(35,35,38) background,
