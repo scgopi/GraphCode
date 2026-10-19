@@ -4524,6 +4524,57 @@ try {
   }
 }
 
+function Write-MultiProjectFailureDiagnostics(
+  $primaryError, [string] $peerPath, [string] $logDirectory, $readObservation, $children,
+  [string] $startedUtc, [long] $elapsedMilliseconds
+) {
+  function Read-BoundedFailureStream([string] $path) {
+    $stream = $null
+    $reader = $null
+    try {
+      if (-not [IO.File]::Exists($path)) { return [ordered]@{ state = "missing"; path = $path } }
+      $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+        [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+      $reader = [IO.StreamReader]::new($stream)
+      $buffer = [char[]]::new(8192)
+      $count = $reader.ReadBlock($buffer, 0, $buffer.Length)
+      return [ordered]@{ state = "read"; path = $path; text = [string]::new($buffer, 0, $count)
+        truncated = -not $reader.EndOfStream }
+    } catch {
+      return [ordered]@{ state = "unreadable"; path = $path; error = $_.Exception.Message }
+    } finally {
+      if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() }
+    }
+  }
+  try {
+    $file = [ordered]@{ path = $peerPath; exists = [IO.File]::Exists($peerPath)
+      length = $null; lastWriteUtc = $null }
+    if ($file.exists) {
+      $info = [IO.FileInfo]::new($peerPath)
+      $file.length = $info.Length
+      $file.lastWriteUtc = $info.LastWriteTimeUtc.ToString("o")
+    }
+    foreach ($child in $children) {
+      $key = "MultiProjectCapture:" + $child.stem
+      $child.teardown = $primaryError.Exception.Data[$key]
+      $child.stdout = Read-BoundedFailureStream (Join-Path $logDirectory ($child.stem + "-stdout.log"))
+      $child.stderr = Read-BoundedFailureStream (Join-Path $logDirectory ($child.stem + "-stderr.log"))
+    }
+    $diagnostic = [ordered]@{ schemaVersion = 1; source = "owned-multiproject-failure"
+      observedUtc = [DateTimeOffset]::UtcNow.ToString("o"); phaseStartedUtc = $startedUtc
+      phaseElapsedMilliseconds = $elapsedMilliseconds
+      primaryError = [ordered]@{ message = $primaryError.Exception.Message
+        type = $primaryError.Exception.GetType().FullName; id = $primaryError.FullyQualifiedErrorId }
+      reader = $readObservation; peerFile = $file; children = @($children) }
+    $path = Join-Path $logDirectory "multiproject-failure.json"
+    $diagnostic | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $path -Encoding utf8 -ErrorAction Stop
+    Write-Host "UIA_MULTIPROJECT_FAILURE_DIAGNOSTICS=$path"
+  } catch {
+    $primaryError.Exception.Data["MultiProjectFailureDiagnostics"] = $_.Exception.Message
+    Write-Warning "MULTIPROJECT_FAILURE_DIAGNOSTICS: $($_.Exception.Message)" -WarningAction Continue
+  }
+}
+
 function Invoke-MultiProjectRenamePhase {
   $directory = Assert-UiaSandboxPath $sandboxPath (Join-Path $sandboxPath "mp")
   $null = New-Item -ItemType Directory -Path $directory
@@ -4548,24 +4599,44 @@ function Invoke-MultiProjectRenamePhase {
   $multiRoot = $null
   $navigation = [Collections.Generic.List[object]]::new()
   $primaryError = $null
+  $phaseStartedUtc = [DateTimeOffset]::UtcNow.ToString("o")
+  $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+  $readObservation = [ordered]@{ calls = 0; attempts = 0; missingFileObservations = 0
+    parseFailures = 0; lastRead = $null; lastPeerCounts = $null }
 
   function Read-MultiProjectPeer {
-    for ($retry = 0; $retry -lt 40; $retry++) {
-      if (Test-Path -LiteralPath $peerPath) {
-        $json = Read-DaemonCommandLog $peerPath
-        try {
-          $snapshot = ($json | ConvertFrom-Json -ErrorAction Stop).multiProjectPeer
-          Require ($null -ne $snapshot) "multi-project result omitted its opt-in peer state"
-          return $snapshot
+    $readClock = [Diagnostics.Stopwatch]::StartNew()
+    $readObservation.calls++
+    $readObservation.lastRead = [ordered]@{ startedUtc = [DateTimeOffset]::UtcNow.ToString("o")
+      endedUtc = $null; elapsedMilliseconds = $null; attempts = 0 }
+    try {
+      for ($retry = 0; $retry -lt 40; $retry++) {
+        $readObservation.attempts++
+        $readObservation.lastRead.attempts++
+        if (Test-Path -LiteralPath $peerPath) {
+          $json = Read-DaemonCommandLog $peerPath
+          try {
+            $snapshot = ($json | ConvertFrom-Json -ErrorAction Stop).multiProjectPeer
+            Require ($null -ne $snapshot) "multi-project result omitted its opt-in peer state"
+            $readObservation.lastPeerCounts = [ordered]@{ requestCount = $snapshot.requestCount
+              responseCount = $snapshot.responseCount; publicationCount = $snapshot.publicationCount }
+            return $snapshot
+          }
+          catch {
+            if ($_.FullyQualifiedErrorId -notlike "*ConvertFromJsonCommand*") { throw }
+            $readObservation.parseFailures++
+            Write-Host "UIA_MULTIPROJECT_PEER_READ_RETRY attempt=$($retry + 1)/40 reason=$($_.Exception.Message)"
+          }
+        } else {
+          $readObservation.missingFileObservations++
         }
-        catch {
-          if ($_.FullyQualifiedErrorId -notlike "*ConvertFromJsonCommand*") { throw }
-          Write-Host "UIA_MULTIPROJECT_PEER_READ_RETRY attempt=$($retry + 1)/40 reason=$($_.Exception.Message)"
-        }
+        Start-Sleep -Milliseconds 50
       }
-      Start-Sleep -Milliseconds 50
+      throw "MULTIPROJECT_PEER: no readable owner/receipt snapshot"
+    } finally {
+      $readObservation.lastRead.endedUtc = [DateTimeOffset]::UtcNow.ToString("o")
+      $readObservation.lastRead.elapsedMilliseconds = $readClock.ElapsedMilliseconds
     }
-    throw "MULTIPROJECT_PEER: no readable owner/receipt snapshot"
   }
   function Wait-MultiProjectPeerSettled {
     $last = ""
@@ -5008,11 +5079,32 @@ function Invoke-MultiProjectRenamePhase {
     throw
   } finally {
     $cleanupFailures = [Collections.Generic.List[string]]::new()
+    $failureChildren = [Collections.Generic.List[object]]::new()
     foreach ($child in @($peerChild, $shellChild)) {
       if ($null -ne $child) {
+        if ($primaryError) {
+          $observed = [ordered]@{ stem = $child.stem; rootPID = $child.rootPID
+            rootStartUtcTicks = $child.rootStartUtcTicks; targetPID = $child.targetPID
+            targetStartUtcTicks = $child.targetStartUtcTicks; observedBeforeTeardownUtc = [DateTimeOffset]::UtcNow.ToString("o")
+            rootExited = $null; rootExitCode = $null; targetExited = $null; targetExitCode = $null
+            observationError = $null; teardown = $null; stdout = $null; stderr = $null }
+          try {
+            $observed.rootExited = $child.rootProcess.HasExited
+            if ($observed.rootExited) { $observed.rootExitCode = $child.rootProcess.ExitCode }
+            if ($child.process) {
+              $observed.targetExited = $child.process.HasExited
+              if ($observed.targetExited) { $observed.targetExitCode = $child.process.ExitCode }
+            }
+          } catch { $observed.observationError = $_.Exception.Message }
+          $failureChildren.Add($observed)
+        }
         try { $null = Complete-MultiProjectCapture $child $logDirectory 5000 $primaryError }
         catch { $cleanupFailures.Add($_.Exception.Message) }
       }
+    }
+    if ($primaryError) {
+      Write-MultiProjectFailureDiagnostics $primaryError $peerPath $logDirectory $readObservation `
+        $failureChildren.ToArray() $phaseStartedUtc $phaseClock.ElapsedMilliseconds
     }
     if ($cleanupFailures.Count -gt 0) {
       $message = "MULTIPROJECT_PHASE_TEARDOWN: $($cleanupFailures -join '; ')"
