@@ -613,8 +613,12 @@ pub fn headerIdentity(action: HeaderAction) []const u8 {
 }
 
 pub const Header = struct {
+    pub const ProjectGlyph = enum { folder, remote, global };
+
     title: []const u8 = "GraphCode Windows",
     context: []const u8 = "",
+    project_glyph: ?ProjectGlyph = null,
+    detail_left: i32 = 0,
     attention_count: usize = 0,
     notice_name: []const u8 = "",
     notice: ?WorktreeStatus.Summary = null,
@@ -652,8 +656,12 @@ pub const Header = struct {
     pub fn layout(self: Header, width: i32) HeaderLayout {
         var result = HeaderLayout{};
         const right = @max(0, width - 8);
-        const identity_right = @min(right, @max(0, @min(280, @divTrunc(width, 3))));
-        result.identity = rect(@min(8, identity_right), 1, identity_right, Tokens.header_height - 1);
+        const identity_left = if (self.project_glyph != null) @min(right, self.detail_left + 20) else @min(8, right);
+        const identity_right = if (self.project_glyph != null)
+            @min(right, identity_left + @min(240, @divTrunc(@max(0, width - identity_left), 3)))
+        else
+            @min(right, @max(0, @min(280, @divTrunc(width, 3))));
+        result.identity = rect(identity_left, 1, identity_right, Tokens.header_height - 1);
         const status_width: i32 = if (width >= 1100) 220 else 0;
         result.status = rect(right - status_width, 5, right, Tokens.header_height - 5);
         const controls_right = @max(identity_right, right - status_width - (if (status_width != 0) @as(i32, 8) else 0));
@@ -730,18 +738,34 @@ pub const ReclaimAction = enum { reclaim, keep };
 pub const ReclaimHit = struct { node_index: usize, action: ReclaimAction };
 
 pub fn attentionRailBounds(width: i32) c.RECT {
-    return rect(Tokens.sidebar_width + 20, Tokens.header_height + 12, width - 20, Tokens.header_height + 43);
+    return attentionRailLayout(rect(Tokens.sidebar_width, Tokens.header_height, width, 720)).rail;
 }
 
 pub fn hitTestAttentionRail(x: i32, y: i32, width: i32) bool {
-    return insideGraph(x, y, attentionRailBounds(width));
+    return insideGraph(x, y, attentionRailLayout(rect(Tokens.sidebar_width, Tokens.header_height, width, 720)).review);
+}
+
+pub const AttentionRailLayout = struct { rail: c.RECT, count: c.RECT, age: c.RECT, review: c.RECT };
+
+pub fn attentionRailLayout(bounds: c.RECT) AttentionRailLayout {
+    const left = @min(bounds.right, bounds.left + 20);
+    const right = @max(left, @min(left + 390, bounds.right - 148));
+    const top = bounds.top + 18;
+    const review_left = @max(left, right - 124);
+    const count_right = @min(left + 151, @max(left, review_left - 9));
+    return .{
+        .rail = rect(left, top, right, top + 30),
+        .count = rect(@min(left + 27, count_right), top, count_right, top + 30),
+        .age = rect(@min(count_right + 9, review_left), top, @max(@min(count_right + 9, review_left), review_left - 9), top + 30),
+        .review = rect(review_left, top + 5, @max(review_left, right - 6), top + 25),
+    };
 }
 
 /// The rail belongs to the graph surfaces. A loop workspace paints its loop bar over the
 /// same strip, so there it is neither drawn nor clickable: a click on the bar's Show in
 /// Graph button must never land on the rail's Review action.
 pub fn attentionRailShown(model: *const GraphModel.Model, surface: Surface) bool {
-    return surface != .workspace and model.attentionCount() != 0;
+    return (surface == .project or surface == .overview) and model.attentionCount() != 0;
 }
 
 pub fn loopDetailCollapseBounds(client_right: i32) c.RECT {
@@ -921,7 +945,7 @@ pub fn paint(
     if (surface != .workspace) drawZoomControls(hdc, allocator, graph_bounds, state);
 
     _ = c.RestoreDC(hdc, saved);
-    if (attentionRailShown(model, surface)) attentionRail(hdc, allocator, model, client.right);
+    if (attentionRailShown(model, surface)) attentionRail(hdc, allocator, model, graph_bounds);
     if (controls.activity_enabled) {
         const workspace_height: i32 = if (surface == .workspace) 0 else if (controls.panel_visible) Tokens.workspace_height else 0;
         activityStrip(
@@ -1218,40 +1242,84 @@ fn transformedRect(bounds: c.RECT, state: *const CanvasState, x: i32, y: i32, wi
 }
 
 fn zoomControlsBounds(bounds: c.RECT) c.RECT {
-    return rect(bounds.right - 190, bounds.bottom - 48, bounds.right - 12, bounds.bottom - 12);
+    return rect(bounds.right - 148, bounds.bottom - 42, bounds.right - 12, bounds.bottom - 12);
 }
 
 fn zoomButtonBounds(bounds: c.RECT, index: i32) c.RECT {
     const controls = zoomControlsBounds(bounds);
-    const widths = [_]i32{ 36, 68, 36, 38 };
-    var left = controls.left;
-    var current: i32 = 0;
-    while (current < index) : (current += 1) left += widths[@intCast(current)];
-    return rect(left, controls.top, left + widths[@intCast(index)], controls.bottom);
+    const offsets = [_]i32{ 6, 30, 78, 108 };
+    const widths = [_]i32{ 22, 46, 22, 22 };
+    const i: usize = @intCast(index);
+    return rect(controls.left + offsets[i], controls.top + 4, controls.left + offsets[i] + widths[i], controls.bottom - 4);
+}
+
+pub fn zoomControlBounds(bounds: c.RECT, control: ZoomControl) c.RECT {
+    return zoomButtonBounds(bounds, @intFromEnum(control));
 }
 
 fn drawZoomControls(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT, state: *const CanvasState) void {
-    roundedCard(hdc, zoomControlsBounds(bounds), 0x0026262A, false);
-    drawTextRect(
-        hdc,
-        allocator,
-        "Zoom  Ctrl+-  Ctrl+0  Ctrl+=  Ctrl+9",
-        rect(bounds.right - 292, bounds.bottom - 68, bounds.right - 12, bounds.bottom - 50),
-        9,
-        0x008A8A8A,
-        c.DT_RIGHT | c.DT_SINGLELINE | c.DT_VCENTER,
-    );
-    const labels = [_][]const u8{ "-", "", "+", "Fit" };
-    for (labels, 0..) |label, index| {
+    const controls = zoomControlsBounds(bounds);
+    roundedControl(hdc, controls, 15, 0x002A2827, 0x00413F3E);
+    fill(hdc, rect(controls.left + 104, controls.top + 8, controls.left + 105, controls.bottom - 8), 0x004B4948);
+    for (0..4) |index| {
         const button = zoomButtonBounds(bounds, @intCast(index));
-        if (index != 0) fill(hdc, rect(button.left, button.top + 7, button.left + 1, button.bottom - 7), 0x00454549);
         if (index == 1) {
             var percent: [16]u8 = undefined;
             const text = std.fmt.bufPrint(&percent, "{d}%", .{@as(i32, @intFromFloat(state.zoom * 100))}) catch "100%";
             drawTextRect(hdc, allocator, text, button, 11, 0x00E0E0E0, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
         } else {
-            drawTextRect(hdc, allocator, label, button, 11, 0x00E0E0E0, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+            drawZoomGlyph(hdc, button, @enumFromInt(index));
         }
+    }
+}
+
+fn drawZoomGlyph(hdc: c.HDC, bounds: c.RECT, control: ZoomControl) void {
+    const x = @divTrunc(bounds.left + bounds.right, 2);
+    const y = @divTrunc(bounds.top + bounds.bottom, 2);
+    const pen = c.CreatePen(c.PS_SOLID, 1, 0x00D8D8D8) orelse return;
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    const old_brush = c.SelectObject(hdc, c.GetStockObject(c.HOLLOW_BRUSH));
+    defer _ = c.SelectObject(hdc, old_brush);
+    if (control == .fit) {
+        const segments = [_][4]i32{
+            .{ x - 6, y + 6, x - 6, y + 1 }, .{ x - 6, y + 6, x - 1, y + 6 },
+            .{ x - 6, y + 6, x - 1, y + 1 }, .{ x + 6, y - 6, x + 6, y - 1 },
+            .{ x + 6, y - 6, x + 1, y - 6 }, .{ x + 6, y - 6, x + 1, y - 1 },
+        };
+        for (segments) |line| {
+            _ = c.MoveToEx(hdc, line[0], line[1], null);
+            _ = c.LineTo(hdc, line[2], line[3]);
+        }
+    } else {
+        _ = c.Ellipse(hdc, x - 7, y - 7, x + 4, y + 4);
+        _ = c.MoveToEx(hdc, x + 2, y + 2, null);
+        _ = c.LineTo(hdc, x + 7, y + 7);
+        _ = c.MoveToEx(hdc, x - 5, y - 2, null);
+        _ = c.LineTo(hdc, x + 2, y - 2);
+        if (control == .in) {
+            _ = c.MoveToEx(hdc, x - 2, y - 5, null);
+            _ = c.LineTo(hdc, x - 2, y + 2);
+        }
+    }
+}
+
+pub fn addButtonBounds(bounds: c.RECT) c.RECT {
+    return rect(bounds.right - 138, bounds.top + 18, bounds.right - 20, bounds.top + 48);
+}
+
+pub fn paintAddButton(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT, label: []const u8, highlighted: bool, focused: bool) void {
+    fill(hdc, bounds, Tokens.canvas_tone);
+    roundedControl(hdc, bounds, 8, if (highlighted) 0x00232220 else 0x001A1B19, 0x00313230);
+    drawTextRect(hdc, allocator, "+", rect(bounds.left + 12, bounds.top, bounds.left + 24, bounds.bottom), 14, 0x00919090, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+    drawCardText(hdc, allocator, label, rect(bounds.left + 31, bounds.top, bounds.right - 10, bounds.bottom), 12, .semibold, if (highlighted) 0x00E8E8E8 else 0x00BDBDBD, true) catch |err| {
+        std.log.warn("Canvas add label unavailable: {s}", .{@errorName(err)});
+    };
+    if (focused) {
+        var focus = bounds;
+        _ = c.InflateRect(&focus, -3, -3);
+        _ = c.DrawFocusRect(hdc, &focus);
     }
 }
 
@@ -1398,7 +1466,11 @@ pub fn paintHeader(
     const layout = presentation.layout(width);
     const flags = c.DT_SINGLELINE | c.DT_VCENTER | c.DT_END_ELLIPSIS | c.DT_NOPREFIX;
     var title_bounds = layout.identity;
-    if (presentation.context.len != 0) {
+    if (presentation.project_glyph) |glyph| {
+        const glyph_bounds = rect(title_bounds.left, 9, title_bounds.left + 14, 24);
+        drawHeaderProjectGlyph(hdc, glyph_bounds, glyph);
+        title_bounds.left += 21;
+    } else if (presentation.context.len != 0) {
         var context_bounds = layout.identity;
         context_bounds.top = 1;
         context_bounds.bottom = 15;
@@ -1406,7 +1478,13 @@ pub fn paintHeader(
         title_bounds.bottom = Tokens.header_height - 1;
         drawTextRect(hdc, allocator, presentation.context, context_bounds, 8, 0x00A8A8A8, flags);
     }
-    drawTextRect(hdc, allocator, presentation.title, title_bounds, 11, 0x00FFFFFF, flags);
+    if (presentation.project_glyph != null) {
+        drawCardText(hdc, allocator, presentation.title, title_bounds, 13, .semibold, 0x00F4F4F4, true) catch |err| {
+            std.log.warn("Project identity unavailable: {s}", .{@errorName(err)});
+        };
+    } else {
+        drawTextRect(hdc, allocator, presentation.title, title_bounds, 11, 0x00FFFFFF, flags);
+    }
     for (header_actions) |action| {
         const bounds = layout.bounds(action) orelse continue;
         const notice = action == .review_attention or action == .inspect_worktrees;
@@ -1427,6 +1505,26 @@ pub fn paintHeader(
         }
     }
     if (layout.status.right > layout.status.left) drawTextRect(hdc, allocator, status, layout.status, 10, 0x00A8A8A8, flags);
+}
+
+fn drawHeaderProjectGlyph(hdc: c.HDC, bounds: c.RECT, glyph: Header.ProjectGlyph) void {
+    const color: u32 = 0x00EFA55D;
+    if (glyph == .folder) {
+        roundedControl(hdc, rect(bounds.left, bounds.top + 2, bounds.left + 6, bounds.top + 7), 1, color, color);
+        roundedControl(hdc, rect(bounds.left, bounds.top + 5, bounds.right, bounds.bottom - 1), 2, color, color);
+    } else {
+        drawGraphDot(hdc, .{ .x = bounds.left + 7, .y = bounds.top + 7 }, 12, Tokens.window_tone, color, 1);
+        const pen = c.CreatePen(c.PS_SOLID, 1, color) orelse return;
+        defer _ = c.DeleteObject(pen);
+        const old = c.SelectObject(hdc, pen);
+        defer _ = c.SelectObject(hdc, old);
+        _ = c.MoveToEx(hdc, bounds.left + 1, bounds.top + 7, null);
+        _ = c.LineTo(hdc, bounds.right - 1, bounds.top + 7);
+        if (glyph == .remote) {
+            _ = c.MoveToEx(hdc, bounds.left + 7, bounds.top + 1, null);
+            _ = c.LineTo(hdc, bounds.left + 7, bounds.top + 13);
+        }
+    }
 }
 
 test "header layout shares visibility hit testing and focus order at narrow widths" {
@@ -1634,7 +1732,7 @@ fn attentionRail(
     hdc: c.HDC,
     allocator: std.mem.Allocator,
     model: *const GraphModel.Model,
-    width: i32,
+    bounds: c.RECT,
 ) void {
     if (model.attentionCount() == 0) return;
     var count: [32]u8 = undefined;
@@ -1642,25 +1740,48 @@ fn attentionRail(
         "1 loop needs you"
     else
         std.fmt.bufPrint(&count, "{d} loops need you", .{model.attentionCount()}) catch "loops need you";
-    const rail = attentionRailBounds(width);
-    fill(hdc, rail, 0x002D2418);
-    const review_left = Tokens.sidebar_width + 210;
-    const age_left = Tokens.sidebar_width + 274;
-    drawText(hdc, allocator, label, Tokens.sidebar_width + 34, Tokens.header_height + 21, 12, 0x00FFCD7A, review_left - 12);
+    const layout = attentionRailLayout(bounds);
+    if (layout.rail.right <= layout.rail.left) return;
+    roundedControl(hdc, layout.rail, 8, 0x00111E2A, 0x00123954);
+    drawGraphDot(hdc, .{ .x = layout.rail.left + 14, .y = layout.rail.top + 15 }, 7, 0x000A9FFF, 0x000A9FFF, 0);
+    drawCardText(hdc, allocator, label, layout.count, 12, .semibold, 0x007ACDFF, true) catch |err| {
+        std.log.warn("Attention count unavailable: {s}", .{@errorName(err)});
+    };
     var age_buffer: [96]u8 = undefined;
     const oldest = if (model.attention_entries.items.len != 0)
         attentionAgeLabel(&age_buffer, model.attention_entries.items[0].node)
     else
-        "none";
-    drawText(hdc, allocator, "Review", review_left, Tokens.header_height + 21, 11, 0x00E6E6E6, age_left - 12);
-    drawText(hdc, allocator, oldest, age_left, Tokens.header_height + 21, 10, 0x00B8B8B8, rail.right - 18);
+        "";
+    drawCardText(hdc, allocator, oldest, layout.age, 10, .card_mono, 0x00467191, true) catch |err| {
+        std.log.warn("Attention age unavailable: {s}", .{@errorName(err)});
+    };
+    roundedControl(hdc, layout.review, 5, 0x000B90E8, 0x000B90E8);
+    drawCardText(hdc, allocator, "Review", rect(layout.review.left + 8, layout.review.top, layout.review.left + 44, layout.review.bottom), 11, .card_state, 0x00031724, false) catch |err| {
+        std.log.warn("Attention review label unavailable: {s}", .{@errorName(err)});
+    };
+    drawCardText(hdc, allocator, "Ctrl+Shift+R", rect(layout.review.left + 47, layout.review.top, layout.review.right - 3, layout.review.bottom), 9.5, .card_mono, 0x00102E49, true) catch |err| {
+        std.log.warn("Attention review shortcut unavailable: {s}", .{@errorName(err)});
+    };
 }
 
 fn attentionAgeLabel(buffer: []u8, node: GraphModel.Node) []const u8 {
+    return attentionAgeLabelAt(buffer, node, @intCast(@max(0, std.time.timestamp())));
+}
+
+fn attentionAgeLabelAt(buffer: []u8, node: GraphModel.Node, now: u64) []const u8 {
     if (node.created_at) |created| {
-        return std.fmt.bufPrint(buffer, "oldest {s}: {s}", .{ elapsedLabel(created), node.title }) catch node.title;
+        var stream = std.io.fixedBufferStream(buffer);
+        stream.writer().writeAll("oldest ") catch |err| {
+            std.log.warn("Attention age unavailable: {s}", .{@errorName(err)});
+            return "Age unavailable";
+        };
+        writeCardAge(stream.writer(), now -| created) catch |err| {
+            std.log.warn("Attention age unavailable: {s}", .{@errorName(err)});
+            return "Age unavailable";
+        };
+        return stream.getWritten();
     }
-    return node.title;
+    return "";
 }
 
 fn activityStrip(
@@ -2231,11 +2352,14 @@ fn drawLoopCard(
 ) void {
     GdiplusAA.drawLoopCardChrome(hdc, bounds, loopCardChrome(node, state, role, attention, selected)) catch |err| {
         std.log.warn("Card {s} chrome degraded to flat GDI fallback: {s}", .{ node.id, @errorName(err) });
-        roundedCard(hdc, bounds, Tokens.loop_card_bottom, selected);
+        roundedControlStroke(hdc, bounds, scaled(Tokens.loop_card_radius, state),
+            if (attention) Tokens.loop_card_attention_bottom else Tokens.loop_card_bottom,
+            if (selected) Tokens.canvas_selection else if (attention) Tokens.loop_card_attention_border else Tokens.loop_card_border,
+            if (selected) scaled(2, state) else scaled(1, state));
         fill(
             hdc,
             rect(bounds.left, bounds.top, bounds.left + scaled(Tokens.loop_card_stripe, state), bounds.bottom),
-            if (role == .unwired) blendCardColor(loopTypeColor(node.loop_type), Tokens.loop_card_bottom, 35) else loopTypeColor(node.loop_type),
+            if (role == .unwired) blendCardColor(loopTypeColor(node.loop_type), if (attention) Tokens.loop_card_attention_bottom else Tokens.loop_card_bottom, 35) else loopTypeColor(node.loop_type),
         );
     };
     drawCardBody(hdc, allocator, node, bounds, state.zoom, role, attention, action, reclaim) catch |err| {
@@ -2249,9 +2373,13 @@ fn drawLoopCard(
 
     if (show_reclaim and reclaim) {
         const offer = reclaimOfferBounds(bounds);
-        fill(hdc, offer.reclaim, 0x003A3A44);
-        drawTextRect(hdc, allocator, "Reclaim", offer.reclaim, scaled(9, state), 0x00E6E6E6, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-        drawTextRect(hdc, allocator, "Keep", offer.keep, scaled(9, state), 0x008A8A8A, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        roundedControl(hdc, offer.reclaim, scaled(5, state), 0x003A3535, 0x00534F4F);
+        drawCardText(hdc, allocator, "Reclaim", rect(offer.reclaim.left + scaled(9, state), offer.reclaim.top, offer.reclaim.right, offer.reclaim.bottom), 11 * state.zoom, .semibold, 0x00D7D7D7, false) catch |err| {
+            std.log.warn("Reclaim label unavailable: {s}", .{@errorName(err)});
+        };
+        drawCardText(hdc, allocator, "Keep", offer.keep, 11 * state.zoom, .semibold, 0x00919191, false) catch |err| {
+            std.log.warn("Keep label unavailable: {s}", .{@errorName(err)});
+        };
     }
     if (role == .entry or role == .unwired) {
         const accent = loopTypeColor(node.loop_type);
@@ -2321,8 +2449,8 @@ const ReclaimOfferBounds = struct { reclaim: c.RECT, keep: c.RECT };
 pub fn reclaimOfferBounds(bounds: c.RECT) ReclaimOfferBounds {
     const zoom = @as(f32, @floatFromInt(bounds.right - bounds.left)) / @as(f32, @floatFromInt(Tokens.loop_card_width));
     return .{
-        .reclaim = rect(bounds.left + scaledValue(11, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(77, zoom), bounds.top + scaledValue(68, zoom)),
-        .keep = rect(bounds.left + scaledValue(83, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(119, zoom), bounds.top + scaledValue(68, zoom)),
+        .reclaim = rect(bounds.left + scaledValue(11, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(77, zoom), bounds.top + scaledValue(72, zoom)),
+        .keep = rect(bounds.left + scaledValue(84, zoom), bounds.top + scaledValue(51, zoom), bounds.left + scaledValue(120, zoom), bounds.top + scaledValue(72, zoom)),
     };
 }
 
@@ -2503,18 +2631,6 @@ fn writeMetricNumber(writer: anytype, value: f64) !void {
     if (@abs(value) < 1_000_000_000 and value == @round(value))
         return writer.print("{d}", .{@as(i64, @intFromFloat(value))});
     return writer.print("{d:.2}", .{value});
-}
-
-fn elapsedLabel(created_at: u64) []const u8 {
-    const normalized = if (created_at < 1_000_000_000_000) created_at *| 1000 else created_at;
-    const now = std.time.milliTimestamp();
-    const created: i64 = @intCast(@min(normalized, @as(u64, std.math.maxInt(i64))));
-    const elapsed_ms: u64 = if (now > created) @intCast(now - created) else 0;
-    const seconds = elapsed_ms / 1000;
-    if (seconds < 60) return "0m";
-    if (seconds < 3600) return "<1h";
-    if (seconds < 86_400) return ">1h";
-    return ">1d";
 }
 
 fn formatTokenUsage(writer: anytype, tokens: u32) !void {
@@ -3521,6 +3637,30 @@ fn roundedCard(hdc: c.HDC, bounds: c.RECT, color: u32, selected: bool) void {
     _ = c.DeleteObject(brush);
 }
 
+fn roundedControl(hdc: c.HDC, bounds: c.RECT, radius: i32, color: u32, border: u32) void {
+    roundedControlStroke(hdc, bounds, radius, color, border, 1);
+}
+
+fn roundedControlStroke(hdc: c.HDC, bounds: c.RECT, radius: i32, color: u32, border: u32, stroke: i32) void {
+    if (bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
+    if (GdiplusAA.drawRoundedRect(hdc, bounds, radius, color, border, @floatFromInt(stroke))) return;
+    const brush = c.CreateSolidBrush(color) orelse {
+        std.log.warn("Canvas control brush unavailable\n", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(brush);
+    const pen = c.CreatePen(c.PS_SOLID, stroke, border) orelse {
+        std.log.warn("Canvas control border unavailable\n", .{});
+        return;
+    };
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    defer _ = c.SelectObject(hdc, old_brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    _ = c.RoundRect(hdc, bounds.left, bounds.top, bounds.right, bounds.bottom, radius * 2, radius * 2);
+}
+
 fn drawText(
     hdc: c.HDC,
     allocator: std.mem.Allocator,
@@ -4399,6 +4539,189 @@ test "zoom controls expose every action and fit content" {
     var state = CanvasState{};
     state.fit(bounds, 1600, 900);
     try std.testing.expect(state.zoom < 1);
+}
+
+test "canvas visual finish attention rail is compact and clear of the add control" {
+    for ([_]i32{ 640, 900, 1280, 1920 }) |width| {
+        const rail = attentionRailBounds(width);
+        try std.testing.expect(rail.right - rail.left <= 410);
+        try std.testing.expectEqual(@as(i32, 30), rail.bottom - rail.top);
+        try std.testing.expectEqual(@as(i32, Tokens.header_height + 18), rail.top);
+        try std.testing.expect(rail.right <= width - 140);
+    }
+    var buffer: [96]u8 = undefined;
+    var node = parityTestNode();
+    node.title = @constCast("A title so long that it must never widen the queue rail " ** 8);
+    const age = attentionAgeLabel(&buffer, node);
+    try std.testing.expect(std.mem.startsWith(u8, age, "oldest "));
+    try std.testing.expect(std.mem.indexOf(u8, age, node.title) == null);
+    try std.testing.expect(std.mem.indexOf(u8, age, ":") == null);
+}
+
+test "canvas visual finish attention queue visibility and shared Review geometry" {
+    var model = GraphModel.Model.init(std.testing.allocator);
+    defer model.deinit();
+    for ([_][]const u8{ "idle", "running", "failed" }, 0..) |state, index| {
+        const frame = try std.fmt.allocPrint(std.testing.allocator, "{{\"graphChanged\":{{\"project\":{{\"path\":\"A\",\"name\":\"A\"}},\"nodes\":[{{\"id\":\"a\",\"title\":\"Long title\",\"state\":\"{s}\",\"presence\":{{\"presence\":\"{s}\"}}}},{{\"id\":\"b\",\"title\":\"Another loop\",\"state\":\"{s}\"}}],\"edges\":[]}}}}", .{ state, if (index == 1) "awaitingInput" else "idle", if (index == 2) "failed" else "idle" });
+        defer std.testing.allocator.free(frame);
+        _ = try model.updateFromFrame(frame);
+        try std.testing.expectEqual(index, model.attentionCount());
+        for ([_]Surface{ .project, .overview, .quick_chats, .workspace }) |surface|
+            try std.testing.expectEqual(index != 0 and (surface == .project or surface == .overview), attentionRailShown(&model, surface));
+    }
+    for ([_]i32{ 0, Tokens.sidebar_width }) |left| {
+        const bounds = rect(left, Tokens.header_height, 1280, 720);
+        const layout = attentionRailLayout(bounds);
+        try std.testing.expectEqual(left + 20, layout.rail.left);
+        try std.testing.expect(layout.count.right <= layout.age.left);
+        try std.testing.expect(layout.age.right < layout.review.left);
+        try std.testing.expect(layout.review.right < addButtonBounds(bounds).left);
+        try std.testing.expect(layout.review.top >= layout.rail.top and layout.review.bottom <= layout.rail.bottom);
+        if (left != 0) {
+            try std.testing.expect(hitTestAttentionRail(layout.review.left + 2, layout.review.top + 2, bounds.right));
+            try std.testing.expect(!hitTestAttentionRail(layout.count.left + 2, layout.count.top + 2, bounds.right));
+        }
+    }
+}
+
+test "canvas visual finish oldest age uses the shared duration without a title or buckets" {
+    var node = parityTestNode();
+    node.created_at = 1000;
+    var buffer: [96]u8 = undefined;
+    for ([_]struct { age: u64, expected: []const u8 }{
+        .{ .age = 0, .expected = "oldest 0s" },
+        .{ .age = 59, .expected = "oldest 59s" },
+        .{ .age = 60, .expected = "oldest 1m" },
+        .{ .age = 3660, .expected = "oldest 1h 1m" },
+        .{ .age = 93600, .expected = "oldest 1d 2h" },
+    }) |sample| {
+        try std.testing.expectEqualStrings(sample.expected, attentionAgeLabelAt(&buffer, node, 1000 + sample.age));
+    }
+    try std.testing.expectEqualStrings("oldest 0s", attentionAgeLabelAt(&buffer, node, 500));
+    node.created_at = null;
+    try std.testing.expectEqualStrings("", attentionAgeLabelAt(&buffer, node, 500));
+}
+
+test "canvas visual finish folder identity stays on the detail axis and actions remain disjoint" {
+    for ([_]i32{ 0, Tokens.sidebar_width }) |left| {
+        for ([_]Header.ProjectGlyph{ .folder, .remote, .global }) |glyph| {
+            const header = Header{ .title = "A long project identity that yields to toolbar actions", .project_glyph = glyph, .detail_left = left, .attention_count = 12, .panel_visible = false };
+            for ([_]i32{ 640, 900, 1280, 1920 }) |width| {
+                const layout = header.layout(width);
+                try std.testing.expectEqual(left + 20, layout.identity.left);
+                var right = layout.identity.right;
+                for (header_actions) |action| {
+                    const button = layout.bounds(action) orelse continue;
+                    try std.testing.expect(button.left > right);
+                    try std.testing.expectEqual(action, layout.actionAt(button.left + 1, button.top + 1).?);
+                    right = button.right;
+                }
+                try std.testing.expect(right <= width);
+            }
+        }
+    }
+    const plain = (Header{ .title = "Quick Chat", .context = "Quick Chat workspace" }).layout(1280);
+    try std.testing.expectEqual(@as(i32, 8), plain.identity.left);
+}
+
+test "canvas visual finish add control shares compact paint focus and hit geometry" {
+    var dib = try ParityDib.init(640, 240);
+    defer dib.deinit();
+    const bounds = addButtonBounds(rect(0, 0, 640, 240));
+    try std.testing.expectEqual(@as(i32, 118), bounds.right - bounds.left);
+    try std.testing.expectEqual(@as(i32, 30), bounds.bottom - bounds.top);
+    paintAddButton(dib.dc, std.testing.allocator, bounds, "New Node", false, false);
+    try std.testing.expectEqual(Tokens.canvas_tone, c.GetPixel(dib.dc, bounds.left, bounds.top));
+    try std.testing.expectEqual(@as(u32, 0x001A1B19), c.GetPixel(dib.dc, bounds.left + 3, bounds.top + 15));
+    try std.testing.expect(dib.count(bounds, 0x00BDBDBD) > 0);
+    paintAddButton(dib.dc, std.testing.allocator, bounds, "New Chat", true, true);
+    try std.testing.expect(dib.count(bounds, 0x00232220) > 0);
+    try std.testing.expect(dib.count(bounds, 0x00E8E8E8) > 0);
+}
+
+test "canvas visual finish notebook raster has 48 pixel pitch and follows pan zoom" {
+    var dib = try ParityDib.init(640, 480);
+    defer dib.deinit();
+    const bounds = rect(40, 40, 600, 440);
+    for ([_]f32{ 0.75, 1, 1.25 }) |zoom| {
+        const state = CanvasState{ .zoom = zoom, .pan_x = -37, .pan_y = 19 };
+        fill(dib.dc, bounds, Tokens.canvas_tone);
+        drawGrid(dib.dc, bounds, &state);
+        const pitch: i32 = @intFromFloat(48 * zoom);
+        var lines: usize = 0;
+        var previous: ?i32 = null;
+        var x = bounds.left;
+        while (x < bounds.right) : (x += 1) {
+            if (c.GetPixel(dib.dc, x, 42) != Tokens.canvas_grid_line) continue;
+            if (previous) |last| try std.testing.expectEqual(pitch, x - last);
+            previous = x;
+            lines += 1;
+        }
+        try std.testing.expect(lines >= 8);
+        try std.testing.expectEqual(Tokens.canvas_grid_line, c.GetPixel(dib.dc, bounds.left + @mod(@as(i32, @intFromFloat(state.pan_x)), pitch), 42));
+    }
+}
+
+test "canvas visual finish zoom capsule has compact disjoint action geometry" {
+    const bounds = rect(240, 34, 1280, 720);
+    const controls = zoomControlsBounds(bounds);
+    try std.testing.expect(controls.right - controls.left <= 140);
+    try std.testing.expectEqual(@as(i32, 30), controls.bottom - controls.top);
+    var right = controls.left;
+    for (0..4) |index| {
+        const button = zoomButtonBounds(bounds, @intCast(index));
+        try std.testing.expect(button.left > right);
+        try std.testing.expect(button.right < controls.right);
+        try std.testing.expect(button.top > controls.top and button.bottom < controls.bottom);
+        try std.testing.expectEqual(@as(ZoomControl, @enumFromInt(index)), hitTestZoomControl(@divTrunc(button.left + button.right, 2), button.top + 2, bounds).?);
+        right = button.right;
+    }
+    try std.testing.expect(hitTestZoomControl(controls.left, controls.top, bounds) == null);
+}
+
+test "canvas visual finish reclaim controls retain a legible rounded action row" {
+    for ([_]f32{ 0.55, 0.8, 1, 1.8 }) |zoom| {
+        const bounds = rect(80, 80, 80 + scaledValue(250, zoom), 80 + scaledValue(96, zoom));
+        const offer = reclaimOfferBounds(bounds);
+        try std.testing.expect(offer.reclaim.bottom - offer.reclaim.top >= scaledValue(20, zoom));
+        try std.testing.expect(offer.reclaim.right < offer.keep.left);
+        try std.testing.expect(offer.keep.right < bounds.right);
+        try std.testing.expect(offer.keep.bottom <= bounds.bottom - scaledValue(21, zoom));
+    }
+}
+
+test "canvas visual finish attention warmth survives the non AA fallback" {
+    if (GdiplusAA.isReady()) return error.SkipZigTest;
+    var dib = try ParityDib.init(640, 240);
+    defer dib.deinit();
+    const bounds = rect(40, 40, 290, 136);
+    var node = parityTestNode();
+    node.state = @constCast("running");
+    node.presence = @constCast("awaitingInput");
+    for ([_]bool{ false, true }) |selected| {
+        fill(dib.dc, rect(0, 0, 640, 240), Tokens.canvas_tone);
+        drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &.{}, .interior, true, .reply, selected, false, true);
+        try std.testing.expectEqual(Tokens.loop_card_attention_bottom, c.GetPixel(dib.dc, bounds.right - 8, bounds.top + 45));
+        try std.testing.expect(dib.count(bounds, if (selected) Tokens.canvas_selection else Tokens.loop_card_attention_border) > 20);
+    }
+}
+
+test "canvas visual finish controls select actual UI and monospaced font faces" {
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(dc);
+    for ([_]struct { size: f32, style: AppFont.Style, face: []const u8, weight: i32 }{
+        .{ .size = 12, .style = .semibold, .face = "Segoe UI", .weight = c.FW_SEMIBOLD },
+        .{ .size = 13, .style = .semibold, .face = "Segoe UI", .weight = c.FW_SEMIBOLD },
+        .{ .size = 11, .style = .semibold, .face = "Segoe UI", .weight = c.FW_SEMIBOLD },
+        .{ .size = 9.5, .style = .card_mono, .face = "Consolas", .weight = c.FW_NORMAL },
+    }) |request| {
+        const fact = try inspectPaintFont(std.testing.allocator, dc,
+            AppFont.getStyle(request.size, request.style), request.face,
+            -AppFont.styleHeight(request.size, 96), request.weight);
+        defer std.testing.allocator.free(fact.actual_face);
+        std.debug.print("canvas visual font requested={s} actual={s} size={d} weight={d}\n",
+            .{ request.face, fact.actual_face, request.size, fact.weight });
+    }
 }
 
 test "loop card parity project metrics match the shipping card" {
@@ -6218,6 +6541,166 @@ test "paint export: overview-paint-764" {
     try paint764Export(.overview);
 }
 
+const VisualFinishScene = enum {
+    project_zero_100,
+    project_one_100,
+    project_many_100,
+    overview_many_100,
+    workspace_header_local,
+    controls_states,
+    attention_matrix_100,
+};
+
+fn visualFinishFixture(allocator: std.mem.Allocator, count: usize) !GraphModel.Model {
+    var model = GraphModel.Model.init(allocator);
+    errdefer model.deinit();
+    const frame = try std.fmt.allocPrint(allocator, "{{\"graphChanged\":{{\"project\":{{\"path\":\"C:\\\\VisualFixture\",\"name\":\"Canvas Fixture\"}},\"nodes\":[" ++
+        "{{\"id\":\"source\",\"title\":\"Source\",\"loopType\":\"sketch\",\"state\":\"{s}\",\"createdAt\":1}}," ++
+        "{{\"id\":\"goal\",\"title\":\"Review synthetic result\",\"loopType\":\"goalBased\",\"state\":\"{s}\",\"presence\":{{\"presence\":\"{s}\"}},\"goal\":{{\"summary\":\"Inspect the synthetic result.\"}},\"createdAt\":1}}," ++
+        "{{\"id\":\"blocked\",\"title\":\"Downstream\",\"loopType\":\"sketch\",\"state\":\"{s}\",\"createdAt\":1}}]," ++
+        "\"edges\":[{{\"id\":\"handoff\",\"from\":\"source\",\"to\":\"blocked\",\"kind\":\"handoff\",\"fired\":false}}]}}}}", .{ if (count > 1) "failed" else "running", if (count != 0) "running" else "idle", if (count != 0) "awaitingInput" else "idle", if (count > 1) "blocked" else "idle" });
+    defer allocator.free(frame);
+    _ = try model.updateFromFrame(frame);
+    try std.testing.expectEqual(if (count > 1) @as(usize, 3) else count, model.attentionCount());
+    try std.testing.expect(model.setSelectedID("goal"));
+    return model;
+}
+
+fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: VisualFinishScene) !void {
+    const count: usize = switch (scene) {
+        .project_zero_100 => 0,
+        .project_one_100 => 1,
+        else => 3,
+    };
+    var model = try visualFinishFixture(allocator, count);
+    defer model.deinit();
+    const surface: Surface = switch (scene) {
+        .overview_many_100 => .overview,
+        .workspace_header_local => .workspace,
+        else => .project,
+    };
+    const bounds = chrome764GraphBounds();
+    var state = try modelTestState(&model, .{}, bounds);
+    defer state.deinitLayout();
+    var sidebar = Sidebar.State.init(allocator);
+    defer sidebar.deinit();
+    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface);
+    paintHeader(dib.dc, allocator, 1280, "", .{
+        .title = "Canvas Fixture",
+        .project_glyph = if (surface == .workspace) .folder else null,
+        .detail_left = Tokens.sidebar_width,
+    }, null);
+    if (surface != .workspace) paintAddButton(dib.dc, allocator, addButtonBounds(bounds), "New Node", false, false);
+    if (scene == .controls_states or scene == .attention_matrix_100) {
+        fill(dib.dc, bounds, Tokens.canvas_tone);
+        drawGrid(dib.dc, bounds, &.{});
+        if (scene == .controls_states) {
+            for ([_]bool{ false, true }, 0..) |highlighted, index| {
+                const x: i32 = 280 + @as(i32, @intCast(index)) * 180;
+                paintAddButton(dib.dc, allocator, rect(x, 90, x + 118, 120), "New Node", highlighted, highlighted);
+            }
+            var node = parityTestNode();
+            node.id = @constCast("reclaim");
+            node.title = @constCast("Resolved Goal");
+            node.state = @constCast("succeeded");
+            node.presence = @constCast("idle");
+            node.created_at = null;
+            for ([_]f32{ 1, 0.55 }, 0..) |zoom, index| {
+                const x: i32 = 280 + @as(i32, @intCast(index)) * 340;
+                const card = rect(x, 200, x + scaledValue(250, zoom), 200 + scaledValue(96, zoom));
+                drawLoopCardShadow(dib.dc, allocator, node, card, &.{ .zoom = zoom }, .interior, false, false);
+                drawLoopCard(dib.dc, allocator, node, card, &.{ .zoom = zoom }, .interior, false, null, false, true, true);
+            }
+            drawZoomControls(dib.dc, allocator, bounds, &.{});
+        } else {
+            const matrix_bounds = rect(0, Tokens.header_height, 1280, 720);
+            fill(dib.dc, matrix_bounds, Tokens.canvas_tone);
+            drawGrid(dib.dc, matrix_bounds, &.{});
+            const types = [_][]const u8{ "goalBased", "sketch", "composite", "sketch" };
+            for (types, 0..) |kind, row| {
+                for (0..4) |column| {
+                    var node = parityTestNode();
+                    node.id = @constCast("attention-matrix");
+                    node.title = @constCast(if (row == 0) "Needs you" else if (row == 3 and column >= 2) "Waiting upstream" else "Blocked");
+                    node.loop_type = @constCast(kind);
+                    node.state = @constCast(if (row == 0) "running" else "blocked");
+                    node.presence = @constCast(if (row == 0) "awaitingInput" else "idle");
+                    node.created_at = null;
+                    var upstream = graphRoleTestNode("upstream");
+                    upstream.state = @constCast(if (row == 3) "running" else "failed");
+                    const nodes = [_]GraphModel.Node{ upstream, node };
+                    const edges = [_]GraphModel.Edge{graphRoleTestEdge("upstream", node.id, "handoff")};
+                    const graph_edges: []const GraphModel.Edge = if (column < 2) &.{} else &edges;
+                    const roles = try resolveCardRoles(allocator, &nodes, graph_edges, &.{});
+                    defer allocator.free(roles);
+                    const warm = needsAttention(node, &nodes, graph_edges);
+                    try std.testing.expectEqual(row == 0 or (row != 3 and column >= 2), warm);
+                    const role = roles[1];
+                    try std.testing.expectEqual(if (column < 2) NodeRole.unwired else NodeRole.interior, role);
+                    const selected = column % 2 == 1;
+                    const x: i32 = 30 + @as(i32, @intCast(column)) * 310;
+                    const y: i32 = 100 + @as(i32, @intCast(row)) * 145;
+                    const card = rect(x, y, x + 250, y + 96);
+                    drawTextRect(dib.dc, allocator, if (column < 2)
+                        (if (selected) "Unwired / selected" else "Unwired / unselected")
+                    else
+                        (if (selected) "Wired / selected" else "Wired / unselected"), rect(x, y - 25, x + 250, y - 5), 11, 0x00B0B0B0, c.DT_LEFT | c.DT_SINGLELINE);
+                    drawLoopCardShadow(dib.dc, allocator, node, card, &.{}, role, warm, selected);
+                    drawLoopCard(dib.dc, allocator, node, card, &.{}, role, warm, primaryCardAction(node), selected, false, true);
+                }
+            }
+        }
+    }
+    if (c.GdiFlush() == 0) return error.PaintFixtureFlushFailed;
+}
+
+test "paint export: canvas-visual-finish" {
+    const allocator = std.testing.allocator;
+    const root = std.process.getEnvVarOwned(allocator, "GRAPHCODE_VISUAL_FINISH_EXPORT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer allocator.free(root);
+    const commit = try std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_SOURCE_COMMIT");
+    defer allocator.free(commit);
+    if (commit.len != 40) return error.PaintExportSourceCommitInvalid;
+    for (commit) |character| if (!std.ascii.isHex(character)) return error.PaintExportSourceCommitInvalid;
+    var directory = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer directory.close();
+    var iterator = directory.iterate();
+    if (try iterator.next() != null) return error.PaintExportRootNotEmpty;
+    try chrome764Native();
+    var receipt = std.array_list.Managed(u8).init(allocator);
+    defer receipt.deinit();
+    try receipt.writer().print("{{\"evidenceClass\":\"offscreen component paint only\",\"baseCommit\":\"{s}\",\"logicalDpi\":96,\"width\":1280,\"height\":720,\"scenes\":[", .{commit});
+    for (std.enums.values(VisualFinishScene), 0..) |scene, index| {
+        var first_rgb: [32]u8 = undefined;
+        for (0..3) |repeat| {
+            var dib = try ParityDib.init(1280, 720);
+            defer dib.deinit();
+            try paintVisualFinish(dib, allocator, scene);
+            const rgb = try dib.rgbSha256(allocator);
+            if (repeat == 0) first_rgb = rgb else try std.testing.expectEqualSlices(u8, &first_rgb, &rgb);
+            const name = try std.fmt.allocPrint(allocator, "{s}-{d}.bmp", .{ @tagName(scene), repeat + 1 });
+            defer allocator.free(name);
+            const path = try std.fs.path.join(allocator, &.{ root, name });
+            defer allocator.free(path);
+            const digest = try dib.writeBmp(allocator, path);
+            if (repeat == 0) {
+                if (index != 0) try receipt.append(',');
+                try receipt.writer().print("{{\"scene\":\"{s}\",\"file\":\"{s}\",\"zoom\":1,\"repeats\":3,\"bmpSha256\":\"{x}\",\"rgbSha256\":\"{x}\"}}", .{ @tagName(scene), name, &digest, &rgb });
+            }
+        }
+    }
+    try receipt.appendSlice("]}\n");
+    const receipt_path = try std.fs.path.join(allocator, &.{ root, "visual-finish-receipt.json" });
+    defer allocator.free(receipt_path);
+    var file = try std.fs.cwd().createFile(receipt_path, .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(receipt.items);
+    std.debug.print("visual-finish export scenes=7 repeats=3 matching-rgb=7 logical-dpi=96; no desktop capture\n", .{});
+}
+
 test "paint scene 764 project inventory" {
     var fixture = try paint764FixtureModel(std.testing.allocator, .project);
     defer fixture.model.deinit();
@@ -6777,8 +7260,8 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
     try chrome764Paint(dib, &fixture, .project, &state, &inspection, &.{});
     const graph = (fixture.model.graph orelse return error.Chrome764ProjectMissing);
     const offer = reclaimOfferBounds(nodeBounds(1, &state));
-    checks.expect(dib.count(offer.reclaim, 0x003A3A44) > 20, "reclaim-fill-preserved", .project, "fixture-goal-done");
-    checks.expect(dib.count(offer.keep, 0x008A8A8A) > 0, "keep-label-preserved", .project, "fixture-goal-done");
+    checks.expect(dib.count(offer.reclaim, 0x003A3535) > 20, "reclaim-rounded-fill-preserved", .project, "fixture-goal-done");
+    checks.expect(dib.count(offer.keep, 0x00919191) > 0, "keep-semibold-label-preserved", .project, "fixture-goal-done");
     const reclaim = hitTestReclaimOffer(graph.nodes.items, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state);
     const keep = hitTestReclaimOffer(graph.nodes.items, &inspection, &.{}, offer.keep.left + 1, offer.keep.top + 1, &state);
     checks.expect(reclaim != null and reclaim.?.node_index == 1 and reclaim.?.action == .reclaim,
@@ -7190,7 +7673,7 @@ test "loop card parity paint 764 accents match Mac COLORREFs on both surfaces" {
         const expected = paint764ExpectedAccent(node.loop_type) orelse
             return error.Paint764UnexpectedLoopType;
         const expected_stripe = if (roles[index] == .unwired)
-            blendCardColor(expected, if (paint764TestRendererReady) chrome764Face(needsAttention(node, graph.nodes.items, graph.edges.items), 8, 96) else Tokens.loop_card_bottom, 35)
+            blendCardColor(expected, if (paint764TestRendererReady) chrome764Face(needsAttention(node, graph.nodes.items, graph.edges.items), 8, 96) else if (needsAttention(node, graph.nodes.items, graph.edges.items)) Tokens.loop_card_attention_bottom else Tokens.loop_card_bottom, 35)
         else
             expected;
         const bounds = nodeBounds(index, &state);
@@ -7644,13 +8127,13 @@ test "loop card parity existing action fills use hit bounds and never paint over
         const offer = reclaimOfferBounds(nodeBounds(1, &state));
         try std.testing.expect(c.GdiFlush() != 0);
         try std.testing.expect(dib.count(attention, 0x000A9FFF) > 0);
-        try std.testing.expect(dib.count(offer.reclaim, 0x003A3A44) > 0);
+        try std.testing.expect(dib.count(offer.reclaim, 0x003A3535) > 0);
         try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &.{}, attention.left + 1, attention.top + 1, &state));
         try std.testing.expectEqual(ReclaimAction.reclaim, hitTestReclaimOffer(&nodes, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state).?.action);
         for (0..2) |index| {
             const meta = cardTextLayout(nodeBounds(index, &state), zoom, scaledValue(80, zoom)).meta;
             try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x000A9FFF));
-            try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x003A3A44));
+            try std.testing.expectEqual(@as(usize, 0), dib.count(meta, 0x003A3535));
         }
     }
 }
@@ -7920,7 +8403,7 @@ test "loop age labels show a just-created daemon loop as recent" {
     try std.testing.expect(std.mem.startsWith(u8, footer, "started "));
     try std.testing.expect(footer.len > "started ".len);
     try std.testing.expect(std.mem.indexOf(u8, footer, "unknown time") == null);
-    try std.testing.expectEqualStrings("oldest 0m: Loop", attentionAgeLabel(&buffer, node));
+    try std.testing.expectEqualStrings("oldest 0s", attentionAgeLabelAt(&buffer, node, node.created_at.?));
 }
 
 test "attention cards expose reason-specific primary actions" {

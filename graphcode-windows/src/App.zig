@@ -1353,6 +1353,7 @@ const UiaDynamicTarget = union(enum) {
     workspace_switch: usize,
     workspace_restart_session: []const u8,
     header_attention,
+    canvas_attention,
     header_worktree,
     header_jump,
     header_toggle_panel,
@@ -7495,9 +7496,14 @@ pub const App = struct {
         );
         self.empty_global_overview_button = createButton(
             self.window.hwnd,
-            "New Loop",
+            "New Node",
             MainWindow.empty_new_loop_id,
         );
+        if (self.empty_global_overview_button) |button| {
+            const style = c.GetWindowLongW(button, c.GWL_STYLE);
+            _ = c.SetWindowLongW(button, c.GWL_STYLE, (style & ~@as(c.LONG, c.BS_TYPEMASK)) | c.BS_OWNERDRAW);
+            AppFont.apply(button, 12, true);
+        }
         self.layoutEmptyStateControls();
     }
 
@@ -7535,20 +7541,21 @@ pub const App = struct {
             );
         }
         if (self.empty_global_overview_button != null) {
-            const label = if (is_quick_chats) "New Chat" else "New Loop";
+            const label = if (is_quick_chats) "New Chat" else "New Node";
             if (!childTextEquals(self.empty_global_overview_button, label)) setButtonText(self.empty_global_overview_button, label);
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
-            const primary_x = if (is_empty) x else content_right - 140;
+            const add_bounds = GraphCanvas.addButtonBounds(.{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom });
+            const primary_x = if (is_empty) content_left + @divTrunc(content_right - content_left - 118, 2) else add_bounds.left;
             const primary_y = if (is_empty)
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
             else
-                Tokens.header_height + 14;
+                add_bounds.top;
             placeChildControl(self.empty_global_overview_button, show_primary, .{
                 .left = physicalCoordinate(primary_x, self.dpi),
                 .top = physicalCoordinate(primary_y, self.dpi),
-                .right = physicalCoordinate(primary_x, self.dpi) + physicalCoordinate(if (is_empty) 220 else 120, self.dpi),
-                .bottom = physicalCoordinate(primary_y, self.dpi) + physicalCoordinate(32, self.dpi),
+                .right = physicalCoordinate(primary_x + 118, self.dpi),
+                .bottom = physicalCoordinate(primary_y + 30, self.dpi),
             });
         }
     }
@@ -7766,6 +7773,10 @@ pub const App = struct {
                 (if (graph.project.isRemote()) "Workspace / Remote" else if (graph.project.isGlobal()) "Workspace / Global" else "Workspace / Local folder")
             else
                 (if (graph.project.isRemote()) "Remote" else if (graph.project.isGlobal()) "Global" else "Local folder");
+            if (self.surface == .workspace) {
+                header.project_glyph = if (graph.project.isRemote()) .remote else if (graph.project.isGlobal()) .global else .folder;
+                header.detail_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+            }
         }
         if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.isQuickChatWorkspace())) {
             header.panel_visible = self.workspace_controls.panel_visible;
@@ -8002,6 +8013,18 @@ pub const App = struct {
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
         provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
+        if (comptime providerHasDecl(@TypeOf(provider), "syncCanvasControls")) {
+            var zoom_bounds: [4]c.RECT = undefined;
+            for ([_]GraphCanvas.ZoomControl{ .out, .actual, .in, .fit }, 0..) |control, index| {
+                zoom_bounds[index] = if (self.surface == .workspace) std.mem.zeroes(c.RECT) else (AccessibilityBounds{ .logical = GraphCanvas.zoomControlBounds(canvas_rect, control) }).physicalRect(self.dpi);
+            }
+            var primary = std.mem.zeroes(c.RECT);
+            if (self.empty_global_overview_button) |button| {
+                if (c.IsWindowVisible(button) != 0 and c.GetWindowRect(button, &primary) != 0)
+                    _ = c.MapWindowPoints(null, self.window.hwnd, @ptrCast(&primary), 2);
+            }
+            provider.syncCanvasControls(primary, if (self.surface == .quick_chats) "New Chat" else "New Node", zoom_bounds);
+        }
         const current_inspection = self.currentWorktreeInspection();
         // The scroll sink is optional so test sinks that only record elements need not declare it.
         if (comptime providerHasDecl(@TypeOf(provider), "syncSidebarScroll")) {
@@ -8021,6 +8044,10 @@ pub const App = struct {
         defer sidebar_rows.deinit(self.allocator);
         const header = self.headerPresentation();
         const header_layout = header.layout(client.right);
+        if (GraphCanvas.attentionRailShown(&self.model, self.surface)) {
+            const rail = GraphCanvas.attentionRailLayout(canvas_rect);
+            self.appendAccessibilityElement(&elements, &owned_identities, "canvas-attention-review", "needs-you", "Review oldest attention loop (Ctrl+Shift+R)", 4, .{ .logical = rail.review }, false, false) catch return;
+        }
         for (GraphCanvas.header_actions) |action| {
             const logical_bounds = header_layout.bounds(action) orelse continue;
             const bounds = (AccessibilityBounds{ .logical = logical_bounds }).physicalRect(self.dpi);
@@ -8568,6 +8595,7 @@ pub const App = struct {
             .{ .identity = "activity-control:scroll-left", .target = .activity_left },
             .{ .identity = "activity-control:scroll-right", .target = .activity_right },
             .{ .identity = "header-attention:needs-you", .target = .header_attention },
+            .{ .identity = "canvas-attention-review:needs-you", .target = .canvas_attention },
             .{ .identity = "header-worktree:worktrees", .target = .header_worktree },
             .{ .identity = "header-jump:jump", .target = .header_jump },
             .{ .identity = "header-toggle-panel:control", .target = .header_toggle_panel },
@@ -8893,6 +8921,11 @@ pub const App = struct {
                 self.launchWorkspace(list.items[index].path);
             },
             .header_attention => return self.invokeHeader(.review_attention),
+            .canvas_attention => {
+                if (!GraphCanvas.attentionRailShown(&self.model, self.surface)) return false;
+                self.handleAction(.cycle_attention);
+                return true;
+            },
             .header_worktree => return self.invokeHeader(.inspect_worktrees),
             .header_jump => return self.invokeHeader(.jump),
             .header_toggle_panel => return self.invokeHeader(.toggle_panel),
@@ -9400,6 +9433,24 @@ fn onWindowMessage(
         return true;
     }
     switch (message) {
+        c.WM_DRAWITEM => {
+            const item = Win32.messagePointer(*c.DRAWITEMSTRUCT, lparam);
+            if (item.CtlID != MainWindow.empty_new_loop_id) return false;
+            const saved = c.SaveDC(item.hDC);
+            defer _ = c.RestoreDC(item.hDC, saved);
+            _ = c.SetMapMode(item.hDC, c.MM_ANISOTROPIC);
+            _ = c.SetWindowExtEx(item.hDC, 96, 96, null);
+            _ = c.SetViewportExtEx(item.hDC, @intCast(app.dpi), @intCast(app.dpi), null);
+            const button_bounds = c.RECT{
+                .left = 0,
+                .top = 0,
+                .right = Dpi.unscale(item.rcItem.right - item.rcItem.left, app.dpi),
+                .bottom = Dpi.unscale(item.rcItem.bottom - item.rcItem.top, app.dpi),
+            };
+            GraphCanvas.paintAddButton(item.hDC, app.allocator, button_bounds, if (app.surface == .quick_chats) "New Chat" else "New Node", (item.itemState & (c.ODS_SELECTED | c.ODS_HOTLIGHT)) != 0, (item.itemState & c.ODS_FOCUS) != 0);
+            result.* = 1;
+            return true;
+        },
         c.WM_GETMINMAXINFO => {
             // Below this the sidebar cannot keep two rows visible beneath the fixed header with the
             // Workspace panel, Activity strip, and status line stacked under it. Only the height is
@@ -10013,7 +10064,12 @@ fn onWindowMessage(
                 return true;
             }
             if (app.header_focus != null) app.leaveHeader(false);
-            if (GraphCanvas.attentionRailShown(&app.model, app.surface) and GraphCanvas.hitTestAttentionRail(x, y, client.right)) {
+            const canvas_bounds = GraphCanvas.renderBounds(client.right, client.bottom, app.workspace_controls);
+            const rail_bounds = GraphCanvas.attentionRailLayout(.{ .left = canvas_bounds.left, .top = canvas_bounds.top, .right = canvas_bounds.right, .bottom = canvas_bounds.bottom });
+            if (GraphCanvas.attentionRailShown(&app.model, app.surface) and
+                x >= rail_bounds.review.left and x < rail_bounds.review.right and
+                y >= rail_bounds.review.top and y < rail_bounds.review.bottom)
+            {
                 app.handleAction(.cycle_attention);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
@@ -14189,8 +14245,8 @@ test "Show in Graph from an open loop shows the graph and never moves the loop b
         try fixture.openFromSidebar(node_id);
         try std.testing.expect(app.workspace_controls.panel_visible);
         const button = LoopBarProbe.show_graph orelse return error.TestExpectedShowGraphButton;
-        // The Dev Box geometry: the button sits inside the graph's hidden Needs-you rail.
-        try std.testing.expect(GraphCanvas.hitTestAttentionRail(
+        // The compact Review target no longer stretches over the workspace action.
+        try std.testing.expect(!GraphCanvas.hitTestAttentionRail(
             @divTrunc(button.left + button.right, 2),
             @divTrunc(button.top + button.bottom, 2),
             logicalClientRect(app.window.hwnd, app.dpi).right,
@@ -15100,7 +15156,6 @@ const LiveTerminalFixture = struct {
         var result: c.LRESULT = 0;
         _ = onWindowMessage(&self.app, self.app.window.hwnd, c.WM_TIMER, MainWindow.timer_id, 0, &result);
     }
-
 
     /// A daemon graph change through the production frame path (and its workspace refresh).
     fn deliver(self: *LiveTerminalFixture, loops: []const LiveLoop) !void {
@@ -19161,14 +19216,16 @@ fn emptyStateButton(app: *App, button: c.HWND) TerminalChild {
     return .{ .visible = (style & c.WS_VISIBLE) != 0, .rect = rect };
 }
 
-/// The canvas's New Loop button sits at the top right of a project that has loops.
+/// The canvas add control sits at the top right of a project that has loops.
 fn expectNewLoopAtTopRight(app: *App) !void {
     const button = emptyStateButton(app, app.empty_global_overview_button);
     try std.testing.expect(button.visible);
     const client = logicalClientRect(app.window.hwnd, app.dpi);
-    try std.testing.expectEqual(physicalCoordinate(client.right - 140, app.dpi), button.rect.left);
-    try std.testing.expectEqual(physicalCoordinate(Tokens.header_height + 14, app.dpi), button.rect.top);
-    try std.testing.expectEqual(physicalCoordinate(120, app.dpi), button.rect.right - button.rect.left);
+    const expected = GraphCanvas.addButtonBounds(.{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = client.bottom });
+    try std.testing.expectEqualDeep((AccessibilityBounds{ .logical = expected }).physicalRect(app.dpi), button.rect);
+    try std.testing.expect(App.childTextEquals(app.empty_global_overview_button, "New Node"));
+    try std.testing.expectEqual(@as(c.LONG, c.BS_OWNERDRAW),
+        c.GetWindowLongW(app.empty_global_overview_button, c.GWL_STYLE) & c.BS_TYPEMASK);
     try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
 }
 
@@ -19212,7 +19269,8 @@ test "workspace surface: canvas New Loop and Open Folder buttons follow the proj
     try std.testing.expectEqualStrings("C:\\empty-fixture", app.model.graph.?.project.path);
     const centred = emptyStateButton(&app, app.empty_global_overview_button);
     try std.testing.expect(centred.visible);
-    try std.testing.expectEqual(physicalCoordinate(220, app.dpi), centred.rect.right - centred.rect.left);
+    try std.testing.expectEqual(physicalCoordinate(118, app.dpi), centred.rect.right - centred.rect.left);
+    try std.testing.expectEqual(physicalCoordinate(30, app.dpi), centred.rect.bottom - centred.rect.top);
 
     // Back on the project with loops, the button returns to the top right.
     try clickSidebarProjectRow(&app, "C:\\core-fixture");
@@ -20064,7 +20122,7 @@ fn expectSettledGraphPublication(surface: GraphCanvas.Surface, owner: []const u8
         .{ .identity = "loop:A:loop", .present = true, .name = alpha_title },
         .{ .identity = "loop:B:loop", .present = true, .name = beta_title },
         .{ .identity = if (surface == .overview) "overview-card:B:loop" else "project-card:B:loop", .present = true, .name = beta_title },
-        .{ .identity = "workspace-toolbar:B", .present = surface == .workspace, .name = "Beta", .bounds = if (surface == .workspace) .{ .{ 8, 1, 280, 33 }, .{ 8, 1, 280, 33 }, .{ 8, 1, 280, 33 } } else null },
+        .{ .identity = "workspace-toolbar:B", .present = surface == .workspace, .name = "Beta", .bounds = if (surface == .workspace) .{ .{ 240, 1, 480, 33 }, .{ 240, 1, 480, 33 }, .{ 240, 1, 480, 33 } } else null },
         .{ .identity = "workspace-loop-bar:loop", .present = surface == .workspace, .name = "Selected loop workspace", .bounds = if (surface == .workspace) .{ .{ 220, 34, 928, 80 }, .{ 220, 34, 928, 80 }, .{ 220, 34, 928, 80 } } else null },
     };
     F.reset(&expected);
@@ -21133,10 +21191,12 @@ test "DPI UIA fixed graph uses physical client bounds" {
 }
 
 test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
-    const common = [_]DpiExpectedElement{
+    const graph_header = [_]DpiExpectedElement{
         .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 288, 5, 400, 29 }, .{ 432, 8, 600, 44 }, .{ 576, 10, 800, 58 } } },
         .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 408, 5, 588, 29 }, .{ 612, 8, 882, 44 }, .{ 816, 10, 1176, 58 } } },
         .{ .identity = "header-jump:jump", .bounds = .{ .{ 596, 5, 760, 29 }, .{ 894, 8, 1140, 44 }, .{ 1192, 10, 1520, 58 } } },
+    };
+    const common = [_]DpiExpectedElement{
         // 42px content inset + Graph/Quick Chats/chat slots + 18px caption gap.
         .{ .identity = "sidebar-section:local", .bounds = .{ .{ 12, 156, 208, 180 }, .{ 18, 234, 312, 270 }, .{ 24, 312, 416, 360 } } },
         .{ .identity = "workspace-switch:B", .bounds = .{ .{ 250, 34, 500, 62 }, .{ 375, 51, 750, 93 }, .{ 500, 68, 1000, 124 } } },
@@ -21154,10 +21214,10 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
     for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
         const footer = if (surface == .workspace) footer_full_height else footer_above_panel;
         try expectDpiAccessibility(surface, null, &(common ++ [_]DpiExpectedElement{footer}));
-        if (surface != .workspace) try expectDpiAccessibility(surface, null, &.{
+        if (surface != .workspace) try expectDpiAccessibility(surface, null, &(graph_header ++ [_]DpiExpectedElement{
             .{ .identity = "header-toggle-panel:control" },
             .{ .identity = "workspace-toolbar:A" },
-        });
+        }));
     }
     try expectDpiAccessibility(.project, null, &.{
         .{ .identity = "project-card:A:loop", .bounds = .{ .{ 382, 134, 632, 230 }, .{ 573, 201, 948, 345 }, .{ 764, 268, 1264, 460 } } },
@@ -21170,8 +21230,11 @@ test "DPI UIA logical cards headers sidebar and direct inserts scale once" {
         .{ .identity = "quick-chat-card:chat", .bounds = .{ .{ 262, 88, 482, 152 }, .{ 393, 132, 723, 228 }, .{ 524, 176, 964, 304 } } },
     });
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 768, 5, 904, 29 }, .{ 1152, 8, 1356, 44 }, .{ 1536, 10, 1808, 58 } } },
-        .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 8, 1, 280, 33 }, .{ 12, 2, 420, 50 }, .{ 16, 2, 560, 66 } } },
+        .{ .identity = "header-attention:needs-you", .bounds = .{ .{ 488, 5, 573, 29 }, .{ 732, 8, 860, 44 }, .{ 976, 10, 1146, 58 } } },
+        .{ .identity = "header-worktree:worktrees", .bounds = .{ .{ 581, 5, 718, 29 }, .{ 872, 8, 1077, 44 }, .{ 1162, 10, 1436, 58 } } },
+        .{ .identity = "header-jump:jump", .bounds = .{ .{ 726, 5, 851, 29 }, .{ 1089, 8, 1277, 44 }, .{ 1452, 10, 1702, 58 } } },
+        .{ .identity = "header-toggle-panel:control", .bounds = .{ .{ 859, 5, 962, 29 }, .{ 1289, 8, 1443, 44 }, .{ 1718, 10, 1924, 58 } } },
+        .{ .identity = "workspace-toolbar:A", .bounds = .{ .{ 240, 1, 480, 33 }, .{ 360, 2, 720, 50 }, .{ 480, 2, 960, 66 } } },
         .{ .identity = "workspace-loop-bar:loop", .bounds = .{ .{ 220, 34, 928, 80 }, .{ 330, 51, 1392, 120 }, .{ 440, 68, 1856, 160 } } },
         .{ .identity = "workspace-show-graph:show-graph", .bounds = .{ .{ 824, 44, 916, 70 }, .{ 1236, 66, 1374, 105 }, .{ 1648, 88, 1832, 140 } }, .eligible = false },
         .{ .identity = "workspace-restart-session:loop", .bounds = .{ .{ 704, 44, 816, 70 }, .{ 1056, 66, 1224, 105 }, .{ 1408, 88, 1632, 140 } } },
@@ -23795,6 +23858,92 @@ test "header presentation follows destinations and keeps sidebar independent" {
     }
 }
 
+test "canvas visual finish header rail and zoom publish shared DPI geometry without a desktop" {
+    const Sink = struct {
+        canvas: ?c.RECT = null,
+        zoom: ?[4]c.RECT = null,
+        review: ?c.RECT = null,
+        toolbar: ?c.RECT = null,
+        checked: bool = false,
+
+        fn syncCanvasBounds(self: *@This(), bounds: c.RECT) void {
+            self.canvas = bounds;
+        }
+        fn syncCanvasControls(self: *@This(), _: c.RECT, _: []const u8, zoom: [4]c.RECT) void {
+            self.zoom = zoom;
+        }
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.checked = true;
+            for (elements) |element| {
+                const bounds = c.RECT{ .left = element.left, .top = element.top, .right = element.right, .bottom = element.bottom };
+                if (std.mem.eql(u8, element.identity, "canvas-attention-review:needs-you")) self.review = bounds;
+                if (std.mem.eql(u8, element.identity, "workspace-toolbar:A")) self.toolbar = bounds;
+            }
+        }
+    };
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        _ = try app.model.updateFromFrame(
+            \\{"graphChanged":{"project":{"path":"A","name":"A source-bound folder"},"nodes":[{"id":"a","title":"Question","state":"running","presence":{"presence":"awaitingInput"}},{"id":"b","title":"Failed","state":"failed"}],"edges":[]}}
+        );
+        for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats, .workspace }) |surface| {
+            app.surface = surface;
+            for ([_]bool{ false, true }) |sidebar| {
+                app.workspace_controls.rail_visible = sidebar;
+                var sink = Sink{};
+                app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+                try std.testing.expect(sink.checked and sink.zoom != null and sink.canvas != null);
+                const render_bounds = GraphCanvas.renderBounds(1200, 900, app.workspace_controls);
+                const canvas = c.RECT{ .left = render_bounds.left, .top = render_bounds.top, .right = render_bounds.right, .bottom = render_bounds.bottom };
+                for ([_]GraphCanvas.ZoomControl{ .out, .actual, .in, .fit }, sink.zoom.?) |control, published| {
+                    const expected = if (surface == .workspace) std.mem.zeroes(c.RECT) else (AccessibilityBounds{ .logical = GraphCanvas.zoomControlBounds(canvas, control) }).physicalRect(dpi);
+                    try std.testing.expectEqualDeep(expected, published);
+                }
+                const rail_shown = surface == .project or surface == .overview;
+                try std.testing.expectEqual(rail_shown, sink.review != null);
+                if (sink.review) |review| {
+                    const expected = (AccessibilityBounds{ .logical = GraphCanvas.attentionRailLayout(canvas).review }).physicalRect(dpi);
+                    try std.testing.expectEqualDeep(expected, review);
+                }
+                const header = app.headerPresentation();
+                try std.testing.expectEqual(surface == .workspace, header.project_glyph != null);
+                if (surface == .workspace) {
+                    try std.testing.expectEqual(GraphCanvas.Header.ProjectGlyph.folder, header.project_glyph.?);
+                    try std.testing.expectEqual(if (sidebar) Tokens.sidebar_width + 20 else @as(i32, 20), header.layout(1200).identity.left);
+                    try std.testing.expect(!app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("canvas-attention-review:needs-you")));
+                }
+            }
+        }
+    }
+}
+
+test "canvas visual finish Review pointer and UIA share selection without workspace activation" {
+    for ([_]bool{ false, true }) |uia| {
+        var fixture: ShowGraphFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const app = &fixture.app;
+        try std.testing.expect(app.selectNodeIndex(1));
+        const before = app.client.outbound_count;
+        if (uia) {
+            try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("canvas-attention-review:needs-you")));
+        } else {
+            const review = GraphCanvas.attentionRailLayout(.{
+                .left = Tokens.sidebar_width,
+                .top = Tokens.header_height,
+                .right = 1200,
+                .bottom = 700,
+            }).review;
+            try nativeClickCenter(app, review);
+        }
+        try std.testing.expectEqual(GraphCanvas.Surface.project, app.surface);
+        try std.testing.expectEqualStrings("loop-a", app.model.selectedNodeID().?);
+        try std.testing.expectEqual(before, app.client.outbound_count);
+        try std.testing.expectEqual(@as(usize, 0), fixture.workspace.loop_id.len);
+    }
+}
+
 test "Quick Chat parity bound identity ignores previous loop and chat list order" {
     const allocator = std.testing.allocator;
     var app = try overviewTestApp(Dpi.base_dpi);
@@ -24095,6 +24244,7 @@ test "header UIA identities hash to distinct payloads" {
     // collision here would silently route one chip's activation to another.
     const identities = [_][]const u8{
         "header-attention:needs-you",
+        "canvas-attention-review:needs-you",
         "header-worktree:worktrees",
         "header-jump:jump",
         "header-toggle-panel:control",

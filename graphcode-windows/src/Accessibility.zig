@@ -28,6 +28,7 @@ extern fn gc_uia_release(provider: *NativeProvider) void;
 extern fn gc_uia_get_object(hwnd: c.HWND, wparam: c.WPARAM, lparam: c.LPARAM, provider: *NativeProvider) c.LRESULT;
 extern fn gc_uia_set_status(provider: *NativeProvider, status: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_set_canvas_bounds(provider: *NativeProvider, left: c_int, top: c_int, right: c_int, bottom: c_int) c.HRESULT;
+extern fn gc_uia_set_canvas_controls(provider: *NativeProvider, bounds: [*]const c_int, primary_name: [*:0]const u8) c.HRESULT;
 extern fn gc_uia_set_sidebar_scroll(provider: *NativeProvider, offset: c_int, max_offset: c_int, viewport: c_int) c.HRESULT;
 extern fn gc_uia_set_header_focus(provider: *NativeProvider, identity: ?[*:0]const u8) c.HRESULT;
 extern fn gc_uia_update(
@@ -303,6 +304,24 @@ pub const Provider = struct {
         const native = self.native_provider orelse return;
         _ = gc_uia_set_canvas_bounds(native, bounds.left, bounds.top, bounds.right, bounds.bottom);
     }
+    pub fn syncCanvasControls(self: *Provider, primary: c.RECT, name: []const u8, controls: [4]c.RECT) void {
+        if (!builtin.link_libc) return;
+        const native = self.native_provider orelse return;
+        const name_z = self.allocator.dupeZ(u8, name) catch {
+            std.log.warn("Canvas action accessibility name allocation failed", .{});
+            return;
+        };
+        defer self.allocator.free(name_z);
+        var bounds: [20]c_int = undefined;
+        for ([_]c.RECT{ primary, controls[0], controls[1], controls[2], controls[3] }, 0..) |control, index| {
+            bounds[index * 4] = control.left;
+            bounds[index * 4 + 1] = control.top;
+            bounds[index * 4 + 2] = control.right;
+            bounds[index * 4 + 3] = control.bottom;
+        }
+        const result = gc_uia_set_canvas_controls(native, &bounds, name_z.ptr);
+        if (result < 0) std.log.warn("Canvas control accessibility bounds rejected: {d}", .{result});
+    }
     /// Reports the sidebar's scroll offset, its maximum, and the visible height so the sidebar
     /// lists can answer UIA scroll-pattern properties and raise changes.
     pub fn syncSidebarScroll(self: *Provider, offset: i32, max_offset: i32, viewport: i32) void {
@@ -358,7 +377,7 @@ pub fn defaultContract(allocator: std.mem.Allocator) !Provider {
     _ = try provider.add(.{ .id = "confirm-each-reclaim", .name = "Confirm each reclaim", .role = .checkbox, .parent = menu, .patterns = &.{ .invoke, .toggle } });
     _ = try provider.add(.{ .id = "overview-destination", .name = "Graph", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "quick-chats-destination", .name = "Quick Chats", .role = .button, .parent = projects, .focusable = true, .patterns = &.{.invoke} });
-    _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Loop or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
+    _ = try provider.add(.{ .id = "canvas-primary-action", .name = "New Node or Chat", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-out", .name = "Zoom out", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "actual-size", .name = "Actual size", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });
     _ = try provider.add(.{ .id = "zoom-in", .name = "Zoom in", .role = .button, .parent = graph, .focusable = true, .patterns = &.{.invoke} });

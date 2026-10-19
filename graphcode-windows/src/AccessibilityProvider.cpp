@@ -43,7 +43,7 @@ static bool isHeader(const std::string &identity) {
 static int hitTier(const std::string &identity) {
   if (identity.rfind("sidebar-update-banner:", 0) == 0 ||
       identity.rfind("sidebar-error-footer:", 0) == 0) return 3;
-  return isHeader(identity) ? 2 : 1;
+  return isHeader(identity) || identity == "canvas-attention-review:needs-you" ? 2 : 1;
 }
 
 static bool hasHeaderNativeFocus(HWND hwnd) {
@@ -88,6 +88,9 @@ struct State {
   // reports one, get_BoundingRectangle falls back to a placeholder rect.
   RECT canvas_bounds{};
   bool has_canvas_bounds = false;
+  RECT canvas_controls[5]{};
+  bool has_canvas_controls = false;
+  std::wstring primary_action_name = L"New Node or Chat";
   // Drawn, scroll-clipped rects of the sidebar's Graph (index 0) and Quick Chats
   // (index 1) destinations, delivered through gc_uia_update under the identities
   // below. Until the app reports them the fixed elements use placeholder rects.
@@ -249,6 +252,9 @@ class Node final : public IRawElementProviderSimple,
           const int slot = static_cast<int>(id_ - 14);
           bool_value = state_->has_destination_bounds[slot] &&
               isEmptyRect(state_->destination_bounds[slot]);
+        } else if (id_ >= 16 && id_ <= 20) {
+          bool_value = !state_->has_canvas_controls ||
+              isEmptyRect(state_->canvas_controls[id_ - 16]);
         }
         kind = kBool;
       } else if (property == UIA_IsKeyboardFocusablePropertyId ||
@@ -388,6 +394,9 @@ class Node final : public IRawElementProviderSimple,
       } else if (id_ == 4 && state_->has_canvas_bounds) {
         canvas_bounds = state_->canvas_bounds;
         has_canvas_bounds = true;
+      } else if (id_ >= 16 && id_ <= 20 && state_->has_canvas_controls) {
+        dynamic_bounds = state_->canvas_controls[id_ - 16];
+        has_dynamic_bounds = true;
       }
     }
     RECT rect{};
@@ -419,19 +428,9 @@ class Node final : public IRawElementProviderSimple,
       value->top = origin.y + (id_ == 14 ? 142 : 358);
       value->width = 220;
       value->height = 24;
-    } else if (id_ == 16) {
-      value->left = origin.x + (rect.right > 140 ? rect.right - 140 : 0);
-      value->top = origin.y + 56;
-      value->width = 120;
-      value->height = 32;
-    } else if (id_ >= 17 && id_ <= 20) {
-      const LONG widths[] = {36, 68, 36, 38};
-      LONG left = rect.right > 190 ? rect.right - 190 : 0;
-      for (int64_t index = 17; index < id_; ++index) left += widths[index - 17];
-      value->left = origin.x + left;
-      value->top = origin.y + (rect.bottom > 48 ? rect.bottom - 48 : 0);
-      value->width = widths[id_ - 17];
-      value->height = 36;
+    } else if (id_ >= 16 && id_ <= 20) {
+      value->width = 0;
+      value->height = 0;
     }
     return S_OK;
   }
@@ -534,6 +533,8 @@ class Node final : public IRawElementProviderSimple,
         }
       };
       if (state_->has_canvas_bounds) consider(4, 0, state_->canvas_bounds);
+      if (state_->has_canvas_controls)
+        for (int slot = 0; slot < 5; ++slot) consider(16 + slot, 2, state_->canvas_controls[slot]);
       for (int slot = 0; slot < 2; ++slot) {
         if (state_->has_destination_bounds[slot])
           consider(14 + slot, 1, state_->destination_bounds[slot]);
@@ -992,6 +993,29 @@ class Node final : public IRawElementProviderSimple,
       graph_node->Release();
     }
   }
+  void setCanvasControls(const int *bounds, const char *primary_name) {
+    Node *changed[5]{};
+    {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      if (!state_->active) return;
+      for (int index = 0; index < 5; ++index) {
+        const RECT next{bounds[index * 4], bounds[index * 4 + 1],
+                        bounds[index * 4 + 2], bounds[index * 4 + 3]};
+        if (!state_->has_canvas_controls ||
+            memcmp(&state_->canvas_controls[index], &next, sizeof(RECT)) != 0)
+          changed[index] = retainElementLocked(16 + index);
+        state_->canvas_controls[index] = next;
+      }
+      state_->has_canvas_controls = true;
+      state_->primary_action_name = wide(primary_name);
+    }
+    for (Node *node : changed) {
+      if (!node) continue;
+      UiaRaiseAutomationPropertyChangedEvent(
+          node, UIA_BoundingRectanglePropertyId, VARIANT{}, VARIANT{});
+      node->Release();
+    }
+  }
   void shutdown() {
     if (id_ != 0) return;
     std::vector<Node *> elements;
@@ -1208,11 +1232,12 @@ class Node final : public IRawElementProviderSimple,
   std::wstring nameLocked() const {
     if (isRowKey(id_)) return state_->rows.at(id_).name;
     if (id_ == 6) return state_->status;
+    if (id_ == 16) return state_->primary_action_name;
     static const wchar_t *names[] = {
         L"GraphCode UIA Root", L"Projects", L"Loops", L"Worktrees", L"Graph", L"Actions",
         L"Status", L"Inspect worktrees", L"Reclaim selected worktrees", L"Reveal in Explorer",
         L"Edit worktree policy", L"Save worktree policy", L"Allow reclaim", L"Confirm each reclaim",
-        L"Graph", L"Quick Chats", L"New Loop or Chat", L"Zoom out",
+        L"Graph", L"Quick Chats", L"New Node or Chat", L"Zoom out",
         L"Actual size", L"Zoom in", L"Fit canvas", L"Workspaces",
         L"New Workspace", L"Rename Workspace", L"Delete Workspace",
     };
@@ -1241,6 +1266,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
           row.identity.rfind("attention-action:", 0) == 0 ? L"attention-action-" :
+          row.identity.rfind("canvas-attention-review:", 0) == 0 ? L"canvas-attention-review-" :
           row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
           row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :
           row.identity.rfind("workspace-quick-chat-bar:", 0) == 0 ? L"workspace-quick-chat-bar-" :
@@ -1487,6 +1513,16 @@ extern "C" HRESULT gc_uia_set_sidebar_scroll(IRawElementProviderSimple *provider
                                               int max_offset, int viewport) {
   if (!provider) return E_INVALIDARG;
   static_cast<Node *>(provider)->setSidebarScroll(offset, max_offset, viewport);
+  return S_OK;
+}
+
+extern "C" HRESULT gc_uia_set_canvas_controls(IRawElementProviderSimple *provider, const int *bounds,
+                                              const char *primary_name) {
+  if (!provider || !bounds || !validUtf8(primary_name)) return E_INVALIDARG;
+  for (int index = 0; index < 5; ++index)
+    if (bounds[index * 4 + 2] < bounds[index * 4] ||
+        bounds[index * 4 + 3] < bounds[index * 4 + 1]) return E_INVALIDARG;
+  static_cast<Node *>(provider)->setCanvasControls(bounds, primary_name);
   return S_OK;
 }
 
