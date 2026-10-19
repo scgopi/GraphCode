@@ -730,7 +730,7 @@ function New-CapManifest {
     }
     if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
         $result.sceneAdapter=$job.sceneAdapter;$result.lane='S';$result.requiredSceneNames=@(Get-CapMatchedSceneNames)
-        $result.g11Qualification='unassessable: product lacks LoopResolution/reclaim live-line consumer'
+        $result.g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
         $result.backendTurns=0;$result.realRestarts=@($realRestarts)
     }
     return $result
@@ -1436,7 +1436,7 @@ function Get-CapMatchedRestartEvidence {
     try {$rows=@(Read-CapRestartTranscript -Path $Context.transcript)}
     catch {
         if ($_.Exception.Data['CapCaptureCode'] -cne 'RestartTranscriptPending') {throw}
-        Write-CapWorkerLog 'RESTART_PENDING transcript publication is incomplete; retaining original deadline'
+        $null=Write-CapWorkerLog 'RESTART_PENDING transcript publication is incomplete; retaining original deadline'
         return $null
     }
     $restartRows=@($rows | Where-Object {
@@ -1532,20 +1532,30 @@ function Initialize-CapMatchedWorktrees {
         '{"allowReclaim":true,"confirmEachReclaim":true,"onResolveLanded":"ask","noticeSizeGB":20,"noticeCount":10}')
 }
 
-function Invoke-CapMatchedRestartCapture {
-    param([string]$Phase,$Fixture)
-    $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\real-restart")
+function Initialize-CapMatchedRestartStore {
+    param($Roots,$Fixture)
+    $null=Assert-CapMatchedFixture -Fixture $Fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
     $node=$Fixture.graphs[0].nodes | Where-Object id -CEQ '11111111-1111-4111-8111-000000000001'
     $project=Assert-CapOwnedPath $Fixture.graphs[0].project.path
     $wirePath=$project.Replace('\','/')
     $graph=$Fixture.graphs[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
     $graph.project.path=$wirePath;$graph.nodes=@($node);$graph.edges=@()
-    $projects=Join-Path $roots.Support 'projects'
+    $projects=Join-Path $Roots.Support 'projects'
     $null=New-Item -ItemType Directory -Path $projects
     $key='v1-'+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($wirePath))).ToLowerInvariant()
-    [IO.File]::WriteAllText((Join-Path $projects "$key.json"),($graph | ConvertTo-Json -Depth 30))
-    [IO.File]::WriteAllText((Join-Path $roots.Support 'recent-projects.json'),(ConvertTo-Json -InputObject @($graph.project)))
-    [IO.File]::WriteAllText((Join-Path $roots.Support 'open-projects.json'),(ConvertTo-Json -InputObject @($wirePath)))
+    $graphPath=Join-Path $projects "$key.json"
+    $recentPath=Join-Path $Roots.Support 'recent-projects.json'
+    Write-CapJsonAtomic -Path $graphPath -Value $graph
+    Write-CapJsonAtomic -Path $recentPath -Value @($graph.project)
+    Write-CapJsonAtomic -Path (Join-Path $Roots.Support 'open-projects.json') -Value @($wirePath)
+    return [pscustomobject]@{node=$node;project=$project;wirePath=$wirePath;graphPath=$graphPath;recentPath=$recentPath}
+}
+
+function Invoke-CapMatchedRestartCapture {
+    param([string]$Phase,$Fixture)
+    $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\real-restart")
+    $store=Initialize-CapMatchedRestartStore -Roots $roots -Fixture $Fixture
+    $node=$store.node;$project=$store.project;$wirePath=$store.wirePath
     $nonce=[guid]::NewGuid().ToString('N')
     $daemonPipe="gc-s-daemon-$nonce";$shellPipe="gc-s-record-$nonce"
     $environment=Get-CapBaseEnvironment -Roots $roots -PipeName $daemonPipe -SessionPrefix "s-$Phase"

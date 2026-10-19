@@ -2364,10 +2364,12 @@ function Invoke-CapMatchedContracts {
             '2ccf303a04f995184aae1d4b738a9eca0f71b79e') 'Matched fixture typed inventory differs.'
         $wire=Invoke-CapPeerWireCase -Peer B -Case clean -Source (Get-CapBPeerSource) `
             -FixturePath (Join-Path $driverDirectory 'fixtures\matched-v12.json') -CaseRoot (Join-Path $scratch 'matched-fixture-wire')
-        return @{fixture=$proof;wire=$wire;qualifiedStates=$proof.states.Count;nodes=$proof.nodes}
+        return @{fixture=$proof;wire=$wire;qualifiedStates=$proof.states.Count;nodes=$proof.nodes
+            persistence=(Invoke-CapMatchedPersistenceContract)}
     }
     Invoke-CapTest 'matched v12 fixture refuses identity type wiring selection reason and outcome mutations' {
-        $cases=@('id','type','status','wiring','reason','selection','resolution','bytes','branch','source','date','duplicate')
+        $cases=@('id','type','status','wiring','reason','selection','resolution','bytes','branch','source','date','duplicate',
+            'project-date-missing','project-date-iso')
         foreach ($case in $cases) {
             $fixture=Get-Content (Join-Path $driverDirectory 'fixtures\matched-v12.json') -Raw | ConvertFrom-Json -DateKind String
             switch ($case) {
@@ -2383,6 +2385,8 @@ function Invoke-CapMatchedContracts {
                 'source' {$fixture.macSource='0'*40}
                 'date' {$fixture.graphs[0].nodes[0].createdAt=0}
                 'duplicate' {$fixture.graphs[0].nodes[1].id=$fixture.graphs[0].nodes[0].id}
+                'project-date-missing' {$fixture.graphs[0].project.PSObject.Properties.Remove('lastOpenedAt')}
+                'project-date-iso' {$fixture.graphs[0].project.lastOpenedAt=$fixture.fixtureUtc}
             }
             $null=Assert-CapRejects {Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot 'C:\fixture'} 'Matched fixture'
         }
@@ -2443,7 +2447,7 @@ function Invoke-CapMatchedContracts {
         return @{positive=2;negative=$cases.Count;mutations=$cases;evidence='SIMULATED_TRANSCRIPT_NOT_DAEMON_EXECUTION'}
     }
     Invoke-CapTest 'real restart scene invokes existing UIA route and refuses offline peer authority' {
-        Invoke-CapMatchedRestartRouteContract
+        return @{route=(Invoke-CapMatchedRestartRouteContract);pending=(Invoke-CapMatchedPendingContract)}
     }
     Invoke-CapTest 'matched transparent proxy relays unchanged real pipe frames with connection identity' {
         Invoke-CapMatchedProxyContract
@@ -2625,6 +2629,63 @@ function Invoke-CapMatchedRestartRouteContract {
     } $function.Extent.Text
 }
 
+function Invoke-CapMatchedPersistenceContract {
+    & {
+        $root=Join-Path $scratch 'matched-persistence'
+        $roots=[pscustomobject]@{Support=(Join-Path $root 'support')}
+        $null=New-Item -ItemType Directory -Path $roots.Support,(Join-Path $root 'fixtures\projects\Matched')
+        $text=[IO.File]::ReadAllText((Join-Path $driverDirectory 'fixtures\matched-v12.json')).Replace(
+            'C:\\fixture',((Join-Path $root 'fixtures\projects' | ConvertTo-Json -Compress).Trim('"')))
+        $fixture=$text | ConvertFrom-Json -DateKind String
+        $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+        foreach ($name in @('Assert-CapOwnedPath','Write-CapJsonAtomic','Initialize-CapMatchedRestartStore')) {
+            $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true)
+            Assert-CapTest ($null -ne $definition) "Actual persistence function missing: $name"
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $store=Initialize-CapMatchedRestartStore -Roots $roots -Fixture $fixture
+        $graph=Get-Content -LiteralPath $store.graphPath -Raw | ConvertFrom-Json -DateKind String
+        $recent=@(Get-Content -LiteralPath $store.recentPath -Raw | ConvertFrom-Json -DateKind String)
+        $seconds=([DateTimeOffset]::Parse($fixture.fixtureUtc)-
+            [DateTimeOffset]::new(2001,1,1,0,0,0,[TimeSpan]::Zero)).TotalSeconds
+        Assert-CapTest ($graph.project.lastOpenedAt -is [long] -and $graph.project.lastOpenedAt -eq $seconds -and
+            $recent.Count -eq 1 -and $recent[0].lastOpenedAt -eq $graph.project.lastOpenedAt -and
+            $recent[0].path -ceq $graph.project.path -and $recent[0].name -ceq $graph.project.name -and
+            $graph.nodes.Count -eq 1 -and $graph.nodes[0].id -ceq '11111111-1111-4111-8111-000000000001' -and
+            $graph.edges.Count -eq 0) 'Actual restart persistence lost required ProjectRef fields or isolated node ownership.'
+        return @{graphPath=$store.graphPath;recentPath=$store.recentPath;projects=1;nodes=1
+            lastOpenedAt=$graph.project.lastOpenedAt;dateEncoding='SWIFT_REFERENCE_SECONDS'
+            evidence='ACTUAL_WORKER_PERSISTENCE_FILE_IO_NOT_DAEMON_EXECUTION'}
+    }
+}
+
+function Invoke-CapMatchedPendingContract {
+    & {
+        $caseRoot=Join-Path $scratch 'matched-pending-transcript'
+        $null=New-Item -ItemType Directory -Path $caseRoot
+        $workerLog=Join-Path $caseRoot 'worker.log'
+        $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+        foreach ($name in @('Write-CapWorkerLog','Get-CapMatchedRestartEvidence')) {
+            $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true)
+            Assert-CapTest ($null -ne $definition) "Actual pending function missing: $name"
+            . ([scriptblock]::Create($definition.Extent.Text))
+        }
+        $path=Join-Path $caseRoot 'frames.jsonl'
+        $context=[pscustomobject]@{transcript=$path}
+        foreach ($text in @('{"ordinal":1','')) {
+            [IO.File]::WriteAllText($path,$text)
+            $result=Get-CapMatchedRestartEvidence -AppRun $null -Context $context
+            Assert-CapTest ($null -eq $result) 'Pending transcript logger polluted the actual helper evidence output.'
+        }
+        [IO.File]::WriteAllText($path,"{bad}`n")
+        $null=Assert-CapRejects {Get-CapMatchedRestartEvidence -AppRun $null -Context $context} 'JSON'
+        $lines=@(Get-Content -LiteralPath $workerLog)
+        Assert-CapTest ($lines.Count -eq 2 -and @($lines | Where-Object {$_ -match 'RESTART_PENDING'}).Count -eq 2) 'Pending diagnostics were lost when suppressing their pipeline output.'
+        return @{pendingNullOutputs=2;malformedJsonRefusals=1;retainedPendingLogs=$lines.Count
+            evidence='ACTUAL_WORKER_HELPER_AND_FILE_READER_NO_UIA_OR_DAEMON'}
+    }
+}
+
 function Invoke-CapMatchedProxyContract {
     Initialize-CapMatchedProxy
     if (-not ('CapMatchedContractEcho' -as [type])) {
@@ -2693,7 +2754,7 @@ public static class CapMatchedContractEcho {
 function Invoke-CapMatchedManifestContract {
     $job=New-CapMatchedTestJob
     $manifest=@{sceneAdapter='S_MATCHED_V12_V1';lane='S';status='COMPLETE';executionMode='LIVE_CAPTURE';backendTurns=0
-        g11Qualification='unassessable: product lacks LoopResolution/reclaim live-line consumer'
+        g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
         images=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {
             @{phase=$phase;scene=$scene;captureMode='PRINTWINDOW';observedState=@{
                 readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}}

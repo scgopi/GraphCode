@@ -3025,10 +3025,30 @@ function Assert-CapMatchedFixture {
         [Text.Json.Nodes.JsonNode]::Parse($canonical))) {
         throw 'Matched fixture identity, type, wiring, selection, attention reason, resolution or worktree facts differ.'
     }
-    $null=ConvertTo-CapUtcInstant $Fixture.fixtureUtc 'Matched fixture UTC'
+    $utc=ConvertTo-CapUtcInstant $Fixture.fixtureUtc 'Matched fixture UTC'
+    $referenceSeconds=($utc-[DateTime]::new(2001,1,1,0,0,0,[DateTimeKind]::Utc)).TotalSeconds
+    $graph=$Fixture.graphs[0]
+    if ($graph.project.lastOpenedAt -isnot [ValueType] -or
+        [Math]::Abs([double]$graph.project.lastOpenedAt-$referenceSeconds) -gt 0.001) {
+        throw 'Matched fixture ProjectRef must preserve numeric Swift-reference lastOpenedAt.'
+    }
+    foreach ($state in $Fixture.states) {
+        $incoming=@($graph.edges | Where-Object {$_.to -ceq $state.nodeId -and $_.blocksTarget})
+        $outgoing=@($graph.edges | Where-Object {$_.from -ceq $state.nodeId -and $_.blocksTarget})
+        $touching=@($graph.edges | Where-Object {$_.to -ceq $state.nodeId -or $_.from -ceq $state.nodeId})
+        $valid=switch ($state.wiring) {
+            'unwired' {$touching.Count -eq 0}
+            'entry' {$incoming.Count -eq 0 -and $outgoing.Count -gt 0}
+            'interior' {$incoming.Count -gt 0}
+            'closed-handoff-cycle' {$incoming.Count -eq 1 -and $outgoing.Count -eq 1 -and
+                $incoming[0].from -ceq $outgoing[0].to}
+            default {$false}
+        }
+        if (-not $valid) {throw "Matched fixture topology does not establish declared wiring for $($state.scene)."}
+    }
     return [pscustomobject]@{states=@($Fixture.states);nodes=$Fixture.graphs[0].nodes.Count
         macSource=$Fixture.macSource;mode='TYPED_WIRE_FIXTURE_NOT_RENDERED_PARITY'
-        g11='unassessable: product lacks LoopResolution/reclaim live-line consumer'}
+        g11='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'}
 }
 
 function Get-CapMatchedAutomationId {
@@ -3313,7 +3333,7 @@ function Assert-CapMatchedManifest {
         $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne 'LIVE_CAPTURE' -or
         $actual.Count -ne 36 -or @($actual | Sort-Object -Unique).Count -ne 36 -or
         (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
-        $Manifest.g11Qualification -cne 'unassessable: product lacks LoopResolution/reclaim live-line consumer' -or
+        $Manifest.g11Qualification -cne 'ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED' -or
         $Manifest.backendTurns -ne 0 -or $Manifest.realRestarts.Count -ne 2) {throw 'Matched manifest inventory or evidence qualification differs.'}
     foreach ($phase in @('before','after')) {
         $restarts=@($Manifest.realRestarts | Where-Object phase -CEQ $phase)

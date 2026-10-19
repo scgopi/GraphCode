@@ -6,7 +6,7 @@
   "graphs": [
     {
       "id": "55555555-5555-4555-8555-555555555555",
-      "project": { "path": "C:\\fixture\\Matched", "name": "Matched" },
+      "project": { "path": "C:\\fixture\\Matched", "name": "Matched", "lastOpenedAt": 814100400 },
       "revision": 1,
       "nodes": [
         { "id": "10000000-0000-4000-8000-000000000001", "title": "Goal", "loopType": "goalBased", "backend": "claudeCode", "state": "awaitingInput", "createdAt": 814011000, "goal": { "summary": "Offline goal awaiting a response", "predicate": "exit 1", "pollIntervalSeconds": 86400, "metricDirection": "maximize", "skipsUnchangedWorkspace": false }, "sessionRestarts": 0 },
@@ -20,7 +20,8 @@
       ],
       "edges": [
         { "id": "50000000-0000-4000-8000-000000000001", "from": "20000000-0000-4000-8000-000000000001", "to": "20000000-0000-4000-8000-000000000002", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": false, "fireCount": 0 },
-        { "id": "50000000-0000-4000-8000-000000000002", "from": "20000000-0000-4000-8000-000000000002", "to": "20000000-0000-4000-8000-000000000001", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": false, "fireCount": 0 }
+        { "id": "50000000-0000-4000-8000-000000000002", "from": "20000000-0000-4000-8000-000000000002", "to": "20000000-0000-4000-8000-000000000001", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": false, "fireCount": 0 },
+        { "id": "50000000-0000-4000-8000-000000000003", "from": "30000000-0000-4000-8000-000000000001", "to": "30000000-0000-4000-8000-000000000002", "kind": "handoff", "condition": "always", "blocksTarget": true, "fired": true, "fireCount": 1 }
       ]
     }
   ],
@@ -29,8 +30,8 @@
     { "scene": "s-goal-unwired-unselected", "nodeId": "10000000-0000-4000-8000-000000000001", "type": "goalBased", "state": "awaitingInput", "selected": false, "wiring": "unwired", "reason": "awaitingInput", "reference": "M6", "copyQualification": "state-only" },
     { "scene": "s-main-cycle-selected", "nodeId": "20000000-0000-4000-8000-000000000001", "type": "sketch", "state": "blocked", "selected": true, "wiring": "closed-handoff-cycle", "reason": "cycle-no-entry", "reference": "M1", "copyQualification": "state-only" },
     { "scene": "s-main-cycle-unselected", "nodeId": "20000000-0000-4000-8000-000000000001", "type": "sketch", "state": "blocked", "selected": false, "wiring": "closed-handoff-cycle", "reason": "cycle-no-entry", "reference": "M1", "copyQualification": "state-only" },
-    { "scene": "s-main-stopped-reclaim", "nodeId": "30000000-0000-4000-8000-000000000001", "type": "sketch", "state": "stopped", "selected": true, "wiring": "unwired", "reason": "stopped", "reference": "M4", "copyQualification": "unassessable: product lacks LoopResolution/reclaim live-line consumer" },
-    { "scene": "s-goal-done-reclaim", "nodeId": "30000000-0000-4000-8000-000000000002", "type": "goalBased", "state": "succeeded", "selected": true, "wiring": "unwired", "reason": "predicate", "reference": "M4-control-context-only", "copyQualification": "unassessable: product lacks LoopResolution/reclaim live-line consumer" }
+    { "scene": "s-main-stopped-reclaim", "nodeId": "30000000-0000-4000-8000-000000000001", "type": "sketch", "state": "stopped", "selected": true, "wiring": "entry", "reason": "stopped", "reference": "M4", "copyQualification": "ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED" },
+    { "scene": "s-goal-done-reclaim", "nodeId": "30000000-0000-4000-8000-000000000002", "type": "goalBased", "state": "succeeded", "selected": true, "wiring": "interior", "reason": "predicate", "reference": "M4-control-context-only", "copyQualification": "ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED" }
   ],
   "worktrees": [
     { "nodeId": "30000000-0000-4000-8000-000000000001", "path": "C:\\fixture\\Matched\\stopped-tree", "branch": "fixture-stopped", "defaultBranch": "main", "sizeBytes": 327155712, "policy": "ask", "qualification": "EXPECTED_FIXTURE_FACTS_NOT_INSPECTED" },

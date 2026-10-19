@@ -19,12 +19,12 @@ combined-tree count update and registered-runner rerun.
 
 | New group | Bounded subcases |
 | --- | --- |
-| Typed fixture inventory | Eight wire nodes, six qualified card-state records; unchanged graph publication through the actual B peer on a real local pipe |
-| Fixture refusals | Twelve identity/type/status/wiring/reason/selection/resolution/size/branch/source/date/duplicate mutations |
+| Typed fixture inventory | Eight wire nodes, six qualified card-state records; unchanged graph publication through the actual B peer on a real local pipe; actual worker persistence of the isolated Restart graph and recent-project index |
+| Fixture refusals | Fourteen identity/type/status/wiring/reason/selection/resolution/size/branch/source/date/duplicate/required-project-date mutations |
 | Scene inventory | One accepted complete inventory; eighteen omission refusals; actual worker's seventeen static-scene/eleven seed/one Restart dispatches with simulated dependencies |
 | Tab observations | Eight positive shapes and seventy-two negative mutations of exact owned IDs, parents, selection, close bounds, final-tab eligibility and visibility |
 | Restart evidence | Two simulated positive transcripts (including UUID casing and response-embedded graph data) and nineteen strict refusal mutations |
-| Restart route | Actual worker function, one simulated positive and one offline-authority refusal |
+| Restart route | Actual worker function, one simulated positive and one offline-authority refusal; actual pending helper returns null for two incomplete files, retains both diagnostics, and loudly refuses malformed complete JSON |
 | Transparent recorder | Four unchanged framed messages on actual local pipes, one connection, a simulated echo upstream; no daemon or UI |
 | Manifest | One simulated thirty-six-image/two-Restart shape and six refusal mutations |
 
@@ -53,7 +53,8 @@ runs. The placeholder hash above is documentation only; the command refuses it.
 `fixtures\matched-v12.json` is synthetic, offline data derived from the qualified
 macOS source `2ccf303a04f995184aae1d4b738a9eca0f71b79e`. The source root
 `C:\fixture` is rewritten in full through the existing hash-bound mapping.
-One graph contains eight nodes and a real closed two-node handoff cycle.
+One graph contains eight nodes, a real closed two-node handoff cycle, and a
+separate fired blocking Main-STOPPED-to-Goal-DONE handoff.
 Node types are not changed by renaming a Goal to Main. Selection is a separate,
 observed UI state, not a `selected` property invented on the daemon's node.
 
@@ -61,8 +62,8 @@ observed UI state, not a `selected` property invented on the daemon's node.
 | --- | --- |
 | `s-goal-unwired-selected`, `s-goal-unwired-unselected` | Goal / `goalBased` / `awaitingInput`, no inbound or outbound edge; M6 unwired NEEDS YOU context. Both selection variants are recorded. Recovery-control equivalence is **not** inferred from the fixture or a warm face. |
 | `s-main-cycle-selected`, `s-main-cycle-unselected` | Main / `sketch` / `blocked`, two unfired blocking handoff edges form a closed cycle with no external entry; M1 Main-cycle context. |
-| `s-main-stopped-reclaim` | Actual Main / `sketch` / `stopped`, null resolution, separate worktree binding; M4 Main STOPPED context. `GraphStore.swift:4955` clears resolution outside succeeded/failed. |
-| `s-goal-done-reclaim` | Actual Goal / `goalBased` / `succeeded`, predicate resolution and separate worktree binding; controls/context only against M4, **not** an equivalent Main outcome. |
+| `s-main-stopped-reclaim` | Actual Main / `sketch` / `stopped` ENTRY, null resolution, separate worktree binding; M4 Main STOPPED entry context. `GraphStore.swift` clears resolution outside succeeded/failed. |
+| `s-goal-done-reclaim` | Actual Goal / `goalBased` / `succeeded` interior, predicate resolution and separate worktree binding; controls/context only against M4, **not** an equivalent Main outcome. |
 | `s-tabs-goal-needs-you` | One Goal tab, agent asks state, selected focused pane. |
 | `s-tabs-loop-running` | One Loop tab, running indicator. |
 | `s-tabs-backend-idle` | One recorded-backend Copilot CLI tab, quiet state. |
@@ -89,7 +90,7 @@ and `LoopWorkspacePanes.swift:40-115`, and Windows
 Mac allows closing its last tab to end a loop; Windows' guard remains a known
 behavioral difference, not a fabricated macOS requirement.
 
-## Outcome-copy qualification remains blocked
+## Outcome-copy source capability, not runtime parity
 
 The wire fixture retains genuine `LoopResolution` (`basis`, `detail`,
 `resolvedAt`) and `WorktreeRef` (`id`, `repositoryPath`, `worktreePath`, `branch`)
@@ -100,15 +101,26 @@ Main STOPPED deliberately has no invented session-exit verdict; Goal DONE has
 the predicate verdict. The reclaim branch/bytes line comes from an assessment,
 not from renaming either type or injecting a renderer string.
 
-**G11 remains `unassessable: product lacks LoopResolution/reclaim live-line
-consumer`.** Neither the fixture contract nor this PR claims visible full-copy
-equivalence. `GraphModel.zig` does not retain the resolution fields at this
-source, and `GraphCanvas.zig:2850-2877` draws its existing node live line without
-the reclaim assessment. macOS `LoopCardPresentation.swift:63-84,108-120` chooses
-the reclaim branch/bytes line or resolved evidence, and
-`GraphcodeKit\Sources\Domain\LoopResolution.swift:37-58` defines the resolution
-copy. A separate product change and runtime evidence are needed; do not flip
-this qualification merely because a later product branch exists.
+The lane was rebased onto actual main
+`b987ad596dcd58d0b35c99eff821b2c8ec9030c4`, which contains the merged outcome
+decoder/card consumer. The fixture qualification is therefore now
+**`ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED`**, not the earlier
+missing-consumer label. `GraphModel.zig` retains `LoopResolution`, while
+`GraphCanvas.zig`'s `cardLiveLine`, `resolutionLine` and `reclaimLine` provide the
+source capability. macOS `LoopCardPresentation.swift:63-84,108-120` chooses
+the reclaim branch/bytes line or resolved evidence; `LoopCardView.swift:65-75`
+instead shows recovery controls for an unwired card. The Main is consequently
+a genuine entry, not an unwired stand-in. Neither this source label nor the
+fixture contract establishes visible full-copy equivalence; C8 must still
+execute and review the states. Goal DONE remains a different type/outcome.
+
+The canonical project also includes required `ProjectRef.lastOpenedAt` as
+**814100400 Swift-reference seconds**, encoding `2026-10-19T11:00:00Z`.
+`Initialize-CapMatchedRestartStore` preserves it in both the saved graph and
+recent-project index. The initializer's default date is not a decoding fallback.
+The compatibility evidence uses the actual repository `ProjectRef.swift`
+compiled with pinned Swift, not a copy of its Codable schema; it is not a claim
+that the real daemon or visible Restart scene ran in this lane.
 
 ## Real Restart, not offline-peer acknowledgement
 
