@@ -2563,12 +2563,14 @@ function Get-CapOwnedDescendants {
                 $property = $row.PSObject.Properties[$name]
                 $rawRow[$name] = if ($null -ne $property) { $property.Value } else { $null }
             }
+            $parentCreation = $parent.PSObject.Properties['CreationFileTimeUtc']
             $context = [pscustomobject]@{
                 ObservedUtc = [DateTimeOffset]::UtcNow.ToString('o')
                 RawRow = [pscustomobject]$rawRow
                 ParentPid = $parent.Pid
-                ParentCreationFileTimeUtc = $parent.CreationFileTimeUtc
+                ParentCreationFileTimeUtc = if ($null -ne $parentCreation) { $parentCreation.Value } else { $null }
                 NativeSnapshot = $null
+                ParentNativeSnapshot = $null
                 ErrorRecord = $null
             }
             $failureCode = 'DescendantNativeIdentityUnavailable'
@@ -2580,6 +2582,57 @@ function Get-CapOwnedDescendants {
                 if ($context.NativeSnapshot.IsExited) {
                     Write-CapTrace -Command 'CapDescendantExited' -Parameters @{
                         diagnosticJson = ($context | ConvertTo-Json -Depth 10 -Compress)
+                    }
+                    continue
+                }
+                # A reused advisory parent PID can select an older, unrelated image.
+                $failureCode = 'DescendantIdentityMismatch'
+                $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
+                    -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
+                $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
+                $context.ParentNativeSnapshot = $parentSnapshot
+                $childCreationFileTimeUtc = $context.NativeSnapshot.CreationFileTimeUtc
+                $savedParentCreationFileTimeUtc = $context.ParentCreationFileTimeUtc
+                if ($childCreationFileTimeUtc -le 0 -or $savedParentCreationFileTimeUtc -isnot [long] -or
+                    $savedParentCreationFileTimeUtc -le 0 -or $parentSnapshot.CreationFileTimeUtc -le 0) {
+                    throw "Unprovable descendant or held parent creation time for PID $pid; refusing."
+                }
+                if ($parentSnapshot.CreationFileTimeUtc -ne $savedParentCreationFileTimeUtc -or
+                    ($parentSnapshot.ImagePath -and (ConvertTo-CapImagePath $parentSnapshot.ImagePath) -ine
+                        (ConvertTo-CapImagePath $parent.ExpectedImagePath))) {
+                    throw "Held parent generation changed for PID $($parent.Pid); refusing."
+                }
+                $parentExitFileTimeUtc = $parentSnapshot.ExitFileTimeUtc
+                if ($parentExitFileTimeUtc -lt 0 -or
+                    ($parentSnapshot.IsExited -and $parentExitFileTimeUtc -le 0) -or
+                    ($parentExitFileTimeUtc -gt 0 -and $parentExitFileTimeUtc -lt $savedParentCreationFileTimeUtc)) {
+                    throw "Unprovable held parent exit time for PID $($parent.Pid); refusing."
+                }
+                $outsideParentLifetime =
+                    ($childCreationFileTimeUtc -lt $savedParentCreationFileTimeUtc) -or
+                    ($parentExitFileTimeUtc -gt 0 -and $childCreationFileTimeUtc -gt $parentExitFileTimeUtc)
+                if ($outsideParentLifetime) {
+                    $alreadyRecorded = @($script:CapExcludedDescendants | Where-Object {
+                        $_.Pid -eq $pid -and $_.ParentPid -eq $parent.Pid -and
+                        $_.CandidateCreationFileTimeUtc -eq $childCreationFileTimeUtc
+                    }).Count -gt 0
+                    if (-not $alreadyRecorded) {
+                        $script:CapExcludedDescendants.Add([pscustomobject]@{
+                            Pid = $pid
+                            ParentPid = $parent.Pid
+                            ParentCreationFileTimeUtc = $savedParentCreationFileTimeUtc
+                            ParentExitFileTimeUtc = $parentExitFileTimeUtc
+                            CandidateCreationFileTimeUtc = $childCreationFileTimeUtc
+                            CandidateImagePath = $context.NativeSnapshot.ImagePath
+                            CandidateCommandLineSha256 = if ($rawRow.CommandLine -is [string]) {
+                                [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                                    [Text.Encoding]::UTF8.GetBytes($rawRow.CommandLine)))
+                            } else { $null }
+                            RawCimRow = $context.RawRow
+                            NativeSnapshot = $context.NativeSnapshot
+                            ParentNativeSnapshot = $parentSnapshot
+                            Disposition = 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED'
+                        })
                     }
                     continue
                 }
@@ -2608,40 +2661,8 @@ function Get-CapOwnedDescendants {
                 if ($verified.State -eq 'Exited') { continue }
                 $failureCode = 'DescendantIdentityMismatch'
                 $meta = $verified.Metadata
-                $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
-                    -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
-                $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
-                if ($parentSnapshot.CreationFileTimeUtc -ne [long]$parent.CreationFileTimeUtc -or
-                    ($parentSnapshot.ImagePath -and (ConvertTo-CapImagePath $parentSnapshot.ImagePath) -ine
-                        (ConvertTo-CapImagePath $parent.ExpectedImagePath))) {
-                    throw "Held parent generation changed for PID $($parent.Pid); refusing."
-                }
-                $childCreationFileTimeUtc = [long]$verified.Snapshot.CreationFileTimeUtc
-                $parentExitFileTimeUtc = [long]$parentSnapshot.ExitFileTimeUtc
-                $outsideParentLifetime =
-                    ($childCreationFileTimeUtc -lt [long]$parent.CreationFileTimeUtc) -or
-                    ($parentExitFileTimeUtc -gt 0 -and
-                        $childCreationFileTimeUtc -gt $parentExitFileTimeUtc)
-                if ($outsideParentLifetime) {
-                    $alreadyRecorded = @($script:CapExcludedDescendants | Where-Object {
-                        $_.Pid -eq $pid -and $_.ParentPid -eq $parent.Pid -and
-                        $_.CandidateCreationFileTimeUtc -eq $childCreationFileTimeUtc
-                    }).Count -gt 0
-                    if (-not $alreadyRecorded) {
-                        $script:CapExcludedDescendants.Add([pscustomobject]@{
-                            Pid = $pid
-                            ParentPid = $parent.Pid
-                            ParentCreationFileTimeUtc = [long]$parent.CreationFileTimeUtc
-                            ParentExitFileTimeUtc = $parentExitFileTimeUtc
-                            CandidateCreationFileTimeUtc = $childCreationFileTimeUtc
-                            CandidateImagePath = $meta.ImagePath
-                            CandidateCommandLineSha256 = [Convert]::ToHexString(
-                                [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($meta.CommandLine))
-                            )
-                            Disposition = 'REJECTED_PARENT_PID_REUSE_NOT_TERMINATED'
-                        })
-                    }
-                    continue
+                if ($verified.Snapshot.CreationFileTimeUtc -ne $childCreationFileTimeUtc) {
+                    throw "Held descendant generation changed for PID $pid; refusing."
                 }
                 $null = Assert-CapDescendantLifetime `
                     -ParentCreationFileTimeUtc ([long]$parent.CreationFileTimeUtc) `
