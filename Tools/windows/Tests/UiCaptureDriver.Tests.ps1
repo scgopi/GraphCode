@@ -1634,6 +1634,7 @@ function Invoke-CapAppChildCase {
         supervisorSha256 = $sourceHashesBefore[$supervisorPath]; preflightReceiptSha256 = 'NOT_LIVE_PREFLIGHT' }
     $self = [Diagnostics.Process]::GetCurrentProcess()
     $run = $null
+    $otherRun = $null
     $child = $null
     $ownedJob = [CapProcessJob]::Create()
     $detail = [ordered]@{ command = $Arguments; safetyJobEmpty = $false; finalStdoutEof = $false; finalStderrEof = $false }
@@ -1644,6 +1645,26 @@ function Invoke-CapAppChildCase {
             -WorkerSha256 $sourceHashesBefore[$workerPath] -SupervisorSha256 $sourceHashesBefore[$supervisorPath] -Identity $selfIdentity
         $journalState = New-CapJournalState -Root $caseRoot -Directory (Join-Path $caseRoot 'journal') `
             -Binding $binding -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(2))
+        if ($UnrelatedRoot -or $AdvisoryParent) {
+            # Keep the fixture's post-FreeConsole stdin gate closed to child creation.
+            $otherRun = Start-CapManagedProcess -FilePath $target.executable -ArgumentList @('--cap-app-parent') `
+                -WorkingDirectory $caseRoot -Role 'graphcode-app-before-normal' -HoldStdin -Environment @{
+                    CAP_APP_CHILD_IMAGE = $childImage; CAP_APP_CHILD_ARGUMENTS = $Arguments
+                    CAP_APP_CHILD_RECEIPT = (Join-Path $caseRoot 'unrelated-child.json')
+                    TEMP = $caseRoot; TMP = $caseRoot
+                }
+            $detail.unrelatedRoot = [ordered]@{ pid = $otherRun.Identity.Pid
+                creationFileTimeUtc = $otherRun.Identity.CreationFileTimeUtc; parentPid = $selfIdentity.Pid
+                parentCreationFileTimeUtc = $selfIdentity.CreationFileTimeUtc
+                kernelExited = $false; stdoutEof = $false; stderrEof = $false }
+            [CapProcessJob]::Assign($ownedJob, $otherRun.Identity.Process.Handle)
+            $otherSnapshot = [CapNative]::Snapshot($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid)
+            Assert-CapTest (-not $otherSnapshot.IsExited -and
+                $otherSnapshot.CreationFileTimeUtc -eq $otherRun.Identity.CreationFileTimeUtc -and
+                [CapNative]::ParentProcessId($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid) -eq $selfIdentity.Pid -and
+                [CapProcessJob]::Contains($ownedJob, $otherRun.Identity.Process.Handle)) `
+                'Dedicated unrelated app root is not its held live job-owned generation.'
+        }
         $run = Start-CapManagedProcess -FilePath $target.executable -ArgumentList @('--cap-app-parent') `
             -WorkingDirectory $caseRoot -Role $ParentRole -HoldStdin -Environment @{
                 CAP_APP_CHILD_IMAGE = $childImage; CAP_APP_CHILD_ARGUMENTS = $Arguments
@@ -1674,18 +1695,26 @@ function Invoke-CapAppChildCase {
         $detail.childCreationFileTimeUtc = $childSnapshot.CreationFileTimeUtc
         $detail.inheritedBothPipes = $true
         $detail.parentInitiallyLive = [bool]$LiveParent
+        if ($otherRun) {
+            $detail.childNativeParentPid = [CapNative]::ParentProcessId($child.Handle, $child.Id)
+            Assert-CapTest ($otherRun.Identity.Pid -ne $selfIdentity.Pid -and
+                $otherRun.Identity.Pid -ne $run.Identity.Pid -and
+                -not [CapNative]::IsExited($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid) -and
+                $detail.childNativeParentPid -eq $run.Identity.Pid -and
+                $detail.childNativeParentPid -ne $otherRun.Identity.Pid) `
+                'Negative fixture does not have actual ancestry distinct from the dedicated scan root.'
+        }
         $app = New-CapAppRunRecord -Run $run -Phase before -SessionPrefix 'gc-cap-test-before-'
         Write-CapProcessJournal -Identity $run.Identity -Phase before
         if ($WrongGeneration) { $run.Identity.CreationFileTimeUtc++ }
         if ($AdvisoryParent) {
             $metadata = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($child.Id)" -ErrorAction Stop
             $advisory = [pscustomobject]@{
-                ProcessId = $metadata.ProcessId; ParentProcessId = $selfIdentity.Pid; SessionId = $metadata.SessionId
+                ProcessId = $metadata.ProcessId; ParentProcessId = $otherRun.Identity.Pid; SessionId = $metadata.SessionId
                 CreationDate = $metadata.CreationDate; ExecutablePath = $metadata.ExecutablePath; CommandLine = $metadata.CommandLine
             }
             $module = Get-Module UiCaptureDriver
-            $other = $selfIdentity.PSObject.Copy()
-            $other.Role = 'graphcode-app-before-normal'
+            $other = $otherRun.Identity
             try {
                 & $module {
                     param($Row)
@@ -1715,8 +1744,7 @@ function Invoke-CapAppChildCase {
                 }
             }
         } elseif ($UnrelatedRoot) {
-            $other = $selfIdentity.PSObject.Copy()
-            $other.Role = 'graphcode-app-before-normal'
+            $other = $otherRun.Identity
             $found = @(Get-CapOwnedDescendants -Roots @($other) -ZmxPath (Join-Path $caseRoot 'runtime\zmx.exe') `
                 -CmdPath (Join-Path ([Environment]::SystemDirectory) 'cmd.exe') `
                 -ConhostPath (Join-Path ([Environment]::SystemDirectory) 'conhost.exe') `
@@ -1753,6 +1781,11 @@ function Invoke-CapAppChildCase {
                 $run.StderrTask.Result.Contains('CAP_APP_CHILD_STDERR')) 'Inherited app output was not actually drained.'
             $detail.receipts = $proof
         }
+        if ($otherRun) {
+            Assert-CapTest (-not [CapNative]::IsExited($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid) -and
+                -not (Test-Path -LiteralPath (Join-Path $caseRoot 'unrelated-child.json'))) `
+                'Dedicated negative scan root exited or passed its held child-creation gate.'
+        }
     } catch {
         $detail.primaryFailure = $_.Exception.ToString()
         throw
@@ -1766,6 +1799,12 @@ function Invoke-CapAppChildCase {
             $detail.finalStdoutEof = $run.StdoutTask.Wait(2000) -and $run.StdoutTask.IsCompletedSuccessfully
             $detail.finalStderrEof = $run.StderrTask.Wait(2000) -and $run.StderrTask.IsCompletedSuccessfully
         }
+        if ($otherRun) {
+            $detail.unrelatedRoot.kernelExited = [CapNative]::IsExited($otherRun.Identity.Process.Handle, $otherRun.Identity.Pid)
+            $detail.unrelatedRoot.stdoutEof = $otherRun.StdoutTask.Wait(2000) -and $otherRun.StdoutTask.IsCompletedSuccessfully
+            $detail.unrelatedRoot.stderrEof = $otherRun.StderrTask.Wait(2000) -and $otherRun.StderrTask.IsCompletedSuccessfully
+            $otherRun.Identity.Process.Dispose()
+        }
         foreach ($identity in $descendantIdentities) { $identity.Process.Dispose() }
         if ($child) { $child.Dispose() }
         if ($run) { $run.Identity.Process.Dispose() }
@@ -1773,6 +1812,9 @@ function Invoke-CapAppChildCase {
         Write-JournalContractJson (Join-Path $caseRoot 'ownership-evidence.json') $detail
         Assert-CapTest ($detail.safetyJobEmpty -and ($null -eq $run -or ($detail.finalStdoutEof -and $detail.finalStderrEof))) `
             'Test-owned safety job or inherited pipes remained unclosed.'
+        Assert-CapTest ($null -eq $otherRun -or ($detail.unrelatedRoot.kernelExited -and
+            $detail.unrelatedRoot.stdoutEof -and $detail.unrelatedRoot.stderrEof)) `
+            'Dedicated unrelated app root did not prove held kernel exit and both actual stream EOFs.'
     }
     return $detail
 }
