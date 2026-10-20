@@ -24323,8 +24323,8 @@ test "Quick Chat remaining parity same scope repairs daemon-owned agent metadata
     defer allocator.free(layout_path);
     var workspace = try reopenTestWorkspace(allocator, layout_path);
     defer workspace.deinit();
-    try workspace.layout.addTab("chat-1", false);
     try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, false);
+    try workspace.layout.addTab("chat-1", false);
     try std.testing.expect(!workspace.layout.tabs.items[0].panes.items[0].launches_agent);
 
     try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, true);
