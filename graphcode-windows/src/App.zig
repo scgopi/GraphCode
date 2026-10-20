@@ -1304,6 +1304,11 @@ const QuickChatCreationRequest = struct {
     backend: []const u8,
 };
 
+const PendingQuickChatCreate = union(enum) {
+    v1,
+    v2: [36]u8,
+};
+
 fn quickChatCreationRequest(
     title_buffer: []u8,
     local_time: c.SYSTEMTIME,
@@ -1503,6 +1508,8 @@ pub const App = struct {
     header_focus_transition: bool = false,
     canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
+    pending_quick_chat_create: ?PendingQuickChatCreate = null,
+    completed_quick_chat_create_request: ?[36]u8 = null,
     selected_quick_chat: ?usize = null,
     workspace_reservation: WorkspaceReservation = .{},
     workspace_summary_work: WorkspaceManager.SummaryWork = .{},
@@ -1659,6 +1666,8 @@ pub const App = struct {
         self.sync_requested = false;
         self.restore_requested = false;
         self.quick_chats_requested = false;
+        self.pending_quick_chat_create = null;
+        self.completed_quick_chat_create_request = null;
     }
 
     fn sendPendingOpen(self: *App) void {
@@ -2096,7 +2105,7 @@ pub const App = struct {
             },
             .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
                 if (event == .quick_chat_changed) {
-                    if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
+                    if (Wire.jsonString(frame, "id")) |id| self.handleQuickChatChanged(frame, id);
                 }
                 var deleted_bound_chat = false;
                 if (event == .quick_chat_deleted and !self.smoke) {
@@ -2116,6 +2125,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
+                self.clearFailedQuickChatCreate(frame);
                 self.failSessionRestart("Daemon refused the session restart");
                 const ingress_failure = self.pending_rebind_path.len != 0;
                 if (self.pending_rebind_path.len != 0) {
@@ -3169,8 +3179,60 @@ pub const App = struct {
             local_time,
             if (self.product_settings) |settings| settings.default_backend else "claudeCode",
         );
-        self.client.sendCreateQuickChat(request.title, request.backend);
+        const request_id = self.client.sendCreateQuickChat(request.title, request.backend) orelse {
+            self.setStatus("Unable to create quick chat");
+            return;
+        };
+        self.pending_quick_chat_create = if (self.client.protocolMode() == .v1)
+            .v1
+        else
+            .{ .v2 = request_id };
+        self.completed_quick_chat_create_request = null;
         self.setStatus("Creating quick chat...");
+    }
+
+    fn handleQuickChatChanged(self: *App, frame: []const u8, id: []const u8) void {
+        if (Wire.responseRequestID(frame)) |response_id| {
+            if (self.completed_quick_chat_create_request) |completed| {
+                if (std.ascii.eqlIgnoreCase(response_id, &completed)) return;
+            }
+        }
+        if (self.pending_quick_chat_create) |pending| {
+            switch (pending) {
+                .v1 => {
+                    self.pending_quick_chat_create = null;
+                    self.client.sendOpenQuickChat(id);
+                    self.setStatus("Opening quick chat...");
+                    return;
+                },
+                .v2 => |request_id| {
+                    if (Wire.responseRequestID(frame)) |response_id| {
+                        if (std.ascii.eqlIgnoreCase(response_id, &request_id)) {
+                            self.pending_quick_chat_create = null;
+                            self.completed_quick_chat_create_request = request_id;
+                            self.client.sendOpenQuickChat(id);
+                            self.setStatus("Opening quick chat...");
+                            return;
+                        }
+                    }
+                    return;
+                },
+            }
+        }
+        self.openQuickChat(id);
+    }
+
+    fn clearFailedQuickChatCreate(self: *App, frame: []const u8) void {
+        const pending = self.pending_quick_chat_create orelse return;
+        switch (pending) {
+            .v1 => self.pending_quick_chat_create = null,
+            .v2 => |request_id| {
+                const response_id = Wire.responseRequestID(frame) orelse return;
+                if (!std.ascii.eqlIgnoreCase(response_id, &request_id)) return;
+                self.pending_quick_chat_create = null;
+                self.completed_quick_chat_create_request = request_id;
+            },
+        }
     }
 
     fn renameSelectedQuickChat(self: *App) void {
@@ -10001,6 +10063,8 @@ fn onWindowMessage(
             if (updated_connection_state != app.last_connection_state) {
                 if (updated_connection_state != .connected) {
                     app.model.invalidateWorktreeNotices(.connection_changed);
+                    app.pending_quick_chat_create = null;
+                    app.completed_quick_chat_create_request = null;
                     app.syncAccessibility();
                 }
                 app.last_connection_state = updated_connection_state;
@@ -24130,6 +24194,93 @@ test "Quick Chat remaining parity creation uses the local date and configured ba
     );
     try std.testing.expectEqualStrings("Chat — Oct 20", request.title);
     try std.testing.expectEqualStrings("copilotCLI", request.backend);
+}
+
+test "Quick Chat remaining parity create response requests the daemon session exactly once" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    app.client.mode = .v2;
+    app.surface = .quick_chats;
+    app.createQuickChat();
+    const request_id = switch (app.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => return error.TestExpectedV2QuickChatCreate,
+        .v2 => |value| value,
+    };
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatChanged":{"id":"chat-new","title":"Chat — Oct 20","backend":"copilotCLI"}}}
+    , App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"response","requestID":"00000000-0000-4000-8000-000000000099","event":{"quickChatChanged":{"id":"other-chat","title":"Other","backend":"claudeCode"}}}
+    , App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+
+    const response = try std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"quickChatChanged\":{{\"id\":\"chat-new\",\"title\":\"Chat — Oct 20\",\"backend\":\"copilotCLI\"}}}}}}",
+        .{request_id},
+    );
+    defer app.allocator.free(response);
+    app.onFrameWithAccessibilityPublish(response, App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(?[36]u8, request_id), app.completed_quick_chat_create_request);
+    try std.testing.expectEqual(@as(usize, 2), app.client.outbound_count);
+    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "\"openQuickChat\":{\"id\":\"chat-new\"}") != null);
+
+    app.onFrameWithAccessibilityPublish(response, App.publishAccessibility);
+    try std.testing.expectEqual(@as(usize, 2), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+}
+
+test "Quick Chat remaining parity create pending state clears on matched errors and v1 changes" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    app.client.mode = .v2;
+    app.createQuickChat();
+    const request_id = switch (app.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => return error.TestExpectedV2QuickChatCreate,
+        .v2 => |value| value,
+    };
+    app.clearFailedQuickChatCreate(
+        \\{"version":2,"kind":"response","requestID":"00000000-0000-4000-8000-000000000099","event":{"errorOccurred":"unrelated"}}
+    );
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    const rejection = try std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"errorOccurred\":\"create failed\"}}}}",
+        .{request_id},
+    );
+    defer app.allocator.free(rejection);
+    app.clearFailedQuickChatCreate(rejection);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(?[36]u8, request_id), app.completed_quick_chat_create_request);
+    app.clearFailedQuickChatCreate(rejection);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+
+    var legacy = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&legacy);
+    legacy.client.mode = .v1;
+    legacy.surface = .quick_chats;
+    legacy.createQuickChat();
+    switch (legacy.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => {},
+        .v2 => return error.TestExpectedV1QuickChatCreate,
+    }
+    legacy.onFrameWithAccessibilityPublish(
+        \\{"quickChatChanged":{"id":"chat-v1","title":"Chat","backend":"claudeCode"}}
+    , App.publishAccessibility);
+    try std.testing.expect(legacy.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(usize, 2), legacy.client.outbound_count);
+    const newest = legacy.client.outbound[(legacy.client.outbound_head + legacy.client.outbound_count - 1) % legacy.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "\"openQuickChat\":{\"id\":\"chat-v1\"}") != null);
 }
 
 test "Quick Chat remaining parity opens the daemon-owned chat instead of the previous loop pane" {

@@ -510,9 +510,13 @@ pub const DaemonClient = struct {
         self.sendCommand(command);
     }
 
-    pub fn sendCreateQuickChat(self: *DaemonClient, title: []const u8, backend: []const u8) void {
-        const command = Wire.commandCreateQuickChat(self.allocator, title, backend) catch return;
-        self.sendCommand(command);
+    pub fn sendCreateQuickChat(self: *DaemonClient, title: []const u8, backend: []const u8) ?[36]u8 {
+        if (self.protocolMode() == .v1 and !self.v1OpenReady()) return null;
+        const command = Wire.commandCreateQuickChat(self.allocator, title, backend) catch return null;
+        var request_id: [36]u8 = undefined;
+        _ = self.allocateRequestID(&request_id);
+        if (!self.sendCommandWithRequestID(command, request_id)) return null;
+        return request_id;
     }
 
     pub fn sendOpenQuickChat(self: *DaemonClient, id: []const u8) void {
@@ -1417,6 +1421,24 @@ test "open project returns the request ID used by the v2 envelope" {
     );
     defer std.testing.allocator.free(frame);
     try std.testing.expectEqualStrings(&request_id, Wire.responseRequestID(frame).?);
+}
+
+test "Quick Chat remaining parity create exposes its request id without changing command bytes" {
+    var client = try DaemonClient.initForTesting(std.testing.allocator);
+    defer client.deinit();
+    const request_id = client.sendCreateQuickChat("Chat — Oct 20", "copilotCLI") orelse
+        return error.TestExpectedQuickChatCreateRequest;
+
+    try std.testing.expectEqual(@as(usize, 1), client.outbound_count);
+    try std.testing.expectEqualStrings(
+        "{\"createQuickChat\":{\"title\":\"Chat — Oct 20\",\"backend\":\"copilotCLI\"}}",
+        client.outbound[client.outbound_head],
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &request_id,
+        &client.outbound_request_ids[client.outbound_head].?,
+    );
 }
 
 const ReadCapture = struct {
