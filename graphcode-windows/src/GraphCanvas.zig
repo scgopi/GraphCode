@@ -600,7 +600,7 @@ fn drawProjectWorktreeChip(
 }
 
 pub const ZoomControl = enum { out, actual, in, fit };
-pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
+pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel, overflow };
 pub const header_actions = [_]HeaderAction{ .review_attention, .inspect_worktrees, .jump, .toggle_panel };
 
 pub fn headerIdentity(action: HeaderAction) []const u8 {
@@ -609,6 +609,7 @@ pub fn headerIdentity(action: HeaderAction) []const u8 {
         .inspect_worktrees => "header-worktree:worktrees",
         .jump => "header-jump:jump",
         .toggle_panel => "header-toggle-panel:control",
+        .overflow => "header-overflow:actions",
     };
 }
 
@@ -631,6 +632,7 @@ pub const Header = struct {
             .inspect_worktrees => self.notice != null,
             .jump => true,
             .toggle_panel => self.panel_visible != null,
+            .overflow => false,
         };
     }
 
@@ -650,6 +652,7 @@ pub const Header = struct {
                 std.fmt.allocPrint(allocator, "{s}: {d} worktrees", .{ self.notice_name, self.notice.?.total }),
             .jump => allocator.dupe(u8, "Jump to loop   Ctrl+P"),
             .toggle_panel => allocator.dupe(u8, if (self.panel_visible.?) "Hide loop panel" else "Show loop panel"),
+            .overflow => allocator.dupe(u8, "More actions"),
         };
     }
 
@@ -673,14 +676,23 @@ pub const Header = struct {
             total += preferred_width;
             count += 1;
         }
-        const gap = @min(@as(i32, 8), @divTrunc(controls_right - identity_right, count * 2));
-        const available = @max(0, controls_right - identity_right - gap * count);
-        var left = identity_right + gap;
-        for (header_actions, preferred, 0..) |action, preferred_width, index| {
-            if (!self.contains(action)) continue;
-            const control_width = @min(preferred_width, @divTrunc(available * preferred_width, total));
-            if (control_width > 0) result.controls[index] = rect(left, 5, left + control_width, Tokens.header_height - 5);
-            left += control_width + gap;
+        const available = @max(0, controls_right - identity_right);
+        if (count != 0) {
+            // Move the whole roster to overflow before direct controls fall below three-quarters width.
+            const direct_threshold = @divTrunc(total * 3, 4) + count * 8;
+            if (available >= direct_threshold) {
+                const gap = @min(@as(i32, 8), @divTrunc(available, count * 2));
+                const control_space = @max(0, available - gap * count);
+                var left = identity_right + gap;
+                for (header_actions, preferred, 0..) |action, preferred_width, index| {
+                    if (!self.contains(action)) continue;
+                    const control_width = @min(preferred_width, @divTrunc(control_space * preferred_width, total));
+                    if (control_width > 0) result.controls[index] = rect(left, 5, left + control_width, Tokens.header_height - 5);
+                    left += control_width + gap;
+                }
+            } else if (available >= 44) {
+                result.overflow = rect(controls_right - 36, 5, controls_right, Tokens.header_height - 5);
+            }
         }
         return result;
     }
@@ -690,20 +702,37 @@ pub const HeaderLayout = struct {
     identity: c.RECT = std.mem.zeroes(c.RECT),
     status: c.RECT = std.mem.zeroes(c.RECT),
     controls: [header_actions.len]?c.RECT = .{null} ** header_actions.len,
+    overflow: ?c.RECT = null,
 
     pub fn bounds(self: HeaderLayout, action: HeaderAction) ?c.RECT {
-        return self.controls[@intFromEnum(action)];
+        return switch (action) {
+            .review_attention => self.controls[0],
+            .inspect_worktrees => self.controls[1],
+            .jump => self.controls[2],
+            .toggle_panel => self.controls[3],
+            .overflow => self.overflow,
+        };
     }
 
     pub fn actionAt(self: HeaderLayout, x: i32, y: i32) ?HeaderAction {
         for (header_actions, self.controls) |action, control| {
             if (control) |bounds_value| if (insideGraph(x, y, bounds_value)) return action;
         }
+        if (self.overflow) |bounds_value| {
+            if (insideGraph(x, y, bounds_value)) return .overflow;
+        }
         return null;
     }
 
     pub fn step(self: HeaderLayout, current: ?HeaderAction, backwards: bool) ?HeaderAction {
-        const start: usize = if (current) |action| @intFromEnum(action) else if (backwards) 0 else header_actions.len - 1;
+        if (self.overflow != null) return .overflow;
+        const start: usize = if (current) |action| switch (action) {
+            .review_attention => 0,
+            .inspect_worktrees => 1,
+            .jump => 2,
+            .toggle_panel => 3,
+            .overflow => if (backwards) 0 else header_actions.len - 1,
+        } else if (backwards) 0 else header_actions.len - 1;
         for (1..header_actions.len + 1) |offset| {
             const index = if (backwards)
                 (start + header_actions.len - offset) % header_actions.len
@@ -790,10 +819,10 @@ pub fn paintLoopDetailExpandControl(hdc: c.HDC, allocator: std.mem.Allocator, cl
 }
 
 pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) RenderBounds {
-    const left = if (controls.rail_visible) Tokens.sidebar_width else 0;
+    const rail = WorkspaceControls.railPresentation(client_right, controls);
     const activity = if (controls.activity_enabled) Tokens.activity_strip_height else 0;
     return .{
-        .left = left,
+        .left = rail.content_left,
         .top = Tokens.header_height,
         .right = client_right,
         .bottom = @max(
@@ -824,6 +853,7 @@ pub fn paint(
     sidebar_hover_y: i32,
     controls: WorkspaceControls.State,
     surface: Surface,
+    selection_active: bool,
 ) void {
     const client = c.RECT{ .left = 0, .top = 0, .right = client_right, .bottom = client_bottom };
     fill(hdc, client, Tokens.canvas_tone);
@@ -834,11 +864,13 @@ pub fn paint(
             null
     else
         null;
-    if (controls.rail_visible) {
+    const rail_presentation = WorkspaceControls.railPresentation(client.right, controls);
+    if (rail_presentation.mode == .docked) {
         Sidebar.draw(
             hdc,
             model,
             surface,
+            selection_active,
             visible_inspection,
             selected_worktree_path,
             sidebar_scroll,
@@ -952,6 +984,24 @@ pub fn paint(
             allocator,
             model,
             rect(0, client.bottom - workspace_height - Tokens.activity_strip_height, client.right, client.bottom - workspace_height),
+        );
+    }
+    if (rail_presentation.mode == .overlay) {
+        Sidebar.draw(
+            hdc,
+            model,
+            surface,
+            selection_active,
+            visible_inspection,
+            selected_worktree_path,
+            sidebar_scroll,
+            status,
+            sidebarBottom(client.bottom, controls, surface),
+            update_version,
+            ingress_error,
+            sidebar_state,
+            sidebar_hover_y,
+            allocator,
         );
     }
 }
@@ -1504,6 +1554,28 @@ test "workspace controls change graph render bounds" {
     );
 }
 
+test "responsive sidebar overlays a visible rail at 451 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(451, 800, .{}).left);
+}
+
+test "responsive sidebar overlays a visible rail at 452 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(452, 800, .{}).left);
+}
+
+test "responsive sidebar overlays a visible rail at 671 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(671, 800, .{}).left);
+}
+
+test "responsive sidebar docks a visible rail at 672 DIP" {
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), renderBounds(672, 800, .{}).left);
+}
+
+test "responsive sidebar leaves no inset when hidden" {
+    for ([_]i32{ 451, 452, 671, 672 }) |width| {
+        try std.testing.expectEqual(@as(i32, 0), renderBounds(width, 800, .{ .rail_visible = false }).left);
+    }
+}
+
 test "inline canvas alerts remain inside the active detail surface" {
     const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
     const alert = inlineAlertBounds(bounds);
@@ -1563,6 +1635,15 @@ pub fn paintHeader(
             _ = c.DrawFocusRect(hdc, &ring);
         }
     }
+    if (layout.overflow) |bounds| {
+        fill(hdc, bounds, 0x00282828);
+        drawTextRect(hdc, allocator, "»", bounds, 13, 0x00D8D8D8, flags | c.DT_CENTER);
+        if (focused == .overflow) {
+            var ring = bounds;
+            _ = c.InflateRect(&ring, -1, -1);
+            _ = c.DrawFocusRect(hdc, &ring);
+        }
+    }
     if (layout.status.right > layout.status.left) drawTextRect(hdc, allocator, status, layout.status, 10, 0x00A8A8A8, flags);
 }
 
@@ -1590,6 +1671,13 @@ test "header layout shares visibility hit testing and focus order at narrow widt
     const header = Header{ .attention_count = 2, .notice = .{ .total = 8, .reclaimable = 3, .blocked = 5 }, .notice_name = "Project", .panel_visible = false };
     for ([_]i32{ 480, 640, 900, 1280 }) |width| {
         const layout = header.layout(width);
+        if (layout.overflow) |overflow| {
+            for (header_actions) |action| try std.testing.expect(layout.bounds(action) == null);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.actionAt(overflow.left + 1, overflow.top + 1).?);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.step(null, false).?);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.step(.overflow, true).?);
+            continue;
+        }
         var previous_right = layout.identity.right;
         var focused: ?HeaderAction = null;
         for (header_actions) |action| {
@@ -1612,6 +1700,25 @@ test "header layout shares visibility hit testing and focus order at narrow widt
     try std.testing.expect(empty.bounds(.inspect_worktrees) == null);
     try std.testing.expect(empty.bounds(.review_attention) == null);
     try std.testing.expect(empty.actionAt(0, Tokens.header_height) == null);
+}
+
+test "header overflow keeps narrow actions out of direct bounds" {
+    const header = Header{
+        .attention_count = 2,
+        .notice = .{ .total = 8, .reclaimable = 3, .blocked = 5 },
+        .notice_name = "Project",
+        .panel_visible = false,
+    };
+    const layout = header.layout(480);
+    for (header_actions) |action| {
+        try std.testing.expect(layout.bounds(action) == null);
+    }
+    const overflow = layout.bounds(.overflow).?;
+    try std.testing.expectEqual(HeaderAction.overflow, layout.actionAt(overflow.left + 1, overflow.top + 1).?);
+    try std.testing.expectEqual(HeaderAction.overflow, layout.step(null, false).?);
+    const label = try header.label(std.testing.allocator, .overflow);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("More actions", label);
 }
 
 test "header panel belongs only to a selected workspace loop with supported content" {
@@ -2421,10 +2528,7 @@ fn drawLoopCard(
 ) void {
     GdiplusAA.drawLoopCardChrome(hdc, bounds, loopCardChrome(node, state, role, attention, selected)) catch |err| {
         std.log.warn("Card {s} chrome degraded to flat GDI fallback: {s}", .{ node.id, @errorName(err) });
-        roundedControlStroke(hdc, bounds, scaled(Tokens.loop_card_radius, state),
-            if (attention) Tokens.loop_card_attention_bottom else Tokens.loop_card_bottom,
-            if (selected) Tokens.canvas_selection else if (attention) Tokens.loop_card_attention_border else Tokens.loop_card_border,
-            if (selected) scaled(2, state) else scaled(1, state));
+        roundedControlStroke(hdc, bounds, scaled(Tokens.loop_card_radius, state), if (attention) Tokens.loop_card_attention_bottom else Tokens.loop_card_bottom, if (selected) Tokens.canvas_selection else if (attention) Tokens.loop_card_attention_border else Tokens.loop_card_border, if (selected) scaled(2, state) else scaled(1, state));
         fill(
             hdc,
             rect(bounds.left, bounds.top, bounds.left + scaled(Tokens.loop_card_stripe, state), bounds.bottom),
@@ -5200,12 +5304,9 @@ test "canvas visual finish controls select actual UI and monospaced font faces" 
         .{ .size = 11, .style = .semibold, .face = "Segoe UI", .weight = c.FW_SEMIBOLD },
         .{ .size = 9.5, .style = .card_mono, .face = "Consolas", .weight = c.FW_NORMAL },
     }) |request| {
-        const fact = try inspectPaintFont(std.testing.allocator, dc,
-            AppFont.getStyle(request.size, request.style), request.face,
-            -AppFont.styleHeight(request.size, 96), request.weight);
+        const fact = try inspectPaintFont(std.testing.allocator, dc, AppFont.getStyle(request.size, request.style), request.face, -AppFont.styleHeight(request.size, 96), request.weight);
         defer std.testing.allocator.free(fact.actual_face);
-        std.debug.print("canvas visual font requested={s} actual={s} size={d} weight={d}\n",
-            .{ request.face, fact.actual_face, request.size, fact.weight });
+        std.debug.print("canvas visual font requested={s} actual={s} size={d} weight={d}\n", .{ request.face, fact.actual_face, request.size, fact.weight });
     }
 }
 
@@ -5484,9 +5585,8 @@ test "card live detail 764 change is right aligned and track is three logical po
         }
         try std.testing.expect(expected_ink > 0);
         const track_top = rows.detail.bottom - scaledValue(3, zoom);
-        try std.testing.expectEqual(@as(usize, @intCast(rows.detail.right - rows.detail.left)),
-            dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), 0x00444141) +
-                dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), loopTypeColor(node.loop_type)));
+        try std.testing.expectEqual(@as(usize, @intCast(rows.detail.right - rows.detail.left)), dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), 0x00444141) +
+            dib.count(rect(rows.detail.left, track_top, rows.detail.right, track_top + 1), loopTypeColor(node.loop_type)));
     }
 }
 
@@ -6025,6 +6125,7 @@ fn paintExportFixture(
         -1,
         controls,
         surface,
+        true,
     );
     paintHeader(
         dib.dc,
@@ -6342,8 +6443,7 @@ fn verifyPaint764StrokeVisibility(dib: ParityDib, mask: ParityDib, sample: c.REC
         for ([_]i32{ -1, 1 }) |offset| {
             const neighbor = c.GetPixel(dib.dc, x, stroke_y + offset);
             if (stroke == c.CLR_INVALID or neighbor == c.CLR_INVALID or mask_pixel == c.CLR_INVALID) {
-                std.debug.print("paint764 edge visibility unreadable edge={s} x={d} stroke-y={d} offset={d}\n",
-                    .{ edge_id, x, stroke_y, offset });
+                std.debug.print("paint764 edge visibility unreadable edge={s} x={d} stroke-y={d} offset={d}\n", .{ edge_id, x, stroke_y, offset });
                 return error.Paint764EdgeStrokeSampleUnreadable;
             }
             const contrast = paint764RgbL1(stroke, neighbor);
@@ -6358,12 +6458,10 @@ fn verifyPaint764StrokeVisibility(dib: ParityDib, mask: ParityDib, sample: c.REC
             const visible = contrast >= margin and advantage >= @as(i32, @intCast(margin));
             comparisons += 1;
             if (!visible) failures += 1;
-            std.debug.print("paint764 edge visibility edge={s} x={d} stroke-y={d} neighbor-y={d} contrast={d} edge-advantage={d} margin={d} pass={}\n",
-                .{ edge_id, x, stroke_y, stroke_y + offset, contrast, advantage, margin, visible });
+            std.debug.print("paint764 edge visibility edge={s} x={d} stroke-y={d} neighbor-y={d} contrast={d} edge-advantage={d} margin={d} pass={}\n", .{ edge_id, x, stroke_y, stroke_y + offset, contrast, advantage, margin, visible });
         }
     }
-    std.debug.print("paint764 edge visibility summary edge={s} region=({d},{d},{d},{d}) comparisons={d} failures={d} margin={d}\n",
-        .{ edge_id, sample.left, sample.top, sample.right, sample.bottom, comparisons, failures, margin });
+    std.debug.print("paint764 edge visibility summary edge={s} region=({d},{d},{d},{d}) comparisons={d} failures={d} margin={d}\n", .{ edge_id, sample.left, sample.top, sample.right, sample.bottom, comparisons, failures, margin });
     try std.testing.expect(comparisons >= 14);
     try std.testing.expect(gaps >= 2);
     if (failures != 0) return error.Paint764EdgeStrokeNotVisible;
@@ -7040,7 +7138,7 @@ fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: Visual
     defer state.deinitLayout();
     var sidebar = Sidebar.State.init(allocator);
     defer sidebar.deinit();
-    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface);
+    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface, true);
     paintHeader(dib.dc, allocator, 1280, "", .{
         .title = "Canvas Fixture",
         .project_glyph = if (surface == .workspace) .folder else null,
@@ -7356,6 +7454,7 @@ fn chrome764Paint(
         -1,
         .{ .graph_visible = true, .rail_visible = true, .panel_visible = false, .activity_enabled = false },
         if (scene == .project) .project else .overview,
+        true,
     );
     if (c.GdiFlush() == 0) return error.Chrome764FlushFailed;
 }
@@ -7411,7 +7510,9 @@ test "loop card parity chrome 764 normal gradient and shared surfaces" {
             checks.pixel(
                 c.GetPixel(project.dc, pb.left + 2, pb.top + 48),
                 c.GetPixel(overview.dc, ob.left + 2, ob.top + 48),
-                "shared-local-stripe", .overview, node.id,
+                "shared-local-stripe",
+                .overview,
+                node.id,
             );
         }
         for ([_]Paint764Scene{ .project, .overview }) |scene| {
@@ -7455,14 +7556,12 @@ test "loop card parity chrome 764 warmth remains independent of primary actions"
                 const warm = needsAttention(node, graph.nodes.items, graph.edges.items);
                 checks.expect(warm == expected_warm[index], "preserved-attention-classification", scene, node.id);
                 const bounds = chrome764Card(&fixture, scene, index, &state);
-                checks.pixel(c.GetPixel(dib.dc, bounds.right - 7, bounds.top + 48),
-                    chrome764Face(expected_warm[index], 48, 96), "reason-selected-face", scene, node.id);
+                checks.pixel(c.GetPixel(dib.dc, bounds.right - 7, bounds.top + 48), chrome764Face(expected_warm[index], 48, 96), "reason-selected-face", scene, node.id);
                 const action = primaryCardAction(node);
                 const expected_action: ?AttentionAction = if (index == 2) .inspect else if (index == 5) .reply else null;
                 checks.expect(action == expected_action, "preserved-independent-primary-action", scene, node.id);
                 const action_pixels = dib.count(attentionActionBounds(bounds, &state), 0x000A9FFF);
-                checks.expect(if (expected_action != null) action_pixels > 20 else action_pixels == 0,
-                    "primary-action-pixels-independent-of-warmth", scene, node.id);
+                checks.expect(if (expected_action != null) action_pixels > 20 else action_pixels == 0, "primary-action-pixels-independent-of-warmth", scene, node.id);
             }
         }
     }
@@ -7512,17 +7611,14 @@ test "loop card parity chrome 764 tinted falloff and offset black lift on both g
             if (distance == 20) checks.expect(orange > green, "emphasized-halo-wider-and-stronger", scene, "chrome-isolated");
             last_green = green;
             last_orange = orange;
-            std.debug.print("chrome764 halo surface={s} distance={d} normal=0x{x} warm=0x{x} ground=0x{x}\n",
-                .{ @tagName(scene), distance, np, wp, ground });
+            std.debug.print("chrome764 halo surface={s} distance={d} normal=0x{x} warm=0x{x} ground=0x{x}\n", .{ @tagName(scene), distance, np, wp, ground });
         }
         for ([_]i32{ 2, 7 }) |distance| {
             const above = c.GetPixel(normal.dc, x, bounds.top - distance);
             const below = c.GetPixel(normal.dc, x, bounds.bottom + distance);
             checks.expect((below & 255) < (above & 255), "downward-contact-and-ambient-black-lift", scene, "chrome-isolated");
         }
-        checks.pixel(c.GetPixel(normal.dc, bounds.right + 80, bounds.top + 48),
-            c.GetPixel(warm.dc, bounds.right + 80, bounds.top + 48),
-            "finite-shadow-support-leaves-far-ground-unchanged", scene, "chrome-isolated");
+        checks.pixel(c.GetPixel(normal.dc, bounds.right + 80, bounds.top + 48), c.GetPixel(warm.dc, bounds.right + 80, bounds.top + 48), "finite-shadow-support-leaves-far-ground-unchanged", scene, "chrome-isolated");
     }
     try checks.finish(error.Chrome764HaloAndContactShadowMissing);
 }
@@ -7563,8 +7659,7 @@ test "loop card parity chrome 764 rounded stripe alpha hairline and unwired dash
         if (!fixture.model.setSelectedIndex(5)) return error.Chrome764SelectionFailed;
         try chrome764Paint(dib, &fixture, .project, &state, null, &.{});
         const bounds = nodeBounds(5, &state);
-        checks.expect(dib.count(rect(bounds.left + 20, bounds.top, bounds.left + 220, bounds.top + 1),
-            Tokens.canvas_selection) >= 190, "selected-unwired-solid-blue-precedence", .project, "fixture-turn-needs-you");
+        checks.expect(dib.count(rect(bounds.left + 20, bounds.top, bounds.left + 220, bounds.top + 1), Tokens.canvas_selection) >= 190, "selected-unwired-solid-blue-precedence", .project, "fixture-turn-needs-you");
         if (!fixture.model.setSelectedIndex(0)) return error.Chrome764SelectionFailed;
     }
     try checks.finish(error.Chrome764RoundedStripeAndDashedAlphaBorderMissing);
@@ -7598,27 +7693,20 @@ test "loop card parity chrome 764 zoom mapping and graph viewport clip" {
                 try chrome764Paint(dib, &fixture, scene, &state, null, &.{"chrome-isolated"});
                 const bounds = chrome764Card(&fixture, scene, 0, &state);
                 const stripe_x = bounds.left + @divTrunc(scaledValue(4, zoom), 2);
-                checks.pixel(c.GetPixel(dib.dc, stripe_x, bounds.top + scaledValue(12, zoom)),
-                    0x00709E19, "stripe-radius-and-HDC-mapping-scale-once", scene, "chrome-isolated");
-                checks.expect(!chrome764ColorNear(c.GetPixel(dib.dc, bounds.left + scaledValue(1, zoom),
-                    bounds.top + scaledValue(1, zoom)), 0x00709E19, 1),
-                    "scaled-rounded-corner-clips-stripe", scene, "chrome-isolated");
+                checks.pixel(c.GetPixel(dib.dc, stripe_x, bounds.top + scaledValue(12, zoom)), 0x00709E19, "stripe-radius-and-HDC-mapping-scale-once", scene, "chrome-isolated");
+                checks.expect(!chrome764ColorNear(c.GetPixel(dib.dc, bounds.left + scaledValue(1, zoom), bounds.top + scaledValue(1, zoom)), 0x00709E19, 1), "scaled-rounded-corner-clips-stripe", scene, "chrome-isolated");
                 const sample_y = bounds.top - scaledValue(12, zoom);
                 const sample_x = bounds.left + scaledValue(125, zoom);
                 const ground: u32 = if (scene == .project) Tokens.canvas_tone else Tokens.workspace_rail;
                 const halo = c.GetPixel(dib.dc, sample_x, sample_y);
                 checks.expect((halo & 255) > (ground & 255), "scaled-halo-overflows-card-within-viewport", scene, "chrome-isolated");
-                checks.pixel(try chrome764DibPixel(dib, graph_bounds.left - 2, 200, dpi), sentinel,
-                    "left-viewport-sentinel-unchanged", scene, "chrome-isolated");
-                checks.pixel(try chrome764DibPixel(dib, 400, graph_bounds.top - 2, dpi), sentinel,
-                    "top-viewport-sentinel-unchanged", scene, "chrome-isolated");
+                checks.pixel(try chrome764DibPixel(dib, graph_bounds.left - 2, 200, dpi), sentinel, "left-viewport-sentinel-unchanged", scene, "chrome-isolated");
+                checks.pixel(try chrome764DibPixel(dib, 400, graph_bounds.top - 2, dpi), sentinel, "top-viewport-sentinel-unchanged", scene, "chrome-isolated");
                 var clip: c.RECT = undefined;
                 if (c.GetClipBox(dib.dc, &clip) == c.ERROR) return error.Chrome764ClipQueryFailed;
                 checks.expect(clip.left == graph_bounds.left and clip.top == graph_bounds.top and
-                    clip.right == graph_bounds.right and clip.bottom == graph_bounds.bottom,
-                    "caller-clip-restored-after-card-chrome", scene, "chrome-isolated");
-                std.debug.print("chrome764 mapped surface={s} dpi={d} zoom={d} card=({d},{d},{d},{d}) halo=0x{x}\n",
-                    .{ @tagName(scene), dpi, zoom, bounds.left, bounds.top, bounds.right, bounds.bottom, halo });
+                    clip.right == graph_bounds.right and clip.bottom == graph_bounds.bottom, "caller-clip-restored-after-card-chrome", scene, "chrome-isolated");
+                std.debug.print("chrome764 mapped surface={s} dpi={d} zoom={d} card=({d},{d},{d},{d}) halo=0x{x}\n", .{ @tagName(scene), dpi, zoom, bounds.left, bounds.top, bounds.right, bounds.bottom, halo });
             }
         }
     }
@@ -7665,22 +7753,16 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
                 const x = bounds.left + scaledValue(125, state.zoom);
                 const y = bounds.top + scaledValue(48, state.zoom);
                 if (scene == .project) {
-                    checks.expect(hitTest(graph.nodes.items, x, y, &state, graph_bounds) == index,
-                        "project-hit-and-activation-identity", scene, node.id);
-                    checks.expect(hitTest(graph.nodes.items, x, bounds.top - 4, &state, graph_bounds) == null,
-                        "halo-overflow-not-interactive", scene, node.id);
+                    checks.expect(hitTest(graph.nodes.items, x, y, &state, graph_bounds) == index, "project-hit-and-activation-identity", scene, node.id);
+                    checks.expect(hitTest(graph.nodes.items, x, bounds.top - 4, &state, graph_bounds) == null, "halo-overflow-not-interactive", scene, node.id);
                 } else {
                     const hit = hitTestOverview(&fixture.model, x, y, &state, graph_bounds);
-                    checks.expect(hit != null and hit.?.graph_index == 0 and hit.?.node_index == index,
-                        "overview-hit-and-activation-identity", scene, node.id);
-                    checks.expect(hitTestOverview(&fixture.model, x, bounds.top - 4, &state, graph_bounds) == null,
-                        "halo-overflow-not-interactive", scene, node.id);
+                    checks.expect(hit != null and hit.?.graph_index == 0 and hit.?.node_index == index, "overview-hit-and-activation-identity", scene, node.id);
+                    checks.expect(hitTestOverview(&fixture.model, x, bounds.top - 4, &state, graph_bounds) == null, "halo-overflow-not-interactive", scene, node.id);
                 }
                 if (primaryCardAction(node) != null and scene == .project) {
                     const action = attentionActionBounds(bounds, &state);
-                    checks.expect(hitTestAttentionAction(graph.nodes.items, graph.edges.items,
-                        action.left + 1, action.top + 1, &state) == index,
-                        "reply-inspect-action-hit-preserved", scene, node.id);
+                    checks.expect(hitTestAttentionAction(graph.nodes.items, graph.edges.items, action.left + 1, action.top + 1, &state) == index, "reply-inspect-action-hit-preserved", scene, node.id);
                 }
             }
         }
@@ -7697,8 +7779,7 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
         const graph = fixture.model.graphs.items[0];
         const roles = try resolveCardRoles(std.testing.allocator, graph.nodes.items, graph.edges.items, &.{});
         defer std.testing.allocator.free(roles);
-        checks.expect(roles[0] == .cycle_only and roles[1] == .cycle_only,
-            "closed-handoff-cycle-role-preserved", scene, "fixture-main-idle");
+        checks.expect(roles[0] == .cycle_only and roles[1] == .cycle_only, "closed-handoff-cycle-role-preserved", scene, "fixture-main-idle");
         const bounds = chrome764Card(&fixture, scene, 0, &state);
         const chip = cardRoleChip(.cycle_only) orelse return error.Chrome764CycleChipMissing;
         checks.expect(dib.count(bounds, chip.fill) > 0, "cycle-role-chip-still-painted", scene, "fixture-main-idle");
@@ -7711,7 +7792,9 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
     defer inspection.entries.deinit();
     try inspection.entries.append(.{
         .path = @constCast("C:\\GraphCodeFixture\\CardStates\\worktrees\\review"),
-        .branch = @constCast("review"), .pushed = true, .landed = true,
+        .branch = @constCast("review"),
+        .pushed = true,
+        .landed = true,
     });
     try chrome764Paint(dib, &fixture, .project, &state, &inspection, &.{});
     const graph = (fixture.model.graph orelse return error.Chrome764ProjectMissing);
@@ -7720,10 +7803,8 @@ test "loop card parity chrome 764 preserves geometry content roles and affordanc
     checks.expect(dib.count(offer.keep, 0x00919191) > 0, "keep-semibold-label-preserved", .project, "fixture-goal-done");
     const reclaim = hitTestReclaimOffer(graph.nodes.items, &inspection, &.{}, offer.reclaim.left + 1, offer.reclaim.top + 1, &state);
     const keep = hitTestReclaimOffer(graph.nodes.items, &inspection, &.{}, offer.keep.left + 1, offer.keep.top + 1, &state);
-    checks.expect(reclaim != null and reclaim.?.node_index == 1 and reclaim.?.action == .reclaim,
-        "reclaim-hit-preserved", .project, "fixture-goal-done");
-    checks.expect(keep != null and keep.?.node_index == 1 and keep.?.action == .keep,
-        "keep-hit-preserved", .project, "fixture-goal-done");
+    checks.expect(reclaim != null and reclaim.?.node_index == 1 and reclaim.?.action == .reclaim, "reclaim-hit-preserved", .project, "fixture-goal-done");
+    checks.expect(keep != null and keep.?.node_index == 1 and keep.?.action == .keep, "keep-hit-preserved", .project, "fixture-goal-done");
     try checks.finish(error.Chrome764ExistingSemanticsRegressed);
 }
 

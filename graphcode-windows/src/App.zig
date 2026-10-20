@@ -1079,8 +1079,10 @@ const AccessibilityBounds = union(enum) {
 
 /// Smallest client height at which the sidebar keeps `Sidebar.min_content_region` of rows under
 /// the fixed header with the Workspace panel, Activity strip, and status line stacked below it.
+const min_client_width: i32 = WorkspaceControls.min_detail_width;
 const min_client_height: i32 = Sidebar.content_top + Sidebar.min_content_region +
     Sidebar.footerReserve(false, false) + Tokens.workspace_height + Tokens.activity_strip_height;
+const header_overflow_command_base: usize = 0x7d00;
 
 extern "user32" fn AdjustWindowRectExForDpi(
     rect: *c.RECT,
@@ -1100,11 +1102,36 @@ fn minimumWindowHeight(hwnd: c.HWND, dpi: u32) i32 {
     return frame.bottom - frame.top;
 }
 
+/// The outer window width whose client area is `min_client_width` at `dpi`, in physical pixels.
+fn minimumWindowWidth(hwnd: c.HWND, dpi: u32) i32 {
+    var frame = c.RECT{ .left = 0, .top = 0, .right = physicalCoordinate(min_client_width, dpi), .bottom = 0 };
+    const style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_STYLE))));
+    const ex_style: c.DWORD = @truncate(@as(usize, @bitCast(c.GetWindowLongPtrW(hwnd, c.GWL_EXSTYLE))));
+    const has_menu: c.BOOL = if (c.GetMenu(hwnd) != null) 1 else 0;
+    if (AdjustWindowRectExForDpi(&frame, style, has_menu, ex_style, Dpi.normalize(dpi)) == 0) return 0;
+    return frame.right - frame.left;
+}
+
 fn clipSidebarAccessibilityBounds(bounds: c.RECT, viewport_bottom: i32) c.RECT {
     const top = @max(bounds.top, Sidebar.content_top);
     const bottom = @min(bounds.bottom, viewport_bottom);
     if (top >= bottom) return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
     return .{ .left = bounds.left, .top = top, .right = bounds.right, .bottom = bottom };
+}
+
+fn clipCanvasAccessibilityBounds(
+    bounds: c.RECT,
+    rail: WorkspaceControls.RailPresentation,
+    dpi: u32,
+) c.RECT {
+    if (rail.mode != .overlay) return bounds;
+    const left = @max(bounds.left, physicalCoordinate(rail.rail_right, dpi));
+    if (left >= bounds.right or bounds.top >= bounds.bottom) return std.mem.zeroes(c.RECT);
+    return .{ .left = left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+}
+
+fn overlayRailOwnsPointer(x: i32, y: i32, rail: WorkspaceControls.RailPresentation) bool {
+    return rail.mode == .overlay and x >= 0 and x < rail.rail_right and y >= Tokens.header_height;
 }
 
 /// UIA element kinds that move with the sidebar scroll offset. The fixed header, the update
@@ -1147,8 +1174,9 @@ fn providerHasDecl(comptime Provider: type, comptime name: []const u8) bool {
 }
 
 fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) InputBounds {
+    const rail = WorkspaceControls.railPresentation(client_right, controls);
     return .{
-        .rail_left = if (controls.rail_visible) Tokens.sidebar_width else 0,
+        .rail_left = rail.rail_right,
         .workspace_top = client_bottom - (if (controls.panel_visible) Tokens.workspace_height else 0),
         .canvas = GraphCanvas.renderBounds(client_right, client_bottom, controls),
     };
@@ -1168,6 +1196,17 @@ fn logicalCoordinate(value: i32, dpi: u32) i32 {
 
 fn physicalCoordinate(value: i32, dpi: u32) i32 {
     return Dpi.scale(value, dpi);
+}
+
+fn headerOverflowCommand(action: GraphCanvas.HeaderAction) usize {
+    return header_overflow_command_base + @intFromEnum(action);
+}
+
+fn headerOverflowAction(header: GraphCanvas.Header, command: usize) ?GraphCanvas.HeaderAction {
+    for (GraphCanvas.header_actions) |action| {
+        if (header.contains(action) and command == headerOverflowCommand(action)) return action;
+    }
+    return null;
 }
 
 fn gestureGeometry(point: ?c.POINT, client: c.RECT, dpi: u32, controls: WorkspaceControls.State) struct {
@@ -1285,7 +1324,7 @@ fn loopBarRect(rect: LoopBarLayout.Rect) c.RECT {
 /// trailing slot holds the panel's expand control).
 fn workspaceLoopBar(controls: WorkspaceControls.State, client_right: i32, resolved: bool) LoopBarLayout.Layout {
     return TerminalWorkspace.loopBarLayout(
-        if (controls.rail_visible) Tokens.sidebar_width else 0,
+        WorkspaceControls.railPresentation(client_right, controls).rail_right,
         client_right - (if (controls.panel_visible) Tokens.loop_detail_width else 0),
         resolved,
         !controls.panel_visible,
@@ -1443,6 +1482,7 @@ const UiaDynamicTarget = union(enum) {
     header_worktree,
     header_jump,
     header_toggle_panel,
+    header_overflow,
 };
 
 pub const App = struct {
@@ -1503,6 +1543,7 @@ pub const App = struct {
     workspace_controls: WorkspaceControls.State = .{ .panel_visible = false },
     dpi: u32 = Dpi.base_dpi,
     surface: GraphCanvas.Surface = .project,
+    selection_active: bool = true,
     header_focus: ?GraphCanvas.HeaderAction = null,
     header_return_focus: c.HWND = null,
     header_focus_transition: bool = false,
@@ -7596,6 +7637,10 @@ pub const App = struct {
             self.header_focus_transition = previous_transition;
         }
         if (self.workspace) |workspace| {
+            const rail_left = physicalCoordinate(
+                WorkspaceControls.railPresentation(logicalCoordinate(client.right, self.dpi), self.workspace_controls).rail_right,
+                self.dpi,
+            );
             const full_workspace = self.surface == .workspace;
             const activity_height = if (self.workspace_controls.activity_enabled) physicalCoordinate(Tokens.activity_strip_height, self.dpi) else 0;
             const panel_height = if (full_workspace)
@@ -7617,9 +7662,9 @@ pub const App = struct {
                 return;
             }
             workspace.resize(
-                if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else 0,
+                rail_left,
                 if (full_workspace) physicalCoordinate(Tokens.header_height + Tokens.loop_bar_height, self.dpi) else @max(0, client.bottom - panel_height),
-                @max(0, client.right - (if (self.workspace_controls.rail_visible) physicalCoordinate(Tokens.sidebar_width, self.dpi) else 0) -
+                @max(0, client.right - rail_left -
                     (if (full_workspace and self.workspace_controls.panel_visible) physicalCoordinate(Tokens.loop_detail_width, self.dpi) else 0)),
                 panel_height,
             );
@@ -7672,10 +7717,12 @@ pub const App = struct {
         else
             true;
         const is_global = if (graph) |value| value.project.isGlobal() else false;
-        const content_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+        const rail = WorkspaceControls.railPresentation(client.right, self.workspace_controls);
+        const content_left = rail.rail_right;
         const content_right = client.right;
         const x = content_left + @divTrunc((content_right - content_left) - 220, 2);
         const bounds = GraphCanvas.renderBounds(client.right, client.bottom, self.workspace_controls);
+        const visible_bounds = c.RECT{ .left = content_left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
         const center_offset: i32 = if (!is_quick_chats and !is_overview and graph == null) -70 else -60;
         const y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) + center_offset + 106;
         if (self.empty_open_folder_button != null) {
@@ -7695,7 +7742,7 @@ pub const App = struct {
             if (!childTextEquals(self.empty_global_overview_button, label)) setButtonText(self.empty_global_overview_button, label);
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
-            const add_bounds = GraphCanvas.addButtonBounds(.{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom });
+            const add_bounds = GraphCanvas.addButtonBounds(visible_bounds);
             const primary_x = if (is_empty and !is_quick_chats) content_left + @divTrunc(content_right - content_left - 118, 2) else add_bounds.left;
             const primary_y = if (is_empty and !is_quick_chats)
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
@@ -7925,7 +7972,10 @@ pub const App = struct {
                 (if (graph.project.isRemote()) "Remote" else if (graph.project.isGlobal()) "Global" else "Local folder");
             if (self.surface == .workspace) {
                 header.project_glyph = if (graph.project.isRemote()) .remote else if (graph.project.isGlobal()) .global else .folder;
-                header.detail_left = if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0;
+                header.detail_left = WorkspaceControls.railPresentation(
+                    logicalClientRect(self.window.hwnd, self.dpi).right,
+                    self.workspace_controls,
+                ).rail_right;
             }
         }
         if (GraphCanvas.loopPanelHasContent(&self.model, self.surface, self.isQuickChatWorkspace())) {
@@ -8063,7 +8113,14 @@ pub const App = struct {
     }
 
     fn invokeHeader(self: *App, action: GraphCanvas.HeaderAction) bool {
-        if (self.headerLayout().bounds(action) == null) {
+        if (action == .overflow) {
+            if (self.headerLayout().bounds(.overflow) == null) {
+                self.setStatus("Toolbar action is no longer available");
+                return false;
+            }
+            return self.showHeaderOverflow();
+        }
+        if (!self.headerPresentation().contains(action)) {
             self.setStatus("Toolbar action is no longer available");
             return false;
         }
@@ -8094,10 +8151,66 @@ pub const App = struct {
             },
             .jump => self.jumpToNode(),
             .toggle_panel => self.toggleWorkspaceDetailPanel(),
+            .overflow => unreachable,
         }
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
         return true;
+    }
+
+    fn invokeHeaderOverflowCommand(self: *App, command: usize) bool {
+        const action = headerOverflowAction(self.headerPresentation(), command) orelse {
+            self.setStatus("Toolbar action is no longer available");
+            return false;
+        };
+        return self.invokeHeader(action);
+    }
+
+    fn showHeaderOverflow(self: *App) bool {
+        const header = self.headerPresentation();
+        const menu = c.CreatePopupMenu() orelse {
+            self.setStatus("Unable to create toolbar actions menu");
+            return false;
+        };
+        defer _ = c.DestroyMenu(menu);
+        for (GraphCanvas.header_actions) |action| {
+            if (!header.contains(action)) continue;
+            const label = header.label(self.allocator, action) catch {
+                self.setStatus("Unable to prepare toolbar action label");
+                return false;
+            };
+            defer self.allocator.free(label);
+            const wide = std.unicode.utf8ToUtf16LeAllocZ(self.allocator, label) catch {
+                self.setStatus("Unable to prepare toolbar action label");
+                return false;
+            };
+            defer self.allocator.free(wide);
+            if (c.AppendMenuW(menu, c.MF_STRING, headerOverflowCommand(action), wide.ptr) == 0) {
+                self.setStatus("Unable to add toolbar action to menu");
+                return false;
+            }
+        }
+
+        const bounds = self.headerLayout().bounds(.overflow) orelse return false;
+        var anchor = c.POINT{
+            .x = physicalCoordinate(bounds.left + @divTrunc(bounds.right - bounds.left, 2), self.dpi),
+            .y = physicalCoordinate(bounds.bottom, self.dpi),
+        };
+        if (c.ClientToScreen(self.window.hwnd, &anchor) == 0) {
+            self.setStatus("Unable to position toolbar actions menu");
+            return false;
+        }
+        const selected = c.TrackPopupMenu(
+            menu,
+            c.TPM_RETURNCMD | c.TPM_NONOTIFY | c.TPM_RIGHTBUTTON,
+            anchor.x,
+            anchor.y,
+            0,
+            self.window.hwnd,
+            null,
+        );
+        if (selected <= 0) return true;
+        return self.invokeHeaderOverflowCommand(@intCast(selected));
     }
 
     fn refreshCanvasLayout(self: *App, client: c.RECT) bool {
@@ -8160,13 +8273,25 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
+        const rail_presentation = WorkspaceControls.railPresentation(client.right, self.workspace_controls);
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
-        provider.syncCanvasBounds((AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi));
+        provider.syncCanvasBounds(clipCanvasAccessibilityBounds(
+            (AccessibilityBounds{ .logical = canvas_rect }).physicalRect(self.dpi),
+            rail_presentation,
+            self.dpi,
+        ));
         if (comptime providerHasDecl(@TypeOf(provider), "syncCanvasControls")) {
             var zoom_bounds: [4]c.RECT = undefined;
             for ([_]GraphCanvas.ZoomControl{ .out, .actual, .in, .fit }, 0..) |control, index| {
-                zoom_bounds[index] = if (self.surface == .workspace) std.mem.zeroes(c.RECT) else (AccessibilityBounds{ .logical = GraphCanvas.zoomControlBounds(canvas_rect, control) }).physicalRect(self.dpi);
+                zoom_bounds[index] = if (self.surface == .workspace)
+                    std.mem.zeroes(c.RECT)
+                else
+                    clipCanvasAccessibilityBounds(
+                        (AccessibilityBounds{ .logical = GraphCanvas.zoomControlBounds(canvas_rect, control) }).physicalRect(self.dpi),
+                        rail_presentation,
+                        self.dpi,
+                    );
             }
             var primary = std.mem.zeroes(c.RECT);
             if (self.empty_global_overview_button) |button| {
@@ -8221,6 +8346,24 @@ pub const App = struct {
             };
             elements.append(.{
                 .identity = GraphCanvas.headerIdentity(action),
+                .name = name,
+                .parent = 1,
+                .eligible = true,
+                .left = bounds.left,
+                .top = bounds.top,
+                .right = bounds.right,
+                .bottom = bounds.bottom,
+            }) catch return;
+        }
+        if (header_layout.bounds(.overflow)) |logical_bounds| {
+            const bounds = (AccessibilityBounds{ .logical = logical_bounds }).physicalRect(self.dpi);
+            const name = header.label(self.allocator, .overflow) catch return;
+            owned_identities.append(name) catch {
+                self.allocator.free(name);
+                return;
+            };
+            elements.append(.{
+                .identity = GraphCanvas.headerIdentity(.overflow),
                 .name = name,
                 .parent = 1,
                 .eligible = true,
@@ -8608,7 +8751,7 @@ pub const App = struct {
                 if (self.workspaceQuickChatID()) |chat_id| {
                     if (quickChatByID(&self.model, chat_id)) |chat| {
                         const bar = TerminalSurface.quickChatBarLayout(
-                            if (self.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                            WorkspaceControls.railPresentation(client.right, self.workspace_controls).rail_right,
                             client.right,
                         );
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-quick-chat-bar", chat_id, chat.title, 4, .{ .logical = loopBarRect(bar.bar) }, false, false) catch return;
@@ -8687,6 +8830,21 @@ pub const App = struct {
                 }) catch return;
             }
         }
+        if (rail_presentation.mode == .overlay) {
+            const overlay_left = physicalCoordinate(rail_presentation.rail_right, self.dpi);
+            for (elements.items) |*element| {
+                if (element.parent != 4) continue;
+                element.left = @max(element.left, overlay_left);
+                if (element.left >= element.right or element.top >= element.bottom) {
+                    element.left = 0;
+                    element.top = 0;
+                    element.right = 0;
+                    element.bottom = 0;
+                    element.eligible = false;
+                    element.invokable = false;
+                }
+            }
+        }
         const policy = if (self.worktree_dialog) |dialog| dialog.policy else WorktreeStatus.Policy{};
         provider.syncElements(self.status(), elements.items, policy, .{
             .available = if (self.model.graph) |graph| graph.project.isLocalFilesystem() else false,
@@ -8763,6 +8921,7 @@ pub const App = struct {
             .{ .identity = "header-worktree:worktrees", .target = .header_worktree },
             .{ .identity = "header-jump:jump", .target = .header_jump },
             .{ .identity = "header-toggle-panel:control", .target = .header_toggle_panel },
+            .{ .identity = "header-overflow:actions", .target = .header_overflow },
         };
         for (static_targets) |candidate| {
             if (Accessibility.worktreeIdentityPayload(candidate.identity) == payload) target = candidate.target;
@@ -9093,6 +9252,7 @@ pub const App = struct {
             .header_worktree => return self.invokeHeader(.inspect_worktrees),
             .header_jump => return self.invokeHeader(.jump),
             .header_toggle_panel => return self.invokeHeader(.toggle_panel),
+            .header_overflow => return self.invokeHeader(.overflow),
         }
         self.clampSidebarScroll();
         self.syncAccessibility();
@@ -9617,9 +9777,11 @@ fn onWindowMessage(
         },
         c.WM_GETMINMAXINFO => {
             // Below this the sidebar cannot keep two rows visible beneath the fixed header with the
-            // Workspace panel, Activity strip, and status line stacked under it. Only the height is
-            // constrained; width keeps the system minimum.
+            // Workspace panel, Activity strip, and status line stacked under it. A 452-DIP client
+            // minimum keeps a readable detail surface; larger system minima remain authoritative.
             const info = Win32.messagePointer(*c.MINMAXINFO, lparam);
+            const minimum_width = minimumWindowWidth(hwnd, app.dpi);
+            if (minimum_width > info.ptMinTrackSize.x) info.ptMinTrackSize.x = minimum_width;
             const minimum = minimumWindowHeight(hwnd, app.dpi);
             if (minimum > info.ptMinTrackSize.y) info.ptMinTrackSize.y = minimum;
             result.* = 0;
@@ -9867,7 +10029,7 @@ fn onWindowMessage(
             if (app.model.currentGraph()) |graph| app.canvas.syncNodeOffsets(graph.nodes.items);
             _ = app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = logical_right, .bottom = logical_bottom });
             const offered_version = if (app.update_state.state == .available) app.update_version else "";
-            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface);
+            GraphCanvas.paint(hdc, logical_right, logical_bottom, &app.model, inspection, app.selected_worktree_path, app.sidebar_scroll, app.status(), offered_version, app.ingress_error, app.connectionFailureVisible(), app.worktree_state, app.declared_entry_ids.items, app.kept_worktree_paths.items, app.allocator, &app.canvas, &app.sidebar_state, app.sidebar_hover_y, app.workspace_controls, app.surface, app.selection_active);
             app.update_lock.unlock();
             if (app.workspace_controls.panel_visible or app.surface == .workspace) {
                 if (app.surface == .workspace) {
@@ -9883,7 +10045,7 @@ fn onWindowMessage(
                             );
                             TerminalWorkspace.Workspace.paintQuickChatBar(
                                 hdc,
-                                if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                                WorkspaceControls.railPresentation(logical_right, app.workspace_controls).rail_right,
                                 logical_right,
                                 presentation,
                             );
@@ -9901,7 +10063,7 @@ fn onWindowMessage(
                             TerminalWorkspace.Workspace.paintLoopBar(
                                 hdc,
                                 app.allocator,
-                                if (app.workspace_controls.rail_visible) Tokens.sidebar_width else 0,
+                                WorkspaceControls.railPresentation(logical_right, app.workspace_controls).rail_right,
                                 workspace_right,
                                 graph.project.name,
                                 node.title,
@@ -10171,6 +10333,10 @@ fn onWindowMessage(
         },
         Accessibility.wm_header_focus => {
             result.* = 0;
+            if (Accessibility.worktreeIdentityPayload(GraphCanvas.headerIdentity(.overflow)) == wparam) {
+                result.* = if (app.focusHeader(.overflow)) 1 else 0;
+                return true;
+            }
             for (GraphCanvas.header_actions) |action| {
                 if (Accessibility.worktreeIdentityPayload(GraphCanvas.headerIdentity(action)) == wparam) {
                     result.* = if (app.focusHeader(action)) 1 else 0;
@@ -10209,6 +10375,11 @@ fn onWindowMessage(
             return true;
         },
         c.WM_ACTIVATEAPP => {
+            const selection_active = wparam != 0;
+            if (app.selection_active != selection_active) {
+                app.selection_active = selection_active;
+                _ = c.InvalidateRect(hwnd, null, 0);
+            }
             if (wparam == 0) {
                 app.cancelCanvasInteraction();
             } else {
@@ -10235,9 +10406,11 @@ fn onWindowMessage(
                 return true;
             }
             if (app.header_focus != null) app.leaveHeader(false);
+            const rail_presentation = WorkspaceControls.railPresentation(client.right, app.workspace_controls);
+            const overlay_rail_hit = overlayRailOwnsPointer(x, y, rail_presentation);
             const canvas_bounds = GraphCanvas.renderBounds(client.right, client.bottom, app.workspace_controls);
             const rail_bounds = GraphCanvas.attentionRailLayout(.{ .left = canvas_bounds.left, .top = canvas_bounds.top, .right = canvas_bounds.right, .bottom = canvas_bounds.bottom });
-            if (GraphCanvas.attentionRailShown(&app.model, app.surface) and
+            if (!overlay_rail_hit and GraphCanvas.attentionRailShown(&app.model, app.surface) and
                 x >= rail_bounds.review.left and x < rail_bounds.review.right and
                 y >= rail_bounds.review.top and y < rail_bounds.review.bottom)
             {
@@ -10332,7 +10505,12 @@ fn onWindowMessage(
                 }
             }
             if (x >= rail_left and y < workspace_top) {
-                const bounds = c.RECT{ .left = rail_left, .top = Tokens.header_height, .right = client.right, .bottom = workspace_top };
+                const bounds = c.RECT{
+                    .left = routing.canvas.left,
+                    .top = routing.canvas.top,
+                    .right = routing.canvas.right,
+                    .bottom = routing.canvas.bottom,
+                };
                 if (app.surface != .workspace) {
                     if (GraphCanvas.hitTestZoomControl(x, y, bounds)) |control| {
                         const center_x = @divTrunc(bounds.left + bounds.right, 2);
@@ -10771,7 +10949,13 @@ fn onWindowMessage(
                 _ = c.ReleaseCapture();
                 if (app.model.graph) |graph| {
                     const client = logicalClientRect(hwnd, app.dpi);
-                    const bounds = c.RECT{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = client.bottom - Tokens.workspace_height };
+                    const canvas_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+                    const bounds = c.RECT{
+                        .left = canvas_bounds.left,
+                        .top = canvas_bounds.top,
+                        .right = canvas_bounds.right,
+                        .bottom = canvas_bounds.bottom,
+                    };
                     if (GraphModel.findNodeIndexByID(graph.nodes.items, source_id)) |source| {
                         if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
                             if (target != source) app.createEdgeBetweenIDs(source_id, graph.nodes.items[target].id);
@@ -12241,6 +12425,83 @@ test "input routing bounds follow hidden workspace panel and rail" {
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
 }
 
+test "responsive sidebar overlay bounds give rail input and UIA precedence over canvas" {
+    const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+    const rail = WorkspaceControls.railPresentation(671, controls);
+    const routing = inputBounds(671, 900, controls);
+    try std.testing.expectEqual(WorkspaceControls.RailMode.overlay, rail.mode);
+    try std.testing.expectEqual(@as(i32, 0), routing.canvas.left);
+    try std.testing.expectEqual(Tokens.sidebar_width, routing.rail_left);
+    try std.testing.expectEqual(WheelRegion.sidebar, wheelRegion(Tokens.sidebar_width - 1, 300, routing, controls));
+    try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(Tokens.sidebar_width, 300, routing, controls));
+    try std.testing.expect(overlayRailOwnsPointer(Tokens.sidebar_width - 1, Tokens.header_height, rail));
+    try std.testing.expect(!overlayRailOwnsPointer(Tokens.sidebar_width, Tokens.header_height, rail));
+    try std.testing.expect(!overlayRailOwnsPointer(Tokens.sidebar_width - 1, Tokens.header_height - 1, rail));
+
+    const clipped = clipCanvasAccessibilityBounds(
+        .{
+            .left = physicalCoordinate(100, 144),
+            .top = physicalCoordinate(50, 144),
+            .right = physicalCoordinate(400, 144),
+            .bottom = physicalCoordinate(300, 144),
+        },
+        rail,
+        144,
+    );
+    try std.testing.expectEqual(physicalCoordinate(Tokens.sidebar_width, 144), clipped.left);
+    try std.testing.expectEqual(physicalCoordinate(400, 144), clipped.right);
+    try std.testing.expectEqualDeep(
+        std.mem.zeroes(c.RECT),
+        clipCanvasAccessibilityBounds(
+            .{
+                .left = physicalCoordinate(20, 144),
+                .top = physicalCoordinate(50, 144),
+                .right = physicalCoordinate(200, 144),
+                .bottom = physicalCoordinate(300, 144),
+            },
+            rail,
+            144,
+        ),
+    );
+}
+
+test "responsive sidebar hit precedence consumes an attention action under a hidden overlay rail" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(c.SetWindowPos(
+        app.window.hwnd,
+        null,
+        0,
+        0,
+        physicalCoordinate(452, app.dpi),
+        physicalCoordinate(900, app.dpi),
+        c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+    ) != 0);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\responsive","name":"Responsive"},"nodes":[{"id":"a","title":"A","state":"failed","presence":"awaitingInput"},{"id":"b","title":"B","state":"failed","presence":"awaitingInput"}],"edges":[]}}}
+    );
+    app.surface = .project;
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    const canvas = GraphCanvas.renderBounds(452, 900, app.workspace_controls);
+    const review = GraphCanvas.attentionRailLayout(.{
+        .left = canvas.left,
+        .top = canvas.top,
+        .right = canvas.right,
+        .bottom = canvas.bottom,
+    }).review;
+    const x = Tokens.sidebar_width - 1;
+    const y = review.top + 1;
+    try std.testing.expect(GraphCanvas.attentionRailShown(&app.model, app.surface));
+    try std.testing.expect(x >= review.left and x < review.right);
+
+    var result: c.LRESULT = 0;
+    const lparam: c.LPARAM = @intCast(x | (y << 16));
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, lparam, &result));
+    try std.testing.expectEqual(@as(?usize, 0), app.model.selectedIndex());
+    try std.testing.expect(!app.canvas.dragging);
+}
+
 test "sidebar UIA bounds clip hidden rows instead of sharing visible hit rectangles" {
     try std.testing.expectEqualDeep(
         c.RECT{ .left = 12, .top = Sidebar.content_top, .right = 232, .bottom = Sidebar.content_top + 8 },
@@ -12595,7 +12856,7 @@ test "parity sidebar navigation Jump and worktree tail scrolling preserve folds"
         remote_path,
         "Target project",
         \\[{"id":"target-root","title":"Target root","loopType":"turnBased","state":"idle"},{"id":"target-child","title":"Target child","loopType":"turnBased","state":"idle"}]
-        ,
+    ,
         \\[{"id":"target-edge","from":"target-root","to":"target-child","kind":"handoff"}]
         ,
     );
@@ -12842,8 +13103,8 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
-                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
-                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
+                            sink.name(index), bounds.left,        bounds.top,   bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,         banner.right, banner.bottom, case.dpi,
                             case.width,       app.sidebar_scroll,
                         },
                     );
@@ -12897,6 +13158,7 @@ fn paintedIngressFooter(app: *App, sidebar_bottom: i32, update: bool) !?c.RECT {
         hdc,
         &app.model,
         app.surface,
+        app.selection_active,
         app.currentWorktreeInspection(),
         "",
         0,
@@ -13262,6 +13524,7 @@ fn paintSidebarBitmap(app: *App, viewport_bottom: i32, update: bool, scroll: i32
         dc,
         &app.model,
         app.surface,
+        app.selection_active,
         app.currentWorktreeInspection(),
         "",
         scroll,
@@ -13519,8 +13782,38 @@ test "sidebar footer collapses the error footer then the banner to keep a 52 px 
     try std.testing.expect(reachable >= 48);
 }
 
+test "responsive sidebar enforces a minimum client width at standard DPIs" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+        var info = std.mem.zeroes(c.MINMAXINFO);
+        info.ptMinTrackSize.x = 100;
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        const minimum_width = physicalCoordinate(WorkspaceControls.min_detail_width, dpi);
+        try std.testing.expectEqual(minimum_width, info.ptMinTrackSize.x);
+
+        info.ptMinTrackSize.x = minimum_width + 50;
+        try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_GETMINMAXINFO, 0, @bitCast(@intFromPtr(&info)), &result));
+        try std.testing.expectEqual(minimum_width + 50, info.ptMinTrackSize.x);
+    }
+}
+
+test "application activation tracks only sidebar selection paint state" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    const surface = app.surface;
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_ACTIVATEAPP, 0, 0, &result));
+    try std.testing.expect(!app.selection_active);
+    try std.testing.expectEqual(surface, app.surface);
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_ACTIVATEAPP, 1, 0, &result));
+    try std.testing.expect(app.selection_active);
+    try std.testing.expectEqual(surface, app.surface);
+}
+
 test "the minimum window height keeps a 52 px sidebar scroll region and at least one published row with the panel, strip, banner and error footer" {
-    for ([_]u32{ 96, 144 }) |dpi| {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
         var app = try overviewTestApp(dpi);
         defer deinitOverviewTestApp(&app);
         var info = std.mem.zeroes(c.MINMAXINFO);
@@ -17241,7 +17534,7 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
 test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17282,7 +17575,7 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
 
 test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17367,7 +17660,7 @@ test "workspace layout: restore keeps a pane whose session zmx could not reach, 
 
 test "workspace layout: a loop's shells are neither ended nor forgotten while zmx cannot reach their session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17389,7 +17682,7 @@ test "workspace layout: a loop's shells are neither ended nor forgotten while zm
 
 test "workspace layout: a shell whose daemon refused the connection is gone: its record is forgotten and nothing is killed" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17404,7 +17697,7 @@ test "workspace layout: a shell whose daemon refused the connection is gone: its
 
 test "live terminal: opening a loop whose session zmx could not reach waits and attaches only once it answers" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -17560,7 +17853,7 @@ const nodes_full = node_loop_a ++ "," ++
 
 test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once the daemon's own answer agrees, and only those" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const other_project = "C:\\another-project";
     const alias_project = try std.mem.replaceOwned(u8, std.testing.allocator, fixture.project, "\\", "/");
@@ -17603,7 +17896,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
 
 test "workspace layout: an empty or partial first snapshot sweeps nothing that the full snapshot still holds" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-a", &.{ .{ .id = "loop-a", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_two } });
@@ -17638,7 +17931,7 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
 
 test "workspace layout: a layout saved after this shell started is another shell's and is never swept" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Written while this shell runs, as a second shell sharing the support directory would.
     try fixture.saveLoopLayout(fixture.project, "other-shells-loop", &.{ .{ .id = "other-shells-loop", .agent = true }, .{ .id = shell_uuid_one } });
@@ -18245,7 +18538,7 @@ test "workspace layout: a stale or revisionless frame that names the loop again 
 /// A layout older than this shell, with a recorded live shell session, for a loop the project's
 /// first usable snapshot will not name; the shell saw only an empty graph of the project before.
 fn emptyFirstGraphWithOldLayout(fixture: *LiveTerminalFixture) !i128 {
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
@@ -18291,7 +18584,7 @@ test "workspace layout: after a reconnect a project the shell holds no snapshot 
 
 test "workspace layout: a project first opened after a reconnect is left alone too" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18314,7 +18607,7 @@ test "workspace layout: a project first opened after a reconnect is left alone t
 
 test "workspace layout: a reconnect before the shell's first poll or snapshot still ends the age sweep" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18339,7 +18632,7 @@ test "workspace layout: a reconnect before the shell's first poll or snapshot st
 
 test "workspace layout: a snapshot queued before the transport failed arms nothing while the client is not connected" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18369,7 +18662,7 @@ test "workspace layout: a snapshot queued before the transport failed arms nothi
 
 test "workspace layout: a look the age sweep started for a layout the shell never held does not outlive the connection" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18742,7 +19035,7 @@ test "workspace layout: an empty graph, and a project the shell does not hold, a
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Node ids are uuids; the daemon names a loop's session after the uppercase one.
     const node_uuid = shell_uuid_seven;
@@ -18767,7 +19060,7 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
 
 test "workspace layout: a layout that cannot be attributed to the deleted loop ends nothing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -18790,7 +19083,7 @@ test "workspace layout: a layout that cannot be attributed to the deleted loop e
 
 test "workspace layout: deleting a loop ends only recorded, live, shell-shaped sessions nothing else names" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const foreign = "other-" ++ shell_uuid_two;
     // A layout from an earlier shell, a stale copy or a hand edit can record anything as a
@@ -18820,7 +19113,7 @@ test "workspace layout: deleting a loop ends only recorded, live, shell-shaped s
 
 test "workspace layout: a loop's shells are ended only after a successful session listing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -18944,7 +19237,7 @@ test "workspace layout: a corrupt, foreign or newer-schema loop layout is kept a
 
 test "workspace layout: a live session that only a layout names is never ended without proof the shell made it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // A foreign session that happens to look like a shell's: lowercase uuid, live, no node's
     // id, named by no other layout. The name shape is not provenance.
@@ -18964,7 +19257,7 @@ test "workspace layout: a live session that only a layout names is never ended w
 
 test "workspace layout: a tab's session is recorded as the shell's own when minted and forgotten once ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const workspace = &fixture.workspace;
@@ -18995,7 +19288,7 @@ test "workspace layout: a tab's session is recorded as the shell's own when mint
 
 test "workspace layout: a layout scan cut short by its cap refuses the kill instead of assuming nothing claims it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -19017,7 +19310,7 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
 
 test "workspace layout: a session another loop's record names is never ended by a different loop's retirement" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // The window in a second shell sharing this layout directory: it has recorded a fresh
     // session for its own loop-a, while a stale layout of the deleted gone-loop names the uuid.
@@ -19037,7 +19330,7 @@ test "workspace layout: a session another loop's record names is never ended by 
 /// sequence waits for each attach to finish before the next save.
 fn expectClaimAndRecordSeenByAttach(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -19120,7 +19413,7 @@ fn attachStartCount(dir: std.fs.Dir) !usize {
 
 test "workspace layout: New Tab and Split with no free surface slot fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -19160,7 +19453,7 @@ test "workspace layout: New Tab and Split with no free surface slot fail before 
 
 test "workspace layout: New Tab and Split with every free slot reserved by a pending restore fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -19242,7 +19535,7 @@ test "workspace layout: a failed rollback save leaves the claim on disk, never a
 
 test "workspace layout: restore drops a loop layout's claimed pane whose session was never started" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -19269,7 +19562,7 @@ test "workspace layout: restore drops a loop layout's claimed pane whose session
 
 test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -19293,7 +19586,7 @@ test "workspace layout: an unreadable unrelated layout defers the cleanup, and t
 
 test "workspace layout: a corrupt layout that cannot be set aside is left as it is and its loop is not opened" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const truncated = "{\"schemaVersion\":2,\"project\":\"";
@@ -19397,8 +19690,7 @@ fn expectNewLoopAtTopRight(app: *App) !void {
     const expected = GraphCanvas.addButtonBounds(.{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = client.bottom });
     try std.testing.expectEqualDeep((AccessibilityBounds{ .logical = expected }).physicalRect(app.dpi), button.rect);
     try std.testing.expect(App.childTextEquals(app.empty_global_overview_button, "New Node"));
-    try std.testing.expectEqual(@as(c.LONG, c.BS_OWNERDRAW),
-        c.GetWindowLongW(app.empty_global_overview_button, c.GWL_STYLE) & c.BS_TYPEMASK);
+    try std.testing.expectEqual(@as(c.LONG, c.BS_OWNERDRAW), c.GetWindowLongW(app.empty_global_overview_button, c.GWL_STYLE) & c.BS_TYPEMASK);
     try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
 }
 
@@ -24031,6 +24323,127 @@ test "header presentation follows destinations and keeps sidebar independent" {
     }
 }
 
+test "responsive header overflow publishes context actions and routes hidden UIA actions without showing the window" {
+    const HeaderSink = struct {
+        count: usize = 0,
+        identities: [16][64]u8 = undefined,
+        lengths: [16]usize = [_]usize{0} ** 16,
+        canvas_bounds: ?c.RECT = null,
+        canvas_under_rail: bool = false,
+
+        fn syncCanvasBounds(self: *@This(), bounds: c.RECT) void {
+            self.canvas_bounds = bounds;
+        }
+
+        fn syncElements(
+            self: *@This(),
+            _: []const u8,
+            elements: []const Accessibility.DynamicElement,
+            _: WorktreeStatus.Policy,
+            _: Accessibility.WorktreeCapabilities,
+        ) void {
+            self.count = 0;
+            for (elements) |element| {
+                if (element.parent == 4 and element.right > element.left and element.bottom > element.top and
+                    element.left < Tokens.sidebar_width)
+                {
+                    self.canvas_under_rail = true;
+                }
+                if (!std.mem.startsWith(u8, element.identity, "header-") or self.count == self.identities.len) continue;
+                const len = @min(element.identity.len, self.identities[self.count].len);
+                @memcpy(self.identities[self.count][0..len], element.identity[0..len]);
+                self.lengths[self.count] = len;
+                self.count += 1;
+            }
+        }
+
+        fn contains(self: *const @This(), identity: []const u8) bool {
+            for (0..self.count) |index| {
+                if (std.mem.eql(u8, self.identities[index][0..self.lengths[index]], identity)) return true;
+            }
+            return false;
+        }
+    };
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(c.SetWindowPos(
+        app.window.hwnd,
+        null,
+        0,
+        0,
+        480,
+        900,
+        c.SWP_NOZORDER | c.SWP_NOACTIVATE,
+    ) != 0);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    const client = c.RECT{ .left = 0, .top = 0, .right = 480, .bottom = 900 };
+    for ([_]GraphCanvas.Surface{ .project, .overview, .quick_chats }) |surface| {
+        app.surface = surface;
+        const header = app.headerPresentation();
+        try std.testing.expect(header.contains(.jump));
+        try std.testing.expect(header.layout(client.right).bounds(.jump) != null);
+        try std.testing.expect(header.layout(client.right).bounds(.overflow) == null);
+        var sink: HeaderSink = .{};
+        app.syncAccessibilityTo(&sink, client);
+        try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), sink.canvas_bounds.?.left);
+        try std.testing.expect(!sink.canvas_under_rail);
+        try std.testing.expect(sink.contains("header-jump:jump"));
+        try std.testing.expect(!sink.contains("header-overflow:actions"));
+    }
+
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"ssh://host/remote","name":"Remote"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("ssh://host/remote"));
+    app.surface = .project;
+    try std.testing.expectEqualStrings("Remote", app.headerPresentation().title);
+    try std.testing.expectEqualStrings("Remote", app.headerPresentation().context);
+    var remote_sink: HeaderSink = .{};
+    app.syncAccessibilityTo(&remote_sink, client);
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), remote_sink.canvas_bounds.?.left);
+    try std.testing.expect(!remote_sink.canvas_under_rail);
+    try std.testing.expect(remote_sink.contains("header-jump:jump"));
+
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\local"));
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    app.surface = .workspace;
+    app.workspace_controls.panel_visible = false;
+    const workspace_header = app.headerPresentation();
+    const workspace_layout = workspace_header.layout(client.right);
+    try std.testing.expect(workspace_header.contains(.toggle_panel));
+    try std.testing.expect(workspace_layout.bounds(.overflow) != null);
+    try std.testing.expect(workspace_layout.bounds(.toggle_panel) == null);
+    var workspace_sink: HeaderSink = .{};
+    app.syncAccessibilityTo(&workspace_sink, client);
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), workspace_sink.canvas_bounds.?.left);
+    try std.testing.expect(!workspace_sink.canvas_under_rail);
+    try std.testing.expect(workspace_sink.contains("header-overflow:actions"));
+    try std.testing.expect(!workspace_sink.contains("header-toggle-panel:control"));
+
+    const all_actions = GraphCanvas.Header{
+        .attention_count = 1,
+        .notice = .{ .total = 4, .reclaimable = 1, .blocked = 3 },
+        .notice_name = "Project",
+        .panel_visible = false,
+    };
+    for (GraphCanvas.header_actions) |action| {
+        try std.testing.expectEqual(action, headerOverflowAction(all_actions, headerOverflowCommand(action)).?);
+    }
+    try std.testing.expect(headerOverflowAction(all_actions, header_overflow_command_base - 1) == null);
+    try std.testing.expectEqual(GraphCanvas.HeaderAction.toggle_panel, headerOverflowAction(workspace_header, headerOverflowCommand(.toggle_panel)).?);
+
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("header-toggle-panel:control")));
+    try std.testing.expect(app.workspace_controls.panel_visible);
+    try std.testing.expect(app.invokeHeaderOverflowCommand(headerOverflowCommand(.toggle_panel)));
+    try std.testing.expect(!app.workspace_controls.panel_visible);
+}
+
 test "canvas visual finish header rail and zoom publish shared DPI geometry without a desktop" {
     const Sink = struct {
         canvas: ?c.RECT = null,
@@ -24638,6 +25051,7 @@ test "header UIA identities hash to distinct payloads" {
         "header-worktree:worktrees",
         "header-jump:jump",
         "header-toggle-panel:control",
+        "header-overflow:actions",
         "needs-you-header:needs-you",
         "activity-header:activity",
         "quick-chat-new:empty-canvas",
