@@ -882,10 +882,9 @@ pub fn paint(
                         drawEntryOrigin(hdc, allocator, graph.nodes.items.len, roles, geometry, band, false);
                     }
                     drawEdges(hdc, graph, state);
-                    drawEdgeLabels(hdc, allocator, graph, state);
+                    drawGraphEdgeLabels(hdc, allocator, graph.nodes.items, graph.edges.items, geometry);
                     for (graph.nodes.items, 0..) |node, index| {
-                        drawLoopCardShadow(hdc, allocator, node, nodeBounds(index, state), state, roles[index],
-                            needsAttention(node, graph.nodes.items, graph.edges.items), model.selectedIndex() == index);
+                        drawLoopCardShadow(hdc, allocator, node, nodeBounds(index, state), state, roles[index], needsAttention(node, graph.nodes.items, graph.edges.items), model.selectedIndex() == index);
                     }
                     for (graph.nodes.items, 0..) |node, index| {
                         drawNode(
@@ -1057,9 +1056,9 @@ fn drawOverview(
         const geometry = GraphGeometry{ .state = state, .overview = .{ .model = model, .graph_index = graph_index, .bounds = bounds } };
         drawEntryOrigin(hdc, allocator, graph.nodes.items.len, roles, geometry, lane, true);
         drawGraphEdges(hdc, graph.nodes.items, graph.edges.items, geometry, false);
+        drawGraphEdgeLabels(hdc, allocator, graph.nodes.items, graph.edges.items, geometry);
         for (graph.nodes.items, 0..) |node, node_index| {
-            drawLoopCardShadow(hdc, allocator, node, overviewCardBounds(model, graph_index, node_index, bounds, state),
-                state, roles[node_index], needsAttention(node, graph.nodes.items, graph.edges.items), false);
+            drawLoopCardShadow(hdc, allocator, node, overviewCardBounds(model, graph_index, node_index, bounds, state), state, roles[node_index], needsAttention(node, graph.nodes.items, graph.edges.items), false);
         }
         var index: usize = 0;
         while (index < graph.nodes.items.len) : (index += 1) {
@@ -1849,44 +1848,49 @@ fn drawEdges(hdc: c.HDC, graph: GraphModel.Graph, state: *const CanvasState) voi
 }
 
 fn drawEdgeLabels(hdc: c.HDC, allocator: std.mem.Allocator, graph: GraphModel.Graph, state: *const CanvasState) void {
-    var placed: [128]c.RECT = undefined;
-    var placed_count: usize = 0;
-    for (graph.edges.items, 0..) |edge, index| {
-        const from = connectorPosition(graph.nodes.items, edge.from, true, state) orelse continue;
-        const to = connectorPosition(graph.nodes.items, edge.to, false, state) orelse continue;
-        const selected = if (state.selected_edge_id.len != 0)
-            std.mem.eql(u8, edge.id, state.selected_edge_id)
-        else
-            state.selected_edge == index;
-        const color = if (selected)
-            Tokens.rgb(Tokens.canvas_selection)
-        else if (edge.fired or edge.fire_count > 0)
-            0x006BD58D
-        else
-            edgeKindColor(edge.kind);
-        const label_result = edgeLabel(allocator, edge);
-        defer if (label_result) |owned| allocator.free(owned) else |_| {};
-        const label = if (label_result) |text| text else |err| switch (err) {
-            error.OutOfMemory => "Edge label unavailable (out of memory)",
-            error.InvalidUtf8 => "Edge label unavailable (invalid text)",
-        };
-        const center_x = @divTrunc(from.x + to.x, 2);
-        var label_y = if (@abs(to.y - from.y) < 40)
-            @min(from.y, to.y) - 76
-        else
-            @divTrunc(from.y + to.y, 2) - 10;
-        var bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
-        var attempts: usize = 0;
-        while (attempts < 12 and overlapsPlaced(bounds, placed[0..placed_count])) : (attempts += 1) {
-            label_y += 24;
-            bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
-        }
-        if (placed_count < placed.len) {
-            placed[placed_count] = bounds;
-            placed_count += 1;
-        }
-        drawTextRect(hdc, allocator, label, bounds, 10, color, c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    drawGraphEdgeLabels(hdc, allocator, graph.nodes.items, graph.edges.items, .{ .state = state });
+}
+
+fn drawGraphEdgeLabels(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    geometry: GraphGeometry,
+) void {
+    for (edges) |edge| {
+        const label = canvasEdgeLabel(allocator, edge) catch |err| {
+            std.log.warn("Canvas edge label formatting failed for {s}: {s}", .{ edge.id, @errorName(err) });
+            continue;
+        } orelse continue;
+        defer allocator.free(label);
+        const bounds = graphEdgeLabelBounds(nodes, edge, geometry) orelse continue;
+        drawTextRect(
+            hdc,
+            allocator,
+            label,
+            bounds,
+            scaledValue(10, geometry.state.zoom),
+            blendCardColor(0x007ACDFF, Tokens.canvas_tone, 80),
+            c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS,
+        );
     }
+}
+
+fn graphEdgeLabelBounds(
+    nodes: []const GraphModel.Node,
+    edge: GraphModel.Edge,
+    geometry: GraphGeometry,
+) ?c.RECT {
+    const middle = (graphEdgeRoute(nodes, edge, geometry) orelse return null).point(0.5);
+    const top = middle.y + scaledValue(1, geometry.state.zoom);
+    const half_width = scaledValue(74, geometry.state.zoom);
+    return rect(
+        middle.x - half_width,
+        top,
+        middle.x + half_width,
+        top + scaledValue(20, geometry.state.zoom),
+    );
 }
 
 fn overlapsPlaced(candidate: c.RECT, placed: []const c.RECT) bool {
@@ -1908,6 +1912,11 @@ fn edgeKindColor(kind: []const u8) u32 {
     if (std.mem.eql(u8, kind, "message")) return 0x00D6A649;
     if (std.mem.eql(u8, kind, "spawn")) return 0x00C77DFF;
     return Tokens.rgb(Tokens.canvas_edge);
+}
+
+fn canvasEdgeLabel(allocator: std.mem.Allocator, edge: GraphModel.Edge) !?[]u8 {
+    if (edge.cycle_guard == null or edge.fire_count <= 0) return null;
+    return try std.fmt.allocPrint(allocator, "retry ×{d}", .{edge.fire_count});
 }
 
 fn edgeLabel(allocator: std.mem.Allocator, edge: GraphModel.Edge) ![]u8 {
@@ -6029,17 +6038,7 @@ fn verifyPaintContract(dib: ParityDib, fixture: *const PaintExportFixture, alloc
     try std.testing.expectEqual(@as(?usize, 0), model.selectedIndex());
     try std.testing.expectEqual(@as(usize, 0), model.activity.items.len);
     const edge = graph.edges.items[0];
-    const from = connectorPosition(graph.nodes.items, edge.from, true, &state).?;
-    const to = connectorPosition(graph.nodes.items, edge.to, false, &state).?;
-    const label_x = @divTrunc(from.x + to.x, 2);
-    const label_y = @min(from.y, to.y) - 76;
-    const label_bounds = rect(label_x - 74, label_y, label_x + 74, label_y + 20);
-    try std.testing.expect(label_bounds.left >= viewport.left and label_bounds.top >= viewport.top);
-    try std.testing.expect(label_bounds.right <= viewport.right and label_bounds.bottom <= viewport.bottom);
-    const label = try edgeLabel(allocator, edge);
-    defer allocator.free(label);
-    try std.testing.expectEqualStrings("handoff", label);
-    try std.testing.expect(dib.count(label_bounds, edgeKindColor(edge.kind)) > 0);
+    try std.testing.expect(try canvasEdgeLabel(allocator, edge) == null);
     try std.testing.expect(dib.nonBackgroundPixels(Tokens.canvas_tone) > 10_000);
 }
 
@@ -6346,8 +6345,6 @@ fn verifyPaint764Contract(
                 state.zoom,
             );
         }
-        var placed_edge_labels: [128]c.RECT = undefined;
-        var placed_edge_label_count: usize = 0;
         for (graph.edges.items) |edge| {
             const from = connectorPosition(graph.nodes.items, edge.from, true, &state) orelse
                 return error.Paint764EdgeSourceMissing;
@@ -6359,7 +6356,6 @@ fn verifyPaint764Contract(
                 return error.Paint764EdgeTargetMissing;
             try std.testing.expectEqual(nodeBounds(from_index, &state).right, from.x);
             try std.testing.expectEqual(nodeBounds(to_index, &state).left, to.x);
-            const center_x = @divTrunc(from.x + to.x, 2);
             const center_y = @divTrunc(from.y + to.y, 2);
             try std.testing.expectEqual(from.y, to.y);
             const stroke_sample = rect(from.x + 8, center_y - 3, from.x + 49, center_y + 4);
@@ -6370,23 +6366,7 @@ fn verifyPaint764Contract(
             const dash = graphEdgeDash(edge).?;
             drawRoute(mask.dc, route, 0x00FFFFFF, 1.5 * state.zoom, .{ scaledValue(dash[0], state.zoom), scaledValue(dash[1], state.zoom) });
             try verifyPaint764StrokeVisibility(dib, mask, stroke_sample, edgeKindColor(edge.kind), edge.id);
-            const label = try edgeLabel(allocator, edge);
-            defer allocator.free(label);
-            try std.testing.expectEqualStrings("handoff", label);
-            var label_y = if (@abs(to.y - from.y) < 40)
-                @min(from.y, to.y) - 76
-            else
-                @divTrunc(from.y + to.y, 2) - 10;
-            var label_bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
-            var attempts: usize = 0;
-            while (attempts < 12 and overlapsPlaced(label_bounds, placed_edge_labels[0..placed_edge_label_count])) : (attempts += 1) {
-                label_y += 24;
-                label_bounds = rect(center_x - 74, label_y, center_x + 74, label_y + 20);
-            }
-            if (placed_edge_label_count < placed_edge_labels.len) {
-                placed_edge_labels[placed_edge_label_count] = label_bounds;
-                placed_edge_label_count += 1;
-            }
+            try std.testing.expect(try canvasEdgeLabel(allocator, edge) == null);
         }
     } else {
         var painted_edges: usize = 0;
@@ -7676,7 +7656,7 @@ fn label858Fixture() !Paint764Fixture {
     var fixture = try paint764FixtureModel(std.testing.allocator, .project);
     errdefer fixture.model.deinit();
     _ = try fixture.model.updateFromFrame(
-        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"paint-764-project","project":{"path":"C:\\GraphCodeFixture\\CardStates","name":"Card States"},"nodes":[{"id":"label-0","title":"Layer zero","loopType":"goalBased","state":"idle"},{"id":"label-1","title":"Layer one","loopType":"goalBased","state":"idle"},{"id":"label-2","title":"Layer two","loopType":"goalBased","state":"idle"},{"id":"label-3","title":"Layer three","loopType":"goalBased","state":"idle"}],"edges":[{"id":"label-edge","from":"label-0","to":"label-3","kind":"handoff","condition":"always"}]}}}
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"id":"paint-764-project","project":{"path":"C:\\GraphCodeFixture\\CardStates","name":"Card States"},"nodes":[{"id":"label-0","title":"Layer zero","loopType":"goalBased","state":"idle"},{"id":"label-1","title":"Layer one","loopType":"goalBased","state":"idle"},{"id":"label-2","title":"Layer two","loopType":"goalBased","state":"idle"},{"id":"label-3","title":"Layer three","loopType":"goalBased","state":"idle"}],"edges":[{"id":"label-edge","from":"label-0","to":"label-3","kind":"handoff","condition":"always","cycleGuard":{"maxIterations":3},"fireCount":2}]}}}
     );
     if (!fixture.model.setSelectedIndex(1)) return error.Label858SelectionFailed;
     return fixture;
@@ -7706,18 +7686,6 @@ fn label858RgbDistance(a: u32, b: u32) !u32 {
     return distance;
 }
 
-const label858Glyphs = [_]c.POINT{
-    .{ .x = 390, .y = 195 }, .{ .x = 393, .y = 195 }, .{ .x = 362, .y = 197 },
-    .{ .x = 367, .y = 197 }, .{ .x = 373, .y = 197 }, .{ .x = 378, .y = 197 },
-    .{ .x = 384, .y = 197 }, .{ .x = 385, .y = 197 }, .{ .x = 389, .y = 197 },
-    .{ .x = 390, .y = 197 }, .{ .x = 391, .y = 197 }, .{ .x = 392, .y = 197 },
-    .{ .x = 393, .y = 197 }, .{ .x = 360, .y = 198 }, .{ .x = 371, .y = 198 },
-    .{ .x = 367, .y = 199 }, .{ .x = 368, .y = 199 }, .{ .x = 366, .y = 201 },
-    .{ .x = 367, .y = 201 }, .{ .x = 368, .y = 201 }, .{ .x = 378, .y = 201 },
-    .{ .x = 379, .y = 201 }, .{ .x = 380, .y = 201 }, .{ .x = 384, .y = 201 },
-    .{ .x = 385, .y = 201 },
-};
-
 const Label858Checks = struct {
     observations: usize = 0,
     failures: usize = 0,
@@ -7728,39 +7696,34 @@ const Label858Checks = struct {
     }
 
     fn finish(self: Label858Checks, name: []const u8, failure: anyerror) !void {
-        std.debug.print("label858 case={s} observations={d} failures={d} native-ready={}\n",
-            .{ name, self.observations, self.failures, GdiplusAA.isReady() });
+        std.debug.print("label858 case={s} observations={d} failures={d} native-ready={}\n", .{ name, self.observations, self.failures, GdiplusAA.isReady() });
         if (self.observations == 0) return error.Label858NoObservations;
         if (self.failures != 0) return failure;
     }
 };
 
-fn label858Text(hdc: c.HDC, color: u32, bounds: c.RECT) void {
-    drawTextRect(hdc, std.testing.allocator, "handoff", bounds, 10, color,
-        c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+fn label858Text(hdc: c.HDC, bounds: c.RECT, zoom: f32) void {
+    drawTextRect(hdc, std.testing.allocator, "retry ×2", bounds, scaledValue(10, zoom), blendCardColor(0x007ACDFF, Tokens.canvas_tone, 80), c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
 }
 
-fn label858Composition(dib: ParityDib, fixture: *const Paint764Fixture, state: *const CanvasState,
-    order: enum { below, above, omitted }) !void
-{
+fn label858Composition(dib: ParityDib, fixture: *const Paint764Fixture, state: *const CanvasState, order: enum { below, above, omitted }) !void {
     const graph = fixture.model.graph orelse return error.Label858GraphMissing;
+    const geometry = GraphGeometry{ .state = state };
+    const label_bounds = graphEdgeLabelBounds(graph.nodes.items, graph.edges.items[0], geometry) orelse
+        return error.Label858RouteMissing;
     fill(dib.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
     drawGrid(dib.dc, chrome764GraphBounds(), state);
     drawEdges(dib.dc, graph, state);
-    const color: u32 = if (state.selected_edge == 0) Tokens.canvas_selection else
-        if (graph.edges.items[0].fired) 0x006BD58D else edgeKindColor("handoff");
-    if (order == .below) label858Text(dib.dc, color, rect(303, 192, 451, 212));
+    if (order == .below) label858Text(dib.dc, label_bounds, state.zoom);
     const roles = try resolveCardRoles(std.testing.allocator, graph.nodes.items, graph.edges.items, &.{});
     defer std.testing.allocator.free(roles);
     for (graph.nodes.items, 0..) |node, index| {
-        drawLoopCardShadow(dib.dc, std.testing.allocator, node, nodeBounds(index, state), state, roles[index],
-            needsAttention(node, graph.nodes.items, graph.edges.items), fixture.model.selectedIndex() == index);
+        drawLoopCardShadow(dib.dc, std.testing.allocator, node, nodeBounds(index, state), state, roles[index], needsAttention(node, graph.nodes.items, graph.edges.items), fixture.model.selectedIndex() == index);
     }
     for (graph.nodes.items, 0..) |node, index| {
-        drawNode(dib.dc, std.testing.allocator, node, index, fixture.model.selectedIndex(),
-            graph.nodes.items, graph.edges.items, roles[index], null, &.{}, state);
+        drawNode(dib.dc, std.testing.allocator, node, index, fixture.model.selectedIndex(), graph.nodes.items, graph.edges.items, roles[index], null, &.{}, state);
     }
-    if (order == .above) label858Text(dib.dc, color, rect(303, 192, 451, 212));
+    if (order == .above) label858Text(dib.dc, label_bounds, state.zoom);
     if (c.GdiFlush() == 0) return error.Label858FlushFailed;
 }
 
@@ -7787,34 +7750,24 @@ test "loop card parity edge-label chrome 858 backing preserves lower-layer pixel
     defer lower.deinit();
     var checks = Label858Checks{};
     const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
-    for (0..3) |variant| {
-        var state = try label858State(&fixture, .{ .selected_edge = if (variant == 1) 0 else null });
-        defer state.deinitLayout();
-        graph.edges.items[0].fired = variant == 2;
-        fill(lower.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        var x: i32 = 303;
-        while (x < 451) : (x += 1)
-            fill(lower.dc, rect(x, 192, x + 1, 212), if (@mod(x, 2) == 0) 0x001B2418 else 0x00251820);
-        if (c.BitBlt(actual.dc, 0, 0, 1280, 720, lower.dc, 0, 0, c.SRCCOPY) == 0)
-            return error.Label858CopyFailed;
-        drawEdgeLabels(actual.dc, std.testing.allocator, graph.*, &state);
-        var y: i32 = 192;
-        while (y < 212) : (y += 1) {
-            for ([_]c.RECT{ rect(303, y, 323, y + 1), rect(431, y, 451, y + 1) }) |strip| {
-                x = strip.left;
-                while (x < strip.right) : (x += 1) {
-                    checks.expect(try label858RgbDistance(c.GetPixel(actual.dc, x, y), c.GetPixel(lower.dc, x, y)) == 0);
-                }
-            }
-        }
-        var ink: usize = 0;
-        for (label858Glyphs) |point| {
-            if (try label858RgbDistance(c.GetPixel(actual.dc, point.x, point.y), c.GetPixel(lower.dc, point.x, point.y)) > 20)
-                ink += 1;
-        }
-        checks.expect(ink == 25);
-        std.debug.print("label858 backing variant={d} protected=800 positive-glyphs={d}\n", .{ variant, ink });
-    }
+    var state = try label858State(&fixture, .{});
+    defer state.deinitLayout();
+    const label_bounds = graphEdgeLabelBounds(graph.nodes.items, graph.edges.items[0], .{ .state = &state }) orelse
+        return error.Label858RouteMissing;
+    fill(lower.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+    var x = label_bounds.left;
+    while (x < label_bounds.right) : (x += 1)
+        fill(lower.dc, rect(x, label_bounds.top, x + 1, label_bounds.bottom), if (@mod(x, 2) == 0) 0x001B2418 else 0x00251820);
+    if (c.BitBlt(actual.dc, 0, 0, 1280, 720, lower.dc, 0, 0, c.SRCCOPY) == 0)
+        return error.Label858CopyFailed;
+    drawEdgeLabels(actual.dc, std.testing.allocator, graph.*, &state);
+    const changed = try label858Differences(actual, lower, label_bounds);
+    checks.expect(changed > 0);
+    const left_strip = rect(label_bounds.left, label_bounds.top, label_bounds.left + scaledValue(20, state.zoom), label_bounds.bottom);
+    const right_strip = rect(label_bounds.right - scaledValue(20, state.zoom), label_bounds.top, label_bounds.right, label_bounds.bottom);
+    checks.expect(try label858Differences(actual, lower, left_strip) == 0);
+    checks.expect(try label858Differences(actual, lower, right_strip) == 0);
+    std.debug.print("label858 backing changed={d} bounds=({d},{d},{d},{d})\n", .{ changed, label_bounds.left, label_bounds.top, label_bounds.right, label_bounds.bottom });
     var empty = graph.*;
     empty.edges.items = &.{};
     const before = try actual.rgbSha256(std.testing.allocator);
@@ -7836,6 +7789,11 @@ test "loop card parity edge-label chrome 858 text is below normal and attention 
     var checks = Label858Checks{};
     var state = try label858State(&fixture, .{});
     defer state.deinitLayout();
+    const label_bounds = graphEdgeLabelBounds(
+        fixture.model.graph.?.nodes.items,
+        fixture.model.graph.?.edges.items[0],
+        .{ .state = &state },
+    ) orelse return error.Label858RouteMissing;
     for (0..2) |warm| {
         const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
         for ([_]usize{ 0, 3 }) |index|
@@ -7843,14 +7801,13 @@ test "loop card parity edge-label chrome 858 text is below normal and attention 
         try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
         try label858Composition(below, &fixture, &state, .below);
         try label858Composition(above, &fixture, &state, .above);
-        const region = rect(303, 192, 451, 212);
+        const region = label_bounds;
         const discriminating = try label858Differences(below, above, region);
         if (discriminating == 0) return error.Label858NondiscriminatingOrder;
         const mismatches = try label858Differences(actual, below, region);
         checks.expect(mismatches == 0);
         checks.expect(try label858Differences(actual, above, region) > 0);
-        std.debug.print("label858 order warm={d} pixels=2960 discriminating={d} correct-order-mismatches={d}\n",
-            .{ warm, discriminating, mismatches });
+        std.debug.print("label858 order warm={d} pixels=2960 discriminating={d} correct-order-mismatches={d}\n", .{ warm, discriminating, mismatches });
     }
     try checks.finish("shadow-order", error.Label858TextAboveShadows);
 }
@@ -7870,18 +7827,29 @@ test "loop card parity edge-label chrome 858 card face occludes overlapping labe
     defer state.deinitLayout();
     state.project_layout.?.positions[1].x -= 182;
     state.project_layout.?.positions[1].y += 106;
+    const label_bounds = graphEdgeLabelBounds(
+        fixture.model.graph.?.nodes.items,
+        fixture.model.graph.?.edges.items[0],
+        .{ .state = &state },
+    ) orelse return error.Label858RouteMissing;
+    const card = nodeBounds(1, &state);
+    const region = rect(
+        @max(label_bounds.left, card.left),
+        @max(label_bounds.top, card.top),
+        @min(label_bounds.right, card.right),
+        @min(label_bounds.bottom, card.bottom),
+    );
+    if (region.right <= region.left or region.bottom <= region.top) return error.Label858NondiscriminatingOcclusion;
     for ([_]usize{ 2, 1 }) |selected| {
         if (!fixture.model.setSelectedIndex(selected)) return error.Label858SelectionFailed;
         try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
         try label858Composition(omitted, &fixture, &state, .omitted);
         try label858Composition(above, &fixture, &state, .above);
-        const region = rect(350, 194, 410, 208);
         const discriminating = try label858Differences(omitted, above, region);
         if (discriminating == 0) return error.Label858NondiscriminatingOcclusion;
         const mismatches = try label858Differences(actual, omitted, region);
         checks.expect(mismatches == 0);
-        std.debug.print("label858 face selected={d} pixels=840 discriminating={d} mismatches={d}\n",
-            .{ selected, discriminating, mismatches });
+        std.debug.print("label858 face selected={d} pixels=840 discriminating={d} mismatches={d}\n", .{ selected, discriminating, mismatches });
     }
     try checks.finish("face-occlusion", error.Label858TextAboveFace);
 }
@@ -7902,74 +7870,19 @@ test "loop card parity edge-label chrome 858 placement and viewport boundaries r
             try chrome764Map(expected, dpi);
             var state = try label858State(&fixture, .{ .zoom = zoom, .pan_x = 17, .pan_y = 9 });
             defer state.deinitLayout();
-            const left: i32 = @intFromFloat(252 * zoom + 17);
-            const width: i32 = @intFromFloat(250 * zoom);
-            const top0: i32 = @intFromFloat(84 * zoom + 9);
-            const top3: i32 = @intFromFloat(224 * zoom + 9);
-            const height: i32 = @intFromFloat(96 * zoom);
-            const cy = @divTrunc(top0 + top3 + height, 2);
-            const cx = left + @divTrunc(width, 2);
             for ([_]ParityDib{ actual, expected }) |dib| {
                 fill(dib.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
                 if (c.IntersectClipRect(dib.dc, 223, 35, 1000, 620) == c.ERROR) return error.Label858ClipFailed;
             }
             drawEdgeLabels(actual.dc, std.testing.allocator, graph, &state);
-            label858Text(expected.dc, edgeKindColor("handoff"), rect(cx - 74, cy - 10, cx + 74, cy + 10));
+            const label_bounds = graphEdgeLabelBounds(graph.nodes.items, graph.edges.items[0], .{ .state = &state }) orelse
+                return error.Label858RouteMissing;
+            label858Text(expected.dc, label_bounds, state.zoom);
             const hash = try actual.rgbSha256(std.testing.allocator);
             checks.expect(std.mem.eql(u8, &hash, &(try expected.rgbSha256(std.testing.allocator))));
-            std.debug.print("label858 placement dpi={d} zoom={d} pan=17,9 expected=({d},{d},148,20) full-rgb-clip-check=true\n",
-                .{ dpi, zoom, cx - 74, cy - 10 });
+            std.debug.print("label858 placement dpi={d} zoom={d} pan=17,9 expected=({d},{d},148,20) full-rgb-clip-check=true\n", .{ dpi, zoom, label_bounds.left, label_bounds.top });
         }
     }
-    var actual = try ParityDib.init(1280, 720);
-    defer actual.deinit();
-    var expected = try ParityDib.init(1280, 720);
-    defer expected.deinit();
-    for ([_]i32{ 39, 40 }) |delta| {
-        var state = try label858State(&fixture, .{});
-        defer state.deinitLayout();
-        state.project_layout.?.positions[3].y += @as(f32, @floatFromInt(delta - 140));
-        fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        drawEdgeLabels(actual.dc, std.testing.allocator, graph, &state);
-        const y: i32 = if (delta == 39) 56 else 142;
-        label858Text(expected.dc, edgeKindColor("handoff"), rect(303, y, 451, y + 20));
-        const hash = try actual.rgbSha256(std.testing.allocator);
-        checks.expect(std.mem.eql(u8, &hash, &(try expected.rgbSha256(std.testing.allocator))));
-    }
-    var edges: [130]GraphModel.Edge = undefined;
-    @memset(&edges, graph.edges.items[0]);
-    var crowded_state = try label858State(&fixture, .{});
-    defer crowded_state.deinitLayout();
-    for ([_]usize{ 2, 128, 129, 130 }) |count| {
-        var crowded = graph;
-        crowded.edges.items = edges[0..count];
-        fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
-        drawEdgeLabels(actual.dc, std.testing.allocator, crowded, &crowded_state);
-        for (0..count) |index| {
-            const y: i32 = 192 + @as(i32, @intCast(@min(index, 12))) * 24;
-            label858Text(expected.dc, edgeKindColor("handoff"), rect(303, y, 451, y + 20));
-        }
-        if (c.GdiFlush() == 0) return error.Label858FlushFailed;
-        var support_mismatches: usize = 0;
-        for (0..actual.height) |y| {
-            for (0..actual.width) |x| {
-                const offset = y * actual.row_bytes + x * 4;
-                const a = actual.pixels[offset .. offset + 3];
-                const b = expected.pixels[offset .. offset + 3];
-                const ground = [_]u8{ 11, 12, 10 };
-                if (std.mem.eql(u8, a, &ground) != std.mem.eql(u8, b, &ground))
-                    support_mismatches += 1;
-            }
-        }
-        checks.expect(support_mismatches == 0);
-        std.debug.print("label858 collision edges={d} attempts=12 record-limit=128 exact-ink-support-mismatches={d}\n",
-            .{ count, support_mismatches });
-    }
-    const placed = [_]c.RECT{rect(303, 192, 451, 212)};
-    checks.expect(!overlapsPlaced(rect(451, 192, 599, 212), &placed));
-    checks.expect(overlapsPlaced(rect(450, 192, 598, 212), &placed));
     try checks.finish("placement-clip", error.Label858PlacementChanged);
 }
 
@@ -7982,62 +7895,67 @@ test "loop card parity edge-label chrome 858 project-only change preserves the c
     var omitted = try ParityDib.init(1280, 720);
     defer omitted.deinit();
     var checks = Label858Checks{};
-    for (0..2) |warm| {
-        const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
-        for ([_]usize{ 0, 3 }) |index|
-            try chrome764Replace(&graph.nodes.items[index].state, if (warm == 0) "idle" else "failed");
-        for (0..3) |variant| {
-            var state = try label858State(&fixture, .{ .selected_edge = if (variant == 1) 0 else null });
-            defer state.deinitLayout();
-            graph.edges.items[0].fired = variant == 2;
-            try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
-            try label858Composition(omitted, &fixture, &state, .omitted);
-            var pairs: usize = 0;
-            var ink: usize = 0;
-            var minimum: u32 = std.math.maxInt(u32);
-            for (label858Glyphs) |point| {
-                const glyph = c.GetPixel(actual.dc, point.x, point.y);
-                const no_label = c.GetPixel(omitted.dc, point.x, point.y);
-                if (try label858RgbDistance(glyph, no_label) >= 100) ink += 1;
-                for ([_]i32{ 302, 451 }) |hx| {
-                    const distance = try label858RgbDistance(glyph, c.GetPixel(actual.dc, hx, point.y));
-                    minimum = @min(minimum, distance);
-                    checks.expect(distance >= 100);
-                    pairs += 1;
-                }
-            }
-            checks.expect(ink > 0);
-            checks.expect(pairs == 50);
-            std.debug.print("label858 fixed-legibility warm={d} variant={d} frozen-glyphs=25 positive-ink={d} pairs={d} minimum-l1={d} fixed-margin=100\n",
-                .{ warm, variant, ink, pairs, minimum });
-        }
-    }
     var state = try label858State(&fixture, .{});
     defer state.deinitLayout();
-    const graph = fixture.model.graph orelse return error.Label858GraphMissing;
+    const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
+    try chrome764Paint(actual, &fixture, .project, &state, null, &.{});
+    try label858Composition(omitted, &fixture, &state, .omitted);
+    const label_bounds = graphEdgeLabelBounds(graph.nodes.items, graph.edges.items[0], .{ .state = &state }) orelse
+        return error.Label858RouteMissing;
+    const changed = try label858Differences(actual, omitted, label_bounds);
+    checks.expect(changed > 0);
     checks.expect(hitTest(graph.nodes.items, 377, 132, &state, chrome764GraphBounds()) == 0);
     checks.expect(contentSize(&fixture.model, .project, &state).width > 0);
-    const label = try edgeLabel(std.testing.allocator, graph.edges.items[0]);
+    const label = (try canvasEdgeLabel(std.testing.allocator, graph.edges.items[0])) orelse
+        return error.Label858LabelMissing;
     defer std.testing.allocator.free(label);
-    checks.expect(std.mem.eql(u8, label, "handoff"));
-    var outside = std.crypto.hash.sha2.Sha256.init(.{});
-    if (c.GdiFlush() == 0) return error.Label858FlushFailed;
-    for (0..actual.height) |y| {
-        for (0..actual.width) |x| {
-            if (x >= 303 and x < 451 and y >= 192 and y < 212) continue;
-            const offset = y * actual.row_bytes + x * 4;
-            outside.update(actual.pixels[offset .. offset + 3]);
-        }
-    }
-    const outside_digest = outside.finalResult();
-    std.debug.print("label858 project-outside-label rgb-sha256={s} pixels=918640\n",
-        .{std.fmt.bytesToHex(outside_digest, .lower)});
+    checks.expect(std.mem.eql(u8, label, "retry ×2"));
+    std.debug.print("label858 project guarded-label changed={d} bounds=({d},{d},{d},{d})\n", .{ changed, label_bounds.left, label_bounds.top, label_bounds.right, label_bounds.bottom });
     var overview_fixture = try paint764FixtureModel(std.testing.allocator, .overview);
     defer overview_fixture.model.deinit();
+    overview_fixture.model.graphs.items[0].edges.items[0].cycle_guard = .{ .max_iterations = 3 };
+    overview_fixture.model.graphs.items[0].edges.items[0].fire_count = 2;
     try paint764TestSurface(actual, &overview_fixture, std.testing.allocator, .overview);
+    var overview_state = try modelTestState(
+        &overview_fixture.model,
+        .{ .zoom = paint764_zoom },
+        chrome764GraphBounds(),
+    );
+    defer overview_state.deinitLayout();
+    const overview_graph = overview_fixture.model.graphs.items[0];
+    const overview_bounds = graphEdgeLabelBounds(
+        overview_graph.nodes.items,
+        overview_graph.edges.items[0],
+        .{
+            .state = &overview_state,
+            .overview = .{
+                .model = &overview_fixture.model,
+                .graph_index = 0,
+                .bounds = chrome764GraphBounds(),
+            },
+        },
+    ) orelse return error.Label858RouteMissing;
+    var overview_quiet = try ParityDib.init(1280, 720);
+    defer overview_quiet.deinit();
+    overview_fixture.model.graphs.items[0].edges.items[0].fire_count = 0;
+    try paint764TestSurface(overview_quiet, &overview_fixture, std.testing.allocator, .overview);
+    const overview_text_only = rect(
+        overview_bounds.left,
+        overview_bounds.top + scaledValue(5, overview_state.zoom),
+        overview_bounds.right,
+        overview_bounds.bottom,
+    );
+    const overview_label_pixels = try label858Differences(actual, overview_quiet, overview_text_only);
+    checks.expect(overview_label_pixels > 0);
+    std.debug.print("label858 overview guarded-label text-only-differences={d} bounds=({d},{d},{d},{d})\n", .{
+        overview_label_pixels,
+        overview_text_only.left,
+        overview_text_only.top,
+        overview_text_only.right,
+        overview_text_only.bottom,
+    });
     const overview_digest = try actual.rgbSha256(std.testing.allocator);
-    std.debug.print("label858 overview-preservation rgb-sha256={s} byte-count={d} unix-seconds={d}\n",
-        .{ std.fmt.bytesToHex(overview_digest, .lower), actual.width * actual.height * 3, std.time.timestamp() });
+    std.debug.print("label858 overview-preservation rgb-sha256={s} byte-count={d} unix-seconds={d}\n", .{ std.fmt.bytesToHex(overview_digest, .lower), actual.width * actual.height * 3, std.time.timestamp() });
     try checks.finish("preservation-legibility", error.Label858LegibilityOrCardContractChanged);
 }
 
@@ -9042,6 +8960,81 @@ test "edge drag state cancels without leaving a selection" {
     try std.testing.expectEqualStrings("node-3", state.endEdgeDrag().?);
     try std.testing.expect(!state.edge_dragging);
     try std.testing.expectEqualStrings("", state.edge_drag_source_id);
+}
+
+test "edge label parity 765 is quiet at rest" {
+    const cases = [_]GraphModel.Edge{
+        .{ .from = @constCast("a"), .to = @constCast("b"), .kind = @constCast("handoff"), .condition = @constCast("always") },
+        .{ .from = @constCast("a"), .to = @constCast("b"), .kind = @constCast("message"), .condition = @constCast("onSuccess") },
+        .{ .from = @constCast("a"), .to = @constCast("b"), .kind = @constCast("spawn"), .condition = @constCast("always"), .fired = true, .fire_count = 1 },
+        .{ .from = @constCast("a"), .to = @constCast("b"), .kind = @constCast("handoff"), .condition = @constCast("always"), .cycle_guard = .{ .max_iterations = 3 } },
+    };
+    for (cases) |edge| {
+        try std.testing.expect(try canvasEdgeLabel(std.testing.allocator, edge) == null);
+    }
+}
+
+test "edge label parity 765 reports only fired guard pass count" {
+    const edge = GraphModel.Edge{
+        .from = @constCast("a"),
+        .to = @constCast("b"),
+        .kind = @constCast("handoff"),
+        .condition = @constCast("always"),
+        .cycle_guard = .{ .max_iterations = 3, .until = @constCast("done") },
+        .fire_count = 2,
+    };
+    const label = (try canvasEdgeLabel(std.testing.allocator, edge)) orelse return error.EdgeLabelMissing;
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("retry ×2", label);
+    const Exercise = struct {
+        fn run(allocator: std.mem.Allocator, value: GraphModel.Edge) !void {
+            const allocated = (try canvasEdgeLabel(allocator, value)) orelse return error.EdgeLabelMissing;
+            defer allocator.free(allocated);
+            try std.testing.expectEqualStrings("retry ×2", allocated);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Exercise.run, .{edge});
+}
+
+test "edge label parity 765 follows route midpoint below card chrome" {
+    var fixture = try label858Fixture();
+    defer fixture.model.deinit();
+    var state = try label858State(&fixture, .{});
+    defer state.deinitLayout();
+    const graph = &(fixture.model.graph orelse return error.Label858GraphMissing);
+    graph.edges.items[0].cycle_guard = .{ .max_iterations = 3 };
+    graph.edges.items[0].fire_count = 2;
+
+    var actual = try ParityDib.init(1280, 720);
+    defer actual.deinit();
+    var expected = try ParityDib.init(1280, 720);
+    defer expected.deinit();
+    fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+    fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+    drawEdgeLabels(actual.dc, std.testing.allocator, graph.*, &state);
+    const route = graphEdgeRoute(graph.nodes.items, graph.edges.items[0], .{ .state = &state }) orelse
+        return error.Label858RouteMissing;
+    const middle = route.point(0.5);
+    const top = middle.y + scaledValue(1, state.zoom);
+    drawTextRect(
+        expected.dc,
+        std.testing.allocator,
+        "retry ×2",
+        rect(middle.x - scaledValue(74, state.zoom), top, middle.x + scaledValue(74, state.zoom), top + scaledValue(20, state.zoom)),
+        scaledValue(10, state.zoom),
+        blendCardColor(0x007ACDFF, Tokens.canvas_tone, 80),
+        c.DT_CENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS,
+    );
+    if (c.GdiFlush() == 0) return error.Label858FlushFailed;
+    try std.testing.expectEqualSlices(u8, &try expected.rgbSha256(std.testing.allocator), &try actual.rgbSha256(std.testing.allocator));
+
+    graph.edges.items[0].cycle_guard = null;
+    graph.edges.items[0].fire_count = 0;
+    fill(actual.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+    fill(expected.dc, rect(0, 0, 1280, 720), Tokens.canvas_tone);
+    drawEdgeLabels(actual.dc, std.testing.allocator, graph.*, &state);
+    if (c.GdiFlush() == 0) return error.Label858FlushFailed;
+    try std.testing.expectEqualSlices(u8, &try expected.rgbSha256(std.testing.allocator), &try actual.rgbSha256(std.testing.allocator));
 }
 
 test "edge presentation distinguishes kind condition and fired state" {
