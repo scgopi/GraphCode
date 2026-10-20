@@ -24313,6 +24313,27 @@ test "Quick Chat remaining parity opens the daemon-owned chat instead of the pre
     try std.testing.expectEqualStrings("chat-b", workspace.launch_waits[0].session);
 }
 
+test "Quick Chat remaining parity same scope repairs daemon-owned agent metadata" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.layout.addTab("chat-1", false);
+    try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, false);
+    try std.testing.expect(!workspace.layout.tabs.items[0].panes.items[0].launches_agent);
+
+    try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, true);
+
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items.len);
+    try std.testing.expectEqualStrings("chat-1", workspace.layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
+}
+
 test "Quick Chat remaining parity empty canvas exposes top right and centered New Chat actions" {
     const Sink = struct {
         primary: c.RECT = std.mem.zeroes(c.RECT),

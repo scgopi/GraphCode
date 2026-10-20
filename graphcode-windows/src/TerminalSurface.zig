@@ -8534,40 +8534,6 @@ test "Quick Chat tab labels preserve saved pane role metadata" {
     try std.testing.expectEqualStrings("Agent", tabLabel(workspace.layout.tabs.items[2]));
 }
 
-test "Quick Chat remaining parity same scope repairs daemon-owned agent metadata" {
-    const allocator = std.testing.allocator;
-    var temporary = std.testing.tmpDir(.{});
-    defer temporary.cleanup();
-    const directory = try temporary.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(directory);
-    const layout_path = try std.fs.path.join(allocator, &.{ directory, "chat.json" });
-    defer allocator.free(layout_path);
-    var workspace = Workspace{
-        .parent = null,
-        .allocator = allocator,
-        .zmx_path = try allocator.dupe(u8, "missing-zmx.exe"),
-        .cwd = try allocator.dupe(u8, "."),
-        .input_queue = .{ .allocator = allocator },
-        .layout = try WorkspaceLayout.Layout.initForLoop(
-            allocator,
-            quick_chat_scope_project,
-            "chat-1",
-        ),
-        .layout_path = try allocator.dupe(u8, layout_path),
-        .project_key = try allocator.dupe(u8, quick_chat_scope_project),
-        .loop_id = try allocator.dupe(u8, "chat-1"),
-        .restore_retry_limit = 0,
-    };
-    defer workspace.deinit();
-    try workspace.layout.addTab("chat-1", false);
-
-    try workspace.scopeToLoop("chat-1", quick_chat_scope_project, true);
-
-    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items.len);
-    try std.testing.expectEqualStrings("chat-1", workspace.layout.tabs.items[0].panes.items[0].id);
-    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
-}
-
 const AttachOutputProbe = struct {
     input: []const u8,
     output: []u8,
