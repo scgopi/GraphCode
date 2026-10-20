@@ -855,7 +855,19 @@ PID and a caller's expected PID are separate nullable evidence fields; an
 expected PID is never substituted for an unavailable acquired PID. Only an
 actual nonzero/non-minus-one `IntPtr` and positive `Int32` reach `Snapshot`.
 An acquired/expected PID mismatch refuses ownership. The native snapshot's
-PID, creation-time, image and kernel checks are unchanged.
+PID, creation-time, image and kernel checks remain mandatory.
+
+Image-path attestation is a separate typed boundary after Handle/Id
+acquisition. A live retained generation that receives
+`QueryFullProcessImageNameW` error 5 is retried at most twice, for three total
+attempts with two 50 ms waits. Every attempt explicitly reacquires Handle/Id
+and rechecks native PID, creation FILETIME and kernel liveness; a changed
+generation refuses immediately. Other image-query errors do not retry.
+Exhaustion raises `ProcessImageAttestationUnavailable` with the actual PID,
+creation FILETIME, Win32 code and attempt count. Expected or CIM image text is
+never substituted for a missing live native image. If the held generation
+exits between attempts, existing kernel-exit and both-stream EOF gates still
+govern whether it is genuinely gone.
 
 Launch error formatting uses retained acquired PID evidence or the explicit
 word `UNAVAILABLE`, not another read of a disposed object. The original typed
@@ -871,16 +883,21 @@ The seven registered focused cases exercise actual not-started/disposed
 self-process wrappers, synthetic null/invalid/independent-failure accessor
 states, valid self kernel/CIM identity, PID/native mismatches, disposed tracked
 assert/stop/wait refusal, and the actual failed-launch handler/rollback/pending
-formatting path without starting a child:
+formatting path without starting a child. The valid-self and rollback groups
+also cover injected transient/persistent image error 5, generation change,
+typed refusal, and cleanup remaining pending/unproven without a kill:
 
 ```powershell
 pwsh -NoProfile -File Tools\windows\Tests\UiCaptureDriver.Tests.ps1 `
   -IdentityContractOnly -ScratchRoot C:\owned\fresh-identity-contracts
 ```
 
-The unchanged-source RED reaches the actual initial `Get-CapProcessIdentity`
-Snapshot binder with a null Handle; it does not enter the native method body.
-Controlled disposal demonstrates that reproduction mechanism, not the cause
-of either historical #849 occurrence. These self-process and synthetic
-contracts are not native child-lifecycle, full-suite, UIA, live B or parity
-evidence.
+The original unchanged-source RED reaches the actual initial
+`Get-CapProcessIdentity` Snapshot binder with a null Handle; it does not enter
+the native method body. The image-attestation RED uses an actual live
+self-process kernel generation and injects only the image-query Win32 result:
+the one-shot boundary refuses the first error 5 instead of retrying. Controlled
+disposal and injected error results demonstrate deterministic contract paths,
+not the cause of any historical #849 occurrence. These self-process and
+synthetic contracts are not native child-lifecycle, full-suite, UIA, live B or
+parity evidence.
