@@ -874,6 +874,7 @@ pub const Workspace = struct {
     pub fn scopeToLoop(self: *Workspace, loop: []const u8, layout_project: []const u8, launches_agent: bool) !void {
         if (loop.len == 0) return;
         if (std.mem.eql(u8, self.loop_id, loop) and std.mem.eql(u8, self.layout.project_key, layout_project)) {
+            if (launches_agent and try self.layout.ensureAgentFirst(loop)) try self.persistLayout();
             // Reopening the open loop picks up a saved pane an earlier restore could not attach.
             self.expediteShellRestores();
             self.restorePersistedSurfaces(loop, 1);
@@ -886,7 +887,7 @@ pub const Workspace = struct {
         errdefer self.allocator.free(new_loop);
         var new_layout = try self.loadLoopLayout(new_path, layout_project, loop);
         errdefer new_layout.deinit();
-        if (launches_agent) try new_layout.ensureAgentFirst(loop);
+        if (launches_agent) _ = try new_layout.ensureAgentFirst(loop);
 
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         self.clearAllRecreateState();
@@ -8531,6 +8532,40 @@ test "Quick Chat tab labels preserve saved pane role metadata" {
     try std.testing.expectEqualStrings("Shell", tabLabel(workspace.layout.tabs.items[0]));
     try std.testing.expectEqualStrings("Agent", tabLabel(workspace.layout.tabs.items[1]));
     try std.testing.expectEqualStrings("Agent", tabLabel(workspace.layout.tabs.items[2]));
+}
+
+test "Quick Chat remaining parity same scope repairs daemon-owned agent metadata" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "chat.json" });
+    defer allocator.free(layout_path);
+    var workspace = Workspace{
+        .parent = null,
+        .allocator = allocator,
+        .zmx_path = try allocator.dupe(u8, "missing-zmx.exe"),
+        .cwd = try allocator.dupe(u8, "."),
+        .input_queue = .{ .allocator = allocator },
+        .layout = try WorkspaceLayout.Layout.initForLoop(
+            allocator,
+            quick_chat_scope_project,
+            "chat-1",
+        ),
+        .layout_path = try allocator.dupe(u8, layout_path),
+        .project_key = try allocator.dupe(u8, quick_chat_scope_project),
+        .loop_id = try allocator.dupe(u8, "chat-1"),
+        .restore_retry_limit = 0,
+    };
+    defer workspace.deinit();
+    try workspace.layout.addTab("chat-1", false);
+
+    try workspace.scopeToLoop("chat-1", quick_chat_scope_project, true);
+
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items.len);
+    try std.testing.expectEqualStrings("chat-1", workspace.layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
 }
 
 const AttachOutputProbe = struct {
