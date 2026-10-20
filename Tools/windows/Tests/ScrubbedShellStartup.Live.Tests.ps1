@@ -224,7 +224,7 @@ function Invoke-Case(
           }
         }
         "complete" {
-          foreach ($page in 1..4) {
+          foreach ($page in 1..5) {
             if (-not [ScrubbedStartupNative]::Command($onboarding, 4)) {
               throw "$name onboarding rejected primary action on page $page"
             }
