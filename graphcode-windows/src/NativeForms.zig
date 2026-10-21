@@ -1377,6 +1377,14 @@ fn sheetMessage(
     result: *c.LRESULT,
 ) bool {
     const state: *DialogState = @ptrCast(@alignCast(context orelse return false));
+    if (message == c.DM_GETDEFID) {
+        const primary = c.GetDlgItem(hwnd, @intCast(ok_id));
+        result.* = if (primary != null and c.IsWindowEnabled(primary) != 0)
+            @as(c.LRESULT, @intCast(ok_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16)
+        else
+            0;
+        return true;
+    }
     return handleFormMessage(hwnd, state, message, wparam, lparam, result);
 }
 
@@ -5017,6 +5025,30 @@ test "dialog framework: invalid draft disables the primary action" {
     syncValidation(&state);
     try std.testing.expect(validationReason(&state) == null);
     try std.testing.expect(c.IsWindowEnabled(primary) != 0);
+}
+
+test "dialog framework: enabled primary is the Enter default and invalid primary is not" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .promotion,
+        .promotion_target = .goal,
+        .parent = owner,
+        .dpi = Dpi.base_dpi,
+    };
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const primary = c.GetDlgItem(host.hwnd, @intCast(ok_id)) orelse return error.TestWindowCreationFailed;
+
+    _ = c.EnableWindow(primary, 1);
+    const enabled_default: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, ok_id), @as(u16, @truncate(enabled_default)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(enabled_default >> 16)));
+
+    _ = c.EnableWindow(primary, 0);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
 }
 
 test "dialog framework: static labels return an opaque sheet brush" {
