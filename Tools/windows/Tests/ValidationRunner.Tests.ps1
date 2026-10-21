@@ -3760,9 +3760,15 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm"') {
     throw "RED: UIA native-form checks still depend on desktop Window control discovery instead of the owned captionless sheet"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)function Wait-UiaOwnedSheetGoneByContentClass\(.*?\$sheetGone = \[GraphCodeUiaGateState\]::FindVisibleOwnedSheetByContentClass\(.*?if \(\$sheetGone -and \[GraphCodeUiaGateState\]::WindowIsEnabled\(\$owner\)\)') {
+    throw "RED: UIA sheet-close waits return before modal teardown re-enables the owner"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)\$renameDialog = Wait-UiaOwnedSheetByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent" \$fixtureRenameTitle' -or
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent"') {
     throw "RED: UIA Rename checks still depend on desktop Window control discovery instead of the owned captionless prompt sheet"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)\$deleteTarget = Find-FragmentByIdWithRetry \$root \$renameGraphIdentity \$rawWalker.*?\$deleteTargetSelection\.Select\(\).*?Require \$deleteTargetSelection\.Current\.IsSelected.*?UIA_DELETE_LOOP_TARGET.*?SendCommand\(\$shellWindow, 5103\)') {
+    throw "RED: UIA Delete Loop invocation does not re-establish the stable fixture selection after Rename"
   }
   if ($uiaLiveGateSource -notmatch '(?s)function Wait-DaemonCommandLog\(.*?\[Diagnostics\.Stopwatch\]::StartNew\(\).*?\$watch\.ElapsedMilliseconds -lt \$timeoutMilliseconds.*?throw "\$label did not reach the daemon command log within' -or
       $uiaLiveGateSource -notmatch '(?s)\$renameCommandJson = Wait-DaemonCommandLog \$daemonCommandLogPath.*?"Rename submission"' -or

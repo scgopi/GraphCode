@@ -1570,8 +1570,9 @@ function Wait-UiaOwnedSheetGoneByContentClass(
 ) {
   $watch = [Diagnostics.Stopwatch]::StartNew()
   do {
-    if ([GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-        [uint32]$processId, $owner, $contentClass) -eq [IntPtr]::Zero) {
+    $sheetGone = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+      [uint32]$processId, $owner, $contentClass) -eq [IntPtr]::Zero
+    if ($sheetGone -and [GraphCodeUiaGateState]::WindowIsEnabled($owner)) {
       return $true
     }
     Start-Sleep -Milliseconds 50
@@ -7476,6 +7477,16 @@ try {
   Write-Host "UIA_RENAME_OUTCOME graph='$renameGraphTitle' sidebar='$renameSidebarTitle' expected='UIA renamed loop' reason=gate-forces-daemon-connection-failure"
 
   $deleteLoopTitle = 'Delete “UIA loop A”?'
+  $deleteTarget = Find-FragmentByIdWithRetry $root $renameGraphIdentity $rawWalker
+  Require ($null -ne $deleteTarget) "Delete Loop could not reacquire the renamed fixture loop identity"
+  $deleteTargetSelection = $deleteTarget.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  )
+  $deleteTargetSelection.Select()
+  Require $deleteTargetSelection.Current.IsSelected `
+    "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
+  Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
+    "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
   Require ([GraphCodeUiaGateState]::SendCommand($shellWindow, 5103)) `
     "Delete Loop fixture command was rejected"
   $deleteLoopDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
