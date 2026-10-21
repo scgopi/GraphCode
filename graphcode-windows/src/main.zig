@@ -1,6 +1,7 @@
 const std = @import("std");
 const App = @import("App.zig").App;
 const Diagnostics = @import("Diagnostics.zig");
+const WindowsRollbackCleanup = @import("WindowsRollbackCleanup.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const build_options = @import("build_options");
@@ -22,6 +23,7 @@ pub fn main() !void {
             return;
         }
     }
+    WindowsRollbackCleanup.start(allocator);
     var app = App.init(allocator) catch |err| {
         if (err == error.InstanceAlreadyRunning) {
             @import("App.zig").restoreCurrentWorkspace(allocator) catch |restore_error| {
