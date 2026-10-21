@@ -4761,14 +4761,14 @@ pub const App = struct {
         defer self.allocator.free(path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        const title = std.fmt.allocPrint(
+        const delete_title = std.fmt.allocPrint(
             self.allocator,
             "Delete “{s}”?",
             .{graph.nodes.items[index].title},
         ) catch return;
-        defer self.allocator.free(title);
+        defer self.allocator.free(delete_title);
         if (!(NativeDialogs.confirm(self.window.hwnd, self.allocator, .{
-            .title = title,
+            .title = delete_title,
             .body = "Its terminal session is ended and every edge touching it is removed. This can't be undone.",
             .cancel_action = .{ .label = "Cancel", .role = .cancel },
             .primary_action = .{ .label = "Delete", .role = .destructive, .is_default = true },
