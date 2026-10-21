@@ -439,6 +439,10 @@ pub const PaintStyle = struct {
     is_opaque: bool,
 };
 
+fn handleResult(handle: anytype) c.LRESULT {
+    return @bitCast(@intFromPtr(handle));
+}
+
 pub fn controlPaintStyle(kind: ControlKind, enabled: bool) PaintStyle {
     return switch (kind) {
         .panel => .{ .background = Tokens.dialog_panel, .foreground = Tokens.dialog_body_text, .is_opaque = true },
@@ -483,7 +487,7 @@ pub const Brushes = struct {
             else => self.panel,
         };
         if (brush == null) return error.SheetBrushUnavailable;
-        return @intCast(@intFromPtr(brush));
+        return handleResult(brush);
     }
 };
 
@@ -929,7 +933,7 @@ fn attachHost(hwnd: c.HWND, lparam: c.LPARAM) ?*Host {
     const create = Win32.messagePointer(*const c.CREATESTRUCTW, lparam);
     const host: ?*Host = @ptrCast(@alignCast(create.lpCreateParams));
     if (host) |value| {
-        _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, @intCast(@intFromPtr(value)));
+        _ = c.SetWindowLongPtrW(hwnd, c.GWLP_USERDATA, @bitCast(@intFromPtr(value)));
         return value;
     }
     return null;
@@ -1507,6 +1511,13 @@ test "dialog framework: dark control paint helpers are opaque and preserve nativ
     }
     try std.testing.expectEqual(Tokens.dialog_field_background, controlPaintStyle(.edit, true).background);
     try std.testing.expectEqual(Tokens.dialog_muted_text, controlPaintStyle(.edit, false).foreground);
+}
+
+test "dialog framework: pointer-shaped handle results preserve high bits without checked casts" {
+    const raw = std.math.maxInt(usize) - 0x1234;
+    const handle = Win32.opaquePointerFromInt(c.HBRUSH, raw);
+    const result = handleResult(handle);
+    try std.testing.expectEqual(raw, @as(usize, @bitCast(result)));
 }
 
 test "dialog framework: rounded field and role button painting succeeds on an offscreen bitmap" {
