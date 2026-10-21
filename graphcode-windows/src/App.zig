@@ -8628,9 +8628,19 @@ pub const App = struct {
                         self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab()) catch return;
                     }
                 }
-                for ([_][]const u8{ "New Tab", "Split Right", "Split Down" }, 0..) |label, control_index| {
+                for (0..3) |control_index| {
                     const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
-                    const kind = if (control_index == 0) "workspace-new-tab" else if (control_index == 1) "workspace-split-right" else "workspace-split-down";
+                    const action = TerminalSurface.chromeActionForIndex(control_index) orelse unreachable;
+                    const kind: []const u8 = switch (action) {
+                        .split_right => "workspace-split-right",
+                        .split_down => "workspace-split-down",
+                        .new_tab => "workspace-new-tab",
+                    };
+                    const label: []const u8 = switch (action) {
+                        .split_right => "Split Right",
+                        .split_down => "Split Down",
+                        .new_tab => "New Tab",
+                    };
                     self.appendAccessibilityElement(&elements, &owned_identities, kind, "control", label, 4, .{ .physical = control_bounds }, false, true) catch return;
                 }
             }
@@ -15623,14 +15633,14 @@ const LiveTerminalFixture = struct {
 
     fn newTab(self: *LiveTerminalFixture) !void {
         const workspace = &self.workspace;
-        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
         try nativeClickCenter(&self.app, bounds);
         try expectNoTerminalFailure(&self.app);
     }
 
     fn splitRight(self: *LiveTerminalFixture) !void {
         const workspace = &self.workspace;
-        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 1);
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
         try nativeClickCenter(&self.app, bounds);
         try expectNoTerminalFailure(&self.app);
     }
@@ -17065,7 +17075,7 @@ test "workspace surface: native New Tab publishes every drawn tab to UIA and sta
         try fixture.waitFor(LiveTerminalFixture.shows, loop);
         try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
 
-        const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+        const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
         try nativeClickCenter(app, new_tab);
         try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
         try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
@@ -19361,7 +19371,7 @@ test "workspace surface: sidebar loop opens, New Tab, and Split Right attach vis
     try expectSameDirectory(fixture.worktree, loop_started_in);
 
     // Native New Tab: a plain shell with no session behind it, started in the loop's worktree.
-    const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+    const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
     try nativeClickCenter(app, new_tab);
     try expectNoTerminalFailure(app);
     try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
@@ -19374,10 +19384,12 @@ test "workspace surface: sidebar loop opens, New Tab, and Split Right attach vis
     try fixture.expectTerminalsInWorkspace(1);
 
     // Native Split Right of that shell: a second visible terminal beside it.
-    const split_right = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 1);
+    const split_right = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
     try nativeClickCenter(app, split_right);
     try expectNoTerminalFailure(app);
-    try std.testing.expectEqual(@as(usize, 2), (workspace.layout.selectedConst() orelse return error.TestExpectedTab).panes.items.len);
+    const selected = workspace.layout.selectedConst() orelse return error.TestExpectedTab;
+    try std.testing.expect(selected.split_direction == .horizontal);
+    try std.testing.expectEqual(@as(usize, 2), selected.panes.items.len);
     try fixture.expectTerminalsInWorkspace(2);
 }
 
@@ -21441,9 +21453,9 @@ test "DPI UIA terminal tab close and controls retain physical geometry" {
         .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 84, 462, 106 }, .{ 342, 124, 748, 146 }, .{ 456, 164, 1034, 186 } } },
         .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 466, 84, 700, 106 }, .{ 754, 124, 1160, 146 }, .{ 1042, 164, 1620, 186 } } },
         .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 676, 84, 700, 106 }, .{ 1124, 124, 1160, 146 }, .{ 1572, 164, 1620, 186 } } },
-        .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
-        .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
-        .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
+        .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
+        .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
+        .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
     });
 }
 
