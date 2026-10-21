@@ -20,6 +20,7 @@ param(
     [switch]$AdvisoryOlderContractOnly,
     [switch]$DAdapterContractOnly,
     [switch]$MatchedScenarioContractOnly,
+    [switch]$MatchedDpiContractOnly,
     [switch]$SeedPathContractOnly,
     [ValidateSet('All','ExitWait')][string]$SeedPathCase = 'All',
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
@@ -602,6 +603,9 @@ function Assert-CapRejects {
                 'CapNative|GetWindowRect|user32.dll|GetWindowRect',
                 'CapNative|GetClientRect|user32.dll|GetClientRect',
                 'CapNative|GetDpiForWindow|user32.dll|GetDpiForWindow',
+                'CapNative|GetWindowLongPtr|user32.dll|GetWindowLongPtrW',
+                'CapNative|GetMenu|user32.dll|GetMenu',
+                'CapNative|AdjustWindowRectExForDpi|user32.dll|AdjustWindowRectExForDpi',
                 'CapNative|SetWindowPos|user32.dll|SetWindowPos',
                 'CapNative|PrintWindow|user32.dll|PrintWindow',
                 'CapProcessJob|CreateJobObjectW|kernel32.dll|CreateJobObjectW',
@@ -616,8 +620,8 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 30 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static30 export contract differs.'
-            return @{ subcases = 30; evidence = 'API export resolution only, no native window or GUI action.' }
+            Assert-CapTest ($actual.Count -eq 33 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static33 export contract differs.'
+            return @{ subcases = 33; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -2499,6 +2503,33 @@ function New-CapMatchedTestJob {
     } | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
 }
 
+function New-CapMatchedDpiTestJob {
+    $job=New-CapMatchedTestJob
+    $job.sceneAdapter='S_MATCHED_V12_DPI_V1'
+    $job.captureContract=[pscustomobject][ordered]@{
+        geometrySchemaVersion=2L
+        phases=@('before','after')
+        sceneCountPerPhase=18L
+        placement='MEASURED_FIT_WORKAREA'
+        logicalClientWH=@(1440L,900L)
+        expectedWindowDpi=192L
+        dpiBase=96L
+        expectedPhysicalClientWH=@(2880L,1800L)
+        expectedAdjustedOuterWH=@(2906L,1910L)
+        minimumPhysicalWorkAreaWH=@(2906L,1910L)
+        windowStyleForAdjustment=47120384L
+        expectedRuntimeWindowStyle=315555840L
+        windowExStyle=0L
+        hasMenu=$true
+        geometryDerivation='AdjustWindowRectExForDpi'
+        canvasZoomPercentLogical=100L
+        rawCaptureResamplingAllowed=$false
+        cleanupReserveSeconds=90L
+        estimatedSeconds=1200L
+    }
+    return $job
+}
+
 function New-CapRestartTestEvidence {
     $project='C:\owned\Matched'
     $node='11111111-1111-4111-8111-000000000001'
@@ -2628,6 +2659,102 @@ function Invoke-CapMatchedContracts {
     }
     Invoke-CapTest 'matched manifest seals scene inventory and refuses premature restart success' {
         Invoke-CapMatchedManifestContract
+    }
+}
+
+function Invoke-CapMatchedDpiContracts {
+    Invoke-CapTest 'DPI matched geometry derives exact 96 and 192 physical frames' {
+        $job=New-CapMatchedDpiTestJob
+        Assert-CapSceneContract -Job $job
+        $style=47120384L
+        $at96=Get-CapDpiGeometry -LogicalClientWH @(1440,900) -ExpectedDpi 96 `
+            -WindowStyle $style -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,3000,2000) `
+            -ExpectedAdjustedOuterWH @(1456,959)
+        $at192=Get-CapDpiGeometry -LogicalClientWH @(1440,900) -ExpectedDpi 192 `
+            -WindowStyle $style -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,3000,2000) `
+            -ExpectedAdjustedOuterWH @(2906,1910)
+        Assert-CapTest (($at96.PhysicalClientWH -join ',') -ceq '1440,900' -and
+            ($at96.OuterWH -join ',') -ceq '1456,959' -and
+            ($at192.PhysicalClientWH -join ',') -ceq '2880,1800' -and
+            ($at192.OuterWH -join ',') -ceq '2906,1910' -and
+            ($at192.NonClientWH -join ',') -ceq '26,110' -and -not $at192.Resampled) `
+            'DPI-parametric exact frame derivation differs.'
+        return @{dpi96=$at96;dpi192=$at192;sceneContract='S_MATCHED_V12_DPI_V1'}
+    }
+    Invoke-CapTest 'DPI matched geometry refuses insufficient work area and invalid scaling' {
+        $arguments=@{LogicalClientWH=@(1440,900);ExpectedDpi=192;WindowStyle=47120384L
+            WindowExStyle=0L;HasMenu=$true;ExpectedAdjustedOuterWH=@(2906,1910)}
+        $small=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,1920,1032)} 'does not fit'
+        $shortWidth=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,2905,1910)} 'does not fit'
+        $shortHeight=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,2906,1909)} 'does not fit'
+        $fractional=Assert-CapRejects {
+            Get-CapDpiGeometry -LogicalClientWH @(1,1) -ExpectedDpi 144 -WindowStyle 47120384L `
+                -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,100,100)
+        } 'not integral'
+        $outer=Assert-CapRejects {
+            Get-CapDpiGeometry @arguments -WorkArea @(0,0,3000,2000) -ExpectedAdjustedOuterWH @(2905,1910)
+        } 'adjusted outer size differs'
+        return @{currentRdpRefused=$small;onePixelWidth=$shortWidth;onePixelHeight=$shortHeight
+            fractionalScaling=$fractional;wrongOuter=$outer}
+    }
+    Invoke-CapTest 'DPI matched logical zoom normalizes physical UIA width' {
+        $dpi96=Get-CapLogicalZoomEvidence -PhysicalWidth 250 -NaturalLogicalWidth 250 -Dpi 96
+        $dpi192=Get-CapLogicalZoomEvidence -PhysicalWidth 500 -NaturalLogicalWidth 250 -Dpi 192
+        Assert-CapTest ($dpi96.ZoomPercent -eq 100 -and $dpi192.ZoomPercent -eq 100 -and
+            $dpi192.MeasuredPhysicalWidth -eq 500 -and $dpi192.MeasuredLogicalWidth -eq 250) `
+            'DPI-normalized actual-size evidence differs.'
+        $unnormalized=Assert-CapRejects {
+            Get-CapLogicalZoomEvidence -PhysicalWidth 250 -NaturalLogicalWidth 250 -Dpi 192
+        } 'expected 100%'
+        return @{dpi96=$dpi96;dpi192=$dpi192;oldPhysicalWidthMutant=$unnormalized}
+    }
+    Invoke-CapTest 'DPI matched manifest preserves raw logical physical metadata without resampling' {
+        $job=New-CapMatchedDpiTestJob
+        $contract=$job.captureContract
+        $baseImage=[ordered]@{
+            captureMode='PRINTWINDOW';observedState=@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}
+            evidenceClassification='C8R_RDP_DPI192_QUALIFIED';geometrySchemaVersion=2L
+            geometryDerivation='AdjustWindowRectExForDpi';logicalClientWH=@(1440L,900L)
+            physicalClientBounds=@(0L,0L,2880L,1800L);clientBounds=@(0L,0L,2880L,1800L)
+            physicalOuterBounds=@(0L,0L,2906L,1910L);outerBounds=@(0L,0L,2906L,1910L)
+            nonClientWH=@(26L,110L);rawPixelWH=@(2906L,1910L);width=2906L;height=1910L
+            actualWindowDpi=192L;dpi=192L;dpiBase=96L;dpiScaleNumerator=192L;dpiScaleDenominator=96L
+            windowStyle=315555840L;windowStyleForAdjustment=47120384L;windowExStyle=0L;hasMenu=$true
+            physicalWorkAreaBounds=@(0L,0L,3000L,2000L);placement='MEASURED_FIT_WORKAREA';resampled=$false
+        }
+        $images=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {
+            $image=$baseImage | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+            $image | Add-Member -NotePropertyName phase -NotePropertyValue $phase
+            $image | Add-Member -NotePropertyName scene -NotePropertyValue $scene
+            $image
+        }})
+        $manifest=@{sceneAdapter='S_MATCHED_V12_DPI_V1';lane='S';status='COMPLETE';executionMode='LIVE_CAPTURE'
+            backendTurns=0;g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED';images=$images
+            realRestarts=@(@{phase='before';evidence=(New-CapRestartTestEvidence)},
+                @{phase='after';evidence=(New-CapRestartTestEvidence)})} |
+            ConvertTo-Json -Depth 40 | ConvertFrom-Json -DateKind String
+        Assert-CapMatchedManifest -Manifest $manifest -Job $job
+        foreach ($image in $manifest.images) {$null=Assert-CapMatchedDpiImage -Image $image -Contract $contract}
+        $mutations=@('resampled','dpi','logical','raw','outer','work')
+        foreach ($mutation in $mutations) {
+            $changed=$baseImage | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+            switch ($mutation) {
+                'resampled' {$changed.resampled=$true}
+                'dpi' {$changed.actualWindowDpi=96L}
+                'logical' {$changed.logicalClientWH=@(720L,450L)}
+                'raw' {$changed.rawPixelWH=@(1440L,900L)}
+                'outer' {
+                    $changed.physicalOuterBounds=@(0L,0L,3000L,2000L)
+                    $changed.outerBounds=@(0L,0L,3000L,2000L)
+                    $changed.rawPixelWH=@(3000L,2000L)
+                    $changed.width=3000L;$changed.height=2000L
+                }
+                'work' {$changed.physicalWorkAreaBounds=@(0L,0L,1920L,1032L)}
+            }
+            $null=Assert-CapRejects {Assert-CapMatchedDpiImage -Image $changed -Contract $contract} 'DPI-parametric matched image'
+        }
+        return @{images=$images.Count;positive=36;negative=$mutations.Count;mutations=$mutations
+            evidenceClassification='C8R_RDP_DPI192_QUALIFIED';resampled=$false}
     }
 }
 
@@ -3596,9 +3723,9 @@ function Invoke-CapDContracts {
                 Assert-CapTest ($errors.Count -eq 0) 'Current worker did not parse.'
                 $definitions=@($ast.FindAll({param($node)
                     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -cin @('Assert-CapOwnedPath','Get-CapBaseEnvironment')
+                    $node.Name -cin @('Assert-CapOwnedPath','Test-CapMatchedAdapter','Get-CapBaseEnvironment')
                 },$true))
-                Assert-CapTest ($definitions.Count -eq 2) 'Actual environment/path functions missing or duplicated.'
+                Assert-CapTest ($definitions.Count -eq 3) 'Actual environment/path functions missing or duplicated.'
                 foreach ($definition in $definitions) {. ([scriptblock]::Create($definition.Extent.Text))}
                 $expected=Join-Path $root 'fixtures\projects\D Offline Capture Fixture'
                 Assert-CapTest (-not (Test-Path -LiteralPath $expected)) 'Owned D project must start absent.'
@@ -6069,6 +6196,19 @@ if ($MatchedScenarioContractOnly) {
     exit 0
 }
 
+if ($MatchedDpiContractOnly) {
+    Invoke-CapMatchedDpiContracts
+    $passed=@($results | Where-Object passed -EQ $true).Count
+    $failed=@($results | Where-Object passed -EQ $false).Count
+    $report=[pscustomobject][ordered]@{suite='UiCaptureMatchedDpiContracts';executed=$results.Count
+        passed=$passed;failed=$failed;skipped=0;gui='NotExecuted';images=0;cases=@($results)
+        evidence='NATIVE_GEOMETRY_AND_SYNTHETIC_RECORDS_NO_WINDOW_LAUNCH'}
+    $report | ConvertTo-Json -Depth 35 | Set-Content (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne 4 -or $passed -ne 4 -or $failed -ne 0) {exit 1}
+    exit 0
+}
+
 if ($DAdapterContractOnly -and $DAdapterCase -cin @('SceneContract','FixtureDirectory')) {
     Invoke-CapDContracts
     Write-CapDContractReport
@@ -6111,7 +6251,9 @@ if ($DescendantMetadataContractOnly) {
 }
 
 if ($PrepareFixturesOnly) {
-    if ($ReceiptContractOnly -or $FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or $PrebuiltFixtureManifest) {
+    if ($ReceiptContractOnly -or $FixtureContractOnly -or $JournalTimingContractOnly -or
+        $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or
+        $MatchedDpiContractOnly -or $PrebuiltFixtureManifest) {
         throw 'Fixture preparation cannot also consume or run contract suites.'
     }
     $null = New-CapHarmlessTarget
@@ -6173,6 +6315,7 @@ try {
         Invoke-CapAppChildContracts
         Invoke-CapDContracts
         Invoke-CapMatchedContracts
+        Invoke-CapMatchedDpiContracts
         Invoke-CapSeedPathContracts
         Invoke-CapIdentityContracts
         Invoke-CapSelectorRefusalContracts
@@ -7228,6 +7371,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; skipped = 0; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 180 } else { 177 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 184 } else { 181 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

@@ -63,6 +63,16 @@ function Write-CapWorkerLog {
     if ($workerLog) { [IO.File]::AppendAllText($workerLog, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }
 }
 
+function Test-CapMatchedAdapter {
+    return $job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')
+}
+
+function Test-CapMatchedDpiAdapter {
+    return $job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1'
+}
+
 function Write-CapJsonAtomic {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -237,7 +247,7 @@ function Assert-CapAcceptedInputs {
         zmx = (Join-Path $root 'runtime\zmx.exe'); before = (Join-Path $root 'inputs\graphcode-before.exe')
         after = (Join-Path $root 'inputs\graphcode-after.exe')
     }
-    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         foreach ($item in @(@('daemon','graphcoded.exe'),@('backendFixture','copilot.exe'))) {
             $expectedHashes[$item[0]]=$job.binaries.($item[0]).sha256
             $paths[$item[0]]=Join-Path $root "runtime\$($item[1])"
@@ -315,7 +325,7 @@ function Get-CapBaseEnvironment {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         $project=Assert-CapOwnedPath (Join-Path $root 'fixtures\projects\Matched')
         $null=New-Item -ItemType Directory -Path $project -Force
         return @{
@@ -410,7 +420,7 @@ function Start-CapOfflineSeed {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     $isD=$job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS=$job.sceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $isS=Test-CapMatchedAdapter
     $arguments=if ($isS) {
         $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
         $null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
@@ -625,7 +635,11 @@ function Measure-CapSceneZoom {
     $automationIdPrefix = $probeMatch.Groups['AutomationIdPrefix'].Value
     $element = Wait-CapVisibleElement -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
         -Name $name -AutomationIdPrefix $automationIdPrefix
-    return Measure-CapZoom -Element $element -NaturalWidth $NaturalWidth
+    $dpi=if ($AppRun.PSObject.Properties['Placement'] -and
+        $AppRun.Placement.PSObject.Properties['ActualDpi']) {
+        [uint32]$AppRun.Placement.ActualDpi
+    } else {96}
+    return Measure-CapZoom -Element $element -NaturalWidth $NaturalWidth -Dpi $dpi
 }
 
 function Save-CapSceneImage {
@@ -641,10 +655,18 @@ function Save-CapSceneImage {
     $metrics = Get-CapWindowMetrics -Window $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
     $expectedOuter = @(30, 30, 1486, 989)
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
+    $isSDpi=Test-CapMatchedDpiAdapter
     if ($isD) {$expectedOuter=@($AppRun.Placement.outerBounds)}
-    $height=if ($isD) {952} else {900}
-    if (($expectedOuter -join ',') -cne (@($metrics.OuterBounds) -join ',') -or $metrics.Dpi -ne 96 -or
-        ($metrics.ClientBounds -join ',') -cne "0,0,1440,$height") {
+    if ($isSDpi) {$expectedOuter=@($AppRun.Placement.OuterBounds)}
+    $expectedDpi=if ($isSDpi) {$AppRun.Placement.ActualDpi} else {96}
+    $expectedClient=if ($isSDpi) {
+        "0,0,$($AppRun.Placement.PhysicalClientWH[0]),$($AppRun.Placement.PhysicalClientWH[1])"
+    } else {
+        $height=if ($isD) {952} else {900}
+        "0,0,1440,$height"
+    }
+    if (($expectedOuter -join ',') -cne (@($metrics.OuterBounds) -join ',') -or
+        $metrics.Dpi -ne $expectedDpi -or ($metrics.ClientBounds -join ',') -cne $expectedClient) {
         throw "Unexpected window geometry for ${Phase}/${SceneName}: $(ConvertTo-Json -InputObject $metrics -Compress)."
     }
     if ($ZoomEvidence -and [Math]::Abs([double]$ZoomEvidence.ZoomPercent - 100.0) -gt 1.0) {
@@ -693,11 +715,35 @@ function Save-CapSceneImage {
         $record | Add-Member -NotePropertyName sceneLabel -NotePropertyValue $(if ($SceneName -ceq 'd-chat-history-roles') {'Observed production-restored history chat Shell state; actual baseline UIA role recorded'} else {$SceneName})
         $AppRun.DActions.Clear()
     }
-    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         $record | Add-Member -NotePropertyName sceneAdapter -NotePropertyValue $job.sceneAdapter
         $record | Add-Member -NotePropertyName observedState -NotePropertyValue $AppRun.SObservation
         $record | Add-Member -NotePropertyName actions -NotePropertyValue @($AppRun.SActions)
         $record | Add-Member -NotePropertyName captureUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o'))
+        if ($isSDpi) {
+            $geometry=$AppRun.Placement
+            $record | Add-Member -NotePropertyMembers @{
+                evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
+                geometrySchemaVersion=2L
+                geometryDerivation=$geometry.GeometryDerivation
+                logicalClientWH=@($geometry.LogicalClientWH)
+                physicalClientBounds=@($metrics.ClientBounds)
+                physicalOuterBounds=@($metrics.OuterBounds)
+                nonClientWH=@($geometry.NonClientWH)
+                rawPixelWH=@([long]$capture.Width,[long]$capture.Height)
+                actualWindowDpi=[long]$metrics.Dpi
+                dpiBase=[long]$geometry.DpiBase
+                dpiScaleNumerator=[long]$geometry.DpiScaleNumerator
+                dpiScaleDenominator=[long]$geometry.DpiScaleDenominator
+                windowStyle=[long]$metrics.Style
+                windowStyleForAdjustment=[long]$geometry.WindowStyle
+                windowExStyle=[long]$metrics.ExStyle
+                hasMenu=[bool]$metrics.HasMenu
+                physicalWorkAreaBounds=@($geometry.PhysicalWorkAreaBounds)
+                placement=$geometry.Placement
+                resampled=$false
+            }
+        }
         $AppRun.SActions.Clear()
     }
     Write-CapWorkerJournalSnapshot -Kind 'Progress'
@@ -749,10 +795,17 @@ function New-CapManifest {
             @{name='missing-bound-chat-workspace-tabs';status='NotExecuted';reason='Production events route away; component coverage only'},
             @{name='saved-Agent-Split-role-labels';status='NotExecuted';reason='Production listing prunes absent panes; only two chat seeds authorized'})
     }
-    if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         $result.sceneAdapter=$job.sceneAdapter;$result.lane='S';$result.requiredSceneNames=@(Get-CapMatchedSceneNames)
         $result.g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
         $result.backendTurns=0;$result.realRestarts=@($realRestarts)
+        if (Test-CapMatchedDpiAdapter) {
+            $result.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
+            $result.geometrySchemaVersion=2L
+            $result.logicalClientWH=@($job.captureContract.logicalClientWH)
+            $result.expectedWindowDpi=[long]$job.captureContract.expectedWindowDpi
+            $result.rawCaptureResamplingAllowed=$false
+        }
     }
     return $result
 }
@@ -803,7 +856,7 @@ function Start-CapGraphCodeApp {
     $arguments = if ($rehearsal) { [string[]]@($job.rehearsalTarget.arguments) } else { [string[]]@() }
     if ($rehearsal) { $role = 'rehearsal-target' }
     $isD=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS=$job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $isS=Test-CapMatchedAdapter
     $workingDirectory = if ($rehearsal) {$Roots.Peer} elseif ($isS) {Join-Path $root 'fixtures\projects\Matched'} elseif ($isD) {Join-Path $root 'fixtures\projects\D Offline Capture Fixture'} else {Join-Path $root 'fixtures\projects\Alpha'}
     if (-not $rehearsal) {
         $shellSession = 'graphcode-' + $SessionPrefix + '-' + [guid]::Empty.ToString('D')
@@ -853,10 +906,44 @@ function Start-CapGraphCodeApp {
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity -X $placement.x -Y $placement.y -Width $placement.width -Height $placement.height
         $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
         $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
+    } elseif (Test-CapMatchedDpiAdapter) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $area=[Windows.Forms.Screen]::FromHandle($window).WorkingArea
+        $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
+        $contract=$job.captureContract
+        if ($beforeMetrics.Dpi -ne $contract.expectedWindowDpi -or
+            $beforeMetrics.Style -ne $contract.expectedRuntimeWindowStyle -or
+            $beforeMetrics.ExStyle -ne $contract.windowExStyle -or
+            $beforeMetrics.HasMenu -ne $contract.hasMenu) {
+            throw "DPI-parametric runtime window identity differs: $(ConvertTo-Json $beforeMetrics -Compress)."
+        }
+        $geometry=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
+            -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
+            -WindowStyle ([long]$contract.windowStyleForAdjustment) `
+            -WindowExStyle ([long]$beforeMetrics.ExStyle) -HasMenu ([bool]$beforeMetrics.HasMenu) `
+            -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom) `
+            -ExpectedAdjustedOuterWH @($contract.expectedAdjustedOuterWH)
+        Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
+            -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
+            -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
+        $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $geometry
+        $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
     } else {Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity}
     Start-Sleep -Milliseconds 500
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
-    if ($metrics.Dpi -ne 96) { throw "Actual app DPI is $($metrics.Dpi), expected 96." }
+    if (Test-CapMatchedDpiAdapter) {
+        $geometry=$appRun.Placement
+        if ($metrics.Dpi -ne $geometry.ActualDpi -or
+            ($metrics.ClientBounds -join ',') -cne "0,0,$($geometry.PhysicalClientWH[0]),$($geometry.PhysicalClientWH[1])" -or
+            ($metrics.OuterBounds -join ',') -cne ($geometry.OuterBounds -join ',') -or
+            $metrics.Style -ne $job.captureContract.expectedRuntimeWindowStyle -or
+            $metrics.ExStyle -ne $geometry.WindowExStyle -or
+            $metrics.HasMenu -ne $geometry.HasMenu) {
+            throw "DPI-parametric window remeasurement differs: $(ConvertTo-Json $metrics -Compress)."
+        }
+    } elseif ($metrics.Dpi -ne 96) {
+        throw "Actual app DPI is $($metrics.Dpi), expected 96."
+    }
     return $appRun
 }
 
@@ -1966,7 +2053,7 @@ try {
         Invoke-CapRealSeedRehearsal
         Invoke-CapRealLaunchRehearsal
     } else {
-    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         foreach ($name in @('GH_TOKEN','GITHUB_TOKEN','COPILOT_GITHUB_TOKEN','COPILOT_API_KEY','ANTHROPIC_API_KEY',
             'OPENAI_API_KEY','AZURE_OPENAI_API_KEY','CODEX_API_KEY','SSH_AUTH_SOCK','SSH_AGENT_PID',
             'AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN')) {
@@ -1977,12 +2064,12 @@ try {
     }
     foreach ($phase in @('before', 'after')) {
         Assert-CapWorkerDeadline "starting phase $phase"
-        if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {Invoke-CapMatchedScenes -Phase $phase}
+        if (Test-CapMatchedAdapter) {Invoke-CapMatchedScenes -Phase $phase}
         elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
         else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    $expectedImages=if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
-    $expectedSeeds=if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {22} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
+    $expectedImages=if (Test-CapMatchedAdapter) {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedSeeds=if (Test-CapMatchedAdapter) {22} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
     if ($images.Count -ne $expectedImages) { throw "Expected $expectedImages images across before/after; captured $($images.Count)." }
     if ($zmxSeedReceipts.Count -ne $expectedSeeds -or @($zmxSeedReceipts | Where-Object {
         $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.cmdCount -lt 1 -or
@@ -2061,7 +2148,7 @@ try {
     if ($manifestPath -and $job -and $auth -and $journalState) {
         $finalStatus = if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
             (($rehearsal -and $rehearsalLaunches.Count -eq 1 -and $images.Count -eq 0) -or
-            (-not $rehearsal -and $images.Count -eq $(if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {36} else {10})))) {
+            (-not $rehearsal -and $images.Count -eq $(if (Test-CapMatchedAdapter) {36} else {10})))) {
             'COMPLETE'
         } else { 'FAILED' }
         try {

@@ -64,6 +64,7 @@ $lease = $null
 $job = $null
 $preflight = $null
 $supervisorIdentity = $null
+$dpiGeometryAdmission = $null
 $thisProcess = [Diagnostics.Process]::GetCurrentProcess()
 $supervisorExecutable = $thisProcess.MainModule.FileName
 $startedUtc = [DateTime]::UtcNow
@@ -76,6 +77,16 @@ function Write-CapSupervisorLog {
     }
 
     Write-Output ('{0:o} {1}' -f [DateTime]::UtcNow, $Message)
+}
+
+function Test-CapMatchedAdapter {
+    return $job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')
+}
+
+function Test-CapMatchedDpiAdapter {
+    return $job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1'
 }
 
 function Assert-CapSupervisorPath {
@@ -145,7 +156,8 @@ function Assert-CapGreenJob {
         before = @((Join-Path $root 'inputs\graphcode-before.exe'), $job.binaries.before.sha256)
         after = @((Join-Path $root 'inputs\graphcode-after.exe'), $job.binaries.after.sha256)
     }
-    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if ($job.PSObject.Properties['sceneAdapter'] -and
+        $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')) {
         $inputHashes.daemon=@((Join-Path $root 'runtime\graphcoded.exe'),$job.binaries.daemon.sha256)
         $inputHashes.backendFixture=@((Join-Path $root 'runtime\copilot.exe'),$job.binaries.backendFixture.sha256)
         $inputHashes.backendSource=@((Join-Path $root 'inputs\offline-backend.c'),$job.binaries.backendFixture.sourceSha256)
@@ -256,9 +268,12 @@ function Assert-CapPreflightReport {
                 throw 'Real seed preflight case does not bind the current pinned provider.'
             }
         }
-        if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
-            if ($preflight.executed -ne 180 -or $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
-                throw 'Matched scene preflight requires exactly 180 passing current contracts and zero skips.'
+        if ($job.PSObject.Properties['sceneAdapter'] -and
+            $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')) {
+            $expectedMatchedPreflight = 184L
+            if ($preflight.executed -ne $expectedMatchedPreflight -or
+                $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
+                throw "Matched scene preflight requires exactly $expectedMatchedPreflight passing current contracts and zero skips."
             }
             foreach ($name in @(
                 'matched v12 fixture binds exact node type wiring reason and outcome fields',
@@ -273,6 +288,16 @@ function Assert-CapPreflightReport {
                 'matched manifest seals scene inventory and refuses premature restart success'
             )) {
                 if (@($preflight.cases | Where-Object name -CEQ $name).Count -ne 1) {throw "Matched scene preflight lacks its unique group: $name"}
+            }
+            foreach ($name in @(
+                'DPI matched geometry derives exact 96 and 192 physical frames',
+                'DPI matched geometry refuses insufficient work area and invalid scaling',
+                'DPI matched logical zoom normalizes physical UIA width',
+                'DPI matched manifest preserves raw logical physical metadata without resampling'
+            )) {
+                if (@($preflight.cases | Where-Object name -CEQ $name).Count -ne 1) {
+                    throw "DPI matched preflight lacks its unique group: $name"
+                }
             }
         }
         return
@@ -690,6 +715,14 @@ function Assert-CapMatchedWorkerManifest {
     foreach ($field in @('cleanupFailures','ownedProcessSurvivors','pendingLaunchesRemaining')) {
         if ($manifest.$field -isnot [array] -or $manifest.$field.Count -ne 0) {throw "Matched manifest has unproved $field."}
     }
+    $isDpi=Test-CapMatchedDpiAdapter
+    if ($isDpi -and ($manifest.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
+        $manifest.geometrySchemaVersion -ne 2 -or
+        ($manifest.logicalClientWH -join ',') -cne ($job.captureContract.logicalClientWH -join ',') -or
+        $manifest.expectedWindowDpi -ne $job.captureContract.expectedWindowDpi -or
+        $manifest.rawCaptureResamplingAllowed -cne $false)) {
+        throw 'DPI-parametric matched manifest classification or geometry contract differs.'
+    }
     foreach ($image in $manifest.images) {
         $binary=$job.binaries.($image.phase)
         if ($image.sceneAdapter -cne $job.sceneAdapter -or $image.sourceHead -cne $binary.source -or
@@ -697,10 +730,15 @@ function Assert-CapMatchedWorkerManifest {
             $image.fixtureSha256 -ne $fixtureHashExpected -or $image.fixtureSourceSha256 -ne $job.fixture.sha256 -or
             $image.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or
             $image.privacyStatus -cne 'CAPTURED_PENDING_INDIVIDUAL_REVIEW' -or
-            ($image.clientBounds -join ',') -cne '0,0,1440,900' -or $image.dpi -ne 96 -or
             $image.sampledColors -lt 4 -or $image.nonMagentaSamples -lt 20 -or
             $image.width -ne ($image.outerBounds[2]-$image.outerBounds[0]) -or
             $image.height -ne ($image.outerBounds[3]-$image.outerBounds[1])) {throw 'Matched image geometry, state or provenance differs.'}
+        if ($isDpi) {
+            $contract=$job.captureContract
+            $null=Assert-CapMatchedDpiImage -Image $image -Contract $contract
+        } elseif (($image.clientBounds -join ',') -cne '0,0,1440,900' -or $image.dpi -ne 96) {
+            throw 'Matched V1 image geometry differs.'
+        }
         if ($image.scene -cmatch '^s-(?:goal-unwired|main-cycle|main-stopped|goal-done)' -and
             ($null -eq $image.zoom -or [Math]::Abs($image.zoom.ZoomPercent-100) -gt 1)) {throw 'Matched card scene lacks actual-size evidence.'}
         $path=Assert-CapSupervisorPath $image.path
@@ -764,7 +802,7 @@ function Assert-CapWorkerManifest {
         }
         return
     }
-    if ($job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
+    if (Test-CapMatchedAdapter) {
         Assert-CapMatchedWorkerManifest
         return
     }
@@ -996,6 +1034,21 @@ try {
     if (-not $rehearsal) {
         $native = @(Assert-CapLiveNativeBindings)
     }
+    if (-not $rehearsal -and (Test-CapMatchedDpiAdapter)) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $area=[Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $contract=$job.captureContract
+        $workArea=@($area.Left,$area.Top,$area.Right,$area.Bottom)
+        if (($area.Width -lt $contract.minimumPhysicalWorkAreaWH[0]) -or
+            ($area.Height -lt $contract.minimumPhysicalWorkAreaWH[1])) {
+            throw "DPI-parametric physical work area is insufficient: $($area.Width)x$($area.Height)."
+        }
+        $dpiGeometryAdmission=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
+            -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
+            -WindowStyle ([long]$contract.windowStyleForAdjustment) `
+            -WindowExStyle ([long]$contract.windowExStyle) -HasMenu ([bool]$contract.hasMenu) `
+            -WorkArea $workArea -ExpectedAdjustedOuterWH @($contract.expectedAdjustedOuterWH)
+    }
     if (@(Get-CapPendingLaunches).Count -ne 0) { throw 'Unreturned capture worker launches remain before run authorization.' }
 
     $shortLease = $lease.leaseId.Replace('-', '').Substring(0, 8)
@@ -1048,6 +1101,7 @@ try {
         fixtureMappingSha256 = $fixtureMappingHashExpected
         sourceRoot = $sourceRoot
         jobIdentity = $jobIdentity
+        dpiGeometryAdmission = $dpiGeometryAdmission
         runDirectory = $runDirectory
         outputDirectory = $outputDirectory
         processJournalPath = $processJournalPath

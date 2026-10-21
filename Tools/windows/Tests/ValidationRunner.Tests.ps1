@@ -4780,7 +4780,7 @@ if ($LASTEXITCODE -ne 0) { throw "RED: offline real-launch capture child failed"
 $uiCaptureSummaries = @($uiCaptureOutput | Where-Object { $_ -is [string] -and $_.StartsWith('{"suite":"UiCaptureDriver",') })
 if ($uiCaptureSummaries.Count -ne 1) { throw "RED: offline real-launch capture structured count missing or duplicated" }
 $uiCaptureSummary = ConvertFrom-Json $uiCaptureSummaries[0]
-if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 177 -or
+if ($uiCaptureSummary.executed -isnot [long] -or $uiCaptureSummary.executed -ne 181 -or
     $uiCaptureSummary.passed -isnot [long] -or $uiCaptureSummary.passed -ne $uiCaptureSummary.executed -or
     $uiCaptureSummary.failed -isnot [long] -or $uiCaptureSummary.failed -ne 0) {
   throw "RED: offline real-launch capture child has no positive executed/passed contract count"
@@ -4797,7 +4797,11 @@ $matchedGroups=@(
   'real restart transcript requires daemon confirmation resume and new owned attach',
   'real restart scene invokes existing UIA route and refuses offline peer authority',
   'matched transparent proxy relays unchanged real pipe frames with connection identity',
-  'matched manifest seals scene inventory and refuses premature restart success'
+  'matched manifest seals scene inventory and refuses premature restart success',
+  'DPI matched geometry derives exact 96 and 192 physical frames',
+  'DPI matched geometry refuses insufficient work area and invalid scaling',
+  'DPI matched logical zoom normalizes physical UIA width',
+  'DPI matched manifest preserves raw logical physical metadata without resampling'
 )
 foreach ($name in $matchedGroups) {
   $group=@($uiCaptureReport.cases | Where-Object name -CEQ $name)

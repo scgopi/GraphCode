@@ -33,10 +33,73 @@ a separately granted capture window. No subset or skipped-scene support is added
 
 Lane S2 adds **two top-level groups**, taking the combined registered totals
 from **175 to 177 default**, or **178 to 180 with `-RequireRealSeed`**.
-`Tests\ValidationRunner.Tests.ps1` requires exactly 177 passing groups and the
-unique presence of the original eight S groups plus both S2 groups. The live
-matched preflight requires exactly 180 passing groups, zero skips, and the same
+At the S2 checkpoint, `Tests\ValidationRunner.Tests.ps1` required exactly 177 passing groups and the
+unique presence of the original eight S groups plus both S2 groups. The then-current live matched preflight required exactly 180 passing groups, zero skips, and the same
 unique groups; a higher count is not accepted.
+
+Those **177 / 180** totals are the pre-DPI historical boundary. The
+`S_MATCHED_V12_DPI_V1` harness change adds four no-desktop top-level groups,
+so current merged-source registration becomes **181 default / 184 with
+`-RequireRealSeed`**. Current matched preflight requires exactly **184**,
+zero skips, the ten existing matched/S2 identities once, and all four DPI
+identities once. Historical reports retain their original denominators.
+
+## DPI-parametric matched adapter
+
+`S_MATCHED_V12_DPI_V1` preserves the V1 fixture, eighteen scene names, actions,
+real Restart requirements, process ownership, privacy and cleanup gates. It
+changes only the geometry/evidence contract.
+
+The job separates logical and physical geometry:
+
+- logical client 1440x900;
+- actual window DPI 192, base DPI 96;
+- physical client 2880x1800;
+- `AdjustWindowRectExForDpi` outer 2906x1910 for
+  `WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN`, extended style 0 and an installed
+  menu;
+- runtime shown-window style `0x12CF0000`, while adjustment uses the
+  source frame style `0x02CF0000`;
+- measured fit inside a physical work area at least 2906x1910;
+- no resampling.
+
+The supervisor performs the work-area calculation before worker launch. The
+worker queries the actual window DPI/style/menu, derives the physical frame,
+positions it without changing size, and remeasures exact physical client and
+outer bounds before any scene action. A 1920x1032 RDP mode refuses before
+product launch.
+
+UIA bounding rectangles remain physical pixels. Actual-size zoom normalizes
+the physical width by `96 / actualDpi` before comparing with the card's 250
+logical-pixel natural width. A 500-physical-pixel card at DPI 192 is therefore
+250 logical pixels and 100% zoom; the old unnormalized 200% interpretation is
+a negative contract.
+
+Each image retains the raw PrintWindow bitmap and records logical client size,
+physical client/outer bounds, nonclient extents, raw pixel dimensions, actual
+DPI and scale, adjustment/runtime styles, menu state, physical work area,
+placement and `resampled=false`. The evidence classification is
+`C8R_RDP_DPI192_QUALIFIED`.
+
+The four focused groups cover:
+
+| Group | Boundary |
+| --- | --- |
+| DPI exact frames | 96-DPI 1456x959 and 192-DPI 2906x1910 results, plus the new scene contract |
+| DPI refusals | insufficient/one-pixel-short work areas, non-integral scaling and wrong adjusted outer |
+| DPI logical zoom | physical-to-logical normalization and the old unnormalized mutant |
+| DPI manifest | 36 simulated raw records and DPI/resampling/logical/work-area mutations |
+
+These contracts launch no GraphCode window and capture no images. A future live
+run still requires a source-reviewed job, exact 184-case preflight, warned
+one-attempt lease and sufficiently large DPI-192 RDP work area.
+
+An exact macOS @2x 1440x900 logical reference has a 2880x1800 client raster and
+may be reviewed against the raw Windows client at native 1:1 pixels without
+resampling. Such review may support observed layout/state/action findings, but
+not physical input, local-console compositor equivalence, native local glyph
+or antialiasing fidelity, focus outside the observed RDP session, or automatic
+row validation. Unmatched scenes remain logical-geometry-only or unassessable.
 
 Matched S seed receipts use the initialized `Roots.Root\zmx-seed.json`, not a
 path rebuilt from the diagnostic phase label. B and D retain their existing
@@ -92,7 +155,7 @@ nor an arbitrary `<=100` cap defines the native argument. A second control
 injects a fully spent 5000 ms window and requires an actual zero-millisecond
 wait, an unsignalled held root, null signal latency and the unchanged kernel-live
 refusal. These controls remain inside the existing first S2 group: **delta 0**,
-with registered totals still **177 default / 180 real-seed**.
+with the S2-checkpoint totals still **177 default / 180 real-seed**.
 Wall observation is separate: a deterministic 1500 ms delay after actual Close
 reproduces the old strict wall-time assertion, and a documented 5000 ms
 observational scheduling tolerance applies only to that wall measurement
@@ -144,7 +207,7 @@ The standalone Lane S change adds **eight top-level groups exactly once**:
 The three existing actual-zmx rehearsal cases are unchanged; the real-seed
 top-level delta is **zero**. No old group or negative case was removed or
 relabelled. Its original registration required 174 and the unique
-presence of all eight names; the current S2 totals above supersede that total.
+presence of all eight names; the historical S2 totals above superseded that total.
 A different total is a failure, not an empty-filter
 pass. A later merged change with its own declared delta requires an explicit
 combined-tree count update and registered-runner rerun.
