@@ -874,6 +874,7 @@ pub const Workspace = struct {
     pub fn scopeToLoop(self: *Workspace, loop: []const u8, layout_project: []const u8, launches_agent: bool) !void {
         if (loop.len == 0) return;
         if (std.mem.eql(u8, self.loop_id, loop) and std.mem.eql(u8, self.layout.project_key, layout_project)) {
+            if (launches_agent and try self.layout.ensureAgentFirst(loop)) try self.persistLayout();
             // Reopening the open loop picks up a saved pane an earlier restore could not attach.
             self.expediteShellRestores();
             self.restorePersistedSurfaces(loop, 1);
@@ -886,7 +887,7 @@ pub const Workspace = struct {
         errdefer self.allocator.free(new_loop);
         var new_layout = try self.loadLoopLayout(new_path, layout_project, loop);
         errdefer new_layout.deinit();
-        if (launches_agent) try new_layout.ensureAgentFirst(loop);
+        if (launches_agent) _ = try new_layout.ensureAgentFirst(loop);
 
         for (self.surfaces, 0..) |_, index| self.destroySurface(index);
         self.clearAllRecreateState();

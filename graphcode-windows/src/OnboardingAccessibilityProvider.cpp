@@ -94,14 +94,14 @@ static bool hasNativeFocus(HWND hwnd) {
 static bool isAvailable(int id, int page) {
   if (id == kRoot || id == kPage || id == kSkip || id == kPrimary) return true;
   if (id == kBack) return page > 0;
-  if (id >= kClaudeCode && id <= kCodex) return page == 3;
+  if (id >= kClaudeCode && id <= kCodex) return page == 4;
   return false;
 }
 
 static std::vector<int> childrenForPage(int page) {
   std::vector<int> children{kPage, kSkip};
   if (page > 0) children.push_back(kBack);
-  if (page == 3) {
+  if (page == 4) {
     children.push_back(kClaudeCode);
     children.push_back(kCopilotCli);
     children.push_back(kCodex);
@@ -115,9 +115,10 @@ static const wchar_t *pageName(int page) {
       L"Welcome to GraphCode: Agents you can watch",
       L"How to read a loop",
       L"Four kinds of loop",
+      L"One window per line of work",
       L"Which agent runs them",
   };
-  return names[page >= 0 && page < 4 ? page : 0];
+  return names[page >= 0 && page < 5 ? page : 0];
 }
 
 static const wchar_t *automationId(int id) {
@@ -140,7 +141,7 @@ static const wchar_t *nameFor(int id, int page) {
     case kPage: return pageName(page);
     case kSkip: return L"Skip onboarding";
     case kBack: return L"Back";
-    case kPrimary: return page == 3 ? L"Get Started" : L"Continue";
+    case kPrimary: return page == 4 ? L"Get Started" : L"Continue";
     case kClaudeCode: return L"Claude Code";
     case kCopilotCli: return L"Copilot CLI";
     case kCodex: return L"Codex";
@@ -568,7 +569,7 @@ extern "C" LRESULT gc_onboarding_uia_get_object(
 
 extern "C" HRESULT gc_onboarding_uia_update(
     IRawElementProviderSimple *provider, int page, int focused, int backend) {
-  if (!provider || page < 0 || page > 3 ||
+  if (!provider || page < 0 || page > 4 ||
       backend < 0 || backend > 2 ||
       !onboarding_uia::isAvailable(focused, page) ||
       !onboarding_uia::isAction(focused))
