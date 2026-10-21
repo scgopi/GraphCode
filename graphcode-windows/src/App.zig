@@ -1299,6 +1299,48 @@ fn quickChatByID(model: *const GraphModel.Model, id: []const u8) ?*const GraphMo
     return null;
 }
 
+const QuickChatCreationRequest = struct {
+    title: []const u8,
+    backend: []const u8,
+};
+
+const PendingQuickChatCreate = union(enum) {
+    v1,
+    v2: [36]u8,
+};
+
+fn quickChatCreationRequest(
+    title_buffer: []u8,
+    local_time: c.SYSTEMTIME,
+    configured_backend: []const u8,
+) QuickChatCreationRequest {
+    const months = [_][]const u8{
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+    const chat_title = if (local_time.wMonth >= 1 and local_time.wMonth <= months.len and local_time.wDay >= 1)
+        std.fmt.bufPrint(
+            title_buffer,
+            "Chat — {s} {d}",
+            .{ months[local_time.wMonth - 1], local_time.wDay },
+        ) catch "Chat"
+    else
+        "Chat";
+    return .{
+        .title = chat_title,
+        .backend = if (configured_backend.len == 0) "claudeCode" else configured_backend,
+    };
+}
+
+fn bindQuickChatWorkspace(
+    workspace: *TerminalWorkspace.Workspace,
+    chat: GraphModel.QuickChat,
+) !void {
+    try workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, true);
+    try workspace.setTabPresentation("composite", chat.backend, "idle");
+    try workspace.openLaunchedNode(0, chat.id, TerminalWorkspace.Workspace.loop_open_timeout_ms);
+}
+
 fn workspaceGraph(model: *const GraphModel.Model) ?*const GraphModel.GraphSummary {
     if (model.currentGraph()) |graph| if (graph.nodes.items.len != 0) return graph;
     if (model.selected_project_path) |path| {
@@ -1466,6 +1508,8 @@ pub const App = struct {
     header_focus_transition: bool = false,
     canvas_layout_store: ?CanvasLayoutStore.Store = null,
     quick_chats_requested: bool = false,
+    pending_quick_chat_create: ?PendingQuickChatCreate = null,
+    completed_quick_chat_create_request: ?[36]u8 = null,
     selected_quick_chat: ?usize = null,
     workspace_reservation: WorkspaceReservation = .{},
     workspace_summary_work: WorkspaceManager.SummaryWork = .{},
@@ -1622,6 +1666,8 @@ pub const App = struct {
         self.sync_requested = false;
         self.restore_requested = false;
         self.quick_chats_requested = false;
+        self.pending_quick_chat_create = null;
+        self.completed_quick_chat_create_request = null;
     }
 
     fn sendPendingOpen(self: *App) void {
@@ -2059,7 +2105,7 @@ pub const App = struct {
             },
             .quick_chats, .quick_chat_changed, .quick_chat_deleted, .quick_chat_activity => {
                 if (event == .quick_chat_changed) {
-                    if (Wire.jsonString(frame, "id")) |id| self.openQuickChat(id);
+                    if (Wire.jsonString(frame, "id")) |id| self.handleQuickChatChanged(frame, id);
                 }
                 var deleted_bound_chat = false;
                 if (event == .quick_chat_deleted and !self.smoke) {
@@ -2079,6 +2125,7 @@ pub const App = struct {
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .error_occurred => {
+                self.clearFailedQuickChatCreate(frame);
                 self.failSessionRestart("Daemon refused the session restart");
                 const ingress_failure = self.pending_rebind_path.len != 0;
                 if (self.pending_rebind_path.len != 0) {
@@ -3124,8 +3171,68 @@ pub const App = struct {
     }
 
     fn createQuickChat(self: *App) void {
-        self.client.sendCreateQuickChat("Chat", "claudeCode");
+        var title_buffer: [64]u8 = undefined;
+        var local_time: c.SYSTEMTIME = undefined;
+        c.GetLocalTime(&local_time);
+        const request = quickChatCreationRequest(
+            &title_buffer,
+            local_time,
+            if (self.product_settings) |settings| settings.default_backend else "claudeCode",
+        );
+        const request_id = self.client.sendCreateQuickChat(request.title, request.backend) orelse {
+            self.setStatus("Unable to create quick chat");
+            return;
+        };
+        self.pending_quick_chat_create = if (self.client.protocolMode() == .v1)
+            .v1
+        else
+            .{ .v2 = request_id };
+        self.completed_quick_chat_create_request = null;
         self.setStatus("Creating quick chat...");
+    }
+
+    fn handleQuickChatChanged(self: *App, frame: []const u8, id: []const u8) void {
+        if (Wire.responseRequestID(frame)) |response_id| {
+            if (self.completed_quick_chat_create_request) |completed| {
+                if (std.ascii.eqlIgnoreCase(response_id, &completed)) return;
+            }
+        }
+        if (self.pending_quick_chat_create) |pending| {
+            switch (pending) {
+                .v1 => {
+                    self.pending_quick_chat_create = null;
+                    self.client.sendOpenQuickChat(id);
+                    self.setStatus("Opening quick chat...");
+                    return;
+                },
+                .v2 => |request_id| {
+                    if (Wire.responseRequestID(frame)) |response_id| {
+                        if (std.ascii.eqlIgnoreCase(response_id, &request_id)) {
+                            self.pending_quick_chat_create = null;
+                            self.completed_quick_chat_create_request = request_id;
+                            self.client.sendOpenQuickChat(id);
+                            self.setStatus("Opening quick chat...");
+                            return;
+                        }
+                    }
+                    return;
+                },
+            }
+        }
+        self.openQuickChat(id);
+    }
+
+    fn clearFailedQuickChatCreate(self: *App, frame: []const u8) void {
+        const pending = self.pending_quick_chat_create orelse return;
+        switch (pending) {
+            .v1 => self.pending_quick_chat_create = null,
+            .v2 => |request_id| {
+                const response_id = Wire.responseRequestID(frame) orelse return;
+                if (!std.ascii.eqlIgnoreCase(response_id, &request_id)) return;
+                self.pending_quick_chat_create = null;
+                self.completed_quick_chat_create_request = request_id;
+            },
+        }
     }
 
     fn renameSelectedQuickChat(self: *App) void {
@@ -3182,7 +3289,7 @@ pub const App = struct {
                 defer self.allocator.free(home);
                 _ = workspace.rebindProject(home) catch {};
             } else |_| {}
-            workspace.scopeToLoop(chat.id, TerminalWorkspace.quick_chat_scope_project, false) catch {
+            bindQuickChatWorkspace(workspace, chat) catch {
                 self.setStatus("Unable to open quick chat workspace");
                 self.routeFromFailedQuickChatOpen();
                 return;
@@ -3197,7 +3304,6 @@ pub const App = struct {
                 self.routeFromFailedQuickChatOpen();
                 return;
             }
-            workspace.openNode(0, chat.id) catch self.setStatus("Unable to open quick chat workspace");
             self.syncAccessibility();
             return;
         }
@@ -7590,8 +7696,8 @@ pub const App = struct {
             const show_primary = is_quick_chats or is_overview or
                 (self.surface == .project and graph != null and !is_global);
             const add_bounds = GraphCanvas.addButtonBounds(.{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom });
-            const primary_x = if (is_empty) content_left + @divTrunc(content_right - content_left - 118, 2) else add_bounds.left;
-            const primary_y = if (is_empty)
+            const primary_x = if (is_empty and !is_quick_chats) content_left + @divTrunc(content_right - content_left - 118, 2) else add_bounds.left;
+            const primary_y = if (is_empty and !is_quick_chats)
                 y + (if (is_global or is_overview) @as(i32, 42) else @as(i32, 0))
             else
                 add_bounds.top;
@@ -8091,6 +8197,19 @@ pub const App = struct {
         if (GraphCanvas.attentionRailShown(&self.model, self.surface)) {
             const rail = GraphCanvas.attentionRailLayout(canvas_rect);
             self.appendAccessibilityElement(&elements, &owned_identities, "canvas-attention-review", "needs-you", "Review oldest attention loop (Ctrl+Shift+R)", 4, .{ .logical = rail.review }, false, false) catch return;
+        }
+        if (self.surface == .quick_chats and self.model.quick_chats.items.len == 0) {
+            self.appendAccessibilityElement(
+                &elements,
+                &owned_identities,
+                "quick-chat-new",
+                "empty-canvas",
+                "New Chat",
+                4,
+                .{ .logical = GraphCanvas.quickChatEmptyActionBounds(canvas_rect) },
+                false,
+                true,
+            ) catch return;
         }
         for (GraphCanvas.header_actions) |action| {
             const logical_bounds = header_layout.bounds(action) orelse continue;
@@ -8632,6 +8751,7 @@ pub const App = struct {
             .{ .identity = "quick-chats-header:quick-chats", .target = .quick_chats_header },
             .{ .identity = "quick-chats-disclosure:quick-chats", .target = .quick_chats_disclosure },
             .{ .identity = "quick-chat-new:quick-chats", .target = .new_quick_chat },
+            .{ .identity = "quick-chat-new:empty-canvas", .target = .new_quick_chat },
             .{ .identity = "sidebar-update-banner:update", .target = .update_banner },
             .{ .identity = "needs-you-header:needs-you", .target = .needs_you_header },
             .{ .identity = "activity-header:activity", .target = .activity_header },
@@ -9943,6 +10063,8 @@ fn onWindowMessage(
             if (updated_connection_state != app.last_connection_state) {
                 if (updated_connection_state != .connected) {
                     app.model.invalidateWorktreeNotices(.connection_changed);
+                    app.pending_quick_chat_create = null;
+                    app.completed_quick_chat_create_request = null;
                     app.syncAccessibility();
                 }
                 app.last_connection_state = updated_connection_state;
@@ -10245,7 +10367,9 @@ fn onWindowMessage(
                         _ = c.InvalidateRect(hwnd, null, 0);
                     },
                     .quick_chats => {
-                        if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, x, y, &app.canvas, bounds)) |index| {
+                        if (app.model.quick_chats.items.len == 0 and GraphCanvas.hitTestQuickChatEmptyAction(x, y, bounds)) {
+                            app.createQuickChat();
+                        } else if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, x, y, &app.canvas, bounds)) |index| {
                             app.client.sendOpenQuickChat(app.model.quick_chats.items[index].id);
                             app.setStatus("Opening quick chat...");
                         } else {
@@ -24052,6 +24176,223 @@ test "Quick Chat parity bound identity ignores previous loop and chat list order
     if (sink.failure) |err| return err;
 }
 
+test "Quick Chat remaining parity creation uses the local date and configured backend" {
+    var title_buffer: [64]u8 = undefined;
+    const request = quickChatCreationRequest(
+        &title_buffer,
+        .{
+            .wYear = 2026,
+            .wMonth = 10,
+            .wDayOfWeek = 2,
+            .wDay = 20,
+            .wHour = 12,
+            .wMinute = 0,
+            .wSecond = 0,
+            .wMilliseconds = 0,
+        },
+        "copilotCLI",
+    );
+    try std.testing.expectEqualStrings("Chat — Oct 20", request.title);
+    try std.testing.expectEqualStrings("copilotCLI", request.backend);
+}
+
+test "Quick Chat remaining parity create response requests the daemon session exactly once" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    app.client.mode = .v2;
+    app.surface = .quick_chats;
+    app.createQuickChat();
+    const request_id = switch (app.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => return error.TestExpectedV2QuickChatCreate,
+        .v2 => |value| value,
+    };
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"quickChatChanged":{"id":"chat-new","title":"Chat — Oct 20","backend":"copilotCLI"}}}
+    , App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+
+    app.onFrameWithAccessibilityPublish(
+        \\{"version":2,"kind":"response","requestID":"00000000-0000-4000-8000-000000000099","event":{"quickChatChanged":{"id":"other-chat","title":"Other","backend":"claudeCode"}}}
+    , App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    try std.testing.expectEqual(@as(usize, 1), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+
+    const response = try std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"quickChatChanged\":{{\"id\":\"chat-new\",\"title\":\"Chat — Oct 20\",\"backend\":\"copilotCLI\"}}}}}}",
+        .{request_id},
+    );
+    defer app.allocator.free(response);
+    app.onFrameWithAccessibilityPublish(response, App.publishAccessibility);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(?[36]u8, request_id), app.completed_quick_chat_create_request);
+    try std.testing.expectEqual(@as(usize, 2), app.client.outbound_count);
+    const newest = app.client.outbound[(app.client.outbound_head + app.client.outbound_count - 1) % app.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "\"openQuickChat\":{\"id\":\"chat-new\"}") != null);
+
+    app.onFrameWithAccessibilityPublish(response, App.publishAccessibility);
+    try std.testing.expectEqual(@as(usize, 2), app.client.outbound_count);
+    try std.testing.expectEqual(GraphCanvas.Surface.quick_chats, app.surface);
+}
+
+test "Quick Chat remaining parity create pending state clears on matched errors and v1 changes" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    app.client.mode = .v2;
+    app.createQuickChat();
+    const request_id = switch (app.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => return error.TestExpectedV2QuickChatCreate,
+        .v2 => |value| value,
+    };
+    app.clearFailedQuickChatCreate(
+        \\{"version":2,"kind":"response","requestID":"00000000-0000-4000-8000-000000000099","event":{"errorOccurred":"unrelated"}}
+    );
+    try std.testing.expect(app.pending_quick_chat_create != null);
+    const rejection = try std.fmt.allocPrint(
+        app.allocator,
+        "{{\"version\":2,\"kind\":\"response\",\"requestID\":\"{s}\",\"event\":{{\"errorOccurred\":\"create failed\"}}}}",
+        .{request_id},
+    );
+    defer app.allocator.free(rejection);
+    app.clearFailedQuickChatCreate(rejection);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(?[36]u8, request_id), app.completed_quick_chat_create_request);
+    app.clearFailedQuickChatCreate(rejection);
+    try std.testing.expect(app.pending_quick_chat_create == null);
+
+    var legacy = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&legacy);
+    legacy.client.mode = .v1;
+    legacy.surface = .quick_chats;
+    legacy.createQuickChat();
+    switch (legacy.pending_quick_chat_create orelse return error.TestExpectedQuickChatCreateRequest) {
+        .v1 => {},
+        .v2 => return error.TestExpectedV1QuickChatCreate,
+    }
+    legacy.onFrameWithAccessibilityPublish(
+        \\{"quickChatChanged":{"id":"chat-v1","title":"Chat","backend":"claudeCode"}}
+    , App.publishAccessibility);
+    try std.testing.expect(legacy.pending_quick_chat_create == null);
+    try std.testing.expectEqual(@as(usize, 2), legacy.client.outbound_count);
+    const newest = legacy.client.outbound[(legacy.client.outbound_head + legacy.client.outbound_count - 1) % legacy.client.outbound.len];
+    try std.testing.expect(std.mem.indexOf(u8, newest, "\"openQuickChat\":{\"id\":\"chat-v1\"}") != null);
+}
+
+test "Quick Chat remaining parity opens the daemon-owned chat instead of the previous loop pane" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.layout.addTab("previous-loop", true);
+    const chat = GraphModel.QuickChat{
+        .id = @constCast("chat-b"),
+        .title = @constCast("Chat — Oct 20"),
+        .backend = @constCast("copilotCLI"),
+    };
+
+    bindQuickChatWorkspace(&workspace, chat) catch {};
+
+    try std.testing.expectEqualStrings("chat-b", workspace.boundQuickChatID().?);
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
+    const tab = workspace.layout.tabs.items[0];
+    try std.testing.expectEqual(@as(usize, 1), tab.panes.items.len);
+    try std.testing.expectEqualStrings("chat-b", tab.panes.items[0].id);
+    try std.testing.expect(tab.panes.items[0].launches_agent);
+    try std.testing.expectEqualStrings("Copilot CLI", workspace.tabTitle(0).?);
+    try std.testing.expect(workspace.isAwaitingLaunch(0));
+    try std.testing.expectEqualStrings("chat-b", workspace.launch_waits[0].session);
+}
+
+test "Quick Chat remaining parity same scope repairs daemon-owned agent metadata" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, false);
+    try workspace.layout.addTab("chat-1", false);
+    try std.testing.expect(!workspace.layout.tabs.items[0].panes.items[0].launches_agent);
+
+    try workspace.scopeToLoop("chat-1", TerminalWorkspace.quick_chat_scope_project, true);
+
+    try std.testing.expectEqual(@as(usize, 1), workspace.layout.tabs.items.len);
+    try std.testing.expectEqualStrings("chat-1", workspace.layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(workspace.layout.tabs.items[0].panes.items[0].launches_agent);
+}
+
+test "Quick Chat remaining parity empty canvas exposes top right and centered New Chat actions" {
+    const Sink = struct {
+        primary: c.RECT = std.mem.zeroes(c.RECT),
+        centered: ?c.RECT = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncCanvasControls(self: *@This(), primary: c.RECT, _: []const u8, _: [4]c.RECT) void {
+            self.primary = primary;
+        }
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "quick-chat-new:empty-canvas")) {
+                    self.centered = .{
+                        .left = element.left,
+                        .top = element.top,
+                        .right = element.right,
+                        .bottom = element.bottom,
+                    };
+                }
+            }
+        }
+    };
+
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 700, 0) != 0);
+    app.surface = .quick_chats;
+    app.createEmptyStateControls();
+    defer {
+        _ = c.DestroyWindow(app.empty_open_folder_button);
+        _ = c.DestroyWindow(app.empty_global_overview_button);
+    }
+    app.layoutEmptyStateControls();
+
+    var sink = Sink{};
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 700 });
+    const canvas = GraphCanvas.renderBounds(1200, 700, app.workspace_controls);
+    const top_right = (AccessibilityBounds{ .logical = GraphCanvas.addButtonBounds(.{
+        .left = canvas.left,
+        .top = canvas.top,
+        .right = canvas.right,
+        .bottom = canvas.bottom,
+    }) }).physicalRect(app.dpi);
+    const primary = emptyStateButton(&app, app.empty_global_overview_button);
+    try std.testing.expect(primary.visible);
+    try std.testing.expectEqualDeep(top_right, primary.rect);
+    const centered = sink.centered orelse return error.TestExpectedQuickChatEmptyAction;
+    try std.testing.expect(centered.left < centered.right and centered.top < centered.bottom);
+    try std.testing.expect(centered.top > primary.rect.bottom);
+    var before = app.client.outbound_count;
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("quick-chat-new:empty-canvas")));
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    before = app.client.outbound_count;
+    try nativeClick(&app, @divTrunc(centered.left + centered.right, 2), @divTrunc(centered.top + centered.bottom, 2));
+    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+}
+
 test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actions" {
     const allocator = std.testing.allocator;
     var app = try overviewTestApp(Dpi.base_dpi);
@@ -24299,6 +24640,7 @@ test "header UIA identities hash to distinct payloads" {
         "header-toggle-panel:control",
         "needs-you-header:needs-you",
         "activity-header:activity",
+        "quick-chat-new:empty-canvas",
     };
     for (identities, 0..) |lhs, i| {
         for (identities[i + 1 ..]) |rhs| {

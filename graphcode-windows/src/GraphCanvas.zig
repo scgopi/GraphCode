@@ -1089,9 +1089,7 @@ fn drawQuickChats(
     state: *const CanvasState,
 ) void {
     if (model.quick_chats.items.len == 0) {
-        const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
-        drawTextRect(hdc, allocator, "No chats yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
-        drawTextRect(hdc, allocator, "A quick chat is a bare session for questions that are not a loop's work.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+        paintQuickChatEmptyState(hdc, allocator, bounds);
         return;
     }
     const rows = (model.quick_chats.items.len + 2) / 3;
@@ -1104,6 +1102,68 @@ fn drawQuickChats(
         drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF, card.right - scaledValue(14, state.zoom));
         drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A, card.right - scaledValue(14, state.zoom));
     }
+}
+
+const quick_chat_empty_message = "A quick chat is a bare session with no goal, no trigger, and no place in any graph — for the questions that aren't a loop's work.";
+
+const QuickChatEmptyLayout = struct {
+    glyph: c.RECT,
+    title: c.RECT,
+    message: c.RECT,
+    action: c.RECT,
+};
+
+fn quickChatEmptyLayout(bounds: c.RECT) QuickChatEmptyLayout {
+    const center_x = bounds.left + @divTrunc(bounds.right - bounds.left, 2);
+    const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
+    return .{
+        .glyph = rect(center_x - 28, center_y - 58, center_x + 28, center_y - 12),
+        .title = rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34),
+        .message = rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86),
+        .action = rect(center_x - 59, center_y + 106, center_x + 59, center_y + 136),
+    };
+}
+
+pub fn quickChatEmptyActionBounds(bounds: c.RECT) c.RECT {
+    return quickChatEmptyLayout(bounds).action;
+}
+
+pub fn hitTestQuickChatEmptyAction(x: i32, y: i32, bounds: c.RECT) bool {
+    return insideGraph(x, y, quickChatEmptyActionBounds(bounds));
+}
+
+fn paintQuickChatEmptyState(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT) void {
+    const layout = quickChatEmptyLayout(bounds);
+    drawQuickChatEmptyGlyph(hdc, layout.glyph);
+    drawTextRect(hdc, allocator, "No chats yet", layout.title, 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
+    drawTextRect(hdc, allocator, quick_chat_empty_message, layout.message, 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+    paintQuickChatEmptyAction(hdc, allocator, layout.action);
+}
+
+fn drawQuickChatEmptyGlyph(hdc: c.HDC, bounds: c.RECT) void {
+    const pen = c.CreatePen(c.PS_SOLID, 2, 0x00919090) orelse return;
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    const old_brush = c.SelectObject(hdc, c.GetStockObject(c.HOLLOW_BRUSH));
+    defer _ = c.SelectObject(hdc, old_brush);
+    const left = rect(bounds.left + 2, bounds.top + 4, bounds.right - 16, bounds.bottom - 10);
+    const right = rect(bounds.left + 17, bounds.top + 13, bounds.right - 1, bounds.bottom - 1);
+    _ = c.RoundRect(hdc, left.left, left.top, left.right, left.bottom, 8, 8);
+    _ = c.MoveToEx(hdc, left.left + 13, left.bottom, null);
+    _ = c.LineTo(hdc, left.left + 9, left.bottom + 6);
+    _ = c.LineTo(hdc, left.left + 19, left.bottom);
+    _ = c.RoundRect(hdc, right.left, right.top, right.right, right.bottom, 8, 8);
+    _ = c.MoveToEx(hdc, right.right - 14, right.bottom, null);
+    _ = c.LineTo(hdc, right.right - 9, right.bottom + 6);
+    _ = c.LineTo(hdc, right.right - 20, right.bottom);
+}
+
+fn paintQuickChatEmptyAction(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT) void {
+    roundedControl(hdc, bounds, 8, 0x001A1B19, 0x00313230);
+    drawCardText(hdc, allocator, "New Chat", rect(bounds.left + 10, bounds.top, bounds.right - 10, bounds.bottom), 12, .semibold, 0x00E8E8E8, true) catch |err| {
+        std.log.warn("Quick Chat empty action label unavailable: {s}", .{@errorName(err)});
+    };
 }
 
 fn overviewLaneBounds(
@@ -5047,6 +5107,21 @@ test "canvas visual finish add control shares compact paint focus and hit geomet
     paintAddButton(dib.dc, std.testing.allocator, bounds, "New Chat", true, true);
     try std.testing.expect(dib.count(bounds, 0x00232220) > 0);
     try std.testing.expect(dib.count(bounds, 0x00E8E8E8) > 0);
+}
+
+test "Quick Chat remaining parity empty state matches macOS copy glyph and centered action" {
+    try std.testing.expectEqualStrings(
+        "A quick chat is a bare session with no goal, no trigger, and no place in any graph — for the questions that aren't a loop's work.",
+        quick_chat_empty_message,
+    );
+    var dib = try ParityDib.init(640, 480);
+    defer dib.deinit();
+    const bounds = rect(0, 0, 640, 480);
+    fill(dib.dc, bounds, Tokens.canvas_tone);
+    paintQuickChatEmptyState(dib.dc, std.testing.allocator, bounds);
+    const layout = quickChatEmptyLayout(bounds);
+    try std.testing.expect(dib.count(layout.glyph, 0x00919090) > 0);
+    try std.testing.expect(dib.count(layout.action, 0x001A1B19) > 0);
 }
 
 test "canvas visual finish notebook raster has 48 pixel pitch and follows pan zoom" {
