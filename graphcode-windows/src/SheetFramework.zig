@@ -608,7 +608,7 @@ pub const Host = struct {
 
     pub fn init(self: *Host, owner: c.HWND, options: HostOptions) !void {
         if (owner == null or c.IsWindow(owner) == 0) return error.SheetOwnerInvalid;
-        self.* = .{ .owner = owner, .options = options };
+        self.* = .{ .owner = owner, .options = options, .previous_focus = c.GetFocus() };
         self.options.layout_input.owner = try ownerClientRect(owner);
         self.options.layout_input.dpi = Dpi.normalize(if (options.layout_input.dpi == 0) Win32.dpiForWindow(owner) else options.layout_input.dpi);
         self.current_layout = layout(self.options.layout_input);
@@ -648,7 +648,6 @@ pub const Host = struct {
 
     pub fn show(self: *Host) !void {
         if (self.hwnd == null or self.scrim == null) return error.SheetHostUnavailable;
-        self.previous_focus = c.GetFocus();
         _ = c.EnableWindow(self.owner, 0);
         self.owner_disabled = true;
         _ = c.ShowWindow(self.scrim, c.SW_SHOWNOACTIVATE);
@@ -1552,6 +1551,36 @@ test "dialog framework: hidden rounded popup and owner client scrim use required
     const region = c.CreateRectRgn(0, 0, 0, 0) orelse return error.TestRegionCreationFailed;
     defer _ = c.DeleteObject(region);
     try std.testing.expect(c.GetWindowRgn(host.hwnd, region) != c.ERROR);
+}
+
+test "dialog framework: host captures owner focus before hidden sheet controls can take it" {
+    const owner = try hiddenOwner(900, 700);
+    defer _ = c.DestroyWindow(owner);
+    const owner_edit = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP,
+        0,
+        0,
+        100,
+        24,
+        owner,
+        Win32.opaquePointerFromInt(c.HMENU, 91),
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestControlCreationFailed;
+    _ = c.SetFocus(owner_edit);
+    try std.testing.expectEqual(owner_edit, c.GetFocus());
+
+    var host: Host = .{};
+    try host.init(owner, .{ .layout_input = testInput(96, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, 400) });
+    defer host.deinit();
+    const sheet_edit = try host.createEdit(92, false);
+    _ = c.SetFocus(sheet_edit);
+
+    try std.testing.expectEqual(owner_edit, host.previous_focus);
+    try std.testing.expectEqual(sheet_edit, c.GetFocus());
 }
 
 test "dialog framework: hidden host DPI relayout keeps viewport above fixed footer" {
