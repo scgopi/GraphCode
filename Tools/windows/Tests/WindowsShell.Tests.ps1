@@ -1261,7 +1261,9 @@ Invoke-Native "Update offer dialog executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+    & $zig test src\WorkspaceUpdateGuard.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include"
+    if ($LASTEXITCODE -ne 0) { return }
+    & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Update install dialog executable tests" {

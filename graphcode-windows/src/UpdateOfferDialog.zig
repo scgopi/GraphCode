@@ -4,6 +4,7 @@ const c = Win32.c;
 const AppFont = @import("AppFont.zig");
 const Dpi = @import("Dpi.zig");
 const SheetFramework = @import("SheetFramework.zig");
+const WorkspaceUpdateGuard = @import("WorkspaceUpdateGuard.zig");
 
 pub const Action = enum {
     later,
@@ -91,6 +92,26 @@ var active = false;
 var active_state: State = undefined;
 
 pub fn show(
+    parent: c.HWND,
+    allocator: std.mem.Allocator,
+    version: []const u8,
+    reason: []const u8,
+    installable: bool,
+) !Action {
+    const action = try showOffer(parent, allocator, version, reason, installable);
+    if (action != .install) return action;
+    return actionAfterWorkspaceGuard(action, try WorkspaceUpdateGuard.confirm(parent, allocator));
+}
+
+fn actionAfterWorkspaceGuard(action: Action, outcome: WorkspaceUpdateGuard.Outcome) Action {
+    if (action != .install) return action;
+    return switch (outcome) {
+        .cancel => .later,
+        .install => .install,
+    };
+}
+
+fn showOffer(
     parent: c.HWND,
     allocator: std.mem.Allocator,
     version: []const u8,
@@ -422,6 +443,25 @@ test "update offer button command ids are distinct" {
 
 test "dismissing the update offer defers rather than implying an install" {
     try std.testing.expectEqual(Action.later, dismiss_action);
+}
+
+test "update workspace guard: update offer preserves its action contract" {
+    try std.testing.expectEqual(
+        Action.later,
+        actionAfterWorkspaceGuard(.install, .cancel),
+    );
+    try std.testing.expectEqual(
+        Action.install,
+        actionAfterWorkspaceGuard(.install, .install),
+    );
+    try std.testing.expectEqual(
+        Action.release_notes,
+        actionAfterWorkspaceGuard(.release_notes, .cancel),
+    );
+    try std.testing.expectEqual(
+        Action.install_unavailable,
+        actionAfterWorkspaceGuard(.install_unavailable, .install),
+    );
 }
 
 fn hiddenOwner() !c.HWND {
