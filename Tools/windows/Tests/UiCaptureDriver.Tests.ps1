@@ -5774,7 +5774,78 @@ function Invoke-CapIdentityContracts {
             Assert-CapTest ($access.Pid -eq $PID -and $snapshot.ProcessId -eq $PID -and -not $snapshot.IsExited -and
                 $snapshot.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc -and
                 $identity.InitialMetadataObserved -and $verified.State -ceq 'Live') 'Valid kernel/CIM ownership behavior changed.'
-            return @{ pid = $identity.Pid; creationFileTimeUtc = $identity.CreationFileTimeUtc; state = $verified.State }
+            $module = Get-Module UiCaptureDriver
+            $transient = & $module {
+                param($Process)
+                $state = [pscustomobject]@{ imageAttempts = 0; kernel = [Collections.Generic.List[object]]::new() }
+                $snapshot = Read-CapProcessSnapshot -Process $Process -Role 'transient-image-self' `
+                    -CallSite 'TransientImageContract' -ExpectedPid $PID -DelayAction {} `
+                    -KernelSnapshotReader {
+                        param($Handle, $ProcessId, $Attempt)
+                        $value = [CapNative]::KernelSnapshot($Handle, $ProcessId)
+                        $state.kernel.Add([pscustomobject]@{ attempt = $Attempt; pid = $value.ProcessId
+                            creationFileTimeUtc = $value.CreationFileTimeUtc; isExited = $value.IsExited })
+                        return $value
+                    } -ImagePathReader {
+                        param($Handle, $ProcessId, $Attempt)
+                        $state.imageAttempts++
+                        if ($Attempt -eq 1) { throw [ComponentModel.Win32Exception]::new(5) }
+                        return [CapNative]::ImagePath($Handle, $ProcessId)
+                    }
+                [pscustomobject]@{ Snapshot = $snapshot; State = $state }
+            } $self
+            $transientValid = $transient.State.imageAttempts -eq 2 -and $transient.State.kernel.Count -eq 2 -and
+                $transient.State.kernel[0].pid -eq $PID -and $transient.State.kernel[1].pid -eq $PID -and
+                $transient.State.kernel[0].creationFileTimeUtc -eq $transient.State.kernel[1].creationFileTimeUtc -and
+                -not $transient.State.kernel[0].isExited -and -not $transient.State.kernel[1].isExited -and
+                [IO.Path]::GetFullPath($transient.Snapshot.ImagePath) -ieq
+                    [IO.Path]::GetFullPath([Environment]::ProcessPath)
+            Assert-CapTest $transientValid `
+                'Transient image access denial did not retry the same live retained generation to its actual image.'
+            $persistent = & $module {
+                param($Process)
+                try {
+                    $null = Read-CapProcessSnapshot -Process $Process -Role 'persistent-image-self' `
+                        -CallSite 'PersistentImageContract' -ExpectedPid $PID -DelayAction {} `
+                        -ImagePathReader { throw [ComponentModel.Win32Exception]::new(5) }
+                } catch [InvalidOperationException] { return $_.Exception }
+                throw 'Persistent image access denial unexpectedly returned a snapshot.'
+            } $self
+            Assert-CapTest ($persistent.Data['CapCaptureCode'] -ceq 'ProcessImageAttestationUnavailable' -and
+                $persistent.Data['AcquiredPid'] -eq $PID -and
+                $persistent.Data['CreationFileTimeUtc'] -eq $snapshot.CreationFileTimeUtc -and
+                $persistent.Data['NativeErrorCode'] -eq 5 -and $persistent.Data['Attempts'] -eq 3 -and
+                $persistent.Data['MaximumAttempts'] -eq 3 -and $persistent.Data['KernelExited'] -eq $false -and
+                -not $persistent.Message.Contains([Environment]::ProcessPath)) `
+                'Persistent image denial did not retain typed actual evidence or substituted an expected image.'
+            $generation = & $module {
+                param($Process)
+                $state = [pscustomobject]@{ kernelReads = 0 }
+                try {
+                    $null = Read-CapProcessSnapshot -Process $Process -Role 'changed-generation-self' `
+                        -CallSite 'ChangedGenerationContract' -ExpectedPid $PID -DelayAction {} `
+                        -KernelSnapshotReader {
+                            param($Handle, $ProcessId, $Attempt)
+                            $value = [CapNative]::KernelSnapshot($Handle, $ProcessId)
+                            $state.kernelReads++
+                            if ($Attempt -gt 1) { $value.CreationFileTimeUtc++ }
+                            return $value
+                        } -ImagePathReader { throw [ComponentModel.Win32Exception]::new(5) }
+                } catch [InvalidOperationException] {
+                    return [pscustomobject]@{ Failure = $_.Exception; KernelReads = $state.kernelReads }
+                }
+                throw 'Changed generation unexpectedly returned a snapshot.'
+            } $self
+            Assert-CapTest ($generation.KernelReads -eq 2 -and
+                $generation.Failure.Data['CapCaptureCode'] -ceq 'ProcessIdentityMismatch' -and
+                $generation.Failure.Data['AcquiredPid'] -eq $PID -and
+                $generation.Failure.Data['Attempts'] -eq 2 -and
+                $generation.Failure.Data['CreationFileTimeUtc'] -ne
+                    $generation.Failure.Data['ExpectedCreationFileTimeUtc']) `
+                'Image retry adopted a changed generation.'
+            return @{ pid = $identity.Pid; creationFileTimeUtc = $identity.CreationFileTimeUtc
+                state = $verified.State; imageAttestationAttempts = $transient.State.imageAttempts
+                persistentAttempts = $persistent.Data['Attempts']; changedGenerationRefused = $true }
         } finally { $self.Dispose() }
     }
     Invoke-CapTest 'acquired PID mismatch and native handle PID mismatch still refuse without adoption' {
@@ -5855,7 +5926,51 @@ function Invoke-CapIdentityContracts {
             @{ acquiredPid = $acquiredPid; outer = $outcome.Outer.ToString()
                 pending = $outcome.Pending; kernelExit = 'UNPROVEN'; eof = 'UNPROVEN' }
         }
-        Assert-CapTest ($details.Count -eq 2 -and @(Get-CapPendingLaunches).Count -eq 0) 'Synthetic-only pending test records were not removed.'
+        $imageProcess = [Diagnostics.Process]::GetProcessById($PID)
+        $imagePid = $imageProcess.get_Id()
+        $imageFailure = & $module {
+            param($Process)
+            try {
+                $null = Read-CapProcessSnapshot -Process $Process -Role 'image-unavailable-launch-contract' `
+                    -CallSite 'ImageUnavailableLaunchContract' -ExpectedPid $PID -DelayAction {} `
+                    -ImagePathReader { throw [ComponentModel.Win32Exception]::new(5) }
+            } catch [InvalidOperationException] { return $_.Exception }
+            throw 'Persistent image denial unexpectedly returned a snapshot.'
+        } $imageProcess
+        $imageProcess.Dispose()
+        $imageRecord = [pscustomobject]@{
+            Process = $imageProcess; AcquiredPid = $imagePid; Role = 'image-unavailable-launch-contract'
+            ExpectedImagePath = [Environment]::ProcessPath; ExpectedParentPid = $PID; ExpectedSessionId = 0
+            Snapshot = $null; StdoutTask = $null; StderrTask = $null; StartFailure = $null; RollbackFailure = $null
+            StartFailureException = $null; RollbackFailureException = $null
+        }
+        $imageOutcome = & $module {
+            param($Record, $Primary)
+            $previous = $script:CapLastRollbackReceipt
+            $script:CapPendingLaunches.Add($Record)
+            try {
+                $outer = $null
+                try { Complete-CapFailedLaunch -LaunchRecord $Record -StartFailure $Primary }
+                catch [InvalidOperationException] { $outer = $_.Exception }
+                $pending = @(Get-CapPendingLaunches | Where-Object Role -CEQ 'image-unavailable-launch-contract')
+                [pscustomobject]@{ Outer = $outer; Pending = $pending
+                    Receipt = $script:CapLastRollbackReceipt; StillPending = $script:CapPendingLaunches.Contains($Record) }
+            } finally {
+                $null = $script:CapPendingLaunches.Remove($Record)
+                $script:CapLastRollbackReceipt = $previous
+            }
+        } $imageRecord $imageFailure
+        Assert-CapTest ($imageOutcome.Outer.Data['CapCaptureCode'] -ceq 'ProcessImageAttestationUnavailable' -and
+            $imageOutcome.Outer.InnerException -is [AggregateException] -and
+            [object]::ReferenceEquals($imageOutcome.Outer.InnerException.InnerExceptions[0], $imageFailure) -and
+            $imageOutcome.Pending.Count -eq 1 -and $null -eq $imageOutcome.Pending[0].KernelExited -and
+            $imageOutcome.Pending[0].KernelProbeFailureDetails['CapCaptureCode'] -ceq 'ProcessIdentityUnavailable' -and
+            $imageOutcome.StillPending -and $imageOutcome.Receipt.RefusedUnsafeTermination -and
+            $null -eq $imageOutcome.Receipt.KernelExited) `
+            'Typed image refusal fabricated identity, authorized termination, or converted cleanup uncertainty to success.'
+        $details += @{ acquiredPid = $imagePid; imageFailure = $imageFailure.ToString()
+            pending = $imageOutcome.Pending; kernelExit = 'UNPROVEN'; eof = 'UNPROVEN' }
+        Assert-CapTest ($details.Count -eq 3 -and @(Get-CapPendingLaunches).Count -eq 0) 'Synthetic-only pending test records were not removed.'
         return @{ cases = @($details); processStarts = 0; scope = 'Actual failed-launch handler and rollback with controlled wrappers; no target' }
     }
 }
