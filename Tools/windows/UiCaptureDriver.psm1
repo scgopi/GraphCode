@@ -77,6 +77,9 @@ public sealed class CapWindowSnapshot {
   public int[] OuterBounds { get; set; }
   public int[] ClientBounds { get; set; }
   public uint Dpi { get; set; }
+  public long Style { get; set; }
+  public long ExStyle { get; set; }
+  public bool HasMenu { get; set; }
 }
 
 public sealed class CapCaptureResult {
@@ -129,6 +132,12 @@ public static class CapNative {
   private static extern bool GetClientRect(IntPtr window, out NativeRect rect);
   [DllImport("user32.dll")]
   private static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW", SetLastError=true)]
+  private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetMenu(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)]
+  private static extern bool AdjustWindowRectExForDpi(ref NativeRect rect, uint style, bool hasMenu, uint exStyle, uint dpi);
   [DllImport("user32.dll", SetLastError=true)]
   private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -269,6 +278,15 @@ public static class CapNative {
     return SetWindowPos(window, IntPtr.Zero, x, y, width, height, 0x0014);
   }
 
+  public static int[] AdjustWindowRectForDpi(int clientWidth, int clientHeight, long style, bool hasMenu, long exStyle, uint dpi) {
+    if (clientWidth <= 0 || clientHeight <= 0 || dpi == 0)
+      throw new ArgumentOutOfRangeException("DPI window geometry requires positive dimensions and DPI.");
+    var rect = new NativeRect { Left = 0, Top = 0, Right = clientWidth, Bottom = clientHeight };
+    if (!AdjustWindowRectExForDpi(ref rect, unchecked((uint)style), hasMenu, unchecked((uint)exStyle), dpi))
+      throw new InvalidOperationException("AdjustWindowRectExForDpi failed: " + Marshal.GetLastWin32Error());
+    return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom, rect.Right - rect.Left, rect.Bottom - rect.Top };
+  }
+
   public static CapWindowSnapshot WindowSnapshot(IntPtr window, int expectedPid) {
     uint owner;
     if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)expectedPid)
@@ -279,7 +297,10 @@ public static class CapNative {
     return new CapWindowSnapshot {
       OuterBounds = new[] { outer.Left, outer.Top, outer.Right, outer.Bottom },
       ClientBounds = new[] { client.Left, client.Top, client.Right, client.Bottom },
-      Dpi = GetDpiForWindow(window)
+      Dpi = GetDpiForWindow(window),
+      Style = GetWindowLongPtr(window, -16).ToInt64(),
+      ExStyle = GetWindowLongPtr(window, -20).ToInt64(),
+      HasMenu = GetMenu(window) != IntPtr.Zero
     };
   }
 
@@ -991,7 +1012,8 @@ function Assert-CapFixtureMapping {
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedMappingSha256,
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSourceSha256,
         [Parameter(Mandatory)][string]$OriginalRoot,
-        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1','S_MATCHED_V12_V1')][string]$SceneAdapter = 'B_FIVE_SCENES_V1',
+        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1','S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')]
+        [string]$SceneAdapter = 'B_FIVE_SCENES_V1',
         [string]$ExpectedPeerSha256
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -1006,7 +1028,7 @@ function Assert-CapFixtureMapping {
     }
     $mapping = Get-Content -LiteralPath $MappingPath -Raw | ConvertFrom-Json -DateKind String
     $isD = $SceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS = $SceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $isS = $SceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')
     $graphCount = if ($isD -or $isS) {1} else {2}
     $nodeCount = if ($isS) {8} elseif ($isD) {2} else {10}
     if ($mapping.sourcePath -cne (Join-Path $OriginalRoot 'fixture.json') -or
@@ -1701,11 +1723,36 @@ function Invoke-CapAction {
     }
 }
 
+function Get-CapLogicalZoomEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateRange(0.01, 100000)][double]$PhysicalWidth,
+        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalLogicalWidth,
+        [Parameter(Mandatory)][ValidateRange(1, 960)][uint32]$Dpi
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    $logicalWidth = $PhysicalWidth * 96.0 / $Dpi
+    $percent = [Math]::Round(($logicalWidth / $NaturalLogicalWidth) * 100, 2)
+    if ($percent -lt 99 -or $percent -gt 101) {
+        throw "Actual-size logical zoom measured $percent%, expected 100%."
+    }
+    return [pscustomobject]@{
+        NaturalLogicalWidth = $NaturalLogicalWidth
+        MeasuredPhysicalWidth = $PhysicalWidth
+        MeasuredLogicalWidth = [Math]::Round($logicalWidth, 4)
+        Dpi = [long]$Dpi
+        DpiBase = 96L
+        ZoomPercent = $percent
+    }
+}
+
 function Measure-CapZoom {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][System.Windows.Automation.AutomationElement]$Element,
-        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalWidth
+        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalWidth,
+        [ValidateRange(1, 960)][uint32]$Dpi = 96
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -1715,15 +1762,147 @@ function Measure-CapZoom {
     if ($current.IsOffscreen -or $rect.Width -le 0 -or $rect.Height -le 0) {
         throw "Zoom probe '$($current.Name)' is not visibly bounded."
     }
-    $percent = [Math]::Round(($rect.Width / $NaturalWidth) * 100, 2)
-    if ($percent -lt 99 -or $percent -gt 101) { throw "Actual-size zoom measured $percent%, expected 100%." }
+    $logical = Get-CapLogicalZoomEvidence -PhysicalWidth $rect.Width `
+        -NaturalLogicalWidth $NaturalWidth -Dpi $Dpi
     return [pscustomobject]@{
         Name = $current.Name
         AutomationId = $current.AutomationId
         Bounds = [pscustomobject]@{ Left = $rect.Left; Top = $rect.Top; Width = $rect.Width; Height = $rect.Height }
         NaturalWidth = $NaturalWidth
         MeasuredWidth = $rect.Width
-        ZoomPercent = $percent
+        MeasuredLogicalWidth = $logical.MeasuredLogicalWidth
+        Dpi = $logical.Dpi
+        DpiBase = $logical.DpiBase
+        ZoomPercent = $logical.ZoomPercent
+    }
+}
+
+function Get-CapDpiGeometry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int[]]$LogicalClientWH,
+        [Parameter(Mandatory)][ValidateRange(1, 960)][uint32]$ExpectedDpi,
+        [Parameter(Mandatory)][long]$WindowStyle,
+        [Parameter(Mandatory)][long]$WindowExStyle,
+        [Parameter(Mandatory)][bool]$HasMenu,
+        [Parameter(Mandatory)][int[]]$WorkArea,
+        [int[]]$ExpectedAdjustedOuterWH = @()
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($LogicalClientWH.Count -ne 2 -or $LogicalClientWH[0] -le 0 -or $LogicalClientWH[1] -le 0) {
+        throw 'DPI-parametric geometry requires two positive logical client dimensions.'
+    }
+    if ($WorkArea.Count -ne 4 -or $WorkArea[2] -le $WorkArea[0] -or $WorkArea[3] -le $WorkArea[1]) {
+        throw 'DPI-parametric geometry requires positive physical work-area bounds.'
+    }
+    $physical = [Collections.Generic.List[int]]::new()
+    foreach ($logical in $LogicalClientWH) {
+        $scaled = [long]$logical * [long]$ExpectedDpi
+        if ($scaled % 96L -ne 0) {
+            throw "DPI-parametric logical dimension $logical is not integral at DPI $ExpectedDpi."
+        }
+        $value = $scaled / 96L
+        if ($value -le 0 -or $value -gt [int]::MaxValue) {
+            throw 'DPI-parametric physical client dimension overflowed.'
+        }
+        $physical.Add([int]$value)
+    }
+    $adjusted = [CapNative]::AdjustWindowRectForDpi(
+        $physical[0], $physical[1], $WindowStyle, $HasMenu, $WindowExStyle, $ExpectedDpi)
+    $outerWH = @([int]$adjusted[4], [int]$adjusted[5])
+    if ($ExpectedAdjustedOuterWH.Count -gt 0 -and
+        ($ExpectedAdjustedOuterWH.Count -ne 2 -or
+            ($ExpectedAdjustedOuterWH -join ',') -cne ($outerWH -join ','))) {
+        throw "DPI-parametric adjusted outer size differs: $($outerWH -join 'x')."
+    }
+    $workWidth = $WorkArea[2] - $WorkArea[0]
+    $workHeight = $WorkArea[3] - $WorkArea[1]
+    if ($outerWH[0] -gt $workWidth -or $outerWH[1] -gt $workHeight) {
+        throw "DPI-parametric window does not fit physical work area: outer=$($outerWH -join 'x') work=${workWidth}x${workHeight}."
+    }
+    return [pscustomobject]@{
+        GeometrySchemaVersion = 2L
+        GeometryDerivation = 'AdjustWindowRectExForDpi'
+        LogicalClientWH = @([long]$LogicalClientWH[0], [long]$LogicalClientWH[1])
+        PhysicalClientWH = @([long]$physical[0], [long]$physical[1])
+        AdjustedOffsets = @([long]$adjusted[0], [long]$adjusted[1],
+            [long]$adjusted[2], [long]$adjusted[3])
+        NonClientWH = @([long]($outerWH[0] - $physical[0]), [long]($outerWH[1] - $physical[1]))
+        OuterWH = @([long]$outerWH[0], [long]$outerWH[1])
+        OuterBounds = @([long]$WorkArea[0], [long]$WorkArea[1],
+            [long]($WorkArea[0] + $outerWH[0]), [long]($WorkArea[1] + $outerWH[1]))
+        PhysicalWorkAreaBounds = @([long]$WorkArea[0], [long]$WorkArea[1],
+            [long]$WorkArea[2], [long]$WorkArea[3])
+        ActualDpi = [long]$ExpectedDpi
+        DpiBase = 96L
+        DpiScaleNumerator = [long]$ExpectedDpi
+        DpiScaleDenominator = 96L
+        WindowStyle = [long]$WindowStyle
+        WindowExStyle = [long]$WindowExStyle
+        HasMenu = $HasMenu
+        Placement = 'MEASURED_FIT_WORKAREA'
+        Resampled = $false
+    }
+}
+
+function Assert-CapMatchedDpiImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Image,
+        [Parameter(Mandatory)]$Contract
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    Assert-CapDataRecord $Image @{
+        evidenceClassification=[string];geometrySchemaVersion=[long];geometryDerivation=[string]
+        logicalClientWH=[array];physicalClientBounds=[array];physicalOuterBounds=[array]
+        nonClientWH=[array];rawPixelWH=[array];actualWindowDpi=[long];dpiBase=[long]
+        dpiScaleNumerator=[long];dpiScaleDenominator=[long];windowStyle=[long]
+        windowStyleForAdjustment=[long]
+        windowExStyle=[long];hasMenu=[bool];physicalWorkAreaBounds=[array]
+        placement=[string];resampled=[bool];clientBounds=[array];outerBounds=[array]
+        width=[long];height=[long];dpi=[long]
+    } 'DPI-parametric matched image'
+    if ($Image.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
+        $Image.geometrySchemaVersion -ne 2 -or $Image.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+        ($Image.logicalClientWH -join ',') -cne ($Contract.logicalClientWH -join ',') -or
+        ($Image.physicalClientBounds -join ',') -cne
+            "0,0,$($Contract.expectedPhysicalClientWH[0]),$($Contract.expectedPhysicalClientWH[1])" -or
+        ($Image.clientBounds -join ',') -cne ($Image.physicalClientBounds -join ',') -or
+        ($Image.physicalOuterBounds -join ',') -cne ($Image.outerBounds -join ',') -or
+        ($Image.outerBounds[2]-$Image.outerBounds[0]) -ne $Contract.expectedAdjustedOuterWH[0] -or
+        ($Image.outerBounds[3]-$Image.outerBounds[1]) -ne $Contract.expectedAdjustedOuterWH[1] -or
+        ($Image.nonClientWH -join ',') -cne
+            "$($Contract.expectedAdjustedOuterWH[0]-$Contract.expectedPhysicalClientWH[0]),$($Contract.expectedAdjustedOuterWH[1]-$Contract.expectedPhysicalClientWH[1])" -or
+        ($Image.rawPixelWH -join ',') -cne ($Contract.expectedAdjustedOuterWH -join ',') -or
+        ($Image.rawPixelWH -join ',') -cne "$($Image.width),$($Image.height)" -or
+        $Image.width -ne $Contract.expectedAdjustedOuterWH[0] -or
+        $Image.height -ne $Contract.expectedAdjustedOuterWH[1] -or
+        $Image.width -ne ($Image.outerBounds[2]-$Image.outerBounds[0]) -or
+        $Image.height -ne ($Image.outerBounds[3]-$Image.outerBounds[1]) -or
+        $Image.actualWindowDpi -ne $Contract.expectedWindowDpi -or
+        $Image.dpi -ne $Contract.expectedWindowDpi -or $Image.dpiBase -ne $Contract.dpiBase -or
+        $Image.dpiScaleNumerator -ne $Contract.expectedWindowDpi -or
+        $Image.dpiScaleDenominator -ne $Contract.dpiBase -or
+        $Image.windowStyle -ne $Contract.expectedRuntimeWindowStyle -or
+        $Image.windowStyleForAdjustment -ne $Contract.windowStyleForAdjustment -or
+        $Image.windowExStyle -ne $Contract.windowExStyle -or $Image.hasMenu -ne $Contract.hasMenu -or
+        $Image.physicalWorkAreaBounds.Count -ne 4 -or
+        ($Image.physicalWorkAreaBounds[2]-$Image.physicalWorkAreaBounds[0]) -lt
+            $Contract.minimumPhysicalWorkAreaWH[0] -or
+        ($Image.physicalWorkAreaBounds[3]-$Image.physicalWorkAreaBounds[1]) -lt
+            $Contract.minimumPhysicalWorkAreaWH[1] -or
+        $Image.placement -cne $Contract.placement -or $Image.resampled -cne $false) {
+        throw 'DPI-parametric matched image logical, physical or raw-pixel metadata differs.'
+    }
+    return [pscustomobject]@{
+        logicalClientWH=@($Image.logicalClientWH)
+        physicalClientWH=@($Contract.expectedPhysicalClientWH)
+        outerWH=@([long]$Image.width,[long]$Image.height)
+        dpi=[long]$Image.actualWindowDpi
+        resampled=$false
+        evidenceClassification=$Image.evidenceClassification
     }
 }
 
@@ -3456,7 +3635,8 @@ function Assert-CapMatchedManifest {
     param([Parameter(Mandatory)]$Manifest,[Parameter(Mandatory)]$Job)
     $expected=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {"${phase}:$scene"}})
     $actual=@($Manifest.images | ForEach-Object {"$($_.phase):$($_.scene)"})
-    if ($Manifest.sceneAdapter -cne 'S_MATCHED_V12_V1' -or $Manifest.lane -cne 'S' -or
+    if ($Job.sceneAdapter -cnotin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1') -or
+        $Manifest.sceneAdapter -cne $Job.sceneAdapter -or $Manifest.lane -cne 'S' -or
         $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne 'LIVE_CAPTURE' -or
         $actual.Count -ne 36 -or @($actual | Sort-Object -Unique).Count -ne 36 -or
         (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
@@ -3477,6 +3657,66 @@ function Assert-CapMatchedManifest {
 
 function Assert-CapSceneContract {
     param([Parameter(Mandatory)]$Job)
+    if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1') {
+        Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array]
+            fixture=[pscustomobject];binaries=[pscustomobject]} 'DPI-parametric matched scene'
+        Assert-CapDataRecord $Job.authority @{centralCaptureLeaseGrantedByThisArtifact=[bool]
+            sWorkerMayLaunchGui=[bool]} 'DPI-parametric matched scene authority'
+        $contract=$Job.captureContract
+        Assert-CapDataRecord $contract @{geometrySchemaVersion=[long];phases=[array];sceneCountPerPhase=[long]
+            placement=[string];logicalClientWH=[array];expectedWindowDpi=[long];dpiBase=[long]
+            expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array];minimumPhysicalWorkAreaWH=[array]
+            windowStyleForAdjustment=[long];expectedRuntimeWindowStyle=[long]
+            windowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+            canvasZoomPercentLogical=[long];rawCaptureResamplingAllowed=[bool]
+            cleanupReserveSeconds=[long];estimatedSeconds=[long]} 'DPI-parametric matched geometry'
+        Assert-CapDataRecord $Job.binaries.backendFixture @{sha256=[string];sourceSha256=[string]
+            networkAllowed=[bool]} 'DPI-parametric matched backend fixture'
+        if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -cne $false -or
+            $Job.authority.sWorkerMayLaunchGui -cne $false -or $contract.geometrySchemaVersion -ne 2 -or
+            ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 18 -or
+            $contract.placement -cne 'MEASURED_FIT_WORKAREA' -or
+            ($contract.logicalClientWH -join ',') -cne '1440,900' -or
+            $contract.expectedWindowDpi -ne 192 -or $contract.dpiBase -ne 96 -or
+            ($contract.expectedPhysicalClientWH -join ',') -cne '2880,1800' -or
+            ($contract.expectedAdjustedOuterWH -join ',') -cne '2906,1910' -or
+            ($contract.minimumPhysicalWorkAreaWH -join ',') -cne '2906,1910' -or
+            $contract.windowStyleForAdjustment -ne 47120384 -or
+            $contract.expectedRuntimeWindowStyle -ne 315555840 -or $contract.windowExStyle -ne 0 -or
+            $contract.hasMenu -cne $true -or $contract.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+            $contract.canvasZoomPercentLogical -ne 100 -or $contract.rawCaptureResamplingAllowed -cne $false -or
+            $contract.cleanupReserveSeconds -ne 90 -or $contract.estimatedSeconds -lt 1 -or
+            $contract.estimatedSeconds -gt 1710 -or
+            ($Job.scenes.name -join ',') -cne ((Get-CapMatchedSceneNames) -join ',')) {
+            throw 'DPI-parametric matched scene inventory, geometry or non-authority differs.'
+        }
+        foreach ($scene in $Job.scenes) {
+            Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'DPI matched scene width'
+            if ($scene.naturalWidthBeforeAfter.Count -ne 2 -or
+                @($scene.naturalWidthBeforeAfter | Where-Object {$_ -isnot [long] -or $_ -ne 250}).Count) {
+                throw 'DPI-parametric matched scene requires exact 250 logical-pixel source widths.'
+            }
+        }
+        foreach ($binary in @('daemon','backendFixture')) {
+            if ($Job.binaries.$binary.sha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {
+                throw 'DPI-parametric matched scene requires hash-bound daemon and backend fixture.'
+            }
+        }
+        if ($Job.binaries.backendFixture.networkAllowed -cne $false) {
+            throw 'DPI-parametric matched backend fixture must prohibit network.'
+        }
+        $seed=@('run','graphcode-11111111-1111-4111-8111-000000000001','-d',
+            'cmd.exe','/Q','/K','echo Offline card fixture - no backend')
+        if (($Job.binaries.offlineZmx.seedArgumentOrder -join [char]0) -cne ($seed -join [char]0)) {
+            throw 'DPI-parametric matched scene requires the exact cmd-only seed vector.'
+        }
+        $sourceHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))
+        if ($Job.binaries.backendFixture.sourceSha256 -ne $sourceHash) {
+            throw 'DPI-parametric matched scene requires its canonical harmless backend source hash.'
+        }
+        return
+    }
     if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
         Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array]
             fixture=[pscustomobject];binaries=[pscustomobject]} 'Matched scene'
@@ -5138,7 +5378,10 @@ Export-ModuleMember -Function @(
     'Assert-CapRootProcess',
     'Assert-CapUiaProcessIds',
     'Invoke-CapAction',
+    'Get-CapLogicalZoomEvidence',
     'Measure-CapZoom',
+    'Get-CapDpiGeometry',
+    'Assert-CapMatchedDpiImage',
     'Get-CapWindowMetrics',
     'Set-CapWindowPosition',
     'Find-CapTopLevelWindow',
