@@ -72,8 +72,14 @@ pub const Layout = struct {
 
     /// Makes sure the layout names `id` as its agent pane, adding it as the first tab when
     /// missing, as macOS does when a saved layout lost it. The human's selected tab stays.
-    pub fn ensureAgentFirst(self: *Layout, id: []const u8) !void {
-        if (self.idExists(id)) return;
+    /// Returns whether the layout changed.
+    pub fn ensureAgentFirst(self: *Layout, id: []const u8) !bool {
+        for (self.tabs.items) |*tab| for (tab.panes.items) |*pane| {
+            if (!std.mem.eql(u8, pane.id, id)) continue;
+            if (pane.launches_agent) return false;
+            pane.launches_agent = true;
+            return true;
+        };
         var panes: std.ArrayListUnmanaged(Pane) = .empty;
         errdefer panes.deinit(self.allocator);
         try panes.append(self.allocator, .{ .id = try self.allocator.dupe(u8, id), .launches_agent = true });
@@ -85,6 +91,7 @@ pub const Layout = struct {
         } else {
             self.selected_tab += 1;
         }
+        return true;
     }
 
     pub fn default(allocator: std.mem.Allocator, project_key: []const u8, node_id: []const u8) !Layout {
@@ -936,21 +943,37 @@ test "layout file names are the loop id when it is a plain name and a hash other
 test "ensureAgentFirst mounts the loop's agent tab first and keeps the selected tab" {
     var layout = try Layout.init(std.testing.allocator, "p");
     defer layout.deinit();
-    try layout.ensureAgentFirst("loop");
+    _ = try layout.ensureAgentFirst("loop");
     try std.testing.expectEqual(@as(usize, 1), layout.tabs.items.len);
     try std.testing.expect(layout.tabs.items[0].panes.items[0].launches_agent);
     try layout.addTab("shell", false);
     layout.selected_tab = 1;
-    try layout.ensureAgentFirst("loop");
+    _ = try layout.ensureAgentFirst("loop");
     try std.testing.expectEqual(@as(usize, 2), layout.tabs.items.len);
     var other = try Layout.init(std.testing.allocator, "p");
     defer other.deinit();
     try other.addTab("shell", false);
-    try other.ensureAgentFirst("loop");
+    _ = try other.ensureAgentFirst("loop");
     try std.testing.expectEqualStrings("loop", other.tabs.items[0].panes.items[0].id);
     try std.testing.expectEqualStrings("shell", other.tabs.items[1].panes.items[0].id);
     try std.testing.expectEqual(@as(usize, 1), other.selected_tab);
     try std.testing.expectEqualStrings("shell", other.selected().?.panes.items[0].id);
+}
+
+test "Quick Chat remaining parity promotes an existing chat shell pane to agent ownership" {
+    var layout = try Layout.initForLoop(std.testing.allocator, "graphcode://quick-chats", "chat");
+    defer layout.deinit();
+    try layout.addTab("chat", false);
+    try layout.addTab("shell", false);
+    layout.selected_tab = 1;
+
+    _ = try layout.ensureAgentFirst("chat");
+
+    try std.testing.expectEqual(@as(usize, 2), layout.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), layout.selected_tab);
+    try std.testing.expectEqualStrings("chat", layout.tabs.items[0].panes.items[0].id);
+    try std.testing.expect(layout.tabs.items[0].panes.items[0].launches_agent);
+    try std.testing.expectEqualStrings("shell", layout.selected().?.panes.items[0].id);
 }
 
 test "legacy project layout is adopted by the loop it names, without other loops' agent panes" {
