@@ -59,6 +59,7 @@ if (-not ('GraphCodeUiaGateState' -as [type])) {
 
 $nativeSource = @'
 using System;
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -76,6 +77,9 @@ public sealed class CapWindowSnapshot {
   public int[] OuterBounds { get; set; }
   public int[] ClientBounds { get; set; }
   public uint Dpi { get; set; }
+  public long Style { get; set; }
+  public long ExStyle { get; set; }
+  public bool HasMenu { get; set; }
 }
 
 public sealed class CapCaptureResult {
@@ -128,6 +132,12 @@ public static class CapNative {
   private static extern bool GetClientRect(IntPtr window, out NativeRect rect);
   [DllImport("user32.dll")]
   private static extern uint GetDpiForWindow(IntPtr window);
+  [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW", SetLastError=true)]
+  private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetMenu(IntPtr window);
+  [DllImport("user32.dll", SetLastError=true)]
+  private static extern bool AdjustWindowRectExForDpi(ref NativeRect rect, uint style, bool hasMenu, uint exStyle, uint dpi);
   [DllImport("user32.dll", SetLastError=true)]
   private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -175,7 +185,7 @@ public static class CapNative {
     }
   }
 
-  public static CapProcessSnapshot Snapshot(IntPtr handle, int expectedPid) {
+  public static CapProcessSnapshot KernelSnapshot(IntPtr handle, int expectedPid) {
     if (handle == IntPtr.Zero) throw new ArgumentNullException("handle");
     uint pid = GetProcessId(handle);
     if (pid == 0 || pid != (uint)expectedPid) throw new InvalidOperationException("Process handle/PID mismatch.");
@@ -185,18 +195,35 @@ public static class CapNative {
     uint wait = WaitForSingleObject(handle, 0);
     if (wait == WAIT_FAILED) throw new InvalidOperationException("WaitForSingleObject failed: " + Marshal.GetLastWin32Error());
     bool exited = wait == WAIT_OBJECT_0;
-    string path = "";
-    uint size = 32768;
-    var buffer = new StringBuilder((int)size);
-    if (QueryFullProcessImageNameW(handle, 0, buffer, ref size)) path = buffer.ToString();
-    else if (!exited) throw new InvalidOperationException("QueryFullProcessImageName failed for live PID " + pid + ": " + Marshal.GetLastWin32Error());
     return new CapProcessSnapshot {
       ProcessId = (int)pid,
       CreationFileTimeUtc = FileTime(creation),
       ExitFileTimeUtc = exited ? FileTime(exit) : 0,
-      ImagePath = path,
+      ImagePath = "",
       IsExited = exited
     };
+  }
+
+  public static string ImagePath(IntPtr handle, int expectedPid) {
+    if (handle == IntPtr.Zero || GetProcessId(handle) != (uint)expectedPid)
+      throw new InvalidOperationException("Process handle/PID mismatch.");
+    uint size = 32768;
+    var buffer = new StringBuilder((int)size);
+    if (!QueryFullProcessImageNameW(handle, 0, buffer, ref size))
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    return buffer.ToString();
+  }
+
+  public static CapProcessSnapshot Snapshot(IntPtr handle, int expectedPid) {
+    var snapshot = KernelSnapshot(handle, expectedPid);
+    try {
+      snapshot.ImagePath = ImagePath(handle, expectedPid);
+    } catch (Win32Exception error) {
+      if (!snapshot.IsExited)
+        throw new InvalidOperationException("QueryFullProcessImageName failed for live PID " +
+          expectedPid + ": " + error.NativeErrorCode, error);
+    }
+    return snapshot;
   }
 
   public static int WindowProcessId(IntPtr window) {
@@ -251,6 +278,15 @@ public static class CapNative {
     return SetWindowPos(window, IntPtr.Zero, x, y, width, height, 0x0014);
   }
 
+  public static int[] AdjustWindowRectForDpi(int clientWidth, int clientHeight, long style, bool hasMenu, long exStyle, uint dpi) {
+    if (clientWidth <= 0 || clientHeight <= 0 || dpi == 0)
+      throw new ArgumentOutOfRangeException("DPI window geometry requires positive dimensions and DPI.");
+    var rect = new NativeRect { Left = 0, Top = 0, Right = clientWidth, Bottom = clientHeight };
+    if (!AdjustWindowRectExForDpi(ref rect, unchecked((uint)style), hasMenu, unchecked((uint)exStyle), dpi))
+      throw new InvalidOperationException("AdjustWindowRectExForDpi failed: " + Marshal.GetLastWin32Error());
+    return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom, rect.Right - rect.Left, rect.Bottom - rect.Top };
+  }
+
   public static CapWindowSnapshot WindowSnapshot(IntPtr window, int expectedPid) {
     uint owner;
     if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)expectedPid)
@@ -261,7 +297,10 @@ public static class CapNative {
     return new CapWindowSnapshot {
       OuterBounds = new[] { outer.Left, outer.Top, outer.Right, outer.Bottom },
       ClientBounds = new[] { client.Left, client.Top, client.Right, client.Bottom },
-      Dpi = GetDpiForWindow(window)
+      Dpi = GetDpiForWindow(window),
+      Style = GetWindowLongPtr(window, -16).ToInt64(),
+      ExStyle = GetWindowLongPtr(window, -20).ToInt64(),
+      HasMenu = GetMenu(window) != IntPtr.Zero
     };
   }
 
@@ -469,25 +508,24 @@ try {
     foreach ($property in $spec.environment.PSObject.Properties) { $info.Environment[$property.Name] = [string]$property.Value }
     $process = [Diagnostics.Process]::Start($info)
     if ($null -eq $process) { throw 'Contained normal Process.Start returned null.' }
-    $access = Read-CapProcessAccess -Process $process -Role 'contained-target' -CallSite 'JobLauncher.InitialSnapshot'
-    $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+    $snapshot = Read-CapProcessSnapshot -Process $process -Role 'contained-target' `
+        -CallSite 'JobLauncher.InitialSnapshot'
     if (-not $snapshot.IsExited -and $snapshot.ImagePath -ine $spec.filePath) { throw 'Contained target image differs.' }
     $outPump = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
     $errPump = $process.StandardError.BaseStream.CopyToAsync($stderr)
     $process.StandardInput.Close()
     $null = Write-CapImmutableJson -Root $spec.root -Path $spec.targetReceiptPath -Value ([pscustomobject]@{
-        jobId = $spec.jobId; specSha256 = $specHash; pid = [long]$access.Pid
+        jobId = $spec.jobId; specSha256 = $specHash; pid = [long]$snapshot.ProcessId
         creationFileTimeUtc = [long]$snapshot.CreationFileTimeUtc
         expectedImagePath = $spec.filePath; arguments = @($spec.arguments)
         attestation = 'NORMAL_START_RETAINED_HANDLE_NOT_PREEXECUTION_IDENTITY'
     })
     while (-not $process.WaitForExit(100)) {}
-    $access = Read-CapProcessAccess -Process $process -Role 'contained-target' `
+    $exit = Read-CapProcessSnapshot -Process $process -Role 'contained-target' `
         -CallSite 'JobLauncher.ExitSnapshot' -ExpectedPid $snapshot.ProcessId
-    $exit = [CapNative]::Snapshot($access.Handle, $access.Pid)
     if (-not $exit.IsExited) { throw 'Contained target exit lacks a signalled original handle.' }
     $null = Write-CapImmutableJson -Root $spec.root -Path $spec.exitReceiptPath -Value ([pscustomobject]@{
-        jobId = $spec.jobId; specSha256 = $specHash; pid = [long]$access.Pid
+        jobId = $spec.jobId; specSha256 = $specHash; pid = [long]$exit.ProcessId
         creationFileTimeUtc = [long]$snapshot.CreationFileTimeUtc; exitCode = [long]$process.ExitCode; kernelExited = $true
     })
     # The job owner may terminate this host while daemon descendants still hold
@@ -699,7 +737,8 @@ function Get-CapJobMembers {
             if (-not [CapProcessJob]::Contains($Run.Job, $access.Handle)) {
                 throw 'Census PID does not identify a held job-member generation.'
             }
-            $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+            $snapshot = Read-CapProcessSnapshot -Process $process -Role 'job-member' `
+                -CallSite 'Get-CapJobMembers.Snapshot' -ExpectedPid $memberPid
             if ($snapshot.IsExited) { continue }
             $existing = @($Run.Members | Where-Object { $_.Pid -eq $memberPid -and
                 $_.CreationFileTimeUtc -eq $snapshot.CreationFileTimeUtc })
@@ -973,7 +1012,8 @@ function Assert-CapFixtureMapping {
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedMappingSha256,
         [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedSourceSha256,
         [Parameter(Mandatory)][string]$OriginalRoot,
-        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1','S_MATCHED_V12_V1')][string]$SceneAdapter = 'B_FIVE_SCENES_V1',
+        [ValidateSet('B_FIVE_SCENES_V1','D_QUICK_CHAT_V1','S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')]
+        [string]$SceneAdapter = 'B_FIVE_SCENES_V1',
         [string]$ExpectedPeerSha256
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -988,7 +1028,7 @@ function Assert-CapFixtureMapping {
     }
     $mapping = Get-Content -LiteralPath $MappingPath -Raw | ConvertFrom-Json -DateKind String
     $isD = $SceneAdapter -ceq 'D_QUICK_CHAT_V1'
-    $isS = $SceneAdapter -ceq 'S_MATCHED_V12_V1'
+    $isS = $SceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')
     $graphCount = if ($isD -or $isS) {1} else {2}
     $nodeCount = if ($isS) {8} elseif ($isD) {2} else {10}
     if ($mapping.sourcePath -cne (Join-Path $OriginalRoot 'fixture.json') -or
@@ -1683,11 +1723,36 @@ function Invoke-CapAction {
     }
 }
 
+function Get-CapLogicalZoomEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateRange(0.01, 100000)][double]$PhysicalWidth,
+        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalLogicalWidth,
+        [Parameter(Mandatory)][ValidateRange(1, 960)][uint32]$Dpi
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    $logicalWidth = $PhysicalWidth * 96.0 / $Dpi
+    $percent = [Math]::Round(($logicalWidth / $NaturalLogicalWidth) * 100, 2)
+    if ($percent -lt 99 -or $percent -gt 101) {
+        throw "Actual-size logical zoom measured $percent%, expected 100%."
+    }
+    return [pscustomobject]@{
+        NaturalLogicalWidth = $NaturalLogicalWidth
+        MeasuredPhysicalWidth = $PhysicalWidth
+        MeasuredLogicalWidth = [Math]::Round($logicalWidth, 4)
+        Dpi = [long]$Dpi
+        DpiBase = 96L
+        ZoomPercent = $percent
+    }
+}
+
 function Measure-CapZoom {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][System.Windows.Automation.AutomationElement]$Element,
-        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalWidth
+        [Parameter(Mandatory)][ValidateRange(1, 1000)][int]$NaturalWidth,
+        [ValidateRange(1, 960)][uint32]$Dpi = 96
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -1697,15 +1762,147 @@ function Measure-CapZoom {
     if ($current.IsOffscreen -or $rect.Width -le 0 -or $rect.Height -le 0) {
         throw "Zoom probe '$($current.Name)' is not visibly bounded."
     }
-    $percent = [Math]::Round(($rect.Width / $NaturalWidth) * 100, 2)
-    if ($percent -lt 99 -or $percent -gt 101) { throw "Actual-size zoom measured $percent%, expected 100%." }
+    $logical = Get-CapLogicalZoomEvidence -PhysicalWidth $rect.Width `
+        -NaturalLogicalWidth $NaturalWidth -Dpi $Dpi
     return [pscustomobject]@{
         Name = $current.Name
         AutomationId = $current.AutomationId
         Bounds = [pscustomobject]@{ Left = $rect.Left; Top = $rect.Top; Width = $rect.Width; Height = $rect.Height }
         NaturalWidth = $NaturalWidth
         MeasuredWidth = $rect.Width
-        ZoomPercent = $percent
+        MeasuredLogicalWidth = $logical.MeasuredLogicalWidth
+        Dpi = $logical.Dpi
+        DpiBase = $logical.DpiBase
+        ZoomPercent = $logical.ZoomPercent
+    }
+}
+
+function Get-CapDpiGeometry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int[]]$LogicalClientWH,
+        [Parameter(Mandatory)][ValidateRange(1, 960)][uint32]$ExpectedDpi,
+        [Parameter(Mandatory)][long]$WindowStyle,
+        [Parameter(Mandatory)][long]$WindowExStyle,
+        [Parameter(Mandatory)][bool]$HasMenu,
+        [Parameter(Mandatory)][int[]]$WorkArea,
+        [int[]]$ExpectedAdjustedOuterWH = @()
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($LogicalClientWH.Count -ne 2 -or $LogicalClientWH[0] -le 0 -or $LogicalClientWH[1] -le 0) {
+        throw 'DPI-parametric geometry requires two positive logical client dimensions.'
+    }
+    if ($WorkArea.Count -ne 4 -or $WorkArea[2] -le $WorkArea[0] -or $WorkArea[3] -le $WorkArea[1]) {
+        throw 'DPI-parametric geometry requires positive physical work-area bounds.'
+    }
+    $physical = [Collections.Generic.List[int]]::new()
+    foreach ($logical in $LogicalClientWH) {
+        $scaled = [long]$logical * [long]$ExpectedDpi
+        if ($scaled % 96L -ne 0) {
+            throw "DPI-parametric logical dimension $logical is not integral at DPI $ExpectedDpi."
+        }
+        $value = $scaled / 96L
+        if ($value -le 0 -or $value -gt [int]::MaxValue) {
+            throw 'DPI-parametric physical client dimension overflowed.'
+        }
+        $physical.Add([int]$value)
+    }
+    $adjusted = [CapNative]::AdjustWindowRectForDpi(
+        $physical[0], $physical[1], $WindowStyle, $HasMenu, $WindowExStyle, $ExpectedDpi)
+    $outerWH = @([int]$adjusted[4], [int]$adjusted[5])
+    if ($ExpectedAdjustedOuterWH.Count -gt 0 -and
+        ($ExpectedAdjustedOuterWH.Count -ne 2 -or
+            ($ExpectedAdjustedOuterWH -join ',') -cne ($outerWH -join ','))) {
+        throw "DPI-parametric adjusted outer size differs: $($outerWH -join 'x')."
+    }
+    $workWidth = $WorkArea[2] - $WorkArea[0]
+    $workHeight = $WorkArea[3] - $WorkArea[1]
+    if ($outerWH[0] -gt $workWidth -or $outerWH[1] -gt $workHeight) {
+        throw "DPI-parametric window does not fit physical work area: outer=$($outerWH -join 'x') work=${workWidth}x${workHeight}."
+    }
+    return [pscustomobject]@{
+        GeometrySchemaVersion = 2L
+        GeometryDerivation = 'AdjustWindowRectExForDpi'
+        LogicalClientWH = @([long]$LogicalClientWH[0], [long]$LogicalClientWH[1])
+        PhysicalClientWH = @([long]$physical[0], [long]$physical[1])
+        AdjustedOffsets = @([long]$adjusted[0], [long]$adjusted[1],
+            [long]$adjusted[2], [long]$adjusted[3])
+        NonClientWH = @([long]($outerWH[0] - $physical[0]), [long]($outerWH[1] - $physical[1]))
+        OuterWH = @([long]$outerWH[0], [long]$outerWH[1])
+        OuterBounds = @([long]$WorkArea[0], [long]$WorkArea[1],
+            [long]($WorkArea[0] + $outerWH[0]), [long]($WorkArea[1] + $outerWH[1]))
+        PhysicalWorkAreaBounds = @([long]$WorkArea[0], [long]$WorkArea[1],
+            [long]$WorkArea[2], [long]$WorkArea[3])
+        ActualDpi = [long]$ExpectedDpi
+        DpiBase = 96L
+        DpiScaleNumerator = [long]$ExpectedDpi
+        DpiScaleDenominator = 96L
+        WindowStyle = [long]$WindowStyle
+        WindowExStyle = [long]$WindowExStyle
+        HasMenu = $HasMenu
+        Placement = 'MEASURED_FIT_WORKAREA'
+        Resampled = $false
+    }
+}
+
+function Assert-CapMatchedDpiImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Image,
+        [Parameter(Mandatory)]$Contract
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    Assert-CapDataRecord $Image @{
+        evidenceClassification=[string];geometrySchemaVersion=[long];geometryDerivation=[string]
+        logicalClientWH=[array];physicalClientBounds=[array];physicalOuterBounds=[array]
+        nonClientWH=[array];rawPixelWH=[array];actualWindowDpi=[long];dpiBase=[long]
+        dpiScaleNumerator=[long];dpiScaleDenominator=[long];windowStyle=[long]
+        windowStyleForAdjustment=[long]
+        windowExStyle=[long];hasMenu=[bool];physicalWorkAreaBounds=[array]
+        placement=[string];resampled=[bool];clientBounds=[array];outerBounds=[array]
+        width=[long];height=[long];dpi=[long]
+    } 'DPI-parametric matched image'
+    if ($Image.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
+        $Image.geometrySchemaVersion -ne 2 -or $Image.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+        ($Image.logicalClientWH -join ',') -cne ($Contract.logicalClientWH -join ',') -or
+        ($Image.physicalClientBounds -join ',') -cne
+            "0,0,$($Contract.expectedPhysicalClientWH[0]),$($Contract.expectedPhysicalClientWH[1])" -or
+        ($Image.clientBounds -join ',') -cne ($Image.physicalClientBounds -join ',') -or
+        ($Image.physicalOuterBounds -join ',') -cne ($Image.outerBounds -join ',') -or
+        ($Image.outerBounds[2]-$Image.outerBounds[0]) -ne $Contract.expectedAdjustedOuterWH[0] -or
+        ($Image.outerBounds[3]-$Image.outerBounds[1]) -ne $Contract.expectedAdjustedOuterWH[1] -or
+        ($Image.nonClientWH -join ',') -cne
+            "$($Contract.expectedAdjustedOuterWH[0]-$Contract.expectedPhysicalClientWH[0]),$($Contract.expectedAdjustedOuterWH[1]-$Contract.expectedPhysicalClientWH[1])" -or
+        ($Image.rawPixelWH -join ',') -cne ($Contract.expectedAdjustedOuterWH -join ',') -or
+        ($Image.rawPixelWH -join ',') -cne "$($Image.width),$($Image.height)" -or
+        $Image.width -ne $Contract.expectedAdjustedOuterWH[0] -or
+        $Image.height -ne $Contract.expectedAdjustedOuterWH[1] -or
+        $Image.width -ne ($Image.outerBounds[2]-$Image.outerBounds[0]) -or
+        $Image.height -ne ($Image.outerBounds[3]-$Image.outerBounds[1]) -or
+        $Image.actualWindowDpi -ne $Contract.expectedWindowDpi -or
+        $Image.dpi -ne $Contract.expectedWindowDpi -or $Image.dpiBase -ne $Contract.dpiBase -or
+        $Image.dpiScaleNumerator -ne $Contract.expectedWindowDpi -or
+        $Image.dpiScaleDenominator -ne $Contract.dpiBase -or
+        $Image.windowStyle -ne $Contract.expectedRuntimeWindowStyle -or
+        $Image.windowStyleForAdjustment -ne $Contract.windowStyleForAdjustment -or
+        $Image.windowExStyle -ne $Contract.windowExStyle -or $Image.hasMenu -ne $Contract.hasMenu -or
+        $Image.physicalWorkAreaBounds.Count -ne 4 -or
+        ($Image.physicalWorkAreaBounds[2]-$Image.physicalWorkAreaBounds[0]) -lt
+            $Contract.minimumPhysicalWorkAreaWH[0] -or
+        ($Image.physicalWorkAreaBounds[3]-$Image.physicalWorkAreaBounds[1]) -lt
+            $Contract.minimumPhysicalWorkAreaWH[1] -or
+        $Image.placement -cne $Contract.placement -or $Image.resampled -cne $false) {
+        throw 'DPI-parametric matched image logical, physical or raw-pixel metadata differs.'
+    }
+    return [pscustomobject]@{
+        logicalClientWH=@($Image.logicalClientWH)
+        physicalClientWH=@($Contract.expectedPhysicalClientWH)
+        outerWH=@([long]$Image.width,[long]$Image.height)
+        dpi=[long]$Image.actualWindowDpi
+        resampled=$false
+        evidenceClassification=$Image.evidenceClassification
     }
 }
 
@@ -1867,6 +2064,85 @@ function Read-CapProcessAccess {
     return [pscustomobject]@{ Handle = $handle; Pid = $processId }
 }
 
+function Read-CapProcessSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process]$Process,
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][string]$CallSite,
+        [Nullable[int]]$ExpectedPid = $null,
+        [ValidateRange(1, 10)][int]$MaximumAttempts = 3,
+        [scriptblock]$KernelSnapshotReader,
+        [scriptblock]$ImagePathReader,
+        [scriptblock]$DelayAction
+    )
+    $firstPid = $null
+    $firstCreationFileTimeUtc = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $requiredPid = if ($null -ne $firstPid) { [Nullable[int]]$firstPid } else { $ExpectedPid }
+        $access = Read-CapProcessAccess -Process $Process -Role $Role -CallSite $CallSite -ExpectedPid $requiredPid
+        $snapshot = if ($KernelSnapshotReader) {
+            & $KernelSnapshotReader $access.Handle $access.Pid $attempt
+        } else {
+            [CapNative]::KernelSnapshot($access.Handle, $access.Pid)
+        }
+        if ($snapshot.ProcessId -ne $access.Pid -or
+            ($null -ne $firstPid -and
+                ($snapshot.ProcessId -ne $firstPid -or
+                    $snapshot.CreationFileTimeUtc -ne $firstCreationFileTimeUtc))) {
+            $failure = [InvalidOperationException]::new(
+                "Process generation changed for $Role at $CallSite while retrying native image attestation.")
+            $failure.Data['CapCaptureCode'] = 'ProcessIdentityMismatch'
+            $failure.Data['AcquiredPid'] = $access.Pid
+            $failure.Data['ExpectedPid'] = if ($null -ne $firstPid) { $firstPid } else { $ExpectedPid }
+            $failure.Data['CreationFileTimeUtc'] = $snapshot.CreationFileTimeUtc
+            $failure.Data['ExpectedCreationFileTimeUtc'] = $firstCreationFileTimeUtc
+            $failure.Data['Attempts'] = $attempt
+            throw $failure
+        }
+        if ($null -eq $firstPid) {
+            $firstPid = $snapshot.ProcessId
+            $firstCreationFileTimeUtc = $snapshot.CreationFileTimeUtc
+        }
+        if ($snapshot.IsExited) { return $snapshot }
+        try {
+            $snapshot.ImagePath = if ($ImagePathReader) {
+                [string](& $ImagePathReader $access.Handle $access.Pid $attempt)
+            } else {
+                [CapNative]::ImagePath($access.Handle, $access.Pid)
+            }
+        } catch {
+            $native = $_.Exception
+            while ($native.InnerException) { $native = $native.InnerException }
+            $nativeCode = if ($native -is [ComponentModel.Win32Exception]) { $native.NativeErrorCode } else { $null }
+            if ($nativeCode -eq 5 -and $attempt -lt $MaximumAttempts) {
+                if ($DelayAction) { & $DelayAction $attempt }
+                else { Start-Sleep -Milliseconds 50 }
+                continue
+            }
+            $failure = [InvalidOperationException]::new(
+                "ProcessImageAttestationUnavailable: $Role at $CallSite; PID=$($access.Pid); Win32=$nativeCode; attempts=$attempt; kernel exit and EOF are UNPROVEN.",
+                $_.Exception)
+            $failure.Data['CapCaptureCode'] = 'ProcessImageAttestationUnavailable'
+            $failure.Data['Role'] = $Role
+            $failure.Data['CallSite'] = $CallSite
+            $failure.Data['AcquiredPid'] = $access.Pid
+            $failure.Data['ExpectedPid'] = $ExpectedPid
+            $failure.Data['CreationFileTimeUtc'] = $snapshot.CreationFileTimeUtc
+            $failure.Data['NativeErrorCode'] = $nativeCode
+            $failure.Data['Attempts'] = $attempt
+            $failure.Data['MaximumAttempts'] = $MaximumAttempts
+            $failure.Data['KernelExited'] = $false
+            throw $failure
+        }
+        if ([string]::IsNullOrWhiteSpace($snapshot.ImagePath)) {
+            throw "Native image query returned an empty path for live $Role PID $($access.Pid)."
+        }
+        return $snapshot
+    }
+    throw "Native image attestation loop ended unexpectedly for $Role at $CallSite."
+}
+
 function Get-CapProcessIdentity {
     [CmdletBinding()]
     param(
@@ -1879,9 +2155,8 @@ function Get-CapProcessIdentity {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
 
-    $access = Read-CapProcessAccess -Process $Process -Role $Role -CallSite 'Get-CapProcessIdentity.InitialSnapshot'
-    $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
-    if ($snapshot.ProcessId -ne $access.Pid) { throw "Kernel PID changed while tracking $Role." }
+    $snapshot = Read-CapProcessSnapshot -Process $Process -Role $Role `
+        -CallSite 'Get-CapProcessIdentity.InitialSnapshot'
     $expected = ConvertTo-CapImagePath -Path $ExpectedImagePath
     if (-not $snapshot.IsExited -and (ConvertTo-CapImagePath -Path $snapshot.ImagePath) -ine $expected) {
         throw "Live $Role executable mismatch: $($snapshot.ImagePath) != $expected."
@@ -1894,14 +2169,13 @@ function Get-CapProcessIdentity {
     $concludedGoneByKernelExit = [bool]$snapshot.IsExited
     if (-not $snapshot.IsExited) {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
-            $state = Read-CapProcessMetadataState -Pid $access.Pid
+            $state = Read-CapProcessMetadataState -Pid $snapshot.ProcessId
             # The retained kernel handle governs an Absent/Incomplete reading. EOF is
             # proven later by the launch caller, so the loop passes BothStreamsEofReached
             # = $false and treats either exited disposition as "break and defer the EOF
             # gate to the caller".
-            $access = Read-CapProcessAccess -Process $Process -Role $Role `
+            $snapshot = Read-CapProcessSnapshot -Process $Process -Role $Role `
                 -CallSite 'Get-CapProcessIdentity.MetadataSnapshot' -ExpectedPid $snapshot.ProcessId
-            $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
             $disposition = Resolve-CapAttestationDisposition -State $state.State `
                 -KernelExited ([bool]$snapshot.IsExited) -BothStreamsEofReached $false
             $terminalState = if ($snapshot.IsExited) { "KernelExitedWith$($state.State)" } else { $state.State }
@@ -1912,14 +2186,14 @@ function Get-CapProcessIdentity {
             if ($disposition -eq 'RefuseLiveIncomplete') {
                 # A torn-down row on a still-live owned child is refused outright,
                 # exactly as main did; it is never retried into a passing outcome.
-                throw "Live $Role PID $($access.Pid) has incomplete current CIM metadata; refusing ownership inference."
+                throw "Live $Role PID $($snapshot.ProcessId) has incomplete current CIM metadata; refusing ownership inference."
             }
             # RetryAbsent: not yet listed on a live child -> bounded startup re-poll.
             Start-Sleep -Milliseconds 50
         }
         if ($null -eq $metadata -and -not $concludedGoneByKernelExit -and -not $snapshot.IsExited -and
             ($ExpectedParentPid -lt 0 -or $ExpectedSessionId -lt 0)) {
-            throw "Live $Role PID $($access.Pid) has no current CIM metadata."
+            throw "Live $Role PID $($snapshot.ProcessId) has no current CIM metadata."
         }
     }
     $expectedMetadataMatches = if ($metadata) {
@@ -2094,9 +2368,8 @@ function Assert-CapProcessIdentity {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
 
-    $access = Read-CapProcessAccess -Process $Identity.Process -Role $Identity.Role `
+    $snapshot = Read-CapProcessSnapshot -Process $Identity.Process -Role $Identity.Role `
         -CallSite 'Assert-CapProcessIdentity.Snapshot' -ExpectedPid $Identity.Pid
-    $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
     if ($snapshot.IsExited) { return [pscustomobject]@{ State = 'Exited'; Snapshot = $snapshot; Metadata = $null } }
     if ($snapshot.ProcessId -ne $Identity.Pid -or
         $snapshot.CreationFileTimeUtc -ne [long]$Identity.CreationFileTimeUtc -or
@@ -2178,41 +2451,39 @@ function Invoke-CapLaunchRollback {
 
 
     $process = $LaunchRecord.Process
-    $access = Read-CapProcessAccess -Process $process -Role $LaunchRecord.Role `
+    $snapshot = Read-CapProcessSnapshot -Process $process -Role $LaunchRecord.Role `
         -CallSite 'Invoke-CapLaunchRollback.InitialSnapshot' -ExpectedPid $LaunchRecord.AcquiredPid
-    $LaunchRecord.AcquiredPid = $access.Pid
-    $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+    $LaunchRecord.AcquiredPid = $snapshot.ProcessId
     $result = $null
     if ($snapshot.IsExited) {
         $result = 'SKIP_GENUINELY_EXITED_KERNEL'
     } else {
         $metadata = $null
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
-            $metadata = Get-CapCurrentMetadata -Pid $access.Pid
+            $metadata = Get-CapCurrentMetadata -Pid $snapshot.ProcessId
             if ($metadata) { break }
-            $access = Read-CapProcessAccess -Process $process -Role $LaunchRecord.Role `
+            $snapshot = Read-CapProcessSnapshot -Process $process -Role $LaunchRecord.Role `
                 -CallSite 'Invoke-CapLaunchRollback.MetadataSnapshot' -ExpectedPid $snapshot.ProcessId
-            $snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
             if ($snapshot.IsExited) { break }
             Start-Sleep -Milliseconds 50
         }
         if ($snapshot.IsExited) {
             $result = 'SKIP_GENUINELY_EXITED_KERNEL'
         } elseif ($null -eq $metadata) {
-            throw "Rollback refused for live PID $($access.Pid): current process metadata is unavailable."
+            throw "Rollback refused for live PID $($snapshot.ProcessId): current process metadata is unavailable."
         } else {
             $expectedPath = ConvertTo-CapImagePath -Path $LaunchRecord.ExpectedImagePath
-            if ($metadata.Pid -ne $access.Pid -or
+            if ($metadata.Pid -ne $snapshot.ProcessId -or
                 [Math]::Abs([double]([long]$metadata.CreationFileTimeUtc - [long]$snapshot.CreationFileTimeUtc)) -gt
                 [TimeSpan]::FromMilliseconds(100).Ticks -or
                 $metadata.ImagePath -ine $expectedPath -or
                 $metadata.ParentPid -ne $LaunchRecord.ExpectedParentPid -or
                 $metadata.SessionId -ne $LaunchRecord.ExpectedSessionId) {
-                throw "Rollback refused for live PID $($access.Pid): current kernel/CIM identity differs from the held launch record."
+                throw "Rollback refused for live PID $($snapshot.ProcessId): current kernel/CIM identity differs from the held launch record."
             }
             $identity = [pscustomobject]@{
                 Process = $process
-                Pid = $access.Pid
+                Pid = $snapshot.ProcessId
                 CreationFileTimeUtc = $snapshot.CreationFileTimeUtc
                 ImagePath = $expectedPath
                 ExpectedImagePath = $expectedPath
@@ -2229,8 +2500,8 @@ function Invoke-CapLaunchRollback {
     }
     if ($null -eq $LaunchRecord.StdoutTask) { $LaunchRecord.StdoutTask = $process.StandardOutput.ReadToEndAsync() }
     if ($null -eq $LaunchRecord.StderrTask) { $LaunchRecord.StderrTask = $process.StandardError.ReadToEndAsync() }
-    if (-not $LaunchRecord.StdoutTask.Wait(2000)) { throw "Rollback stdout reader did not reach bounded EOF for PID $($access.Pid)." }
-    if (-not $LaunchRecord.StderrTask.Wait(2000)) { throw "Rollback stderr reader did not reach bounded EOF for PID $($access.Pid)." }
+    if (-not $LaunchRecord.StdoutTask.Wait(2000)) { throw "Rollback stdout reader did not reach bounded EOF for PID $($snapshot.ProcessId)." }
+    if (-not $LaunchRecord.StderrTask.Wait(2000)) { throw "Rollback stderr reader did not reach bounded EOF for PID $($snapshot.ProcessId)." }
     $stdout = [string]$LaunchRecord.StdoutTask.Result
     $stderr = [string]$LaunchRecord.StderrTask.Result
     $access = Read-CapProcessAccess -Process $process -Role $LaunchRecord.Role `
@@ -2346,9 +2617,11 @@ function Start-CapManagedProcessCore {
     }
     $script:CapPendingLaunches.Add($launchRecord)
     try {
-        $access = Read-CapProcessAccess -Process $process -Role $Role -CallSite 'Start-CapManagedProcessCore.InitialSnapshot'
-        $launchRecord.AcquiredPid = $access.Pid
-        $launchRecord.Snapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+        $launchRecord.Snapshot = Read-CapProcessSnapshot -Process $process -Role $Role `
+            -CallSite 'Start-CapManagedProcessCore.InitialSnapshot'
+        $launchRecord.AcquiredPid = $launchRecord.Snapshot.ProcessId
+        $access = Read-CapProcessAccess -Process $process -Role $Role `
+            -CallSite 'Start-CapManagedProcessCore.TraceHandle' -ExpectedPid $launchRecord.AcquiredPid
         $launchRecord.StdoutTask = $process.StandardOutput.ReadToEndAsync()
         $launchRecord.StderrTask = $process.StandardError.ReadToEndAsync()
         Write-CapTrace -Command 'Process.Start' -Parameters @{
@@ -2604,9 +2877,8 @@ function Get-CapAdvisoryOlderExclusion {
     }
     if ($null -eq $nativeError -or $nativeError.NativeErrorCode -ne 5) { return $null }
 
-    $parentAccess = Read-CapProcessAccess -Process $Parent.Process -Role $Parent.Role `
+    $parentSnapshot = Read-CapProcessSnapshot -Process $Parent.Process -Role $Parent.Role `
         -CallSite 'Get-CapOwnedDescendants.AdvisoryParentSnapshot' -ExpectedPid $Parent.Pid
-    $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
     $Context.ParentNativeSnapshot = $parentSnapshot
     if ($Context.ParentCreationFileTimeUtc -isnot [long] -or $Context.ParentCreationFileTimeUtc -le 0 -or
         $parentSnapshot.CreationFileTimeUtc -le 0 -or
@@ -2715,7 +2987,8 @@ function Get-CapOwnedDescendants {
                     }
                     continue
                 }
-                $context.NativeSnapshot = [CapNative]::Snapshot($access.Handle, $access.Pid)
+                $context.NativeSnapshot = Read-CapProcessSnapshot -Process $process -Role 'descendant' `
+                    -CallSite 'Get-CapOwnedDescendants.NativeSnapshot' -ExpectedPid $access.Pid
                 if ($context.NativeSnapshot.IsExited) {
                     Write-CapTrace -Command 'CapDescendantExited' -Parameters @{
                         diagnosticJson = ($context | ConvertTo-Json -Depth 10 -Compress)
@@ -2724,9 +2997,8 @@ function Get-CapOwnedDescendants {
                 }
                 # A reused advisory parent PID can select an older, unrelated image.
                 $failureCode = 'DescendantIdentityMismatch'
-                $parentAccess = Read-CapProcessAccess -Process $parent.Process -Role $parent.Role `
+                $parentSnapshot = Read-CapProcessSnapshot -Process $parent.Process -Role $parent.Role `
                     -CallSite 'Get-CapOwnedDescendants.ParentSnapshot' -ExpectedPid $parent.Pid
-                $parentSnapshot = [CapNative]::Snapshot($parentAccess.Handle, $parentAccess.Pid)
                 $context.ParentNativeSnapshot = $parentSnapshot
                 $childCreationFileTimeUtc = $context.NativeSnapshot.CreationFileTimeUtc
                 $savedParentCreationFileTimeUtc = $context.ParentCreationFileTimeUtc
@@ -3363,7 +3635,8 @@ function Assert-CapMatchedManifest {
     param([Parameter(Mandatory)]$Manifest,[Parameter(Mandatory)]$Job)
     $expected=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {"${phase}:$scene"}})
     $actual=@($Manifest.images | ForEach-Object {"$($_.phase):$($_.scene)"})
-    if ($Manifest.sceneAdapter -cne 'S_MATCHED_V12_V1' -or $Manifest.lane -cne 'S' -or
+    if ($Job.sceneAdapter -cnotin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1') -or
+        $Manifest.sceneAdapter -cne $Job.sceneAdapter -or $Manifest.lane -cne 'S' -or
         $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne 'LIVE_CAPTURE' -or
         $actual.Count -ne 36 -or @($actual | Sort-Object -Unique).Count -ne 36 -or
         (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
@@ -3384,6 +3657,66 @@ function Assert-CapMatchedManifest {
 
 function Assert-CapSceneContract {
     param([Parameter(Mandatory)]$Job)
+    if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1') {
+        Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array]
+            fixture=[pscustomobject];binaries=[pscustomobject]} 'DPI-parametric matched scene'
+        Assert-CapDataRecord $Job.authority @{centralCaptureLeaseGrantedByThisArtifact=[bool]
+            sWorkerMayLaunchGui=[bool]} 'DPI-parametric matched scene authority'
+        $contract=$Job.captureContract
+        Assert-CapDataRecord $contract @{geometrySchemaVersion=[long];phases=[array];sceneCountPerPhase=[long]
+            placement=[string];logicalClientWH=[array];expectedWindowDpi=[long];dpiBase=[long]
+            expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array];minimumPhysicalWorkAreaWH=[array]
+            windowStyleForAdjustment=[long];expectedRuntimeWindowStyle=[long]
+            windowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+            canvasZoomPercentLogical=[long];rawCaptureResamplingAllowed=[bool]
+            cleanupReserveSeconds=[long];estimatedSeconds=[long]} 'DPI-parametric matched geometry'
+        Assert-CapDataRecord $Job.binaries.backendFixture @{sha256=[string];sourceSha256=[string]
+            networkAllowed=[bool]} 'DPI-parametric matched backend fixture'
+        if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -cne $false -or
+            $Job.authority.sWorkerMayLaunchGui -cne $false -or $contract.geometrySchemaVersion -ne 2 -or
+            ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 18 -or
+            $contract.placement -cne 'MEASURED_FIT_WORKAREA' -or
+            ($contract.logicalClientWH -join ',') -cne '1440,900' -or
+            $contract.expectedWindowDpi -ne 192 -or $contract.dpiBase -ne 96 -or
+            ($contract.expectedPhysicalClientWH -join ',') -cne '2880,1800' -or
+            ($contract.expectedAdjustedOuterWH -join ',') -cne '2906,1910' -or
+            ($contract.minimumPhysicalWorkAreaWH -join ',') -cne '2906,1910' -or
+            $contract.windowStyleForAdjustment -ne 47120384 -or
+            $contract.expectedRuntimeWindowStyle -ne 315555840 -or $contract.windowExStyle -ne 0 -or
+            $contract.hasMenu -cne $true -or $contract.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+            $contract.canvasZoomPercentLogical -ne 100 -or $contract.rawCaptureResamplingAllowed -cne $false -or
+            $contract.cleanupReserveSeconds -ne 90 -or $contract.estimatedSeconds -lt 1 -or
+            $contract.estimatedSeconds -gt 1710 -or
+            ($Job.scenes.name -join ',') -cne ((Get-CapMatchedSceneNames) -join ',')) {
+            throw 'DPI-parametric matched scene inventory, geometry or non-authority differs.'
+        }
+        foreach ($scene in $Job.scenes) {
+            Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'DPI matched scene width'
+            if ($scene.naturalWidthBeforeAfter.Count -ne 2 -or
+                @($scene.naturalWidthBeforeAfter | Where-Object {$_ -isnot [long] -or $_ -ne 250}).Count) {
+                throw 'DPI-parametric matched scene requires exact 250 logical-pixel source widths.'
+            }
+        }
+        foreach ($binary in @('daemon','backendFixture')) {
+            if ($Job.binaries.$binary.sha256 -cnotmatch '^[A-Fa-f0-9]{64}$') {
+                throw 'DPI-parametric matched scene requires hash-bound daemon and backend fixture.'
+            }
+        }
+        if ($Job.binaries.backendFixture.networkAllowed -cne $false) {
+            throw 'DPI-parametric matched backend fixture must prohibit network.'
+        }
+        $seed=@('run','graphcode-11111111-1111-4111-8111-000000000001','-d',
+            'cmd.exe','/Q','/K','echo Offline card fixture - no backend')
+        if (($Job.binaries.offlineZmx.seedArgumentOrder -join [char]0) -cne ($seed -join [char]0)) {
+            throw 'DPI-parametric matched scene requires the exact cmd-only seed vector.'
+        }
+        $sourceHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+            [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))
+        if ($Job.binaries.backendFixture.sourceSha256 -ne $sourceHash) {
+            throw 'DPI-parametric matched scene requires its canonical harmless backend source hash.'
+        }
+        return
+    }
     if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
         Assert-CapDataRecord $Job @{authority=[pscustomobject];captureContract=[pscustomobject];scenes=[array]
             fixture=[pscustomobject];binaries=[pscustomobject]} 'Matched scene'
@@ -5045,13 +5378,17 @@ Export-ModuleMember -Function @(
     'Assert-CapRootProcess',
     'Assert-CapUiaProcessIds',
     'Invoke-CapAction',
+    'Get-CapLogicalZoomEvidence',
     'Measure-CapZoom',
+    'Get-CapDpiGeometry',
+    'Assert-CapMatchedDpiImage',
     'Get-CapWindowMetrics',
     'Set-CapWindowPosition',
     'Find-CapTopLevelWindow',
     'Capture-CapWindow',
     'Get-CapProcessIdentity',
     'Read-CapProcessAccess',
+    'Read-CapProcessSnapshot',
     'Read-CapProcessMetadataState',
     'Resolve-CapAttestationDisposition',
     'Get-CapCurrentMetadata',

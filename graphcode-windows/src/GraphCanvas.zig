@@ -600,7 +600,7 @@ fn drawProjectWorktreeChip(
 }
 
 pub const ZoomControl = enum { out, actual, in, fit };
-pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel };
+pub const HeaderAction = enum { review_attention, inspect_worktrees, jump, toggle_panel, overflow };
 pub const header_actions = [_]HeaderAction{ .review_attention, .inspect_worktrees, .jump, .toggle_panel };
 
 pub fn headerIdentity(action: HeaderAction) []const u8 {
@@ -609,6 +609,7 @@ pub fn headerIdentity(action: HeaderAction) []const u8 {
         .inspect_worktrees => "header-worktree:worktrees",
         .jump => "header-jump:jump",
         .toggle_panel => "header-toggle-panel:control",
+        .overflow => "header-overflow:actions",
     };
 }
 
@@ -631,6 +632,7 @@ pub const Header = struct {
             .inspect_worktrees => self.notice != null,
             .jump => true,
             .toggle_panel => self.panel_visible != null,
+            .overflow => false,
         };
     }
 
@@ -650,6 +652,7 @@ pub const Header = struct {
                 std.fmt.allocPrint(allocator, "{s}: {d} worktrees", .{ self.notice_name, self.notice.?.total }),
             .jump => allocator.dupe(u8, "Jump to loop   Ctrl+P"),
             .toggle_panel => allocator.dupe(u8, if (self.panel_visible.?) "Hide loop panel" else "Show loop panel"),
+            .overflow => allocator.dupe(u8, "More actions"),
         };
     }
 
@@ -673,14 +676,23 @@ pub const Header = struct {
             total += preferred_width;
             count += 1;
         }
-        const gap = @min(@as(i32, 8), @divTrunc(controls_right - identity_right, count * 2));
-        const available = @max(0, controls_right - identity_right - gap * count);
-        var left = identity_right + gap;
-        for (header_actions, preferred, 0..) |action, preferred_width, index| {
-            if (!self.contains(action)) continue;
-            const control_width = @min(preferred_width, @divTrunc(available * preferred_width, total));
-            if (control_width > 0) result.controls[index] = rect(left, 5, left + control_width, Tokens.header_height - 5);
-            left += control_width + gap;
+        const available = @max(0, controls_right - identity_right);
+        if (count != 0) {
+            // Move the whole roster to overflow before direct controls fall below three-quarters width.
+            const direct_threshold = @divTrunc(total * 3, 4) + count * 8;
+            if (available >= direct_threshold) {
+                const gap = @min(@as(i32, 8), @divTrunc(available, count * 2));
+                const control_space = @max(0, available - gap * count);
+                var left = identity_right + gap;
+                for (header_actions, preferred, 0..) |action, preferred_width, index| {
+                    if (!self.contains(action)) continue;
+                    const control_width = @min(preferred_width, @divTrunc(control_space * preferred_width, total));
+                    if (control_width > 0) result.controls[index] = rect(left, 5, left + control_width, Tokens.header_height - 5);
+                    left += control_width + gap;
+                }
+            } else if (available >= 44) {
+                result.overflow = rect(controls_right - 36, 5, controls_right, Tokens.header_height - 5);
+            }
         }
         return result;
     }
@@ -690,20 +702,37 @@ pub const HeaderLayout = struct {
     identity: c.RECT = std.mem.zeroes(c.RECT),
     status: c.RECT = std.mem.zeroes(c.RECT),
     controls: [header_actions.len]?c.RECT = .{null} ** header_actions.len,
+    overflow: ?c.RECT = null,
 
     pub fn bounds(self: HeaderLayout, action: HeaderAction) ?c.RECT {
-        return self.controls[@intFromEnum(action)];
+        return switch (action) {
+            .review_attention => self.controls[0],
+            .inspect_worktrees => self.controls[1],
+            .jump => self.controls[2],
+            .toggle_panel => self.controls[3],
+            .overflow => self.overflow,
+        };
     }
 
     pub fn actionAt(self: HeaderLayout, x: i32, y: i32) ?HeaderAction {
         for (header_actions, self.controls) |action, control| {
             if (control) |bounds_value| if (insideGraph(x, y, bounds_value)) return action;
         }
+        if (self.overflow) |bounds_value| {
+            if (insideGraph(x, y, bounds_value)) return .overflow;
+        }
         return null;
     }
 
     pub fn step(self: HeaderLayout, current: ?HeaderAction, backwards: bool) ?HeaderAction {
-        const start: usize = if (current) |action| @intFromEnum(action) else if (backwards) 0 else header_actions.len - 1;
+        if (self.overflow != null) return .overflow;
+        const start: usize = if (current) |action| switch (action) {
+            .review_attention => 0,
+            .inspect_worktrees => 1,
+            .jump => 2,
+            .toggle_panel => 3,
+            .overflow => if (backwards) 0 else header_actions.len - 1,
+        } else if (backwards) 0 else header_actions.len - 1;
         for (1..header_actions.len + 1) |offset| {
             const index = if (backwards)
                 (start + header_actions.len - offset) % header_actions.len
@@ -790,16 +819,27 @@ pub fn paintLoopDetailExpandControl(hdc: c.HDC, allocator: std.mem.Allocator, cl
 }
 
 pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) RenderBounds {
-    const left = if (controls.rail_visible) Tokens.sidebar_width else 0;
+    const rail = WorkspaceControls.railPresentation(client_right, controls);
     const activity = if (controls.activity_enabled) Tokens.activity_strip_height else 0;
     return .{
-        .left = left,
+        .left = rail.content_left,
         .top = Tokens.header_height,
         .right = client_right,
         .bottom = @max(
             Tokens.header_height + 1,
             client_bottom - (if (controls.panel_visible) Tokens.workspace_height else 0) - activity,
         ),
+    };
+}
+
+pub fn visibleDetailBounds(bounds: c.RECT, controls: WorkspaceControls.State) c.RECT {
+    const rail = WorkspaceControls.railPresentation(bounds.right, controls);
+    if (rail.mode != .overlay) return bounds;
+    return .{
+        .left = @min(bounds.right, @max(bounds.left, rail.rail_right)),
+        .top = bounds.top,
+        .right = bounds.right,
+        .bottom = bounds.bottom,
     };
 }
 
@@ -824,6 +864,7 @@ pub fn paint(
     sidebar_hover_y: i32,
     controls: WorkspaceControls.State,
     surface: Surface,
+    selection_active: bool,
 ) void {
     const client = c.RECT{ .left = 0, .top = 0, .right = client_right, .bottom = client_bottom };
     fill(hdc, client, Tokens.canvas_tone);
@@ -834,11 +875,13 @@ pub fn paint(
             null
     else
         null;
-    if (controls.rail_visible) {
+    const rail_presentation = WorkspaceControls.railPresentation(client.right, controls);
+    if (rail_presentation.mode == .docked) {
         Sidebar.draw(
             hdc,
             model,
             surface,
+            selection_active,
             visible_inspection,
             selected_worktree_path,
             sidebar_scroll,
@@ -856,21 +899,35 @@ pub fn paint(
     if (surface == .workspace) presentation_controls.panel_visible = false;
     const bounds = renderBounds(client.right, client.bottom, presentation_controls);
     const graph_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    const visible_bounds = visibleDetailBounds(graph_bounds, controls);
     fill(hdc, graph_bounds, Tokens.canvas_tone);
     const saved = c.SaveDC(hdc);
     _ = c.IntersectClipRect(hdc, graph_bounds.left, graph_bounds.top, graph_bounds.right, graph_bounds.bottom);
     drawGrid(hdc, graph_bounds, state);
     switch (surface) {
-        .overview => drawOverview(hdc, allocator, model, graph_bounds, state, declared_entries) catch |err| {
+        .overview => drawOverview(
+            hdc,
+            allocator,
+            model,
+            if (model.graphs.items.len == 0) visible_bounds else graph_bounds,
+            state,
+            declared_entries,
+        ) catch |err| {
             std.log.warn("Overview card role resolution failed: {s}", .{@errorName(err)});
             drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
         },
-        .quick_chats => drawQuickChats(hdc, allocator, model, graph_bounds, state),
+        .quick_chats => drawQuickChats(
+            hdc,
+            allocator,
+            model,
+            if (model.quick_chats.items.len == 0) visible_bounds else graph_bounds,
+            state,
+        ),
         .project => if (model.graph) |graph| {
             drawProjectWorktreeChip(hdc, allocator, model, graph_bounds);
             drawCompositeBreadcrumb(hdc, allocator, model, graph_bounds);
             if (graph.nodes.items.len == 0) {
-                emptyGraph(hdc, allocator, graph, graph_bounds);
+                emptyGraph(hdc, allocator, graph, visible_bounds);
             } else if (state.project_layout == null) {
                 drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
             } else {
@@ -904,7 +961,7 @@ pub fn paint(
                 }
             }
         } else {
-            welcome(hdc, allocator, graph_bounds);
+            welcome(hdc, allocator, visible_bounds);
         },
         .workspace => {},
     }
@@ -952,6 +1009,24 @@ pub fn paint(
             allocator,
             model,
             rect(0, client.bottom - workspace_height - Tokens.activity_strip_height, client.right, client.bottom - workspace_height),
+        );
+    }
+    if (rail_presentation.mode == .overlay) {
+        Sidebar.draw(
+            hdc,
+            model,
+            surface,
+            selection_active,
+            visible_inspection,
+            selected_worktree_path,
+            sidebar_scroll,
+            status,
+            sidebarBottom(client.bottom, controls, surface),
+            update_version,
+            ingress_error,
+            sidebar_state,
+            sidebar_hover_y,
+            allocator,
         );
     }
 }
@@ -1089,9 +1164,7 @@ fn drawQuickChats(
     state: *const CanvasState,
 ) void {
     if (model.quick_chats.items.len == 0) {
-        const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
-        drawTextRect(hdc, allocator, "No chats yet", rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34), 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
-        drawTextRect(hdc, allocator, "A quick chat is a bare session for questions that are not a loop's work.", rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86), 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+        paintQuickChatEmptyState(hdc, allocator, bounds);
         return;
     }
     const rows = (model.quick_chats.items.len + 2) / 3;
@@ -1104,6 +1177,68 @@ fn drawQuickChats(
         drawText(hdc, allocator, chat.title, card.left + scaledValue(14, state.zoom), card.top + scaledValue(12, state.zoom), scaledValue(13, state.zoom), 0x00FFFFFF, card.right - scaledValue(14, state.zoom));
         drawText(hdc, allocator, if (std.mem.eql(u8, chat.backend, "claudeCode")) "chat" else chat.backend, card.left + scaledValue(14, state.zoom), card.top + scaledValue(37, state.zoom), scaledValue(10, state.zoom), 0x009A9A9A, card.right - scaledValue(14, state.zoom));
     }
+}
+
+const quick_chat_empty_message = "A quick chat is a bare session with no goal, no trigger, and no place in any graph — for the questions that aren't a loop's work.";
+
+const QuickChatEmptyLayout = struct {
+    glyph: c.RECT,
+    title: c.RECT,
+    message: c.RECT,
+    action: c.RECT,
+};
+
+fn quickChatEmptyLayout(bounds: c.RECT) QuickChatEmptyLayout {
+    const center_x = bounds.left + @divTrunc(bounds.right - bounds.left, 2);
+    const center_y = bounds.top + @divTrunc(bounds.bottom - bounds.top, 2) - 60;
+    return .{
+        .glyph = rect(center_x - 28, center_y - 58, center_x + 28, center_y - 12),
+        .title = rect(bounds.left + 40, center_y, bounds.right - 40, center_y + 34),
+        .message = rect(bounds.left + 100, center_y + 40, bounds.right - 100, center_y + 86),
+        .action = rect(center_x - 59, center_y + 106, center_x + 59, center_y + 136),
+    };
+}
+
+pub fn quickChatEmptyActionBounds(bounds: c.RECT) c.RECT {
+    return quickChatEmptyLayout(bounds).action;
+}
+
+pub fn hitTestQuickChatEmptyAction(x: i32, y: i32, bounds: c.RECT) bool {
+    return insideGraph(x, y, quickChatEmptyActionBounds(bounds));
+}
+
+fn paintQuickChatEmptyState(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT) void {
+    const layout = quickChatEmptyLayout(bounds);
+    drawQuickChatEmptyGlyph(hdc, layout.glyph);
+    drawTextRect(hdc, allocator, "No chats yet", layout.title, 20, 0x00F2F2F2, c.DT_CENTER | c.DT_SINGLELINE);
+    drawTextRect(hdc, allocator, quick_chat_empty_message, layout.message, 13, 0x00A8A8AE, c.DT_CENTER | c.DT_WORDBREAK);
+    paintQuickChatEmptyAction(hdc, allocator, layout.action);
+}
+
+fn drawQuickChatEmptyGlyph(hdc: c.HDC, bounds: c.RECT) void {
+    const pen = c.CreatePen(c.PS_SOLID, 2, 0x00919090) orelse return;
+    defer _ = c.DeleteObject(pen);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer _ = c.SelectObject(hdc, old_pen);
+    const old_brush = c.SelectObject(hdc, c.GetStockObject(c.HOLLOW_BRUSH));
+    defer _ = c.SelectObject(hdc, old_brush);
+    const left = rect(bounds.left + 2, bounds.top + 4, bounds.right - 16, bounds.bottom - 10);
+    const right = rect(bounds.left + 17, bounds.top + 13, bounds.right - 1, bounds.bottom - 1);
+    _ = c.RoundRect(hdc, left.left, left.top, left.right, left.bottom, 8, 8);
+    _ = c.MoveToEx(hdc, left.left + 13, left.bottom, null);
+    _ = c.LineTo(hdc, left.left + 9, left.bottom + 6);
+    _ = c.LineTo(hdc, left.left + 19, left.bottom);
+    _ = c.RoundRect(hdc, right.left, right.top, right.right, right.bottom, 8, 8);
+    _ = c.MoveToEx(hdc, right.right - 14, right.bottom, null);
+    _ = c.LineTo(hdc, right.right - 9, right.bottom + 6);
+    _ = c.LineTo(hdc, right.right - 20, right.bottom);
+}
+
+fn paintQuickChatEmptyAction(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT) void {
+    roundedControl(hdc, bounds, 8, 0x001A1B19, 0x00313230);
+    drawCardText(hdc, allocator, "New Chat", rect(bounds.left + 10, bounds.top, bounds.right - 10, bounds.bottom), 12, .semibold, 0x00E8E8E8, true) catch |err| {
+        std.log.warn("Quick Chat empty action label unavailable: {s}", .{@errorName(err)});
+    };
 }
 
 fn overviewLaneBounds(
@@ -1444,6 +1579,96 @@ test "workspace controls change graph render bounds" {
     );
 }
 
+test "responsive sidebar overlays a visible rail at 451 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(451, 800, .{}).left);
+}
+
+test "responsive sidebar overlays a visible rail at 452 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(452, 800, .{}).left);
+}
+
+test "responsive sidebar overlays a visible rail at 671 DIP" {
+    try std.testing.expectEqual(@as(i32, 0), renderBounds(671, 800, .{}).left);
+}
+
+test "responsive sidebar docks a visible rail at 672 DIP" {
+    try std.testing.expectEqual(@as(i32, Tokens.sidebar_width), renderBounds(672, 800, .{}).left);
+}
+
+test "responsive sidebar leaves no inset when hidden" {
+    for ([_]i32{ 451, 452, 671, 672 }) |width| {
+        try std.testing.expectEqual(@as(i32, 0), renderBounds(width, 800, .{ .rail_visible = false }).left);
+    }
+}
+
+test "responsive overlay centers empty-state content in the visible detail region" {
+    const controls = WorkspaceControls.State{};
+    for ([_]i32{ 451, 452, 671 }) |width| {
+        const bounds = renderBounds(width, 800, controls);
+        const visible = visibleDetailBounds(rect(bounds.left, bounds.top, bounds.right, bounds.bottom), controls);
+        try std.testing.expectEqual(Tokens.sidebar_width, visible.left);
+        try std.testing.expectEqual(width, visible.right);
+        const action = quickChatEmptyActionBounds(visible);
+        try std.testing.expect(action.left >= visible.left);
+        try std.testing.expect(action.right <= visible.right);
+    }
+
+    const docked_controls = WorkspaceControls.State{};
+    const docked = renderBounds(672, 800, docked_controls);
+    try std.testing.expectEqualDeep(
+        rect(docked.left, docked.top, docked.right, docked.bottom),
+        visibleDetailBounds(rect(docked.left, docked.top, docked.right, docked.bottom), docked_controls),
+    );
+    const hidden_controls = WorkspaceControls.State{ .rail_visible = false };
+    const hidden = renderBounds(451, 800, hidden_controls);
+    try std.testing.expectEqualDeep(
+        rect(hidden.left, hidden.top, hidden.right, hidden.bottom),
+        visibleDetailBounds(rect(hidden.left, hidden.top, hidden.right, hidden.bottom), hidden_controls),
+    );
+}
+
+test "responsive overlay rail background stops above the full-width Activity strip" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var dib = try ParityDib.init(452, 800);
+    defer dib.deinit();
+    const client = rect(0, 0, 452, 800);
+    const bounds = renderBounds(client.right, client.bottom, .{});
+    var canvas = try modelTestState(&model, .{}, rect(bounds.left, bounds.top, bounds.right, bounds.bottom));
+    defer canvas.deinitLayout();
+    var sidebar = Sidebar.State.init(allocator);
+    defer sidebar.deinit();
+
+    paint(
+        dib.dc,
+        client.right,
+        client.bottom,
+        &model,
+        null,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        &.{},
+        &.{},
+        allocator,
+        &canvas,
+        &sidebar,
+        -1,
+        .{ .rail_visible = true, .panel_visible = false, .activity_enabled = true },
+        .overview,
+        true,
+    );
+
+    const strip_top = client.bottom - Tokens.activity_strip_height;
+    try std.testing.expectEqual(@as(u32, 0x001D1D21), c.GetPixel(dib.dc, 2, strip_top + 10));
+    try std.testing.expectEqual(@as(u32, 0x001D1D21), c.GetPixel(dib.dc, 300, strip_top + 10));
+}
+
 test "inline canvas alerts remain inside the active detail surface" {
     const bounds = rect(Tokens.sidebar_width, Tokens.header_height, 1200, 800);
     const alert = inlineAlertBounds(bounds);
@@ -1503,6 +1728,15 @@ pub fn paintHeader(
             _ = c.DrawFocusRect(hdc, &ring);
         }
     }
+    if (layout.overflow) |bounds| {
+        fill(hdc, bounds, 0x00282828);
+        drawTextRect(hdc, allocator, "»", bounds, 13, 0x00D8D8D8, flags | c.DT_CENTER);
+        if (focused == .overflow) {
+            var ring = bounds;
+            _ = c.InflateRect(&ring, -1, -1);
+            _ = c.DrawFocusRect(hdc, &ring);
+        }
+    }
     if (layout.status.right > layout.status.left) drawTextRect(hdc, allocator, status, layout.status, 10, 0x00A8A8A8, flags);
 }
 
@@ -1530,6 +1764,13 @@ test "header layout shares visibility hit testing and focus order at narrow widt
     const header = Header{ .attention_count = 2, .notice = .{ .total = 8, .reclaimable = 3, .blocked = 5 }, .notice_name = "Project", .panel_visible = false };
     for ([_]i32{ 480, 640, 900, 1280 }) |width| {
         const layout = header.layout(width);
+        if (layout.overflow) |overflow| {
+            for (header_actions) |action| try std.testing.expect(layout.bounds(action) == null);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.actionAt(overflow.left + 1, overflow.top + 1).?);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.step(null, false).?);
+            try std.testing.expectEqual(HeaderAction.overflow, layout.step(.overflow, true).?);
+            continue;
+        }
         var previous_right = layout.identity.right;
         var focused: ?HeaderAction = null;
         for (header_actions) |action| {
@@ -1552,6 +1793,25 @@ test "header layout shares visibility hit testing and focus order at narrow widt
     try std.testing.expect(empty.bounds(.inspect_worktrees) == null);
     try std.testing.expect(empty.bounds(.review_attention) == null);
     try std.testing.expect(empty.actionAt(0, Tokens.header_height) == null);
+}
+
+test "header overflow keeps narrow actions out of direct bounds" {
+    const header = Header{
+        .attention_count = 2,
+        .notice = .{ .total = 8, .reclaimable = 3, .blocked = 5 },
+        .notice_name = "Project",
+        .panel_visible = false,
+    };
+    const layout = header.layout(480);
+    for (header_actions) |action| {
+        try std.testing.expect(layout.bounds(action) == null);
+    }
+    const overflow = layout.bounds(.overflow).?;
+    try std.testing.expectEqual(HeaderAction.overflow, layout.actionAt(overflow.left + 1, overflow.top + 1).?);
+    try std.testing.expectEqual(HeaderAction.overflow, layout.step(null, false).?);
+    const label = try header.label(std.testing.allocator, .overflow);
+    defer std.testing.allocator.free(label);
+    try std.testing.expectEqualStrings("More actions", label);
 }
 
 test "header panel belongs only to a selected workspace loop with supported content" {
@@ -5049,6 +5309,79 @@ test "canvas visual finish add control shares compact paint focus and hit geomet
     try std.testing.expect(dib.count(bounds, 0x00E8E8E8) > 0);
 }
 
+test "Quick Chat remaining parity empty state matches macOS copy glyph and centered action" {
+    try std.testing.expectEqualStrings(
+        "A quick chat is a bare session with no goal, no trigger, and no place in any graph — for the questions that aren't a loop's work.",
+        quick_chat_empty_message,
+    );
+    var dib = try ParityDib.init(640, 480);
+    defer dib.deinit();
+    const bounds = rect(0, 0, 640, 480);
+    fill(dib.dc, bounds, Tokens.canvas_tone);
+    paintQuickChatEmptyState(dib.dc, std.testing.allocator, bounds);
+    const layout = quickChatEmptyLayout(bounds);
+    try std.testing.expect(dib.count(layout.glyph, 0x00919090) > 0);
+    try std.testing.expect(dib.count(layout.action, 0x001A1B19) > 0);
+}
+
+test "responsive overlay paints the Quick Chat empty action in the visible detail region" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+    var dib = try ParityDib.init(452, 800);
+    defer dib.deinit();
+    const bounds = renderBounds(452, 800, controls);
+    var canvas = try modelTestState(
+        &model,
+        .{},
+        rect(bounds.left, bounds.top, bounds.right, bounds.bottom),
+    );
+    defer canvas.deinitLayout();
+    var sidebar = Sidebar.State.init(allocator);
+    defer sidebar.deinit();
+
+    paint(
+        dib.dc,
+        452,
+        800,
+        &model,
+        null,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        &.{},
+        &.{},
+        allocator,
+        &canvas,
+        &sidebar,
+        -1,
+        controls,
+        .quick_chats,
+        true,
+    );
+
+    const full_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    const visible = visibleDetailBounds(full_bounds, controls);
+    const action = quickChatEmptyActionBounds(visible);
+    try std.testing.expect(dib.count(action, 0x001A1B19) > 1000);
+    try std.testing.expect(hitTestQuickChatEmptyAction(
+        @divTrunc(action.left + action.right, 2),
+        @divTrunc(action.top + action.bottom, 2),
+        visible,
+    ));
+    const old_centered = quickChatEmptyActionBounds(full_bounds);
+    try std.testing.expect(!hitTestQuickChatEmptyAction(
+        @divTrunc(old_centered.left + old_centered.right, 2),
+        @divTrunc(old_centered.top + old_centered.bottom, 2),
+        visible,
+    ));
+}
+
 test "canvas visual finish notebook raster has 48 pixel pitch and follows pan zoom" {
     var dib = try ParityDib.init(640, 480);
     defer dib.deinit();
@@ -5950,6 +6283,7 @@ fn paintExportFixture(
         -1,
         controls,
         surface,
+        true,
     );
     paintHeader(
         dib.dc,
@@ -6965,7 +7299,7 @@ fn paintVisualFinish(dib: ParityDib, allocator: std.mem.Allocator, scene: Visual
     defer state.deinitLayout();
     var sidebar = Sidebar.State.init(allocator);
     defer sidebar.deinit();
-    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface);
+    paint(dib.dc, 1280, 720, &model, null, "", 0, "", "", "", false, "", &.{}, &.{}, allocator, &state, &sidebar, -1, .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false }, surface, true);
     paintHeader(dib.dc, allocator, 1280, "", .{
         .title = "Canvas Fixture",
         .project_glyph = if (surface == .workspace) .folder else null,
@@ -7281,6 +7615,7 @@ fn chrome764Paint(
         -1,
         .{ .graph_visible = true, .rail_visible = true, .panel_visible = false, .activity_enabled = false },
         if (scene == .project) .project else .overview,
+        true,
     );
     if (c.GdiFlush() == 0) return error.Chrome764FlushFailed;
 }

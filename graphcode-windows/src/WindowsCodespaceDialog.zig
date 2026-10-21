@@ -14,11 +14,12 @@
 //! it, tab stops in reading order, Enter on the default button, and Escape to cancel.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
-const ModalTeardown = @import("ModalTeardown.zig");
-const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
+const Dpi = @import("Dpi.zig");
+const SheetFramework = @import("SheetFramework.zig");
 const Codespaces = @import("Codespaces.zig");
 
 pub const intro_text =
@@ -220,6 +221,10 @@ const DialogState = struct {
     retry_button: c.HWND = null,
     create_button: c.HWND = null,
     accept_button: c.HWND = null,
+    labels: [5]c.HWND = .{ null, null, null, null, null },
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    dpi: u32 = Dpi.base_dpi,
     updating_path: bool = false,
     accepted: bool = false,
     closed: bool = false,
@@ -227,7 +232,6 @@ const DialogState = struct {
 
 var dialog_active = false;
 var dialog_state: DialogState = undefined;
-var dark_field_brush: c.HBRUSH = null;
 
 /// The validated codespace the sheet produced. Owned by the caller; `null` when the
 /// human cancelled.
@@ -268,57 +272,15 @@ pub fn open(
     dialog_state.list_operation = Codespaces.ListOperation.start(allocator) catch null;
     if (dialog_state.list_operation == null) model.applyFailure(.list_failed);
 
-    const wide_title = try wideZ(allocator, title_text);
-    defer allocator.free(wide_title);
-    const style = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU;
-    const ex_style = c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT;
-    var frame = c.RECT{ .left = 0, .top = 0, .right = 640, .bottom = 540 };
-    _ = c.AdjustWindowRectEx(&frame, style, 0, ex_style);
-    const width = frame.right - frame.left;
-    const height = frame.bottom - frame.top;
-    var owner: c.RECT = undefined;
-    _ = c.GetWindowRect(parent, &owner);
-    const x = owner.left + @divTrunc((owner.right - owner.left) - width, 2);
-    const y = owner.top + @divTrunc((owner.bottom - owner.top) - height, 2);
-    const hwnd = c.CreateWindowExW(
-        ex_style,
-        dialog_class.ptr,
-        wide_title.ptr,
-        style,
-        x,
-        y,
-        width,
-        height,
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse return error.CodespaceDialogCreationFailed;
-
-    _ = c.SetTimer(hwnd, timer_id, 100, null);
-    _ = c.EnableWindow(parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
+    dialog_state.dpi = Dpi.normalize(Win32.dpiForWindow(parent));
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, parent);
+    const hwnd = host.hwnd;
+    if (c.SetTimer(hwnd, timer_id, 100, null) == 0) return error.CodespaceDialogTimerFailed;
     _ = c.SetFocus(dialog_state.list_box);
-
-    var message: c.MSG = undefined;
-    while (!dialog_state.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            dialog_state.closed = true;
-            break;
-        }
-        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_ESCAPE) {
-            requestCancel();
-            continue;
-        }
-        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
-    }
-
+    try host.runModal();
     _ = c.KillTimer(hwnd, timer_id);
-    ModalTeardown.dismiss(hwnd, parent);
     if (!dialog_state.accepted) return null;
     const accepted = model.fields() orelse return null;
     const name = try allocator.dupe(u8, accepted.name);
@@ -329,7 +291,7 @@ pub fn open(
 
 fn registerClass() !void {
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    klass.lpfnWndProc = @ptrCast(&dialogProc);
+    klass.lpfnWndProc = @ptrCast(&contentProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = dialog_class.ptr;
     klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
@@ -338,20 +300,127 @@ fn registerClass() !void {
         return error.CodespaceDialogClassRegistrationFailed;
 }
 
-fn dialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    if (!dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
-    switch (message) {
-        c.WM_CREATE => {
-            createControls(hwnd);
-            refreshPresentation();
-            return 0;
+fn createSheet(host: *SheetFramework.Host, parent: c.HWND) !void {
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = dialog_state.dpi,
+            .desired_width = 640,
+            .minimum_width = 480,
+            .heights = .{ .minimum = 420, .ideal = 540, .maximum = 700 },
+            .content_extent = 464,
         },
-        c.WM_ERASEBKGND => return eraseBackground(hwnd, wparam),
-        c.WM_CTLCOLORSTATIC => return colorStatic(controlHandleFrom(lparam), wparam),
-        c.WM_CTLCOLOREDIT, c.WM_CTLCOLORLISTBOX => return colorField(wparam),
+        .context = &dialog_state,
+        .on_layout = &layoutSheet,
+        .on_message = &sheetMessage,
+    });
+    const title = try wideZ(dialog_state.allocator, title_text);
+    defer dialog_state.allocator.free(title);
+    if (c.SetWindowTextW(host.hwnd, title.ptr) == 0) return error.CodespaceDialogCreationFailed;
+    dialog_state.host = host;
+    dialog_state.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
+        dialog_class.ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        0,
+        0,
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.CodespaceDialogCreationFailed;
+    createControls(dialog_state.content_root);
+    const actions = codespaceFooterActions(host.hwnd, dialog_state.dpi);
+    try host.configureFooter(&actions);
+    _ = try host.createFooterButton(id_cancel, std.unicode.utf8ToUtf16LeStringLiteral("Cancel").ptr);
+    dialog_state.create_button = try host.createFooterButton(id_create, std.unicode.utf8ToUtf16LeStringLiteral("Create on GitHub...").ptr);
+    dialog_state.retry_button = try host.createFooterButton(id_retry, std.unicode.utf8ToUtf16LeStringLiteral("Try Again").ptr);
+    dialog_state.accept_button = try host.createFooterButton(id_accept, std.unicode.utf8ToUtf16LeStringLiteral("Add").ptr);
+    for ([_]c.HWND{
+        c.GetDlgItem(host.hwnd, id_cancel),
+        dialog_state.create_button,
+        dialog_state.retry_button,
+        dialog_state.accept_button,
+    }) |button| AppFont.apply(button, AppFont.control_size, false);
+    try host.relayout();
+    refreshPresentation();
+}
+
+fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const state: *DialogState = @ptrCast(@alignCast(context.?));
+    if (state.content_root == null) return;
+    state.dpi = Dpi.normalize(state.host.?.options.layout_input.dpi);
+    refreshControlFonts(state);
+    refreshEnabledStates(state);
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
+    const content_width = @max(0, layout.viewport.width - scrollbar);
+    if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
+        return error.CodespaceDialogLayoutFailed;
+    const width = @max(0, content_width - Dpi.scale(48, state.dpi));
+    const controls = [_]struct { hwnd: c.HWND, x: i32, y: i32, width: ?i32, height: i32 }{
+        .{ .hwnd = state.labels[0], .x = 24, .y = 20, .width = null, .height = 58 },
+        .{ .hwnd = state.labels[1], .x = 24, .y = 90, .width = null, .height = 20 },
+        .{ .hwnd = state.list_box, .x = 24, .y = 114, .width = null, .height = 180 },
+        .{ .hwnd = state.status_label, .x = 24, .y = 302, .width = null, .height = 54 },
+        .{ .hwnd = state.labels[2], .x = 24, .y = 362, .width = null, .height = 20 },
+        .{ .hwnd = state.path_edit, .x = 24, .y = 386, .width = null, .height = 28 },
+        .{ .hwnd = state.error_label, .x = 24, .y = 424, .width = null, .height = 40 },
+    };
+    for (controls) |entry| if (entry.hwnd != null) {
+        if (c.MoveWindow(entry.hwnd, Dpi.scale(entry.x, state.dpi), Dpi.scale(entry.y, state.dpi), entry.width orelse width, Dpi.scale(entry.height, state.dpi), 1) == 0)
+            return error.CodespaceDialogLayoutFailed;
+    };
+}
+
+fn refreshControlFonts(state: *DialogState) void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, state.dpi);
+    for ([_]c.HWND{
+        state.labels[0],
+        state.labels[1],
+        state.list_box,
+        state.status_label,
+        state.labels[2],
+        state.path_edit,
+        state.error_label,
+        if (state.host) |host| c.GetDlgItem(host.hwnd, id_cancel) else null,
+        state.create_button,
+        state.retry_button,
+        state.accept_button,
+    }) |control_handle| {
+        if (control_handle != null)
+            _ = c.SendMessageW(control_handle, c.WM_SETFONT, @intFromPtr(font), 1);
+    }
+}
+
+fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return Dpi.scale(fallback, dpi);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, @intCast(text.len), &size) == 0)
+        return Dpi.scale(fallback, dpi);
+    return size.cx;
+}
+
+fn codespaceFooterActions(hwnd: c.HWND, dpi: u32) [4]SheetFramework.FooterAction {
+    return .{
+        .{ .id = id_cancel, .role = .cancel, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Cancel"), 48) },
+        .{ .id = id_create, .role = .secondary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Create on GitHub..."), 112) },
+        .{ .id = id_retry, .role = .secondary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Try Again"), 62) },
+        .{ .id = id_accept, .role = .primary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Add"), 28), .return_hint = true, .enabled = false },
+    };
+}
+
+fn handleMessage(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM) bool {
+    switch (message) {
         c.WM_TIMER => {
             if (wparam == timer_id) pollOperations();
-            return 0;
+            return true;
         },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
@@ -364,32 +433,101 @@ fn dialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 id_list => {
                     if (notification == c.LBN_SELCHANGE) selectionChanged();
                     if (notification == c.LBN_DBLCLK) submit();
+                    if (notification == c.LBN_SETFOCUS) dialog_state.host.?.reveal(Dpi.scale(110, dialog_state.dpi), Dpi.scale(300, dialog_state.dpi)) catch {};
                 },
                 id_path => {
                     if (notification == c.EN_CHANGE and !dialog_state.updating_path) pathChanged();
+                    if (notification == c.EN_SETFOCUS) dialog_state.host.?.reveal(Dpi.scale(382, dialog_state.dpi), Dpi.scale(420, dialog_state.dpi)) catch {};
                 },
                 else => {},
             }
-            return 0;
+            return true;
         },
         c.WM_CLOSE => {
             requestCancel();
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn sheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    _ = context;
+    if (message == c.WM_DRAWITEM) {
+        result.* = drawFooterItem(dialog_state.host.?, lparam);
+        return true;
+    }
+    if (message == c.DM_GETDEFID) {
+        result.* = (c.DC_HASDEFID << 16) | id_accept;
+        return true;
+    }
+
+    if (handleMessage(hwnd, message, wparam)) {
+        result.* = 0;
+        return true;
+    }
+    return false;
+}
+
+fn drawFooterItem(host: *SheetFramework.Host, lparam: c.LPARAM) c.LRESULT {
+    const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+    var role = SheetFramework.ActionRole.secondary;
+    var return_hint = false;
+    for (host.footer_actions[0..host.footer_action_count]) |action| {
+        if (action.id != item.CtlID) continue;
+        role = action.role;
+        return_hint = action.return_hint and action.role.isPrimary();
+        break;
+    }
+    SheetFramework.drawButton(item.hDC, .{ .x = item.rcItem.left, .y = item.rcItem.top, .width = item.rcItem.right - item.rcItem.left, .height = item.rcItem.bottom - item.rcItem.top }, host.options.layout_input.dpi, role, item.itemState & c.ODS_DISABLED == 0, item.itemState & c.ODS_SELECTED != 0) catch return 0;
+    var text: [128]u16 = [_]u16{0} ** 128;
+    const count = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.SetTextColor(item.hDC, SheetFramework.controlPaintStyle(.button, item.itemState & c.ODS_DISABLED == 0).foreground);
+    var bounds = item.rcItem;
+    if (return_hint) bounds.right -= SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, count, &bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    if (return_hint) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = bounds.right;
+        _ = c.DrawTextW(item.hDC, std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr, 1, &hint_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    }
+    return 1;
+}
+
+fn contentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!dialog_active or dialog_state.host == null) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (handleMessage(dialog_state.host.?.hwnd, message, wparam)) return 0;
+    switch (message) {
+        c.WM_ERASEBKGND => return eraseBackground(hwnd, wparam),
+        c.WM_CTLCOLORSTATIC => return colorStatic(controlHandleFrom(lparam), wparam),
+        c.WM_CTLCOLOREDIT, c.WM_CTLCOLORLISTBOX => return colorField(wparam),
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const hdc = c.BeginPaint(hwnd, &paint);
+            if (hdc != null) {
+                const focus = c.GetFocus();
+                const fields = [_]c.HWND{ dialog_state.list_box, dialog_state.path_edit };
+                for (fields) |field| if (field != null) drawFieldAround(hwnd, hdc, field, focus == field);
+                _ = c.EndPaint(hwnd, &paint);
+            }
             return 0;
         },
-        else => {},
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 fn createControls(hwnd: c.HWND) void {
     const state = &dialog_state;
-    _ = createStatic(hwnd, intro_text, 24, 20, 592, 58, 0);
+    state.labels[0] = createStatic(hwnd, intro_text, 24, 20, 592, 58, 0);
     // Every interactive control is preceded in z-order by the STATIC that names it,
     // which is how UI Automation and Narrator derive a name for a bare Win32 control.
-    _ = createStatic(hwnd, "Codespace", 24, 90, 592, 20, 0);
+    state.labels[1] = createStatic(hwnd, "Codespace", 24, 90, 592, 20, 0);
     state.list_box = createControl(
         hwnd,
-        c.WS_EX_CLIENTEDGE,
+        0,
         "LISTBOX",
         "",
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.WS_VSCROLL | c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT,
@@ -400,10 +538,10 @@ fn createControls(hwnd: c.HWND) void {
         id_list,
     );
     state.status_label = createStatic(hwnd, loading_text, 24, 302, 592, 54, 0);
-    _ = createStatic(hwnd, "Repository path inside the codespace", 24, 362, 592, 20, 0);
+    state.labels[2] = createStatic(hwnd, "Repository path inside the codespace", 24, 362, 592, 20, 0);
     state.path_edit = createControl(
         hwnd,
-        c.WS_EX_CLIENTEDGE,
+        0,
         "EDIT",
         "",
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
@@ -419,10 +557,6 @@ fn createControls(hwnd: c.HWND) void {
         _ = c.SendMessageW(state.path_edit, em_setcuebanner, 1, @bitCast(@intFromPtr(value.ptr)));
     }
     state.error_label = createStatic(hwnd, "", 24, 424, 592, 40, 0);
-    state.create_button = createButton(hwnd, "Create on GitHub…", id_create, 24, 476, 168, 30, false);
-    state.retry_button = createButton(hwnd, "Try Again", id_retry, 200, 476, 108, 30, false);
-    _ = createButton(hwnd, "Cancel", id_cancel, 430, 476, 88, 30, false);
-    state.accept_button = createButton(hwnd, "Add", id_accept, 528, 476, 88, 30, true);
 }
 
 fn pollOperations() void {
@@ -449,15 +583,18 @@ fn pollOperations() void {
             .succeeded => {
                 if (abandoned) {
                     state.closed = true;
+                    state.host.?.requestClose();
                     return;
                 }
                 state.accepted = true;
                 state.closed = true;
+                state.host.?.requestClose();
                 return;
             },
             else => {
                 if (abandoned) {
                     state.closed = true;
+                    state.host.?.requestClose();
                     return;
                 }
                 state.model.phase = .ready;
@@ -504,6 +641,7 @@ fn requestCancel() void {
         return;
     }
     dialog_state.closed = true;
+    if (dialog_state.host) |host| host.requestClose();
 }
 
 fn submit() void {
@@ -535,6 +673,7 @@ fn submit() void {
 }
 
 fn openCreatePage(hwnd: c.HWND) void {
+    if (builtin.is_test) return;
     const allocator = dialog_state.allocator;
     const url = Codespaces.createURLFor(allocator, dialog_state.model.createRepository()) catch return;
     defer allocator.free(url);
@@ -565,6 +704,11 @@ fn refreshPresentation() void {
     setControlText(state.status_label, model.statusText());
     _ = c.ShowWindow(state.status_label, if (model.statusText().len == 0) c.SW_HIDE else c.SW_SHOW);
     setControlText(state.error_label, model.inline_failure orelse "");
+    refreshEnabledStates(state);
+}
+
+fn refreshEnabledStates(state: *DialogState) void {
+    const model = state.model;
     const busy = model.phase == .validating or model.phase == .abandoning or model.phase == .loading;
     _ = c.EnableWindow(state.list_box, @intFromBool(model.phase == .ready));
     _ = c.EnableWindow(state.path_edit, @intFromBool(model.phase == .ready));
@@ -592,31 +736,35 @@ fn eraseBackground(hwnd: c.HWND, wparam: c.WPARAM) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
-    const brush = c.CreateSolidBrush(Tokens.dialog_panel);
-    if (brush != null) {
-        _ = c.FillRect(hdc, &client, brush);
-        _ = c.DeleteObject(brush);
-    }
+    _ = c.FillRect(hdc, &client, dialog_state.host.?.brushes.panel);
     return 1;
 }
 
 fn colorStatic(control: c.HWND, wparam: c.WPARAM) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
-    _ = c.SetTextColor(hdc, if (control == dialog_state.error_label)
-        Tokens.dialog_error_text
-    else
-        Tokens.dialog_body_text);
-    _ = c.SetBkMode(hdc, c.TRANSPARENT);
-    return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+    const style = SheetFramework.controlPaintStyle(.static, true);
+    _ = c.SetTextColor(hdc, if (control == dialog_state.error_label) @as(u32, 0x000080ff) else style.foreground);
+    _ = c.SetBkColor(hdc, style.background);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    return @intCast(@intFromPtr(dialog_state.host.?.brushes.panel));
 }
 
 fn colorField(wparam: c.WPARAM) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
-    _ = c.SetTextColor(hdc, Tokens.dialog_title_text);
-    _ = c.SetBkColor(hdc, Tokens.dialog_field_background);
-    _ = c.SetBkMode(hdc, c.OPAQUE);
-    if (dark_field_brush == null) dark_field_brush = c.CreateSolidBrush(Tokens.dialog_field_background);
-    return @intCast(@intFromPtr(dark_field_brush));
+    return dialog_state.host.?.brushes.apply(hdc, .edit, true) catch 0;
+}
+
+fn drawFieldAround(parent: c.HWND, hdc: c.HDC, field: c.HWND, focused: bool) void {
+    var bounds: c.RECT = undefined;
+    if (c.GetWindowRect(field, &bounds) == 0) return;
+    var origin = c.POINT{ .x = bounds.left, .y = bounds.top };
+    _ = c.ScreenToClient(parent, &origin);
+    SheetFramework.drawField(hdc, .{
+        .x = origin.x - Dpi.scale(4, dialog_state.dpi),
+        .y = origin.y - Dpi.scale(4, dialog_state.dpi),
+        .width = bounds.right - bounds.left + Dpi.scale(8, dialog_state.dpi),
+        .height = bounds.bottom - bounds.top + Dpi.scale(8, dialog_state.dpi),
+    }, dialog_state.dpi, focused) catch {};
 }
 
 fn deviceContextFrom(wparam: c.WPARAM) c.HDC {
@@ -638,10 +786,10 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, width
         "BUTTON",
         text,
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | @as(c.LONG, if (default) 1 else 0),
-        x,
-        y,
-        width,
-        height,
+        Dpi.scale(x, dialog_state.dpi),
+        Dpi.scale(y, dialog_state.dpi),
+        Dpi.scale(width, dialog_state.dpi),
+        Dpi.scale(height, dialog_state.dpi),
         id,
     );
 }
@@ -820,4 +968,105 @@ test "sheet copy states the trade and the codespace requirements" {
     try std.testing.expect(std.mem.indexOf(u8, intro_text, "codespace scope") != null);
     try std.testing.expect(std.mem.indexOf(u8, intro_text, "zmx") != null);
     try std.testing.expect(std.mem.indexOf(u8, intro_text, "stopped codespace is started") != null);
+}
+
+fn hiddenCodespaceOwner() !c.HWND {
+    return c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, null, c.WS_POPUP, 20, 20, 900, 680, null, null, c.GetModuleHandleW(null), null) orelse error.CodespaceDialogCreationFailed;
+}
+
+test "dialog framework: codespace dialog uses hidden sheet native fields and fixed footer" {
+    try registerClass();
+    const owner = try hiddenCodespaceOwner();
+    defer _ = c.DestroyWindow(owner);
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    dialog_state = .{ .allocator = std.testing.allocator, .parent = owner, .model = &model, .dpi = 144 };
+    dialog_active = true;
+    defer dialog_active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
+    var title: [64]u16 = [_]u16{0} ** 64;
+    const title_length = c.GetWindowTextW(host.hwnd, &title, title.len);
+    const expected_title = std.unicode.utf8ToUtf16LeStringLiteral(title_text);
+    try std.testing.expectEqualSlices(u16, expected_title[0..expected_title.len], title[0..@intCast(title_length)]);
+    try std.testing.expect(c.GetParent(dialog_state.content_root) == host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog_state.path_edit, c.GWL_EXSTYLE) & c.WS_EX_CLIENTEDGE == 0);
+    try std.testing.expect(host.footer_layout.?.slotFor(id_accept).?.role == .primary);
+    try std.testing.expect(host.footer_layout.?.slotFor(id_cancel).?.role == .cancel);
+    host.options.layout_input.content_extent = Dpi.unscale(host.current_layout.viewport.height, dialog_state.dpi) + 100;
+    try host.relayout();
+    var viewport: c.RECT = undefined;
+    var content: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(host.viewport, &viewport) != 0);
+    try std.testing.expect(c.GetClientRect(dialog_state.content_root, &content) != 0);
+    try std.testing.expectEqual(
+        SheetFramework.Metrics.forDpi(dialog_state.dpi).scrollbar_width,
+        (viewport.right - viewport.left) - (content.right - content.left),
+    );
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        try std.testing.expectEqual(dpi, dialog_state.dpi);
+        const expected_font = AppFont.getForDpi(AppFont.control_size, false, dpi);
+        for ([_]c.HWND{
+            dialog_state.labels[0],
+            dialog_state.labels[1],
+            dialog_state.list_box,
+            dialog_state.status_label,
+            dialog_state.labels[2],
+            dialog_state.path_edit,
+            dialog_state.error_label,
+            c.GetDlgItem(host.hwnd, id_cancel),
+            dialog_state.create_button,
+            dialog_state.retry_button,
+            dialog_state.accept_button,
+        }) |control_handle| {
+            try std.testing.expectEqual(
+                expected_font,
+                Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control_handle, c.WM_GETFONT, 0, 0))),
+            );
+        }
+    }
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = codespaceFooterActions(host.hwnd, dpi);
+        const width = Dpi.scale(640, dpi);
+        const footer = try SheetFramework.measureFooter(width, Dpi.scale(64, dpi), dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width <= width);
+        for (footer.slice()) |slot| try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= width);
+        try std.testing.expect(actions[3].return_hint);
+        try std.testing.expect(footer.slotFor(id_accept).?.bounds.width >=
+            actions[3].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
+    }
+}
+
+test "dialog framework: Add enabled state survives DPI refresh while submittable and busy" {
+    try registerClass();
+    const owner = try hiddenCodespaceOwner();
+    defer _ = c.DestroyWindow(owner);
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    model.applyLoaded(try testList(std.testing.allocator,
+        \\[{"name":"dev-widget","displayName":"widget","repository":"octo/widget","state":"Available"}]
+    ));
+    dialog_state = .{ .allocator = std.testing.allocator, .parent = owner, .model = &model, .dpi = 96 };
+    dialog_active = true;
+    defer dialog_active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+
+    try std.testing.expect(model.canSubmit());
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) != 0);
+    try host.refreshForDpi(192);
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) != 0);
+
+    model.phase = .validating;
+    refreshPresentation();
+    try std.testing.expect(!model.canSubmit());
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) == 0);
+    try host.refreshForDpi(96);
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) == 0);
 }

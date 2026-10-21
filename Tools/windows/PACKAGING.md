@@ -195,6 +195,32 @@ native Windows file-sharing lock. It isolates daemon and shortcut operations;
 the real-product packaging gate separately exercises scheduled-daemon
 install/upgrade/rollback/uninstall.
 
+## Successful update backup cleanup
+
+After an upgrade commits, setup creates a sibling
+`.GraphCode-rollback-<id>.cleanup-ready` sidecar before attempting to delete the
+previous installation. The marker is created only for a committed transaction;
+the unmarked `.GraphCode-rollback-<id>` directories described above remain
+recovery-owned and must not be removed automatically.
+
+An in-app update can leave the committed backup locked because the old
+`graphcode-windows.exe` is still running from it. Normal installed-shell startup
+scans only exact cleanup-ready sidecars beside `current`, takes an exclusive
+lease on each marker, and confirms every remaining backup file can be opened
+exclusively before deleting the directory. Multiple shell processes therefore
+cannot own the same cleanup attempt. A lock, access error, race, or partial
+deletion leaves the marker in place for a bounded background retry and a later
+launch; cleanup never blocks startup or touches the active `current`
+installation.
+
+If setup cannot create the success marker, the upgrade remains successful and
+warns. A backup that also cannot be deleted is deliberately left unmarked: this
+may retain expendable files, but it cannot authorize deletion of failed-recovery
+state. `Packaging.Rollback.Tests.ps1` covers the commit-only marker and its
+secondary-failure behavior. `WindowsRollbackCleanup.zig` tests marked cleanup,
+unmarked recovery preservation, locked-file retry, malformed markers, orphan
+markers, and concurrent marker leases.
+
 ## Uninstall with GraphCode still running
 
 Uninstall removes the installation completely or changes nothing. Before

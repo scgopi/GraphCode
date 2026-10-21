@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Forms = @import("Forms.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
 const DraftAttachments = @import("DraftAttachments.zig");
@@ -8,7 +9,7 @@ const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
-const ModalTeardown = @import("ModalTeardown.zig");
+const SheetFramework = @import("SheetFramework.zig");
 
 extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, max_files: c.DWORD) callconv(.c) c_int;
 
@@ -21,8 +22,10 @@ const DialogState = struct {
     result: bool = false,
     closed: bool = false,
     dpi: u32 = Dpi.base_dpi,
-    scroll_offset: i32 = 0,
+    sheet: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
     checks: [3]c.HWND = .{ null, null, null },
+    policy_statics: [6]c.HWND = .{null} ** 6,
     labels: [256]c.HWND = .{null} ** 256,
     helps: [256]c.HWND = .{null} ** 256,
     edits: [256]c.HWND = .{null} ** 256,
@@ -100,7 +103,6 @@ const templates_id = 4;
 
 const form_width: i32 = 760;
 const form_max_height: i32 = 760;
-const form_min_height: i32 = 420;
 const form_margin: i32 = 24;
 const form_fields_top: i32 = 76;
 const form_footer_height: i32 = 64;
@@ -110,68 +112,6 @@ const form_help_height: i32 = 20;
 const form_row_height: i32 = 84;
 const tile_row_height: i32 = 204;
 const attachment_section_height: i32 = 176;
-
-const LayoutRect = struct {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-};
-
-fn rectsIntersect(first: LayoutRect, second: LayoutRect) bool {
-    return first.left < second.right and first.right > second.left and
-        first.top < second.bottom and first.bottom > second.top;
-}
-
-fn rectFitsInside(rect: LayoutRect, bounds: LayoutRect) bool {
-    return rect.left >= bounds.left and rect.top >= bounds.top and
-        rect.right <= bounds.right and rect.bottom <= bounds.bottom;
-}
-
-fn clipRectToViewport(rect: LayoutRect, viewport_height: i32) ?LayoutRect {
-    const top = @max(0, rect.top);
-    const bottom = @min(viewport_height, rect.bottom);
-    if (bottom <= top) return null;
-    return .{ .left = rect.left, .top = top, .right = rect.right, .bottom = bottom };
-}
-
-const ContentControlClip = union(enum) {
-    hidden,
-    empty,
-    visible: LayoutRect,
-};
-
-fn contentControlClip(rect: LayoutRect, shown: bool, viewport_height: i32) ContentControlClip {
-    if (!shown) return .hidden;
-    return if (clipRectToViewport(rect, viewport_height)) |clipped|
-        .{ .visible = clipped }
-    else
-        .empty;
-}
-
-fn fitDialogRect(
-    work_area: LayoutRect,
-    desired_width: i32,
-    desired_height: i32,
-    minimum_height: i32,
-    margin: i32,
-) LayoutRect {
-    const work_width = @max(1, work_area.right - work_area.left);
-    const work_height = @max(1, work_area.bottom - work_area.top);
-    const horizontal_margin = @min(@max(0, margin), @divTrunc(work_width - 1, 2));
-    const vertical_margin = @min(@max(0, margin), @divTrunc(work_height - 1, 2));
-    const maximum_width = @max(1, work_width - horizontal_margin * 2);
-    const maximum_height = @max(1, work_height - vertical_margin * 2);
-    const width = @min(@max(1, desired_width), maximum_width);
-    const height = std.math.clamp(
-        @max(1, desired_height),
-        @min(@max(1, minimum_height), maximum_height),
-        maximum_height,
-    );
-    const left = work_area.left + @divTrunc(work_width - width, 2);
-    const top = work_area.top + @divTrunc(work_height - height, 2);
-    return .{ .left = left, .top = top, .right = left + width, .bottom = top + height };
-}
 
 fn scaled(state: *const DialogState, value: i32) i32 {
     return Dpi.scale(value, state.dpi);
@@ -184,7 +124,8 @@ fn formContentWidth(hwnd: c.HWND, state: *const DialogState) i32 {
 }
 
 fn formViewportHeight(hwnd: c.HWND, state: *const DialogState) i32 {
-    return @max(scaled(state, 120), clientHeight(hwnd) - scaled(state, form_footer_height));
+    _ = state;
+    return clientHeight(hwnd);
 }
 
 var active_state: bool = false;
@@ -335,6 +276,7 @@ fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
         .destroy => {},
     }
     state.closed = true;
+    if (state.sheet) |sheet| sheet.requestClose();
 }
 
 pub fn node(
@@ -1194,65 +1136,47 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     active_state_storage.closed = false;
     active_state_storage.result = false;
     active_state_storage.dpi = Dpi.normalize(Win32.dpiForWindow(state.parent));
+    configureFields(&active_state_storage);
+    defer {
+        active_state_storage.sheet = null;
+        active_state_storage.content_root = null;
+        state.* = active_state_storage;
+    }
 
-    const monitor = c.MonitorFromWindow(state.parent, c.MONITOR_DEFAULTTONEAREST) orelse
-        return error.FormMonitorLookupFailed;
-    var monitor_info: c.MONITORINFO = std.mem.zeroes(c.MONITORINFO);
-    monitor_info.cbSize = @sizeOf(c.MONITORINFO);
-    if (c.GetMonitorInfoW(monitor, &monitor_info) == 0) return error.FormMonitorInfoUnavailable;
-    const work_area = LayoutRect{
-        .left = monitor_info.rcWork.left,
-        .top = monitor_info.rcWork.top,
-        .right = monitor_info.rcWork.right,
-        .bottom = monitor_info.rcWork.bottom,
-    };
-    const desired_height = if (state.kind == .worktree_policy) 520 else form_max_height;
-    const dialog_rect = fitDialogRect(
-        work_area,
-        scaled(&active_state_storage, form_width),
-        scaled(&active_state_storage, desired_height),
-        Dpi.scale(form_min_height, active_state_storage.dpi),
-        Dpi.scale(32, active_state_storage.dpi),
-    );
-    const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
+    var sheet: SheetFramework.Host = .{};
+    active_state_storage.sheet = &sheet;
+    defer {
+        active_state_storage.sheet = null;
+        sheet.deinit();
+    }
+    try sheet.init(state.parent, .{
+        .layout_input = formLayoutInput(&active_state_storage),
+        .context = &active_state_storage,
+        .on_layout = sheetLayout,
+        .on_message = sheetMessage,
+    });
+    _ = c.SetWindowTextW(sheet.hwnd, wide_title.ptr);
+    active_state_storage.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
         class_name.ptr,
-        wide_title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU | c.WS_VSCROLL,
-        dialog_rect.left,
-        dialog_rect.top,
-        dialog_rect.right - dialog_rect.left,
-        dialog_rect.bottom - dialog_rect.top,
-        state.parent,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        sheet.current_layout.viewport.width,
+        sheet.current_layout.scroll.extent,
+        sheet.viewport,
         null,
         c.GetModuleHandleW(null),
-        @ptrCast(state),
-    ) orelse {
-        return error.FormCreationFailed;
-    };
-    _ = c.EnableWindow(state.parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-    var message: c.MSG = undefined;
-    var quit_code: ?c.WPARAM = null;
-    while (!active_state_storage.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            active_state_storage.closed = true;
-            if (code == 0) quit_code = message.wParam;
-            break;
-        }
-        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
-    }
-    // Destroy the modal window from the owner thread after dispatch returns.
-    // Calling DestroyWindow from the window procedure can violate the C
-    // callback handle alignment contract on some Zig/Win32 combinations.
-    ModalTeardown.dismiss(hwnd, state.parent);
-    state.* = active_state_storage;
-    if (quit_code) |value| c.PostQuitMessage(@intCast(value));
-    return state.result;
+        null,
+    ) orelse return error.FormContentCreationFailed;
+    try createSheetControls(&active_state_storage);
+    try configureSheetFooter(&active_state_storage);
+    try sheet.relayout();
+    if (sheet.failure) |failure| return failure;
+    _ = c.SendMessageW(sheet.hwnd, c.DM_SETDEFID, ok_id, 0);
+    try sheet.runModal();
+    return active_state_storage.result;
 }
 
 fn registerClass() !void {
@@ -1264,6 +1188,212 @@ fn registerClass() !void {
     window_class.hbrBackground = null;
     if (c.RegisterClassW(&window_class) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.ClassRegistrationFailed;
+}
+
+fn formLayoutInput(state: *const DialogState) SheetFramework.LayoutInput {
+    const content_extent = Dpi.unscale(contentHeight(state), state.dpi);
+    const natural_height = content_extent + form_footer_height;
+    const heights: SheetFramework.HeightRange = if (state.kind == .node)
+        .{ .minimum = 560, .ideal = form_max_height, .maximum = form_max_height }
+    else
+        .{ .minimum = @min(220, natural_height), .ideal = natural_height, .maximum = form_max_height };
+    return .{
+        .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+        .dpi = state.dpi,
+        .desired_width = form_width,
+        .minimum_width = 360,
+        .heights = heights,
+        .content_extent = content_extent,
+        .footer_height = form_footer_height,
+    };
+}
+
+fn primaryLabel(kind: Kind) []const u8 {
+    return switch (kind) {
+        .promotion => "Promote",
+        .node => "Create",
+        .worktree_policy => "Done",
+        .worktree_sweep => "Remove Selected",
+        else => "OK",
+    };
+}
+
+fn measureTextWidth(hwnd: c.HWND, state: *const DialogState, text: []const u8) i32 {
+    const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return scaled(state, 72);
+    defer std.heap.c_allocator.free(wide);
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return scaled(state, 72);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, wide.ptr, @intCast(wide.len), &size) == 0)
+        return scaled(state, 72);
+    return size.cx;
+}
+
+fn footerActions(state: *DialogState, enabled: bool) [3]SheetFramework.FooterAction {
+    const host = state.sheet.?.hwnd;
+    const auxiliary = if (state.kind == .worktree_sweep) "Show in Explorer" else "Templates";
+    const has_auxiliary = (state.kind == .node and state.templates_available) or state.kind == .worktree_sweep;
+    return .{
+        .{ .id = cancel_id, .role = .cancel, .measured_text_width = measureTextWidth(host, state, "Cancel") },
+        .{
+            .id = if (has_auxiliary) (if (state.kind == .worktree_sweep) reveal_id else templates_id) else 0,
+            .role = .secondary,
+            .measured_text_width = if (has_auxiliary) measureTextWidth(host, state, auxiliary) else 0,
+        },
+        .{
+            .id = ok_id,
+            .role = if (state.kind == .worktree_sweep) .destructive else .primary,
+            .measured_text_width = measureTextWidth(host, state, primaryLabel(state.kind)),
+            .return_hint = true,
+            .enabled = enabled,
+        },
+    };
+}
+
+fn configureSheetFooter(state: *DialogState) !void {
+    const enabled = validationReason(state) == null;
+    const actions = footerActions(state, enabled);
+    const has_auxiliary = actions[1].id != 0;
+    try state.sheet.?.configureFooter(if (has_auxiliary) &actions else &.{ actions[0], actions[2] });
+}
+
+fn createFooterButton(state: *DialogState, id: u16, text: []const u8) !void {
+    const wide = try utf8ToWideZ(state.allocator, text);
+    defer state.allocator.free(wide);
+    const button = try state.sheet.?.createFooterButton(id, @ptrCast(wide.ptr));
+    AppFont.apply(button, AppFont.control_size, false);
+}
+
+fn createSheetControls(state: *DialogState) !void {
+    const body = state.content_root;
+    if (state.kind == .worktree_policy) {
+        createStatic(body, state, "Project Settings", 18, 14, 530, 24, &state.intro);
+        createStatic(body, state, "When a loop resolves and its branch has landed", 18, 48, 530, 20, &state.policy_statics[0]);
+        createPolicyRadio(body, state, "Remove: automatically remove safe landed worktrees.", 0, 74);
+        createPolicyRadio(body, state, "Ask: offer Reclaim / Keep on the resolved loop.", 1, 104);
+        createPolicyRadio(body, state, "Keep: leave worktrees until Worktrees is opened.", 2, 134);
+        createStatic(body, state, "Only landed, clean, pushed, unbound worktrees are ever eligible.", 18, 170, 530, 32, &state.policy_statics[1]);
+        createStatic(body, state, "Mention worktrees when this project passes either threshold", 18, 210, 530, 20, &state.policy_statics[2]);
+        createPolicyEdit(body, state, 0, 18, 238, 70);
+        createStatic(body, state, "GB", 94, 242, 30, 20, &state.policy_statics[3]);
+        createPolicyEdit(body, state, 1, 145, 238, 70);
+        createStatic(body, state, "worktrees", 221, 242, 90, 20, &state.policy_statics[4]);
+        createStatic(body, state, "The notice removes nothing; it only surfaces cleanup work.", 18, 276, 530, 32, &state.policy_statics[5]);
+    } else {
+        createStatic(body, state, formIntro(state.kind), 18, 12, 530, 34, &state.intro);
+        for (0..state.field_count) |index| createField(body, state, index);
+        if (state.kind == .node) createAttachmentsSection(body, state);
+        if (showsRecap(state.kind)) {
+            const recap = recapText(state);
+            defer if (recap.len != 0) state.allocator.free(recap);
+            createStatic(body, state, recap, 18, 0, 530, 34, &state.recap);
+        }
+    }
+    createStatic(state.sheet.?.hwnd, state, "", 18, 0, 320, 34, &state.validation);
+    try configureSheetFooter(state);
+    try createFooterButton(state, cancel_id, "Cancel");
+    if (state.kind == .node and state.templates_available)
+        try createFooterButton(state, templates_id, "Templates");
+    if (state.kind == .worktree_sweep)
+        try createFooterButton(state, reveal_id, "Show in Explorer");
+    try createFooterButton(state, ok_id, primaryLabel(state.kind));
+    syncValidation(state);
+}
+
+fn sheetLayout(context: ?*anyopaque, layout_value: SheetFramework.Layout) anyerror!void {
+    const state: *DialogState = @ptrCast(@alignCast(context orelse return));
+    state.dpi = state.sheet.?.options.layout_input.dpi;
+    if (state.content_root == null) return;
+    const content_width = layout_value.viewport.width;
+    const scrollbar_width = if (layout_value.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
+    const content_height = @max(layout_value.scroll.extent, layout_value.viewport.height);
+    if (c.MoveWindow(state.content_root, 0, -layout_value.scroll.offset, @max(0, content_width - scrollbar_width), content_height, 1) == 0)
+        return error.FormContentMoveFailed;
+    if (state.kind == .worktree_policy)
+        layoutPolicy(state)
+    else
+        layoutForm(state.content_root, state);
+    if (state.sheet.?.footer_layout) |footer| {
+        const validation = footer.validation;
+        _ = c.MoveWindow(
+            state.validation,
+            validation.x,
+            layout_value.footer.y + validation.y,
+            validation.width,
+            validation.height,
+            1,
+        );
+    }
+    refreshControlFonts(state);
+    _ = c.InvalidateRect(state.content_root, null, 1);
+}
+
+fn layoutPolicy(state: *DialogState) void {
+    const width = formContentWidth(state.content_root, state);
+    const margin = scaled(state, form_margin);
+    const move = struct {
+        fn control(hwnd: c.HWND, x: i32, y: i32, w: i32, h: i32) void {
+            if (hwnd != null) _ = c.MoveWindow(hwnd, x, y, w, h, 1);
+        }
+    }.control;
+    move(state.intro, margin, scaled(state, 14), width, scaled(state, 24));
+    move(state.policy_statics[0], margin, scaled(state, 48), width, scaled(state, 20));
+    for (0..3) |index| move(state.checks[index], margin, scaled(state, 74 + @as(i32, @intCast(index)) * 30), width, scaled(state, form_input_height));
+    move(state.policy_statics[1], margin, scaled(state, 170), width, scaled(state, 32));
+    move(state.policy_statics[2], margin, scaled(state, 210), width, scaled(state, 20));
+    layoutFieldControl(state.edits[0], state, fieldBounds(state, margin, scaled(state, 238), scaled(state, 70)), scaled(state, form_input_height));
+    move(state.policy_statics[3], margin + scaled(state, 76), scaled(state, 242), scaled(state, 30), scaled(state, 20));
+    layoutFieldControl(state.edits[1], state, fieldBounds(state, margin + scaled(state, 127), scaled(state, 238), scaled(state, 70)), scaled(state, form_input_height));
+    move(state.policy_statics[4], margin + scaled(state, 203), scaled(state, 242), scaled(state, 90), scaled(state, 20));
+    move(state.policy_statics[5], margin, scaled(state, 276), width, scaled(state, 32));
+}
+
+fn refreshControlFonts(state: *DialogState) void {
+    AppFont.apply(state.intro, AppFont.control_size, true);
+    AppFont.apply(state.validation, AppFont.control_size, false);
+    AppFont.apply(state.recap, AppFont.control_size, false);
+    for (0..state.field_count) |index| {
+        AppFont.apply(state.labels[index], AppFont.control_size, true);
+        AppFont.apply(state.helps[index], 12, false);
+        AppFont.apply(state.edits[index], AppFont.control_size, false);
+    }
+    for (state.checks) |control| AppFont.apply(control, AppFont.control_size, false);
+    for (state.policy_statics) |control| AppFont.apply(control, AppFont.control_size, false);
+    if (state.sheet) |sheet| {
+        inline for (.{ ok_id, cancel_id, reveal_id, templates_id }) |id|
+            AppFont.apply(c.GetDlgItem(sheet.hwnd, id), AppFont.control_size, false);
+    }
+}
+
+fn sheetMessage(
+    context: ?*anyopaque,
+    hwnd: c.HWND,
+    message: c.UINT,
+    wparam: c.WPARAM,
+    lparam: c.LPARAM,
+    result: *c.LRESULT,
+) bool {
+    const state: *DialogState = @ptrCast(@alignCast(context orelse return false));
+    if (message == c.DM_GETDEFID) {
+        const focused = c.GetFocus();
+        if (focused != null and c.IsChild(hwnd, focused) != 0 and c.IsWindowEnabled(focused) != 0) {
+            const focused_id = c.GetDlgCtrlID(focused);
+            if (focused_id == cancel_id or focused_id == templates_id or focused_id == reveal_id or focused_id == ok_id) {
+                result.* = @as(c.LRESULT, @intCast(focused_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16);
+                return true;
+            }
+        }
+        const primary = c.GetDlgItem(hwnd, @intCast(ok_id));
+        result.* = if (primary != null and c.IsWindowEnabled(primary) != 0)
+            @as(c.LRESULT, @intCast(ok_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16)
+        else
+            0;
+        return true;
+    }
+    return handleFormMessage(hwnd, state, message, wparam, lparam, result);
 }
 
 // Dark sheet theme: same panel/text palette as the validated
@@ -1295,8 +1425,9 @@ fn fillFormBackground(hdc: c.HDC, bounds: c.RECT) void {
 fn formCtlColorStatic(hwnd: c.HWND, wparam: c.WPARAM, validation_label: c.HWND) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
     _ = c.SetTextColor(hdc, if (hwnd == validation_label) Tokens.dialog_error_text else Tokens.dialog_body_text);
-    _ = c.SetBkMode(hdc, c.TRANSPARENT);
-    return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+    _ = c.SetBkColor(hdc, Tokens.dialog_panel);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    return @bitCast(@intFromPtr(darkPanelBrush()));
 }
 
 fn formCtlColorEdit(wparam: c.WPARAM) c.LRESULT {
@@ -1304,7 +1435,15 @@ fn formCtlColorEdit(wparam: c.WPARAM) c.LRESULT {
     _ = c.SetTextColor(hdc, Tokens.dialog_title_text);
     _ = c.SetBkColor(hdc, Tokens.dialog_field_background);
     _ = c.SetBkMode(hdc, c.OPAQUE);
-    return @intCast(@intFromPtr(darkFieldBrush()));
+    return @bitCast(@intFromPtr(darkFieldBrush()));
+}
+
+fn formCtlColorButton(wparam: c.WPARAM) c.LRESULT {
+    const hdc = deviceContextFrom(wparam);
+    _ = c.SetTextColor(hdc, Tokens.dialog_title_text);
+    _ = c.SetBkColor(hdc, Tokens.dialog_panel);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    return @bitCast(@intFromPtr(darkPanelBrush()));
 }
 
 fn deviceContextFrom(wparam: c.WPARAM) c.HDC {
@@ -1564,139 +1703,135 @@ fn fieldHelp(kind: Kind, index: usize) []const u8 {
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     if (!active_state) return c.DefWindowProcW(hwnd, message, wparam, lparam);
-    // `hwnd` is already a `c.HWND`; the previous `@ptrFromInt(@intFromPtr(...))`
-    // round-trip only re-derived the same value, but it reintroduced a
-    // pointer-alignment safety check against a value that is a Win32 *handle*,
-    // not a real aligned pointer. Window handles are opaque, arbitrarily
-    // valued tokens, so whenever the window manager happened to hand out an
-    // unaligned handle the round-trip aborted the process with
-    // "panic: incorrect alignment" while the form was laying out. Use the
-    // parameter directly so no alignment assumption is made about a handle.
-    const safe_hwnd: c.HWND = hwnd;
-    const value = &active_state_storage;
+    var result: c.LRESULT = 0;
+    if (handleFormMessage(hwnd, &active_state_storage, message, wparam, lparam, &result)) return result;
+    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+fn handleFormMessage(
+    hwnd: c.HWND,
+    value: *DialogState,
+    message: c.UINT,
+    wparam: c.WPARAM,
+    lparam: c.LPARAM,
+    result: *c.LRESULT,
+) bool {
     switch (message) {
-        c.WM_CREATE => {
-            configureFields(value);
-            if (value.kind == .worktree_policy) {
-                createStatic(safe_hwnd, value, "Project Settings", 18, 14, 530, 24, &value.intro);
-                var unused: c.HWND = null;
-                createStatic(safe_hwnd, value, "When a loop resolves and its branch has landed", 18, 48, 530, 20, &unused);
-                createPolicyRadio(safe_hwnd, value, "Remove: automatically remove safe landed worktrees.", 0, 74);
-                createPolicyRadio(safe_hwnd, value, "Ask: offer Reclaim / Keep on the resolved loop.", 1, 104);
-                createPolicyRadio(safe_hwnd, value, "Keep: leave worktrees until Worktrees is opened.", 2, 134);
-                createStatic(safe_hwnd, value, "Only landed, clean, pushed, unbound worktrees are ever eligible.", 18, 170, 530, 32, &unused);
-                createStatic(safe_hwnd, value, "Mention worktrees when this project passes either threshold", 18, 210, 530, 20, &unused);
-                createPolicyEdit(safe_hwnd, value, 0, 18, 238, 70);
-                createStatic(safe_hwnd, value, "GB", 94, 242, 30, 20, &unused);
-                createPolicyEdit(safe_hwnd, value, 1, 145, 238, 70);
-                createStatic(safe_hwnd, value, "worktrees", 221, 242, 90, 20, &unused);
-                createStatic(safe_hwnd, value, "The notice removes nothing; it only surfaces cleanup work.", 18, 276, 530, 32, &unused);
-                createStatic(safe_hwnd, value, "", 18, 316, 360, 34, &value.validation);
-            } else {
-                createStatic(safe_hwnd, value, formIntro(value.kind), 18, 12, 530, 34, &value.intro);
-                for (0..value.field_count) |index| createField(safe_hwnd, value, index);
-                if (value.kind == .node) createAttachmentsSection(safe_hwnd, value);
-                if (showsRecap(value.kind)) {
-                    const recap = recapText(value);
-                    defer if (recap.len != 0) value.allocator.free(recap);
-                    createStatic(safe_hwnd, value, recap, 18, 0, 530, 34, &value.recap);
-                }
-                createStatic(safe_hwnd, value, "", 18, 0, 320, 34, &value.validation);
-                layoutForm(safe_hwnd, value);
-            }
-            var client: c.RECT = undefined;
-            _ = c.GetClientRect(safe_hwnd, &client);
-            createButton(safe_hwnd, value, if (value.kind == .promotion) "Promote" else if (value.kind == .node) "Create" else if (value.kind == .worktree_policy) "Done" else if (value.kind == .worktree_sweep) "Remove Selected" else "OK", ok_id, 0, 0);
-            if (value.kind == .node and value.templates_available)
-                createButton(safe_hwnd, value, "Templates", templates_id, 0, 0);
-            if (value.kind == .worktree_sweep) createButton(safe_hwnd, value, "Show in Explorer", reveal_id, 0, 0);
-            createButton(safe_hwnd, value, "Cancel", cancel_id, 0, 0);
-            layoutFooter(safe_hwnd, value);
-            return 0;
-        },
         c.WM_ERASEBKGND => {
-            const hdc = deviceContextFrom(wparam);
             var client: c.RECT = undefined;
-            _ = c.GetClientRect(safe_hwnd, &client);
-            fillFormBackground(hdc, client);
-            return 1;
+            _ = c.GetClientRect(hwnd, &client);
+            fillFormBackground(deviceContextFrom(wparam), client);
+            result.* = 1;
+            return true;
         },
-        c.WM_CTLCOLORSTATIC => return formCtlColorStatic(controlHandleFrom(lparam), wparam, value.validation),
-        c.WM_CTLCOLOREDIT => return formCtlColorEdit(wparam),
-        c.WM_CTLCOLORLISTBOX => return formCtlColorEdit(wparam),
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const hdc = c.BeginPaint(hwnd, &paint);
+            if (hdc != null) {
+                var client: c.RECT = undefined;
+                _ = c.GetClientRect(hwnd, &client);
+                fillFormBackground(hdc, client);
+                paintFormFields(value, hdc) catch |failure| if (value.sheet) |sheet| {
+                    sheet.failure = failure;
+                };
+                _ = c.EndPaint(hwnd, &paint);
+            }
+            result.* = 0;
+            return true;
+        },
+        c.WM_CTLCOLORSTATIC => {
+            result.* = formCtlColorStatic(controlHandleFrom(lparam), wparam, value.validation);
+            return true;
+        },
+        c.WM_CTLCOLOREDIT, c.WM_CTLCOLORLISTBOX => {
+            result.* = formCtlColorEdit(wparam);
+            return true;
+        },
+        c.WM_CTLCOLORBTN => {
+            result.* = formCtlColorButton(wparam);
+            return true;
+        },
         c.WM_DRAWITEM => {
             const draw_item = drawItemFrom(lparam);
             if (value.tile_field_index != null and draw_item.CtlID >= tile_base_id and draw_item.CtlID < tile_base_id + max_tiles) {
                 drawTile(value, draw_item.CtlID - tile_base_id, draw_item);
-                return 1;
+                result.* = 1;
+                return true;
             }
-            return 0;
-        },
-        c.WM_SIZE => {
-            layoutFooter(safe_hwnd, value);
-            if (value.kind != .worktree_policy) layoutForm(safe_hwnd, value);
-            updateScrollBar(safe_hwnd, value);
-            return 0;
-        },
-        c.WM_VSCROLL => {
-            const command: u16 = @truncate(wparam);
-            if (command == c.SB_THUMBTRACK or command == c.SB_THUMBPOSITION) {
-                var info: c.SCROLLINFO = std.mem.zeroes(c.SCROLLINFO);
-                info.cbSize = @sizeOf(c.SCROLLINFO);
-                info.fMask = c.SIF_TRACKPOS;
-                if (c.GetScrollInfo(safe_hwnd, c.SB_VERT, &info) != 0) {
-                    setScrollOffset(safe_hwnd, value, info.nTrackPos);
-                }
-                return 0;
+            if (draw_item.CtlID == ok_id or draw_item.CtlID == cancel_id or draw_item.CtlID == reveal_id or draw_item.CtlID == templates_id) {
+                drawFooterAction(value, draw_item) catch |failure| if (value.sheet) |sheet| {
+                    sheet.failure = failure;
+                };
+                result.* = 1;
+                return true;
             }
-            const delta: i32 = switch (command) {
-                c.SB_LINEUP => -scaled(value, 48),
-                c.SB_LINEDOWN => scaled(value, 48),
-                c.SB_PAGEUP => -@as(i32, @intCast(@max(scaled(value, 48), formViewportHeight(safe_hwnd, value) - scaled(value, 12)))),
-                c.SB_PAGEDOWN => @as(i32, @intCast(@max(scaled(value, 48), formViewportHeight(safe_hwnd, value) - scaled(value, 12)))),
-                c.SB_TOP => -100000,
-                c.SB_BOTTOM => 100000,
-                else => 0,
-            };
-            scrollFields(safe_hwnd, value, delta);
-            return 0;
         },
         c.WM_MOUSEWHEEL => {
-            const wheel_delta: i16 = @bitCast(@as(u16, @truncate(wparam >> 16)));
-            scrollFields(safe_hwnd, value, if (wheel_delta > 0) -scaled(value, 48) else scaled(value, 48));
-            return 0;
+            if (value.sheet) |sheet| {
+                _ = c.SendMessageW(sheet.viewport, message, wparam, lparam);
+                result.* = 0;
+                return true;
+            }
         },
         c.WM_COMMAND => {
             const command = @as(u16, @truncate(wparam));
             const notification: u16 = @truncate(wparam >> 16);
             if (notification == c.BN_CLICKED and command >= tile_base_id and command < tile_base_id + max_tiles) {
                 selectTile(value, command - tile_base_id);
-                layoutForm(safe_hwnd, value);
-                return 0;
+                refreshSheetLayout(value);
+                syncValidation(value);
+                result.* = 0;
+                return true;
             }
-            if ((notification == c.EN_SETFOCUS or notification == c.CBN_SETFOCUS or notification == c.BN_SETFOCUS) and command >= 9100 and command < 9120) {
-                ensureControlVisible(safe_hwnd, value, command - 9100);
-                return 0;
+            if (notification == c.BN_SETFOCUS and command >= tile_base_id and command < tile_base_id + max_tiles) {
+                if (value.tile_field_index) |index| revealField(value, index);
+                result.* = 0;
+                return true;
             }
-            if (notification == c.CBN_SELCHANGE and command >= 9100 and command < 9120) {
+            if (value.kind == .node and
+                ((command == attachment_listbox_id and notification == c.LBN_SETFOCUS) or
+                    ((command == attachment_attach_id or command == attachment_remove_id) and notification == c.BN_SETFOCUS)))
+            {
+                revealAttachments(value);
+                result.* = 0;
+                return true;
+            }
+            if (value.kind == .worktree_policy and notification == c.BN_SETFOCUS and command >= 9200 and command <= 9202) {
+                const index: usize = command - 9200;
+                revealRange(value, scaled(value, 74 + @as(i32, @intCast(index)) * 30), scaled(value, 74 + @as(i32, @intCast(index)) * 30 + form_input_height));
+                result.* = 0;
+                return true;
+            }
+            if ((notification == c.EN_SETFOCUS or notification == c.CBN_SETFOCUS or notification == c.BN_SETFOCUS) and command >= 9100 and command < 9100 + 256) {
+                ensureControlVisible(hwnd, value, command - 9100);
+                _ = c.InvalidateRect(value.content_root, null, 1);
+                result.* = 0;
+                return true;
+            }
+            if ((notification == c.EN_KILLFOCUS or notification == c.CBN_KILLFOCUS) and command >= 9100 and command < 9100 + 256) {
+                _ = c.InvalidateRect(value.content_root, null, 1);
+            }
+            if (notification == c.CBN_SELCHANGE and command >= 9100 and command < 9100 + 256) {
                 readValue(value, command - 9100);
                 updateConditionalVisibility(value);
-                setStaticText(value, value.validation, captureFailureReason(value) orelse "");
                 refreshRecap(value);
-                layoutForm(safe_hwnd, value);
-                return 0;
+                refreshSheetLayout(value);
+                syncValidation(value);
+                result.* = 0;
+                return true;
             }
-            if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9120) {
+            if ((notification == c.EN_CHANGE or notification == c.BN_CLICKED) and command >= 9100 and command < 9100 + 256) {
                 readValue(value, command - 9100);
-                setStaticText(value, value.validation, captureFailureReason(value) orelse "");
                 refreshRecap(value);
+                syncValidation(value);
             }
             if (value.kind == .worktree_policy and
                 (notification == c.EN_CHANGE or notification == c.BN_CLICKED) and
-                command >= 9100 and command < 9200)
+                command >= 9100 and command <= 9202)
             {
                 readPolicy(value);
                 persistPolicy(value);
+                syncValidation(value);
             }
             if (command == ok_id) {
                 if (value.kind == .promotion) value.promotion_read_failed = false;
@@ -1705,14 +1840,17 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                 if (value.kind == .worktree_sweep and hasDestructiveSelection(value) and !value.confirmation_armed) {
                     value.confirmation_armed = true;
                     setStaticText(value, value.validation, "Selected rows contain uncommitted files. Press Remove Selected again to remove anyway.");
-                    return 0;
+                    result.* = 0;
+                    return true;
                 }
                 if (validationReason(value)) |reason| {
                     setStaticText(value, value.validation, reason);
+                    syncValidation(value);
                 } else {
                     applyModalCommand(value, .submit);
                 }
-                return 0;
+                result.* = 0;
+                return true;
             }
             if (command == reveal_id and value.kind == .worktree_sweep) {
                 for (0..value.field_count) |index| {
@@ -1721,52 +1859,147 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
                     defer value.allocator.free(parameters);
                     const wide = utf8ToWideZ(value.allocator, parameters) catch break;
                     defer value.allocator.free(wide);
-                    _ = c.ShellExecuteW(safe_hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr, wide.ptr, null, c.SW_SHOWNORMAL);
+                    if (!builtin.is_test)
+                        _ = c.ShellExecuteW(value.sheet.?.hwnd, std.unicode.utf8ToUtf16LeStringLiteral("open").ptr, std.unicode.utf8ToUtf16LeStringLiteral("explorer.exe").ptr, wide.ptr, null, c.SW_SHOWNORMAL);
                     break;
                 }
-                return 0;
+                result.* = 0;
+                return true;
             }
             if (command == templates_id and value.kind == .node and value.templates_available) {
                 readValues(value);
                 value.template_requested = true;
                 applyModalCommand(value, .cancel);
-                return 0;
+                result.* = 0;
+                return true;
             }
             if (command == cancel_id) {
                 applyModalCommand(value, .cancel);
-                return 0;
+                result.* = 0;
+                return true;
             }
             if (value.kind == .node and command == attachment_attach_id and notification == c.BN_CLICKED) {
-                attachFiles(safe_hwnd, value);
-                layoutForm(safe_hwnd, value);
-                return 0;
+                attachFiles(value.sheet.?.hwnd, value);
+                refreshSheetLayout(value);
+                syncValidation(value);
+                result.* = 0;
+                return true;
             }
             if (value.kind == .node and command == attachment_remove_id and notification == c.BN_CLICKED) {
                 removeSelectedAttachment(value);
-                return 0;
+                syncValidation(value);
+                result.* = 0;
+                return true;
             }
         },
         c.WM_CLOSE => {
             applyModalCommand(value, .close);
-            return 0;
-        },
-        c.WM_SETFOCUS => {
-            if (c.GetFocus()) |focused| {
-                for (0..20) |index| {
-                    if (focused == value.edits[index]) {
-                        ensureControlVisible(safe_hwnd, value, index);
-                        break;
-                    }
-                }
-            }
-        },
-        c.WM_DESTROY => {
-            applyModalCommand(value, .destroy);
-            return 0;
+            result.* = 0;
+            return true;
         },
         else => {},
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    return false;
+}
+
+fn refreshSheetLayout(state: *DialogState) void {
+    const sheet = state.sheet orelse return;
+    const input = formLayoutInput(state);
+    sheet.options.layout_input.desired_width = input.desired_width;
+    sheet.options.layout_input.minimum_width = input.minimum_width;
+    sheet.options.layout_input.heights = input.heights;
+    sheet.options.layout_input.content_extent = input.content_extent;
+    sheet.options.layout_input.footer_height = input.footer_height;
+    sheet.refreshOwnerGeometry() catch |failure| {
+        sheet.failure = failure;
+    };
+}
+
+fn syncValidation(state: *DialogState) void {
+    const reason = validationReason(state);
+    setStaticText(state, state.validation, reason orelse "");
+    configureSheetFooter(state) catch |failure| if (state.sheet) |sheet| {
+        sheet.failure = failure;
+    };
+}
+
+fn fieldBounds(state: *const DialogState, x: i32, y: i32, width: i32) SheetFramework.Rect {
+    return .{ .x = x, .y = y, .width = width, .height = scaled(state, form_input_height) };
+}
+
+fn layoutFieldControl(control: c.HWND, state: *const DialogState, bounds: SheetFramework.Rect, native_height: i32) void {
+    if (control == null) return;
+    const geometry = SheetFramework.fieldGeometry(bounds, state.dpi);
+    _ = c.MoveWindow(control, geometry.fill.x, geometry.fill.y, geometry.fill.width, @max(geometry.fill.height, native_height - (bounds.height - geometry.fill.height)), 1);
+}
+
+fn paintFormFields(state: *DialogState, hdc: c.HDC) !void {
+    const focused = c.GetFocus();
+    const margin = scaled(state, form_margin);
+    const width = formContentWidth(state.content_root, state);
+    if (state.kind == .worktree_policy) {
+        try SheetFramework.drawField(hdc, fieldBounds(state, margin, scaled(state, 238), scaled(state, 70)), state.dpi, focused == state.edits[0]);
+        try SheetFramework.drawField(hdc, fieldBounds(state, margin + scaled(state, 127), scaled(state, 238), scaled(state, 70)), state.dpi, focused == state.edits[1]);
+        return;
+    }
+    var y = scaled(state, form_fields_top);
+    for (0..state.field_count) |index| {
+        if (!state.visible[index]) continue;
+        switch (state.input_kinds[index]) {
+            .edit, .readonly, .combo => try SheetFramework.drawField(
+                hdc,
+                fieldBounds(state, margin, y + scaled(state, 26), width),
+                state.dpi,
+                focused == state.edits[index],
+            ),
+            else => {},
+        }
+        y += rowHeight(state, index);
+    }
+}
+
+fn drawFooterAction(state: *DialogState, item: *c.DRAWITEMSTRUCT) !void {
+    const role: SheetFramework.ActionRole = if (item.CtlID == ok_id)
+        (if (state.kind == .worktree_sweep) .destructive else .primary)
+    else if (item.CtlID == cancel_id)
+        .cancel
+    else
+        .secondary;
+    const bounds = SheetFramework.Rect{
+        .x = item.rcItem.left,
+        .y = item.rcItem.top,
+        .width = item.rcItem.right - item.rcItem.left,
+        .height = item.rcItem.bottom - item.rcItem.top,
+    };
+    const enabled = item.itemState & c.ODS_DISABLED == 0;
+    try SheetFramework.drawButton(item.hDC, bounds, state.dpi, role, enabled, item.itemState & c.ODS_SELECTED != 0);
+
+    var text: [128]u16 = undefined;
+    const length = c.GetWindowTextW(item.hwndItem, &text, @intCast(text.len));
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetTextColor(item.hDC, if (enabled) Tokens.dialog_title_text else Tokens.dialog_muted_text);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    var text_bounds = item.rcItem;
+    if (role.isPrimary()) text_bounds.right -= SheetFramework.Metrics.forDpi(state.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, length, &text_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE | c.DT_END_ELLIPSIS);
+    if (role.isPrimary()) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = text_bounds.right;
+        _ = c.DrawTextW(
+            item.hDC,
+            std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr,
+            1,
+            &hint_bounds,
+            c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE,
+        );
+    }
+    if (item.itemState & c.ODS_FOCUS != 0) {
+        var focus = item.rcItem;
+        const inset = SheetFramework.Metrics.forDpi(state.dpi).focus_ring_width + 1;
+        _ = c.InflateRect(&focus, -inset, -inset);
+        _ = c.DrawFocusRect(item.hDC, &focus);
+    }
 }
 
 fn createStatic(hwnd: c.HWND, state: *DialogState, text: []const u8, x: i32, y: i32, width: i32, height: i32, output: *c.HWND) void {
@@ -1856,7 +2089,7 @@ fn briefFieldIndex(state: *const DialogState) ?usize {
 fn createAttachmentsSection(hwnd: c.HWND, state: *DialogState) void {
     createStatic(hwnd, state, "Attachments", 18, 0, 530, 18, &state.attachment_label);
     state.attachment_listbox = c.CreateWindowExW(
-        c.WS_EX_CLIENTEDGE,
+        0,
         std.unicode.utf8ToUtf16LeStringLiteral("LISTBOX").ptr,
         null,
         @as(c.DWORD, @intCast(c.WS_CHILD)) | @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
@@ -2040,7 +2273,7 @@ fn attachFiles(hwnd: c.HWND, state: *DialogState) void {
     };
     defer state.allocator.free(buffer);
     @memset(buffer, 0);
-    const picked = graphcode_pick_files(hwnd, buffer.ptr, @intCast(stride), @intCast(remaining));
+    const picked = if (builtin.is_test) 0 else graphcode_pick_files(hwnd, buffer.ptr, @intCast(stride), @intCast(remaining));
     if (picked <= 0) return;
     var added = false;
     var index: usize = 0;
@@ -2159,7 +2392,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
     const input = switch (state.input_kinds[index]) {
         .tiles => createTileButtons(hwnd, state, index),
         .combo => c.CreateWindowExW(
-            c.WS_EX_CLIENTEDGE,
+            0,
             std.unicode.utf8ToUtf16LeStringLiteral("COMBOBOX").ptr,
             null,
             style | @as(c.DWORD, @intCast(if (state.kind == .template_picker) c.CBS_DROPDOWN else c.CBS_DROPDOWNLIST)) | @as(c.DWORD, @intCast(c.WS_VSCROLL)),
@@ -2191,7 +2424,7 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             );
         },
         .edit, .readonly => c.CreateWindowExW(
-            c.WS_EX_CLIENTEDGE,
+            0,
             std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
             null,
             style | @as(c.DWORD, @intCast(c.ES_AUTOHSCROLL)) | (if (state.input_kinds[index] == .readonly) @as(c.DWORD, @intCast(c.ES_READONLY)) else 0),
@@ -2316,19 +2549,29 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
     var y = scaled(state, form_fields_top);
     const margin = scaled(state, form_margin);
     const width = formContentWidth(hwnd, state);
-    layoutContentControl(state.intro, margin, scaled(state, 16) - state.scroll_offset, width, scaled(state, 48), true, formViewportHeight(hwnd, state));
+    layoutContentControl(state.intro, margin, scaled(state, 16), width, scaled(state, 48), true, formViewportHeight(hwnd, state));
     for (0..state.field_count) |index| {
         const shown = state.visible[index];
         const viewport = formViewportHeight(hwnd, state);
         if (state.input_kinds[index] == .tiles) {
-            layoutTiles(state, index, margin, y - state.scroll_offset, width, shown, viewport);
+            layoutTiles(state, index, margin, y, width, shown, viewport);
         } else {
-            layoutContentControl(state.edits[index], margin, y - state.scroll_offset + scaled(state, 26), width, inputControlHeight(state, state.input_kinds[index]), shown, viewport);
+            if (shown) {
+                _ = c.ShowWindow(state.edits[index], c.SW_SHOW);
+                layoutFieldControl(
+                    state.edits[index],
+                    state,
+                    fieldBounds(state, margin, y + scaled(state, 26), width),
+                    inputControlHeight(state, state.input_kinds[index]),
+                );
+            } else {
+                _ = c.ShowWindow(state.edits[index], c.SW_HIDE);
+            }
         }
         layoutContentControl(
             state.labels[index],
             margin,
-            y - state.scroll_offset,
+            y,
             width,
             scaled(state, form_label_height),
             shown,
@@ -2337,7 +2580,7 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         layoutContentControl(
             state.helps[index],
             margin,
-            y - state.scroll_offset + scaled(state, 62),
+            y + scaled(state, 62),
             width,
             scaled(state, form_help_height),
             shown and state.input_kinds[index] != .tiles,
@@ -2347,13 +2590,12 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
         y += rowHeight(state, index);
     }
     if (state.kind == .node) {
-        layoutAttachmentsSection(hwnd, state, y - state.scroll_offset);
+        layoutAttachmentsSection(hwnd, state, y);
         if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
     }
     if (showsRecap(state.kind)) {
-        layoutContentControl(state.recap, margin, y - state.scroll_offset, width, scaled(state, 40), true, formViewportHeight(hwnd, state));
+        layoutContentControl(state.recap, margin, y, width, scaled(state, 40), true, formViewportHeight(hwnd, state));
     }
-    updateScrollBar(hwnd, state);
 }
 
 const tile_columns = 2;
@@ -2374,34 +2616,19 @@ fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32, sh
 }
 
 fn layoutContentControl(control: c.HWND, x: i32, y: i32, width: i32, height: i32, shown: bool, viewport: i32) void {
+    _ = viewport;
     if (control == null) return;
-    const control_rect = LayoutRect{ .left = x, .top = y, .right = x + width, .bottom = y + height };
-    const clip = contentControlClip(control_rect, shown, viewport);
-    if (clip == .hidden) {
+    if (!shown) {
         _ = c.ShowWindow(control, c.SW_HIDE);
         return;
     }
-    const region_rect = switch (clip) {
-        .hidden => unreachable,
-        .empty => LayoutRect{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-        .visible => |clipped| LayoutRect{ .left = 0, .top = clipped.top - y, .right = width, .bottom = clipped.bottom - y },
-    };
-    const region = c.CreateRectRgn(region_rect.left, region_rect.top, region_rect.right, region_rect.bottom) orelse {
-        c.OutputDebugStringW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode: failed to clip a native form control; hiding it to protect the footer.\n").ptr);
-        _ = c.ShowWindow(control, c.SW_HIDE);
-        return;
-    };
-    _ = c.MoveWindow(control, x, y, width, height, 0);
-    if (c.SetWindowRgn(control, region, 1) == 0) {
-        _ = c.DeleteObject(region);
-        c.OutputDebugStringW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCode: failed to apply a native form control clip; hiding it to protect the footer.\n").ptr);
-        _ = c.ShowWindow(control, c.SW_HIDE);
-        return;
-    }
+    _ = c.SetWindowRgn(control, null, 0);
+    _ = c.MoveWindow(control, x, y, width, height, 1);
     _ = c.ShowWindow(control, c.SW_SHOW);
 }
 
 fn contentHeight(state: *const DialogState) i32 {
+    if (state.kind == .worktree_policy) return scaled(state, 350);
     var y = scaled(state, form_fields_top);
     for (0..state.field_count) |index| {
         if (state.visible[index]) y += rowHeight(state, index);
@@ -2417,92 +2644,33 @@ fn clientHeight(hwnd: c.HWND) i32 {
     return rect.bottom;
 }
 
-fn scrollFields(hwnd: c.HWND, state: *DialogState, requested: i32) void {
-    const viewport = formViewportHeight(hwnd, state);
-    const content = contentHeight(state);
-    const next = boundedScrollOffset(content, viewport, state.scroll_offset, requested);
-    setScrollOffsetValue(hwnd, state, next);
-}
-
-fn setScrollOffset(hwnd: c.HWND, state: *DialogState, requested: i32) void {
-    const viewport = formViewportHeight(hwnd, state);
-    const content = contentHeight(state);
-    const next = std.math.clamp(requested, 0, @max(0, content - viewport));
-    setScrollOffsetValue(hwnd, state, next);
-}
-
-fn setScrollOffsetValue(hwnd: c.HWND, state: *DialogState, next: i32) void {
-    const delta = state.scroll_offset - next;
-    if (delta == 0) return;
-    state.scroll_offset = next;
-    layoutForm(hwnd, state);
-    updateScrollBar(hwnd, state);
-}
-
-fn updateScrollBar(hwnd: c.HWND, state: *DialogState) void {
-    const viewport = formViewportHeight(hwnd, state);
-    const content = contentHeight(state);
-    const page: u32 = @intCast(@max(1, viewport));
-    const max_offset = @max(0, content - @as(i32, @intCast(page)));
-    state.scroll_offset = std.math.clamp(state.scroll_offset, 0, max_offset);
-    var info: c.SCROLLINFO = std.mem.zeroes(c.SCROLLINFO);
-    info.cbSize = @sizeOf(c.SCROLLINFO);
-    info.fMask = c.SIF_RANGE | c.SIF_PAGE | c.SIF_POS;
-    info.nMin = 0;
-    info.nMax = content;
-    info.nPage = page;
-    info.nPos = @intCast(state.scroll_offset);
-    _ = c.SetScrollInfo(hwnd, c.SB_VERT, &info, 1);
-}
-
 fn ensureControlVisible(hwnd: c.HWND, state: *DialogState, index: usize) void {
+    _ = hwnd;
+    if (state.kind == .worktree_policy and index < 2) {
+        revealRange(state, scaled(state, 238), scaled(state, 238 + form_input_height));
+        return;
+    }
+    revealField(state, index);
+}
+
+fn revealField(state: *DialogState, index: usize) void {
     const top = fieldTop(state, index) orelse return;
-    const viewport = formViewportHeight(hwnd, state);
     const bottom = top + rowHeight(state, index) - 3;
-    const visible_top = state.scroll_offset;
-    const visible_bottom = state.scroll_offset + @max(1, viewport);
-    if (top < visible_top) {
-        scrollFields(hwnd, state, top - visible_top);
-    } else if (bottom > visible_bottom) {
-        scrollFields(hwnd, state, bottom - visible_bottom);
-    }
+    revealRange(state, top, bottom);
 }
 
-fn boundedScrollOffset(content: i32, viewport: i32, current: i32, requested: i32) i32 {
-    const max_offset = @max(0, content - @max(120, viewport));
-    return std.math.clamp(current + requested, 0, max_offset);
+fn revealAttachments(state: *DialogState) void {
+    var top = scaled(state, form_fields_top);
+    for (0..state.field_count) |index| if (state.visible[index]) {
+        top += rowHeight(state, index);
+    };
+    revealRange(state, top, top + scaled(state, attachment_section_height));
 }
 
-fn createButton(hwnd: c.HWND, state: *const DialogState, text: []const u8, id: usize, x: i32, y: i32) void {
-    const wide = utf8ToWideZ(std.heap.c_allocator, text) catch return;
-    defer std.heap.c_allocator.free(wide);
-    const button_style: c.DWORD = @intCast(if (id == ok_id) c.BS_DEFPUSHBUTTON else c.BS_PUSHBUTTON);
-    const style: c.DWORD = @as(c.DWORD, @intCast(c.WS_CHILD)) |
-        @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
-        @as(c.DWORD, @intCast(c.WS_TABSTOP)) |
-        button_style;
-    const button = c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr, wide.ptr, style, scaled(state, x), scaled(state, y), scaled(state, 88), scaled(state, 34), hwnd, childId(id), c.GetModuleHandleW(null), null);
-    AppFont.apply(button, AppFont.control_size, false);
-}
-
-fn layoutFooter(hwnd: c.HWND, state: *DialogState) void {
-    var client: c.RECT = undefined;
-    _ = c.GetClientRect(hwnd, &client);
-    const margin = scaled(state, form_margin);
-    const button_width = scaled(state, 96);
-    const button_height = scaled(state, 36);
-    const gap = scaled(state, 12);
-    const y = client.bottom - scaled(state, 50);
-    const ok_x = client.right - margin - button_width;
-    const cancel_x = ok_x - gap - button_width;
-    _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(ok_id)), ok_x, y, button_width, button_height, 1);
-    _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(cancel_id)), cancel_x, y, button_width, button_height, 1);
-    if ((state.kind == .node and state.templates_available) or state.kind == .worktree_sweep) {
-        const auxiliary_id: usize = if (state.kind == .worktree_sweep) reveal_id else templates_id;
-        _ = c.MoveWindow(c.GetDlgItem(hwnd, @intCast(auxiliary_id)), cancel_x - gap - scaled(state, 132), y, scaled(state, 132), button_height, 1);
-    }
-    if (state.validation != null)
-        _ = c.MoveWindow(state.validation, margin, client.bottom - scaled(state, 54), @max(scaled(state, 180), cancel_x - margin - gap), scaled(state, 42), 1);
+fn revealRange(state: *DialogState, top: i32, bottom: i32) void {
+    if (state.sheet) |sheet| sheet.reveal(top, bottom) catch |failure| {
+        sheet.failure = failure;
+    };
 }
 
 fn createCheckBox(hwnd: c.HWND, state: *DialogState, text: []const u8, index: usize, y: i32) void {
@@ -2549,7 +2717,7 @@ fn createPolicyRadio(hwnd: c.HWND, state: *DialogState, text: []const u8, index:
 
 fn createPolicyEdit(hwnd: c.HWND, state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
     const edit = c.CreateWindowExW(
-        c.WS_EX_CLIENTEDGE,
+        0,
         std.unicode.utf8ToUtf16LeStringLiteral("EDIT").ptr,
         null,
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL | c.ES_NUMBER,
@@ -4737,73 +4905,314 @@ test "node update initialization and result release every partial allocation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
 
-test "keyboard-sized guided form keeps every field reachable through bounded scrolling" {
-    const content: i32 = form_fields_top + 10 * form_row_height + 16;
-    const viewport: i32 = 768 - form_footer_height;
-    const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
-    try std.testing.expectEqual(max_offset, boundedScrollOffset(content, viewport, max_offset, 48));
-    try std.testing.expectEqual(@as(i32, 0), boundedScrollOffset(content, viewport, 0, -48));
-    const last_top: i32 = form_fields_top + 9 * form_row_height;
-    try std.testing.expect(last_top + form_row_height <= max_offset + viewport);
+fn hiddenNativeControlHost() !c.HWND {
+    return c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        std.unicode.utf8ToUtf16LeStringLiteral("").ptr,
+        c.WS_OVERLAPPED,
+        0,
+        0,
+        form_width,
+        form_max_height,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
 }
 
-test "goal-based form content does not overlap the fixed footer" {
-    const client_height: i32 = 672;
-    const viewport_height = @max(@as(i32, 120), client_height - form_footer_height);
-    const footer = LayoutRect{ .left = 641, .top = client_height - 50, .right = 737, .bottom = client_height - 14 };
-    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null, .scroll_offset = 1 };
-    state.values[1] = @constCast("goalBased");
+fn initHiddenForm(owner: c.HWND, state: *DialogState, host: *SheetFramework.Host) !void {
+    state.parent = owner;
+    state.dpi = Dpi.normalize(state.dpi);
+    configureFields(state);
+    state.sheet = host;
+    try host.init(owner, .{
+        .layout_input = formLayoutInput(state),
+        .context = state,
+        .on_layout = sheetLayout,
+        .on_message = sheetMessage,
+    });
+    state.content_root = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        host.current_layout.viewport.width,
+        @max(host.current_layout.scroll.extent, host.current_layout.viewport.height),
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestContentCreationFailed;
+    try createSheetControls(state);
+    try host.relayout();
+}
+
+test "dialog framework: short promotion sizes from content" {
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .promotion,
+        .promotion_target = .goal,
+        .parent = null,
+        .dpi = Dpi.base_dpi,
+    };
     configureFields(&state);
-    updateConditionalVisibility(&state);
-    try std.testing.expectEqual(@as(usize, 15), state.field_count);
+    const content_sized_height = contentHeight(&state) + form_footer_height;
+    var input = formLayoutInput(&state);
+    input.owner = .{ .x = 0, .y = 0, .width = 1200, .height = 1000 };
+    const result = SheetFramework.layout(input);
 
-    const label_top = fieldTop(&state, 9).? - state.scroll_offset;
-    const label = LayoutRect{ .left = 58, .top = label_top, .right = 737, .bottom = label_top + form_label_height };
-    try std.testing.expect(rectsIntersect(label, footer));
-    try std.testing.expect(clipRectToViewport(label, viewport_height) == null);
-
-    const partial_label = clipRectToViewport(.{ .left = 58, .top = 598, .right = 737, .bottom = 620 }, viewport_height).?;
-    try std.testing.expect(rectFitsInside(partial_label, .{
-        .left = 0,
-        .top = 0,
-        .right = 760,
-        .bottom = viewport_height,
-    }));
-    try std.testing.expectEqual(@as(i32, viewport_height), partial_label.bottom);
-    try std.testing.expect(!rectsIntersect(partial_label, footer));
+    try std.testing.expectEqual(content_sized_height, result.sheet.height);
+    try std.testing.expect(!result.scroll.visible);
 }
 
-test "offscreen visible controls retain an empty clip while hidden controls remain hidden" {
-    const offscreen = LayoutRect{ .left = 10, .top = 620, .right = 90, .bottom = 640 };
-    switch (contentControlClip(offscreen, true, 608)) {
-        .empty => {},
-        else => return error.ExpectedEmptyClip,
-    }
-    switch (contentControlClip(offscreen, false, 608)) {
-        .hidden => {},
-        else => return error.ExpectedHiddenControl,
-    }
-    switch (contentControlClip(.{ .left = 10, .top = 598, .right = 90, .bottom = 620 }, true, 608)) {
-        .visible => |clipped| try std.testing.expectEqual(@as(i32, 608), clipped.bottom),
-        else => return error.ExpectedViewportClip,
+test "dialog framework: worktree policy extent reaches final threshold content" {
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .worktree_policy,
+        .parent = null,
+        .dpi = Dpi.base_dpi,
+    };
+    configureFields(&state);
+
+    try std.testing.expect(contentHeight(&state) >= scaled(&state, 350));
+}
+
+test "dialog framework: footer and viewport partition every declared form kind" {
+    for ([_]Kind{
+        .node,
+        .edge,
+        .update,
+        .promotion,
+        .settings,
+        .jump,
+        .template_picker,
+        .worktree_policy,
+        .worktree_sweep,
+    }) |kind| {
+        const owner = try hiddenNativeControlHost();
+        defer _ = c.DestroyWindow(owner);
+        var state = DialogState{ .allocator = std.testing.allocator, .kind = kind, .parent = owner };
+        var host: SheetFramework.Host = .{};
+        defer host.deinit();
+        try initHiddenForm(owner, &state, &host);
+        const primary = c.GetDlgItem(host.hwnd, ok_id);
+        var primary_rect: c.RECT = undefined;
+        try std.testing.expect(state.intro != null and c.GetParent(state.intro) == state.content_root);
+        try std.testing.expect(c.GetParent(state.content_root) == host.viewport);
+        try std.testing.expect(primary != null and c.GetParent(primary) == host.hwnd);
+        try std.testing.expect(c.GetWindowRect(primary, &primary_rect) != 0);
+        _ = c.MapWindowPoints(null, host.hwnd, @ptrCast(&primary_rect), 2);
+        try std.testing.expect(primary_rect.top >= host.current_layout.footer.y);
+        try std.testing.expectEqual(host.current_layout.sheet.height, host.current_layout.viewport.height + host.current_layout.footer.height);
     }
 }
 
-test "native form window fits inside the selected monitor work area" {
-    const work_area = LayoutRect{ .left = 0, .top = 0, .right = 1024, .bottom = 728 };
-    const dialog = fitDialogRect(work_area, form_width, form_max_height, form_min_height, 32);
+test "dialog framework: invalid draft disables the primary action" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .promotion,
+        .promotion_target = .goal,
+        .parent = owner,
+        .dpi = Dpi.base_dpi,
+    };
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const primary = c.GetDlgItem(host.hwnd, ok_id);
 
-    try std.testing.expect(rectFitsInside(dialog, work_area));
-    try std.testing.expectEqual(@as(i32, 664), dialog.bottom - dialog.top);
+    try std.testing.expect(validationReason(&state) != null);
+    try std.testing.expect(primary != null and c.IsWindowEnabled(primary) == 0);
+    state.values[0] = try std.testing.allocator.dupe(u8, "Ship the completed goal");
+    defer std.testing.allocator.free(state.values[0]);
+    syncValidation(&state);
+    try std.testing.expect(validationReason(&state) == null);
+    try std.testing.expect(c.IsWindowEnabled(primary) != 0);
 }
 
-test "scrollbar thumb positions seek and clamp the dialog content" {
-    const content: i32 = form_fields_top + 10 * form_row_height + 16;
-    const viewport: i32 = 768 - form_footer_height;
-    try std.testing.expectEqual(@as(i32, 0), std.math.clamp(@as(i32, 0), 0, content - viewport));
-    const max_offset = boundedScrollOffset(content, viewport, 0, 100000);
-    try std.testing.expectEqual(@min(@as(i32, 200), max_offset), std.math.clamp(@as(i32, 200), 0, max_offset));
-    try std.testing.expectEqual(max_offset, std.math.clamp(@as(i32, 100000), 0, max_offset));
+test "dialog framework: enabled primary is the Enter default and invalid primary is not" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .promotion,
+        .promotion_target = .goal,
+        .parent = owner,
+        .dpi = Dpi.base_dpi,
+    };
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const primary = c.GetDlgItem(host.hwnd, @intCast(ok_id)) orelse return error.TestWindowCreationFailed;
+
+    _ = c.EnableWindow(primary, 1);
+    const enabled_default: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, ok_id), @as(u16, @truncate(enabled_default)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(enabled_default >> 16)));
+
+    const cancel = c.GetDlgItem(host.hwnd, @intCast(cancel_id)) orelse return error.TestWindowCreationFailed;
+    _ = c.SetFocus(cancel);
+    const cancel_default: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, cancel_id), @as(u16, @truncate(cancel_default)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(cancel_default >> 16)));
+
+    _ = c.EnableWindow(primary, 0);
+    const disabled_primary_focused_cancel: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, cancel_id), @as(u16, @truncate(disabled_primary_focused_cancel)));
+    _ = c.SetFocus(state.edits[0]);
+    try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+}
+
+test "dialog framework: static labels return an opaque sheet brush" {
+    const dc = c.CreateCompatibleDC(null) orelse return error.TestDcCreationFailed;
+    defer _ = c.DeleteDC(dc);
+    _ = c.SetBkMode(dc, c.TRANSPARENT);
+    const label = Win32.opaquePointerFromInt(c.HWND, 1);
+    const brush_result = formCtlColorStatic(label, @intFromPtr(dc), null);
+    const brush = Win32.opaquePointerFromInt(c.HBRUSH, @bitCast(brush_result));
+    var info: c.LOGBRUSH = undefined;
+    const described = c.GetObjectW(brush, @sizeOf(c.LOGBRUSH), &info) != 0;
+
+    try std.testing.expect(
+        c.GetBkMode(dc) == c.OPAQUE and
+            described and
+            info.lbStyle == c.BS_SOLID and
+            info.lbColor == Tokens.dialog_panel,
+    );
+}
+
+test "dialog framework: every node edge promotion and utility variant lays out at 96 144 and 192 DPI" {
+    const Variant = struct {
+        name: []const u8,
+        kind: Kind,
+        promotion_target: SketchPromotion.Target = .goal,
+        node_loop: []const u8 = "",
+        edge_kind: []const u8 = "",
+        edge_condition: []const u8 = "",
+        edge_transform: []const u8 = "",
+        promotion_choice: []const u8 = "",
+    };
+    const variants = [_]Variant{
+        .{ .name = "node turn", .kind = .node, .node_loop = "turnBased" },
+        .{ .name = "node timed", .kind = .node, .node_loop = "timeBased" },
+        .{ .name = "node goal", .kind = .node, .node_loop = "goalBased" },
+        .{ .name = "node proactive", .kind = .node, .node_loop = "proactive" },
+        .{ .name = "edge handoff always", .kind = .edge, .edge_kind = "handoff", .edge_condition = "always", .edge_transform = "none" },
+        .{ .name = "edge message success template", .kind = .edge, .edge_kind = "message", .edge_condition = "success", .edge_transform = "template" },
+        .{ .name = "edge spawn failure script", .kind = .edge, .edge_kind = "spawn", .edge_condition = "failure", .edge_transform = "script" },
+        .{ .name = "update", .kind = .update },
+        .{ .name = "promotion goal", .kind = .promotion, .promotion_target = .goal },
+        .{ .name = "promotion turn", .kind = .promotion, .promotion_target = .turn },
+        .{ .name = "promotion timed default", .kind = .promotion, .promotion_target = .timed, .promotion_choice = "hourly" },
+        .{ .name = "promotion timed custom", .kind = .promotion, .promotion_target = .timed, .promotion_choice = "custom" },
+        .{ .name = "settings", .kind = .settings },
+        .{ .name = "jump", .kind = .jump },
+        .{ .name = "template picker", .kind = .template_picker },
+        .{ .name = "worktree policy", .kind = .worktree_policy },
+    };
+    for (variants) |variant| {
+        for ([_]u32{ 96, 144, 192 }) |dpi| {
+            var state = DialogState{
+                .allocator = std.testing.allocator,
+                .kind = variant.kind,
+                .promotion_target = variant.promotion_target,
+                .parent = null,
+                .dpi = dpi,
+            };
+            if (variant.node_loop.len != 0) state.values[1] = @constCast(variant.node_loop);
+            if (variant.edge_kind.len != 0) state.values[2] = @constCast(variant.edge_kind);
+            if (variant.edge_condition.len != 0) state.values[3] = @constCast(variant.edge_condition);
+            if (variant.edge_transform.len != 0) state.values[4] = @constCast(variant.edge_transform);
+            if (variant.promotion_choice.len != 0) state.values[0] = @constCast(variant.promotion_choice);
+            configureFields(&state);
+            var input = formLayoutInput(&state);
+            input.owner = .{
+                .x = 31,
+                .y = 47,
+                .width = Dpi.scale(1024, dpi),
+                .height = Dpi.scale(768, dpi),
+            };
+            const form_layout = SheetFramework.layout(input);
+            try std.testing.expect(form_layout.sheet.x >= input.owner.x);
+            try std.testing.expect(form_layout.sheet.y >= input.owner.y);
+            try std.testing.expect(form_layout.sheet.right() <= input.owner.right());
+            try std.testing.expect(form_layout.sheet.bottom() <= input.owner.bottom());
+            try std.testing.expectEqual(form_layout.sheet.height, form_layout.viewport.height + form_layout.footer.height);
+            try std.testing.expectEqual(Dpi.scale(input.content_extent, dpi), form_layout.scroll.extent);
+            try std.testing.expect(variant.name.len != 0);
+        }
+    }
+}
+
+test "dialog framework: policy thresholds and final controls are revealable at every DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var state = DialogState{
+            .allocator = std.testing.allocator,
+            .kind = .worktree_policy,
+            .parent = null,
+            .dpi = dpi,
+        };
+        configureFields(&state);
+        var input = formLayoutInput(&state);
+        input.owner = .{
+            .x = 0,
+            .y = 0,
+            .width = Dpi.scale(760, dpi),
+            .height = Dpi.scale(300, dpi),
+        };
+        const form_layout = SheetFramework.layout(input);
+        try std.testing.expect(form_layout.scroll.visible);
+        const threshold_top = Dpi.scale(238, dpi);
+        const threshold_bottom = Dpi.scale(238 + form_input_height, dpi);
+        const threshold_revealed = form_layout.scroll.reveal(threshold_top, threshold_bottom);
+        try std.testing.expect(threshold_top >= threshold_revealed.offset);
+        try std.testing.expect(threshold_bottom <= threshold_revealed.offset + threshold_revealed.page);
+        const final_top = Dpi.scale(276, dpi);
+        const final_bottom = Dpi.scale(308, dpi);
+        const revealed = form_layout.scroll.reveal(final_top, final_bottom);
+        try std.testing.expect(final_top >= revealed.offset);
+        try std.testing.expect(final_bottom <= revealed.offset + revealed.page);
+        try std.testing.expect(revealed.offset <= revealed.max_offset);
+    }
+}
+
+test "dialog framework: sweep 0 1 and 256 row extents use overflow only at every DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        for ([_]usize{ 0, 1, 256 }) |row_count| {
+            var state = DialogState{
+                .allocator = std.testing.allocator,
+                .kind = .worktree_sweep,
+                .parent = null,
+                .dpi = dpi,
+                .field_count = row_count,
+            };
+            configureFields(&state);
+            var input = formLayoutInput(&state);
+            input.owner = .{
+                .x = 0,
+                .y = 0,
+                .width = Dpi.scale(900, dpi),
+                .height = Dpi.scale(700, dpi),
+            };
+            const form_layout = SheetFramework.layout(input);
+            try std.testing.expectEqual(row_count == 256, form_layout.scroll.visible);
+            if (row_count == 256) {
+                const final_top = Dpi.scale(form_fields_top + 255 * form_row_height, dpi);
+                const final_bottom = final_top + Dpi.scale(form_row_height, dpi);
+                const revealed = form_layout.scroll.reveal(final_top, final_bottom);
+                try std.testing.expect(revealed.offset <= revealed.max_offset);
+                try std.testing.expect(final_top >= revealed.offset);
+                try std.testing.expect(final_bottom <= revealed.offset + revealed.page);
+            } else {
+                try std.testing.expectEqual(@as(i32, 0), form_layout.scroll.max_offset);
+            }
+        }
+    }
 }
 
 test "loop type teaching tiles carry the exact macOS accent colors" {

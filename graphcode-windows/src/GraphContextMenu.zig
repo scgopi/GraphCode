@@ -1,6 +1,7 @@
 const c = @import("Win32.zig").c;
 const Wire = @import("Wire.zig");
 const SketchPromotion = @import("SketchPromotion.zig");
+const NativeDialogs = @import("WindowsNativeDialogs.zig");
 
 pub const NodeTarget = struct {
     project_path: []const u8,
@@ -334,7 +335,7 @@ fn buildMenu(target: Target) c.HMENU {
                         _ = c.DestroyMenu(menu);
                         return null;
                     }
-                }
+                },
             };
         },
         .edge => {
@@ -355,11 +356,16 @@ fn buildMenu(target: Target) c.HMENU {
 }
 
 pub fn confirm(parent: c.HWND, title: []const u8, message: []const u8) bool {
-    const title_wide = toWide(title) orelse return false;
-    defer std.heap.c_allocator.free(title_wide);
-    const message_wide = toWide(message) orelse return false;
-    defer std.heap.c_allocator.free(message_wide);
-    return c.MessageBoxW(parent, message_wide.ptr, title_wide.ptr, c.MB_ICONWARNING | c.MB_YESNO | c.MB_DEFBUTTON2) == c.IDYES;
+    return NativeDialogs.confirm(parent, std.heap.c_allocator, confirmationSpec(title, message)) catch false;
+}
+
+fn confirmationSpec(title: []const u8, message: []const u8) NativeDialogs.PromptSpec {
+    return .{
+        .title = title,
+        .body = message,
+        .cancel_action = .{ .label = "No", .role = .cancel, .is_default = true },
+        .primary_action = .{ .label = "Yes", .role = .primary },
+    };
 }
 
 fn actionForCommand(command: c_int) Action {
@@ -449,6 +455,19 @@ fn toWide(text: []const u8) ?[]u16 {
 }
 
 const std = @import("std");
+
+test "dialog framework: generic confirmation preserves caller copy and No default" {
+    const spec = confirmationSpec("Delete Edge", "Remove this edge?");
+    try std.testing.expectEqualStrings("Delete Edge", spec.title);
+    try std.testing.expectEqualStrings("Remove this edge?", spec.body);
+    try std.testing.expectEqual(@as(usize, 0), spec.labels.len);
+    try std.testing.expectEqualStrings("No", spec.cancel_action.label);
+    try std.testing.expectEqual(NativeDialogs.ActionRole.cancel, spec.cancel_action.role);
+    try std.testing.expect(spec.cancel_action.is_default);
+    try std.testing.expectEqualStrings("Yes", spec.primary_action.label);
+    try std.testing.expectEqual(NativeDialogs.ActionRole.primary, spec.primary_action.role);
+    try std.testing.expect(!spec.primary_action.is_default);
+}
 
 const ExpectedMenuItem = struct {
     id: ?c.UINT = null,

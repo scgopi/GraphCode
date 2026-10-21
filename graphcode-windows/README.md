@@ -149,14 +149,17 @@ menu; Enter is not a standalone shortcut for it. Mutations are sent as
 correlated v2 daemon requests; daemon refusals remain visible as explicit status
 errors.
 
-Text prompts (`GraphCodeWindowsDialog`, including Rename, New Workspace and
-Save as Template) measure wrapped descriptions and labels with the current
-DPI font, fit their client area plus native frame within the monitor work area,
-and scroll only overflowing content above a fixed footer. Labels and the
-viewport paint opaque panel backgrounds when controls move. Hidden native tests
-cover geometry at injected 96/144/192 DPI, scroll/focus-notification routing and
-owned Unicode results; they do not establish rendered mixed-DPI, physical-keyboard
-or macOS visual parity. Other form and confirmation classes are unchanged.
+Application-owned dialogs now share owner-bounded, captionless rounded sheets
+over a dimmed owner client. The shared host covers text prompts and
+confirmations (including Rename and Delete Loop), node/edge and Project Settings
+forms, product Settings, Manage Workspaces, repository and Codespace ingress,
+and update offer/install surfaces. Content-derived sizing keeps the role-based
+footer fixed while only overflowing body content scrolls; existing native
+controls and automation IDs remain in place. Hidden native tests cover geometry
+at injected 96/144/192 DPI, bounded overflow, focus/scroll routing, action roles,
+and owned Unicode results. They do not establish live composition, rendered
+mixed-DPI behavior, physical keyboard input, accessibility conformance, daemon
+persistence, or macOS visual parity.
 
 Edge editing queues one checked `updateEdge` command, never delete/recreate.
 The existing edge ID and endpoints stay fixed, and the daemon retains its current
@@ -473,9 +476,32 @@ first, then the update banner; the status line is the floor. A collapsed part is
 not painted, published, or clickable. The window's minimum height is the smallest
 client height at which the status line, Activity strip, and open Workspace panel
 still leave that region (`min_client_height`, enforced through
-`WM_GETMINMAXINFO`; width keeps the system minimum, and the 517-DIP minimum-height
-expression is preserved). This is layout and message evidence from App and
-native provider tests, not a screen-reader or Dev Box run.
+`WM_GETMINMAXINFO`; the 517-DIP minimum-height expression is preserved). The
+client also keeps a 452-DIP minimum width, scaled with
+`AdjustWindowRectExForDpi`; an existing larger operating-system minimum is never
+reduced.
+
+Rail presentation is shared by canvas rendering, App layout, pointer routing,
+and UIA. With the rail visible, clients at 672 DIP and wider dock it and reserve
+the 220-DIP rail; narrower clients overlay it on the canvas, which is painted
+first so the rail stays above it. The overlay wins pointer and UIA hit testing.
+The 451-, 452-, and 671-DIP boundaries overlay, while 672 DIP docks; hiding the
+rail always leaves the canvas inset at zero.
+
+Native terminal workspaces remain docked with a 220-DIP reservation at narrow
+widths. Winghostty uses a child HWND and the main window clips child painting,
+so the parent-painted rail cannot safely overlay a terminal surface; that
+requires a separate overlay HWND. The responsive overlay evidence in this slice
+applies to parent-painted canvas surfaces, not terminal workspaces.
+
+The header keeps direct action buttons when their readable widths fit. Otherwise
+one `»` button opens a native popup containing the available actions in their
+existing order. Its hit target, keyboard focus, and UIA identity share the
+header layout, and popup selections use the same action handlers as direct
+buttons.
+
+This is layout, hidden-window message, and UIA publication evidence from App
+and native provider tests, not a screen-reader, live-window, or Dev Box run.
 
 ## Workspace lifecycle
 

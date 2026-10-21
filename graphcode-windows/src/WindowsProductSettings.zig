@@ -2,7 +2,9 @@ const std = @import("std");
 const CanvasInput = @import("CanvasInput.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
-const ModalTeardown = @import("ModalTeardown.zig");
+const Dpi = @import("Dpi.zig");
+const AppFont = @import("AppFont.zig");
+const SheetFramework = @import("SheetFramework.zig");
 
 pub const Settings = struct {
     allocator: std.mem.Allocator,
@@ -31,10 +33,9 @@ pub const Settings = struct {
 
     pub fn fields(self: Settings) [9][]const u8 {
         return .{
-            self.default_backend, self.default_model, self.claude_permissions,
-            self.copilot_permissions, self.codex_approvals,
-            if (self.activity) "on" else "off", if (self.briefing) "on" else "off",
-            if (self.beta) "on" else "off", if (self.auto_selects_model) "on" else "off",
+            self.default_backend,               self.default_model,             self.claude_permissions,
+            self.copilot_permissions,           self.codex_approvals,           if (self.activity) "on" else "off",
+            if (self.briefing) "on" else "off", if (self.beta) "on" else "off", if (self.auto_selects_model) "on" else "off",
         };
     }
 
@@ -192,8 +193,7 @@ fn resolveSupportDirectory(allocator: std.mem.Allocator) ![]u8 {
         const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
         defer allocator.free(home);
         const suffix = std.mem.trimLeft(u8, value[1..], "/\\");
-        return if (suffix.len == 0) allocator.dupe(u8, home)
-            else std.fs.path.join(allocator, &.{ home, suffix });
+        return if (suffix.len == 0) allocator.dupe(u8, home) else std.fs.path.join(allocator, &.{ home, suffix });
     }
     if (!std.fs.path.isAbsolute(value)) {
         const home = try std.process.getEnvVarOwned(allocator, "USERPROFILE");
@@ -241,61 +241,14 @@ pub fn open(parent_address: usize, allocator: std.mem.Allocator, current: Settin
         .auto_model = current.auto_selects_model,
     };
     settings_active = true;
+    errdefer settings_active = false;
 
-    var frame = c.RECT{ .left = 0, .top = 0, .right = settings_width, .bottom = settings_height };
-    const style = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU;
-    const ex_style = c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT;
-    _ = c.AdjustWindowRectEx(&frame, style, 0, ex_style);
-    const width = frame.right - frame.left;
-    const height = frame.bottom - frame.top;
-    var owner: c.RECT = undefined;
-    _ = c.GetWindowRect(parent, &owner);
-    const hwnd = c.CreateWindowExW(
-        ex_style,
-        settings_class.ptr,
-        settings_title.ptr,
-        style,
-        owner.left + @divTrunc((owner.right - owner.left) - width, 2),
-        owner.top + @divTrunc((owner.bottom - owner.top) - height, 2),
-        width,
-        height,
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse {
-        settings_active = false;
-        return error.SettingsCreationFailed;
-    };
-    const safe_hwnd = windowHandle(@intFromPtr(hwnd.?));
-    createSettingsControls(safe_hwnd);
-    _ = c.EnableWindow(parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-    _ = c.SetFocus(hwnd);
-    var message: c.MSG = undefined;
-    while (!settings_state.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            settings_state.closed = true;
-            break;
-        }
-        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_RETURN) {
-            settings_state.accepted = true;
-            settings_state.closed = true;
-            continue;
-        }
-        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_ESCAPE) {
-            settings_state.closed = true;
-            continue;
-        }
-        if (c.IsDialogMessageW(hwnd, &message) == 0) {
-            _ = c.TranslateMessage(&message);
-            _ = c.DispatchMessageW(&message);
-        }
-    }
+    settings_state.dpi = Dpi.normalize(Win32.dpiForWindow(parent));
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSettingsSheet(&host, parent);
+    try host.runModal();
     const accepted = settings_state.accepted;
-    ModalTeardown.dismiss(hwnd, parent);
     settings_active = false;
     if (!accepted) return null;
     return @as(?Settings, try Settings.parse(allocator, &.{
@@ -366,12 +319,16 @@ const SettingsDialogState = struct {
     closed: bool = false,
     controls: [9]c.HWND = @splat(null),
     explanations: [9]c.HWND = @splat(null),
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    dpi: u32 = Dpi.base_dpi,
 };
 
 const settings_class = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeProductSettings");
 const settings_title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Settings");
 const settings_width: i32 = 620;
 const settings_height: i32 = 830;
+const settings_content_height: i32 = 764;
 var settings_active = false;
 var settings_state: SettingsDialogState = undefined;
 
@@ -391,6 +348,204 @@ fn registerSettingsClass() !void {
         return error.SettingsClassRegistrationFailed;
 }
 
+fn createSettingsSheet(host: *SheetFramework.Host, parent: c.HWND) !void {
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = settings_state.dpi,
+            .desired_width = settings_width,
+            .minimum_width = 480,
+            .heights = .{ .minimum = 430, .ideal = settings_height, .maximum = 880 },
+            .content_extent = settings_content_height,
+        },
+        .context = &settings_state,
+        .on_layout = &layoutSettingsSheet,
+        .on_message = &settingsSheetMessage,
+    });
+    if (c.SetWindowTextW(host.hwnd, settings_title.ptr) == 0) return error.SettingsCreationFailed;
+    settings_state.host = host;
+    settings_state.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
+        settings_class.ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        0,
+        0,
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.SettingsCreationFailed;
+    createSettingsControls(settings_state.content_root);
+    const actions = settingsFooterActions(host.hwnd, settings_state.dpi);
+    try host.configureFooter(&actions);
+    const cancel = try host.createFooterButton(cancel_id, std.unicode.utf8ToUtf16LeStringLiteral("Cancel").ptr);
+    const save = try host.createFooterButton(save_id, std.unicode.utf8ToUtf16LeStringLiteral("Save").ptr);
+    AppFont.apply(cancel, AppFont.control_size, false);
+    AppFont.apply(save, AppFont.control_size, false);
+    _ = c.SendMessageW(host.hwnd, c.DM_SETDEFID, save_id, 0);
+    try host.relayout();
+}
+
+fn layoutSettingsSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const state: *SettingsDialogState = @ptrCast(@alignCast(context.?));
+    if (state.host) |host| state.dpi = Dpi.normalize(host.options.layout_input.dpi);
+    if (state.content_root == null) return;
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
+    if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, @max(0, layout.viewport.width - scrollbar), @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
+        return error.SettingsLayoutFailed;
+    try layoutSettingsControls(state);
+}
+
+const SettingsControlBounds = struct { x: i32, y: i32, width: i32, height: i32 };
+
+const settings_control_bounds = [_]SettingsControlBounds{
+    .{ .x = 36, .y = 70, .width = 548, .height = 30 },
+    .{ .x = 36, .y = 148, .width = 548, .height = 30 },
+    .{ .x = 36, .y = 210, .width = 548, .height = 30 },
+    .{ .x = 36, .y = 280, .width = 548, .height = 30 },
+    .{ .x = 36, .y = 398, .width = 548, .height = 30 },
+    .{ .x = 44, .y = 432, .width = 532, .height = 26 },
+    .{ .x = 44, .y = 512, .width = 532, .height = 26 },
+    .{ .x = 44, .y = 584, .width = 532, .height = 26 },
+    .{ .x = 44, .y = 672, .width = 532, .height = 26 },
+};
+
+const settings_explanation_bounds = [_]SettingsControlBounds{
+    .{ .x = 48, .y = 102, .width = 524, .height = 24 },
+    .{ .x = 48, .y = 180, .width = 524, .height = 28 },
+    .{ .x = 48, .y = 242, .width = 524, .height = 36 },
+    .{ .x = 48, .y = 312, .width = 524, .height = 28 },
+    .{ .x = 48, .y = 342, .width = 524, .height = 34 },
+    .{ .x = 48, .y = 462, .width = 524, .height = 42 },
+    .{ .x = 48, .y = 542, .width = 524, .height = 38 },
+    .{ .x = 48, .y = 614, .width = 524, .height = 38 },
+    .{ .x = 48, .y = 702, .width = 524, .height = 50 },
+};
+
+fn layoutSettingsControls(state: *SettingsDialogState) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, state.dpi);
+    for (state.controls, settings_control_bounds) |control_handle, bounds| {
+        if (control_handle == null) continue;
+        _ = c.SendMessageW(control_handle, c.WM_SETFONT, @intFromPtr(font), 1);
+        if (c.MoveWindow(control_handle, Dpi.scale(bounds.x, state.dpi), Dpi.scale(bounds.y, state.dpi), Dpi.scale(bounds.width, state.dpi), Dpi.scale(bounds.height, state.dpi), 1) == 0)
+            return error.SettingsLayoutFailed;
+    }
+    for (state.explanations, settings_explanation_bounds) |control_handle, bounds| {
+        if (control_handle == null) continue;
+        _ = c.SendMessageW(control_handle, c.WM_SETFONT, @intFromPtr(font), 1);
+        if (c.MoveWindow(control_handle, Dpi.scale(bounds.x, state.dpi), Dpi.scale(bounds.y, state.dpi), Dpi.scale(bounds.width, state.dpi), Dpi.scale(bounds.height, state.dpi), 1) == 0)
+            return error.SettingsLayoutFailed;
+    }
+    if (state.host) |host| {
+        for ([_]usize{ cancel_id, save_id }) |id| {
+            const button = c.GetDlgItem(host.hwnd, @intCast(id));
+            if (button != null) _ = c.SendMessageW(button, c.WM_SETFONT, @intFromPtr(font), 1);
+        }
+    }
+}
+
+fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return Dpi.scale(fallback, dpi);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, @intCast(text.len), &size) == 0)
+        return Dpi.scale(fallback, dpi);
+    return size.cx;
+}
+
+fn settingsFooterActions(hwnd: c.HWND, dpi: u32) [2]SheetFramework.FooterAction {
+    return .{
+        .{ .id = cancel_id, .role = .cancel, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Cancel"), 48) },
+        .{ .id = save_id, .role = .primary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Save"), 34), .return_hint = true },
+    };
+}
+
+fn closeSettings(accepted: bool) void {
+    settings_state.accepted = accepted;
+    settings_state.closed = true;
+    if (settings_state.host) |host| host.requestClose();
+}
+
+fn handleSettingsCommand(command: u16) bool {
+    switch (command) {
+        save_id => closeSettings(true),
+        cancel_id => closeSettings(false),
+        backend_id => settings_state.backend = (settings_state.backend + 1) % backend_values.len,
+        claude_id => settings_state.claude = (settings_state.claude + 1) % claude_values.len,
+        copilot_id => settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len,
+        codex_id => settings_state.codex = (settings_state.codex + 1) % codex_values.len,
+        model_id => settings_state.model = (settings_state.model + 1) % model_values.len,
+        auto_model_id => settings_state.auto_model = !settings_state.auto_model,
+        activity_id => settings_state.activity = !settings_state.activity,
+        briefing_id => settings_state.briefing = !settings_state.briefing,
+        beta_id => settings_state.beta = !settings_state.beta,
+        else => return false,
+    }
+    updateSettingsControls();
+    if (settings_state.content_root != null) _ = c.InvalidateRect(settings_state.content_root, null, 0);
+    return true;
+}
+
+fn settingsSheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    _ = context;
+    _ = hwnd;
+    switch (message) {
+        c.WM_DRAWITEM => {
+            result.* = drawFooterItem(settings_state.host.?, lparam);
+            return true;
+        },
+        c.DM_GETDEFID => {
+            result.* = (c.DC_HASDEFID << 16) | save_id;
+            return true;
+        },
+        c.WM_COMMAND => {
+            if (!handleSettingsCommand(@truncate(wparam))) return false;
+            result.* = 0;
+            return true;
+        },
+        c.WM_CLOSE => {
+            closeSettings(false);
+            result.* = 0;
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn drawFooterItem(host: *SheetFramework.Host, lparam: c.LPARAM) c.LRESULT {
+    const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+    var role = SheetFramework.ActionRole.secondary;
+    var return_hint = false;
+    for (host.footer_actions[0..host.footer_action_count]) |action| {
+        if (action.id != item.CtlID) continue;
+        role = action.role;
+        return_hint = action.return_hint and action.role.isPrimary();
+        break;
+    }
+    SheetFramework.drawButton(item.hDC, .{ .x = item.rcItem.left, .y = item.rcItem.top, .width = item.rcItem.right - item.rcItem.left, .height = item.rcItem.bottom - item.rcItem.top }, host.options.layout_input.dpi, role, item.itemState & c.ODS_DISABLED == 0, item.itemState & c.ODS_SELECTED != 0) catch return 0;
+    var text: [128]u16 = [_]u16{0} ** 128;
+    const count = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.SetTextColor(item.hDC, SheetFramework.controlPaintStyle(.button, item.itemState & c.ODS_DISABLED == 0).foreground);
+    var bounds = item.rcItem;
+    if (return_hint) bounds.right -= SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, count, &bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    if (return_hint) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = bounds.right;
+        _ = c.DrawTextW(item.hDC, std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr, 1, &hint_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    }
+    return 1;
+}
+
 fn settingsWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
     const safe_hwnd: c.HWND = if (hwnd) |value| windowHandle(@intFromPtr(value)) else null;
     if (!settings_active) return c.DefWindowProcW(safe_hwnd, message, wparam, lparam);
@@ -407,51 +562,32 @@ fn settingsWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c
         },
         c.WM_LBUTTONUP => {
             const point = CanvasInput.decodeMouseMessage(lparam);
-            if (applySettingsClick(point.x, point.y)) _ = c.InvalidateRect(safe_hwnd, null, 0);
+            if (applySettingsClick(Dpi.unscale(point.x, settings_state.dpi), Dpi.unscale(point.y, settings_state.dpi))) _ = c.InvalidateRect(safe_hwnd, null, 0);
             return 0;
         },
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
-            switch (command) {
-                save_id => {
-                    settings_state.accepted = true;
-                    settings_state.closed = true;
-                },
-                cancel_id => settings_state.closed = true,
-                backend_id => settings_state.backend = (settings_state.backend + 1) % backend_values.len,
-                claude_id => settings_state.claude = (settings_state.claude + 1) % claude_values.len,
-                copilot_id => settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len,
-                codex_id => settings_state.codex = (settings_state.codex + 1) % codex_values.len,
-                model_id => settings_state.model = (settings_state.model + 1) % model_values.len,
-                auto_model_id => settings_state.auto_model = !settings_state.auto_model,
-                activity_id => settings_state.activity = !settings_state.activity,
-                briefing_id => settings_state.briefing = !settings_state.briefing,
-                beta_id => settings_state.beta = !settings_state.beta,
-                else => return c.DefWindowProcW(safe_hwnd, message, wparam, lparam),
-            }
-            updateSettingsControls();
-            _ = c.InvalidateRect(safe_hwnd, null, 0);
-            return 0;
+            return if (handleSettingsCommand(command)) 0 else c.DefWindowProcW(safe_hwnd, message, wparam, lparam);
         },
         c.WM_CTLCOLORSTATIC => {
             const hdc = deviceContext(wparam);
             _ = c.SetTextColor(hdc, settingsRgb(190, 190, 198));
-            _ = c.SetBkMode(hdc, c.TRANSPARENT);
-            return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+            _ = c.SetBkColor(hdc, SheetFramework.controlPaintStyle(.static, true).background);
+            _ = c.SetBkMode(hdc, c.OPAQUE);
+            return @intCast(@intFromPtr(settings_state.host.?.brushes.panel));
         },
         c.WM_KEYDOWN => {
             if (wparam == c.VK_ESCAPE) {
-                settings_state.closed = true;
+                closeSettings(false);
                 return 0;
             }
             if (wparam == c.VK_RETURN) {
-                settings_state.accepted = true;
-                settings_state.closed = true;
+                closeSettings(true);
                 return 0;
             }
         },
         c.WM_CLOSE => {
-            settings_state.closed = true;
+            closeSettings(false);
             return 0;
         },
         else => {},
@@ -461,24 +597,14 @@ fn settingsWindowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c
 
 fn applySettingsClick(x: i32, y: i32) bool {
     if (inside(x, y, settingsRect(476, 780, 584, 818))) {
-        settings_state.accepted = true;
-        settings_state.closed = true;
+        closeSettings(true);
         return false;
     }
     if (inside(x, y, settingsRect(374, 780, 466, 818))) {
-        settings_state.closed = true;
+        closeSettings(false);
         return false;
     }
-    if (rowHit(x, y, 70)) settings_state.backend = (settings_state.backend + 1) % backend_values.len
-    else if (rowHit(x, y, 148)) settings_state.claude = (settings_state.claude + 1) % claude_values.len
-    else if (rowHit(x, y, 210)) settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len
-    else if (rowHit(x, y, 280)) settings_state.codex = (settings_state.codex + 1) % codex_values.len
-    else if (rowHit(x, y, 398)) settings_state.model = (settings_state.model + 1) % model_values.len
-    else if (rowHit(x, y, 432)) settings_state.auto_model = !settings_state.auto_model
-    else if (rowHit(x, y, 512)) settings_state.activity = !settings_state.activity
-    else if (rowHit(x, y, 584)) settings_state.briefing = !settings_state.briefing
-    else if (rowHit(x, y, 672)) settings_state.beta = !settings_state.beta
-    else return false;
+    if (rowHit(x, y, 70)) settings_state.backend = (settings_state.backend + 1) % backend_values.len else if (rowHit(x, y, 148)) settings_state.claude = (settings_state.claude + 1) % claude_values.len else if (rowHit(x, y, 210)) settings_state.copilot = (settings_state.copilot + 1) % copilot_values.len else if (rowHit(x, y, 280)) settings_state.codex = (settings_state.codex + 1) % codex_values.len else if (rowHit(x, y, 398)) settings_state.model = (settings_state.model + 1) % model_values.len else if (rowHit(x, y, 432)) settings_state.auto_model = !settings_state.auto_model else if (rowHit(x, y, 512)) settings_state.activity = !settings_state.activity else if (rowHit(x, y, 584)) settings_state.briefing = !settings_state.briefing else if (rowHit(x, y, 672)) settings_state.beta = !settings_state.beta else return false;
     updateSettingsControls();
     return true;
 }
@@ -488,30 +614,17 @@ fn rowHit(x: i32, y: i32, top: i32) bool {
 }
 
 fn paintSettings(hdc: c.HDC) void {
-    settingsFill(hdc, settingsRect(0, 0, settings_width, settings_height), settingsRgb(35, 35, 38));
-    settingsText(hdc, "Settings", settingsRect(36, 22, 584, 54), 24, settingsRgb(245, 245, 247), true);
-    settingsText(hdc, "DEFAULT BACKEND", settingsRect(36, 52, 260, 68), 10, settingsRgb(135, 135, 142), true);
-    settingsText(hdc, "PERMISSIONS", settingsRect(36, 130, 260, 146), 10, settingsRgb(135, 135, 142), true);
-    settingsText(hdc, "MODEL", settingsRect(36, 380, 260, 396), 10, settingsRgb(135, 135, 142), true);
-    settingsText(hdc, "BEHAVIOR", settingsRect(36, 494, 260, 510), 10, settingsRgb(135, 135, 142), true);
-    settingsText(hdc, "UPDATES", settingsRect(36, 654, 260, 670), 10, settingsRgb(135, 135, 142), true);
+    settingsFill(hdc, scaledSettingsRect(0, 0, settings_width, settings_content_height), settingsRgb(35, 35, 38));
+    settingsText(hdc, "Settings", scaledSettingsRect(36, 22, 584, 54), Dpi.scale(24, settings_state.dpi), settingsRgb(245, 245, 247), true);
+    settingsText(hdc, "DEFAULT BACKEND", scaledSettingsRect(36, 52, 260, 68), Dpi.scale(10, settings_state.dpi), settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "PERMISSIONS", scaledSettingsRect(36, 130, 260, 146), Dpi.scale(10, settings_state.dpi), settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "MODEL", scaledSettingsRect(36, 380, 260, 396), Dpi.scale(10, settings_state.dpi), settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "BEHAVIOR", scaledSettingsRect(36, 494, 260, 510), Dpi.scale(10, settings_state.dpi), settingsRgb(135, 135, 142), true);
+    settingsText(hdc, "UPDATES", scaledSettingsRect(36, 654, 260, 670), Dpi.scale(10, settings_state.dpi), settingsRgb(135, 135, 142), true);
 }
 
 fn createSettingsControls(hwnd: c.HWND) void {
-    settings_state.controls[0] = c.CreateWindowExW(
-        0,
-        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
-        std.unicode.utf8ToUtf16LeStringLiteral("New loops use: Claude Code").ptr,
-        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON,
-        36,
-        70,
-        548,
-        30,
-        hwnd,
-        Win32.opaquePointerFromInt(c.HMENU, backend_id),
-        c.GetModuleHandleW(null),
-        null,
-    );
+    settings_state.controls[0] = createSettingsControl(hwnd, "BUTTON", "New loops use: Claude Code", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 70, 548, 30, backend_id);
     settings_state.explanations[0] = createSettingsControl(hwnd, "STATIC", "Which backend a new loop starts on. You can still change it per loop.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 102, 524, 24, 0);
 
     settings_state.controls[1] = createSettingsControl(hwnd, "BUTTON", "", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 36, 148, 548, 30, claude_id);
@@ -534,8 +647,6 @@ fn createSettingsControls(hwnd: c.HWND) void {
     settings_state.controls[8] = createSettingsControl(hwnd, "BUTTON", "Get beta releases", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_AUTOCHECKBOX, 44, 672, 532, 26, beta_id);
     settings_state.explanations[8] = createSettingsControl(hwnd, "STATIC", "On, Check for Updates offers pre-releases as well as stable releases — newer features, less soak time. Off, stable releases only.", c.WS_CHILD | c.WS_VISIBLE | c.SS_LEFT, 48, 702, 524, 50, 0);
 
-    _ = createSettingsControl(hwnd, "BUTTON", "Cancel", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON, 374, 780, 92, 38, cancel_id);
-    _ = createSettingsControl(hwnd, "BUTTON", "Save", c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, 476, 780, 108, 38, save_id);
     updateSettingsControls();
 }
 
@@ -547,7 +658,8 @@ fn createSettingsControl(hwnd: c.HWND, class_name: []const u8, text: []const u8,
         std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr
     else
         std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr;
-    const control = c.CreateWindowExW(0, wide_class, wide_text.ptr, style, x, y, width, height, hwnd, menu, c.GetModuleHandleW(null), null);
+    const control = c.CreateWindowExW(0, wide_class, wide_text.ptr, style, Dpi.scale(x, settings_state.dpi), Dpi.scale(y, settings_state.dpi), Dpi.scale(width, settings_state.dpi), Dpi.scale(height, settings_state.dpi), hwnd, menu, c.GetModuleHandleW(null), null);
+    AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
 
@@ -626,6 +738,15 @@ fn settingsFill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
 
 fn settingsRect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
     return .{ .left = left, .top = top, .right = right, .bottom = bottom };
+}
+
+fn scaledSettingsRect(left: i32, top: i32, right: i32, bottom: i32) c.RECT {
+    return .{
+        .left = Dpi.scale(left, settings_state.dpi),
+        .top = Dpi.scale(top, settings_state.dpi),
+        .right = Dpi.scale(right, settings_state.dpi),
+        .bottom = Dpi.scale(bottom, settings_state.dpi),
+    };
 }
 
 fn inside(x: i32, y: i32, bounds: c.RECT) bool {
@@ -770,4 +891,89 @@ test "settings expose Swift permission labels and consequence copy" {
     try std.testing.expect(std.mem.indexOf(u8, claude_explanations[2], "guardrails") != null);
     try std.testing.expect(std.mem.indexOf(u8, copilot_explanations[2], "tools, paths, and URLs") != null);
     try std.testing.expect(std.mem.indexOf(u8, codex_explanations[1], "write inside the project") != null);
+}
+
+fn hiddenSettingsOwner() !c.HWND {
+    return c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        null,
+        c.WS_POPUP,
+        20,
+        20,
+        960,
+        760,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse error.SettingsCreationFailed;
+}
+
+test "dialog framework: product settings uses hidden rounded sheet with overflow viewport" {
+    try registerSettingsClass();
+    const owner = try hiddenSettingsOwner();
+    defer _ = c.DestroyWindow(owner);
+    settings_state = .{
+        .allocator = std.testing.allocator,
+        .backend = 0,
+        .model = 1,
+        .claude = 2,
+        .copilot = 2,
+        .codex = 1,
+        .activity = false,
+        .briefing = true,
+        .beta = false,
+        .auto_model = false,
+        .dpi = 144,
+    };
+    settings_active = true;
+    defer settings_active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSettingsSheet(&host, owner);
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
+    var title: [64]u16 = [_]u16{0} ** 64;
+    const title_length = c.GetWindowTextW(host.hwnd, &title, title.len);
+    try std.testing.expectEqualSlices(u16, settings_title[0..settings_title.len], title[0..@intCast(title_length)]);
+    try std.testing.expect(c.GetParent(settings_state.content_root) == host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(settings_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    try std.testing.expect(host.current_layout.scroll.visible);
+    var viewport: c.RECT = undefined;
+    var content: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(host.viewport, &viewport) != 0);
+    try std.testing.expect(c.GetClientRect(settings_state.content_root, &content) != 0);
+    try std.testing.expectEqual(
+        SheetFramework.Metrics.forDpi(settings_state.dpi).scrollbar_width,
+        (viewport.right - viewport.left) - (content.right - content.left),
+    );
+    try std.testing.expect(host.footer_layout.?.slotFor(save_id).?.role == .primary);
+    try std.testing.expect(host.footer_layout.?.slotFor(cancel_id).?.role == .cancel);
+    for ([_]u32{ 192, 96, 144 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        try std.testing.expectEqual(dpi, settings_state.dpi);
+        try std.testing.expectEqual(
+            AppFont.getForDpi(AppFont.control_size, false, dpi),
+            Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(settings_state.controls[0], c.WM_GETFONT, 0, 0))),
+        );
+        var control_bounds: c.RECT = undefined;
+        var content_bounds: c.RECT = undefined;
+        try std.testing.expect(c.GetWindowRect(settings_state.controls[0], &control_bounds) != 0);
+        try std.testing.expect(c.GetWindowRect(settings_state.content_root, &content_bounds) != 0);
+        try std.testing.expectEqual(Dpi.scale(36, dpi), control_bounds.left - content_bounds.left);
+    }
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = settingsFooterActions(host.hwnd, dpi);
+        const width = Dpi.scale(settings_width, dpi);
+        const footer = try SheetFramework.measureFooter(width, Dpi.scale(64, dpi), dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width <= width);
+        for (footer.slice()) |slot| {
+            try std.testing.expect(slot.bounds.x >= 0);
+            try std.testing.expect(slot.bounds.right() <= width);
+        }
+        try std.testing.expect(actions[1].return_hint);
+        try std.testing.expect(footer.slotFor(save_id).?.bounds.width >=
+            actions[1].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
+    }
 }

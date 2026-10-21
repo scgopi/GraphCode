@@ -20,7 +20,7 @@ extern fn gc_onboarding_uia_update(
     backend: c_int,
 ) c.HRESULT;
 
-pub const page_count: u8 = 4;
+pub const page_count: u8 = 5;
 
 pub const Backend = enum {
     claudeCode,
@@ -297,7 +297,7 @@ fn applyKeyboard(state: *State, key: usize, shift: bool) bool {
 fn focusOrder(page: u8) []const Action {
     return switch (page) {
         0 => &.{ .skip, .primary },
-        1, 2 => &.{ .skip, .back, .primary },
+        1, 2, 3 => &.{ .skip, .back, .primary },
         else => &.{ .skip, .back, .claude_code, .copilot_cli, .codex, .primary },
     };
 }
@@ -317,7 +317,7 @@ fn actionAvailable(page: u8, action: Action) bool {
     return switch (action) {
         .skip, .primary => true,
         .back => page > 0,
-        .claude_code, .copilot_cli, .codex => page == 3,
+        .claude_code, .copilot_cli, .codex => page == 4,
     };
 }
 
@@ -364,7 +364,7 @@ fn applyClick(state: *State, x: i32, y: i32) bool {
         invokeAction(state, .primary);
         return true;
     }
-    if (state.page == 3) {
+    if (state.page == 4) {
         if (inside(x, y, rect(58, 182, 502, 248))) invokeAction(state, .claude_code);
         if (inside(x, y, rect(58, 258, 502, 324))) invokeAction(state, .copilot_cli);
         if (inside(x, y, rect(58, 334, 502, 400))) invokeAction(state, .codex);
@@ -387,6 +387,7 @@ fn paint(
         0 => paintWelcome(hdc, allocator),
         1 => paintReading(hdc, allocator),
         2 => paintTypes(hdc, allocator),
+        3 => paintWorkspaces(hdc, allocator),
         else => paintBackends(hdc, allocator, backend, focused_action),
     }
     paintFooter(hdc, allocator, page, focused_action);
@@ -430,6 +431,90 @@ fn paintTypes(hdc: c.HDC, allocator: std.mem.Allocator) void {
     line(hdc, 250, 397, 306, 397, rgb(112, 112, 118), 2);
     card(hdc, allocator, rect(314, 370, 482, 424), rgb(123, 210, 130), "Fix them", "IDLE", "waiting on the hand-off", false);
     text(hdc, allocator, "Wire them together by dragging from a card's + handle. Click + without dragging to grow a new loop already connected to it.", rect(58, 446, 502, 512), 13, rgb(158, 158, 165), c.DT_CENTER | c.DT_WORDBREAK, false);
+}
+
+const workspace_title = "One window per line of work";
+const workspace_body = "A workspace has its own projects, loops and daemon. Start one when a second kind of work would otherwise crowd the first.";
+const workspace_make_one = "File > Workspace > New Workspace...";
+const workspace_switch = "Ctrl+Alt+PageUp / Ctrl+Alt+PageDown";
+const workspace_closing = "You do not need one yet — one workspace is the right number until it isn't.";
+
+const WorkspacePageLayout = struct {
+    left_window: c.RECT,
+    divider: c.RECT,
+    right_window: c.RECT,
+    facts: c.RECT,
+    closing: c.RECT,
+};
+
+fn workspacePageLayout() WorkspacePageLayout {
+    return .{
+        .left_window = rect(58, 176, 230, 260),
+        .divider = rect(242, 182, 318, 258),
+        .right_window = rect(330, 176, 502, 260),
+        .facts = rect(58, 292, 502, 424),
+        .closing = rect(58, 454, 502, 494),
+    };
+}
+
+fn paintWorkspaces(hdc: c.HDC, allocator: std.mem.Allocator) void {
+    const layout = workspacePageLayout();
+    text(hdc, allocator, workspace_title, rect(32, 62, 528, 100), 25, rgb(245, 245, 247), c.DT_CENTER | c.DT_SINGLELINE, true);
+    text(hdc, allocator, workspace_body, rect(48, 106, 512, 156), 14, rgb(168, 168, 174), c.DT_CENTER | c.DT_WORDBREAK, false);
+
+    workspaceMiniWindow(hdc, allocator, layout.left_window, "Default", rgb(10, 132, 255), &.{ 154, 117, 136, 92 });
+    workspaceDivider(hdc, allocator, layout.divider);
+    workspaceMiniWindow(hdc, allocator, layout.right_window, "Client Work", rgb(216, 166, 87), &.{ 126, 154, 83 });
+
+    workspaceFact(hdc, allocator, layout.facts.top, "Separate", "projects, loops, terminal layouts, agent default");
+    workspaceFact(hdc, allocator, layout.facts.top + 30, "Shared", "the app itself, and nothing else");
+    workspaceFact(hdc, allocator, layout.facts.top + 60, "Make one", workspace_make_one);
+    workspaceFact(hdc, allocator, layout.facts.top + 90, "Switch", workspace_switch);
+
+    text(hdc, allocator, workspace_closing, layout.closing, 11, rgb(126, 126, 133), c.DT_CENTER | c.DT_WORDBREAK, false);
+}
+
+fn workspaceMiniWindow(
+    hdc: c.HDC,
+    allocator: std.mem.Allocator,
+    bounds: c.RECT,
+    name: []const u8,
+    tint: u32,
+    widths: []const i32,
+) void {
+    rounded(hdc, bounds, rgb(35, 35, 38), rgb(66, 66, 72), 8);
+    fill(hdc, rect(bounds.left + 1, bounds.top + 1, bounds.right - 1, bounds.top + 19), rgb(47, 47, 51));
+    fill(hdc, rect(bounds.left + 8, bounds.top + 7, bounds.left + 14, bounds.top + 13), tint);
+    text(hdc, allocator, name, rect(bounds.left + 20, bounds.top + 4, bounds.right - 7, bounds.top + 17), 9, rgb(190, 190, 196), c.DT_LEFT | c.DT_SINGLELINE, false);
+    line(hdc, bounds.left + 1, bounds.top + 19, bounds.right - 1, bounds.top + 19, rgb(58, 58, 63), 1);
+
+    for (widths, 0..) |width, index| {
+        const bar_color = switch (index) {
+            0 => rgb(71, 126, 87),
+            2 => rgb(128, 100, 55),
+            else => rgb(67, 67, 73),
+        };
+        rounded(
+            hdc,
+            rect(bounds.left + 9, bounds.top + 29 + @as(i32, @intCast(index)) * 11, bounds.left + 9 + width, bounds.top + 34 + @as(i32, @intCast(index)) * 11),
+            bar_color,
+            bar_color,
+            3,
+        );
+    }
+}
+
+fn workspaceDivider(hdc: c.HDC, allocator: std.mem.Allocator, bounds: c.RECT) void {
+    const middle = @divTrunc(bounds.left + bounds.right, 2);
+    line(hdc, bounds.left + 8, bounds.top + 18, bounds.right - 8, bounds.top + 18, rgb(70, 70, 76), 1);
+    fill(hdc, rect(middle - 10, bounds.top + 8, middle + 10, bounds.top + 29), rgb(35, 35, 38));
+    text(hdc, allocator, "x", rect(middle - 10, bounds.top + 10, middle + 10, bounds.top + 27), 9, rgb(102, 102, 109), c.DT_CENTER | c.DT_SINGLELINE, true);
+    text(hdc, allocator, "nothing\ncrosses", rect(bounds.left, bounds.top + 38, bounds.right, bounds.bottom), 10, rgb(105, 105, 112), c.DT_CENTER | c.DT_WORDBREAK, false);
+}
+
+fn workspaceFact(hdc: c.HDC, allocator: std.mem.Allocator, y: i32, label: []const u8, value: []const u8) void {
+    text(hdc, allocator, label, rect(58, y, 154, y + 22), 11, rgb(126, 126, 133), c.DT_RIGHT | c.DT_SINGLELINE, false);
+    text(hdc, allocator, value, rect(163, y, 502, y + 24), 12, rgb(184, 184, 190), c.DT_LEFT | c.DT_SINGLELINE | c.DT_END_ELLIPSIS, false);
 }
 
 fn paintBackends(
@@ -484,7 +569,7 @@ fn paintFooter(hdc: c.HDC, allocator: std.mem.Allocator, page: u8, focused_actio
     rounded(hdc, rect(418, 564, 540, 604), if (primary) rgb(10, 132, 255) else rgb(48, 48, 52), if (primary) rgb(10, 132, 255) else rgb(78, 78, 84), 9);
     text(hdc, allocator, if (primary) "Get Started" else "Continue", rect(418, 576, 540, 598), 13, rgb(245, 245, 247), c.DT_CENTER | c.DT_SINGLELINE, true);
     if (focused_action == .primary) focusOutline(hdc, rect(418, 564, 540, 604));
-    var x: i32 = 254;
+    var x: i32 = 246;
     for (0..page_count) |index| {
         const color = if (index == page) rgb(10, 132, 255) else rgb(92, 92, 98);
         const brush = c.CreateSolidBrush(color);
@@ -606,8 +691,8 @@ fn rgb(red: u8, green: u8, blue: u8) u32 {
     return @as(u32, red) | (@as(u32, green) << 8) | (@as(u32, blue) << 16);
 }
 
-test "Windows onboarding matches the four-page macOS contract" {
-    try std.testing.expectEqual(@as(u8, 4), page_count);
+test "Windows onboarding matches the five-page macOS contract" {
+    try std.testing.expectEqual(@as(u8, 5), page_count);
 }
 
 test "onboarding click flow navigates every page and selects a backend" {
@@ -617,10 +702,14 @@ test "onboarding click flow navigates every page and selects a backend" {
     try std.testing.expect(applyClick(&state, 500, 580));
     try std.testing.expect(applyClick(&state, 500, 580));
     try std.testing.expectEqual(@as(u8, 3), state.page);
+    try std.testing.expect(!applyClick(&state, 200, 280));
+    try std.testing.expectEqual(Backend.claudeCode, state.backend);
+    try std.testing.expect(applyClick(&state, 500, 580));
+    try std.testing.expectEqual(@as(u8, 4), state.page);
     try std.testing.expect(applyClick(&state, 200, 280));
     try std.testing.expectEqual(Backend.copilotCLI, state.backend);
     try std.testing.expect(applyClick(&state, 50, 580));
-    try std.testing.expectEqual(@as(u8, 2), state.page);
+    try std.testing.expectEqual(@as(u8, 3), state.page);
     try std.testing.expect(applyClick(&state, 500, 580));
     try std.testing.expect(applyClick(&state, 500, 580));
     try std.testing.expect(state.closed);
@@ -647,7 +736,7 @@ test "onboarding keyboard focus traversal and invocation is deterministic" {
 test "onboarding keyboard backend selection remains in the deterministic focus order" {
     var state = State{
         .allocator = std.testing.allocator,
-        .page = 3,
+        .page = 4,
         .backend = .claudeCode,
     };
 
@@ -664,6 +753,47 @@ test "onboarding keyboard backend selection remains in the deterministic focus o
     try std.testing.expectEqual(Action.copilot_cli, state.focused_action);
 }
 
+test "onboarding workspace page focus excludes backend actions" {
+    var state = State{
+        .allocator = std.testing.allocator,
+        .page = 3,
+        .backend = .claudeCode,
+    };
+
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.skip, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.back, state.focused_action);
+    try std.testing.expect(applyKeyboard(&state, c.VK_TAB, false));
+    try std.testing.expectEqual(Action.primary, state.focused_action);
+}
+
+test "onboarding workspace page copy matches macOS with Windows commands" {
+    try std.testing.expectEqualStrings("One window per line of work", workspace_title);
+    try std.testing.expectEqualStrings(
+        "A workspace has its own projects, loops and daemon. Start one when a second kind of work would otherwise crowd the first.",
+        workspace_body,
+    );
+    try std.testing.expectEqualStrings("File > Workspace > New Workspace...", workspace_make_one);
+    try std.testing.expectEqualStrings("Ctrl+Alt+PageUp / Ctrl+Alt+PageDown", workspace_switch);
+    try std.testing.expectEqualStrings(
+        "You do not need one yet — one workspace is the right number until it isn't.",
+        workspace_closing,
+    );
+}
+
+test "onboarding workspace illustration and facts stay above the footer" {
+    const layout = workspacePageLayout();
+    try std.testing.expect(layout.left_window.left >= 0);
+    try std.testing.expect(layout.left_window.right < layout.divider.left);
+    try std.testing.expect(layout.divider.right < layout.right_window.left);
+    try std.testing.expect(layout.right_window.right <= client_width);
+    try std.testing.expect(layout.left_window.bottom < layout.facts.top);
+    try std.testing.expect(layout.right_window.bottom < layout.facts.top);
+    try std.testing.expect(layout.facts.bottom < layout.closing.top);
+    try std.testing.expect(layout.closing.bottom < 564);
+}
+
 test "onboarding routes WM_GETOBJECT to named Invoke-capable actions" {
     const source = @embedFile("WindowsOnboarding.zig");
     const proc_start = std.mem.indexOf(u8, source, "fn windowProc") orelse
@@ -677,6 +807,9 @@ test "onboarding routes WM_GETOBJECT to named Invoke-capable actions" {
 
     const native_source = @embedFile("OnboardingAccessibilityProvider.cpp");
     try std.testing.expect(std.mem.indexOf(u8, native_source, "UIA_InvokePatternId") != null);
+    try std.testing.expect(std.mem.indexOf(u8, native_source, "One window per line of work") != null);
+    try std.testing.expect(std.mem.indexOf(u8, native_source, "page == 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, native_source, "page > 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, native_source, "Get Started") != null);
 }
 

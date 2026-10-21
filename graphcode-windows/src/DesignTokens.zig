@@ -123,6 +123,9 @@ pub const dialog_muted_text: Color = 0x008E8787;
 pub const dialog_error_text: Color = 0x006060FF;
 pub const dialog_field_background: Color = 0x00302B2B;
 pub const dialog_field_border: Color = 0x00473F3F;
+// SheetFramework derives focus, pressed, disabled and scrollbar interaction
+// colors locally from these shared palette tokens. They are rendered-state
+// composites, not additional cross-platform source palette entries.
 
 pub const sidebar_width: i32 = 220;
 pub const header_height: i32 = 34;

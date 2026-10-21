@@ -1,8 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const ModalTeardown = @import("ModalTeardown.zig");
 const AppFont = @import("AppFont.zig");
+const Dpi = @import("Dpi.zig");
+const SheetFramework = @import("SheetFramework.zig");
 const WindowsUpdateInstall = @import("WindowsUpdateInstall.zig");
 
 /// The in-window install-progress indicator and the post-install relaunch
@@ -100,6 +103,7 @@ pub const ShellOpenError = error{ShellOpenFailed};
 /// path can be asserted without launching a browser.
 const ShellApi = struct {
     pub fn openUrl(owner: c.HWND, allocator: std.mem.Allocator, url: []const u8) ShellOpenError!void {
+        if (builtin.is_test) return error.ShellOpenFailed;
         const wide = wideZ(allocator, url) catch return error.ShellOpenFailed;
         defer allocator.free(wide);
         const result = c.ShellExecuteW(
@@ -164,6 +168,7 @@ pub const relaunch_message =
 // ---------------------------------------------------------------------------
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeUpdateInstall");
+const window_title = std.unicode.utf8ToUtf16LeStringLiteral("GraphCode Update");
 const cancel_id: u16 = 9711;
 const relaunch_id: u16 = 9712;
 const later_id: u16 = 9713;
@@ -185,6 +190,9 @@ const State = struct {
     cancel_requested: bool = false,
     status_hwnd: c.HWND = null,
     button_hwnd: [2]c.HWND = .{ null, null },
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    content_extent: i32 = 112,
 };
 
 var active = false;
@@ -241,25 +249,10 @@ pub fn run(
     shared_failed.store(false, .release);
     shared_cancelled.store(false, .release);
 
-    const title = try wideZ(allocator, "GraphCode Update");
-    defer allocator.free(title);
-    const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
-        class_name.ptr,
-        title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
-        c.CW_USEDEFAULT,
-        c.CW_USEDEFAULT,
-        460,
-        180,
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse {
-        active = false;
-        return error.DialogCreationFailed;
-    };
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, parent);
+    const hwnd = host.hwnd;
     const options = WindowsUpdateInstall.InstallOptions{
         .allocator = allocator,
         .asset_url = asset_url,
@@ -271,6 +264,260 @@ pub fn run(
     const thread = try startInstall(StartupApi, hwnd, parent, options);
 
     return finishInstall(StartupApi, hwnd, parent, thread);
+}
+
+fn createSheet(host: *SheetFramework.Host, parent: c.HWND) !void {
+    const dpi = Dpi.normalize(Win32.dpiForWindow(parent));
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = dpi,
+            .desired_width = 520,
+            .minimum_width = 360,
+            .heights = .{ .minimum = 170, .ideal = 220, .maximum = 420 },
+            .content_extent = active_state.content_extent,
+        },
+        .context = &active_state,
+        .on_layout = &layoutSheet,
+        .on_message = &sheetMessage,
+    });
+    if (c.SetWindowTextW(host.hwnd, window_title.ptr) == 0) return error.DialogCreationFailed;
+    active_state.host = host;
+    active_state.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
+        class_name.ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE,
+        0,
+        0,
+        0,
+        0,
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.DialogCreationFailed;
+    active_state.status_hwnd = createStatic(active_state.content_root, active_state.allocator, "Preparing…", 22, 22, 476, active_state.content_extent - 44);
+    try configureStageFooter();
+    try host.relayout();
+}
+
+fn configureStageFooter() !void {
+    const host = active_state.host orelse return error.DialogCreationFailed;
+    const dpi = host.options.layout_input.dpi;
+    for (active_state.button_hwnd) |button| {
+        if (button != null and c.IsWindow(button) != 0) _ = c.DestroyWindow(button);
+    }
+    active_state.button_hwnd = .{ null, null };
+    switch (active_state.stage) {
+        .progress => {
+            const actions = [_]SheetFramework.FooterAction{
+                .{ .id = cancel_id, .role = .cancel, .measured_text_width = footerTextWidth(host.hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Cancel"), 48) },
+            };
+            try host.configureFooter(&actions);
+            active_state.button_hwnd[0] = try host.createFooterButton(cancel_id, std.unicode.utf8ToUtf16LeStringLiteral("Cancel").ptr);
+        },
+        .relaunch => {
+            const actions = [_]SheetFramework.FooterAction{
+                .{ .id = later_id, .role = .cancel, .measured_text_width = footerTextWidth(host.hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Later"), 38) },
+                .{ .id = relaunch_id, .role = .primary, .measured_text_width = footerTextWidth(host.hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Relaunch Now"), 92), .return_hint = true },
+            };
+            try host.configureFooter(&actions);
+            active_state.button_hwnd[0] = try host.createFooterButton(later_id, std.unicode.utf8ToUtf16LeStringLiteral("Later").ptr);
+            active_state.button_hwnd[1] = try host.createFooterButton(relaunch_id, std.unicode.utf8ToUtf16LeStringLiteral("Relaunch Now").ptr);
+        },
+        .failed => {
+            const actions = [_]SheetFramework.FooterAction{
+                .{ .id = close_id, .role = .cancel, .measured_text_width = footerTextWidth(host.hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Close"), 38) },
+                .{ .id = download_id, .role = .primary, .measured_text_width = footerTextWidth(host.hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Download in Browser"), 132), .return_hint = true },
+            };
+            try host.configureFooter(&actions);
+            active_state.button_hwnd[0] = try host.createFooterButton(close_id, std.unicode.utf8ToUtf16LeStringLiteral("Close").ptr);
+            active_state.button_hwnd[1] = try host.createFooterButton(download_id, std.unicode.utf8ToUtf16LeStringLiteral("Download in Browser").ptr);
+        },
+    }
+
+    for (active_state.button_hwnd) |button| {
+        if (button != null) AppFont.apply(button, AppFont.control_size, false);
+    }
+}
+
+fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return Dpi.scale(fallback, dpi);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, @intCast(text.len), &size) == 0)
+        return Dpi.scale(fallback, dpi);
+    return size.cx;
+}
+
+fn relaunchFooterActions(hwnd: c.HWND, dpi: u32) [2]SheetFramework.FooterAction {
+    return .{
+        .{ .id = later_id, .role = .cancel, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Later"), 38) },
+        .{ .id = relaunch_id, .role = .primary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Relaunch Now"), 92), .return_hint = true },
+    };
+}
+
+fn stageHasCommand(stage: Stage, command: u16) bool {
+    return switch (stage) {
+        .progress => command == cancel_id,
+        .relaunch => command == later_id or command == relaunch_id,
+        .failed => command == close_id or command == download_id,
+    };
+}
+
+fn enabledStageCommand(hwnd: c.HWND, stage: Stage, command: u16) bool {
+    if (!stageHasCommand(stage, command)) return false;
+    const button = c.GetDlgItem(hwnd, command) orelse return false;
+    return c.IsWindow(button) != 0 and c.IsWindowEnabled(button) != 0;
+}
+
+fn hintedActionForStage(stage: Stage) ?u16 {
+    return switch (stage) {
+        .progress => null,
+        .relaunch => relaunch_id,
+        .failed => download_id,
+    };
+}
+
+fn defaultActionId(hwnd: c.HWND, stage: Stage) ?u16 {
+    const command = hintedActionForStage(stage) orelse return null;
+    return if (enabledStageCommand(hwnd, stage, command)) command else null;
+}
+
+fn applyControlFontsForDpi(state: *State, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.DialogFontCreationFailed;
+    if (state.status_hwnd != null) _ = c.SendMessageW(state.status_hwnd, c.WM_SETFONT, @intFromPtr(font), 1);
+    for (state.button_hwnd) |button| {
+        if (button != null) _ = c.SendMessageW(button, c.WM_SETFONT, @intFromPtr(font), 1);
+    }
+}
+
+fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const state: *State = @ptrCast(@alignCast(context.?));
+    if (state.content_root == null) return;
+    const dpi = state.host.?.options.layout_input.dpi;
+    try applyControlFontsForDpi(state, dpi);
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(dpi).scrollbar_width else 0;
+    const content_width = @max(0, layout.viewport.width - scrollbar);
+    if (c.MoveWindow(
+        state.content_root,
+        0,
+        -layout.scroll.offset,
+        content_width,
+        @max(layout.scroll.extent, layout.viewport.height),
+        1,
+    ) == 0) return error.DialogLayoutFailed;
+    if (state.status_hwnd != null and c.MoveWindow(
+        state.status_hwnd,
+        Dpi.scale(22, dpi),
+        Dpi.scale(22, dpi),
+        @max(0, content_width - Dpi.scale(44, dpi)),
+        Dpi.scale(@max(52, state.content_extent - 44), dpi),
+        1,
+    ) == 0) return error.DialogLayoutFailed;
+}
+
+fn sheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    const state: *State = @ptrCast(@alignCast(context.?));
+    switch (message) {
+        c.WM_DRAWITEM => {
+            result.* = drawFooterItem(state.host.?, lparam);
+            return true;
+        },
+        tick_message => {
+            onTick(hwnd);
+            result.* = 0;
+            return true;
+        },
+        c.DM_GETDEFID => {
+            result.* = if (defaultActionId(hwnd, state.stage)) |id|
+                @as(c.LRESULT, @intCast(id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16)
+            else
+                0;
+            return true;
+        },
+        c.WM_COMMAND => {
+            const command: u16 = @truncate(wparam);
+            if (!enabledStageCommand(hwnd, state.stage, command)) return false;
+            handleCommand(command, hwnd);
+            result.* = 0;
+            return true;
+        },
+        c.WM_CLOSE => {
+            if (state.stage == .progress) {
+                state.cancel_requested = true;
+                shared_cancelled.store(true, .release);
+            } else {
+                requestClose(hwnd);
+            }
+            result.* = 0;
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn drawFooterItem(host: *SheetFramework.Host, lparam: c.LPARAM) c.LRESULT {
+    const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+    var role = SheetFramework.ActionRole.secondary;
+    var return_hint = false;
+    for (host.footer_actions[0..host.footer_action_count]) |action| {
+        if (action.id != item.CtlID) continue;
+        role = action.role;
+        return_hint = action.return_hint and action.role.isPrimary();
+        break;
+    }
+    SheetFramework.drawButton(item.hDC, .{ .x = item.rcItem.left, .y = item.rcItem.top, .width = item.rcItem.right - item.rcItem.left, .height = item.rcItem.bottom - item.rcItem.top }, host.options.layout_input.dpi, role, item.itemState & c.ODS_DISABLED == 0, item.itemState & c.ODS_SELECTED != 0) catch return 0;
+    var text: [128]u16 = [_]u16{0} ** 128;
+    const count = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.SetTextColor(item.hDC, SheetFramework.controlPaintStyle(.button, item.itemState & c.ODS_DISABLED == 0).foreground);
+    var bounds = item.rcItem;
+    if (return_hint) bounds.right -= SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, count, &bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    if (return_hint) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = bounds.right;
+        _ = c.DrawTextW(item.hDC, std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr, 1, &hint_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    }
+    return 1;
+}
+
+fn handleCommand(command: u16, hwnd: c.HWND) void {
+    switch (command) {
+        cancel_id => {
+            active_state.cancel_requested = true;
+            shared_cancelled.store(true, .release);
+            setStatusText(active_state.status_hwnd, active_state.allocator, "Cancelling…");
+            if (active_state.button_hwnd[0]) |button| _ = c.EnableWindow(button, 0);
+        },
+        relaunch_id => {
+            active_state.outcome = .{ .relaunch = .relaunch_now };
+            requestClose(hwnd);
+        },
+        later_id => {
+            active_state.outcome = .{ .relaunch = .later };
+            requestClose(hwnd);
+        },
+        close_id => requestClose(hwnd),
+        download_id => {
+            switch (downloadInBrowserWith(ShellApi, hwnd, active_state.allocator, active_state.asset_url)) {
+                .opened => requestClose(hwnd),
+                .open_failed => {
+                    var buffer: [FailureMessage.capacity + download_open_failed_message.len + 1]u8 = undefined;
+                    const reason = if (active_state.outcome != null) failureTextOf(&active_state.outcome.?) orelse "" else "";
+                    setStatusText(active_state.status_hwnd, active_state.allocator, downloadFailedText(&buffer, reason));
+                },
+            }
+        },
+        else => {},
+    }
 }
 
 fn finishInstall(comptime Api: type, hwnd: c.HWND, parent: c.HWND, thread: std.Thread) Outcome {
@@ -312,8 +559,12 @@ const StartupApi = struct {
     }
 
     pub fn showWindow(window: c.HWND) void {
-        _ = c.ShowWindow(window, c.SW_SHOW);
-        _ = c.SetForegroundWindow(window);
+        if (active_state.host) |host| {
+            host.show() catch return;
+        } else {
+            _ = c.ShowWindow(window, c.SW_SHOW);
+            _ = c.SetForegroundWindow(window);
+        }
     }
 
     pub fn destroyWindow(window: c.HWND) void {
@@ -347,7 +598,7 @@ fn startInstall(comptime Api: type, hwnd: c.HWND, parent: c.HWND, options: Windo
 
 fn registerClass() !void {
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    klass.lpfnWndProc = @ptrCast(&windowProc);
+    klass.lpfnWndProc = @ptrCast(&contentProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = class_name.ptr;
     klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
@@ -355,66 +606,17 @@ fn registerClass() !void {
         return error.DialogClassRegistrationFailed;
 }
 
-fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    if (!active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+fn contentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!active or active_state.host == null) return c.DefWindowProcW(hwnd, message, wparam, lparam);
     switch (message) {
-        c.WM_CREATE => {
-            active_state.status_hwnd = createStatic(hwnd, active_state.allocator, "Preparing…", 18, 20, 420, 24);
-            active_state.button_hwnd[0] = createButton(hwnd, "Cancel", cancel_id, 320, 90, 110);
-            return 0;
+        c.WM_CTLCOLORSTATIC => return active_state.host.?.brushes.apply(Win32.opaquePointerFromInt(c.HDC, wparam), .static, true) catch 0,
+        c.WM_ERASEBKGND => {
+            var bounds: c.RECT = undefined;
+            if (c.GetClientRect(hwnd, &bounds) != 0) _ = c.FillRect(Win32.opaquePointerFromInt(c.HDC, wparam), &bounds, active_state.host.?.brushes.panel);
+            return 1;
         },
-        tick_message => {
-            onTick(hwnd);
-            return 0;
-        },
-        c.WM_COMMAND => {
-            const command: u16 = @truncate(wparam);
-            switch (command) {
-                cancel_id => {
-                    active_state.cancel_requested = true;
-                    shared_cancelled.store(true, .release);
-                    setStatusText(active_state.status_hwnd, active_state.allocator, "Cancelling…");
-                    if (active_state.button_hwnd[0]) |button| _ = c.EnableWindow(button, 0);
-                },
-                relaunch_id => {
-                    active_state.outcome = .{ .relaunch = .relaunch_now };
-                    requestClose(hwnd);
-                },
-                later_id => {
-                    active_state.outcome = .{ .relaunch = .later };
-                    requestClose(hwnd);
-                },
-                close_id => {
-                    requestClose(hwnd);
-                },
-                download_id => {
-                    switch (downloadInBrowserWith(ShellApi, hwnd, active_state.allocator, active_state.asset_url)) {
-                        // Teardown stays the same as Close: the decided
-                        // failure outcome is what the caller still receives.
-                        .opened => requestClose(hwnd),
-                        .open_failed => {
-                            var buffer: [FailureMessage.capacity + download_open_failed_message.len + 1]u8 = undefined;
-                            const reason = if (active_state.outcome != null) failureTextOf(&active_state.outcome.?) orelse "" else "";
-                            setStatusText(active_state.status_hwnd, active_state.allocator, downloadFailedText(&buffer, reason));
-                        },
-                    }
-                },
-                else => {},
-            }
-            return 0;
-        },
-        c.WM_CLOSE => {
-            if (active_state.stage == .progress) {
-                active_state.cancel_requested = true;
-                shared_cancelled.store(true, .release);
-                return 0; // Wait for the worker to actually stop before closing.
-            }
-            requestClose(hwnd);
-            return 0;
-        },
-        else => {},
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 /// Decides the outcome of a worker that reported failure. `source` is the
@@ -457,32 +659,25 @@ fn onTick(hwnd: c.HWND) void {
 }
 
 fn transitionToRelaunch(hwnd: c.HWND) void {
-    if (active_state.button_hwnd[0]) |button| _ = c.DestroyWindow(button);
+    active_state.content_extent = 156;
+    active_state.host.?.setContentExtent(active_state.content_extent) catch {};
     setStatusText(active_state.status_hwnd, active_state.allocator, "Update installed. " ++ relaunch_message);
-    active_state.button_hwnd[0] = createButton(hwnd, "Relaunch Now", relaunch_id, 220, 90, 110);
-    active_state.button_hwnd[1] = createButton(hwnd, "Later", later_id, 350, 90, 110);
+    configureStageFooter() catch {
+        active_state.outcome = .{ .failed = FailureMessage.init("The update controls could not be displayed.") };
+        requestClose(hwnd);
+    };
 }
 
 fn transitionToFailed(hwnd: c.HWND, message: []const u8) void {
-    if (active_state.button_hwnd[0]) |button| _ = c.DestroyWindow(button);
+    active_state.content_extent = 132;
+    active_state.host.?.setContentExtent(active_state.content_extent) catch {};
     setStatusText(active_state.status_hwnd, active_state.allocator, message);
-    const actions = failureActions();
-    std.debug.assert(actions.len <= active_state.button_hwnd.len);
-    // Laid out from the right edge so the action order reads the same as the
-    // list the contract test asserts.
-    var right: i32 = 460;
-    var index = actions.len;
-    while (index > 0) {
-        index -= 1;
-        const width = actionWidth(actions[index]);
-        right -= width;
-        active_state.button_hwnd[index] = createButton(hwnd, actionLabel(actions[index]), actionId(actions[index]), right, 90, width);
-        right -= 10;
-    }
+    configureStageFooter() catch requestClose(hwnd);
 }
 
 fn requestClose(hwnd: c.HWND) void {
     active_state.closed = true;
+    if (active_state.host) |host| host.requestClose();
     _ = c.PostMessageW(hwnd, c.WM_NULL, 0, 0);
 }
 
@@ -512,27 +707,6 @@ fn createStatic(hwnd: c.HWND, allocator: std.mem.Allocator, text: []const u8, x:
     );
     AppFont.apply(control, AppFont.control_size, false);
     return control;
-}
-
-fn createButton(hwnd: c.HWND, label: []const u8, id: u16, x: i32, y: i32, width: i32) c.HWND {
-    const wide = wideZ(std.heap.c_allocator, label) catch return null;
-    defer std.heap.c_allocator.free(wide);
-    const button = c.CreateWindowExW(
-        0,
-        std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
-        wide.ptr,
-        c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.BS_PUSHBUTTON,
-        x,
-        y,
-        width,
-        30,
-        hwnd,
-        controlId(id),
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse return null;
-    AppFont.apply(button, AppFont.control_size, false);
-    return button;
 }
 
 fn controlId(value: u16) c.HMENU {
@@ -896,4 +1070,178 @@ test "update install dialog signals cancellation to the worker before joining on
     try std.testing.expect(quit_join_observed_cancel);
     try std.testing.expect(active_state.cancel_requested);
     try std.testing.expect(outcome == .failed);
+}
+
+fn hiddenOwner() !c.HWND {
+    return c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        null,
+        c.WS_POPUP,
+        20,
+        20,
+        900,
+        700,
+        null,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse error.DialogCreationFailed;
+}
+
+fn pumpReturn(hwnd: c.HWND, target: c.HWND) void {
+    var message = std.mem.zeroes(c.MSG);
+    message.hwnd = target;
+    message.message = c.WM_KEYDOWN;
+    message.wParam = c.VK_RETURN;
+    if (c.IsDialogMessageW(hwnd, &message) != 0) return;
+    _ = c.TranslateMessage(&message);
+    _ = c.DispatchMessageW(&message);
+}
+
+fn queriedDefaultId(hwnd: c.HWND) ?u16 {
+    const reply: usize = @bitCast(c.SendMessageW(hwnd, c.DM_GETDEFID, 0, 0));
+    if (reply >> 16 != c.DC_HASDEFID) return null;
+    return @truncate(reply);
+}
+
+fn controlFont(control: c.HWND) c.HFONT {
+    return Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control, c.WM_GETFONT, 0, 0)));
+}
+
+fn expectControlFontForDpi(control: c.HWND, dpi: u32) !void {
+    const font = controlFont(control);
+    try std.testing.expectEqual(AppFont.getForDpi(AppFont.control_size, false, dpi), font);
+    var info = std.mem.zeroes(c.LOGFONTW);
+    try std.testing.expect(c.GetObjectW(font, @sizeOf(c.LOGFONTW), &info) != 0);
+    try std.testing.expectEqual(-Dpi.scale(AppFont.control_size, dpi), info.lfHeight);
+}
+
+test "hidden update install refreshes status and action fonts across DPI transitions" {
+    try registerClass();
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    active_state = .{ .allocator = std.testing.allocator, .stage = .relaunch };
+    active = true;
+    defer active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+    try configureStageFooter();
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+
+    var font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        try expectControlFontForDpi(active_state.status_hwnd, dpi);
+        for (active_state.button_hwnd) |button| try expectControlFontForDpi(button, dpi);
+        const current = controlFont(active_state.status_hwnd);
+        if (font_96 == null) {
+            font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != font_96);
+        } else {
+            try std.testing.expectEqual(font_96, current);
+        }
+    }
+}
+
+test "hidden update install Return follows the hinted action as stages change" {
+    try registerClass();
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    active_state = .{ .allocator = std.testing.allocator };
+    active = true;
+    defer active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+
+    try std.testing.expectEqual(@as(?u16, null), queriedDefaultId(host.hwnd));
+    active_state.stage = .relaunch;
+    try configureStageFooter();
+    try std.testing.expectEqual(@as(?u16, relaunch_id), queriedDefaultId(host.hwnd));
+    pumpReturn(host.hwnd, active_state.status_hwnd);
+
+    try std.testing.expect(active_state.closed);
+    try std.testing.expectEqual(RelaunchAction.relaunch_now, active_state.outcome.?.relaunch);
+}
+
+test "hidden update install rejects disabled nonexistent and out-of-stage default actions" {
+    try registerClass();
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    active_state = .{
+        .allocator = std.testing.allocator,
+        .asset_url = "https://example.invalid/GraphCode.zip",
+        .outcome = .{ .failed = FailureMessage.init(failureMessage(error.DownloadFailed)) },
+    };
+    active = true;
+    defer active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, relaunch_id, 0);
+    try std.testing.expect(!active_state.closed);
+    try std.testing.expect(active_state.outcome.? == .failed);
+
+    active_state.stage = .failed;
+    try configureStageFooter();
+    try std.testing.expectEqual(@as(?u16, download_id), queriedDefaultId(host.hwnd));
+    const download = c.GetDlgItem(host.hwnd, download_id) orelse return error.TestButtonMissing;
+    _ = c.EnableWindow(download, 0);
+    try std.testing.expectEqual(@as(?u16, null), queriedDefaultId(host.hwnd));
+    pumpReturn(host.hwnd, active_state.status_hwnd);
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, download_id, 0);
+    try std.testing.expect(!active_state.closed);
+    try std.testing.expect(active_state.outcome.? == .failed);
+
+    _ = c.DestroyWindow(download);
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, download_id, 0);
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, download_id + 100, 0);
+    try std.testing.expectEqual(@as(?u16, null), queriedDefaultId(host.hwnd));
+    try std.testing.expect(!active_state.closed);
+    try std.testing.expect(active_state.outcome.? == .failed);
+}
+
+test "dialog framework: update install uses hidden sheet and fixed stage footer" {
+    try registerClass();
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    active_state = .{ .allocator = std.testing.allocator };
+    active = true;
+    defer active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
+    var title: [64]u16 = [_]u16{0} ** 64;
+    const title_length = c.GetWindowTextW(host.hwnd, &title, title.len);
+    try std.testing.expectEqualSlices(u16, window_title[0..window_title.len], title[0..@intCast(title_length)]);
+    try std.testing.expect(c.GetParent(active_state.content_root) == host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(active_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    try std.testing.expect(host.footer_layout.?.slotFor(cancel_id).?.role == .cancel);
+    try std.testing.expectEqual(host.current_layout.sheet.height, host.current_layout.viewport.height + host.current_layout.footer.height);
+    host.options.layout_input.content_extent = Dpi.unscale(host.current_layout.viewport.height, host.options.layout_input.dpi) + 100;
+    try host.relayout();
+    var viewport: c.RECT = undefined;
+    var content: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(host.viewport, &viewport) != 0);
+    try std.testing.expect(c.GetClientRect(active_state.content_root, &content) != 0);
+    try std.testing.expectEqual(
+        SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).scrollbar_width,
+        (viewport.right - viewport.left) - (content.right - content.left),
+    );
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = relaunchFooterActions(host.hwnd, dpi);
+        const width = Dpi.scale(520, dpi);
+        const footer = try SheetFramework.measureFooter(width, Dpi.scale(64, dpi), dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width <= width);
+        for (footer.slice()) |slot| try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= width);
+        try std.testing.expect(actions[1].return_hint);
+        try std.testing.expect(footer.slotFor(relaunch_id).?.bounds.width >=
+            actions[1].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
+    }
 }

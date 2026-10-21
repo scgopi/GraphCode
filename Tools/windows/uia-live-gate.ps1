@@ -88,6 +88,11 @@ public static class GraphCodeUiaGateState {
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")]
   private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
+  private static extern IntPtr SendMessageTimeout(
+    IntPtr window, uint message, UIntPtr wParam, IntPtr lParam,
+    uint flags, uint timeoutMilliseconds, out UIntPtr result
+  );
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
   private static extern IntPtr SendMessageString(IntPtr window, uint message, UIntPtr wParam, string lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
@@ -190,6 +195,54 @@ public static class GraphCodeUiaGateState {
       if (!IsWindowVisible(window)) return true;
       result = window;
       return false;
+    }, IntPtr.Zero);
+    return result;
+  }
+  public static IntPtr FindVisibleOwnedSheetByContentClass(
+      uint processId, IntPtr expectedOwner, string contentClass) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          GetWindow(window, 4) == expectedOwner &&
+          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
+          String.Equals(SheetContentClass(window), contentClass, StringComparison.Ordinal)) {
+        result = window;
+        return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return result;
+  }
+  public static int CountVisibleOwnedSheetsByContentClass(
+      uint processId, IntPtr expectedOwner, string contentClass) {
+    int count = 0;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          GetWindow(window, 4) == expectedOwner &&
+          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
+          String.Equals(SheetContentClass(window), contentClass, StringComparison.Ordinal)) {
+        count++;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return count;
+  }
+  public static IntPtr FindVisibleOwnedSheet(uint processId, string title) {
+    IntPtr result = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
+          String.Equals(WindowTitle(window), title, StringComparison.Ordinal)) {
+        result = window;
+        return false;
+      }
+      return true;
     }, IntPtr.Zero);
     return result;
   }
@@ -335,8 +388,11 @@ public static class GraphCodeUiaGateState {
   }
   public static bool SendCommand(IntPtr window, uint command) {
     if (window == IntPtr.Zero) return false;
-    SendMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
-    return true;
+    UIntPtr result;
+    return SendMessageTimeout(
+      window, 0x0111, (UIntPtr)command, IntPtr.Zero,
+      0x0001 | 0x0002, 5000, out result
+    ) != IntPtr.Zero;
   }
   public static bool ClickButton(IntPtr button) {
     if (button == IntPtr.Zero) return false;
@@ -502,6 +558,38 @@ public static class GraphCodeUiaGateState {
   }
   public static bool WindowIsVisible(IntPtr window) {
     return window != IntPtr.Zero && IsWindowVisible(window);
+  }
+  public static IntPtr WindowOwner(IntPtr window) {
+    return window == IntPtr.Zero ? IntPtr.Zero : GetWindow(window, 4);
+  }
+  public static bool IsCaptionlessSheet(IntPtr window) {
+    if (window == IntPtr.Zero ||
+        !String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal))
+      return false;
+    ulong style = unchecked((ulong)GetWindowLongPtr(window, -16).ToInt64());
+    return (style & 0x80000000UL) != 0 && (style & 0x00C00000UL) == 0;
+  }
+  public static string SheetContentClass(IntPtr window) {
+    if (window == IntPtr.Zero ||
+        !String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal))
+      return "";
+    IntPtr viewport = FindWindowEx(window, IntPtr.Zero, "GraphCodeSheetViewport", null);
+    if (viewport == IntPtr.Zero) return "";
+    string[] contentClasses = new[] {
+      "GraphCodeWindowsDialogContent",
+      "GraphCodeNativeForm",
+      "GraphCodeProductSettings",
+      "GraphCodeWorkspaceManager",
+      "GraphCodeRepositoryIngressDialog",
+      "GraphCodeRepositoryOperationDialog",
+      "GraphCodeCodespaceIngressDialog",
+      "GraphCodeUpdateOffer",
+      "GraphCodeUpdateInstall"
+    };
+    foreach (string contentClass in contentClasses)
+      if (FindWindowEx(viewport, IntPtr.Zero, contentClass, null) != IntPtr.Zero)
+        return contentClass;
+    return "";
   }
   public static IntPtr FindVisibleProcessWindow(uint processId, string title) {
     IntPtr result = IntPtr.Zero;
@@ -764,7 +852,9 @@ public static class GraphCodeUiaGateState {
     return text.ToString();
   }
   public static string FirstEditText(IntPtr parent) {
-    var edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
+    var edit = ControlById(parent, 9100);
+    if (edit == IntPtr.Zero) edit = ControlById(parent, 9904);
+    if (edit == IntPtr.Zero) edit = FindWindowEx(parent, IntPtr.Zero, "Edit", null);
     if (edit == IntPtr.Zero) return null;
     return EditBufferText(edit);
   }
@@ -803,6 +893,8 @@ public static class GraphCodeUiaGateState {
   private static extern IntPtr RealChildWindowFromPoint(IntPtr parent, ScreenPoint clientPoint);
   [DllImport("user32.dll")]
   private static extern IntPtr GetWindow(IntPtr window, uint command);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+  private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
   public sealed class ControlClick {
     public int ControlId, Left, Top, Right, Bottom, ScreenX, ScreenY;
     public int CursorBeforeX, CursorBeforeY, CursorAtX, CursorAtY;
@@ -884,10 +976,28 @@ public static class GraphCodeUiaGateState {
     if (parent == IntPtr.Zero) return IntPtr.Zero;
     IntPtr direct = GetDlgItem(parent, controlId);
     if (direct != IntPtr.Zero) return direct;
-    if (!String.Equals(ClassOf(parent), "GraphCodeWindowsDialog", StringComparison.Ordinal))
+    if (!String.Equals(ClassOf(parent), "GraphCodeSheetHost", StringComparison.Ordinal))
       return IntPtr.Zero;
-    IntPtr content = FindWindowEx(parent, IntPtr.Zero, "GraphCodeWindowsDialogContent", null);
-    return content == IntPtr.Zero ? IntPtr.Zero : GetDlgItem(content, controlId);
+    IntPtr viewport = FindWindowEx(parent, IntPtr.Zero, "GraphCodeSheetViewport", null);
+    if (viewport == IntPtr.Zero) return IntPtr.Zero;
+    string[] contentClasses = new[] {
+      "GraphCodeWindowsDialogContent",
+      "GraphCodeNativeForm",
+      "GraphCodeProductSettings",
+      "GraphCodeWorkspaceManager",
+      "GraphCodeRepositoryIngressDialog",
+      "GraphCodeRepositoryOperationDialog",
+      "GraphCodeCodespaceIngressDialog",
+      "GraphCodeUpdateOffer",
+      "GraphCodeUpdateInstall"
+    };
+    foreach (string contentClass in contentClasses) {
+      IntPtr content = FindWindowEx(viewport, IntPtr.Zero, contentClass, null);
+      if (content == IntPtr.Zero) continue;
+      IntPtr nested = GetDlgItem(content, controlId);
+      if (nested != IntPtr.Zero) return nested;
+    }
+    return IntPtr.Zero;
   }
   public static ControlClick ClickScreenPoint(IntPtr target) {
     RECT rect;
@@ -1079,7 +1189,7 @@ public static class GraphCodeUiaGateState {
     var buffer = new int[Math.Max(0, last - first + 1)];
     int found = 0;
     for (int id = first; id <= last; id++) {
-      IntPtr child = GetDlgItem(parent, id);
+      IntPtr child = ControlById(parent, id);
       if (child != IntPtr.Zero && IsWindowVisible(child)) buffer[found++] = id;
     }
     var result = new int[found];
@@ -1107,7 +1217,7 @@ public static class GraphCodeUiaGateState {
     return window == IntPtr.Zero ? null : EditBufferText(window);
   }
   public static string ComboSelection(IntPtr parent, int controlId) {
-    IntPtr combo = GetDlgItem(parent, controlId);
+    IntPtr combo = ControlById(parent, controlId);
     if (combo == IntPtr.Zero) return null;
     int index = (int)SendMessage(combo, 0x0147, UIntPtr.Zero, IntPtr.Zero);
     if (index < 0) return index + "|";
@@ -1395,6 +1505,112 @@ function Require([bool] $condition, [string] $message) {
   if (-not $condition) { throw $message }
 }
 
+function Test-MultiProjectOwnedSheetIdentity(
+  $identity,
+  [int] $expectedProcessId,
+  [IntPtr] $expectedOwner,
+  [string] $expectedTitle,
+  [string] $expectedContentClass
+) {
+  return $null -ne $identity -and
+    ($identity.processId -is [int] -or $identity.processId -is [uint32] -or $identity.processId -is [long]) -and
+    $identity.processId -eq $expectedProcessId -and $expectedProcessId -gt 0 -and
+    $identity.handle -is [long] -and $identity.handle -gt 0 -and
+    $identity.owner -is [long] -and $identity.owner -eq $expectedOwner.ToInt64() -and
+    $expectedOwner -ne [IntPtr]::Zero -and
+    $identity.className -is [string] -and $identity.className -ceq "GraphCodeSheetHost" -and
+    $identity.title -is [string] -and $identity.title -ceq $expectedTitle -and
+    $identity.contentClass -is [string] -and $identity.contentClass -ceq $expectedContentClass -and
+    $identity.visible -is [bool] -and $identity.visible -and
+    $identity.captionless -is [bool] -and $identity.captionless
+}
+
+function Get-UiaOwnedSheetIdentity($element) {
+  if ($null -eq $element) { return $null }
+  $handle = [IntPtr]$element.Current.NativeWindowHandle
+  return [ordered]@{
+    processId = [GraphCodeUiaGateState]::WindowProcessId($handle)
+    handle = $handle.ToInt64()
+    owner = [GraphCodeUiaGateState]::WindowOwner($handle).ToInt64()
+    className = [GraphCodeUiaGateState]::WindowClass($handle)
+    title = [GraphCodeUiaGateState]::WindowTextOf($handle)
+    contentClass = [GraphCodeUiaGateState]::SheetContentClass($handle)
+    visible = [GraphCodeUiaGateState]::WindowIsVisible($handle)
+    captionless = [GraphCodeUiaGateState]::IsCaptionlessSheet($handle)
+  }
+}
+
+function Assert-UiaOwnedSheet(
+  $element,
+  [int] $expectedProcessId,
+  [IntPtr] $expectedOwner,
+  [string] $expectedTitle,
+  [string] $expectedContentClass,
+  [string] $label
+) {
+  $identity = Get-UiaOwnedSheetIdentity $element
+  Require (Test-MultiProjectOwnedSheetIdentity $identity $expectedProcessId $expectedOwner `
+      $expectedTitle $expectedContentClass) `
+    "$label was not the exact visible captionless GraphCodeSheetHost owned by the shell: $($identity | ConvertTo-Json -Compress)"
+  return $identity
+}
+
+function Wait-UiaOwnedSheetByContentClass(
+  [int] $processId,
+  [IntPtr] $owner,
+  [string] $contentClass,
+  [string] $expectedHostTitle,
+  [string] $label,
+  [int] $timeoutMilliseconds = 5000
+) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  $lastIdentity = $null
+  do {
+    $handle = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+      [uint32]$processId, $owner, $contentClass
+    )
+    if ($handle -ne [IntPtr]::Zero) {
+      try {
+        $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        $identity = Get-UiaOwnedSheetIdentity $element
+        $lastIdentity = $identity
+        if (Test-MultiProjectOwnedSheetIdentity $identity $processId $owner `
+            $expectedHostTitle $contentClass) {
+          return $element
+        }
+        Write-Host ("UIA_OWNED_SHEET_RETRY label='$label' reason=identity-drift identity=" +
+          ($identity | ConvertTo-Json -Compress))
+      } catch {
+        Write-Host "UIA_OWNED_SHEET_RETRY label='$label' reason=unavailable error='$($_.Exception.Message)'"
+      }
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($watch.ElapsedMilliseconds -lt $timeoutMilliseconds)
+  if ($null -ne $lastIdentity) {
+    Write-Host ("UIA_OWNED_SHEET_TIMEOUT label='$label' lastIdentity=" +
+      ($lastIdentity | ConvertTo-Json -Compress))
+  }
+  return $null
+}
+
+function Wait-UiaOwnedSheetGoneByContentClass(
+  [int] $processId,
+  [IntPtr] $owner,
+  [string] $contentClass,
+  [int] $timeoutMilliseconds = 5000
+) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  do {
+    $sheetGone = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+      [uint32]$processId, $owner, $contentClass) -eq [IntPtr]::Zero
+    if ($sheetGone -and [GraphCodeUiaGateState]::WindowIsEnabled($owner)) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($watch.ElapsedMilliseconds -lt $timeoutMilliseconds)
+  return $false
+}
+
 # Diagnostic reader for a redirected child stream: never throws, so it can be
 # folded into a failure message without masking the original failure.
 function Read-UiaTextFile([string] $path) {
@@ -1446,6 +1662,34 @@ function Read-DaemonCommandLog([string] $path) {
     Start-Sleep -Milliseconds 50
   }
   throw "daemon command log '$path' never became a complete readable record: $lastFailure"
+}
+
+function Wait-DaemonCommandLog(
+  [string] $path,
+  [scriptblock] $predicate,
+  [string] $label,
+  [int] $timeoutMilliseconds = 5000
+) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  $lastRecord = $null
+  $lastFailure = "not attempted"
+  do {
+    if (Test-Path -LiteralPath $path) {
+      try {
+        $text = Read-DaemonCommandLog $path
+        $record = $text | ConvertFrom-Json -ErrorAction Stop
+        $lastRecord = $text
+        if (& $predicate $record) { return $text }
+        $lastFailure = "latest record did not match"
+      } catch {
+        $lastFailure = $_.Exception.Message
+      }
+    } else {
+      $lastFailure = "missing"
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($watch.ElapsedMilliseconds -lt $timeoutMilliseconds)
+  throw "$label did not reach the daemon command log within ${timeoutMilliseconds}ms; lastFailure=$lastFailure; lastRecord=$lastRecord"
 }
 
 function Format-WindowHandle([IntPtr] $handle) {
@@ -3636,7 +3880,21 @@ function Invoke-MultiProjectTypeText(
   return [ordered]@{ sourceInvocations = $sourceInvocations; producedInformationRecords = $informationRecords; retainedInformationRecords = $retainedRecords }
 }
 
-function New-MultiProjectEditNativeApi {
+function Test-MultiProjectRenameTitle([string] $actual, [string] $expected = "") {
+  if (-not [string]::IsNullOrEmpty($expected)) { return $actual -ceq $expected }
+  return $actual -is [string] -and $actual -cmatch '^Rename “[^“”\r\n]{1,512}”$'
+}
+
+function Get-MultiProjectRenameTitle([string] $loopTitle) {
+  if ([string]::IsNullOrEmpty($loopTitle) -or $loopTitle.Length -gt 512 -or
+      $loopTitle.Contains('“') -or $loopTitle.Contains('”') -or
+      $loopTitle.Contains("`r") -or $loopTitle.Contains("`n")) {
+    throw "MULTIPROJECT_RENAME_TITLE: fixture title is unavailable or outside the exact bounded contract"
+  }
+  return 'Rename “' + $loopTitle + '”'
+}
+
+function New-MultiProjectEditNativeApi([string] $expectedTitle = "") {
   if(-not("GraphCodeMultiProjectEditNative" -as [type])){
     Add-Type -TypeDefinition @'
 using System;
@@ -3714,7 +3972,7 @@ public static class GraphCodeMultiProjectEditNative {
 }
 '@
   }
-  $api=New-MultiProjectRenameNativeApi
+  $api=New-MultiProjectRenameNativeApi $expectedTitle
   $api | Add-Member NoteProperty Watch ([Diagnostics.Stopwatch]::StartNew())
   $api | Add-Member NoteProperty LastFocusPostedFallback $false
   $api | Add-Member NoteProperty LastFocusControlFallback $false
@@ -3753,7 +4011,7 @@ public static class GraphCodeMultiProjectEditNative {
       throw "MULTIPROJECT_EDIT_FOCUS: measured edit focus target changed before single mouse insertion"
     }
     $title=$this.Title($modal,(Get-MultiProjectEditRemaining $this $started))
-    if($title -isnot [string] -or $title -cne "Rename Loop"){throw "MULTIPROJECT_EDIT_FOCUS: owned focus modal title changed"}
+    if(-not (Test-MultiProjectRenameTitle $title $this.ExpectedTitle)){throw "MULTIPROJECT_EDIT_FOCUS: owned focus modal title changed"}
     $owner=$this.ProcessId($modal);$editOwner=$this.ProcessId($edit)
     if(($owner -isnot [int] -and $owner -isnot [uint32] -and $owner -isnot [long]) -or $owner -ne $expectedProcessId -or
       ($editOwner -isnot [int] -and $editOwner -isnot [uint32] -and $editOwner -isnot [long]) -or $editOwner -ne $expectedProcessId){
@@ -3794,7 +4052,7 @@ function Assert-MultiProjectEditOwned($api,[IntPtr]$modal,[int]$processId,[long]
   $field=Read-MultiProjectRenameField $api $modal 9904 $processId
   $title=$api.Title($modal,(Get-MultiProjectEditRemaining $api $started))
   $foreground=$api.Foreground($modal);$visible=$api.Visible($modal);$enabled=$api.Enabled($modal)
-  if($title -isnot [string] -or $title -cne "Rename Loop" -or
+  if(-not (Test-MultiProjectRenameTitle $title $api.ExpectedTitle) -or
     -not(Test-MultiProjectRenameField $field $modal 9904 $processId) -or $foreground -isnot [bool] -or -not $foreground -or
     $visible -isnot [bool] -or -not $visible -or $enabled -isnot [bool] -or -not $enabled -or
     ($null -ne $known -and $field.handle -ne $known.handle)){
@@ -3811,9 +4069,11 @@ function Assert-MultiProjectEditOwned($api,[IntPtr]$modal,[int]$processId,[long]
 }
 
 function Invoke-MultiProjectSequencedEdit(
-  [IntPtr]$modal,[int]$processId,[string]$expectedPrefill,[string]$text,$nativeApi=$null,[scriptblock]$phaseSink=$null
+  [IntPtr]$modal,[int]$processId,[string]$expectedPrefill,[string]$text,$nativeApi=$null,
+  [scriptblock]$phaseSink=$null,[string]$expectedTitle=""
 ) {
-  $api=if($null -ne $nativeApi){$nativeApi}else{New-MultiProjectEditNativeApi}
+  $api=if($null -ne $nativeApi){$nativeApi}else{New-MultiProjectEditNativeApi $expectedTitle}
+  if ($null -ne $api.PSObject.Properties["ExpectedTitle"]) { $api.ExpectedTitle = $expectedTitle }
   $phaseWriter=if($phaseSink){$phaseSink}else{{param($message) Write-Host $message}}
   $started=[long]$api.Clock()
   $record=[ordered]@{phase="initial";expectedPrefill=$expectedPrefill;expectedText=$text;clear=@();typed=@()
@@ -3977,7 +4237,7 @@ function Invoke-MultiProjectSequencedEdit(
   }
 }
 
-function New-MultiProjectRenameNativeApi {
+function New-MultiProjectRenameNativeApi([string] $expectedTitle = "") {
   if (-not ("GraphCodeMultiProjectRenameNative" -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -3992,6 +4252,8 @@ public static class GraphCodeMultiProjectRenameNative {
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr window, uint flags);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
   [DllImport("user32.dll")] private static extern IntPtr RealChildWindowFromPoint(IntPtr window, Point point);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+  private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string title);
   [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="GetClassNameW")]
   private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int capacity);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool GetClientRect(IntPtr window, out Rect rect);
@@ -4015,6 +4277,14 @@ public static class GraphCodeMultiProjectRenameNative {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetMonitorInfo");
     return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
   }
+  private static bool ContainsScreenPoint(IntPtr window, int x, int y) {
+    Rect rect;
+    if (!GetClientRect(window, out rect)) return false;
+    var first = new Point { X=rect.Left, Y=rect.Top };
+    var last = new Point { X=rect.Right, Y=rect.Bottom };
+    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last)) return false;
+    return x >= first.X && x < last.X && y >= first.Y && y < last.Y;
+  }
   public static IntPtr ChildAt(IntPtr window, int x, int y) {
     var point = new Point { X=x, Y=y };
     if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
@@ -4022,19 +4292,34 @@ public static class GraphCodeMultiProjectRenameNative {
     var rootClass = new System.Text.StringBuilder(128);
     var childClass = new System.Text.StringBuilder(128);
     GetClassName(window, rootClass, rootClass.Capacity);
+    if (direct == IntPtr.Zero &&
+        String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal)) {
+      IntPtr viewport = FindWindowEx(window, IntPtr.Zero, "GraphCodeSheetViewport", null);
+      if (ContainsScreenPoint(viewport, x, y)) direct = viewport;
+    }
     GetClassName(direct, childClass, childClass.Capacity);
-    if (!String.Equals(rootClass.ToString(), "GraphCodeWindowsDialog", StringComparison.Ordinal) ||
-        !String.Equals(childClass.ToString(), "GraphCodeWindowsDialogContent", StringComparison.Ordinal))
+    if (!String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal) ||
+        !String.Equals(childClass.ToString(), "GraphCodeSheetViewport", StringComparison.Ordinal))
       return direct;
+    IntPtr content = FindWindowEx(direct, IntPtr.Zero, "GraphCodeWindowsDialogContent", null);
+    if (content == IntPtr.Zero) return direct;
+    var viewportPoint = new Point { X=x, Y=y };
+    if (!ScreenToClient(direct, ref viewportPoint))
+      throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename viewport ScreenToClient");
+    IntPtr viewportChild = RealChildWindowFromPoint(direct, viewportPoint);
+    if (viewportChild != content &&
+        !(viewportChild == IntPtr.Zero && ContainsScreenPoint(content, x, y))) return direct;
     var contentPoint = new Point { X=x, Y=y };
-    if (!ScreenToClient(direct, ref contentPoint))
+    if (!ScreenToClient(content, ref contentPoint))
       throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename content ScreenToClient");
-    return RealChildWindowFromPoint(direct, contentPoint);
+    IntPtr nested = RealChildWindowFromPoint(content, contentPoint);
+    return nested == IntPtr.Zero ? content : nested;
   }
 }
 '@
   }
   $api = New-Object PSObject
+  $api | Add-Member NoteProperty ExpectedTitle $expectedTitle
   $api | Add-Member ScriptMethod ProcessId { param($window) [GraphCodeUiaGateState]::WindowProcessId($window) }
   $api | Add-Member ScriptMethod Title { param($window) [GraphCodeUiaGateState]::WindowTextOf($window) }
   $api | Add-Member ScriptMethod Visible { param($window) [GraphCodeUiaGateState]::WindowIsVisible($window) }
@@ -4067,7 +4352,7 @@ public static class GraphCodeMultiProjectRenameNative {
     if ($this.ProcessId($window) -ne $processId -or $this.ProcessId($control) -ne $processId -or
         $this.Control($window,$id) -ne $control -or $this.ControlId($control) -ne $id -or
         $this.Root($control) -ne $window -or -not $this.Visible($control) -or -not $this.Enabled($control) -or
-        $this.Title($window) -cne "Rename Loop" -or
+        -not (Test-MultiProjectRenameTitle ($this.Title($window)) $this.ExpectedTitle) -or
         -not $this.Foreground($window) -or $hit.root -ne $window -or $hit.child -ne $control -or $hit.processId -ne $processId) {
       throw "MULTIPROJECT_RENAME_GUARD: native target changed immediately before input"
     }
@@ -4122,12 +4407,13 @@ function Test-MultiProjectRenameField($field, [IntPtr] $modal, [int] $id, [int] 
 
 function Invoke-MultiProjectRenameAction(
   [IntPtr] $modal, [int] $processId, [string] $expectedText, [array] $inputEvidence,
-  [switch] $Cancel, $nativeApi = $null
+  [switch] $Cancel, $nativeApi = $null, [string] $expectedTitle = ""
 ) {
-  $api = if ($null -ne $nativeApi) { $nativeApi } else { New-MultiProjectRenameNativeApi }
+  $api = if ($null -ne $nativeApi) { $nativeApi } else { New-MultiProjectRenameNativeApi $expectedTitle }
+  if ($null -ne $api.PSObject.Properties["ExpectedTitle"]) { $api.ExpectedTitle = $expectedTitle }
   $buttonId = if ($Cancel) { 9808 } else { 9800 }
   $diagnostic = [ordered]@{
-    expected = [ordered]@{ modalPID = $processId; title = "Rename Loop"; modal = $modal.ToInt64(); buttonId = $buttonId
+    expected = [ordered]@{ modalPID = $processId; title = if ($expectedTitle) { $expectedTitle } else { 'Rename “bounded loop title”' }; modal = $modal.ToInt64(); buttonId = $buttonId
       editId = 9904; buffer = $expectedText; clearInputCount = 2; textInputCount = 2 * $expectedText.Length }
     observed = [ordered]@{ modalPID = $null; title = $null; titleState = "not-read"
       modalVisible = $null; modalEnabled = $null; clientBounds = @(); workBounds = @(); button = $null; edit = $null }
@@ -4145,7 +4431,7 @@ function Invoke-MultiProjectRenameAction(
       $observed.edit = Read-MultiProjectRenameField $api $modal 9904 $processId
     }
     Write-Host ("UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=" + ($diagnostic | ConvertTo-Json -Depth 7 -Compress))
-    if ($observed.title -isnot [string] -or $observed.title -cne "Rename Loop" -or
+    if (-not (Test-MultiProjectRenameTitle $observed.title $expectedTitle) -or
         $observed.modalVisible -isnot [bool] -or -not $observed.modalVisible -or
         $observed.modalEnabled -isnot [bool] -or -not $observed.modalEnabled -or
         -not (Test-MultiProjectRenameRectangle $observed.clientBounds) -or
@@ -4207,7 +4493,7 @@ function Invoke-MultiProjectRenameAction(
         $freshButton.handle -ne $observed.button.handle -or $freshEdit.handle -ne $observed.edit.handle -or
         (ConvertTo-SketchCanonicalJson $freshButton.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.button.bounds) -or
         (ConvertTo-SketchCanonicalJson $freshEdit.bounds) -cne (ConvertTo-SketchCanonicalJson $observed.edit.bounds) -or
-        $beforeInput.title -isnot [string] -or $beforeInput.title -cne "Rename Loop" -or
+        -not (Test-MultiProjectRenameTitle $beforeInput.title $expectedTitle) -or
         $beforeInput.visible -isnot [bool] -or -not $beforeInput.visible -or
         $beforeInput.enabled -isnot [bool] -or -not $beforeInput.enabled -or
         (ConvertTo-SketchCanonicalJson $beforeInput.clientBounds) -cne (ConvertTo-SketchCanonicalJson $observed.clientBounds) -or
@@ -4976,18 +5262,25 @@ function Invoke-MultiProjectRenamePhase {
     Require ($null -ne $click) "multi-project native Rename item was not hit"
     $renameProcess = $multiProcess
     $renameShellWindow = $multiWindow
-    $null = Assert-SketchModal "Rename Loop"
+    $renameTitle = Get-MultiProjectRenameTitle $owner.title
+    $null = Assert-SketchModal $renameTitle
     $modal = $script:edgeWorkflowWindow
     $nativeDialog = [System.Windows.Automation.AutomationElement]::FromHandle($modal)
+    $null = Assert-UiaOwnedSheet $nativeDialog $multiProcess.Id $multiWindow $renameTitle `
+      "GraphCodeWindowsDialogContent" `
+      "multi-project Rename sheet"
     $content = @($nativeDialog.FindAll([System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition) | ForEach-Object { $_.Current.Name }) -join "`n"
-    Require ($content -match "(?m)^Title$" -and $content.Contains("Choose the title shown for this loop throughout the graph.")) `
+    Require ($content -match "(?m)^Title$" -and
+      $content.Contains("Only the name changes — the loop keeps its session, its edges, and its work.") -and
+      $content -match "(?m)^Rename$" -and $content -match "(?m)^Cancel$") `
       "multi-project native Rename omitted its shown Title label/explanation"
     $prefill = Sketch-Field 9904 "rename prefill"
     Require ($prefill -ceq $owner.title) "multi-project Rename prefill belongs to a different loop/title"
     $inputEvidence = [Collections.Generic.List[string]]::new()
     $null = Invoke-MultiProjectTypeText 9904 $typedTitle $inputEvidence -typeSource {
-      param($id,$text) Invoke-MultiProjectSequencedEdit $modal $multiProcess.Id $prefill $text
+      param($id,$text) Invoke-MultiProjectSequencedEdit $modal $multiProcess.Id $prefill $text `
+        -expectedTitle $renameTitle
     }
     $fullInput = @($inputEvidence | Where-Object {
       $_ -match 'inputAttempted=True' -and $_ -match 'inputCountsFull=True' -and
@@ -4996,9 +5289,10 @@ function Invoke-MultiProjectRenamePhase {
     Require ($fullInput.Count -gt 0) "multi-project rename did not record full real clear/text SendInput counts"
     $submitBuffer = Sketch-Field 9904 "rename stable immediately before submit"
     Require ($submitBuffer -ceq $typedTitle) "multi-project Rename buffer differs at submit"
-    $action = Invoke-MultiProjectRenameAction $modal $multiProcess.Id $typedTitle $inputEvidence.ToArray() -Cancel:$Cancel
-    Wait-EdgeClosed "Rename Loop"
-    return [ordered]@{ pid = $multiProcess.Id; title = "Rename Loop"; controlID = 9904; nativeOwner = $modal.ToInt64()
+    $action = Invoke-MultiProjectRenameAction $modal $multiProcess.Id $typedTitle $inputEvidence.ToArray() `
+      -Cancel:$Cancel -expectedTitle $renameTitle
+    Wait-EdgeClosed $renameTitle
+    return [ordered]@{ pid = $multiProcess.Id; title = $renameTitle; controlID = 9904; nativeOwner = $modal.ToInt64()
       prefill = $prefill; typedTitle = $typedTitle; stableSubmitBuffer = $submitBuffer
       nodeHit = $nodeHit; rightClickFallback = $rightClickFallback
       inputAttempts = $inputEvidence.ToArray(); action = $action; projectCardAutomationId = $row.card.automationId }
@@ -5386,57 +5680,28 @@ try {
   Write-Host "UIA_ROOT_ACCESS processId=$($process.Id) window=$(Format-WindowHandle $shellWindow) visible=True foreground=$(Format-WindowHandle $foregroundAtRoot) background=$($foregroundAtRoot -ne $shellWindow) automationId=$($root.Current.AutomationId) rawFirstChildPresent=$($null -ne $firstRootChild) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';')"
 
   $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-  $updateDialog = $desktop.FindFirst(
-    [System.Windows.Automation.TreeScope]::Children,
+  Write-Host "UIA_UPDATE_DIALOG_DIAGNOSTICS processId=$($process.Id) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';') $(Get-FocusDiagnostics $shellWindow)"
+  $updateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeUpdateOffer" "GraphCode Update Available" "update offer sheet"
+  Require ($null -ne $updateDialog) "update offer dialog did not appear"
+  $nativeUpdateWindow = [IntPtr]$updateDialog.Current.NativeWindowHandle
+  $updateSheetIdentity = Get-UiaOwnedSheetIdentity $updateDialog
+  $availabilityLabel = $updateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty,
-      "GraphCode Update Available"
+      [System.Windows.Automation.AutomationElement]::NameProperty, "An update is available."
     ))
   )
-  if ($null -ne $updateDialog -and $updateDialog.Current.ProcessId -ne $process.Id) {
-    $updateDialog = $null
-  }
-  Write-Host "UIA_UPDATE_DIALOG_CHILDREN found=$($null -ne $updateDialog)"
-  $nativeUpdateWindow = [IntPtr]::Zero
-  if ($null -eq $updateDialog) {
-    Write-Host "UIA_UPDATE_DIALOG_DIAGNOSTICS processId=$($process.Id) topLevels=$([GraphCodeUiaGateState]::DescribeTopLevelWindows([uint32]$process.Id) -join ';') $(Get-FocusDiagnostics $shellWindow)"
-    $nativeUpdateWindow = [GraphCodeUiaGateState]::FindTopLevel("GraphCodeUpdateOffer", [uint32]$process.Id)
-    if ([GraphCodeUiaGateState]::WindowIsVisible($nativeUpdateWindow)) {
-      try {
-        $directUpdate = [System.Windows.Automation.AutomationElement]::FromHandle($nativeUpdateWindow)
-        $directName = $directUpdate.Current.Name
-        $directButton = $directUpdate.FindFirst(
-          [System.Windows.Automation.TreeScope]::Descendants,
-          (New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty, "Later"
-          ))
-        )
-        Write-Host "UIA_UPDATE_DIALOG_DIRECT handle=$(Format-WindowHandle $nativeUpdateWindow) name='$directName' laterFound=$($null -ne $directButton)"
-        if ($directName -eq "GraphCode Update Available") {
-          $updateDialog = $directUpdate
-        }
-      } catch {
-        $errorCode = $_.Exception.GetBaseException().HResult
-        throw "UIA_UPDATE_DIALOG_DIRECT handle=$(Format-WindowHandle $nativeUpdateWindow) errorType=$($_.Exception.GetBaseException().GetType().FullName) hresult=0x$($errorCode.ToString('X8')) message='$($_.Exception.GetBaseException().Message)'"
-      }
-    }
-  }
-  Require ($null -ne $updateDialog) "update offer dialog did not appear"
+  $directButton = $updateDialog.FindFirst(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    (New-Object System.Windows.Automation.PropertyCondition(
+      [System.Windows.Automation.AutomationElement]::NameProperty, "Later"
+    ))
+  )
+  Write-Host "UIA_UPDATE_DIALOG_DIRECT handle=$(Format-WindowHandle $nativeUpdateWindow) host='$($updateDialog.Current.Name)' availabilityLabelFound=$($null -ne $availabilityLabel) laterFound=$($null -ne $directButton)"
+  Require ($null -ne $availabilityLabel) "update offer sheet omitted its semantic availability label"
   Start-Sleep -Milliseconds 250
-  if ($nativeUpdateWindow -ne [IntPtr]::Zero) {
-    $updateDialog = [System.Windows.Automation.AutomationElement]::FromHandle($nativeUpdateWindow)
-  } else {
-    $updateDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Children,
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        "GraphCode Update Available"
-      ))
-    )
-    if ($null -ne $updateDialog -and $updateDialog.Current.ProcessId -ne $process.Id) {
-      $updateDialog = $null
-    }
-  }
+  $updateDialog = [System.Windows.Automation.AutomationElement]::FromHandle($nativeUpdateWindow)
   $installButton = $updateDialog.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
     (New-Object System.Windows.Automation.PropertyCondition(
@@ -5543,31 +5808,8 @@ try {
     "computed sidebar update banner click point fell outside the live sidebar rail"
   Require ([GraphCodeUiaGateState]::ClickAt($shellWindow, $updateBannerClickX, $updateBannerClickY)) `
     "synthetic click on the sidebar update banner's live pixel geometry was rejected"
-  $clickedUpdateDialog = $null
-  for ($index = 0; $index -lt 20 -and $null -eq $clickedUpdateDialog; $index++) {
-    Start-Sleep -Milliseconds 100
-    $clickedUpdateDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Children,
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty,
-        "GraphCode Update Available"
-      ))
-    )
-    if ($null -ne $clickedUpdateDialog -and $clickedUpdateDialog.Current.ProcessId -ne $process.Id) {
-      $clickedUpdateDialog = $null
-    }
-    if ($null -eq $clickedUpdateDialog) {
-      $clickedUpdateWindow = [GraphCodeUiaGateState]::FindTopLevel(
-        "GraphCodeUpdateOffer", [uint32]$process.Id
-      )
-      if ([GraphCodeUiaGateState]::WindowIsVisible($clickedUpdateWindow)) {
-        $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($clickedUpdateWindow)
-        if ($candidate.Current.Name -eq "GraphCode Update Available") {
-          $clickedUpdateDialog = $candidate
-        }
-      }
-    }
-  }
+  $clickedUpdateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeUpdateOffer" "GraphCode Update Available" "clicked update offer sheet" 2000
   Require ($null -ne $clickedUpdateDialog) `
     "a real click on the sidebar update banner's live geometry did not open the update offer dialog"
   $clickedUpdateVersion = $clickedUpdateDialog.FindFirst(
@@ -5751,21 +5993,8 @@ try {
   Require (Ensure-ShellForeground $shellWindow "project-row New Loop") `
     "GraphCode shell did not reacquire foreground before invoking project-row New Loop"
   $projectNewLoop.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  $sidebarNodeForm = $null
-  $sidebarNodeFormCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
-    ))
-  )
-  $sidebarNodeForm = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $sidebarNodeFormCondition `
-    -label "project-row New Loop node form" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $sidebarNodeForm = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Create or edit node" "project-row New Loop node form"
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
   $templatesButton = $sidebarNodeForm.FindFirst(
     [System.Windows.Automation.TreeScope]::Descendants,
@@ -5779,30 +6008,14 @@ try {
   Require ([GraphCodeUiaGateState]::PostCommand(
     [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle, 4
   )) "Templates action rejected invocation"
-  $templatePickerCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Choose a saved template"
-    ))
-  )
-  $templatePicker = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $templatePickerCondition `
-    -label "project-row New Loop template picker" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $templatePicker = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Choose a saved template" "project-row New Loop template picker"
   Require ($null -ne $templatePicker) "project-row New Loop did not expose the saved template picker"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$templatePicker.Current.NativeWindowHandle, 0x0D
   )) "template picker rejected keyboard application"
-  $sidebarNodeForm = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $sidebarNodeFormCondition `
-    -label "project-row New Loop node form" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $sidebarNodeForm = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Create or edit node" "project-row New Loop node form"
   Require ($null -ne $sidebarNodeForm) "project-row New Loop did not open the node form"
   $nodeFormElements = @($sidebarNodeForm.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
@@ -5818,11 +6031,8 @@ try {
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$sidebarNodeForm.Current.NativeWindowHandle
   )) "project-row New Loop form rejected cancellation"
-  Require (Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $sidebarNodeFormCondition `
-    -label "project-row New Loop node form close" `
-    -diagnosticWindow $shellWindow) "project-row New Loop form did not close after cancellation"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm") "project-row New Loop form did not close after cancellation"
   foreach ($ingress in @(
     [pscustomobject]@{
       Command = 4106
@@ -5839,51 +6049,38 @@ try {
   )) {
     Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, $ingress.Command)) `
       "$($ingress.Title) command was rejected"
-    $ingressCondition = New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $ingress.Title
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window
-      ))
-    )
-    $ingressDialog = Wait-ForDesktopElement `
-      -desktop $desktop `
-      -condition $ingressCondition `
-      -label $ingress.Title `
-      -diagnosticWindow $shellWindow `
-      -RecoverForeground
+    $ingressDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+      "GraphCodeRepositoryIngressDialog" $ingress.Title "$($ingress.Title) sheet"
     Require ($null -ne $ingressDialog) "$($ingress.Title) did not open its native sheet"
     $ingressContent = @($ingressDialog.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition
     ) | ForEach-Object { $_.Current.Name }) -join "`n"
-    foreach ($label in $ingress.Labels) {
+    foreach ($label in @($ingress.Title) + $ingress.Labels) {
       Require ($ingressContent -match [regex]::Escape($label)) `
         "$($ingress.Title) omitted '$label'"
     }
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=submit-invalid phase=before"
     Require ([GraphCodeUiaGateState]::SendCommand(
       [IntPtr]$ingressDialog.Current.NativeWindowHandle, 1
     )) "$($ingress.Title) rejected its primary action"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=submit-invalid phase=after"
     Start-Sleep -Milliseconds 100
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=validation-enumeration phase=before"
     $validationContent = @($ingressDialog.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition
     ) | ForEach-Object { $_.Current.Name }) -join "`n"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=validation-enumeration phase=after"
     Require ($validationContent -match [regex]::Escape($ingress.Error)) `
       "$($ingress.Title) did not expose its inline validation failure"
     Require ([GraphCodeUiaGateState]::PostClose(
       [IntPtr]$ingressDialog.Current.NativeWindowHandle
     )) "$($ingress.Title) rejected cancellation"
-    Require (Wait-ForDesktopElementGone `
-      -desktop $desktop `
-      -condition $ingressCondition `
-      -label "$($ingress.Title) close" `
-      -diagnosticWindow $shellWindow) "$($ingress.Title) did not close after cancellation"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=close-wait phase=before"
+    Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+      "GraphCodeRepositoryIngressDialog") "$($ingress.Title) did not close after cancellation"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=close-wait phase=after"
     # Let DialogBoxParamW return to the shell message loop before posting the
     # next modal command.
     Start-Sleep -Milliseconds 100
@@ -5907,25 +6104,12 @@ try {
   )) {
     Require ([GraphCodeUiaGateState]::PostPresentForm($shellWindow, $nativeForm.Id)) `
       "$($nativeForm.Title) fixture request was rejected"
-    $nativeFormCondition = New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $nativeForm.Title
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window
-      ))
-    )
-    $nativeFormWindow = Wait-ForDesktopElement `
-      -desktop $desktop `
-      -condition $nativeFormCondition `
-      -label $nativeForm.Title `
-      -diagnosticWindow $shellWindow `
-      -RecoverForeground
+    $nativeFormWindow = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+      "GraphCodeNativeForm" $nativeForm.Title "$($nativeForm.Title) sheet"
     Require ($null -ne $nativeFormWindow) "$($nativeForm.Title) did not open"
+    $null = Assert-UiaOwnedSheet $nativeFormWindow $process.Id $shellWindow $nativeForm.Title `
+      "GraphCodeNativeForm" `
+      "$($nativeForm.Title) sheet"
     $nativeFormContent = @($nativeFormWindow.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition
@@ -5937,11 +6121,8 @@ try {
     Require ([GraphCodeUiaGateState]::PostClose(
       [IntPtr]$nativeFormWindow.Current.NativeWindowHandle
     )) "$($nativeForm.Title) rejected cancellation"
-    Require (Wait-ForDesktopElementGone `
-      -desktop $desktop `
-      -condition $nativeFormCondition `
-      -label "$($nativeForm.Title) close" `
-      -diagnosticWindow $shellWindow) "$($nativeForm.Title) did not close after cancellation"
+    Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+      "GraphCodeNativeForm") "$($nativeForm.Title) did not close after cancellation"
   }
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
   $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
@@ -6180,20 +6361,8 @@ try {
   Start-Sleep -Milliseconds 100
   Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $connectorTargetClientX, $connectorTargetClientY)) `
     "connector drag mouse-up message was rejected"
-  $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit edge"
-    ))
-  )
-  $edgeDialog = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $edgeDialogCondition `
-    -label "connector drag Create or edit edge dialog" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $edgeDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Create or edit edge" "connector drag Create or edit edge sheet"
   Require ($null -ne $edgeDialog) "dragging from the connector to the target card did not open the Create or edit edge dialog"
   # NativeForms.zig's edge dialog renders locked From/To endpoints as ES_READONLY
   # Edit controls, but this app's custom UIA provider (AccessibilityProvider.cpp)
@@ -6222,11 +6391,8 @@ try {
     "connector drag did not lock the To endpoint to the dropped target loop: $edgeToValue"
   Require ([GraphCodeUiaGateState]::PostClose([IntPtr]$edgeDialog.Current.NativeWindowHandle)) `
     "Create or edit edge dialog rejected cancellation"
-  Require (Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $edgeDialogCondition `
-    -label "connector drag Create or edit edge dialog close" `
-    -diagnosticWindow $shellWindow) "Create or edit edge dialog did not close after cancellation"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm") "Create or edit edge dialog did not close after cancellation"
 
   $surfaceActionPatterns = @{}
   foreach ($id in @($navigationIds + $canvasActionIds)) {
@@ -7295,32 +7461,13 @@ try {
 
 
   $shellWindow = $process.MainWindowHandle
-  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 7)) "Rename Loop fixture command was rejected"
-  $renameDialog = $null
-  $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-  $renameWindowCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Rename Loop"
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Window
-    ))
-  )
-  $renameCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    $renameWindowCondition
-  )
-  for ($index = 0; $index -lt 40 -and $null -eq $renameDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $renameDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $renameCondition
-    )
-  }
-  Require ($null -ne $renameDialog) "Rename Loop command did not open its native dialog"
+  $fixtureRenameTitle = 'Rename “UIA loop A”'
+  Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 7)) "Rename fixture command was rejected"
+  $renameDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent" $fixtureRenameTitle "Rename fixture sheet"
+  Require ($null -ne $renameDialog) "Rename command did not open its native sheet"
+  $renameSheetIdentity = Assert-UiaOwnedSheet $renameDialog $process.Id $shellWindow `
+    $fixtureRenameTitle "GraphCodeWindowsDialogContent" "Rename fixture sheet"
   $renameGraphBefore = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -eq "UIA loop A"
   })
@@ -7336,34 +7483,34 @@ try {
     [System.Windows.Automation.Condition]::TrueCondition
   ))
   $renameContent = @($renameElements | ForEach-Object { $_.Current.Name }) -join "`n"
-  Require ($renameContent -match "Choose the title shown") "Rename Loop dialog omitted its explanation"
-  Require ($renameContent -match "(?m)^Title$") "Rename Loop dialog omitted its Title field label"
-  Require ($renameContent -match "UIA loop A") "Rename Loop dialog did not populate the current title"
+  Require ($renameContent.Contains("Only the name changes — the loop keeps its session, its edges, and its work.")) `
+    "Rename sheet omitted its exact consequence copy"
+  Require ($renameContent -match "(?m)^Title$") "Rename sheet omitted its Title field label"
+  Require ($renameContent -match "(?m)^Rename$" -and $renameContent -match "(?m)^Cancel$") `
+    "Rename sheet omitted its Rename/Cancel actions"
+  Require ($renameContent -match "UIA loop A") "Rename sheet did not populate the current title"
   $renameDialogName = [string]$renameDialog.Current.Name
   $renameShownTitle = @($renameElements | ForEach-Object { [string]$_.Current.Name } |
     Where-Object { $_ -match "UIA loop A" }) | Select-Object -First 1
   Require ([GraphCodeUiaGateState]::SetEditTextById(
     [IntPtr]$renameDialog.Current.NativeWindowHandle, 9904, "UIA renamed loop"
-  )) "Rename Loop dialog omitted its native Title edit control (id 9904)"
+  )) "Rename sheet omitted its native Title edit control (id 9904)"
   $renameInputAfterSet = [GraphCodeUiaGateState]::EditTextById(
     [IntPtr]$renameDialog.Current.NativeWindowHandle, 9904
   )
   Write-Host "UIA_RENAME_INPUT requested='UIA renamed loop' observed='$renameInputAfterSet'"
   Require ($renameInputAfterSet -eq "UIA renamed loop") `
-    "Rename Loop edit control did not retain the requested replacement title"
+    "Rename edit control did not retain the requested replacement title"
   Require ([GraphCodeUiaGateState]::SendReturn(
     [IntPtr]$renameDialog.Current.NativeWindowHandle
-  )) "Rename Loop dialog rejected Return"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingRename = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $renameCondition
-    )
-    if ($null -eq $remainingRename) { break }
-  }
-  Require ($null -eq $remainingRename) "Return did not submit and close the Rename Loop dialog"
-  $renameCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  )) "Rename sheet rejected Return"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent") "Return did not submit and close the Rename sheet"
+  $renameCommandJson = Wait-DaemonCommandLog $daemonCommandLogPath {
+    param($record)
+    $record.graphCommand.command.renameNode._0 -eq
+      "11111111-1111-4111-8111-111111111111"
+  } "Rename submission"
   $renameCommand = ConvertFrom-Json -InputObject $renameCommandJson
   Require ($renameCommand.graphCommand.command.renameNode._0 -eq
            "11111111-1111-4111-8111-111111111111") `
@@ -7376,58 +7523,92 @@ try {
   $renameSidebarTitle = [string]$renamedSidebarRow.Current.Name
   Write-Host "UIA_RENAME_OUTCOME graph='$renameGraphTitle' sidebar='$renameSidebarTitle' expected='UIA renamed loop' reason=gate-forces-daemon-connection-failure"
 
-  $updateWindowCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, "Update node"
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window
-      ))
-    ))
+  $deleteLoopTitle = 'Delete “UIA loop A”?'
+  $deleteTarget = Find-FragmentByIdWithRetry $root $renameGraphIdentity $rawWalker
+  Require ($null -ne $deleteTarget) "Delete Loop could not reacquire the renamed fixture loop identity"
+  $deleteTargetSelection = $deleteTarget.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
   )
+  $deleteTargetSelection.Select()
+  Require $deleteTargetSelection.Current.IsSelected `
+    "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
+  Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
+    "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
+  Require (Ensure-ShellForeground $shellWindow "Delete Loop context menu") `
+    "GraphCode shell did not reacquire foreground before the Delete Loop context menu"
+  Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)) `
+    "Delete Loop context menu request was rejected"
+  $deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"
+  Require ($deleteLoopPopup -ne [IntPtr]::Zero) "Delete Loop context menu did not open"
+  $deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)
+  $deleteLoopItem = @($deleteLoopItems | Where-Object {
+    $_.Id -eq 5103 -and $_.Enabled
+  }) | Select-Object -First 1
+  Require ($null -ne $deleteLoopItem) `
+    "Delete Loop context menu omitted its enabled Delete action: $(Format-PopupMenuItems $deleteLoopItems)"
+  $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
+    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id
+  )
+  Require ($null -ne $deleteLoopClick) "Delete Loop context-menu action could not be clicked"
+  Write-Host ("UIA_DELETE_LOOP_MENU command=$($deleteLoopItem.Id) " +
+    "hilite=$($deleteLoopClick.Hilite) keyboardFallback=$($deleteLoopClick.UsedKeyboardFallback)")
+  $deleteLoopDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"
+  Require ($null -ne $deleteLoopDialog) "Delete Loop did not open its custom sheet"
+  $deleteLoopIdentity = Assert-UiaOwnedSheet $deleteLoopDialog $process.Id $shellWindow `
+    $deleteLoopTitle "GraphCodeWindowsDialogContent" "Delete Loop custom sheet"
+  $deleteLoopElements = @($deleteLoopDialog.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $deleteLoopContent = @($deleteLoopElements | ForEach-Object { [string]$_.Current.Name }) -join "`n"
+  $deleteLoopBody = "Its terminal session is ended and every edge touching it is removed. This can't be undone."
+  Require ($deleteLoopContent.Contains($deleteLoopBody)) "Delete Loop custom sheet omitted its exact consequence copy"
+  $deleteLoopCancel = @($deleteLoopElements | Where-Object { $_.Current.Name -ceq "Cancel" }) | Select-Object -First 1
+  $deleteLoopDelete = @($deleteLoopElements | Where-Object { $_.Current.Name -ceq "Delete" }) | Select-Object -First 1
+  Require ($null -ne $deleteLoopCancel -and $null -ne $deleteLoopDelete) `
+    "Delete Loop custom sheet omitted Cancel/Delete actions"
+  Require ([GraphCodeUiaGateState]::ControlIdOf(
+      [IntPtr]$deleteLoopCancel.Current.NativeWindowHandle) -eq 9808 -and
+    [GraphCodeUiaGateState]::ControlIdOf(
+      [IntPtr]$deleteLoopDelete.Current.NativeWindowHandle) -eq 9800) `
+    "Delete Loop custom sheet changed its native Cancel/Delete control identities"
+  $deleteLoopEvidence = [ordered]@{
+    identity = $deleteLoopIdentity
+    body = $deleteLoopBody
+    cancelId = 9808
+    deleteId = 9800
+  }
+  Write-Host ("UIA_DELETE_LOOP_SHEET_EVIDENCE=" +
+    ($deleteLoopEvidence | ConvertTo-Json -Depth 4 -Compress))
+  Require ([GraphCodeUiaGateState]::SendCommand(
+    [IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808
+  )) "Delete Loop custom sheet rejected Cancel"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent") "Delete Loop custom sheet remained open after Cancel"
+
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 21)) `
     "Edit Details open fixture command was rejected"
-  $updateDialog = $null
-  for ($index = 0; $index -lt 40 -and $null -eq $updateDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $updateDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $updateWindowCondition
-    )
-  }
+  $updateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Update node" "Update node sheet"
   Require ($null -ne $updateDialog) "Update node dialog did not open"
+  $null = Assert-UiaOwnedSheet $updateDialog $process.Id $shellWindow "Update node" `
+    "GraphCodeNativeForm" `
+    "Update node sheet"
   $renameCommandAfterCancel = (Read-DaemonCommandLog $daemonCommandLogPath)
   Require ([GraphCodeUiaGateState]::SendCommand(
     [IntPtr]$updateDialog.Current.NativeWindowHandle, 2
   )) "Edit Details dialog rejected Cancel"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingUpdate = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $updateWindowCondition
-    )
-    if ($null -eq $remainingUpdate) { break }
-  }
-  Require ($null -eq $remainingUpdate) "Update node cancellation left the dialog open"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm") "Update node cancellation left the dialog open"
   Require ((Read-DaemonCommandLog $daemonCommandLogPath) -ceq $renameCommandAfterCancel) `
     "Edit Details cancellation dispatched a daemon command"
   Write-Host "UIA_EDIT_DETAILS open=True cancel=closed commandUnchanged=True"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 21)) `
     "Edit Details submit fixture command was rejected"
-  $updateDialog = $null
-  for ($index = 0; $index -lt 40 -and $null -eq $updateDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $updateDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $updateWindowCondition
-    )
-  }
+  $updateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Update node" "Update node submission sheet"
   Require ($null -ne $updateDialog) "Update node dialog did not reopen for submission"
   Require ([GraphCodeUiaGateState]::SetEditTextById(
     [IntPtr]$updateDialog.Current.NativeWindowHandle, 9100, "UIA details submitted"
@@ -7439,14 +7620,8 @@ try {
   Require ([GraphCodeUiaGateState]::SendCommand(
     [IntPtr]$updateDialog.Current.NativeWindowHandle, 1
   )) "Edit Details dialog rejected Submit"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingUpdate = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $updateWindowCondition
-    )
-    if ($null -eq $remainingUpdate) { break }
-  }
+  $remainingUpdate = if (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+      "GraphCodeNativeForm") { $null } else { $updateDialog }
   if ($null -ne $remainingUpdate) {
     $updateSubmitElements = @($remainingUpdate.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
@@ -7461,7 +7636,13 @@ try {
     Write-Host "UIA_UPDATE_NODE_SUBMIT_STATE stillOpen=True firstEdit='$updateSubmitFirstEdit' content='$updateSubmitContent'"
   }
   Require ($null -eq $remainingUpdate) "Edit Details submission left the dialog open"
-  $updateCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  $updateCommandJson = Wait-DaemonCommandLog $daemonCommandLogPath {
+    param($record)
+    ($record.graphCommand.command.updateNode._0 -eq
+      "11111111-1111-4111-8111-111111111111") -and
+    ($record.graphCommand.command.updateNode.update.goalSummary -eq
+      "UIA details submitted")
+  } "Edit Details submission"
   $updateCommand = ConvertFrom-Json -InputObject $updateCommandJson
   Require (($updateCommand.graphCommand.command.updateNode._0 -eq
             "11111111-1111-4111-8111-111111111111") -and
@@ -7471,6 +7652,7 @@ try {
   Require ($renameDispatchMatches) `
     "Rename submission dispatched a title different from the requested replacement"
   $renameDialogEvidence = [ordered]@{
+    identity = $renameSheetIdentity
     dialogName = $renameDialogName
     shownTitle = $renameShownTitle
     inputAfterSet = $renameInputAfterSet
@@ -7657,28 +7839,8 @@ try {
     "GraphCode shell did not reacquire foreground before empty global New Loop command"
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty global New Loop command was rejected"
-  $nodeForm = $null
-  $nodeFormWindowCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Create or edit node"
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Window
-    ))
-  )
-  $nodeFormCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    $nodeFormWindowCondition
-  )
-  $nodeForm = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $nodeFormCondition `
-    -label "empty global New Loop node form" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $nodeForm = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Create or edit node" "empty global New Loop node form"
   Require ($null -ne $nodeForm) "empty global New Loop did not open the node form"
   $emptyOverviewEvidence.nodeForm = [string]$nodeForm.Current.Name
   Write-Host ("UIA_EMPTY_OVERVIEW_EVIDENCE=" +
@@ -7686,11 +7848,8 @@ try {
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$nodeForm.Current.NativeWindowHandle
   )) "empty global node form rejected cancellation"
-  Require (Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $nodeFormCondition `
-    -label "empty global New Loop node form close" `
-    -diagnosticWindow $shellWindow) "empty global node form did not close after cancellation"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm") "empty global node form did not close after cancellation"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 10)) "empty project fixture command was rejected"
   Start-Sleep -Milliseconds 200
@@ -7708,13 +7867,8 @@ try {
     "GraphCode shell did not reacquire foreground before empty project New Loop command"
   Require ([GraphCodeUiaGateState]::PostCommand($shellWindow, 4602)) `
     "empty project New Loop command was rejected"
-  $projectNodeForm = $null
-  $projectNodeForm = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $nodeFormCondition `
-    -label "empty project New Loop node form" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $projectNodeForm = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Create or edit node" "empty project New Loop node form"
   Require ($null -ne $projectNodeForm) "empty project New Loop did not open the node form"
   $emptyProjectEvidence.nodeForm = [string]$projectNodeForm.Current.Name
   Write-Host ("UIA_EMPTY_PROJECT_EVIDENCE=" +
@@ -7722,11 +7876,8 @@ try {
   Require ([GraphCodeUiaGateState]::PostClose(
     [IntPtr]$projectNodeForm.Current.NativeWindowHandle
   )) "empty project node form rejected cancellation"
-  Require (Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $nodeFormCondition `
-    -label "empty project New Loop node form close" `
-    -diagnosticWindow $shellWindow) "empty project node form did not close after cancellation"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm") "empty project node form did not close after cancellation"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 11)) `
     "Remote Connection fixture command was rejected"
@@ -7777,29 +7928,8 @@ try {
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 12)) `
     "Delete All Loops fixture command was rejected"
-  $deleteLoopsDialog = $null
-  $deleteLoopsWindowCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Delete All Loops"
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Window
-    ))
-  )
-  $deleteLoopsCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    $deleteLoopsWindowCondition
-  )
-  for ($index = 0; $index -lt 40 -and $null -eq $deleteLoopsDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $deleteLoopsDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $deleteLoopsCondition
-    )
-  }
+  $deleteLoopsDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent" "Delete All Loops" "Delete All Loops confirmation"
   Require ($null -ne $deleteLoopsDialog) "Delete All Loops did not open its confirmation"
   $deleteLoopsContent = @($deleteLoopsDialog.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
@@ -7819,35 +7949,15 @@ try {
   Write-Host ("UIA_DELETE_PROJECT_LOOPS_EVIDENCE=" +
     ($deleteProjectLoopsEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::SendCommand(
-    [IntPtr]$deleteLoopsDialog.Current.NativeWindowHandle, 7
+    [IntPtr]$deleteLoopsDialog.Current.NativeWindowHandle, 9808
   )) "Delete All Loops confirmation rejected its safe No action"
-  Start-Sleep -Milliseconds 200
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent") "Delete All Loops confirmation remained open after No"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 13)) `
     "Delete Edge fixture command was rejected"
-  $deleteEdgeDialog = $null
-  $deleteEdgeWindowCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Delete Edge"
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Window
-    ))
-  )
-  $deleteEdgeCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    $deleteEdgeWindowCondition
-  )
-  for ($index = 0; $index -lt 40 -and $null -eq $deleteEdgeDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $deleteEdgeDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $deleteEdgeCondition
-    )
-  }
+  $deleteEdgeDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent" "Delete Edge" "Delete Edge confirmation"
   Require ($null -ne $deleteEdgeDialog) "Delete Edge did not open its confirmation"
   $deleteEdgeContent = @($deleteEdgeDialog.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
@@ -7871,9 +7981,10 @@ try {
   Write-Host ("UIA_DELETE_EDGE_EVIDENCE=" +
     ($deleteEdgeEvidence | ConvertTo-Json -Compress))
   Require ([GraphCodeUiaGateState]::SendCommand(
-    [IntPtr]$deleteEdgeDialog.Current.NativeWindowHandle, 7
+    [IntPtr]$deleteEdgeDialog.Current.NativeWindowHandle, 9808
   )) "Delete Edge confirmation rejected its safe No action"
-  Start-Sleep -Milliseconds 200
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeWindowsDialogContent") "Delete Edge confirmation remained open after No"
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 6)) "About dialog fixture command was rejected"
   $aboutDialog = $null
@@ -7995,48 +8106,25 @@ try {
     "Check for Updates status text never left the checking state"
   Require ($checkUpdatesFinalStatus -match "(?i)update") `
     "Check for Updates completion status omitted any update-check outcome; saw '$checkUpdatesFinalStatus'"
-  $settledUpdateDialogCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty,
-      "GraphCode Update Available"
-    )),
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-      [System.Windows.Automation.ControlType]::Window
-    ))
-  )
   if ($checkUpdatesFinalStatus -match "(?i)update available") {
     # finishUpdateCheck re-enables the menu command immediately before
     # synchronously presenting the available-update modal. The enabled bit
     # therefore means the background request settled, not that its resulting
     # modal interaction is finished. Handle that real result before continuing
     # so later shell assertions never race a correctly disabled modal owner.
-    $settledUpdateDialog = Wait-ForDesktopElement `
-      -desktop $desktop `
-      -condition $settledUpdateDialogCondition `
-      -label "manual update-check offer" `
-      -diagnosticWindow $shellWindow
+    $settledUpdateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+      "GraphCodeUpdateOffer" "GraphCode Update Available" "manual update-check offer"
     Require ($null -ne $settledUpdateDialog) `
       "Check for Updates reported an available update but did not present its offer"
     Require ([GraphCodeUiaGateState]::SendCommand(
       [IntPtr]$settledUpdateDialog.Current.NativeWindowHandle, 9703
     )) "Check for Updates offer could not be dismissed via Later"
-    Require (Wait-ForDesktopElementGone `
-      -desktop $desktop `
-      -condition $settledUpdateDialogCondition `
-      -label "manual update-check offer close" `
-      -diagnosticWindow $shellWindow) `
+    Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+      "GraphCodeUpdateOffer") `
       "Check for Updates offer did not close after Later"
   } else {
-    $unexpectedUpdateDialog = Wait-ForDesktopElement `
-      -desktop $desktop `
-      -condition $settledUpdateDialogCondition `
-      -label "unexpected manual update-check offer" `
-      -diagnosticWindow $shellWindow `
-      -TimeoutMilliseconds 1000
+    $unexpectedUpdateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+      "GraphCodeUpdateOffer" "GraphCode Update Available" "unexpected manual update-check offer" 1000
     Require ($null -eq $unexpectedUpdateDialog) `
       "Check for Updates presented an offer despite reporting '$checkUpdatesFinalStatus'"
   }
@@ -8387,26 +8475,8 @@ try {
     Require $editEdgeDirectCommandFallback `
       "canvas edge Edit Edge direct command fallback failed"
   }
-  $edgeDialogCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-    )),
-    (New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, "Edit edge"
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window
-      ))
-    ))
-  )
-  $canvasEdgeDialog = Wait-ForDesktopElement `
-    -desktop $desktop `
-    -condition $edgeDialogCondition `
-    -label "canvas edge Edit Edge dialog" `
-    -diagnosticWindow $shellWindow `
-    -RecoverForeground
+  $canvasEdgeDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm" "Edit edge" "canvas edge Edit Edge sheet"
   $canvasEdgeEditDialogOpened = $null -ne $canvasEdgeDialog
   Require $canvasEdgeEditDialogOpened `
     "clicking Edit Edge from the canvas did not open the edge editor: $($editEdgeClickEvidence | ConvertTo-Json -Compress)"
@@ -8436,11 +8506,8 @@ try {
   Require ([GraphCodeUiaGateState]::SendCommand(
     [IntPtr]$canvasEdgeDialog.Current.NativeWindowHandle, 2
   )) "canvas edge Edit Edge dialog rejected Cancel"
-  $canvasEdgeEditCancelled = Wait-ForDesktopElementGone `
-    -desktop $desktop `
-    -condition $edgeDialogCondition `
-    -label "canvas edge Edit Edge dialog close" `
-    -diagnosticWindow $shellWindow
+  $canvasEdgeEditCancelled = Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+    "GraphCodeNativeForm"
   Require $canvasEdgeEditCancelled `
     "canvas edge Edit Edge dialog did not close after cancellation"
   $edgeCommandAfterCancel = if (Test-Path -LiteralPath $daemonCommandLogPath) {
@@ -8838,8 +8905,8 @@ try {
     for ($index = 0; $index -lt 100 -and
          $settingsHandle -eq [IntPtr]::Zero; $index++) {
       Start-Sleep -Milliseconds 50
-      $settingsHandle = [GraphCodeUiaGateState]::FindTopLevel(
-        "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+      $settingsHandle = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+        [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
       )
     }
   }
@@ -8862,6 +8929,8 @@ try {
     throw "Product Settings fixture did not open the real settings window; process windows: $($windowNames -join ', '); status=$($settingsStatus.Current.Name)"
   }
   $productSettings = [System.Windows.Automation.AutomationElement]::FromHandle($settingsHandle)
+  $productSettingsIdentity = Assert-UiaOwnedSheet $productSettings $settingsProcess.Id `
+    $settingsShellWindow "GraphCode Settings" "GraphCodeProductSettings" "Product Settings sheet"
   $settingsElements = @($productSettings.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
     [System.Windows.Automation.Condition]::TrueCondition
@@ -8921,6 +8990,7 @@ try {
       "Product Settings toggle '$($entry.Key)' did not load the isolated fixture"
   }
   $productSettingsEvidence = [ordered]@{
+    identity = $productSettingsIdentity
     shownSettings = @($requiredSettingsNames | Where-Object { $settingsNames -contains $_ })
     toggleStates = $productSettingsToggleStates
     savedDefaultBackend = $null
@@ -8942,8 +9012,8 @@ try {
   )) "Product Settings focused control rejected Return"
   for ($index = 0; $index -lt 40; $index++) {
     Start-Sleep -Milliseconds 50
-    $remainingSettings = [GraphCodeUiaGateState]::FindTopLevel(
-      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+    $remainingSettings = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+      [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
     )
     if ($remainingSettings -eq [IntPtr]::Zero) { break }
   }
@@ -8964,12 +9034,14 @@ try {
   for ($index = 0; $index -lt 300 -and
        $cancelHandle -eq [IntPtr]::Zero; $index++) {
     Start-Sleep -Milliseconds 50
-    $cancelHandle = [GraphCodeUiaGateState]::FindTopLevel(
-      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
+    $cancelHandle = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+      [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
     )
   }
   Require ($cancelHandle -ne [IntPtr]::Zero) "Product Settings did not reopen for Escape verification"
   $cancelSettings = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHandle)
+  $null = Assert-UiaOwnedSheet $cancelSettings $settingsProcess.Id $settingsShellWindow `
+    "GraphCode Settings" "GraphCodeProductSettings" "Product Settings Escape sheet"
   $cancelWindow = $cancelHandle
   Require ([GraphCodeUiaGateState]::SendCommand($cancelWindow, 6112)) `
     "Product Settings cancel mutation was rejected"
@@ -8984,17 +9056,54 @@ try {
     $cancelWindow $cancelModel $cancelModel.Current.AutomationId `
     "product-settings-escape"
   Require ($null -ne $cancelFocus.Focused) "Product Settings model control could not retain foreground focus; focused=$(Format-AutomationElement $cancelFocus.Candidate); $(Get-FocusDiagnostics $cancelWindow)"
+  $cancelViewport = [GraphCodeUiaGateState]::FindChild(
+    $cancelWindow, "GraphCodeSheetViewport"
+  )
+  $cancelContent = [GraphCodeUiaGateState]::FindChild(
+    $cancelViewport, "GraphCodeProductSettings"
+  )
+  Require (($cancelViewport -ne [IntPtr]::Zero) -and ($cancelContent -ne [IntPtr]::Zero)) `
+    "Product Settings Escape path could not resolve its owned content window"
+  $underlyingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($underlyingUpdateCount -eq 1) `
+    "Product Settings Escape requires exactly one underlying update offer; found $underlyingUpdateCount"
+  $underlyingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($underlyingUpdateSheet -ne [IntPtr]::Zero) `
+    "Product Settings Escape could not resolve its required underlying update offer"
+  $underlyingUpdateElement =
+    [System.Windows.Automation.AutomationElement]::FromHandle($underlyingUpdateSheet)
+  $underlyingUpdateIdentity = Assert-UiaOwnedSheet `
+    $underlyingUpdateElement $settingsProcess.Id $settingsShellWindow `
+    "GraphCode Update Available" "GraphCodeUpdateOffer" `
+    "Product Settings underlying update offer"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
-    [IntPtr]$cancelModel.Current.NativeWindowHandle, 0x1B
-  )) "Product Settings focused control rejected Escape"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingCancelSettings = [GraphCodeUiaGateState]::FindTopLevel(
-      "GraphCodeProductSettings", [uint32]$settingsProcess.Id
-    )
-    if ($remainingCancelSettings -eq [IntPtr]::Zero) { break }
-  }
-  Require ($remainingCancelSettings -eq [IntPtr]::Zero) "Escape did not cancel and close Product Settings"
+    $cancelContent, 0x1B
+  )) "Product Settings content window rejected Escape"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $settingsProcess.Id $settingsShellWindow `
+    "GraphCodeProductSettings") "Escape did not cancel and close Product Settings"
+  $remainingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($remainingUpdateCount -eq 1) `
+    "Product Settings Escape did not preserve exactly one underlying update offer; found $remainingUpdateCount"
+  $remainingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($remainingUpdateSheet -eq $underlyingUpdateSheet) `
+    "Product Settings Escape replaced the underlying update offer handle"
+  $remainingUpdateElement =
+    [System.Windows.Automation.AutomationElement]::FromHandle($remainingUpdateSheet)
+  $remainingUpdateIdentity = Assert-UiaOwnedSheet `
+    $remainingUpdateElement $settingsProcess.Id $settingsShellWindow `
+    "GraphCode Update Available" "GraphCodeUpdateOffer" `
+    "Product Settings preserved update offer"
+  Require (($remainingUpdateIdentity.handle -eq $underlyingUpdateIdentity.handle) -and
+           ($remainingUpdateIdentity.contentClass -ceq $underlyingUpdateIdentity.contentClass)) `
+    "Product Settings Escape changed the underlying update offer identity"
   Require (([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath))) -eq
            ([Convert]::ToBase64String($savedSettingsBytes))) `
     "Escape changed persisted Product Settings"
@@ -9149,22 +9258,13 @@ try {
     "stable=$renameStubConnectionCountStable")
 
   Require ([GraphCodeUiaGateState]::PostFixtureMutation($renameShellWindow, 7)) `
-    "connected-daemon Rename Loop command was rejected"
-  $renameLiveCondition = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $renameProcess.Id
-    )),
-    $renameWindowCondition
-  )
-  $renameLiveDialog = $null
-  for ($index = 0; $index -lt 60 -and $null -eq $renameLiveDialog; $index++) {
-    Start-Sleep -Milliseconds 50
-    $renameLiveDialog = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $renameLiveCondition
-    )
-  }
-  Require ($null -ne $renameLiveDialog) "connected-daemon Rename Loop dialog did not open"
+    "connected-daemon Rename command was rejected"
+  $renameLiveTitle = Get-MultiProjectRenameTitle $renameInitialTitle
+  $renameLiveDialog = Wait-UiaOwnedSheetByContentClass $renameProcess.Id $renameShellWindow `
+    "GraphCodeWindowsDialogContent" $renameLiveTitle "connected-daemon Rename sheet"
+  Require ($null -ne $renameLiveDialog) "connected-daemon Rename sheet did not open"
+  $null = Assert-UiaOwnedSheet $renameLiveDialog $renameProcess.Id $renameShellWindow `
+    $renameLiveTitle "GraphCodeWindowsDialogContent" "connected-daemon Rename sheet"
   $renameLiveGraph = Find-FragmentByIdWithRetry $renameRoot "graph" $rawWalker
   Require ($null -ne $renameLiveGraph) "connected-daemon shell omitted its graph fragment"
   $renameGraphCardBefore = $null
@@ -9190,6 +9290,9 @@ try {
   $renameLiveContent = @($renameLiveElements | ForEach-Object { $_.Current.Name }) -join "`n"
   Require ($renameLiveContent -match [regex]::Escape($renameInitialTitle)) `
     "connected-daemon Rename dialog did not prefill the daemon-supplied title"
+  Require ($renameLiveContent.Contains("Only the name changes — the loop keeps its session, its edges, and its work.") -and
+    $renameLiveContent -match "(?m)^Rename$" -and $renameLiveContent -match "(?m)^Cancel$") `
+    "connected-daemon Rename sheet omitted its exact body or Rename/Cancel actions"
   Require ([GraphCodeUiaGateState]::SetEditTextById(
     [IntPtr]$renameLiveDialog.Current.NativeWindowHandle, 9904, $renameFinalTitle
   )) "connected-daemon Rename dialog omitted its native Title edit control (id 9904)"
@@ -9199,17 +9302,14 @@ try {
   Require ([GraphCodeUiaGateState]::SendReturn(
     [IntPtr]$renameLiveDialog.Current.NativeWindowHandle
   )) "connected-daemon Rename dialog rejected Return"
-  $remainingLiveRename = $null
-  for ($index = 0; $index -lt 60; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingLiveRename = $desktop.FindFirst(
-      [System.Windows.Automation.TreeScope]::Descendants,
-      $renameLiveCondition
-    )
-    if ($null -eq $remainingLiveRename) { break }
-  }
-  Require ($null -eq $remainingLiveRename) "connected-daemon Rename dialog stayed open after Return"
-  $renameLiveCommand = ConvertFrom-Json -InputObject (Read-DaemonCommandLog $renameCommandLogPath)
+  Require (Wait-UiaOwnedSheetGoneByContentClass $renameProcess.Id $renameShellWindow `
+    "GraphCodeWindowsDialogContent") "connected-daemon Rename dialog stayed open after Return"
+  $renameLiveCommand = ConvertFrom-Json -InputObject (Wait-DaemonCommandLog `
+    $renameCommandLogPath {
+      param($record)
+      ($record.graphCommand.command.renameNode._0 -eq $renameNodeId) -and
+      ($record.graphCommand.command.renameNode.title -eq $renameFinalTitle)
+    } "connected-daemon Rename submission")
   Require (($renameLiveCommand.graphCommand.command.renameNode._0 -eq $renameNodeId) -and
            ($renameLiveCommand.graphCommand.command.renameNode.title -eq $renameFinalTitle)) `
     "connected-daemon rename dispatched the wrong node identity or title"
@@ -9476,7 +9576,7 @@ try {
     }
     $modalCommandFallback = $false
     if ($script:edgeWorkflowWindow -eq [IntPtr]::Zero) {
-      $command = if ($title -eq "Rename Loop") { 5101 } `
+      $command = if (Test-MultiProjectRenameTitle $title) { 5101 } `
         elseif ($title -eq "Create or edit node") { 5119 } `
         elseif ($title -like "Promote * to Goal") { 5116 } `
         elseif ($title -like "Promote * to Turn") { 5117 } `
@@ -11342,6 +11442,7 @@ try {
     dynamicInvocations = $dynamicInvocationEvidence
     compositeNavigation = $compositeNavigationEvidence
     renameDialog = $renameDialogEvidence
+    deleteLoopSheet = $deleteLoopEvidence
     connectedDaemonRenamePropagationConfirmed = $renamePropagationConfirmed
     connectedDaemonGraphTitle = $renameLiveGraphTitle
     connectedDaemonSidebarTitle = $renameLiveSidebarTitle
@@ -11358,6 +11459,7 @@ try {
     productSettings = $productSettingsEvidence
     productSettingsReturnSaved = ($savedSettings.defaultBackend -eq "copilotCLI")
     aboutDialog = $aboutDialogEvidence
+    updateOfferSheet = $updateSheetIdentity
     checkUpdatesReachable = $checkUpdatesReachableEvidence
     checkUpdatesDisabledWhileChecking = $checkUpdatesDisabledWhileCheckingEvidence
     checkUpdatesSettledAfterCheck = $checkUpdatesSettled

@@ -173,6 +173,7 @@ pub fn draw(
     hdc: c.HDC,
     model: *const GraphModel.Model,
     surface: Surface,
+    selection_active: bool,
     inspection: ?*const WorktreeStatus.Inspection,
     selected_worktree_path: []const u8,
     scroll_offset: i32,
@@ -184,7 +185,7 @@ pub fn draw(
     hover_y: i32,
     allocator: std.mem.Allocator,
 ) void {
-    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
+    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, @max(Tokens.header_height, viewport_bottom));
     fill(hdc, sidebar, Tokens.workspace_rail);
     const footer = effectiveFooter(viewport_bottom, update_version.len != 0, ingress_error.len != 0);
     const has_update = footer.update;
@@ -222,7 +223,7 @@ pub fn draw(
             },
             .overview => {
                 if (navigationRowSelected(row, surface, model.selected_project_path))
-                    drawSelection(hdc, bounds);
+                    drawSelection(hdc, bounds, selection_active);
                 drawOutlineIcon(hdc, .graph, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
                 drawTextRect(hdc, allocator, "Graph", rect(44, row.top + 5, 172, row.top + 27), 13, 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom and row.has_graph) {
@@ -232,7 +233,7 @@ pub fn draw(
             },
             .open_project => if (row.project_path) |path| {
                 const selected = navigationRowSelected(row, surface, model.selected_project_path);
-                if (selected) drawSelection(hdc, bounds);
+                if (selected) drawSelection(hdc, bounds, selection_active);
                 const graph = graphForProject(model, path);
                 const remote = if (graph) |value| value.project().isRemote() else std.mem.startsWith(u8, path, "ssh://") or std.mem.startsWith(u8, path, "codespace://");
                 drawOutlineIcon(hdc, if (remote) .remote_folder else .local_folder, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
@@ -279,7 +280,7 @@ pub fn draw(
                 const entry = value.entries.items[row.index];
                 const selected = std.mem.eql(u8, entry.path, selected_worktree_path);
                 if (selected and WorktreeStatus.decision(entry) == .reclaimable)
-                    drawSelection(hdc, bounds);
+                    drawSelection(hdc, bounds, false);
                 drawText(hdc, allocator, entry.path, 24, row.top, 11, 0x00E6E6E6);
                 const size = WorktreeStatus.sizeCoverageText(allocator, entry.sizeCoverage()) catch null;
                 defer if (size) |value_text| allocator.free(value_text);
@@ -292,7 +293,7 @@ pub fn draw(
             },
             .quick_chat_overview => {
                 const selected = navigationRowSelected(row, surface, model.selected_project_path);
-                if (selected) drawSelection(hdc, bounds);
+                if (selected) drawSelection(hdc, bounds, selection_active);
                 drawOutlineIcon(hdc, .chat, rect(18, row.top + 8, 34, row.top + 24), 0x00E6E6E6);
                 drawTextRect(hdc, allocator, "Quick Chats", rect(44, row.top + 5, 172, row.top + 27), 13, if (selected) 0x00FFFFFF else 0x00E6E6E6, loop_text_format);
                 if (hover_y >= bounds.top and hover_y < bounds.bottom) {
@@ -1870,6 +1871,63 @@ fn appendTestOpenProject(allocator: std.mem.Allocator, model: *GraphModel.Model,
     });
 }
 
+fn appendSidebarInteractionFixtures(allocator: std.mem.Allocator, model: *GraphModel.Model) !void {
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Graph"},"nodes":[{"id":"global-loop","title":"Global loop","state":"idle"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"local-loop","title":"Local loop","state":"idle"}],"edges":[]}}}
+    );
+    _ = try model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"project":{"path":"ssh://host/remote","name":"Remote"},"nodes":[{"id":"remote-loop","title":"Remote loop","state":"idle"}],"edges":[]}}}
+    );
+    try model.quick_chats.append(.{
+        .id = try allocator.dupe(u8, "chat"),
+        .title = try allocator.dupe(u8, "Quick Chat"),
+        .backend = try allocator.dupe(u8, "claudeCode"),
+    });
+}
+
+fn sidebarTestPixelCount(bitmap: TestSidebarBitmap, bounds: c.RECT, color: u32) usize {
+    var count: usize = 0;
+    var y = bounds.top;
+    while (y < bounds.bottom) : (y += 1) {
+        var x = bounds.left;
+        while (x < bounds.right) : (x += 1) {
+            if (c.GetPixel(bitmap.hdc, x, y) == color) count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectSidebarTestDisclosureDirection(bitmap: TestSidebarBitmap, bounds: c.RECT, color: u32, collapsed: bool) !void {
+    var left = bounds.right;
+    var right = bounds.left;
+    var top = bounds.bottom;
+    var bottom = bounds.top;
+    var count: usize = 0;
+    var y = bounds.top;
+    while (y < bounds.bottom) : (y += 1) {
+        var x = bounds.left;
+        while (x < bounds.right) : (x += 1) {
+            if (c.GetPixel(bitmap.hdc, x, y) != color) continue;
+            left = @min(left, x);
+            right = @max(right, x);
+            top = @min(top, y);
+            bottom = @max(bottom, y);
+            count += 1;
+        }
+    }
+    try std.testing.expect(count > 0);
+    const width = right - left + 1;
+    const height = bottom - top + 1;
+    if (collapsed) {
+        try std.testing.expect(width < height);
+    } else {
+        try std.testing.expect(width > height);
+    }
+}
+
 fn countProjectRows(rows: []const Row, kind: RowKind, path: []const u8) usize {
     var count: usize = 0;
     for (rows) |row| {
@@ -2124,7 +2182,7 @@ test "sidebar framing starts with navigation instead of a fixed title block" {
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var painted_rows: usize = 0;
     for (rows.items) |row| {
         var pixels: usize = 0;
@@ -2185,6 +2243,131 @@ test "sidebar framing folder captions own the source-defined eighteen point gap"
     try std.testing.expectEqual(@as(usize, 2), checked);
 }
 
+test "remaining sidebar interaction parity paints active navigation selection blue" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendSidebarInteractionFixtures(allocator, &model);
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    const cases = [_]struct {
+        surface: Surface,
+        kind: RowKind,
+        project_path: ?[]const u8,
+    }{
+        .{ .surface = .overview, .kind = .overview, .project_path = null },
+        .{ .surface = .quick_chats, .kind = .quick_chat_overview, .project_path = null },
+        .{ .surface = .project, .kind = .open_project, .project_path = "C:\\local" },
+        .{ .surface = .project, .kind = .open_project, .project_path = "ssh://host/remote" },
+    };
+    for (cases) |case| {
+        if (case.project_path) |path| try std.testing.expect(model.selectProject(path));
+        const selected_row = for (rows.items) |row| {
+            if (row.kind != case.kind) continue;
+            if (case.project_path) |path| {
+                if (row.project_path == null or !std.mem.eql(u8, row.project_path.?, path)) continue;
+            }
+            break row;
+        } else return error.TestUnexpectedResult;
+
+        draw(bitmap.hdc, &model, case.surface, true, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        try std.testing.expectEqual(
+            @as(u32, Tokens.pane_focus_tint),
+            c.GetPixel(bitmap.hdc, 100, selected_row.top + 1),
+        );
+        draw(bitmap.hdc, &model, case.surface, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        try std.testing.expectEqual(
+            @as(u32, 0x003A3A44),
+            c.GetPixel(bitmap.hdc, 100, selected_row.top + 1),
+        );
+    }
+}
+
+test "remaining sidebar interaction parity keeps navigation controls hover-only and directional" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    try appendSidebarInteractionFixtures(allocator, &model);
+    var state = State.init(allocator);
+    defer state.deinit();
+    var bitmap = try TestSidebarBitmap.init();
+    defer bitmap.deinit();
+    var rows = try appendRows(allocator, &model, null, 0, &state);
+    defer rows.deinit(allocator);
+    const expected_kinds = [_]RowKind{
+        .overview,
+        .loop,
+        .quick_chat_overview,
+        .quick_chat,
+        .local_heading,
+        .open_project,
+        .loop,
+        .remote_heading,
+        .open_project,
+        .loop,
+    };
+    try std.testing.expectEqual(expected_kinds.len, rows.items.len);
+    for (expected_kinds, rows.items) |kind, row| try std.testing.expectEqual(kind, row.kind);
+
+    const control_color: u32 = 0x00B8B8B8;
+    const heading_color: u32 = 0x00909090;
+    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    var navigation_rows: usize = 0;
+    var headings: usize = 0;
+    for (rows.items) |row| {
+        switch (row.kind) {
+            .overview, .open_project, .quick_chat_overview => {
+                const add_bounds = if (row.kind == .quick_chat_overview) newChatBounds(row) else newLoopBounds(row);
+                const disclosure = if (row.kind == .quick_chat_overview) chatsDisclosureBounds(row) else disclosureBounds(row);
+                const add_control: RowControl = if (row.kind == .quick_chat_overview) .new_chat else .add_loop;
+                const disclosure_control: RowControl = if (row.kind == .quick_chat_overview) .chats_disclosure else .disclosure;
+                try std.testing.expectEqual(@as(i32, 174), add_bounds.left);
+                try std.testing.expectEqual(@as(i32, 198), add_bounds.right);
+                try std.testing.expectEqual(row.top - 3, add_bounds.top);
+                try std.testing.expectEqual(row.top + 29, add_bounds.bottom);
+                try std.testing.expectEqual(@as(i32, 198), disclosure.left);
+                try std.testing.expectEqual(rowBounds(row).right, disclosure.right);
+                try std.testing.expectEqual(add_control, rowControlAt(add_bounds.left, row.top + 8, row).?);
+                try std.testing.expectEqual(disclosure_control, rowControlAt(disclosure.left, row.top + 8, row).?);
+                try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, add_bounds, control_color));
+                try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, disclosure, control_color));
+
+                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                try std.testing.expect(sidebarTestPixelCount(bitmap, add_bounds, control_color) > 0);
+                try expectSidebarTestDisclosureDirection(bitmap, disclosure, control_color, false);
+                navigation_rows += 1;
+            },
+            .local_heading, .remote_heading => {
+                const disclosure = rect(198, row.top, rowBounds(row).right, row.top + 20);
+                try std.testing.expectEqual(@as(usize, 0), sidebarTestPixelCount(bitmap, disclosure, heading_color));
+                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                try expectSidebarTestDisclosureDirection(bitmap, disclosure, heading_color, false);
+                headings += 1;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), navigation_rows);
+    try std.testing.expectEqual(@as(usize, 2), headings);
+
+    try state.toggleProject(global_project_path);
+    try state.toggleProject("C:\\local");
+    try state.toggleProject("ssh://host/remote");
+    state.chats_collapsed = true;
+    var collapsed_rows = try appendRows(allocator, &model, null, 0, &state);
+    defer collapsed_rows.deinit(allocator);
+    for (collapsed_rows.items) |row| {
+        if (row.kind != .overview and row.kind != .open_project and row.kind != .quick_chat_overview) continue;
+        const disclosure = if (row.kind == .quick_chat_overview) chatsDisclosureBounds(row) else disclosureBounds(row);
+        draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+        try expectSidebarTestDisclosureDirection(bitmap, disclosure, control_color, true);
+    }
+}
+
 test "sidebar framing rounds every selected navigation surface inside the rail" {
     // macOS delegates selection to List.listStyle(.sidebar), not a full-width fill.
     const allocator = std.testing.allocator;
@@ -2201,7 +2384,7 @@ test "sidebar framing rounds every selected navigation surface inside the rail" 
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     for (surfaces, kinds) |surface, kind| {
-        draw(bitmap.hdc, &model, surface, null, "", 0, "", 800, "", "", &state, -1, allocator);
+        draw(bitmap.hdc, &model, surface, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
         const row = for (rows.items) |candidate| {
             if (candidate.kind == kind) break candidate;
         } else return error.TestUnexpectedResult;
@@ -2240,12 +2423,12 @@ test "sidebar framing rounds reclaimable worktree selection without selecting un
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .workspace, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
     const bounds = rowBounds(row);
     try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, bounds.left, bounds.top));
     try std.testing.expectEqual(@as(u32, 0x003A3A44), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
     inspection.entries.items[0].dirty = true;
-    draw(bitmap.hdc, &model, .workspace, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, false, &inspection, "worktree", 0, "", 800, "", "", &state, -1, allocator);
     try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, 100, bounds.top + 1));
 }
 
@@ -2328,7 +2511,7 @@ test "sidebar row parity paints solid and hollow states on the production draw p
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .overview, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .overview, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     const colors = [_]u32{ 0x000A9FFF, 0x000A9FFF, 0x00FF840A, 0x00FF840A, 0x0058D130, 0x003A45FF, 0x00F25ABF, 0x006F6C6C, 0x006F6C6C };
@@ -2389,7 +2572,7 @@ test "sidebar row parity keeps section controls trailing and header icons aligne
     defer bitmap.deinit();
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
-    draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var headers_checked: usize = 0;
     var sections_checked: usize = 0;
     for (rows.items) |row| {
@@ -2413,7 +2596,7 @@ test "sidebar row parity keeps section controls trailing and header icons aligne
                     while (x < 220) : (x += 1)
                         try std.testing.expectEqual(@as(u32, Tokens.workspace_rail), c.GetPixel(bitmap.hdc, x, y));
                 }
-                draw(bitmap.hdc, &model, .workspace, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
+                draw(bitmap.hdc, &model, .workspace, false, null, "", 0, "", 800, "", "", &state, row.top + 8, allocator);
                 var chevron_pixels: usize = 0;
                 y = row.top;
                 while (y < row.top + 20) : (y += 1) {
@@ -2445,7 +2628,7 @@ test "sidebar row parity gives short elapsed labels spare title space" {
     defer state.deinit();
     var bitmap = try TestSidebarBitmap.init();
     defer bitmap.deinit();
-    draw(bitmap.hdc, &model, .overview, null, "", 0, "", 800, "", "", &state, -1, allocator);
+    draw(bitmap.hdc, &model, .overview, false, null, "", 0, "", 800, "", "", &state, -1, allocator);
     var rows = try appendRows(allocator, &model, null, 0, &state);
     defer rows.deinit(allocator);
     const loop = for (rows.items) |row| {
@@ -2707,7 +2890,7 @@ test "sidebar draw clips rows to the content viewport and keeps status text insi
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
     const long_status = "S" ** 120;
-    draw(hdc, &model, .project, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, false, null, "", 0, long_status, viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     const content_bottom = contentViewportBottom(viewport_bottom, false, false);
     const status = statusTextRect(viewport_bottom, false, false);
@@ -2754,7 +2937,7 @@ test "sidebar paints an open project whose daemon name is empty" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, .project, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, false, null, "", 0, "", 800, "", "", &state, -1, draw_allocator.allocator());
 }
 
 fn manyLoopModel(allocator: std.mem.Allocator, loops: usize) !GraphModel.Model {
@@ -2818,7 +3001,7 @@ test "scrolled rows are not drawn over the application header inset" {
     defer _ = c.SelectObject(hdc, previous);
     var draw_allocator = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(draw_allocator.deinit() == .ok);
-    draw(hdc, &model, .project, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
+    draw(hdc, &model, .project, false, null, "", scroll, "", viewport_bottom, "", "", &state, -1, draw_allocator.allocator());
 
     // The goalBased accent bar is only ever painted by loop rows.
     const accent: u32 = 0x00709E19;
@@ -3011,10 +3194,9 @@ fn fill(hdc: c.HDC, bounds: c.RECT, color: u32) void {
     }
 }
 
-fn drawSelection(hdc: c.HDC, bounds: c.RECT) void {
-    // macOS's sidebar List supplies the rounded surface. Retain the existing neutral
-    // ink: Sidebar.draw has no app/window activation input to qualify an accent fill.
-    const brush = c.CreateSolidBrush(0x003A3A44) orelse {
+fn drawSelection(hdc: c.HDC, bounds: c.RECT, selection_active: bool) void {
+    const color = if (selection_active) Tokens.pane_focus_tint else 0x003A3A44;
+    const brush = c.CreateSolidBrush(color) orelse {
         std.log.err("Sidebar selection brush creation failed", .{});
         return;
     };

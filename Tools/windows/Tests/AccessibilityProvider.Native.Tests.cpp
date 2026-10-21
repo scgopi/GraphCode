@@ -10,6 +10,7 @@
 
 extern "C" IRawElementProviderSimple *gc_uia_create(HWND hwnd);
 extern "C" void gc_uia_release(IRawElementProviderSimple *provider);
+extern "C" HRESULT gc_uia_set_header_focus(IRawElementProviderSimple *provider, const char *identity);
 extern "C" HRESULT gc_uia_update(IRawElementProviderSimple *provider, const char *status,
                                    const char **identities, const char **names,
                                    const int *parents, const int *selected,
@@ -284,14 +285,22 @@ static void nativeSidebarGeometryChecks(IRawElementProviderSimple *provider, HWN
 // A window that records the commands and sidebar-scroll requests the provider sends it, the way
 // the shell's window procedure receives them.
 static const UINT kSidebarScrollMessage = WM_APP + 47;
+static const UINT kHeaderFocusMessage = WM_APP + 46;
 enum ScrollOperation { kScrollSetPercent = 5, kScrollIntoView = 6 };
 struct SentMessage { WPARAM wparam; LPARAM lparam; };
 static std::vector<WPARAM> posted_commands;
 static std::vector<SentMessage> sidebar_scroll_requests;
+static bool header_focus_received = false;
+static WPARAM header_focus_request = 0;
 static LRESULT sidebar_scroll_result = 1;
 
 static LRESULT CALLBACK captureProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   if (message == WM_COMMAND) posted_commands.push_back(wparam);
+  if (message == kHeaderFocusMessage) {
+    header_focus_received = true;
+    header_focus_request = wparam;
+    return 1;
+  }
   if (message == kSidebarScrollMessage) {
     sidebar_scroll_requests.push_back({wparam, lparam});
     return sidebar_scroll_result;
@@ -333,6 +342,87 @@ static IUnknown *pattern(IRawElementProviderFragment *fragment, PATTERNID id) {
   if (simple->GetPatternProvider(id, &result) != S_OK) result = nullptr;
   simple->Release();
   return result;
+}
+
+static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND hwnd,
+                                       IRawElementProviderFragment *root_fragment) {
+  IRawElementProviderFragmentRoot *root = nullptr;
+  check(root_fragment &&
+            root_fragment->QueryInterface(IID_PPV_ARGS(&root)) == S_OK && root,
+        "header overflow provider supports fragment hit-testing");
+  if (!root) return;
+  const char *identity = "header-overflow:actions";
+  const char *identities[] = {identity};
+  const char *names[] = {"More actions"};
+  const int parents[] = {1};
+  const int none[] = {0};
+  const int eligible[] = {1};
+  const int invokable_flags[] = {1};
+  const int bounds[] = {444, 5, 480, 29};
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  check(update(provider, "Header overflow", identities, names, parents, none, eligible,
+               invokable_flags, bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
+        "header overflow publishes");
+
+  auto *projects = child(root_fragment, NavigateDirection_FirstChild);
+  auto *overflow = child(projects, NavigateDirection_FirstChild);
+  checkName(overflow, L"More actions");
+  check(stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(L"header-overflow-", 0) == 0,
+        "header overflow exposes its stable automation id prefix");
+
+  IRawElementProviderSimple *simple = nullptr;
+  check(overflow && overflow->QueryInterface(IID_PPV_ARGS(&simple)) == S_OK && simple,
+        "header overflow supports native UIA properties");
+  if (simple) {
+    VARIANT control_type;
+    VariantInit(&control_type);
+    const bool is_button = simple->GetPropertyValue(UIA_ControlTypePropertyId, &control_type) == S_OK &&
+        control_type.vt == VT_I4 && control_type.lVal == UIA_ButtonControlTypeId;
+    check(is_button, "header overflow is exposed as a Button");
+    VariantClear(&control_type);
+
+    VARIANT keyboard_focusable;
+    VariantInit(&keyboard_focusable);
+    const bool is_focusable = simple->GetPropertyValue(UIA_IsKeyboardFocusablePropertyId, &keyboard_focusable) == S_OK &&
+        keyboard_focusable.vt == VT_BOOL && keyboard_focusable.boolVal == VARIANT_TRUE;
+    check(is_focusable, "header overflow is keyboard focusable");
+    VariantClear(&keyboard_focusable);
+    simple->Release();
+  }
+  check(invokable(overflow), "header overflow exposes Invoke");
+  IUnknown *selection_item = pattern(overflow, UIA_SelectionItemPatternId);
+  check(selection_item == nullptr, "header overflow is not a SelectionItem");
+  if (selection_item) selection_item->Release();
+
+  auto *invoke = static_cast<IInvokeProvider *>(pattern(overflow, UIA_InvokePatternId));
+  check(invoke != nullptr, "header overflow exposes IInvokeProvider");
+  posted_commands.clear();
+  if (invoke) {
+    check(invoke->Invoke() == S_OK, "header overflow Invoke succeeds");
+    invoke->Release();
+  }
+  check(posted_commands.empty(), "header overflow Invoke posts outside the UIA call");
+  drainMessages(hwnd);
+  const WPARAM expected_command = 0x8000000000000000ULL | identityPayload(identity);
+  check(posted_commands.size() == 1 && posted_commands[0] == expected_command,
+        "header overflow posts its exact dynamic-invoke identity");
+
+  header_focus_received = false;
+  header_focus_request = 0;
+  check(overflow && overflow->SetFocus() == S_OK,
+        "header overflow SetFocus routes through the header-focus message");
+  check(header_focus_received && header_focus_request == identityPayload(identity),
+        "header overflow SetFocus sends its exact identity payload");
+  check(gc_uia_set_header_focus(provider, identity) == S_OK,
+        "header overflow focus synchronization succeeds and raises a focus event");
+  POINT origin{0, 0};
+  ClientToScreen(hwnd, &origin);
+  expectHit(root, origin, 460, 20, L"More actions",
+            "header overflow wins native UIA coordinate hit-testing");
+
+  if (overflow) overflow->Release();
+  if (projects) projects->Release();
+  root->Release();
 }
 
 // The update banner must be invokable through COM, and Invoke must post exactly the command
@@ -600,6 +690,7 @@ static void nativeCommandAndScrollChecks() {
     IRawElementProviderFragment *root = nullptr;
     check(provider->QueryInterface(IID_PPV_ARGS(&root)) == S_OK, "capture root fragment exists");
     if (root) {
+      nativeHeaderOverflowChecks(provider, capture, root);
       nativeBannerInvokeChecks(provider, capture, root);
       nativeQuickChatRestartChecks(provider, capture, root);
       nativeQuickChatWorkspaceBarChecks(provider, root);

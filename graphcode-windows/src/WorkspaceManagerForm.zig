@@ -1,13 +1,15 @@
 const std = @import("std");
 const Manager = @import("WorkspaceManager.zig");
+const Lifecycle = @import("WorkspaceLifecycle.zig");
 const NativeForms = @import("NativeForms.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
 const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
-const ModalTeardown = @import("ModalTeardown.zig");
+const SheetFramework = @import("SheetFramework.zig");
 
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeWorkspaceManager");
+const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Manage Workspaces");
 const list_id = 9721;
 const open_id = 9722;
 const rename_id = 9723;
@@ -42,6 +44,15 @@ const Dialog = struct {
     rename: c.HWND = null,
     new: c.HWND = null,
     delete: c.HWND = null,
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    title_label: c.HWND = null,
+    note_label: c.HWND = null,
+    dpi: u32 = Dpi.base_dpi,
+    list_height: i32 = 220,
+    detail_y: i32 = 276,
+    reason_y: i32 = 396,
+    content_extent: i32 = 468,
     closed: bool = false,
     failure: ?anyerror = null,
 
@@ -49,6 +60,7 @@ const Dialog = struct {
         self.handoff.cancel(self.model.allocator);
         self.work.cancel();
         self.closed = true;
+        if (self.host) |host| host.requestClose();
     }
 };
 
@@ -76,70 +88,134 @@ pub fn show(parent: c.HWND, model: *Manager.Model, work: *Manager.SummaryWork) !
 
 fn run(parent: c.HWND, dialog: *Dialog) !void {
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    klass.lpfnWndProc = @ptrCast(&windowProc);
+    klass.lpfnWndProc = @ptrCast(&contentProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = class_name.ptr;
     klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
-    klass.hbrBackground = Win32.opaquePointerFromInt(c.HBRUSH, c.COLOR_WINDOW + 1);
+    klass.hbrBackground = null;
     if (c.RegisterClassW(&klass) == 0 and c.GetLastError() != c.ERROR_CLASS_ALREADY_EXISTS)
         return error.WorkspaceManagerClassFailed;
-    const dpi = Dpi.normalize(Win32.dpiForWindow(parent));
-    const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
-        class_name.ptr,
-        std.unicode.utf8ToUtf16LeStringLiteral("Manage Workspaces").ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
-        c.CW_USEDEFAULT,
-        c.CW_USEDEFAULT,
-        Dpi.scale(920, dpi),
-        @min(Dpi.scale(560, dpi), c.GetSystemMetrics(c.SM_CYSCREEN) - Dpi.scale(64, dpi)),
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse return error.WorkspaceManagerCreationFailed;
-    _ = c.EnableWindow(parent, 0);
-    defer ModalTeardown.dismiss(hwnd, parent);
-    var client: c.RECT = undefined;
-    if (c.GetClientRect(hwnd, &client) == 0) return error.WorkspaceManagerLayoutFailed;
-    const list_height = listHeight(client.bottom, dpi);
-    const detail_top = 50 + list_height;
-    const reason_top = detail_top + 112;
-    const buttons_top = reason_top + 44;
-    _ = try control(hwnd, dpi, "STATIC", "Workspaces - saved summaries are not live totals", 0, 0, 16, 12, 870, 24);
-    dialog.list = try control(hwnd, dpi, "LISTBOX", "", list_id, c.WS_TABSTOP | c.WS_VSCROLL | c.WS_HSCROLL | c.WS_BORDER | c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT, 16, 40, 870, list_height);
-    dialog.detail = try control(hwnd, dpi, "EDIT", "Select a workspace to see its full path and actions.", detail_id, c.WS_TABSTOP | c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL, 16, detail_top, 870, 104);
-    _ = try control(hwnd, dpi, "STATIC", Manager.delete_note, 0, 0, 16, reason_top, 870, 36);
-    dialog.open = try control(hwnd, dpi, "BUTTON", "Open", open_id, c.WS_TABSTOP, 16, buttons_top, 110, 30);
-    dialog.rename = try control(hwnd, dpi, "BUTTON", "Rename...", rename_id, c.WS_TABSTOP, 138, buttons_top, 120, 30);
-    dialog.new = try control(hwnd, dpi, "BUTTON", "New Workspace...", new_id, c.WS_TABSTOP, 270, buttons_top, 160, 30);
-    dialog.delete = try control(hwnd, dpi, "BUTTON", "Delete...", delete_id, c.WS_TABSTOP, 442, buttons_top, 180, 30);
-    const done = try control(hwnd, dpi, "BUTTON", "Done", done_id, c.WS_TABSTOP | c.BS_DEFPUSHBUTTON, 776, buttons_top, 110, 30);
-    _ = c.SendMessageW(hwnd, c.DM_SETDEFID, done_id, 0);
+    dialog.dpi = Dpi.normalize(Win32.dpiForWindow(parent));
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, parent, dialog);
+    const hwnd = host.hwnd;
     _ = try syncRows(dialog);
     try syncDetails(dialog);
     if (c.SetTimer(hwnd, timer_id, 100, null) == 0) return error.WorkspaceManagerTimerFailed;
     defer _ = c.KillTimer(hwnd, timer_id);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-    _ = c.SetFocus(done);
-    var message: c.MSG = undefined;
-    while (!dialog.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            dialog.cancel();
-            if (code == 0) c.PostQuitMessage(@intCast(message.wParam));
-            if (code < 0) return error.WorkspaceManagerMessageFailed;
-            break;
-        }
-        if (message.message == c.WM_KEYDOWN and message.wParam == c.VK_ESCAPE) {
-            dialog.cancel();
-            continue;
-        }
-        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
+    _ = c.SendMessageW(hwnd, c.DM_SETDEFID, done_id, 0);
+    _ = c.SetFocus(dialog.host.?.hwnd);
+    try host.runModal();
+}
+
+fn createSheet(host: *SheetFramework.Host, parent: c.HWND, dialog: *Dialog) !void {
+    dialog.list_height = std.math.clamp(96 + @as(i32, @intCast(dialog.model.rows.len)) * 24, 144, 260);
+    dialog.detail_y = 56 + dialog.list_height;
+    dialog.reason_y = dialog.detail_y + 120;
+    dialog.content_extent = dialog.reason_y + 72;
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = dialog.dpi,
+            .desired_width = 920,
+            .minimum_width = 620,
+            .heights = .{ .minimum = 440, .ideal = 560, .maximum = 760 },
+            .content_extent = dialog.content_extent,
+        },
+        .context = dialog,
+        .on_layout = &layoutSheet,
+        .on_message = &sheetMessage,
+    });
+    if (c.SetWindowTextW(host.hwnd, window_title.ptr) == 0) return error.WorkspaceManagerCreationFailed;
+    dialog.host = host;
+    dialog.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
+        class_name.ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        0,
+        0,
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.WorkspaceManagerCreationFailed;
+    dialog.title_label = try control(dialog.content_root, dialog.dpi, "STATIC", "Workspaces - saved summaries are not live totals", 0, 0, 16, 12, 870, 24);
+    dialog.list = try control(dialog.content_root, dialog.dpi, "LISTBOX", "", list_id, c.WS_TABSTOP | c.WS_VSCROLL | c.WS_HSCROLL | c.LBS_NOTIFY | c.LBS_NOINTEGRALHEIGHT, 16, 40, 870, dialog.list_height);
+    dialog.detail = try control(dialog.content_root, dialog.dpi, "EDIT", "Select a workspace to see its full path and actions.", detail_id, c.WS_TABSTOP | c.ES_READONLY | c.ES_MULTILINE | c.ES_AUTOVSCROLL | c.WS_VSCROLL, 16, dialog.detail_y, 870, 104);
+    dialog.note_label = try control(dialog.content_root, dialog.dpi, "STATIC", Manager.delete_note, 0, 0, 16, dialog.reason_y, 870, 52);
+    const actions = workspaceFooterActions(host.hwnd, dialog.dpi);
+    try host.configureFooter(&actions);
+    dialog.open = try host.createFooterButton(open_id, std.unicode.utf8ToUtf16LeStringLiteral("Open").ptr);
+    dialog.rename = try host.createFooterButton(rename_id, std.unicode.utf8ToUtf16LeStringLiteral("Rename...").ptr);
+    dialog.new = try host.createFooterButton(new_id, std.unicode.utf8ToUtf16LeStringLiteral("New Workspace...").ptr);
+    dialog.delete = try host.createFooterButton(delete_id, std.unicode.utf8ToUtf16LeStringLiteral("Delete...").ptr);
+    const done = try host.createFooterButton(done_id, std.unicode.utf8ToUtf16LeStringLiteral("Done").ptr);
+    for ([_]c.HWND{ dialog.open, dialog.rename, dialog.new, dialog.delete, done }) |button|
+        AppFont.apply(button, AppFont.control_size, false);
+    try host.relayout();
+}
+
+fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const dialog: *Dialog = @ptrCast(@alignCast(context.?));
+    if (dialog.host) |host| dialog.dpi = Dpi.normalize(host.options.layout_input.dpi);
+    if (dialog.content_root == null) return;
+    const font = AppFont.getForDpi(AppFont.control_size, false, dialog.dpi);
+    for ([_]c.HWND{
+        dialog.title_label,
+        dialog.list,
+        dialog.detail,
+        dialog.note_label,
+        dialog.open,
+        dialog.rename,
+        dialog.new,
+        dialog.delete,
+        c.GetDlgItem(dialog.host.?.hwnd, done_id),
+    }) |control_handle| {
+        if (control_handle != null)
+            _ = c.SendMessageW(control_handle, c.WM_SETFONT, @intFromPtr(font), 1);
     }
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(dialog.dpi).scrollbar_width else 0;
+    const content_width = @max(0, layout.viewport.width - scrollbar);
+    if (c.MoveWindow(dialog.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
+        return error.WorkspaceManagerLayoutFailed;
+    const inset = Dpi.scale(16, dialog.dpi);
+    const width = @max(0, content_width - inset * 2);
+    const positions = [_]struct { hwnd: c.HWND, y: i32, height: i32 }{
+        .{ .hwnd = dialog.title_label, .y = 12, .height = 24 },
+        .{ .hwnd = dialog.list, .y = 40, .height = dialog.list_height },
+        .{ .hwnd = dialog.detail, .y = dialog.detail_y, .height = 104 },
+        .{ .hwnd = dialog.note_label, .y = dialog.reason_y, .height = 52 },
+    };
+    for (positions) |entry| if (entry.hwnd != null) {
+        if (c.MoveWindow(entry.hwnd, inset, Dpi.scale(entry.y, dialog.dpi), width, Dpi.scale(entry.height, dialog.dpi), 1) == 0)
+            return error.WorkspaceManagerLayoutFailed;
+    };
+}
+
+fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return Dpi.scale(fallback, dpi);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, @intCast(text.len), &size) == 0)
+        return Dpi.scale(fallback, dpi);
+    return size.cx;
+}
+
+fn workspaceFooterActions(hwnd: c.HWND, dpi: u32) [5]SheetFramework.FooterAction {
+    return .{
+        .{ .id = open_id, .role = .secondary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Open"), 36) },
+        .{ .id = rename_id, .role = .secondary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Rename..."), 68) },
+        .{ .id = new_id, .role = .secondary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("New Workspace..."), 112) },
+        .{ .id = delete_id, .role = .destructive, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Delete..."), 66) },
+        .{ .id = done_id, .role = .primary, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Done"), 36), .return_hint = true },
+    };
 }
 
 fn listHeight(client_height: i32, dpi: u32) i32 {
@@ -237,20 +313,14 @@ fn syncDetails(dialog: *Dialog) !void {
     if (c.SetWindowTextW(dialog.detail, wide.ptr) == 0) return error.WorkspaceManagerTextFailed;
 }
 
-fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+fn handleMessage(dialog: *Dialog, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM) bool {
     switch (message) {
-        c.WM_DESTROY => {
-            if (!dialog.closed) dialog.cancel();
-            return 0;
-        },
-        c.DM_GETDEFID => return (c.DC_HASDEFID << 16) | done_id,
         c.WM_CLOSE => {
             dialog.cancel();
-            return 0;
+            return true;
         },
         c.WM_TIMER => {
-            if (wparam != timer_id) return 0;
+            if (wparam != timer_id) return false;
             const drained = dialog.work.poll(dialog.model);
             if (drained) {
                 _ = c.KillTimer(hwnd, timer_id);
@@ -262,44 +332,140 @@ fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM)
             const changed = syncRows(dialog) catch |err| {
                 dialog.failure = err;
                 dialog.cancel();
-                return 0;
+                return true;
             };
             if (changed) syncDetails(dialog) catch |err| {
                 dialog.failure = err;
                 dialog.cancel();
-                return 0;
+                return true;
             };
-            if (drained and dialog.handoff.pending != null) dialog.closed = true;
-            return 0;
+            finishHandoffAfterDrain(dialog, drained);
+            return true;
         },
         c.WM_COMMAND => {
             const id = wparam & 0xffff;
             if (id == done_id or id == cancel_id) {
                 dialog.cancel();
-                return 0;
+                return true;
             }
             if (id == list_id and wparam >> 16 == c.LBN_SELCHANGE and dialog.handoff.pending == null) {
                 const selected = c.SendMessageW(dialog.list, c.LB_GETCURSEL, 0, 0);
                 dialog.selection = if (selected >= 0 and selected < dialog.model.rows.len) @intCast(selected) else null;
+            } else if (id == list_id and wparam >> 16 == c.LBN_SETFOCUS) {
+                dialog.host.?.reveal(Dpi.scale(36, dialog.dpi), Dpi.scale(48 + dialog.list_height, dialog.dpi)) catch {};
+            } else if (id == detail_id and wparam >> 16 == c.EN_SETFOCUS) {
+                dialog.host.?.reveal(Dpi.scale(dialog.detail_y - 4, dialog.dpi), Dpi.scale(dialog.detail_y + 112, dialog.dpi)) catch {};
             } else if (actionForCommand(id)) |kind| {
-                if (dialog.handoff.pending != null) return 0;
+                if (dialog.handoff.pending != null) return true;
                 dialog.handoff.pending = dialog.model.capture(kind, dialog.selection) catch |err| {
                     dialog.failure = err;
                     dialog.cancel();
-                    return 0;
+                    return true;
                 };
                 dialog.work.cancel();
-                if (dialog.work.poll(dialog.model)) dialog.closed = true;
+                if (dialog.work.poll(dialog.model)) {
+                    dialog.closed = true;
+                    dialog.host.?.requestClose();
+                }
             }
             syncDetails(dialog) catch |err| {
                 dialog.failure = err;
                 dialog.cancel();
             };
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn finishHandoffAfterDrain(dialog: *Dialog, drained: bool) void {
+    if (!drained or dialog.handoff.pending == null) return;
+    dialog.closed = true;
+    if (dialog.host) |host| host.requestClose();
+}
+
+fn sheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    const dialog: *Dialog = @ptrCast(@alignCast(context.?));
+    if (message == c.WM_DRAWITEM) {
+        result.* = drawFooterItem(dialog.host.?, lparam);
+        return true;
+    }
+    if (message == c.DM_GETDEFID) {
+        result.* = (c.DC_HASDEFID << 16) | done_id;
+        return true;
+    }
+
+    if (handleMessage(dialog, hwnd, message, wparam)) {
+        result.* = 0;
+        return true;
+    }
+    return false;
+}
+
+fn drawFooterItem(host: *SheetFramework.Host, lparam: c.LPARAM) c.LRESULT {
+    const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+    var role = SheetFramework.ActionRole.secondary;
+    var return_hint = false;
+    for (host.footer_actions[0..host.footer_action_count]) |action| {
+        if (action.id != item.CtlID) continue;
+        role = action.role;
+        return_hint = action.return_hint and action.role.isPrimary();
+        break;
+    }
+    SheetFramework.drawButton(item.hDC, .{ .x = item.rcItem.left, .y = item.rcItem.top, .width = item.rcItem.right - item.rcItem.left, .height = item.rcItem.bottom - item.rcItem.top }, host.options.layout_input.dpi, role, item.itemState & c.ODS_DISABLED == 0, item.itemState & c.ODS_SELECTED != 0) catch return 0;
+    var text: [128]u16 = [_]u16{0} ** 128;
+    const count = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.SetTextColor(item.hDC, SheetFramework.controlPaintStyle(.button, item.itemState & c.ODS_DISABLED == 0).foreground);
+    var bounds = item.rcItem;
+    if (return_hint) bounds.right -= SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, count, &bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    if (return_hint) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = bounds.right;
+        _ = c.DrawTextW(item.hDC, std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr, 1, &hint_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    }
+    return 1;
+}
+
+fn contentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    const dialog = active orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (handleMessage(dialog, dialog.host.?.hwnd, message, wparam)) return 0;
+    switch (message) {
+        c.WM_CTLCOLORSTATIC => return dialog.host.?.brushes.apply(Win32.opaquePointerFromInt(c.HDC, wparam), .static, true) catch 0,
+        c.WM_CTLCOLOREDIT, c.WM_CTLCOLORLISTBOX => return dialog.host.?.brushes.apply(Win32.opaquePointerFromInt(c.HDC, wparam), .edit, true) catch 0,
+        c.WM_ERASEBKGND => {
+            var bounds: c.RECT = undefined;
+            if (c.GetClientRect(hwnd, &bounds) != 0) _ = c.FillRect(Win32.opaquePointerFromInt(c.HDC, wparam), &bounds, dialog.host.?.brushes.panel);
+            return 1;
+        },
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const hdc = c.BeginPaint(hwnd, &paint);
+            if (hdc != null) {
+                const focus = c.GetFocus();
+                const fields = [_]c.HWND{ dialog.list, dialog.detail };
+                for (fields) |field| if (field != null) {
+                    var bounds: c.RECT = undefined;
+                    if (c.GetWindowRect(field, &bounds) != 0) {
+                        var origin = c.POINT{ .x = bounds.left, .y = bounds.top };
+                        _ = c.ScreenToClient(hwnd, &origin);
+                        SheetFramework.drawField(hdc, .{
+                            .x = origin.x - Dpi.scale(4, dialog.dpi),
+                            .y = origin.y - Dpi.scale(4, dialog.dpi),
+                            .width = bounds.right - bounds.left + Dpi.scale(8, dialog.dpi),
+                            .height = bounds.bottom - bounds.top + Dpi.scale(8, dialog.dpi),
+                        }, dialog.dpi, focus == field) catch {};
+                    }
+                };
+                _ = c.EndPaint(hwnd, &paint);
+            }
             return 0;
         },
-        else => {},
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 test "workspace manager controls route Delete to a delete action and never route Done" {
@@ -331,10 +497,118 @@ test "workspace manager modal lease blocks reentry and releases before handoff" 
     defer next.deinit();
 }
 
+test "workspace manager drained handoff closes its sheet host" {
+    var cached: [0]CachedRow = .{};
+    var host: SheetFramework.Host = .{};
+    var dialog = Dialog{
+        .model = undefined,
+        .work = undefined,
+        .handoff = .{ .pending = .{ .kind = .new } },
+        .cached = &cached,
+        .host = &host,
+    };
+    finishHandoffAfterDrain(&dialog, false);
+    try std.testing.expect(!dialog.closed and !host.closed);
+    finishHandoffAfterDrain(&dialog, true);
+    try std.testing.expect(dialog.closed and host.closed);
+}
+
 test "workspace manager shorter screen layout preserves footer room at common DPI" {
     for ([_]u32{ 96, 144, 192 }) |dpi| {
         const height = listHeight(Dpi.scale(440, dpi), dpi);
         try std.testing.expectEqual(@as(i32, 179), height);
         try std.testing.expect(50 + height + 112 + 44 + 30 < 440);
+    }
+}
+
+fn hiddenOwner() !c.HWND {
+    return c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, null, c.WS_POPUP, 20, 20, 1000, 760, null, null, c.GetModuleHandleW(null), null) orelse error.WorkspaceManagerCreationFailed;
+}
+
+test "dialog framework: workspace manager uses hidden sheet viewport and role footer" {
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    const unavailable = Lifecycle.Workspace{
+        .name = "unavailable",
+        .path = "C:\\fixture\\.graphcode-unavailable",
+        .identity = "c:/fixture/.graphcode-unavailable",
+        .is_default = false,
+    };
+    var model = try Manager.Model.init(std.testing.allocator, &.{unavailable}, "", &.{.unavailable});
+    defer model.deinit();
+    var work = Manager.SummaryWork{};
+    const cached = try std.testing.allocator.alloc(CachedRow, model.rows.len);
+    @memset(cached, .{});
+    defer {
+        for (cached) |entry| if (entry.text) |value| std.testing.allocator.free(value);
+        std.testing.allocator.free(cached);
+    }
+    var dialog = Dialog{ .model = &model, .work = &work, .selection = 0, .cached = cached };
+    active = &dialog;
+    defer active = null;
+    var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
+    klass.lpfnWndProc = @ptrCast(&contentProc);
+    klass.hInstance = c.GetModuleHandleW(null);
+    klass.lpszClassName = class_name.ptr;
+    _ = c.RegisterClassW(&klass);
+    dialog.dpi = 144;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner, &dialog);
+    _ = try syncRows(&dialog);
+    try syncDetails(&dialog);
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
+    var title: [64]u16 = [_]u16{0} ** 64;
+    const title_length = c.GetWindowTextW(host.hwnd, &title, title.len);
+    try std.testing.expectEqualSlices(u16, window_title[0..window_title.len], title[0..@intCast(title_length)]);
+    try std.testing.expect(c.GetParent(dialog.content_root) == host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(dialog.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    host.options.layout_input.content_extent = Dpi.unscale(host.current_layout.viewport.height, dialog.dpi) + 100;
+    try host.relayout();
+    try std.testing.expect(host.current_layout.scroll.visible);
+    var viewport: c.RECT = undefined;
+    var content: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(host.viewport, &viewport) != 0);
+    try std.testing.expect(c.GetClientRect(dialog.content_root, &content) != 0);
+    try std.testing.expectEqual(
+        SheetFramework.Metrics.forDpi(dialog.dpi).scrollbar_width,
+        (viewport.right - viewport.left) - (content.right - content.left),
+    );
+    try std.testing.expect(host.footer_layout.?.slotFor(delete_id).?.role == .destructive);
+    try std.testing.expect(host.footer_layout.?.slotFor(done_id).?.role == .primary);
+    for ([_]u32{ 192, 96, 144 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        try std.testing.expect(c.IsWindowEnabled(dialog.open) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.rename) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.delete) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.new) != 0);
+        for (host.footer_actions[0..host.footer_action_count]) |action| {
+            if (action.id == open_id or action.id == rename_id or action.id == delete_id)
+                try std.testing.expect(!action.enabled);
+        }
+        try std.testing.expect(!host.footer_layout.?.slotFor(open_id).?.enabled);
+        try std.testing.expect(!host.footer_layout.?.slotFor(rename_id).?.enabled);
+        try std.testing.expect(!host.footer_layout.?.slotFor(delete_id).?.enabled);
+        try std.testing.expectEqual(dpi, dialog.dpi);
+        try std.testing.expectEqual(
+            AppFont.getForDpi(AppFont.control_size, false, dpi),
+            Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(dialog.list, c.WM_GETFONT, 0, 0))),
+        );
+        var title_bounds: c.RECT = undefined;
+        var content_bounds: c.RECT = undefined;
+        try std.testing.expect(c.GetWindowRect(dialog.title_label, &title_bounds) != 0);
+        try std.testing.expect(c.GetWindowRect(dialog.content_root, &content_bounds) != 0);
+        try std.testing.expectEqual(Dpi.scale(16, dpi), title_bounds.left - content_bounds.left);
+    }
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = workspaceFooterActions(host.hwnd, dpi);
+        const width = Dpi.scale(920, dpi);
+        const footer = try SheetFramework.measureFooter(width, Dpi.scale(64, dpi), dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width <= width);
+        for (footer.slice()) |slot| try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= width);
+        try std.testing.expect(actions[4].return_hint);
+        try std.testing.expect(footer.slotFor(done_id).?.bounds.width >=
+            actions[4].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
     }
 }

@@ -1,9 +1,11 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
-const ModalTeardown = @import("ModalTeardown.zig");
 const Tokens = @import("DesignTokens.zig");
 const AppFont = @import("AppFont.zig");
+const Dpi = @import("Dpi.zig");
+const SheetFramework = @import("SheetFramework.zig");
 
 extern fn graphcode_pick_folder(owner: c.HWND, buffer: [*]u16, capacity: c.DWORD) callconv(.c) c_int;
 
@@ -11,19 +13,28 @@ fn darkDialogEraseBackground(hwnd: c.HWND, wparam: c.WPARAM) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
     var client: c.RECT = undefined;
     _ = c.GetClientRect(hwnd, &client);
-    const brush = c.CreateSolidBrush(Tokens.dialog_panel);
-    if (brush != null) {
-        _ = c.FillRect(hdc, &client, brush);
-        _ = c.DeleteObject(brush);
-    }
+    const brush = if (repository_dialog_active and repository_dialog_state.host != null)
+        repository_dialog_state.host.?.brushes.panel
+    else if (operation_dialog_active and operation_dialog_state.host != null)
+        operation_dialog_state.host.?.brushes.panel
+    else
+        darkFieldBrush();
+    _ = c.FillRect(hdc, &client, brush);
     return 1;
 }
 
 fn darkDialogCtlColorStatic(hwnd: c.HWND, wparam: c.WPARAM, error_label: c.HWND) c.LRESULT {
     const hdc = deviceContextFrom(wparam);
     _ = c.SetTextColor(hdc, if (hwnd == error_label) Tokens.dialog_error_text else Tokens.dialog_body_text);
-    _ = c.SetBkMode(hdc, c.TRANSPARENT);
-    return @intCast(@intFromPtr(c.GetStockObject(c.NULL_BRUSH)));
+    _ = c.SetBkColor(hdc, Tokens.dialog_panel);
+    _ = c.SetBkMode(hdc, c.OPAQUE);
+    const brush = if (repository_dialog_active and repository_dialog_state.host != null)
+        repository_dialog_state.host.?.brushes.panel
+    else if (operation_dialog_active and operation_dialog_state.host != null)
+        operation_dialog_state.host.?.brushes.panel
+    else
+        darkFieldBrush();
+    return @intCast(@intFromPtr(brush));
 }
 
 fn darkDialogCtlColorEdit(wparam: c.WPARAM) c.LRESULT {
@@ -606,10 +617,22 @@ const RepositoryDialogState = struct {
     updating_destination: bool = false,
     accepted: bool = false,
     closed: bool = false,
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    labels: [5]c.HWND = .{ null, null, null, null, null },
+    browse: c.HWND = null,
+    dpi: u32 = Dpi.base_dpi,
 };
 
 var repository_dialog_active = false;
 var repository_dialog_state: RepositoryDialogState = undefined;
+
+fn repositoryHeading(kind: DialogKind) []const u8 {
+    return switch (kind) {
+        .clone => clone_title ++ "\r\n" ++ clone_intro,
+        .remote => remote_title ++ "\r\n" ++ remote_intro,
+    };
+}
 
 fn openRepositoryDialog(
     parent: c.HWND,
@@ -627,56 +650,14 @@ fn openRepositoryDialog(
     };
     repository_dialog_active = true;
     errdefer repository_dialog_active = false;
+    errdefer if (repository_dialog_state.clone_parent) |path| allocator.free(path);
 
-    const title = if (kind == .clone) clone_title else remote_title;
-    const wide_title = try wideZ(allocator, title);
-    defer allocator.free(wide_title);
-    const client_width: i32 = 640;
-    const client_height: i32 = if (kind == .clone) 500 else 478;
-    const style = c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU;
-    const ex_style = c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT;
-    var frame = c.RECT{ .left = 0, .top = 0, .right = client_width, .bottom = client_height };
-    _ = c.AdjustWindowRectEx(&frame, style, 0, ex_style);
-    const width = frame.right - frame.left;
-    const height = frame.bottom - frame.top;
-    var owner: c.RECT = undefined;
-    _ = c.GetWindowRect(parent, &owner);
-    const x = owner.left + @divTrunc((owner.right - owner.left) - width, 2);
-    const y = owner.top + @divTrunc((owner.bottom - owner.top) - height, 2);
-    const hwnd = c.CreateWindowExW(
-        ex_style,
-        repository_dialog_class.ptr,
-        wide_title.ptr,
-        style,
-        x,
-        y,
-        width,
-        height,
-        parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse {
-        repository_dialog_active = false;
-        return error.RepositoryDialogCreationFailed;
-    };
-    _ = c.EnableWindow(parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
+    repository_dialog_state.dpi = Dpi.normalize(Win32.dpiForWindow(parent));
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createRepositorySheet(&host, parent);
     _ = c.SetFocus(repository_dialog_state.edits[0]);
-
-    var message: c.MSG = undefined;
-    while (!repository_dialog_state.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            repository_dialog_state.closed = true;
-            break;
-        }
-        if (c.IsDialogMessageW(hwnd, &message) != 0) continue;
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
-    }
-    ModalTeardown.dismiss(hwnd, parent);
+    try host.runModal();
     if (repository_dialog_state.clone_parent) |path| allocator.free(path);
     repository_dialog_active = false;
     if (!repository_dialog_state.accepted) return null;
@@ -685,7 +666,7 @@ fn openRepositoryDialog(
 
 fn registerRepositoryDialogClass() !void {
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    klass.lpfnWndProc = @ptrCast(&repositoryDialogProc);
+    klass.lpfnWndProc = @ptrCast(&repositoryContentProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = repository_dialog_class.ptr;
     klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
@@ -694,30 +675,140 @@ fn registerRepositoryDialogClass() !void {
         return error.RepositoryDialogClassRegistrationFailed;
 }
 
-fn repositoryDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    if (!repository_dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
-    switch (message) {
-        c.WM_CREATE => {
-            createRepositoryDialogControls(hwnd);
-            return 0;
+fn createRepositorySheet(host: *SheetFramework.Host, parent: c.HWND) !void {
+    const extent: i32 = if (repository_dialog_state.kind == .clone) 422 else 400;
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = repository_dialog_state.dpi,
+            .desired_width = 640,
+            .minimum_width = 480,
+            .heights = .{ .minimum = 390, .ideal = extent + 64, .maximum = 680 },
+            .content_extent = extent,
         },
-        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
-        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, repository_dialog_state.error_label),
-        c.WM_CTLCOLOREDIT => return darkDialogCtlColorEdit(wparam),
+        .context = &repository_dialog_state,
+        .on_layout = &layoutRepositorySheet,
+        .on_message = &repositorySheetMessage,
+    });
+    const title = if (repository_dialog_state.kind == .clone) clone_title else remote_title;
+    const wide_title = try wideZ(repository_dialog_state.allocator, title);
+    defer repository_dialog_state.allocator.free(wide_title);
+    if (c.SetWindowTextW(host.hwnd, wide_title.ptr) == 0) return error.RepositoryDialogCreationFailed;
+    repository_dialog_state.host = host;
+    repository_dialog_state.content_root = c.CreateWindowExW(c.WS_EX_CONTROLPARENT, repository_dialog_class.ptr, null, c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN, 0, 0, 0, 0, host.viewport, null, c.GetModuleHandleW(null), null) orelse
+        return error.RepositoryDialogCreationFailed;
+    createRepositoryDialogControls(repository_dialog_state.content_root);
+    const actions = repositoryFooterActions(host.hwnd, repository_dialog_state.dpi, repository_dialog_state.kind);
+    try host.configureFooter(&actions);
+    _ = try host.createFooterButton(id_cancel, std.unicode.utf8ToUtf16LeStringLiteral("Cancel").ptr);
+    _ = try host.createFooterButton(id_accept, if (repository_dialog_state.kind == .clone)
+        std.unicode.utf8ToUtf16LeStringLiteral("Clone").ptr
+    else
+        std.unicode.utf8ToUtf16LeStringLiteral("Connect").ptr);
+    AppFont.apply(c.GetDlgItem(host.hwnd, id_cancel), AppFont.control_size, false);
+    AppFont.apply(c.GetDlgItem(host.hwnd, id_accept), AppFont.control_size, false);
+    try host.relayout();
+}
+
+fn applyControlFontForDpi(control: c.HWND, font: c.HFONT) void {
+    if (control != null) _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(font), 1);
+}
+
+fn applyRepositoryControlFontsForDpi(state: *RepositoryDialogState, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.RepositoryDialogFontCreationFailed;
+    for (state.labels) |label| applyControlFontForDpi(label, font);
+    for (state.edits) |edit| applyControlFontForDpi(edit, font);
+    applyControlFontForDpi(state.destination_hint, font);
+    applyControlFontForDpi(state.error_label, font);
+    applyControlFontForDpi(state.browse, font);
+    applyControlFontForDpi(c.GetDlgItem(state.host.?.hwnd, id_cancel), font);
+    applyControlFontForDpi(c.GetDlgItem(state.host.?.hwnd, id_accept), font);
+}
+
+fn layoutRepositorySheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const state: *RepositoryDialogState = @ptrCast(@alignCast(context.?));
+    if (state.content_root == null) return;
+    state.dpi = state.host.?.options.layout_input.dpi;
+    try applyRepositoryControlFontsForDpi(state, state.dpi);
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
+    const content_width = @max(0, layout.viewport.width - scrollbar);
+    if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
+        return error.RepositoryDialogLayoutFailed;
+    const width = @max(0, content_width - Dpi.scale(48, state.dpi));
+    const clone_y = [_]i32{ 78, 154, 246, 322 };
+    const remote_y = [_]i32{ 78, 154, 230, 306 };
+    if (state.labels[0] != null and c.MoveWindow(state.labels[0], Dpi.scale(24, state.dpi), Dpi.scale(20, state.dpi), width, Dpi.scale(42, state.dpi), 1) == 0)
+        return error.RepositoryDialogLayoutFailed;
+    for (state.edits, 0..) |edit, index| if (edit != null) {
+        const label_y = if (state.kind == .clone) clone_y[index] else remote_y[index];
+        const edit_width = if (state.kind == .clone and index == 1) @max(0, width - Dpi.scale(120, state.dpi)) else width;
+        if (c.MoveWindow(edit, Dpi.scale(24, state.dpi), Dpi.scale(label_y + 24, state.dpi), edit_width, Dpi.scale(28, state.dpi), 1) == 0)
+            return error.RepositoryDialogLayoutFailed;
+        if (state.labels[index + 1] != null and c.MoveWindow(state.labels[index + 1], Dpi.scale(24, state.dpi), Dpi.scale(label_y, state.dpi), width, Dpi.scale(20, state.dpi), 1) == 0)
+            return error.RepositoryDialogLayoutFailed;
+    };
+    if (state.kind == .clone) {
+        if (state.browse != null and c.MoveWindow(state.browse, @max(Dpi.scale(24, state.dpi), content_width - Dpi.scale(132, state.dpi)), Dpi.scale(178, state.dpi), Dpi.scale(108, state.dpi), Dpi.scale(30, state.dpi), 1) == 0)
+            return error.RepositoryDialogLayoutFailed;
+        if (state.destination_hint != null and c.MoveWindow(state.destination_hint, Dpi.scale(24, state.dpi), Dpi.scale(214, state.dpi), width, Dpi.scale(20, state.dpi), 1) == 0)
+            return error.RepositoryDialogLayoutFailed;
+    }
+
+    const error_y: i32 = if (state.kind == .clone) 388 else 366;
+    if (state.error_label != null and c.MoveWindow(state.error_label, Dpi.scale(24, state.dpi), Dpi.scale(error_y, state.dpi), width, Dpi.scale(34, state.dpi), 1) == 0)
+        return error.RepositoryDialogLayoutFailed;
+}
+
+fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
+    const hdc = c.GetDC(hwnd);
+    if (hdc == null) return Dpi.scale(fallback, dpi);
+    defer _ = c.ReleaseDC(hwnd, hdc);
+    const old_font = AppFont.selectForDpi(hdc, AppFont.control_size, false);
+    defer _ = c.SelectObject(hdc, old_font);
+    var size: c.SIZE = undefined;
+    if (c.GetTextExtentPoint32W(hdc, text.ptr, @intCast(text.len), &size) == 0)
+        return Dpi.scale(fallback, dpi);
+    return size.cx;
+}
+
+fn repositoryFooterActions(hwnd: c.HWND, dpi: u32, kind: DialogKind) [2]SheetFramework.FooterAction {
+    const primary_width = if (kind == .clone)
+        footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Clone"), 42)
+    else
+        footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Connect"), 58);
+    return .{
+        .{ .id = id_cancel, .role = .cancel, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Cancel"), 48) },
+        .{ .id = id_accept, .role = .primary, .measured_text_width = primary_width, .return_hint = true },
+    };
+}
+
+fn operationFooterActions(hwnd: c.HWND, dpi: u32) [1]SheetFramework.FooterAction {
+    return .{
+        .{ .id = operation_cancel_id, .role = .cancel, .measured_text_width = footerTextWidth(hwnd, dpi, std.unicode.utf8ToUtf16LeStringLiteral("Cancel"), 48) },
+    };
+}
+
+fn closeRepositoryDialog() void {
+    repository_dialog_state.closed = true;
+    if (repository_dialog_state.host) |host| host.requestClose();
+}
+
+fn handleRepositoryMessage(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM) bool {
+    switch (message) {
         c.WM_COMMAND => {
             const command: u16 = @truncate(wparam);
             const notification: u16 = @truncate(wparam >> 16);
             if (command == id_accept) {
                 acceptRepositoryDialog();
-                return 0;
+                return true;
             }
             if (command == id_cancel) {
-                repository_dialog_state.closed = true;
-                return 0;
+                closeRepositoryDialog();
+                return true;
             }
             if (command == id_browse) {
                 browseCloneDestination(hwnd);
-                return 0;
+                return true;
             }
             if (repository_dialog_state.kind == .clone and notification == c.EN_CHANGE) {
                 if (command == id_url_or_host) updateCloneDestinationPresentation();
@@ -728,24 +819,69 @@ fn repositoryDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam:
                     }
                 }
             }
+            if (notification == c.EN_SETFOCUS and command >= id_url_or_host and command <= id_depth_or_path) {
+                const index = command - id_url_or_host;
+                const clone_y = [_]i32{ 78, 154, 246, 322 };
+                const remote_y = [_]i32{ 78, 154, 230, 306 };
+                const top = if (repository_dialog_state.kind == .clone) clone_y[index] else remote_y[index];
+                repository_dialog_state.host.?.reveal(Dpi.scale(top, repository_dialog_state.dpi), Dpi.scale(top + 58, repository_dialog_state.dpi)) catch {};
+            }
+            return true;
         },
         c.WM_CLOSE => {
-            repository_dialog_state.closed = true;
+            closeRepositoryDialog();
+            return true;
+        },
+        else => return false,
+    }
+    return false;
+}
+
+fn repositorySheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    _ = context;
+    if (message == c.WM_DRAWITEM) {
+        result.* = drawFooterItem(repository_dialog_state.host.?, lparam);
+        return true;
+    }
+    if (message == c.DM_GETDEFID) {
+        result.* = (c.DC_HASDEFID << 16) | id_accept;
+        return true;
+    }
+    if (handleRepositoryMessage(hwnd, message, wparam)) {
+        result.* = 0;
+        return true;
+    }
+    return false;
+}
+
+fn repositoryContentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!repository_dialog_active or repository_dialog_state.host == null) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (handleRepositoryMessage(repository_dialog_state.host.?.hwnd, message, wparam)) return 0;
+    switch (message) {
+        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
+        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, repository_dialog_state.error_label),
+        c.WM_CTLCOLOREDIT => return darkDialogCtlColorEdit(wparam),
+        c.WM_PAINT => {
+            var paint: c.PAINTSTRUCT = undefined;
+            const hdc = c.BeginPaint(hwnd, &paint);
+            if (hdc != null) {
+                const focus = c.GetFocus();
+                for (repository_dialog_state.edits) |edit| if (edit != null) drawRepositoryField(hwnd, hdc, edit, focus == edit);
+                _ = c.EndPaint(hwnd, &paint);
+            }
             return 0;
         },
-        else => {},
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 fn createRepositoryDialogControls(hwnd: c.HWND) void {
     const state = &repository_dialog_state;
-    const intro = if (state.kind == .clone) clone_intro else remote_intro;
-    _ = createStatic(hwnd, intro, 24, 20, 592, 42);
+    state.labels[0] = createStatic(hwnd, repositoryHeading(state.kind), 24, 20, 592, 42);
     if (state.kind == .clone) {
         createLabeledEdit(hwnd, 0, "Repository URL", "https://github.com/owner/repository.git", 78);
         createLabeledEdit(hwnd, 1, "Destination folder", "C:\\Users\\you\\Source\\repository", 154);
-        _ = createButton(hwnd, "Browse…", id_browse, 508, 180, 108, 28, false);
+        state.browse = createButton(hwnd, "Browse…", id_browse, 508, 180, 108, 28, false);
         state.destination_hint = createStatic(hwnd, "", 24, 214, 592, 20);
         createLabeledEdit(hwnd, 2, "Branch (optional)", "Leave empty to use the repository default", 246);
         createLabeledEdit(hwnd, 3, "Depth (optional)", "Leave empty for full history", 322);
@@ -755,19 +891,17 @@ fn createRepositoryDialogControls(hwnd: c.HWND) void {
         createLabeledEdit(hwnd, 2, "Port", "22", 230);
         createLabeledEdit(hwnd, 3, "Absolute repository path", "/srv/git/repository.git", 306);
     }
-    const button_y: i32 = if (state.kind == .clone) 446 else 424;
-    state.error_label = createStatic(hwnd, "", 24, button_y - 40, 392, 34);
-    _ = createButton(hwnd, "Cancel", id_cancel, 430, button_y, 88, 30, false);
-    _ = createButton(hwnd, if (state.kind == .clone) "Clone" else "Connect", id_accept, 528, button_y, 88, 30, true);
+    const error_y: i32 = if (state.kind == .clone) 388 else 366;
+    state.error_label = createStatic(hwnd, "", 24, error_y, 592, 34);
     updateCloneDestinationPresentation();
 }
 
 fn createLabeledEdit(hwnd: c.HWND, index: usize, label: []const u8, cue: []const u8, y: i32) void {
-    _ = createStatic(hwnd, label, 24, y, 592, 20);
+    repository_dialog_state.labels[index + 1] = createStatic(hwnd, label, 24, y, 592, 20);
     const width: i32 = if (repository_dialog_state.kind == .clone and index == 1) 472 else 592;
     const edit = createControl(
         hwnd,
-        c.WS_EX_CLIENTEDGE,
+        0,
         "EDIT",
         repository_dialog_state.initial[index],
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | c.ES_AUTOHSCROLL,
@@ -794,10 +928,10 @@ fn createButton(hwnd: c.HWND, text: []const u8, id: usize, x: i32, y: i32, width
         "BUTTON",
         text,
         c.WS_CHILD | c.WS_VISIBLE | c.WS_TABSTOP | @as(c.LONG, if (default) 1 else 0),
-        x,
-        y,
-        width,
-        height,
+        Dpi.scale(x, repository_dialog_state.dpi),
+        Dpi.scale(y, repository_dialog_state.dpi),
+        Dpi.scale(width, repository_dialog_state.dpi),
+        Dpi.scale(height, repository_dialog_state.dpi),
         id,
     );
 }
@@ -892,7 +1026,20 @@ fn acceptRepositoryDialog() void {
     }
     repository_dialog_state.accepted_values = owned_values;
     repository_dialog_state.accepted = true;
-    repository_dialog_state.closed = true;
+    closeRepositoryDialog();
+}
+
+fn drawRepositoryField(parent: c.HWND, hdc: c.HDC, edit: c.HWND, focused: bool) void {
+    var bounds: c.RECT = undefined;
+    if (c.GetWindowRect(edit, &bounds) == 0) return;
+    var origin = c.POINT{ .x = bounds.left, .y = bounds.top };
+    _ = c.ScreenToClient(parent, &origin);
+    SheetFramework.drawField(hdc, .{
+        .x = origin.x - Dpi.scale(4, repository_dialog_state.dpi),
+        .y = origin.y - Dpi.scale(4, repository_dialog_state.dpi),
+        .width = bounds.right - bounds.left + Dpi.scale(8, repository_dialog_state.dpi),
+        .height = bounds.bottom - bounds.top + Dpi.scale(8, repository_dialog_state.dpi),
+    }, repository_dialog_state.dpi, focused) catch {};
 }
 
 fn readRepositoryDialogValues(allocator: std.mem.Allocator) ![4][]u8 {
@@ -933,6 +1080,10 @@ fn validationMessage(err: anyerror) []const u8 {
 }
 
 fn browseCloneDestination(hwnd: c.HWND) void {
+    if (builtin.is_test) {
+        showRepositoryDialogError("The Windows folder picker is unavailable in hidden tests.");
+        return;
+    }
     var wide_path: [32768]u16 = [_]u16{0} ** 32768;
     const picked = graphcode_pick_folder(hwnd, &wide_path, wide_path.len);
     if (picked <= 0) {
@@ -1043,6 +1194,9 @@ const OperationDialogState = struct {
     cancel: c.HWND = null,
     closed: bool = false,
     cancelled: bool = false,
+    host: ?*SheetFramework.Host = null,
+    content_root: c.HWND = null,
+    dpi: u32 = Dpi.base_dpi,
 };
 
 var operation_dialog_active = false;
@@ -1084,40 +1238,14 @@ fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult 
     try registerOperationDialogClass();
     operation_dialog_state.closed = false;
     operation_dialog_state.cancelled = false;
-    const wide_title = try wideZ(operation_dialog_state.allocator, title);
-    defer operation_dialog_state.allocator.free(wide_title);
-    const hwnd = c.CreateWindowExW(
-        c.WS_EX_DLGMODALFRAME | c.WS_EX_CONTROLPARENT,
-        operation_dialog_class.ptr,
-        wide_title.ptr,
-        c.WS_OVERLAPPED | c.WS_CAPTION | c.WS_SYSMENU,
-        c.CW_USEDEFAULT,
-        c.CW_USEDEFAULT,
-        560,
-        180,
-        operation_dialog_state.parent,
-        null,
-        c.GetModuleHandleW(null),
-        null,
-    ) orelse return error.OperationDialogCreationFailed;
-    operation_dialog_state.label = createOperationControl(hwnd, "STATIC", initial, 24, 28, 500, 46, 0);
-    operation_dialog_state.cancel = createOperationControl(hwnd, "BUTTON", "Cancel", 430, 96, 88, 30, operation_cancel_id);
-    _ = c.SetTimer(hwnd, operation_timer_id, 100, null);
-    _ = c.EnableWindow(operation_dialog_state.parent, 0);
-    _ = c.ShowWindow(hwnd, c.SW_SHOW);
-    _ = c.SetForegroundWindow(hwnd);
-    var message: c.MSG = undefined;
-    while (!operation_dialog_state.closed) {
-        const code = c.GetMessageW(&message, null, 0, 0);
-        if (code <= 0) {
-            operation_dialog_state.closed = true;
-            break;
-        }
-        _ = c.TranslateMessage(&message);
-        _ = c.DispatchMessageW(&message);
-    }
+    operation_dialog_state.dpi = Dpi.normalize(Win32.dpiForWindow(operation_dialog_state.parent));
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createOperationSheet(&host, operation_dialog_state.parent, title, initial);
+    const hwnd = host.hwnd;
+    if (c.SetTimer(hwnd, operation_timer_id, 100, null) == 0) return error.OperationDialogTimerFailed;
+    try host.runModal();
     _ = c.KillTimer(hwnd, operation_timer_id);
-    ModalTeardown.dismiss(hwnd, operation_dialog_state.parent);
     if (operation_dialog_state.cancelled) return .cancelled;
     if (operation_dialog_state.clone) |operation| {
         return switch (operation.poll() orelse .failed) {
@@ -1138,7 +1266,7 @@ fn showOperationDialog(title: []const u8, initial: []const u8) !OperationResult 
 
 fn registerOperationDialogClass() !void {
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
-    klass.lpfnWndProc = @ptrCast(&operationDialogProc);
+    klass.lpfnWndProc = @ptrCast(&operationContentProc);
     klass.hInstance = c.GetModuleHandleW(null);
     klass.lpszClassName = operation_dialog_class.ptr;
     klass.hCursor = c.LoadCursorW(null, Win32.resourceIdentifier(32512));
@@ -1147,13 +1275,62 @@ fn registerOperationDialogClass() !void {
         return error.OperationDialogClassRegistrationFailed;
 }
 
-fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
-    if (!operation_dialog_active) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+fn createOperationSheet(host: *SheetFramework.Host, parent: c.HWND, title: []const u8, initial: []const u8) !void {
+    try host.init(parent, .{
+        .layout_input = .{
+            .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
+            .dpi = operation_dialog_state.dpi,
+            .desired_width = 560,
+            .minimum_width = 360,
+            .heights = .{ .minimum = 170, .ideal = 210, .maximum = 360 },
+            .content_extent = 88,
+        },
+        .context = &operation_dialog_state,
+        .on_layout = &layoutOperationSheet,
+        .on_message = &operationSheetMessage,
+    });
+    const wide_title = try wideZ(operation_dialog_state.allocator, title);
+    defer operation_dialog_state.allocator.free(wide_title);
+    if (c.SetWindowTextW(host.hwnd, wide_title.ptr) == 0) return error.OperationDialogCreationFailed;
+    operation_dialog_state.host = host;
+    operation_dialog_state.content_root = c.CreateWindowExW(c.WS_EX_CONTROLPARENT, operation_dialog_class.ptr, null, c.WS_CHILD | c.WS_VISIBLE, 0, 0, 0, 0, host.viewport, null, c.GetModuleHandleW(null), null) orelse
+        return error.OperationDialogCreationFailed;
+    operation_dialog_state.label = createOperationControl(operation_dialog_state.content_root, "STATIC", initial, 24, 24, 512, 48, 0);
+    const actions = operationFooterActions(host.hwnd, operation_dialog_state.dpi);
+    try host.configureFooter(&actions);
+    operation_dialog_state.cancel = try host.createFooterButton(operation_cancel_id, std.unicode.utf8ToUtf16LeStringLiteral("Cancel").ptr);
+    AppFont.apply(operation_dialog_state.cancel, AppFont.control_size, false);
+    try host.relayout();
+}
+
+fn applyOperationControlFontsForDpi(state: *OperationDialogState, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.OperationDialogFontCreationFailed;
+    applyControlFontForDpi(state.label, font);
+    applyControlFontForDpi(state.cancel, font);
+}
+
+fn layoutOperationSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
+    const state: *OperationDialogState = @ptrCast(@alignCast(context.?));
+    if (state.content_root == null) return;
+    state.dpi = state.host.?.options.layout_input.dpi;
+    try applyOperationControlFontsForDpi(state, state.dpi);
+    const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
+    const content_width = @max(0, layout.viewport.width - scrollbar);
+    if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
+        return error.OperationDialogLayoutFailed;
+    if (state.label != null and c.MoveWindow(state.label, Dpi.scale(24, state.dpi), Dpi.scale(24, state.dpi), @max(0, content_width - Dpi.scale(48, state.dpi)), Dpi.scale(48, state.dpi), 1) == 0)
+        return error.OperationDialogLayoutFailed;
+}
+
+fn closeOperationDialog() void {
+    operation_dialog_state.closed = true;
+    if (operation_dialog_state.host) |host| host.requestClose();
+}
+
+fn handleOperationMessage(message: c.UINT, wparam: c.WPARAM) bool {
     switch (message) {
-        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
-        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, null),
         c.WM_TIMER => {
-            if (wparam != operation_timer_id) return 0;
+            if (wparam != operation_timer_id) return false;
             if (operation_dialog_state.clone) |operation| {
                 var progress: [256]u8 = undefined;
                 var stderr: [256]u8 = undefined;
@@ -1161,14 +1338,14 @@ fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: 
                 if (snapshot.progress_len != 0) setOperationText(operation_dialog_state.label, progress[0..snapshot.progress_len]);
                 if (snapshot.stderr_len != 0) setOperationText(operation_dialog_state.label, stderr[0..snapshot.stderr_len]);
                 if (operation.poll()) |status| {
-                    if (status != .cloning) operation_dialog_state.closed = true;
+                    if (status != .cloning) closeOperationDialog();
                 }
             } else if (operation_dialog_state.remote) |operation| {
                 if (operation.poll()) |status| {
-                    if (status != .validating) operation_dialog_state.closed = true;
+                    if (status != .validating) closeOperationDialog();
                 }
             }
-            return 0;
+            return true;
         },
         c.WM_COMMAND => {
             if (@as(u16, @truncate(wparam)) == operation_cancel_id) {
@@ -1176,18 +1353,70 @@ fn operationDialogProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: 
                 if (operation_dialog_state.clone) |operation| operation.cancel();
                 setOperationText(operation_dialog_state.label, "Cancelling…");
                 if (operation_dialog_state.remote != null) setOperationText(operation_dialog_state.label, "Waiting for SSH validation to finish…");
-                return 0;
+                return true;
             }
         },
         c.WM_CLOSE => {
             operation_dialog_state.cancelled = true;
             if (operation_dialog_state.clone) |operation| operation.cancel();
             setOperationText(operation_dialog_state.label, "Cancelling…");
-            return 0;
+            return true;
         },
-        else => {},
+        else => return false,
     }
-    return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    return false;
+}
+
+fn operationSheetMessage(context: ?*anyopaque, hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM, result: *c.LRESULT) bool {
+    _ = context;
+    _ = hwnd;
+    if (message == c.WM_DRAWITEM) {
+        result.* = drawFooterItem(operation_dialog_state.host.?, lparam);
+        return true;
+    }
+    if (handleOperationMessage(message, wparam)) {
+        result.* = 0;
+        return true;
+    }
+
+    return false;
+}
+
+fn drawFooterItem(host: *SheetFramework.Host, lparam: c.LPARAM) c.LRESULT {
+    const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+    var role = SheetFramework.ActionRole.secondary;
+    var return_hint = false;
+    for (host.footer_actions[0..host.footer_action_count]) |action| {
+        if (action.id != item.CtlID) continue;
+        role = action.role;
+        return_hint = action.return_hint and action.role.isPrimary();
+        break;
+    }
+    SheetFramework.drawButton(item.hDC, .{ .x = item.rcItem.left, .y = item.rcItem.top, .width = item.rcItem.right - item.rcItem.left, .height = item.rcItem.bottom - item.rcItem.top }, host.options.layout_input.dpi, role, item.itemState & c.ODS_DISABLED == 0, item.itemState & c.ODS_SELECTED != 0) catch return 0;
+    var text: [128]u16 = [_]u16{0} ** 128;
+    const count = c.GetWindowTextW(item.hwndItem, &text, text.len);
+    const old_font = AppFont.selectForDpi(item.hDC, AppFont.control_size, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.SetTextColor(item.hDC, SheetFramework.controlPaintStyle(.button, item.itemState & c.ODS_DISABLED == 0).foreground);
+    var bounds = item.rcItem;
+    if (return_hint) bounds.right -= SheetFramework.Metrics.forDpi(host.options.layout_input.dpi).return_hint_width;
+    _ = c.DrawTextW(item.hDC, &text, count, &bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    if (return_hint) {
+        var hint_bounds = item.rcItem;
+        hint_bounds.left = bounds.right;
+        _ = c.DrawTextW(item.hDC, std.unicode.utf8ToUtf16LeStringLiteral("\u{21b5}").ptr, 1, &hint_bounds, c.DT_CENTER | c.DT_VCENTER | c.DT_SINGLELINE);
+    }
+    return 1;
+}
+
+fn operationContentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (!operation_dialog_active or operation_dialog_state.host == null) return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    switch (message) {
+        c.WM_ERASEBKGND => return darkDialogEraseBackground(hwnd, wparam),
+        c.WM_CTLCOLORSTATIC => return darkDialogCtlColorStatic(controlHandleFrom(lparam), wparam, null),
+        else => return c.DefWindowProcW(hwnd, message, wparam, lparam),
+    }
 }
 
 fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: i32, y: i32, width: i32, height: i32, id: usize) c.HWND {
@@ -1199,7 +1428,7 @@ fn createOperationControl(hwnd: c.HWND, class: []const u8, text: []const u8, x: 
     const style: c.DWORD = @as(c.DWORD, @intCast(c.WS_CHILD)) |
         @as(c.DWORD, @intCast(c.WS_VISIBLE)) |
         (if (std.mem.eql(u8, class, "BUTTON")) @as(c.DWORD, @intCast(c.WS_TABSTOP)) else 0);
-    const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, x, y, width, height, hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
+    const control = c.CreateWindowExW(0, wide_class.ptr, wide_text.ptr, style, Dpi.scale(x, operation_dialog_state.dpi), Dpi.scale(y, operation_dialog_state.dpi), Dpi.scale(width, operation_dialog_state.dpi), Dpi.scale(height, operation_dialog_state.dpi), hwnd, controlId(id), c.GetModuleHandleW(null), null) orelse return null;
     AppFont.apply(control, AppFont.control_size, false);
     return control;
 }
@@ -1428,4 +1657,150 @@ test "clone refuses non-empty destinations without deleting sentinels" {
     var reader = kept.reader(&.{});
     try reader.interface.readSliceAll(&bytes);
     try std.testing.expectEqualStrings("keep", &bytes);
+}
+
+fn hiddenRepositoryOwner() !c.HWND {
+    return c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, null, c.WS_POPUP, 20, 20, 920, 700, null, null, c.GetModuleHandleW(null), null) orelse error.RepositoryDialogCreationFailed;
+}
+
+fn controlFont(control: c.HWND) c.HFONT {
+    return Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control, c.WM_GETFONT, 0, 0)));
+}
+
+fn expectControlFontForDpi(control: c.HWND, dpi: u32) !void {
+    const font = controlFont(control);
+    try std.testing.expectEqual(AppFont.getForDpi(AppFont.control_size, false, dpi), font);
+    var info = std.mem.zeroes(c.LOGFONTW);
+    try std.testing.expect(c.GetObjectW(font, @sizeOf(c.LOGFONTW), &info) != 0);
+    try std.testing.expectEqual(-Dpi.scale(AppFont.control_size, dpi), info.lfHeight);
+}
+
+test "hidden repository and operation dialogs refresh every control font across DPI transitions" {
+    try registerRepositoryDialogClass();
+    try registerOperationDialogClass();
+    const owner = try hiddenRepositoryOwner();
+    defer _ = c.DestroyWindow(owner);
+
+    repository_dialog_state = .{
+        .allocator = std.testing.allocator,
+        .parent = owner,
+        .kind = .clone,
+        .initial = .{ "https://example.test/org/repository.git", "C:\\src\\repository", "", "" },
+    };
+    repository_dialog_active = true;
+    var repository_host: SheetFramework.Host = .{};
+    try createRepositorySheet(&repository_host, owner);
+    try std.testing.expect(c.IsWindowVisible(repository_host.hwnd) == 0);
+    var repository_font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try repository_host.refreshForDpi(dpi);
+        for (repository_dialog_state.labels) |label| try expectControlFontForDpi(label, dpi);
+        for (repository_dialog_state.edits) |edit| try expectControlFontForDpi(edit, dpi);
+        try expectControlFontForDpi(repository_dialog_state.destination_hint, dpi);
+        try expectControlFontForDpi(repository_dialog_state.error_label, dpi);
+        try expectControlFontForDpi(repository_dialog_state.browse, dpi);
+        try expectControlFontForDpi(c.GetDlgItem(repository_host.hwnd, id_cancel), dpi);
+        try expectControlFontForDpi(c.GetDlgItem(repository_host.hwnd, id_accept), dpi);
+        const current = controlFont(repository_dialog_state.edits[0]);
+        if (repository_font_96 == null) {
+            repository_font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != repository_font_96);
+        } else {
+            try std.testing.expectEqual(repository_font_96, current);
+        }
+    }
+    repository_host.deinit();
+    repository_dialog_active = false;
+
+    operation_dialog_state = .{ .allocator = std.testing.allocator, .parent = owner };
+    operation_dialog_active = true;
+    defer operation_dialog_active = false;
+    var operation_host: SheetFramework.Host = .{};
+    defer operation_host.deinit();
+    try createOperationSheet(&operation_host, owner, "Cloning repository", "Starting clone…");
+    try std.testing.expect(c.IsWindowVisible(operation_host.hwnd) == 0);
+    var operation_font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try operation_host.refreshForDpi(dpi);
+        try expectControlFontForDpi(operation_dialog_state.label, dpi);
+        try expectControlFontForDpi(operation_dialog_state.cancel, dpi);
+        const current = controlFont(operation_dialog_state.label);
+        if (operation_font_96 == null) {
+            operation_font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != operation_font_96);
+        } else {
+            try std.testing.expectEqual(operation_font_96, current);
+        }
+    }
+}
+
+test "dialog framework: repository ingress and operation dialogs use hidden sheets" {
+    try registerRepositoryDialogClass();
+    try registerOperationDialogClass();
+    const owner = try hiddenRepositoryOwner();
+    defer _ = c.DestroyWindow(owner);
+
+    repository_dialog_state = .{
+        .allocator = std.testing.allocator,
+        .parent = owner,
+        .kind = .remote,
+        .initial = .{ "example.com", "git", "22", "/srv/repo.git" },
+        .dpi = 144,
+    };
+    repository_dialog_active = true;
+    var repository_host: SheetFramework.Host = .{};
+    try createRepositorySheet(&repository_host, owner);
+    try std.testing.expect(c.IsWindowVisible(repository_host.hwnd) == 0);
+    try std.testing.expect(c.GetWindowLongPtrW(repository_host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
+    var repository_title: [64]u16 = [_]u16{0} ** 64;
+    const repository_title_length = c.GetWindowTextW(repository_host.hwnd, &repository_title, repository_title.len);
+    const expected_repository_title = std.unicode.utf8ToUtf16LeStringLiteral(remote_title);
+    try std.testing.expectEqualSlices(u16, expected_repository_title[0..expected_repository_title.len], repository_title[0..@intCast(repository_title_length)]);
+    const heading = try readControlText(std.testing.allocator, repository_dialog_state.labels[0]);
+    defer std.testing.allocator.free(heading);
+    try std.testing.expectEqualStrings(repositoryHeading(.remote), heading);
+    try std.testing.expect(std.mem.startsWith(u8, repositoryHeading(.clone), clone_title));
+    try std.testing.expect(c.GetParent(repository_dialog_state.content_root) == repository_host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(repository_dialog_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(repository_dialog_state.edits[0], c.GWL_EXSTYLE) & c.WS_EX_CLIENTEDGE == 0);
+    try std.testing.expect(repository_host.footer_layout.?.slotFor(id_accept).?.role == .primary);
+    repository_host.options.layout_input.content_extent = Dpi.unscale(repository_host.current_layout.viewport.height, repository_dialog_state.dpi) + 100;
+    try repository_host.relayout();
+    var repository_viewport: c.RECT = undefined;
+    var repository_content: c.RECT = undefined;
+    try std.testing.expect(c.GetClientRect(repository_host.viewport, &repository_viewport) != 0);
+    try std.testing.expect(c.GetClientRect(repository_dialog_state.content_root, &repository_content) != 0);
+    try std.testing.expectEqual(
+        SheetFramework.Metrics.forDpi(repository_dialog_state.dpi).scrollbar_width,
+        (repository_viewport.right - repository_viewport.left) - (repository_content.right - repository_content.left),
+    );
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = repositoryFooterActions(repository_host.hwnd, dpi, .remote);
+        const width = Dpi.scale(640, dpi);
+        const footer = try SheetFramework.measureFooter(width, Dpi.scale(64, dpi), dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width <= width);
+        for (footer.slice()) |slot| try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= width);
+        try std.testing.expect(actions[1].return_hint);
+        try std.testing.expect(footer.slotFor(id_accept).?.bounds.width >=
+            actions[1].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
+    }
+    repository_host.deinit();
+    repository_dialog_active = false;
+
+    operation_dialog_state = .{ .allocator = std.testing.allocator, .parent = owner, .dpi = 192 };
+    operation_dialog_active = true;
+    defer operation_dialog_active = false;
+    var operation_host: SheetFramework.Host = .{};
+    defer operation_host.deinit();
+    try createOperationSheet(&operation_host, owner, "Validating SSH connection", "Checking repository access…");
+    try std.testing.expect(c.IsWindowVisible(operation_host.hwnd) == 0);
+    var operation_title: [64]u16 = [_]u16{0} ** 64;
+    const operation_title_length = c.GetWindowTextW(operation_host.hwnd, &operation_title, operation_title.len);
+    const expected_operation_title = std.unicode.utf8ToUtf16LeStringLiteral("Validating SSH connection");
+    try std.testing.expectEqualSlices(u16, expected_operation_title[0..expected_operation_title.len], operation_title[0..@intCast(operation_title_length)]);
+    try std.testing.expect(c.GetParent(operation_dialog_state.content_root) == operation_host.viewport);
+    try std.testing.expect(c.GetWindowLongPtrW(operation_dialog_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
+    try std.testing.expect(operation_host.footer_layout.?.slotFor(operation_cancel_id).?.role == .cancel);
 }
