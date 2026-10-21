@@ -90,8 +90,8 @@ exit /b %test_exit%
   $setupPathLength = $setupPath[0].Substring(5).Length
   Write-Host "[native-uia] post-vcvars PATH length=$setupPathLength (cmd limit=8191)"
   if ($setupPathLength -ge 8191) { throw "Native accessibility provider post-vcvars PATH exceeds cmd limit: $setupPathLength" }
-  if (@($nativeOutput | Where-Object { $_ -eq "Native accessibility provider: 204 checks, 0 failures" }).Count -ne 1) {
-    throw "Native accessibility provider test-exe did not report exactly one 204-check, zero-failure summary"
+  if (@($nativeOutput | Where-Object { $_ -eq "Native accessibility provider: 224 checks, 0 failures" }).Count -ne 1) {
+    throw "Native accessibility provider test-exe did not report exactly one 224-check, zero-failure summary"
   }
 } finally {
   $env:TEMP = $savedTemp

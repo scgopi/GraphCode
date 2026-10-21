@@ -476,9 +476,32 @@ first, then the update banner; the status line is the floor. A collapsed part is
 not painted, published, or clickable. The window's minimum height is the smallest
 client height at which the status line, Activity strip, and open Workspace panel
 still leave that region (`min_client_height`, enforced through
-`WM_GETMINMAXINFO`; width keeps the system minimum, and the 517-DIP minimum-height
-expression is preserved). This is layout and message evidence from App and
-native provider tests, not a screen-reader or Dev Box run.
+`WM_GETMINMAXINFO`; the 517-DIP minimum-height expression is preserved). The
+client also keeps a 452-DIP minimum width, scaled with
+`AdjustWindowRectExForDpi`; an existing larger operating-system minimum is never
+reduced.
+
+Rail presentation is shared by canvas rendering, App layout, pointer routing,
+and UIA. With the rail visible, clients at 672 DIP and wider dock it and reserve
+the 220-DIP rail; narrower clients overlay it on the canvas, which is painted
+first so the rail stays above it. The overlay wins pointer and UIA hit testing.
+The 451-, 452-, and 671-DIP boundaries overlay, while 672 DIP docks; hiding the
+rail always leaves the canvas inset at zero.
+
+Native terminal workspaces remain docked with a 220-DIP reservation at narrow
+widths. Winghostty uses a child HWND and the main window clips child painting,
+so the parent-painted rail cannot safely overlay a terminal surface; that
+requires a separate overlay HWND. The responsive overlay evidence in this slice
+applies to parent-painted canvas surfaces, not terminal workspaces.
+
+The header keeps direct action buttons when their readable widths fit. Otherwise
+one `»` button opens a native popup containing the available actions in their
+existing order. Its hit target, keyboard focus, and UIA identity share the
+header layout, and popup selections use the same action handlers as direct
+buttons.
+
+This is layout, hidden-window message, and UIA publication evidence from App
+and native provider tests, not a screen-reader, live-window, or Dev Box run.
 
 ## Workspace lifecycle
 
