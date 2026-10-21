@@ -3756,6 +3756,10 @@ Start-Sleep -Seconds 60
       (Test-BoundedIngressSource $reorderedMarkerMutant)) {
     throw "RED: UIA ingress commands and scene transitions are not bounded and attributable"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)\$nativeFormWindow = Wait-UiaOwnedSheetByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm" \$nativeForm\.Title' -or
+      $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm"') {
+    throw "RED: UIA native-form checks still depend on desktop Window control discovery instead of the owned captionless sheet"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_INPUT' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_OUTCOME' -or

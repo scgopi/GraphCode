@@ -6060,24 +6060,8 @@ try {
   )) {
     Require ([GraphCodeUiaGateState]::PostPresentForm($shellWindow, $nativeForm.Id)) `
       "$($nativeForm.Title) fixture request was rejected"
-    $nativeFormCondition = New-Object System.Windows.Automation.AndCondition(
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $process.Id
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $nativeForm.Title
-      )),
-      (New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window
-      ))
-    )
-    $nativeFormWindow = Wait-ForDesktopElement `
-      -desktop $desktop `
-      -condition $nativeFormCondition `
-      -label $nativeForm.Title `
-      -diagnosticWindow $shellWindow `
-      -RecoverForeground
+    $nativeFormWindow = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
+      "GraphCodeNativeForm" $nativeForm.Title "$($nativeForm.Title) sheet"
     Require ($null -ne $nativeFormWindow) "$($nativeForm.Title) did not open"
     $null = Assert-UiaOwnedSheet $nativeFormWindow $process.Id $shellWindow $nativeForm.Title `
       "GraphCodeNativeForm" `
@@ -6093,11 +6077,8 @@ try {
     Require ([GraphCodeUiaGateState]::PostClose(
       [IntPtr]$nativeFormWindow.Current.NativeWindowHandle
     )) "$($nativeForm.Title) rejected cancellation"
-    Require (Wait-ForDesktopElementGone `
-      -desktop $desktop `
-      -condition $nativeFormCondition `
-      -label "$($nativeForm.Title) close" `
-      -diagnosticWindow $shellWindow) "$($nativeForm.Title) did not close after cancellation"
+    Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
+      "GraphCodeNativeForm") "$($nativeForm.Title) did not close after cancellation"
   }
   $loopIds = @($loopRows | ForEach-Object { $_.Current.AutomationId })
   $null = $loops.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
