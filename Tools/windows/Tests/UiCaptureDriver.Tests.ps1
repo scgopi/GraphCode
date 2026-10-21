@@ -603,6 +603,9 @@ function Assert-CapRejects {
                 'CapNative|GetWindowRect|user32.dll|GetWindowRect',
                 'CapNative|GetClientRect|user32.dll|GetClientRect',
                 'CapNative|GetDpiForWindow|user32.dll|GetDpiForWindow',
+                'CapNative|GetWindowLongPtr|user32.dll|GetWindowLongPtrW',
+                'CapNative|GetMenu|user32.dll|GetMenu',
+                'CapNative|AdjustWindowRectExForDpi|user32.dll|AdjustWindowRectExForDpi',
                 'CapNative|SetWindowPos|user32.dll|SetWindowPos',
                 'CapNative|PrintWindow|user32.dll|PrintWindow',
                 'CapProcessJob|CreateJobObjectW|kernel32.dll|CreateJobObjectW',
@@ -617,8 +620,8 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 30 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static30 export contract differs.'
-            return @{ subcases = 30; evidence = 'API export resolution only, no native window or GUI action.' }
+            Assert-CapTest ($actual.Count -eq 33 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static33 export contract differs.'
+            return @{ subcases = 33; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -3720,9 +3723,9 @@ function Invoke-CapDContracts {
                 Assert-CapTest ($errors.Count -eq 0) 'Current worker did not parse.'
                 $definitions=@($ast.FindAll({param($node)
                     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -cin @('Assert-CapOwnedPath','Get-CapBaseEnvironment')
+                    $node.Name -cin @('Assert-CapOwnedPath','Test-CapMatchedAdapter','Get-CapBaseEnvironment')
                 },$true))
-                Assert-CapTest ($definitions.Count -eq 2) 'Actual environment/path functions missing or duplicated.'
+                Assert-CapTest ($definitions.Count -eq 3) 'Actual environment/path functions missing or duplicated.'
                 foreach ($definition in $definitions) {. ([scriptblock]::Create($definition.Extent.Text))}
                 $expected=Join-Path $root 'fixtures\projects\D Offline Capture Fixture'
                 Assert-CapTest (-not (Test-Path -LiteralPath $expected)) 'Owned D project must start absent.'
