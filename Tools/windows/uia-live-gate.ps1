@@ -88,6 +88,11 @@ public static class GraphCodeUiaGateState {
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll")]
   private static extern IntPtr SendMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
+  private static extern IntPtr SendMessageTimeout(
+    IntPtr window, uint message, UIntPtr wParam, IntPtr lParam,
+    uint flags, uint timeoutMilliseconds, out UIntPtr result
+  );
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
   private static extern IntPtr SendMessageString(IntPtr window, uint message, UIntPtr wParam, string lParam);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
@@ -367,8 +372,11 @@ public static class GraphCodeUiaGateState {
   }
   public static bool SendCommand(IntPtr window, uint command) {
     if (window == IntPtr.Zero) return false;
-    SendMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
-    return true;
+    UIntPtr result;
+    return SendMessageTimeout(
+      window, 0x0111, (UIntPtr)command, IntPtr.Zero,
+      0x0001 | 0x0002, 5000, out result
+    ) != IntPtr.Zero;
   }
   public static bool ClickButton(IntPtr button) {
     if (button == IntPtr.Zero) return false;
@@ -6008,21 +6016,27 @@ try {
       Require ($ingressContent -match [regex]::Escape($label)) `
         "$($ingress.Title) omitted '$label'"
     }
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=submit-invalid phase=before"
     Require ([GraphCodeUiaGateState]::SendCommand(
       [IntPtr]$ingressDialog.Current.NativeWindowHandle, 1
     )) "$($ingress.Title) rejected its primary action"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=submit-invalid phase=after"
     Start-Sleep -Milliseconds 100
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=validation-enumeration phase=before"
     $validationContent = @($ingressDialog.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition
     ) | ForEach-Object { $_.Current.Name }) -join "`n"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=validation-enumeration phase=after"
     Require ($validationContent -match [regex]::Escape($ingress.Error)) `
       "$($ingress.Title) did not expose its inline validation failure"
     Require ([GraphCodeUiaGateState]::PostClose(
       [IntPtr]$ingressDialog.Current.NativeWindowHandle
     )) "$($ingress.Title) rejected cancellation"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=close-wait phase=before"
     Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
       "GraphCodeRepositoryIngressDialog") "$($ingress.Title) did not close after cancellation"
+    Write-Host "UIA_INGRESS_STEP title='$($ingress.Title)' action=close-wait phase=after"
     # Let DialogBoxParamW return to the shell message loop before posting the
     # next modal command.
     Start-Sleep -Milliseconds 100

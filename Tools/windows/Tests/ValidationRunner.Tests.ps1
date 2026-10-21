@@ -3695,6 +3695,13 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -match '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "GraphCode Update Available"') {
     throw "RED: UIA gate does not use and verify the shared owned update sheet when desktop-tree lookup omits it"
   }
+  if ($uiaLiveGateSource -notmatch 'SendMessageTimeoutW' -or
+      $uiaLiveGateSource -notmatch '0x0001 \| 0x0002, 5000' -or
+      $uiaLiveGateSource -notmatch "action=submit-invalid phase=before" -or
+      $uiaLiveGateSource -notmatch "action=validation-enumeration phase=before" -or
+      $uiaLiveGateSource -notmatch "action=close-wait phase=before") {
+    throw "RED: UIA ingress commands and scene transitions are not bounded and attributable"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_INPUT' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_OUTCOME' -or
