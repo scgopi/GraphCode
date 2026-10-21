@@ -832,6 +832,17 @@ pub fn renderBounds(client_right: i32, client_bottom: i32, controls: WorkspaceCo
     };
 }
 
+pub fn visibleDetailBounds(bounds: c.RECT, controls: WorkspaceControls.State) c.RECT {
+    const rail = WorkspaceControls.railPresentation(bounds.right, controls);
+    if (rail.mode != .overlay) return bounds;
+    return .{
+        .left = @min(bounds.right, @max(bounds.left, rail.rail_right)),
+        .top = bounds.top,
+        .right = bounds.right,
+        .bottom = bounds.bottom,
+    };
+}
+
 pub fn paint(
     hdc: c.HDC,
     client_right: i32,
@@ -888,21 +899,35 @@ pub fn paint(
     if (surface == .workspace) presentation_controls.panel_visible = false;
     const bounds = renderBounds(client.right, client.bottom, presentation_controls);
     const graph_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    const visible_bounds = visibleDetailBounds(graph_bounds, controls);
     fill(hdc, graph_bounds, Tokens.canvas_tone);
     const saved = c.SaveDC(hdc);
     _ = c.IntersectClipRect(hdc, graph_bounds.left, graph_bounds.top, graph_bounds.right, graph_bounds.bottom);
     drawGrid(hdc, graph_bounds, state);
     switch (surface) {
-        .overview => drawOverview(hdc, allocator, model, graph_bounds, state, declared_entries) catch |err| {
+        .overview => drawOverview(
+            hdc,
+            allocator,
+            model,
+            if (model.graphs.items.len == 0) visible_bounds else graph_bounds,
+            state,
+            declared_entries,
+        ) catch |err| {
             std.log.warn("Overview card role resolution failed: {s}", .{@errorName(err)});
             drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
         },
-        .quick_chats => drawQuickChats(hdc, allocator, model, graph_bounds, state),
+        .quick_chats => drawQuickChats(
+            hdc,
+            allocator,
+            model,
+            if (model.quick_chats.items.len == 0) visible_bounds else graph_bounds,
+            state,
+        ),
         .project => if (model.graph) |graph| {
             drawProjectWorktreeChip(hdc, allocator, model, graph_bounds);
             drawCompositeBreadcrumb(hdc, allocator, model, graph_bounds);
             if (graph.nodes.items.len == 0) {
-                emptyGraph(hdc, allocator, graph, graph_bounds);
+                emptyGraph(hdc, allocator, graph, visible_bounds);
             } else if (state.project_layout == null) {
                 drawText(hdc, allocator, "Graph layout unavailable", graph_bounds.left + 24, graph_bounds.top + 24, 13, Tokens.dialog_error_text, graph_bounds.right - 24);
             } else {
@@ -936,7 +961,7 @@ pub fn paint(
                 }
             }
         } else {
-            welcome(hdc, allocator, graph_bounds);
+            welcome(hdc, allocator, visible_bounds);
         },
         .workspace => {},
     }
@@ -1574,6 +1599,74 @@ test "responsive sidebar leaves no inset when hidden" {
     for ([_]i32{ 451, 452, 671, 672 }) |width| {
         try std.testing.expectEqual(@as(i32, 0), renderBounds(width, 800, .{ .rail_visible = false }).left);
     }
+}
+
+test "responsive overlay centers empty-state content in the visible detail region" {
+    const controls = WorkspaceControls.State{};
+    for ([_]i32{ 451, 452, 671 }) |width| {
+        const bounds = renderBounds(width, 800, controls);
+        const visible = visibleDetailBounds(rect(bounds.left, bounds.top, bounds.right, bounds.bottom), controls);
+        try std.testing.expectEqual(Tokens.sidebar_width, visible.left);
+        try std.testing.expectEqual(width, visible.right);
+        const action = quickChatEmptyActionBounds(visible);
+        try std.testing.expect(action.left >= visible.left);
+        try std.testing.expect(action.right <= visible.right);
+    }
+
+    const docked_controls = WorkspaceControls.State{};
+    const docked = renderBounds(672, 800, docked_controls);
+    try std.testing.expectEqualDeep(
+        rect(docked.left, docked.top, docked.right, docked.bottom),
+        visibleDetailBounds(rect(docked.left, docked.top, docked.right, docked.bottom), docked_controls),
+    );
+    const hidden_controls = WorkspaceControls.State{ .rail_visible = false };
+    const hidden = renderBounds(451, 800, hidden_controls);
+    try std.testing.expectEqualDeep(
+        rect(hidden.left, hidden.top, hidden.right, hidden.bottom),
+        visibleDetailBounds(rect(hidden.left, hidden.top, hidden.right, hidden.bottom), hidden_controls),
+    );
+}
+
+test "responsive overlay rail background stops above the full-width Activity strip" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    var dib = try ParityDib.init(452, 800);
+    defer dib.deinit();
+    const client = rect(0, 0, 452, 800);
+    const bounds = renderBounds(client.right, client.bottom, .{});
+    var canvas = try modelTestState(&model, .{}, rect(bounds.left, bounds.top, bounds.right, bounds.bottom));
+    defer canvas.deinitLayout();
+    var sidebar = Sidebar.State.init(allocator);
+    defer sidebar.deinit();
+
+    paint(
+        dib.dc,
+        client.right,
+        client.bottom,
+        &model,
+        null,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        &.{},
+        &.{},
+        allocator,
+        &canvas,
+        &sidebar,
+        -1,
+        .{ .rail_visible = true, .panel_visible = false, .activity_enabled = true },
+        .overview,
+        true,
+    );
+
+    const strip_top = client.bottom - Tokens.activity_strip_height;
+    try std.testing.expectEqual(@as(u32, 0x001D1D21), c.GetPixel(dib.dc, 2, strip_top + 10));
+    try std.testing.expectEqual(@as(u32, 0x001D1D21), c.GetPixel(dib.dc, 300, strip_top + 10));
 }
 
 test "inline canvas alerts remain inside the active detail surface" {
@@ -5229,6 +5322,64 @@ test "Quick Chat remaining parity empty state matches macOS copy glyph and cente
     const layout = quickChatEmptyLayout(bounds);
     try std.testing.expect(dib.count(layout.glyph, 0x00919090) > 0);
     try std.testing.expect(dib.count(layout.action, 0x001A1B19) > 0);
+}
+
+test "responsive overlay paints the Quick Chat empty action in the visible detail region" {
+    const allocator = std.testing.allocator;
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+    var dib = try ParityDib.init(452, 800);
+    defer dib.deinit();
+    const bounds = renderBounds(452, 800, controls);
+    var canvas = try modelTestState(
+        &model,
+        .{},
+        rect(bounds.left, bounds.top, bounds.right, bounds.bottom),
+    );
+    defer canvas.deinitLayout();
+    var sidebar = Sidebar.State.init(allocator);
+    defer sidebar.deinit();
+
+    paint(
+        dib.dc,
+        452,
+        800,
+        &model,
+        null,
+        "",
+        0,
+        "",
+        "",
+        "",
+        false,
+        "",
+        &.{},
+        &.{},
+        allocator,
+        &canvas,
+        &sidebar,
+        -1,
+        controls,
+        .quick_chats,
+        true,
+    );
+
+    const full_bounds = rect(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    const visible = visibleDetailBounds(full_bounds, controls);
+    const action = quickChatEmptyActionBounds(visible);
+    try std.testing.expect(dib.count(action, 0x001A1B19) > 1000);
+    try std.testing.expect(hitTestQuickChatEmptyAction(
+        @divTrunc(action.left + action.right, 2),
+        @divTrunc(action.top + action.bottom, 2),
+        visible,
+    ));
+    const old_centered = quickChatEmptyActionBounds(full_bounds);
+    try std.testing.expect(!hitTestQuickChatEmptyAction(
+        @divTrunc(old_centered.left + old_centered.right, 2),
+        @divTrunc(old_centered.top + old_centered.bottom, 2),
+        visible,
+    ));
 }
 
 test "canvas visual finish notebook raster has 48 pixel pitch and follows pan zoom" {

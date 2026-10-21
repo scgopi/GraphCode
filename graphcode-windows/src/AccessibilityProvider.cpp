@@ -35,7 +35,8 @@ static bool isHeader(const std::string &identity) {
   return identity == "header-attention:needs-you" ||
       identity == "header-worktree:worktrees" ||
       identity == "header-jump:jump" ||
-      identity == "header-toggle-panel:control";
+      identity == "header-toggle-panel:control" ||
+      identity == "header-overflow:actions";
 }
 
 // Paint order for coordinate hit-testing: the fixed footer (update banner, error footer)
@@ -1290,6 +1291,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("header-worktree:", 0) == 0 ? L"header-worktree-" :
           row.identity.rfind("header-jump:", 0) == 0 ? L"header-jump-" :
           row.identity.rfind("header-toggle-panel:", 0) == 0 ? L"header-toggle-panel-" :
+          row.identity.rfind("header-overflow:", 0) == 0 ? L"header-overflow-" :
           parent == 1 ? L"project-row-" :
           parent == 2 ? L"loop-row-" :
           parent == 3 ? L"worktree-row-" : L"canvas-card-";

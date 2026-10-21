@@ -185,7 +185,7 @@ pub fn draw(
     hover_y: i32,
     allocator: std.mem.Allocator,
 ) void {
-    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, 1200);
+    const sidebar = rect(0, Tokens.header_height, Tokens.sidebar_width, @max(Tokens.header_height, viewport_bottom));
     fill(hdc, sidebar, Tokens.workspace_rail);
     const footer = effectiveFooter(viewport_bottom, update_version.len != 0, ingress_error.len != 0);
     const has_update = footer.update;

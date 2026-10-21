@@ -85,11 +85,3 @@ test "responsive sidebar presentation hides the rail without reserving content" 
         try std.testing.expectEqual(@as(i32, 0), presentation.rail_right);
     }
 }
-
-test "responsive sidebar render bounds overlay below the detail width" {
-    const GraphCanvas = @import("GraphCanvas.zig");
-    const shown = State{};
-    const hidden = State{ .rail_visible = false };
-    try std.testing.expectEqual(@as(i32, 0), GraphCanvas.renderBounds(451, 800, shown).left);
-    try std.testing.expectEqual(@as(i32, 0), GraphCanvas.renderBounds(451, 800, hidden).left);
-}

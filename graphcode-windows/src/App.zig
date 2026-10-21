@@ -1182,6 +1182,56 @@ fn inputBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControl
     };
 }
 
+fn interactiveCanvasBounds(client_right: i32, client_bottom: i32, controls: WorkspaceControls.State) c.RECT {
+    const bounds = GraphCanvas.renderBounds(client_right, client_bottom, controls);
+    return GraphCanvas.visibleDetailBounds(.{
+        .left = bounds.left,
+        .top = bounds.top,
+        .right = bounds.right,
+        .bottom = bounds.bottom,
+    }, controls);
+}
+
+fn pointInsideCanvas(bounds: c.RECT, x: i32, y: i32) bool {
+    return x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom;
+}
+
+fn canvasHoverConnector(
+    nodes: []const GraphModel.Node,
+    x: i32,
+    y: i32,
+    state: *const GraphCanvas.CanvasState,
+    client_right: i32,
+    client_bottom: i32,
+    controls: WorkspaceControls.State,
+) ?usize {
+    return GraphCanvas.hitTestConnector(
+        nodes,
+        x,
+        y,
+        state,
+        interactiveCanvasBounds(client_right, client_bottom, controls),
+    );
+}
+
+fn canvasDropTarget(
+    nodes: []const GraphModel.Node,
+    x: i32,
+    y: i32,
+    state: *const GraphCanvas.CanvasState,
+    client_right: i32,
+    client_bottom: i32,
+    controls: WorkspaceControls.State,
+) ?usize {
+    return GraphCanvas.hitTest(
+        nodes,
+        x,
+        y,
+        state,
+        interactiveCanvasBounds(client_right, client_bottom, controls),
+    );
+}
+
 fn logicalClientRect(hwnd: c.HWND, dpi: u32) c.RECT {
     var client: c.RECT = undefined;
     if (c.GetClientRect(hwnd, &client) == 0) return std.mem.zeroes(c.RECT);
@@ -8244,13 +8294,17 @@ pub const App = struct {
             !self.refreshCanvasLayout(logicalClientRect(self.window.hwnd, self.dpi)))
         {
             if (self.accessibility) |*provider| provider.syncElements("Graph layout unavailable", &.{}, .{}, .{});
+            self.syncHeaderFocus();
             return;
         }
         // The canvas's native New Loop / Open Folder buttons follow the same state UIA
         // publishes, so a project switch or graph arrival never leaves one stale.
         self.layoutEmptyStateControls();
         if (builtin.is_test) if (accessibility_publication_observer) |observe| observe(self);
-        const provider = if (self.accessibility) |*value| value else return;
+        const provider = if (self.accessibility) |*value| value else {
+            self.syncHeaderFocus();
+            return;
+        };
         self.syncAccessibilityTo(provider, logicalClientRect(self.window.hwnd, self.dpi));
         self.syncHeaderFocus();
     }
@@ -8274,6 +8328,7 @@ pub const App = struct {
             .right = canvas_bounds.right,
             .bottom = canvas_bounds.bottom,
         };
+        const visible_canvas_rect = GraphCanvas.visibleDetailBounds(canvas_rect, self.workspace_controls);
         const rail_presentation = WorkspaceControls.railPresentation(client.right, self.workspace_controls);
         const sidebar_bottom = self.sidebarContentBottom(client.bottom);
         const footer_viewport_bottom = GraphCanvas.sidebarBottom(client.bottom, self.workspace_controls, self.surface);
@@ -8332,7 +8387,7 @@ pub const App = struct {
                 "empty-canvas",
                 "New Chat",
                 4,
-                .{ .logical = GraphCanvas.quickChatEmptyActionBounds(canvas_rect) },
+                .{ .logical = GraphCanvas.quickChatEmptyActionBounds(visible_canvas_rect) },
                 false,
                 true,
             ) catch return;
@@ -8368,6 +8423,7 @@ pub const App = struct {
                 .name = name,
                 .parent = 1,
                 .eligible = true,
+                .invokable = true,
                 .left = bounds.left,
                 .top = bounds.top,
                 .right = bounds.right,
@@ -10546,7 +10602,10 @@ fn onWindowMessage(
                         _ = c.InvalidateRect(hwnd, null, 0);
                     },
                     .quick_chats => {
-                        if (app.model.quick_chats.items.len == 0 and GraphCanvas.hitTestQuickChatEmptyAction(x, y, bounds)) {
+                        const empty_bounds = GraphCanvas.visibleDetailBounds(bounds, app.workspace_controls);
+                        if (app.model.quick_chats.items.len == 0 and
+                            GraphCanvas.hitTestQuickChatEmptyAction(x, y, empty_bounds))
+                        {
                             app.createQuickChat();
                         } else if (GraphCanvas.hitTestQuickChat(app.model.quick_chats.items.len, x, y, &app.canvas, bounds)) |index| {
                             app.client.sendOpenQuickChat(app.model.quick_chats.items[index].id);
@@ -10914,6 +10973,17 @@ fn onWindowMessage(
         },
         c.WM_LBUTTONUP => {
             if (app.canvas.node_dragging) {
+                const physical_point = CanvasInput.decodeMouseMessage(lparam);
+                const release_point = c.POINT{
+                    .x = logicalCoordinate(physical_point.x, app.dpi),
+                    .y = logicalCoordinate(physical_point.y, app.dpi),
+                };
+                const client = logicalClientRect(hwnd, app.dpi);
+                const release_in_canvas = pointInsideCanvas(
+                    interactiveCanvasBounds(client.right, client.bottom, app.workspace_controls),
+                    release_point.x,
+                    release_point.y,
+                );
                 const dragged = app.canvas.node_drag_started;
                 const activation_index = app.canvas.completeNodeDrag();
                 if (dragged) {
@@ -10921,7 +10991,7 @@ fn onWindowMessage(
                         store.save(&app.canvas) catch app.setStatus("Canvas position could not be saved");
                     }
                 }
-                if (activation_index != null and
+                if (activation_index != null and release_in_canvas and
                     app.canvas_press_project_path.len != 0 and
                     app.canvas_press_node_id.len != 0)
                 {
@@ -10950,15 +11020,16 @@ fn onWindowMessage(
                 _ = c.ReleaseCapture();
                 if (app.model.graph) |graph| {
                     const client = logicalClientRect(hwnd, app.dpi);
-                    const canvas_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                    const bounds = c.RECT{
-                        .left = canvas_bounds.left,
-                        .top = canvas_bounds.top,
-                        .right = canvas_bounds.right,
-                        .bottom = canvas_bounds.bottom,
-                    };
                     if (GraphModel.findNodeIndexByID(graph.nodes.items, source_id)) |source| {
-                        if (GraphCanvas.hitTest(graph.nodes.items, point.x, point.y, &app.canvas, bounds)) |target| {
+                        if (canvasDropTarget(
+                            graph.nodes.items,
+                            point.x,
+                            point.y,
+                            &app.canvas,
+                            client.right,
+                            client.bottom,
+                            app.workspace_controls,
+                        )) |target| {
                             if (target != source) app.createEdgeBetweenIDs(source_id, graph.nodes.items[target].id);
                         }
                     }
@@ -11000,37 +11071,40 @@ fn onWindowMessage(
             const hover_x = logicalCoordinate(mouseX(lparam), app.dpi);
             app.updateSidebarRootDrag(hover_y);
             const next_hover = if (hover_x >= 0 and hover_x < Tokens.sidebar_width) hover_y else -1;
+            const client = logicalClientRect(hwnd, app.dpi);
+            const interactive_bounds = interactiveCanvasBounds(client.right, client.bottom, app.workspace_controls);
+            const pointer_in_canvas = pointInsideCanvas(interactive_bounds, hover_x, hover_y);
             if (next_hover != app.sidebar_hover_y) {
                 app.sidebar_hover_y = next_hover;
                 _ = c.InvalidateRect(hwnd, null, 0);
             }
             if (app.canvas.node_dragging) {
-                app.canvas.updateNodeDrag(hover_x, hover_y);
+                if (pointer_in_canvas) app.canvas.updateNodeDrag(hover_x, hover_y);
                 app.syncAccessibility();
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             } else if (app.canvas.edge_dragging) {
-                app.canvas.updateEdgeDrag(hover_x, hover_y);
+                if (pointer_in_canvas) app.canvas.updateEdgeDrag(hover_x, hover_y);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             } else if (app.canvas.dragging) {
-                app.canvas.updatePan(hover_x, hover_y);
+                if (pointer_in_canvas) app.canvas.updatePan(hover_x, hover_y);
                 _ = c.InvalidateRect(hwnd, null, 0);
                 result.* = 0;
                 return true;
             }
             if (app.model.graph) |graph| {
-                const client = logicalClientRect(hwnd, app.dpi);
-                const canvas_render_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                const canvas_bounds = c.RECT{
-                    .left = canvas_render_bounds.left,
-                    .top = canvas_render_bounds.top,
-                    .right = canvas_render_bounds.right,
-                    .bottom = canvas_render_bounds.bottom,
-                };
-                const next_connector = GraphCanvas.hitTestConnector(graph.nodes.items, hover_x, hover_y, &app.canvas, canvas_bounds);
+                const next_connector = canvasHoverConnector(
+                    graph.nodes.items,
+                    hover_x,
+                    hover_y,
+                    &app.canvas,
+                    client.right,
+                    client.bottom,
+                    app.workspace_controls,
+                );
                 if (next_connector != app.canvas.hovered_connector) {
                     app.canvas.hovered_connector = next_connector;
                     _ = c.InvalidateRect(hwnd, null, 0);
@@ -12466,6 +12540,100 @@ test "responsive sidebar overlay bounds give rail input and UIA precedence over 
     );
 }
 
+test "responsive overlay rail blocks connector hover and edge-release targets beneath it" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(c.MoveWindow(
+        app.window.hwnd,
+        0,
+        0,
+        physicalCoordinate(452, app.dpi),
+        physicalCoordinate(900, app.dpi),
+        0,
+    ) != 0);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\responsive-drop","name":"Responsive drop"},"nodes":[{"id":"source","title":"Source","state":"idle"},{"id":"target","title":"Target","state":"idle"}],"edges":[]}}}
+    );
+    app.surface = .project;
+    const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+    app.workspace_controls = controls;
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    try std.testing.expect(app.refreshCanvasLayout(client));
+    const graph = app.model.graph orelse return error.TestExpectedGraph;
+    const full_render = GraphCanvas.renderBounds(client.right, client.bottom, controls);
+    const interactive = interactiveCanvasBounds(client.right, client.bottom, controls);
+    try std.testing.expectEqual(@as(i32, 0), full_render.left);
+    try std.testing.expectEqual(Tokens.sidebar_width, interactive.left);
+    try std.testing.expect(!pointInsideCanvas(interactive, Tokens.sidebar_width - 1, Tokens.header_height + 1));
+    try std.testing.expect(pointInsideCanvas(interactive, Tokens.sidebar_width + 10, Tokens.header_height + 1));
+
+    var source_bounds = GraphCanvas.nodeBounds(0, &app.canvas);
+    app.canvas.pan_x += @as(f32, @floatFromInt(Tokens.sidebar_width - 1 - source_bounds.right));
+    source_bounds = GraphCanvas.nodeBounds(0, &app.canvas);
+    const connector_y = @divTrunc(source_bounds.top + source_bounds.bottom, 2);
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        canvasHoverConnector(
+            graph.nodes.items,
+            Tokens.sidebar_width - 1,
+            connector_y,
+            &app.canvas,
+            client.right,
+            client.bottom,
+            controls,
+        ),
+    );
+    source_bounds = GraphCanvas.nodeBounds(0, &app.canvas);
+    app.canvas.pan_x += @as(f32, @floatFromInt(Tokens.sidebar_width + 10 - source_bounds.right));
+    source_bounds = GraphCanvas.nodeBounds(0, &app.canvas);
+    const visible_connector_y = @divTrunc(source_bounds.top + source_bounds.bottom, 2);
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        canvasHoverConnector(
+            graph.nodes.items,
+            Tokens.sidebar_width + 10,
+            visible_connector_y,
+            &app.canvas,
+            client.right,
+            client.bottom,
+            controls,
+        ),
+    );
+
+    var target_bounds = GraphCanvas.nodeBounds(1, &app.canvas);
+    app.canvas.pan_x += @as(f32, @floatFromInt(Tokens.sidebar_width - 1 - @divTrunc(target_bounds.left + target_bounds.right, 2)));
+    target_bounds = GraphCanvas.nodeBounds(1, &app.canvas);
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        canvasDropTarget(
+            graph.nodes.items,
+            Tokens.sidebar_width - 1,
+            @divTrunc(target_bounds.top + target_bounds.bottom, 2),
+            &app.canvas,
+            client.right,
+            client.bottom,
+            controls,
+        ),
+    );
+    target_bounds = GraphCanvas.nodeBounds(1, &app.canvas);
+    app.canvas.pan_x += @as(f32, @floatFromInt(
+        Tokens.sidebar_width + 10 - @divTrunc(target_bounds.left + target_bounds.right, 2),
+    ));
+    target_bounds = GraphCanvas.nodeBounds(1, &app.canvas);
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        canvasDropTarget(
+            graph.nodes.items,
+            Tokens.sidebar_width + 10,
+            @divTrunc(target_bounds.top + target_bounds.bottom, 2),
+            &app.canvas,
+            client.right,
+            client.bottom,
+            controls,
+        ),
+    );
+}
+
 test "responsive sidebar hit precedence consumes an attention action under a hidden overlay rail" {
     var app = try overviewTestApp(Dpi.base_dpi);
     defer deinitOverviewTestApp(&app);
@@ -12744,6 +12912,7 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
         };
         for (route_cases) |case| {
             app.surface = case.surface;
+            app.selection_active = true;
             app.workspace = if (case.quick_chat_workspace) &quick_chat_workspace else null;
             try std.testing.expectEqual(case.quick_chat_workspace, app.isQuickChatWorkspace());
             var route_sink: SidebarUiaSink = .{};
@@ -12763,8 +12932,16 @@ test "parity sidebar navigation UIA matches painted owners and clipped row contr
                     .{ .row = local_row, .selected = case.local },
                 };
                 for (row_selections) |selection| {
-                    const expected_fill = dibColor(if (selection.selected) 0x003A3A44 else Tokens.workspace_rail);
+                    const expected_fill = dibColor(if (selection.selected) Tokens.pane_focus_tint else Tokens.workspace_rail);
                     try std.testing.expectEqual(expected_fill, bitmap.pixel(190, selection.row.top + 10));
+                }
+
+                app.selection_active = false;
+                var inactive_bitmap = try paintSidebarBitmap(&app, client.bottom, false, 0);
+                defer inactive_bitmap.deinit();
+                for (row_selections) |selection| {
+                    const expected_fill = dibColor(if (selection.selected) 0x003A3A44 else Tokens.workspace_rail);
+                    try std.testing.expectEqual(expected_fill, inactive_bitmap.pixel(190, selection.row.top + 10));
                 }
             }
         }
@@ -24481,6 +24658,50 @@ test "responsive header overflow publishes context actions and routes hidden UIA
     try std.testing.expect(!app.workspace_controls.panel_visible);
 }
 
+test "responsive header focus moves a direct action into overflow on window resize" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    app.surface = .workspace;
+    app.workspace_controls.panel_visible = false;
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 900, 0) != 0);
+    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) != null);
+    app.header_focus = .toggle_panel;
+
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 480, 900, 0) != 0);
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_SIZE, 0, 0, &result));
+
+    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) == null);
+    try std.testing.expect(app.headerLayout().bounds(.overflow) != null);
+    try std.testing.expectEqual(GraphCanvas.HeaderAction.overflow, app.header_focus.?);
+}
+
+test "responsive header focus moves a direct action into overflow on window resize" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.setSelectedIndex(0));
+    app.surface = .workspace;
+    app.workspace_controls.panel_visible = false;
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 900, 0) != 0);
+    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) != null);
+    app.header_focus = .toggle_panel;
+
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 480, 900, 0) != 0);
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_SIZE, 0, 0, &result));
+
+    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) == null);
+    try std.testing.expect(app.headerLayout().bounds(.overflow) != null);
+    try std.testing.expectEqual(GraphCanvas.HeaderAction.overflow, app.header_focus.?);
+}
+
 test "canvas visual finish header rail and zoom publish shared DPI geometry without a desktop" {
     const Sink = struct {
         canvas: ?c.RECT = null,
@@ -24811,36 +25032,41 @@ test "Quick Chat remaining parity empty canvas exposes top right and centered Ne
 
     var app = try overviewTestApp(Dpi.base_dpi);
     defer deinitOverviewTestApp(&app);
-    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 700, 0) != 0);
     app.surface = .quick_chats;
     app.createEmptyStateControls();
     defer {
         _ = c.DestroyWindow(app.empty_open_folder_button);
         _ = c.DestroyWindow(app.empty_global_overview_button);
     }
-    app.layoutEmptyStateControls();
+    for ([_]i32{ 452, 1200 }) |outer_width| {
+        const width = if (outer_width == 452) minimumWindowWidth(app.window.hwnd, app.dpi) else outer_width;
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, width, 700, 0) != 0);
+        app.layoutEmptyStateControls();
 
-    var sink = Sink{};
-    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 700 });
-    const canvas = GraphCanvas.renderBounds(1200, 700, app.workspace_controls);
-    const top_right = (AccessibilityBounds{ .logical = GraphCanvas.addButtonBounds(.{
-        .left = canvas.left,
-        .top = canvas.top,
-        .right = canvas.right,
-        .bottom = canvas.bottom,
-    }) }).physicalRect(app.dpi);
-    const primary = emptyStateButton(&app, app.empty_global_overview_button);
-    try std.testing.expect(primary.visible);
-    try std.testing.expectEqualDeep(top_right, primary.rect);
-    const centered = sink.centered orelse return error.TestExpectedQuickChatEmptyAction;
-    try std.testing.expect(centered.left < centered.right and centered.top < centered.bottom);
-    try std.testing.expect(centered.top > primary.rect.bottom);
-    var before = app.client.outbound_count;
-    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("quick-chat-new:empty-canvas")));
-    try std.testing.expectEqual(before + 1, app.client.outbound_count);
-    before = app.client.outbound_count;
-    try nativeClick(&app, @divTrunc(centered.left + centered.right, 2), @divTrunc(centered.top + centered.bottom, 2));
-    try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        var sink = Sink{};
+        app.syncAccessibilityTo(&sink, client);
+        const canvas = GraphCanvas.renderBounds(client.right, client.bottom, app.workspace_controls);
+        const canvas_bounds = c.RECT{ .left = canvas.left, .top = canvas.top, .right = canvas.right, .bottom = canvas.bottom };
+        const visible_bounds = GraphCanvas.visibleDetailBounds(canvas_bounds, app.workspace_controls);
+        const top_right = (AccessibilityBounds{ .logical = GraphCanvas.addButtonBounds(visible_bounds) }).physicalRect(app.dpi);
+        const expected_centered = (AccessibilityBounds{
+            .logical = GraphCanvas.quickChatEmptyActionBounds(visible_bounds),
+        }).physicalRect(app.dpi);
+        const primary = emptyStateButton(&app, app.empty_global_overview_button);
+        try std.testing.expect(primary.visible);
+        try std.testing.expectEqualDeep(top_right, primary.rect);
+        const centered = sink.centered orelse return error.TestExpectedQuickChatEmptyAction;
+        try std.testing.expectEqualDeep(expected_centered, centered);
+        try std.testing.expect(centered.left >= physicalCoordinate(Tokens.sidebar_width, app.dpi));
+        try std.testing.expect(centered.top > primary.rect.bottom);
+        var before = app.client.outbound_count;
+        try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("quick-chat-new:empty-canvas")));
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+        before = app.client.outbound_count;
+        try nativeClick(&app, @divTrunc(centered.left + centered.right, 2), @divTrunc(centered.top + centered.bottom, 2));
+        try std.testing.expectEqual(before + 1, app.client.outbound_count);
+    }
 }
 
 test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actions" {
