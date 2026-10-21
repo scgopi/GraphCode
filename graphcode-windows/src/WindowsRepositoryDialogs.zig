@@ -627,6 +627,13 @@ const RepositoryDialogState = struct {
 var repository_dialog_active = false;
 var repository_dialog_state: RepositoryDialogState = undefined;
 
+fn repositoryHeading(kind: DialogKind) []const u8 {
+    return switch (kind) {
+        .clone => clone_title ++ "\r\n" ++ clone_intro,
+        .remote => remote_title ++ "\r\n" ++ remote_intro,
+    };
+}
+
 fn openRepositoryDialog(
     parent: c.HWND,
     allocator: std.mem.Allocator,
@@ -870,8 +877,7 @@ fn repositoryContentProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam
 
 fn createRepositoryDialogControls(hwnd: c.HWND) void {
     const state = &repository_dialog_state;
-    const intro = if (state.kind == .clone) clone_intro else remote_intro;
-    state.labels[0] = createStatic(hwnd, intro, 24, 20, 592, 42);
+    state.labels[0] = createStatic(hwnd, repositoryHeading(state.kind), 24, 20, 592, 42);
     if (state.kind == .clone) {
         createLabeledEdit(hwnd, 0, "Repository URL", "https://github.com/owner/repository.git", 78);
         createLabeledEdit(hwnd, 1, "Destination folder", "C:\\Users\\you\\Source\\repository", 154);
@@ -1752,6 +1758,10 @@ test "dialog framework: repository ingress and operation dialogs use hidden shee
     const repository_title_length = c.GetWindowTextW(repository_host.hwnd, &repository_title, repository_title.len);
     const expected_repository_title = std.unicode.utf8ToUtf16LeStringLiteral(remote_title);
     try std.testing.expectEqualSlices(u16, expected_repository_title[0..expected_repository_title.len], repository_title[0..@intCast(repository_title_length)]);
+    const heading = try readControlText(std.testing.allocator, repository_dialog_state.labels[0]);
+    defer std.testing.allocator.free(heading);
+    try std.testing.expectEqualStrings(repositoryHeading(.remote), heading);
+    try std.testing.expect(std.mem.startsWith(u8, repositoryHeading(.clone), clone_title));
     try std.testing.expect(c.GetParent(repository_dialog_state.content_root) == repository_host.viewport);
     try std.testing.expect(c.GetWindowLongPtrW(repository_dialog_state.content_root, c.GWL_EXSTYLE) & c.WS_EX_CONTROLPARENT != 0);
     try std.testing.expect(c.GetWindowLongPtrW(repository_dialog_state.edits[0], c.GWL_EXSTYLE) & c.WS_EX_CLIENTEDGE == 0);
