@@ -654,6 +654,7 @@ Assert-Contract ($appSource -match
 
 $codespaceDialogSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\WindowsCodespaceDialog.zig") -Raw
 $codespaceClientSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\Codespaces.zig") -Raw
+$sheetFrameworkSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\SheetFramework.zig") -Raw
 $graphModelSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\GraphModel.zig") -Raw
 
 Assert-Contract ($mainWindowSource -match 'Add Codespace\.\.\.\\tCtrl\+Shift\+K') `
@@ -674,7 +675,11 @@ Assert-Contract ($codespaceClientSource -match 'gh auth refresh -h github\.com -
   "a missing codespace scope must tell the human the exact command that fixes it"
 Assert-Contract ($codespaceDialogSource -match 'WM_CTLCOLORLISTBOX' -and $codespaceDialogSource -match 'WM_CTLCOLOREDIT') `
   "the codespace sheet must paint its list and fields dark like the rest of the shell"
-Assert-Contract ($codespaceDialogSource -match 'IsDialogMessageW') `
+Assert-Contract (
+  $codespaceDialogSource -match '@import\("SheetFramework\.zig"\)' -and
+  $codespaceDialogSource -match 'host\.runModal\(\)' -and
+  $sheetFrameworkSource -match 'IsDialogMessageW\(self\.hwnd,\s*&message\)'
+) `
   "the codespace sheet must remain keyboard navigable"
 
 $zmxSessionSource = Get-Content -LiteralPath (Join-Path $shellRoot "src\ZmxSession.zig") -Raw
@@ -772,7 +777,7 @@ Invoke-Native "Native dialog message-loop executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\NativeForms.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    & $zig test src\NativeForms.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Update offer modal deferral executable tests" {
@@ -792,7 +797,7 @@ Invoke-Native "Context menu and gate fixture message executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\GraphContextMenu.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    & $zig test src\GraphContextMenu.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
     if ($LASTEXITCODE -ne 0) { return }
     & $zig test src\MainWindow.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include"
   } finally { Pop-Location }
@@ -1256,7 +1261,7 @@ Invoke-Native "Update offer dialog executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 "-I$include"
+    & $zig test src\UpdateOfferDialog.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Update install dialog executable tests" {
@@ -1268,7 +1273,7 @@ Invoke-Native "Update install dialog executable tests" {
   $include = Join-Path $winghosttyRoot "include"
   Push-Location $shellRoot
   try {
-    & $zig test src\UpdateInstallDialog.zig -target x86_64-windows-msvc -lc -lwinhttp -luser32 "-I$include"
+    & $zig test src\UpdateInstallDialog.zig -target x86_64-windows-msvc -lc -lwinhttp -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Native dialog field contract executable tests" {

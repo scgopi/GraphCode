@@ -824,7 +824,7 @@ test "dialog framework: prompt footer measures labels and renders return hint at
         defer _ = c.DeleteObject(bitmap);
         const previous = c.SelectObject(dc, bitmap);
         defer _ = c.SelectObject(dc, previous);
-        const fill = c.CreateSolidBrush(Tokens.dialog_primary_button) orelse return error.TestBrushCreationFailed;
+        const fill = c.CreateSolidBrush(Tokens.pane_focus_tint) orelse return error.TestBrushCreationFailed;
         defer _ = c.DeleteObject(fill);
         var bounds = c.RECT{ .left = 0, .top = 0, .right = slot.bounds.width, .bottom = slot.bounds.height };
         try std.testing.expect(c.FillRect(dc, &bounds, fill) != 0);
@@ -846,7 +846,7 @@ test "dialog framework: prompt footer measures labels and renders return hint at
         while (y < hint.bottom()) : (y += 1) {
             var x = hint.x;
             while (x < hint.right()) : (x += 1) {
-                if (c.GetPixel(dc, x, y) != Tokens.dialog_primary_button) changed_pixels += 1;
+                if (c.GetPixel(dc, x, y) != Tokens.pane_focus_tint) changed_pixels += 1;
             }
         }
         try std.testing.expect(changed_pixels > 0);

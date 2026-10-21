@@ -5,6 +5,14 @@ const AppFont = @import("AppFont.zig");
 const Dpi = @import("Dpi.zig");
 const Tokens = @import("DesignTokens.zig");
 
+const dialog_focus_tint: u32 = 0x005A4024;
+const dialog_primary_button: u32 = Tokens.pane_focus_tint;
+const dialog_primary_button_pressed: u32 = 0x00D16A08;
+const dialog_secondary_button: u32 = 0x00413B3B;
+const dialog_secondary_button_pressed: u32 = 0x004B4545;
+const dialog_disabled_button: u32 = 0x00342F2F;
+const dialog_scrollbar_thumb: u32 = 0x00645D5D;
+
 pub const Rect = struct {
     x: i32,
     y: i32,
@@ -436,7 +444,7 @@ pub fn controlPaintStyle(kind: ControlKind, enabled: bool) PaintStyle {
         .panel => .{ .background = Tokens.dialog_panel, .foreground = Tokens.dialog_body_text, .is_opaque = true },
         .static => .{ .background = Tokens.dialog_panel, .foreground = Tokens.dialog_body_text, .is_opaque = true },
         .edit => .{ .background = Tokens.dialog_field_background, .foreground = if (enabled) Tokens.dialog_title_text else Tokens.dialog_muted_text, .is_opaque = true },
-        .button => .{ .background = Tokens.dialog_secondary_button, .foreground = if (enabled) Tokens.dialog_title_text else Tokens.dialog_muted_text, .is_opaque = true },
+        .button => .{ .background = dialog_secondary_button, .foreground = if (enabled) Tokens.dialog_title_text else Tokens.dialog_muted_text, .is_opaque = true },
     };
 }
 
@@ -449,7 +457,7 @@ pub const Brushes = struct {
         var brushes = Brushes{
             .panel = c.CreateSolidBrush(Tokens.dialog_panel),
             .field = c.CreateSolidBrush(Tokens.dialog_field_background),
-            .button = c.CreateSolidBrush(Tokens.dialog_secondary_button),
+            .button = c.CreateSolidBrush(dialog_secondary_button),
         };
         errdefer brushes.deinit();
         if (brushes.panel == null or brushes.field == null or brushes.button == null) return error.SheetBrushCreationFailed;
@@ -499,19 +507,19 @@ pub fn drawField(hdc: c.HDC, bounds: Rect, dpi: u32, focused: bool) !void {
     const geometry = fieldGeometry(bounds, dpi);
     const metrics = Metrics.forDpi(dpi);
     if (focused) {
-        try drawRoundedRect(hdc, geometry.focus_tint, geometry.radius + metrics.focus_tint_width, Tokens.dialog_panel, Tokens.dialog_focus_tint, metrics.focus_tint_width);
-        try drawRoundedRect(hdc, geometry.focus_ring, geometry.radius + metrics.focus_ring_width, Tokens.dialog_panel, Tokens.dialog_focus_ring, metrics.focus_ring_width);
+        try drawRoundedRect(hdc, geometry.focus_tint, geometry.radius + metrics.focus_tint_width, Tokens.dialog_panel, dialog_focus_tint, metrics.focus_tint_width);
+        try drawRoundedRect(hdc, geometry.focus_ring, geometry.radius + metrics.focus_ring_width, Tokens.dialog_panel, Tokens.pane_focus_tint, metrics.focus_ring_width);
     }
     try drawRoundedRect(hdc, geometry.border, geometry.radius, Tokens.dialog_field_background, Tokens.dialog_field_border, 1);
 }
 
 fn buttonFillColor(role: ActionRole, enabled: bool, pressed: bool) u32 {
     return if (!enabled)
-        Tokens.dialog_disabled_button
+        dialog_disabled_button
     else if (role.isPrimary())
-        (if (pressed) Tokens.dialog_primary_button_pressed else Tokens.dialog_primary_button)
+        (if (pressed) dialog_primary_button_pressed else dialog_primary_button)
     else
-        (if (pressed) Tokens.dialog_secondary_button_pressed else Tokens.dialog_secondary_button);
+        (if (pressed) dialog_secondary_button_pressed else dialog_secondary_button);
 }
 
 pub fn drawButton(hdc: c.HDC, bounds: Rect, dpi: u32, role: ActionRole, enabled: bool, pressed: bool) !void {
@@ -985,8 +993,10 @@ fn hostProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) c
         },
         c.WM_DRAWITEM => {
             const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
-            const action = value.footerAction(@intCast(item.CtlID)) orelse FooterAction{
-                .id = @intCast(item.CtlID),
+            const control_id = std.math.cast(u16, item.CtlID) orelse
+                return c.DefWindowProcW(hwnd, message, wparam, lparam);
+            const action = value.footerAction(control_id) orelse FooterAction{
+                .id = control_id,
                 .role = if (item.CtlID == c.IDOK) .primary else .secondary,
                 .measured_text_width = 0,
             };
@@ -1101,7 +1111,7 @@ fn viewportProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARA
             if (c.FillRect(hdc, &paint.rcPaint, value.brushes.panel) == 0) value.fail(error.SheetViewportPaintFailed);
             if (value.current_layout.scroll.visible) {
                 const geometry = scrollbarGeometry(value.current_layout.viewport, value.current_layout.scroll, value.options.layout_input.dpi);
-                drawRoundedRect(hdc, geometry.thumb, @divTrunc(geometry.thumb.width, 2), Tokens.dialog_scrollbar_thumb, Tokens.dialog_scrollbar_thumb, 1) catch |failure| value.fail(failure);
+                drawRoundedRect(hdc, geometry.thumb, @divTrunc(geometry.thumb.width, 2), dialog_scrollbar_thumb, dialog_scrollbar_thumb, 1) catch |failure| value.fail(failure);
             }
             _ = c.EndPaint(hwnd, &paint);
             return 0;
@@ -1390,7 +1400,7 @@ test "dialog framework: footer measures current DPI labels and paints configured
         defer _ = c.DeleteObject(bitmap);
         const previous = c.SelectObject(dc, bitmap);
         defer _ = c.SelectObject(dc, previous);
-        const fill = c.CreateSolidBrush(Tokens.dialog_primary_button) orelse return error.TestBrushCreationFailed;
+        const fill = c.CreateSolidBrush(dialog_primary_button) orelse return error.TestBrushCreationFailed;
         defer _ = c.DeleteObject(fill);
         var bitmap_bounds = c.RECT{ .left = 0, .top = 0, .right = slot.bounds.width, .bottom = slot.bounds.height };
         try std.testing.expect(c.FillRect(dc, &bitmap_bounds, fill) != 0);
@@ -1412,11 +1422,11 @@ test "dialog framework: footer measures current DPI labels and paints configured
         while (y < hint.bottom()) : (y += 1) {
             var x = hint.x;
             while (x < hint.right()) : (x += 1) {
-                if (c.GetPixel(dc, x, y) != Tokens.dialog_primary_button) changed_pixels += 1;
+                if (c.GetPixel(dc, x, y) != dialog_primary_button) changed_pixels += 1;
             }
         }
         try std.testing.expect(changed_pixels > 0);
-        try std.testing.expectEqual(Tokens.dialog_primary_button, buttonFillColor(.destructive, true, false));
+        try std.testing.expectEqual(dialog_primary_button, buttonFillColor(.destructive, true, false));
     }
 }
 
@@ -1511,6 +1521,19 @@ test "dialog framework: rounded field and role button painting succeeds on an of
     try drawField(dc, .{ .x = 10, .y = 10, .width = 380, .height = 46 }, 144, true);
     try drawButton(dc, .{ .x = 210, .y = 80, .width = 180, .height = 48 }, 144, .primary, true, false);
     try drawButton(dc, .{ .x = 10, .y = 80, .width = 170, .height = 48 }, 144, .secondary, false, false);
+}
+
+test "dialog framework: unknown wide draw-item IDs defer without integer-cast panic" {
+    const owner = try hiddenOwner(900, 700);
+    defer _ = c.DestroyWindow(owner);
+    var host: Host = .{};
+    try host.init(owner, .{ .layout_input = testInput(96, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, 400) });
+    defer host.deinit();
+    var item: c.DRAWITEMSTRUCT = std.mem.zeroes(c.DRAWITEMSTRUCT);
+    item.CtlID = std.math.maxInt(c.UINT);
+
+    _ = c.SendMessageW(host.hwnd, c.WM_DRAWITEM, 0, @bitCast(@intFromPtr(&item)));
+    try std.testing.expect(host.failure == null);
 }
 
 test "dialog framework: scrollbar thumb scales and follows the single offset model" {
