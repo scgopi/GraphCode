@@ -345,7 +345,12 @@ static IUnknown *pattern(IRawElementProviderFragment *fragment, PATTERNID id) {
 }
 
 static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND hwnd,
-                                       IRawElementProviderFragmentRoot *root) {
+                                       IRawElementProviderFragment *root_fragment) {
+  IRawElementProviderFragmentRoot *root = nullptr;
+  check(root_fragment &&
+            root_fragment->QueryInterface(IID_PPV_ARGS(&root)) == S_OK && root,
+        "header overflow provider supports fragment hit-testing");
+  if (!root) return;
   const char *identity = "header-overflow:actions";
   const char *identities[] = {identity};
   const char *names[] = {"More actions"};
@@ -359,7 +364,7 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
                invokable_flags, bounds, 1, 0, 1, 0, 0, 0, 0) == S_OK,
         "header overflow publishes");
 
-  auto *projects = child(root, NavigateDirection_FirstChild);
+  auto *projects = child(root_fragment, NavigateDirection_FirstChild);
   auto *overflow = child(projects, NavigateDirection_FirstChild);
   checkName(overflow, L"More actions");
   check(stringProperty(overflow, UIA_AutomationIdPropertyId).rfind(L"header-overflow-", 0) == 0,
@@ -417,6 +422,7 @@ static void nativeHeaderOverflowChecks(IRawElementProviderSimple *provider, HWND
 
   if (overflow) overflow->Release();
   if (projects) projects->Release();
+  root->Release();
 }
 
 // The update banner must be invokable through COM, and Invoke must post exactly the command

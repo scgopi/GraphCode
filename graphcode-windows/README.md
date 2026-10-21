@@ -485,6 +485,12 @@ first so the rail stays above it. The overlay wins pointer and UIA hit testing.
 The 451-, 452-, and 671-DIP boundaries overlay, while 672 DIP docks; hiding the
 rail always leaves the canvas inset at zero.
 
+Native terminal workspaces remain docked with a 220-DIP reservation at narrow
+widths. Winghostty uses a child HWND and the main window clips child painting,
+so the parent-painted rail cannot safely overlay a terminal surface; that
+requires a separate overlay HWND. The responsive overlay evidence in this slice
+applies to parent-painted canvas surfaces, not terminal workspaces.
+
 The header keeps direct action buttons when their readable widths fit. Otherwise
 one `»` button opens a native popup containing the available actions in their
 existing order. Its hit target, keyboard focus, and UIA identity share the

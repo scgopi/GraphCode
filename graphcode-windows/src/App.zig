@@ -12500,6 +12500,45 @@ test "input routing bounds follow hidden workspace panel and rail" {
     try std.testing.expectEqual(WheelRegion.canvas, wheelRegion(600, 850, hidden, hidden_controls));
 }
 
+test "responsive terminal workspace keeps native child surfaces docked at the minimum width" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(directory);
+    const layout_path = try std.fs.path.join(allocator, &.{ directory, "layout.json" });
+    defer allocator.free(layout_path);
+    var workspace = try reopenTestWorkspace(allocator, layout_path);
+    defer workspace.deinit();
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    app.workspace = &workspace;
+    defer app.workspace = null;
+    app.surface = .workspace;
+    app.workspace_controls = .{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
+
+    try std.testing.expect(c.MoveWindow(
+        app.window.hwnd,
+        0,
+        0,
+        minimumWindowWidth(app.window.hwnd, app.dpi),
+        physicalCoordinate(900, app.dpi),
+        0,
+    ) != 0);
+    app.layoutWorkspace();
+
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    try std.testing.expectEqual(
+        WorkspaceControls.RailMode.overlay,
+        WorkspaceControls.railPresentation(client.right, app.workspace_controls).mode,
+    );
+    try std.testing.expectEqual(physicalCoordinate(Tokens.sidebar_width, app.dpi), workspace.layout_origin_x);
+    try std.testing.expectEqual(
+        physicalCoordinate(WorkspaceControls.min_detail_width - Tokens.sidebar_width, app.dpi),
+        workspace.layout_width,
+    );
+}
+
 test "responsive sidebar overlay bounds give rail input and UIA precedence over canvas" {
     const controls = WorkspaceControls.State{ .rail_visible = true, .panel_visible = false, .activity_enabled = false };
     const rail = WorkspaceControls.railPresentation(671, controls);
@@ -24656,28 +24695,6 @@ test "responsive header overflow publishes context actions and routes hidden UIA
     try std.testing.expect(app.workspace_controls.panel_visible);
     try std.testing.expect(app.invokeHeaderOverflowCommand(headerOverflowCommand(.toggle_panel)));
     try std.testing.expect(!app.workspace_controls.panel_visible);
-}
-
-test "responsive header focus moves a direct action into overflow on window resize" {
-    var app = try overviewTestApp(Dpi.base_dpi);
-    defer deinitOverviewTestApp(&app);
-    _ = try app.model.updateFromFrame(
-        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\local","name":"Local"},"nodes":[{"id":"loop","title":"Loop","state":"idle","metricHistory":[{"value":1},{"value":2}]}],"edges":[]}}}
-    );
-    try std.testing.expect(app.model.setSelectedIndex(0));
-    app.surface = .workspace;
-    app.workspace_controls.panel_visible = false;
-    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 1200, 900, 0) != 0);
-    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) != null);
-    app.header_focus = .toggle_panel;
-
-    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, 480, 900, 0) != 0);
-    var result: c.LRESULT = 0;
-    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_SIZE, 0, 0, &result));
-
-    try std.testing.expect(app.headerLayout().bounds(.toggle_panel) == null);
-    try std.testing.expect(app.headerLayout().bounds(.overflow) != null);
-    try std.testing.expectEqual(GraphCanvas.HeaderAction.overflow, app.header_focus.?);
 }
 
 test "responsive header focus moves a direct action into overflow on window resize" {
