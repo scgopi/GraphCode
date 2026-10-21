@@ -9,7 +9,8 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $repoRoot "Tools\windows\PackageRuntime.ps1"), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw "Packaging script has parse errors: $errors" }
-foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "Install-Package", "Open-Package", "Close-Package")) {
+foreach ($name in @("Fail", "Require", "Copy-Tree", "Move-InstallDirectory", "Get-RollbackCleanupMarker",
+    "New-RollbackCleanupMarker", "Install-Package", "Open-Package", "Close-Package")) {
   $definition = $ast.Find({
       param($node)
       $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -21,6 +22,7 @@ $copyTree = (Get-Command Copy-Tree).ScriptBlock
 $moveDirectory = (Get-Command Move-InstallDirectory).ScriptBlock
 $openPackage = (Get-Command Open-Package).ScriptBlock
 $closePackage = (Get-Command Close-Package).ScriptBlock
+$newRollbackCleanupMarker = (Get-Command New-RollbackCleanupMarker).ScriptBlock
 
 function Assert([bool] $condition, [string] $message) {
   if (-not $condition) { throw "RED: $message" }
@@ -86,6 +88,12 @@ function Move-InstallDirectory([string] $source, [string] $destination) {
   }
   & $moveDirectory $source $destination
 }
+function New-RollbackCleanupMarker([string] $backup) {
+  if ($case -eq "committed-cleanup-secondary") {
+    throw "injected cleanup marker failure"
+  }
+  & $newRollbackCleanupMarker $backup
+}
 function Remove-Item {
   [CmdletBinding()]
   param(
@@ -98,17 +106,24 @@ function Remove-Item {
   if ($case -eq "remove-new" -and $targets -contains $InstallRoot) {
     throw "injected promoted install removal failure"
   }
+  if ($case -in @("committed-cleanup-blocked", "committed-cleanup-secondary") -and
+      @($targets | Where-Object { (Split-Path $_ -Leaf) -like ".GraphCode-rollback-*" }).Count) {
+    throw "injected committed cleanup lock"
+  }
   Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
 }
 
 $versionWasProvided = $false
 $NoScheduledTask = $false
 $failures = [Collections.Generic.List[string]]::new()
+$executed = 0
 try {
   foreach ($case in @("stop", "backup-move", "restore-move", "remove-new", "stop-new", "copy",
       "staged-verification", "snapshot", "remove-task", "promote", "path", "shortcut",
       "start", "restart", "restore-shortcut", "success", "fresh-success", "fresh-failure",
-      "portable-success", "locked-install", "relative-success")) {
+      "portable-success", "locked-install", "relative-success", "committed-cleanup-blocked",
+      "committed-cleanup-secondary")) {
+    $executed++
     $lock = $null
     $pushed = $false
     try {
@@ -125,8 +140,10 @@ try {
       }
       $state = @{ stops = 0; starts = 0; closed = $false; shortcut = "old" }
       $NoScheduledTask = $case -in @("portable-success", "locked-install")
-      $succeeds = $case -in @("success", "fresh-success", "portable-success", "relative-success")
+      $succeeds = $case -in @("success", "fresh-success", "portable-success", "relative-success",
+        "committed-cleanup-blocked", "committed-cleanup-secondary")
       $errorMessage = $null
+      $installOutput = @()
       $label = $case
       if ($case -eq "fresh-failure") { $case = "start" }
       if ($case -eq "locked-install") {
@@ -138,16 +155,31 @@ try {
         $pushed = $true
         $InstallRoot = ".\current"
       }
-      try { Install-Package (-not $fresh) | Out-Null } catch { $errorMessage = $_.Exception.Message }
+      try { $installOutput = @(Install-Package (-not $fresh) 3>&1) } catch { $errorMessage = $_.Exception.Message }
       Assert $state.closed "$label did not close the package"
       Assert ($succeeds -eq (-not $errorMessage)) "$label returned an unexpected result: $errorMessage"
       $backups = @(Get-ChildItem -LiteralPath $caseRoot -Directory -Filter ".GraphCode-rollback-*")
+      $cleanupMarkers = @(Get-ChildItem -LiteralPath $caseRoot -File -Filter ".GraphCode-rollback-*.cleanup-ready")
       $shortcuts = @(Get-ChildItem -LiteralPath $caseRoot -Directory -Filter ".GraphCode-shortcut-*")
       $stages = @(Get-ChildItem -LiteralPath $caseRoot -Directory -Filter ".GraphCode-install-*")
       Assert ($stages.Count -eq 0) "$label leaked its unpromoted stage"
       if ($succeeds) {
         Assert ((Get-Content (Join-Path $InstallRoot "bin\graphcoded.exe")) -eq "new") "$label did not install the new payload"
-        Assert ($backups.Count -eq 0 -and $shortcuts.Count -eq 0) "$label left transaction debris"
+        if ($label -eq "committed-cleanup-blocked") {
+          Assert ($backups.Count -eq 1) "$label did not retain the cleanup-blocked committed backup"
+          Assert ($cleanupMarkers.Count -eq 1) "$label did not mark the committed backup as cleanup-ready"
+          Assert ($cleanupMarkers[0].BaseName -eq $backups[0].Name) "$label marker did not identify its rollback backup"
+          Assert (($installOutput | Out-String) -match "could not clean transaction directory") "$label did not warn about blocked cleanup"
+        } elseif ($label -eq "committed-cleanup-secondary") {
+          Assert ($backups.Count -eq 1) "$label did not retain the cleanup-blocked committed backup"
+          Assert ($cleanupMarkers.Count -eq 0) "$label authorized cleanup after marker creation failed"
+          $warningText = $installOutput | Out-String
+          Assert ($warningText -match "could not authorize later cleanup" -and
+            $warningText -match "could not clean transaction directory") "$label did not report both cleanup failures"
+        } else {
+          Assert ($backups.Count -eq 0 -and $cleanupMarkers.Count -eq 0) "$label left transaction debris"
+        }
+        Assert ($shortcuts.Count -eq 0) "$label left shortcut transaction debris"
         Assert ($state.shortcut -eq "new") "$label did not update the shortcut"
         Assert ($NoScheduledTask -eq ($state.starts -eq 0 -and $state.stops -eq 0)) "$label ignored scheduled-task policy"
         continue
@@ -161,13 +193,16 @@ try {
         Assert ($backups.Count -eq 1) "$label deleted the only recoverable installation"
         Assert ((Get-Content (Join-Path $backups[0].FullName "sentinel.txt")) -eq "previous installation") "$label corrupted the recovery payload"
         Assert ($errorMessage.Contains($backups[0].FullName)) "$label did not report the retained backup path: $errorMessage"
+        Assert ($cleanupMarkers.Count -eq 0) "$label marked a required recovery backup as cleanup-ready"
         Assert ($state.starts -eq $(if ($case -eq "stop-new") { 1 } else { 0 })) "$label started a daemon before the old payload was restored"
       } elseif ($fresh) {
         Assert (-not (Test-Path -LiteralPath $InstallRoot)) "$label left the failed fresh installation"
+        Assert ($cleanupMarkers.Count -eq 0) "$label marked a failed fresh install as cleanup-ready"
       } else {
         Assert (Test-Path -LiteralPath (Join-Path $InstallRoot "sentinel.txt")) "$label deleted the previous installation"
         Assert ((Get-Content (Join-Path $InstallRoot "bin\graphcoded.exe")) -eq "old") "$label did not restore the old payload"
         Assert ($backups.Count -eq 0) "$label left an unnecessary payload backup"
+        Assert ($cleanupMarkers.Count -eq 0) "$label marked a restored backup as cleanup-ready"
       }
       if ($case -in @("restart", "restore-shortcut", "restore-move", "remove-new", "stop-new")) {
         $secondary = switch ($case) {
@@ -221,7 +256,8 @@ try {
     }
   }
   if ($failures.Count) { throw ($failures -join "`n") }
-  Write-Output "Package transaction ownership and recoverable rollback contracts: PASS"
+  if ($executed -ne 23) { throw "Package rollback contract executed $executed of 23 cases" }
+  Write-Output "Package transaction ownership and recoverable rollback contracts (23 cases): PASS"
 } finally {
   if (Test-Path -LiteralPath $fixture) {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $fixture -Recurse -Force
