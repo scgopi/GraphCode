@@ -123,6 +123,16 @@ pub const dialog_muted_text: Color = 0x008E8787;
 pub const dialog_error_text: Color = 0x006060FF;
 pub const dialog_field_background: Color = 0x00302B2B;
 pub const dialog_field_border: Color = 0x00473F3F;
+pub const dialog_focus_ring: Color = pane_focus_tint;
+pub const dialog_focus_tint: Color = 0x005A4024;
+pub const dialog_primary_button: Color = pane_focus_tint;
+pub const dialog_primary_button_pressed: Color = 0x00D16A08;
+pub const dialog_secondary_button: Color = 0x00413B3B;
+pub const dialog_secondary_button_pressed: Color = 0x004B4545;
+pub const dialog_disabled_button: Color = 0x00342F2F;
+pub const dialog_scrim: Color = 0x00000000;
+pub const dialog_scrollbar_track: Color = dialog_panel;
+pub const dialog_scrollbar_thumb: Color = 0x00645D5D;
 
 pub const sidebar_width: i32 = 220;
 pub const header_height: i32 = 34;

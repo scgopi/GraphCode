@@ -76,6 +76,88 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       ($geometry.open -join ",") -cne "872,82,928,102") "old 760-pixel action geometry was accepted"
     return "New source geometry rejects the old narrow-window lane/action coordinates"
   }
+  Invoke-MultiCase "dynamic Rename title uses the exact fixture title" {
+    $expected = Get-MultiProjectRenameTitle "Alpha renamed"
+    Assert-MultiCase ($expected -ceq 'Rename “Alpha renamed”' -and
+      (Test-MultiProjectRenameTitle $expected $expected)) "exact fixture-derived Rename title drifted"
+    return "Exact fixture title, curly quotes, and bounded title predicate"
+  }
+  foreach ($titleMutation in @(
+      "Rename Loop",
+      'Rename "Alpha renamed"',
+      'Rename “Alpha renamed” extra',
+      'Rename “”',
+      ('Rename “Alpha' + "`n" + 'renamed”')
+    )) {
+    Invoke-MultiCase ("dynamic Rename title rejects " + ($titleMutation -replace "`n"," newline ")) -Negative {
+      Assert-MultiCase (-not (Test-MultiProjectRenameTitle $titleMutation 'Rename “Alpha renamed”')) `
+        "obsolete, malformed, or non-exact Rename title was accepted"
+      return "Exact fixture-derived title mismatch rejected"
+    }
+  }
+  Invoke-MultiCase "bounded Rename title pattern accepts one unavailable-fixture title" {
+    Assert-MultiCase (Test-MultiProjectRenameTitle 'Rename “Owned loop”') `
+      "bounded unavailable-fixture Rename pattern rejected a valid title"
+    return "Tightly bounded fallback pattern only; fixture-driven paths use exact equality"
+  }
+  foreach ($titleMutation in @(
+      "Rename Loop",
+      'Rename “”',
+      'Rename “nested “quote””',
+      ('Rename “' + ("x" * 513) + '”')
+    )) {
+    Invoke-MultiCase ("bounded Rename title pattern rejects malformed case " + $titleMutation.Length) -Negative {
+      Assert-MultiCase (-not (Test-MultiProjectRenameTitle $titleMutation)) `
+        "bounded unavailable-fixture Rename pattern widened"
+      return "Legacy, empty, nested-quote, or overlong title rejected"
+    }
+  }
+  $ownedSheet = [ordered]@{
+    processId = 4242
+    handle = [long]42
+    owner = [long]7
+    className = "GraphCodeSheetHost"
+    title = 'Delete “Alpha renamed”?'
+    contentClass = "GraphCodeWindowsDialogContent"
+    visible = $true
+    captionless = $true
+  }
+  Invoke-MultiCase "Delete custom sheet accepts exact owned captionless identity" {
+    Assert-MultiCase (Test-MultiProjectOwnedSheetIdentity $ownedSheet 4242 ([IntPtr]7) `
+      'Delete “Alpha renamed”?' "GraphCodeWindowsDialogContent") `
+      "exact Delete custom-sheet identity was rejected"
+    return "Exact PID, native owner, host class, title, visibility, and captionless style"
+  }
+  foreach ($identityMutation in @(
+      "pid", "owner", "class", "title", "content", "hidden", "captioned", "zero-handle"
+    )) {
+    Invoke-MultiCase ("Delete custom sheet rejects " + $identityMutation) -Negative {
+      $candidate = [ordered]@{
+        processId = $ownedSheet.processId
+        handle = $ownedSheet.handle
+        owner = $ownedSheet.owner
+        className = $ownedSheet.className
+        title = $ownedSheet.title
+        contentClass = $ownedSheet.contentClass
+        visible = $ownedSheet.visible
+        captionless = $ownedSheet.captionless
+      }
+      switch ($identityMutation) {
+        "pid" { $candidate.processId = 7777 }
+        "owner" { $candidate.owner = [long]8 }
+        "class" { $candidate.className = "#32770" }
+        "title" { $candidate.title = "Delete Loop" }
+        "content" { $candidate.contentClass = "GraphCodeNativeForm" }
+        "hidden" { $candidate.visible = $false }
+        "captioned" { $candidate.captionless = $false }
+        "zero-handle" { $candidate.handle = [long]0 }
+      }
+      Assert-MultiCase (-not (Test-MultiProjectOwnedSheetIdentity $candidate 4242 ([IntPtr]7) `
+        'Delete “Alpha renamed”?' "GraphCodeWindowsDialogContent")) `
+        "foreign, legacy, hidden, captioned, or invalid Delete sheet identity was accepted"
+      return "Identity guard rejected before any input"
+    }
+  }
   Invoke-MultiCase "actual early Worktrees click assignment consumes the exported caption snapshot" {
     $gateAst = [Management.Automation.Language.Parser]::ParseInput($gateSource, [ref]$null, [ref]$null)
     $assignments = @($gateAst.FindAll({
@@ -373,7 +455,7 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       $nativeTransport | Add-Member ScriptMethod IsControlOwnedBy { param($window,$control,$id) return $control -eq [IntPtr]$id }
       $nativeTransport | Add-Member ScriptMethod HasVisibleBounds { param($control) return $control -ne [IntPtr]::Zero }
       $nativeTransport | Add-Member ScriptMethod WindowIsVisible { param($window) return $true }
-      $nativeTransport | Add-Member ScriptMethod WindowTextOf { param($window) return "Rename Loop" }
+      $nativeTransport | Add-Member ScriptMethod WindowTextOf { param($window) return 'Rename “Alpha renamed”' }
       $nativeTransport | Add-Member ScriptMethod WindowProcessId { param($window) return 4242 }
       $nativeTransport | Add-Member ScriptMethod ControlIdOf { param($window) return [int]$window.ToInt64() }
       $nativeTransport | Add-Member ScriptMethod FocusedControlInDialog { param($window) return $this.focus }
@@ -395,7 +477,7 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       function Start-Sleep { param($Milliseconds) }
       $renameProcess=[pscustomobject]@{Id=4242}
       $renameProcess | Add-Member ScriptMethod WaitForInputIdle { param($timeout) return $true }
-      $script:edgeWorkflowWindow=[IntPtr]42; $script:edgeWorkflowTitle="Rename Loop"
+      $script:edgeWorkflowWindow=[IntPtr]42; $script:edgeWorkflowTitle='Rename “Alpha renamed”'
       $evidence=[Collections.Generic.List[string]]::new()
       $script:streamSourceCalls=0; $script:streamPrimary=$null; $primary=$null
       $records=@(& {
@@ -703,11 +785,11 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     $controls["9904"].bounds = @(30,100,500,124)
     $api = [pscustomobject]@{ state = @{
-      modalPID = 4242; title = "Rename Loop"; visible = $true; enabled = $true
+      modalPID = 4242; title = 'Rename “Alpha renamed”'; visible = $true; enabled = $true
       client = @(10,40,600,400); work = @(0,0,1920,1080); foreground = $true
       buffer = "  Alpha renamed  "; secondBuffer = "  Alpha renamed  "; controls = $controls
       hitRoot = [IntPtr]42; hitPID = 4242; hitChild = [IntPtr]9800; late = $null; inputSent = 2; inputExpected = 2
-    }; inputCalls = 0; bufferReads = 0; hitReads = 0
+    }; inputCalls = 0; bufferReads = 0; hitReads = 0; ExpectedTitle = ""
       order = [Collections.Generic.List[string]]::new(); requested = [Collections.Generic.List[int]]::new() }
     $api | Add-Member ScriptMethod ProcessId {
       param($window)
@@ -926,7 +1008,7 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         "title-wrong"{$api.state.title="Different dialog"}
         "foreground-false"{$api.state.foreground=$false}
         "hit-wrong"{$api.state.hitChild=[IntPtr]9800}
-        "title-deadline"{$api|Add-Member ScriptMethod Title {param($modal,$remaining)$this.order.Add("TITLE:$modal");$this.Now=5000;return "Rename Loop"} -Force}
+        "title-deadline"{$api|Add-Member ScriptMethod Title {param($modal,$remaining)$this.order.Add("TITLE:$modal");$this.Now=5000;return 'Rename “Alpha renamed”'} -Force}
       }
       $caught=$null;try{$api.FocusMouse([IntPtr]42,[IntPtr]9904,@(100,110),4242,[long]0)|Out-Null}catch{$caught=$_}
       Assert-MultiCase ($null -ne $caught -and $api.PhaseState.focusClicks -eq 0) "actual production focus primitive adopted PID or latebudget"
@@ -2225,7 +2307,9 @@ function Assert-MultiProjectRenameSubmitContract([string] $source, [string] $dia
       "function Test-MultiProjectRenameField", "UIA_MULTIPROJECT_RENAME_NATIVE_TARGET=",
       "UIA_MULTIPROJECT_RENAME_NATIVE_FAILURE=", "UIA_MULTIPROJECT_RENAME_NATIVE_ACTION=",
       '$buttonId = if ($Cancel) { 9808 } else { 9800 }', "ClientBounds", "WorkBounds", "topOwner", "rectState",
-      "hitSamples", "beforeInput", "enterFallbackUsed = `$false", "actualPriorButton1ReturnEstablished = `$false")) {
+      "hitSamples", "beforeInput", "enterFallbackUsed = `$false", "actualPriorButton1ReturnEstablished = `$false",
+      'Get-MultiProjectRenameTitle $owner.title', "-expectedTitle `$renameTitle",
+      "Only the name changes — the loop keeps its session, its edges, and its work.")) {
     if (-not $source.Contains($required)) { throw "RED: strict native Rename family route lacks $required" }
   }
 }
@@ -3603,11 +3687,13 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Require \(\[GraphCodeUiaGateState\]::WindowIsVisible\(\$shellWindow\)\)') {
     throw "RED: UIA gate does not identify visible shell HWND, background root access, missing modal and short TEMP remedy"
   }
-  if ($uiaLiveGateSource -notmatch 'FindTopLevel\("GraphCodeUpdateOffer", \[uint32\]\$process\.Id\)' -or
-      $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIRECT' -or
+  if ($uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_DIRECT' -or
       $uiaLiveGateSource -notmatch 'FromHandle\(\$nativeUpdateWindow\)' -or
-      $uiaLiveGateSource -notmatch '\$updateDialog = \$directUpdate') {
-    throw "RED: UIA gate does not use the owned modal HWND when desktop-tree lookup omits it"
+      $uiaLiveGateSource -notmatch 'Wait-UiaOwnedSheetByContentClass \$process\.Id \$shellWindow' -or
+      $uiaLiveGateSource -notmatch 'Get-UiaOwnedSheetIdentity \$updateDialog' -or
+      $uiaLiveGateSource -notmatch '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "An update is available\."' -or
+      $uiaLiveGateSource -match '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "GraphCode Update Available"') {
+    throw "RED: UIA gate does not use and verify the shared owned update sheet when desktop-tree lookup omits it"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_INPUT' -or
@@ -3618,8 +3704,35 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Update node dialog did not open' -or
       $uiaLiveGateSource -notmatch 'Update node cancellation left the dialog open' -or
       $uiaLiveGateSource -notmatch 'UIA_UPDATE_NODE_SUBMIT_STATE' -or
-      $uiaLiveGateSource -notmatch 'UIA_UPDATE_NODE_DISPATCH') {
-    throw "RED: UIA gate does not verify rename dispatch/result or Edit Details open, cancel, and submit"
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_NODE_DISPATCH' -or
+      $uiaLiveGateSource -notmatch 'UIA_DELETE_LOOP_SHEET_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch ([regex]::Escape('Delete “UIA loop A”?')) -or
+      $uiaLiveGateSource -notmatch ([regex]::Escape("Its terminal session is ended and every edge touching it is removed. This can't be undone.")) -or
+      $uiaLiveGateSource -notmatch 'cancelId = 9808' -or
+      $uiaLiveGateSource -notmatch 'deleteId = 9800') {
+    throw "RED: UIA gate does not verify dynamic Rename, custom Delete, or Edit Details sheet behavior"
+  }
+  if ($uiaLiveGateSource -match '"Rename Loop"' -or
+      $uiaLiveGateSource -notmatch 'function Test-MultiProjectRenameTitle' -or
+      $uiaLiveGateSource -notmatch 'function Get-MultiProjectRenameTitle' -or
+      $uiaLiveGateSource -notmatch 'GraphCodeSheetHost' -or
+      $uiaLiveGateSource -notmatch 'GraphCodeSheetViewport' -or
+      $uiaLiveGateSource -notmatch 'function Test-MultiProjectOwnedSheetIdentity' -or
+      $uiaLiveGateSource -notmatch 'IsCaptionlessSheet' -or
+      $uiaLiveGateSource -notmatch 'WindowOwner' -or
+      $uiaLiveGateSource -notmatch 'SheetContentClass') {
+    throw "RED: shared sheet title/hierarchy/identity contracts are missing or retain the obsolete Rename Loop title"
+  }
+  if ($uiaLiveGateSource -match 'FindTopLevel\("GraphCode(UpdateOffer|ProductSettings)"' -or
+      $uiaLiveGateSource -notmatch 'FindVisibleOwnedSheetByContentClass\(\s*\[uint32\]\$settingsProcess\.Id, \$settingsShellWindow, "GraphCodeProductSettings"\s*\)' -or
+      $uiaLiveGateSource -notmatch 'Assert-UiaOwnedSheet \$nativeFormWindow \$process\.Id \$shellWindow \$nativeForm\.Title') {
+    throw "RED: update, Product Settings, or native form discovery still assumes a migrated content class is top-level"
+  }
+  if ($uiaLiveGateSource -match '"GraphCode sheet"' -or
+      $uiaLiveGateSource -notmatch '"GraphCodeUpdateOffer" "GraphCode Update Available"' -or
+      $uiaLiveGateSource -notmatch '"GraphCodeRepositoryIngressDialog" \$ingress\.Title' -or
+      $uiaLiveGateSource -notmatch '\$settingsShellWindow "GraphCode Settings" "GraphCodeProductSettings"') {
+    throw "RED: migrated sheet identity checks do not retain exact surface-specific host titles"
   }
   if ($uiaLiveGateSource -notmatch 'SendMessageString\(edit, 0x000C' -or
       $uiaLiveGateSource -notmatch 'SendMessageText\(edit, 0x000D' -or
@@ -3724,10 +3837,11 @@ Start-Sleep -Seconds 60
       $stubDaemonSource -notmatch 'function New-StubGraphEvent') {
     throw "RED: stub daemon cannot apply a renameNode command and republish its graph"
   }
-  if ($uiaLiveGateSource -notmatch '(?s)\$updateDialog = \$desktop\.FindFirst\(\s*\[System\.Windows\.Automation\.TreeScope\]::Children' -or
-      $uiaLiveGateSource -notmatch 'UIA_UPDATE_DIALOG_CHILDREN found=' -or
-      $uiaLiveGateSource -notmatch 'Current\.ProcessId -ne \$process\.Id') {
-    throw "RED: UIA gate does not search top-level dialogs as desktop children scoped to the shell PID"
+  if ($uiaLiveGateSource -notmatch 'function Wait-UiaOwnedSheetByContentClass' -or
+      $uiaLiveGateSource -notmatch 'function Wait-UiaOwnedSheetGoneByContentClass' -or
+      $uiaLiveGateSource -notmatch 'GraphCodeRepositoryIngressDialog' -or
+      $uiaLiveGateSource -match '(?s)\$ingressDialog = Wait-ForDesktopElement.*?\$ingress\.Title') {
+    throw "RED: migrated standalone dialogs are not discovered by exact owner/PID/direct content class"
   }
   if ($uiaLiveGateSource -notmatch 'LastActivationDiagnostic' -or
       $uiaLiveGateSource -notmatch 'SetForegroundWindow\(window\).*?Marshal.GetLastWin32Error\(\)' -or
@@ -4549,8 +4663,12 @@ public static class PromptLookupFixture {
   }
 }
 '@
-  [PromptLookupFixture]::Register("GraphCodeWindowsDialog")
+  [PromptLookupFixture]::Register("GraphCodeSheetHost")
+  [PromptLookupFixture]::Register("GraphCodeSheetViewport")
   [PromptLookupFixture]::Register("GraphCodeWindowsDialogContent")
+  [PromptLookupFixture]::Register("GraphCodeNativeForm")
+  [PromptLookupFixture]::Register("GraphCodeWorkspaceManager")
+  [PromptLookupFixture]::Register("GraphCodeUnknownSheetContent")
   $lookupRoots = [Collections.Generic.List[IntPtr]]::new()
   function New-PromptLookupRoot([string] $class) {
     $window = [PromptLookupFixture]::Create($class, [IntPtr]::Zero, 0)
@@ -4566,8 +4684,9 @@ public static class PromptLookupFixture {
   }
   $script:promptLookupExecuted = 0
   try {
-    $promptRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
-    $content = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $promptRoot, 0)
+    $promptRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $viewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $promptRoot, 0)
+    $content = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $viewport, 0)
     $edit = [PromptLookupFixture]::Create("EDIT", $content, 9904)
     Assert-PromptLookup $promptRoot 9904 $edit "exact named direct viewport"
     if ([PromptLookupFixture]::IsWindowVisible($promptRoot) -or
@@ -4585,28 +4704,49 @@ public static class PromptLookupFixture {
     $direct = [PromptLookupFixture]::Create("EDIT", $promptRoot, 9904)
     Assert-PromptLookup $promptRoot 9904 $direct "direct-child precedence"
     $wrongRoot = New-PromptLookupRoot "STATIC"
-    $wrongRootContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $wrongRoot, 0)
+    $wrongRootViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $wrongRoot, 0)
+    $wrongRootContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $wrongRootViewport, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $wrongRootContent, 9904)
     Assert-PromptLookup $wrongRoot 9904 ([IntPtr]::Zero) "wrong root cannot opt in"
-    $wrongContainerRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $wrongContainerRoot = New-PromptLookupRoot "GraphCodeSheetHost"
     $wrongContainer = [PromptLookupFixture]::Create("STATIC", $wrongContainerRoot, 0)
-    $null = [PromptLookupFixture]::Create("EDIT", $wrongContainer, 9904)
-    Assert-PromptLookup $wrongContainerRoot 9904 ([IntPtr]::Zero) "wrong container ignored"
-    $namedContainer = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $wrongContainerRoot, 0)
+    $wrongContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $wrongContainer, 0)
+    $null = [PromptLookupFixture]::Create("EDIT", $wrongContent, 9904)
+    Assert-PromptLookup $wrongContainerRoot 9904 ([IntPtr]::Zero) "wrong viewport ignored"
+    $namedViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $wrongContainerRoot, 0)
+    $namedContainer = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $namedViewport, 0)
     Assert-PromptLookup $wrongContainerRoot 9904 ([IntPtr]::Zero) "same id in other sibling ignored"
     $deeper = [PromptLookupFixture]::Create("STATIC", $namedContainer, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $deeper, 9904)
     Assert-PromptLookup $wrongContainerRoot 9904 ([IntPtr]::Zero) "no deeper fallback"
-    $deepRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $deepRoot = New-PromptLookupRoot "GraphCodeSheetHost"
     $wrapper = [PromptLookupFixture]::Create("STATIC", $deepRoot, 0)
-    $deepContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $wrapper, 0)
+    $deepViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $wrapper, 0)
+    $deepContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $deepViewport, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $deepContent, 9904)
     Assert-PromptLookup $deepRoot 9904 ([IntPtr]::Zero) "named viewport must be direct"
+    $nativeRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $nativeViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $nativeRoot, 0)
+    $nativeContent = [PromptLookupFixture]::Create("GraphCodeNativeForm", $nativeViewport, 0)
+    $nativeEdit = [PromptLookupFixture]::Create("EDIT", $nativeContent, 9100)
+    Assert-PromptLookup $nativeRoot 9100 $nativeEdit "exact named native-form content"
+    $workspaceRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $workspaceViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $workspaceRoot, 0)
+    $workspaceContent = [PromptLookupFixture]::Create("GraphCodeWorkspaceManager", $workspaceViewport, 0)
+    $workspaceList = [PromptLookupFixture]::Create("LISTBOX", $workspaceContent, 9721)
+    Assert-PromptLookup $workspaceRoot 9721 $workspaceList "exact named workspace-manager content"
+    $unknownRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $unknownViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $unknownRoot, 0)
+    $unknownContent = [PromptLookupFixture]::Create("GraphCodeUnknownSheetContent", $unknownViewport, 0)
+    $null = [PromptLookupFixture]::Create("EDIT", $unknownContent, 9100)
+    Assert-PromptLookup $unknownRoot 9100 ([IntPtr]::Zero) "unknown content class cannot opt in"
     Assert-PromptLookup ([IntPtr]::Zero) 9904 ([IntPtr]::Zero) "null parent"
-    if ($script:promptLookupExecuted -ne 11) { throw "RED: prompt lookup case count was not 11" }
+    if ($script:promptLookupExecuted -ne 14) { throw "RED: prompt lookup case count was not 14" }
     Write-Host "Prompt lookup hidden native cases: $script:promptLookupExecuted passed"
-    $hitRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
-    $hitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $hitRoot, 0)
+    $hitRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $hitViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $hitRoot, 0)
+    [PromptLookupFixture]::Place($hitViewport, 0, 0, 400, 300)
+    $hitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $hitViewport, 0)
     [PromptLookupFixture]::Place($hitContent, 15, 20, 350, 250)
     $hitEdit = [PromptLookupFixture]::Create("EDIT", $hitContent, 9904)
     [PromptLookupFixture]::Place($hitEdit, 20, 25, 100, 24)
@@ -4624,14 +4764,15 @@ public static class PromptLookupFixture {
     }
     $hitCases++
     $plainRoot = New-PromptLookupRoot "STATIC"
-    $plainContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $plainRoot, 0)
+    $plainViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $plainRoot, 0)
+    $plainContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $plainViewport, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $plainContent, 9904)
     $plainBounds = [GraphCodeUiaGateState]::WindowBounds($plainContent)
-    if ([GraphCodeMultiProjectRenameNative]::ChildAt($plainRoot,$plainBounds[0]+50,$plainBounds[1]+50) -ne $plainContent) {
+    if ([GraphCodeMultiProjectRenameNative]::ChildAt($plainRoot,$plainBounds[0]+50,$plainBounds[1]+50) -ne $plainViewport) {
       throw "RED: prompt hit descended through wrong root class"
     }
     $hitCases++
-    $otherRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $otherRoot = New-PromptLookupRoot "GraphCodeSheetHost"
     $otherContent = [PromptLookupFixture]::Create("BUTTON", $otherRoot, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $otherContent, 9904)
     $otherBounds = [GraphCodeUiaGateState]::WindowBounds($otherContent)
@@ -4639,8 +4780,10 @@ public static class PromptLookupFixture {
       throw "RED: prompt hit descended through wrong container class"
     }
     $hitCases++
-    $deepHitRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
-    $deepHitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $deepHitRoot, 0)
+    $deepHitRoot = New-PromptLookupRoot "GraphCodeSheetHost"
+    $deepHitViewport = [PromptLookupFixture]::Create("GraphCodeSheetViewport", $deepHitRoot, 0)
+    [PromptLookupFixture]::Place($deepHitViewport, 0, 0, 400, 300)
+    $deepHitContent = [PromptLookupFixture]::Create("GraphCodeWindowsDialogContent", $deepHitViewport, 0)
     $hitWrapper = [PromptLookupFixture]::Create("BUTTON", $deepHitContent, 0)
     $null = [PromptLookupFixture]::Create("EDIT", $hitWrapper, 9904)
     $deepBounds = [GraphCodeUiaGateState]::WindowBounds($hitWrapper)
@@ -4648,7 +4791,7 @@ public static class PromptLookupFixture {
       throw "RED: prompt hit recursively searched deeper descendants"
     }
     $hitCases++
-    $directRoot = New-PromptLookupRoot "GraphCodeWindowsDialog"
+    $directRoot = New-PromptLookupRoot "GraphCodeSheetHost"
     $directEdit = [PromptLookupFixture]::Create("EDIT", $directRoot, 9904)
     $directBounds = [GraphCodeUiaGateState]::WindowBounds($directEdit)
     if ([GraphCodeMultiProjectRenameNative]::ChildAt($directRoot,$directBounds[0]+50,$directBounds[1]+50) -ne $directEdit) {

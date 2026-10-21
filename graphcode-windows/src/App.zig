@@ -509,7 +509,14 @@ const WorkspaceMutationResult = union(enum) {
     /// Deletion ran; the report says how far it got and what, if anything, it put back.
     torn_down: WorkspaceTeardown.Report,
 };
-const workspace_delete_confirmation_flags = c.MB_YESNO | c.MB_ICONWARNING | c.MB_DEFBUTTON2;
+fn workspaceDeleteConfirmationSpec() NativeDialogs.PromptSpec {
+    return .{
+        .title = WorkspaceTeardown.delete_caption,
+        .body = WorkspaceTeardown.confirmation_text,
+        .cancel_action = .{ .label = "No", .role = .cancel, .is_default = true },
+        .primary_action = .{ .label = "Yes", .role = .destructive },
+    };
+}
 
 /// Recovery ownership survives formatting failures and later transient statuses.
 const WorkspaceRecoveryState = struct {
@@ -845,12 +852,12 @@ const WorkspaceMutationApi = struct {
     const windows = WorkspaceProcess.windows;
 
     fn confirm(owner: c.HWND) c.INT {
-        return c.MessageBoxW(
+        const accepted = NativeDialogs.confirm(
             owner,
-            std.unicode.utf8ToUtf16LeStringLiteral(WorkspaceTeardown.confirmation_text).ptr,
-            std.unicode.utf8ToUtf16LeStringLiteral(WorkspaceTeardown.delete_caption).ptr,
-            workspace_delete_confirmation_flags,
-        );
+            std.heap.c_allocator,
+            workspaceDeleteConfirmationSpec(),
+        ) catch false;
+        return if (accepted) c.IDYES else c.IDNO;
     }
 
     fn rename(allocator: std.mem.Allocator, source: []const u8, destination: []const u8) !void {
@@ -3698,17 +3705,26 @@ pub const App = struct {
         const graph = self.model.graph orelse return;
         const index = self.model.selectedIndex() orelse return;
         if (index >= graph.nodes.items.len) return;
+        const rename_title = std.fmt.allocPrint(
+            self.allocator,
+            "Rename “{s}”",
+            .{graph.nodes.items[index].title},
+        ) catch return;
+        defer self.allocator.free(rename_title);
         const project_path = self.allocator.dupe(u8, graph.project.path) catch return;
         defer self.allocator.free(project_path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        var result = NativeDialogs.textWithDescription(
+        var result = NativeDialogs.custom(
             self.window.hwnd,
             self.allocator,
-            "Rename Loop",
-            "Choose the title shown for this loop throughout the graph.",
-            &.{"Title"},
-            &.{graph.nodes.items[index].title},
+            .{
+                .title = rename_title,
+                .body = "Only the name changes — the loop keeps its session, its edges, and its work.",
+                .labels = &.{"Title"},
+                .initial = &.{graph.nodes.items[index].title},
+                .primary_action = .{ .label = "Rename", .role = .primary, .is_default = true },
+            },
         ) catch {
             self.setStatus("Unable to open loop rename form");
             return;
@@ -4639,14 +4655,20 @@ pub const App = struct {
         defer self.allocator.free(path);
         const node_id = self.allocator.dupe(u8, graph.nodes.items[index].id) catch return;
         defer self.allocator.free(node_id);
-        const message = std.fmt.allocPrint(
+        const title = std.fmt.allocPrint(
             self.allocator,
-            "Delete \"{s}\"?\n\nThe loop and its graph connections will be removed. This cannot be undone.",
+            "Delete “{s}”?",
             .{graph.nodes.items[index].title},
         ) catch return;
-        defer self.allocator.free(message);
-        if (!GraphContextMenu.confirm(self.window.hwnd, "Delete Loop", message)) return;
+        defer self.allocator.free(title);
+        if (!(NativeDialogs.confirm(self.window.hwnd, self.allocator, .{
+            .title = title,
+            .body = "Its terminal session is ended and every edge touching it is removed. This can't be undone.",
+            .cancel_action = .{ .label = "Cancel", .role = .cancel },
+            .primary_action = .{ .label = "Delete", .role = .destructive, .is_default = true },
+        }) catch false)) return;
         const updated_graph = self.model.graph orelse return;
+        if (!std.mem.eql(u8, updated_graph.project.path, path)) return;
         const updated_index = GraphModel.findNodeIndexByID(updated_graph.nodes.items, node_id) orelse return;
         self.client.sendDeleteNode(path, updated_graph.nodes.items[updated_index].id);
     }
@@ -11503,10 +11525,16 @@ test "workspace deletion guards default current open legacy and every non Yes re
     try std.testing.expectEqualStrings("beta-state", untouched);
 }
 
-test "workspace delete confirmation makes No the default and uses a warning" {
-    try std.testing.expectEqual(c.MB_YESNO, workspace_delete_confirmation_flags & c.MB_TYPEMASK);
-    try std.testing.expectEqual(c.MB_DEFBUTTON2, workspace_delete_confirmation_flags & c.MB_DEFMASK);
-    try std.testing.expectEqual(c.MB_ICONWARNING, workspace_delete_confirmation_flags & c.MB_ICONMASK);
+test "workspace delete confirmation uses the custom sheet and keeps No as the default" {
+    const spec = workspaceDeleteConfirmationSpec();
+    try std.testing.expectEqualStrings(WorkspaceTeardown.delete_caption, spec.title);
+    try std.testing.expectEqualStrings(WorkspaceTeardown.confirmation_text, spec.body);
+    try std.testing.expectEqualStrings("No", spec.cancel_action.label);
+    try std.testing.expect(spec.cancel_action.is_default);
+    try std.testing.expectEqual(NativeDialogs.ActionRole.cancel, spec.cancel_action.role);
+    try std.testing.expectEqualStrings("Yes", spec.primary_action.label);
+    try std.testing.expectEqual(NativeDialogs.ActionRole.destructive, spec.primary_action.role);
+    try std.testing.expect(!spec.primary_action.is_default);
 }
 
 test "workspace cancelled mutation releases every partial allocation and reservation" {

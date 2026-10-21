@@ -1163,6 +1163,18 @@ Invoke-Native "GDI gradient executable tests" {
     & $zig test src\GdiGradient.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
   } finally { Pop-Location }
 }
+Invoke-Native "Sheet framework executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
+  if (-not $winghosttyRoot) {
+    $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\SheetFramework.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 "-I$include"
+  } finally { Pop-Location }
+}
 Invoke-Native "App font cache executable tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
   $winghosttyRoot = [Environment]::GetEnvironmentVariable("GRAPHCODE_WINGHOSTTY_ROOT")
