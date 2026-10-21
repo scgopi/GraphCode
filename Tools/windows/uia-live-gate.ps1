@@ -1632,6 +1632,34 @@ function Read-DaemonCommandLog([string] $path) {
   throw "daemon command log '$path' never became a complete readable record: $lastFailure"
 }
 
+function Wait-DaemonCommandLog(
+  [string] $path,
+  [scriptblock] $predicate,
+  [string] $label,
+  [int] $timeoutMilliseconds = 5000
+) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  $lastRecord = $null
+  $lastFailure = "not attempted"
+  do {
+    if (Test-Path -LiteralPath $path) {
+      try {
+        $text = Read-DaemonCommandLog $path
+        $record = $text | ConvertFrom-Json -ErrorAction Stop
+        $lastRecord = $text
+        if (& $predicate $record) { return $text }
+        $lastFailure = "latest record did not match"
+      } catch {
+        $lastFailure = $_.Exception.Message
+      }
+    } else {
+      $lastFailure = "missing"
+    }
+    Start-Sleep -Milliseconds 50
+  } while ($watch.ElapsedMilliseconds -lt $timeoutMilliseconds)
+  throw "$label did not reach the daemon command log within ${timeoutMilliseconds}ms; lastFailure=$lastFailure; lastRecord=$lastRecord"
+}
+
 function Format-WindowHandle([IntPtr] $handle) {
   return "0x$($handle.ToInt64().ToString('x'))"
 }
@@ -7430,7 +7458,11 @@ try {
   )) "Rename sheet rejected Return"
   Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow `
     "GraphCodeWindowsDialogContent") "Return did not submit and close the Rename sheet"
-  $renameCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  $renameCommandJson = Wait-DaemonCommandLog $daemonCommandLogPath {
+    param($record)
+    $record.graphCommand.command.renameNode._0 -eq
+      "11111111-1111-4111-8111-111111111111"
+  } "Rename submission"
   $renameCommand = ConvertFrom-Json -InputObject $renameCommandJson
   Require ($renameCommand.graphCommand.command.renameNode._0 -eq
            "11111111-1111-4111-8111-111111111111") `
@@ -7530,7 +7562,13 @@ try {
     Write-Host "UIA_UPDATE_NODE_SUBMIT_STATE stillOpen=True firstEdit='$updateSubmitFirstEdit' content='$updateSubmitContent'"
   }
   Require ($null -eq $remainingUpdate) "Edit Details submission left the dialog open"
-  $updateCommandJson = (Read-DaemonCommandLog $daemonCommandLogPath)
+  $updateCommandJson = Wait-DaemonCommandLog $daemonCommandLogPath {
+    param($record)
+    ($record.graphCommand.command.updateNode._0 -eq
+      "11111111-1111-4111-8111-111111111111") -and
+    ($record.graphCommand.command.updateNode.update.goalSummary -eq
+      "UIA details submitted")
+  } "Edit Details submission"
   $updateCommand = ConvertFrom-Json -InputObject $updateCommandJson
   Require (($updateCommand.graphCommand.command.updateNode._0 -eq
             "11111111-1111-4111-8111-111111111111") -and
@@ -9155,7 +9193,12 @@ try {
   )) "connected-daemon Rename dialog rejected Return"
   Require (Wait-UiaOwnedSheetGoneByContentClass $renameProcess.Id $renameShellWindow `
     "GraphCodeWindowsDialogContent") "connected-daemon Rename dialog stayed open after Return"
-  $renameLiveCommand = ConvertFrom-Json -InputObject (Read-DaemonCommandLog $renameCommandLogPath)
+  $renameLiveCommand = ConvertFrom-Json -InputObject (Wait-DaemonCommandLog `
+    $renameCommandLogPath {
+      param($record)
+      ($record.graphCommand.command.renameNode._0 -eq $renameNodeId) -and
+      ($record.graphCommand.command.renameNode.title -eq $renameFinalTitle)
+    } "connected-daemon Rename submission")
   Require (($renameLiveCommand.graphCommand.command.renameNode._0 -eq $renameNodeId) -and
            ($renameLiveCommand.graphCommand.command.renameNode.title -eq $renameFinalTitle)) `
     "connected-daemon rename dispatched the wrong node identity or title"

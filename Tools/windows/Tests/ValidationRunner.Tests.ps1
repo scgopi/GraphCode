@@ -3764,6 +3764,12 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent"') {
     throw "RED: UIA Rename checks still depend on desktop Window control discovery instead of the owned captionless prompt sheet"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)function Wait-DaemonCommandLog\(.*?\[Diagnostics\.Stopwatch\]::StartNew\(\).*?\$watch\.ElapsedMilliseconds -lt \$timeoutMilliseconds.*?throw "\$label did not reach the daemon command log within' -or
+      $uiaLiveGateSource -notmatch '(?s)\$renameCommandJson = Wait-DaemonCommandLog \$daemonCommandLogPath.*?"Rename submission"' -or
+      $uiaLiveGateSource -notmatch '(?s)\$updateCommandJson = Wait-DaemonCommandLog \$daemonCommandLogPath.*?"Edit Details submission"' -or
+      $uiaLiveGateSource -notmatch '(?s)\$renameLiveCommand = ConvertFrom-Json -InputObject \(Wait-DaemonCommandLog.*?"connected-daemon Rename submission"\)') {
+    throw "RED: UIA Rename and Update evidence reads the daemon log before the asynchronous command is recorded"
+  }
   if ($uiaLiveGateSource -match '\$(deleteLoopCondition|updateWindowCondition|nodeFormCondition|sidebarNodeFormCondition|templatePickerCondition|deleteLoopsCondition|deleteEdgeCondition|edgeDialogCondition|renameLiveCondition)\b' -or
       $uiaLiveGateSource -notmatch '(?s)"GraphCodeWindowsDialogContent"\s+\$deleteLoopTitle' -or
       $uiaLiveGateSource -notmatch '(?s)"GraphCodeNativeForm"\s+"Update node"' -or
