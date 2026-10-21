@@ -327,8 +327,9 @@ fn onHostMessage(
             var default_id: usize = if (state.cancel_action.is_default) cancel_id else ok_id;
             const focused = c.GetFocus();
             if (focused != null and c.IsChild(hwnd, focused) != 0) {
-                const focused_id: usize = @intCast(c.GetDlgCtrlID(focused));
-                if (focused_id == cancel_id or focused_id == ok_id) default_id = focused_id;
+                if (std.math.cast(u16, c.GetDlgCtrlID(focused))) |focused_id| {
+                    if (focused_id == cancel_id or focused_id == ok_id) default_id = focused_id;
+                }
             }
             result.* = @as(c.LRESULT, @intCast(default_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16);
             return true;
@@ -377,7 +378,10 @@ fn onHostMessage(
             return true;
         },
         c.WM_DRAWITEM => {
-            drawAction(state, Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam)) catch |err| failDialog(err);
+            const item = Win32.messagePointer(*const c.DRAWITEMSTRUCT, lparam);
+            const control_id = std.math.cast(u16, item.CtlID) orelse return false;
+            if (control_id != cancel_id and control_id != ok_id) return false;
+            drawAction(state, item, control_id) catch |err| failDialog(err);
             result.* = 1;
             return true;
         },
@@ -592,10 +596,10 @@ fn moveControlWithFont(state: *State, hwnd: c.HWND, x: i32, y: i32, width: i32, 
         return error.DialogLayoutFailed;
 }
 
-fn drawAction(state: *State, item: *const c.DRAWITEMSTRUCT) !void {
-    const action = if (item.CtlID == cancel_id) state.cancel_action else state.primary_action;
+fn drawAction(state: *State, item: *const c.DRAWITEMSTRUCT, control_id: u16) !void {
+    const action = if (control_id == cancel_id) state.cancel_action else state.primary_action;
     try Sheet.drawFooterAction(item, state.dpi, .{
-        .id = @intCast(item.CtlID),
+        .id = control_id,
         .role = action.role,
         .measured_text_width = 0,
         .return_hint = action.is_default,
@@ -833,7 +837,7 @@ test "dialog framework: prompt footer measures labels and renders return hint at
         item.hwndItem = button;
         item.hDC = dc;
         item.rcItem = bounds;
-        drawAction(&active_state, &item) catch |err| return err;
+        drawAction(&active_state, &item, ok_id) catch |err| return err;
         const content = Sheet.footerContentLayout(.{
             .x = 0,
             .y = 0,
@@ -851,6 +855,34 @@ test "dialog framework: prompt footer measures labels and renders return hint at
         }
         try std.testing.expect(changed_pixels > 0);
     }
+}
+
+test "dialog framework: prompt callback defers unknown and wide draw-item IDs safely" {
+    var state = State{ .allocator = std.testing.allocator, .parent = null };
+    var result: c.LRESULT = -1;
+    var item: c.DRAWITEMSTRUCT = std.mem.zeroes(c.DRAWITEMSTRUCT);
+    item.CtlID = std.math.maxInt(c.UINT);
+    try std.testing.expect(!onHostMessage(
+        &state,
+        null,
+        c.WM_DRAWITEM,
+        0,
+        @bitCast(@intFromPtr(&item)),
+        &result,
+    ));
+    try std.testing.expect(state.failure == null);
+
+    item.CtlID = 99;
+    try std.testing.expect(!onHostMessage(
+        &state,
+        null,
+        c.WM_DRAWITEM,
+        0,
+        @bitCast(@intFromPtr(&item)),
+        &result,
+    ));
+    try std.testing.expect(state.failure == null);
+    try std.testing.expect(std.math.cast(u16, @as(c.INT, -1)) == null);
 }
 
 test "dialog framework: selected initial rename value survives the exact Rename contract" {
