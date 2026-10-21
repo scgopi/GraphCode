@@ -19,7 +19,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Signed catalog integrity and publisher policy | `pwsh Tools\windows\Tests\Packaging.Signing.Tests.ps1` |
 | Native SignTool PS1 signature and tamper detection (SDK required) | `pwsh Tools\windows\Tests\Packaging.ScriptSigning.Tests.ps1` |
 | Native missing/idle task stop and deletion | `pwsh Tools\windows\Tests\Packaging.Scheduler.Tests.ps1` |
-| Failed-upgrade preservation and recoverable rollback | `pwsh Tools\windows\Tests\Packaging.Rollback.Tests.ps1` |
+| Failed-upgrade preservation, committed-backup marking, and recoverable rollback | `pwsh Tools\windows\Tests\Packaging.Rollback.Tests.ps1` |
 | Uninstall refusal with live sessions/locked files and all-or-nothing removal | `pwsh Tools\windows\Tests\Packaging.Uninstall.Tests.ps1` |
 | Standalone setup under PowerShell 5.1 and 7 | `pwsh Tools\windows\Tests\Packaging.Standalone.Tests.ps1` |
 | Release publishing: signing gates, asset labeling, workflow contract | `pwsh Tools\windows\Tests\Release.Tests.ps1` |
@@ -27,6 +27,7 @@ The Windows port must have runnable commands before implementation fleets begin.
 | Native accessibility provider (MSVC and Windows SDK) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.ps1` |
 | Native accessibility harness failure attribution (mock tools, no native fixture) | `pwsh -NoProfile -File Tools\windows\Tests\AccessibilityProvider.Native.Tests.Harness.Tests.ps1` |
 | Native release feed, URL handoff, and allocation safety | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes updater tests) |
+| Successful-update rollback cleanup, locked retry, and failed-recovery preservation | `pwsh Tools\windows\Tests\WindowsShell.Tests.ps1 -ZigExecutable $env:GRAPHCODE_ZIG0152` (includes `WindowsRollbackCleanup.zig`) |
 | Real-product packaging and source/standalone install/upgrade/rollback/uninstall | `pwsh Tools\windows\validate.ps1 -Task packaging` |
 | Shared Swift package | `swift test --package-path <shared-package>` once extracted |
 | macOS app/daemon/CLI | `make test` |

@@ -544,6 +544,7 @@ foreach ($path in @(
     "src\UpdateOfferPresentation.zig",
     "src\WindowsOnboarding.zig",
     "src\WindowsProductSettings.zig",
+    "src\WindowsRollbackCleanup.zig",
     "src\Accessibility.zig",
     "src\DesignTokens.zig",
     "src\Wire.zig",
@@ -878,6 +879,20 @@ Invoke-Native "Windows update install executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\WindowsUpdateInstall.zig -target x86_64-windows-msvc -lc -lwinhttp "-I$include"
+  } finally { Pop-Location }
+}
+Invoke-Native "Committed rollback cleanup executable tests" {
+  $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
+  $winghosttyRoot = if ($env:GRAPHCODE_WINGHOSTTY_ROOT) {
+    $env:GRAPHCODE_WINGHOSTTY_ROOT
+  } else {
+    Join-Path $depotRoot "Winghostty-worktrees\host-integration"
+  }
+  $include = Join-Path $winghosttyRoot "include"
+  Push-Location $shellRoot
+  try {
+    & $zig test src\WindowsRollbackCleanup.zig -target x86_64-windows-msvc `
+      -lc -lkernel32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Frame buffer executable tests" {
