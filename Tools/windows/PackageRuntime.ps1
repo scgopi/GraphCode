@@ -361,6 +361,22 @@ function Move-InstallDirectory([string] $source, [string] $destination) {
   $destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($destination)
   [IO.Directory]::Move($source, $destination)
 }
+function Get-RollbackCleanupMarker([string] $backup) {
+  $backup = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($backup)
+  return "$backup.cleanup-ready"
+}
+function New-RollbackCleanupMarker([string] $backup) {
+  $marker = Get-RollbackCleanupMarker $backup
+  $stream = [IO.File]::Open($marker, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes("committed`n")
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    $stream.Dispose()
+  }
+  return $marker
+}
 function Install-Package([bool] $upgrade) {
   try {
     $root = Open-Package ($(if ($Package) { $Package } else { Fail "-Package is required" }))
@@ -455,12 +471,29 @@ function Install-Package([bool] $upgrade) {
       throw $failure
     } finally {
       $cleanup = @($stage)
-      if ($committed) { $cleanup += $backup }
       if (-not $keepShortcutBackup) { $cleanup += $shortcutBackup }
       foreach ($path in $cleanup) {
         if (Test-Path -LiteralPath $path) {
           try { Remove-Item -LiteralPath $path -Recurse -Force } catch {
             Write-Warning "GraphCode packaging: could not clean transaction directory '$path': $($_.Exception.Message)"
+          }
+        }
+      }
+      if ($committed -and $previousInstallMoved -and (Test-Path -LiteralPath $backup)) {
+        $cleanupMarker = Get-RollbackCleanupMarker $backup
+        try {
+          New-RollbackCleanupMarker $backup | Out-Null
+        } catch {
+          Write-Warning "GraphCode packaging: could not authorize later cleanup of committed backup '$backup': $($_.Exception.Message)"
+        }
+        try {
+          Remove-Item -LiteralPath $backup -Recurse -Force
+        } catch {
+          Write-Warning "GraphCode packaging: could not clean transaction directory '$backup': $($_.Exception.Message)"
+        }
+        if (-not (Test-Path -LiteralPath $backup) -and (Test-Path -LiteralPath $cleanupMarker)) {
+          try { Remove-Item -LiteralPath $cleanupMarker -Force } catch {
+            Write-Warning "GraphCode packaging: removed committed backup but could not clean transaction marker '$cleanupMarker': $($_.Exception.Message)"
           }
         }
       }
