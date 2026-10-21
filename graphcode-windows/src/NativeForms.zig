@@ -1378,6 +1378,14 @@ fn sheetMessage(
 ) bool {
     const state: *DialogState = @ptrCast(@alignCast(context orelse return false));
     if (message == c.DM_GETDEFID) {
+        const focused = c.GetFocus();
+        if (focused != null and c.IsChild(hwnd, focused) != 0 and c.IsWindowEnabled(focused) != 0) {
+            const focused_id = c.GetDlgCtrlID(focused);
+            if (focused_id == cancel_id or focused_id == templates_id or focused_id == reveal_id or focused_id == ok_id) {
+                result.* = @as(c.LRESULT, @intCast(focused_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16);
+                return true;
+            }
+        }
         const primary = c.GetDlgItem(hwnd, @intCast(ok_id));
         result.* = if (primary != null and c.IsWindowEnabled(primary) != 0)
             @as(c.LRESULT, @intCast(ok_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16)
@@ -5047,7 +5055,16 @@ test "dialog framework: enabled primary is the Enter default and invalid primary
     try std.testing.expectEqual(@as(u16, ok_id), @as(u16, @truncate(enabled_default)));
     try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(enabled_default >> 16)));
 
+    const cancel = c.GetDlgItem(host.hwnd, @intCast(cancel_id)) orelse return error.TestWindowCreationFailed;
+    _ = c.SetFocus(cancel);
+    const cancel_default: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, cancel_id), @as(u16, @truncate(cancel_default)));
+    try std.testing.expectEqual(@as(u16, c.DC_HASDEFID), @as(u16, @truncate(cancel_default >> 16)));
+
     _ = c.EnableWindow(primary, 0);
+    const disabled_primary_focused_cancel: usize = @bitCast(c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
+    try std.testing.expectEqual(@as(u16, cancel_id), @as(u16, @truncate(disabled_primary_focused_cancel)));
+    _ = c.SetFocus(state.edits[0]);
     try std.testing.expectEqual(@as(c.LRESULT, 0), c.SendMessageW(host.hwnd, c.DM_GETDEFID, 0, 0));
 }
 
