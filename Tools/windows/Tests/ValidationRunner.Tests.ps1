@@ -3767,7 +3767,65 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent"') {
     throw "RED: UIA Rename checks still depend on desktop Window control discovery instead of the owned captionless prompt sheet"
   }
-  if ($uiaLiveGateSource -notmatch '(?s)\$deleteTarget = Find-FragmentByIdWithRetry \$root \$renameGraphIdentity \$rawWalker.*?\$deleteTargetSelection\.Select\(\).*?Require \$deleteTargetSelection\.Current\.IsSelected.*?UIA_DELETE_LOOP_TARGET.*?SendCommand\(\$shellWindow, 5103\)') {
+  function Test-DeleteLoopContextSource([string] $source) {
+    $start = $source.IndexOf('$deleteLoopTitle =')
+    $end = if ($start -ge 0) {
+      $source.IndexOf('Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 21))', $start)
+    } else { -1 }
+    if ($start -lt 0 -or $end -le $start) { return $false }
+    $block = ([regex]::Replace($source.Substring($start, $end - $start), '\s+', ' ')).Trim()
+    if ($block -match 'SendCommand\(\$shellWindow,\s*5103\)') { return $false }
+    $required = @(
+      '$deleteTarget = Find-FragmentByIdWithRetry $root $renameGraphIdentity $rawWalker',
+      '$deleteTargetSelection.Select()',
+      'Require $deleteTargetSelection.Current.IsSelected',
+      'UIA_DELETE_LOOP_TARGET',
+      '[GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)',
+      '$deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"',
+      '$deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)',
+      '$_.Id -eq 5103 -and $_.Enabled',
+      'Require ($null -ne $deleteLoopItem)',
+      '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id',
+      'Require ($null -ne $deleteLoopClick)',
+      'UIA_DELETE_LOOP_MENU',
+      '"GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"',
+      '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808',
+      'Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow ` "GraphCodeWindowsDialogContent") "Delete Loop custom sheet remained open after Cancel"'
+    )
+    $offset = 0
+    foreach ($needle in $required) {
+      $next = $block.IndexOf($needle, $offset, [StringComparison]::Ordinal)
+      if ($next -lt 0) { return $false }
+      $offset = $next + $needle.Length
+    }
+    return $true
+  }
+  $directDeleteMutant = $uiaLiveGateSource.Replace(
+    '[GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)',
+    '[GraphCodeUiaGateState]::SendCommand($shellWindow, 5103)'
+  )
+  $missingItemAssertionMutant = $uiaLiveGateSource.Replace(
+    'Require ($null -ne $deleteLoopItem)',
+    '$null = ($null -ne $deleteLoopItem)'
+  )
+  $wrongClickMutant = $uiaLiveGateSource.Replace(
+    '$deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id',
+    '$deleteLoopPopup, $shellWindow, 0, 5103'
+  )
+  $wrongCancelMutant = $uiaLiveGateSource.Replace(
+    '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 9808',
+    '[IntPtr]$deleteLoopDialog.Current.NativeWindowHandle, 7'
+  )
+  $missingTeardownMutant = $uiaLiveGateSource.Replace(
+    'Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow',
+    'Wait-UiaOwnedSheetGoneDisabled $process.Id $shellWindow'
+  )
+  if (-not (Test-DeleteLoopContextSource $uiaLiveGateSource) -or
+      (Test-DeleteLoopContextSource $directDeleteMutant) -or
+      (Test-DeleteLoopContextSource $missingItemAssertionMutant) -or
+      (Test-DeleteLoopContextSource $wrongClickMutant) -or
+      (Test-DeleteLoopContextSource $wrongCancelMutant) -or
+      (Test-DeleteLoopContextSource $missingTeardownMutant)) {
     throw "RED: UIA Delete Loop invocation does not re-establish the stable fixture selection after Rename"
   }
   if ($uiaLiveGateSource -notmatch '(?s)function Wait-DaemonCommandLog\(.*?\[Diagnostics\.Stopwatch\]::StartNew\(\).*?\$watch\.ElapsedMilliseconds -lt \$timeoutMilliseconds.*?throw "\$label did not reach the daemon command log within' -or

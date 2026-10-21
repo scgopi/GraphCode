@@ -7487,8 +7487,24 @@ try {
     "Delete Loop could not select the fixture loop before invoking the selection-dependent command"
   Write-Host ("UIA_DELETE_LOOP_TARGET automationId='$($deleteTarget.Current.AutomationId)' " +
     "name='$($deleteTarget.Current.Name)' selected=$($deleteTargetSelection.Current.IsSelected)")
-  Require ([GraphCodeUiaGateState]::SendCommand($shellWindow, 5103)) `
-    "Delete Loop fixture command was rejected"
+  Require (Ensure-ShellForeground $shellWindow "Delete Loop context menu") `
+    "GraphCode shell did not reacquire foreground before the Delete Loop context menu"
+  Require ([GraphCodeUiaGateState]::PostContextMenu($shellWindow, 3)) `
+    "Delete Loop context menu request was rejected"
+  $deleteLoopPopup = Wait-ForPopupMenu $process $shellWindow "Delete Loop"
+  Require ($deleteLoopPopup -ne [IntPtr]::Zero) "Delete Loop context menu did not open"
+  $deleteLoopItems = @(Get-PopupMenuItems $deleteLoopPopup)
+  $deleteLoopItem = @($deleteLoopItems | Where-Object {
+    $_.Id -eq 5103 -and $_.Enabled
+  }) | Select-Object -First 1
+  Require ($null -ne $deleteLoopItem) `
+    "Delete Loop context menu omitted its enabled Delete action: $(Format-PopupMenuItems $deleteLoopItems)"
+  $deleteLoopClick = [GraphCodeUiaGateState]::ClickPopupMenuItem(
+    $deleteLoopPopup, $shellWindow, [int]$deleteLoopItem.Position, [int]$deleteLoopItem.Id
+  )
+  Require ($null -ne $deleteLoopClick) "Delete Loop context-menu action could not be clicked"
+  Write-Host ("UIA_DELETE_LOOP_MENU command=$($deleteLoopItem.Id) " +
+    "hilite=$($deleteLoopClick.Hilite) keyboardFallback=$($deleteLoopClick.UsedKeyboardFallback)")
   $deleteLoopDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeWindowsDialogContent" $deleteLoopTitle "Delete Loop custom sheet"
   Require ($null -ne $deleteLoopDialog) "Delete Loop did not open its custom sheet"
