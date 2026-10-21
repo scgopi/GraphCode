@@ -76,6 +76,9 @@ pub const LayoutInput = struct {
     dpi: u32 = Dpi.base_dpi,
     desired_width: i32,
     minimum_width: i32,
+    /// Native-pixel constraints derived from measured footer controls.
+    footer_minimum_width: i32 = 0,
+    footer_minimum_height: i32 = 0,
     heights: HeightRange,
     content_extent: i32,
     footer_height: ?i32 = null,
@@ -124,16 +127,25 @@ pub fn layout(input: LayoutInput) Layout {
     const metrics = Metrics.forDpi(input.dpi);
     const available_width = @max(0, input.owner.width - metrics.outer_margin * 2);
     const available_height = @max(0, input.owner.height - metrics.outer_margin * 2);
-    const minimum_width = @min(@max(0, Dpi.scale(input.minimum_width, input.dpi)), available_width);
-    const desired_width = Dpi.scale(input.desired_width, input.dpi);
+    const minimum_width = @min(
+        @max(@max(0, Dpi.scale(input.minimum_width, input.dpi)), input.footer_minimum_width),
+        available_width,
+    );
+    const desired_width = @max(Dpi.scale(input.desired_width, input.dpi), input.footer_minimum_width);
     const width = std.math.clamp(desired_width, minimum_width, available_width);
 
     const configured_footer = input.footer_height orelse Dpi.unscale(metrics.footer_height, input.dpi);
-    const footer_target = @max(0, Dpi.scale(configured_footer, input.dpi));
+    const configured_footer_height = @max(0, Dpi.scale(configured_footer, input.dpi));
+    const footer_target = @max(configured_footer_height, input.footer_minimum_height);
     const content_extent = @max(0, Dpi.scale(input.content_extent, input.dpi));
     const minimum_height = @min(@max(0, Dpi.scale(input.heights.minimum, input.dpi)), available_height);
     const maximum_height = @min(@max(minimum_height, Dpi.scale(input.heights.maximum, input.dpi)), available_height);
-    const ideal_height = std.math.clamp(Dpi.scale(input.heights.ideal, input.dpi), minimum_height, maximum_height);
+    const footer_growth = @max(0, footer_target - configured_footer_height);
+    const ideal_height = std.math.clamp(
+        Dpi.scale(input.heights.ideal, input.dpi) + footer_growth,
+        minimum_height,
+        maximum_height,
+    );
     const natural_height = content_extent + footer_target;
     const height = std.math.clamp(@min(natural_height, ideal_height), minimum_height, maximum_height);
     const footer_height = @min(footer_target, height);
@@ -182,6 +194,8 @@ pub const FooterLayout = struct {
     count: usize = 0,
     validation: Rect,
     measured_minimum_width: i32,
+    required_height: i32,
+    row_count: usize,
 
     pub fn slice(self: *const FooterLayout) []const FooterSlot {
         return self.slots[0..self.count];
@@ -196,6 +210,13 @@ pub const FooterLayout = struct {
 fn actionWidth(action: FooterAction, metrics: Metrics) i32 {
     const hint = if (action.return_hint and action.role.isPrimary()) metrics.return_hint_width else 0;
     return @max(metrics.button_min_width, action.measured_text_width + metrics.button_text_padding * 2 + hint);
+}
+
+fn footerMinimumWidth(actions: []const FooterAction, metrics: Metrics) i32 {
+    var width = metrics.footer_inset * 2;
+    for (actions) |action| width += actionWidth(action, metrics);
+    const gaps = if (actions.len == 0) 0 else actions.len - 1;
+    return width + @as(i32, @intCast(gaps)) * metrics.footer_gap;
 }
 
 const max_footer_label_units = 512;
@@ -254,59 +275,98 @@ pub fn measureFooter(width_value: i32, height_value: i32, dpi: u32, actions: []c
     if (actions.len > max_footer_actions) return error.TooManyFooterActions;
     const metrics = Metrics.forDpi(dpi);
     const width = @max(0, width_value);
-    const height = @max(0, height_value);
-    const y = @max(0, @divTrunc(height - metrics.button_height, 2));
-    const button_height = @min(metrics.button_height, height);
-    var result = FooterLayout{
-        .validation = .{ .x = metrics.footer_inset, .y = 0, .width = 0, .height = height },
-        .measured_minimum_width = metrics.footer_inset * 2,
-    };
-    var left = @min(metrics.footer_inset, width);
-    var right = @max(left, width - metrics.footer_inset);
-    for (actions) |action| {
-        result.measured_minimum_width += actionWidth(action, metrics);
-    }
-    const gaps = if (actions.len == 0) 0 else actions.len - 1;
-    result.measured_minimum_width += @as(i32, @intCast(gaps)) * metrics.footer_gap;
-
-    var reverse = actions.len;
-    while (reverse > 0) {
-        reverse -= 1;
-        const action = actions[reverse];
-        if (!action.role.isPrimary()) continue;
-        const measured = actionWidth(action, metrics);
-        const available = @max(0, right - left);
-        const slot_width = @min(measured, available);
-        right -= slot_width;
-        result.slots[reverse] = .{
-            .id = action.id,
-            .role = action.role,
-            .bounds = .{ .x = right, .y = y, .width = slot_width, .height = button_height },
-            .enabled = action.enabled,
-        };
-        if (right > left) right = @max(left, right - metrics.footer_gap);
-    }
+    var widths = [_]i32{0} ** max_footer_actions;
+    var rows = [_]usize{0} ** max_footer_actions;
+    var widest: i32 = 0;
     for (actions, 0..) |action, index| {
-        if (action.role.isPrimary()) continue;
-        const measured = actionWidth(action, metrics);
-        const available = @max(0, right - left);
-        const slot_width = @min(measured, available);
-        result.slots[index] = .{
-            .id = action.id,
-            .role = action.role,
-            .bounds = .{ .x = left, .y = y, .width = slot_width, .height = button_height },
-            .enabled = action.enabled,
-        };
-        left += slot_width;
-        if (left < right) left = @min(right, left + metrics.footer_gap);
+        widths[index] = actionWidth(action, metrics);
+        widest = @max(widest, widths[index]);
+    }
+    if (actions.len != 0 and widest > width) return error.SheetFooterActionTooWide;
+    const horizontal_inset = @min(metrics.footer_inset, @divTrunc(@max(0, width - widest), 2));
+    const usable_width = @max(0, width - horizontal_inset * 2);
+    var row_count: usize = 1;
+    var used_width: i32 = 0;
+    for (actions, 0..) |_, index| {
+        const next_width = if (used_width == 0)
+            widths[index]
+        else
+            used_width + metrics.footer_gap + widths[index];
+        if (used_width != 0 and next_width > usable_width) {
+            row_count += 1;
+            used_width = widths[index];
+        } else {
+            used_width = next_width;
+        }
+        rows[index] = row_count - 1;
+    }
+    const row_gap_height = @as(i32, @intCast(row_count - 1)) * metrics.footer_gap;
+    const rows_height = @as(i32, @intCast(row_count)) * metrics.button_height + row_gap_height;
+    const vertical_inset = @max(0, @divTrunc(metrics.footer_height - metrics.button_height, 2));
+    const required_height = @max(metrics.footer_height, rows_height + vertical_inset * 2);
+    const height = @max(@max(0, height_value), required_height);
+    const first_row_y = @max(0, @divTrunc(height - rows_height, 2));
+    var result = FooterLayout{
+        .validation = .{ .x = horizontal_inset, .y = 0, .width = 0, .height = height },
+        .measured_minimum_width = footerMinimumWidth(actions, metrics),
+        .required_height = required_height,
+        .row_count = row_count,
+    };
+    var best_validation_width: i32 = -1;
+    for (0..row_count) |row| {
+        var left = horizontal_inset;
+        var right = width - horizontal_inset;
+        var right_count: usize = 0;
+        var reverse = actions.len;
+        while (reverse > 0) {
+            reverse -= 1;
+            const action = actions[reverse];
+            if (rows[reverse] != row or !action.role.isPrimary()) continue;
+            if (right_count != 0) right -= metrics.footer_gap;
+            right -= widths[reverse];
+            result.slots[reverse] = .{
+                .id = action.id,
+                .role = action.role,
+                .bounds = .{
+                    .x = right,
+                    .y = first_row_y + @as(i32, @intCast(row)) * (metrics.button_height + metrics.footer_gap),
+                    .width = widths[reverse],
+                    .height = metrics.button_height,
+                },
+                .enabled = action.enabled,
+            };
+            right_count += 1;
+        }
+        var left_count: usize = 0;
+        for (actions, 0..) |action, index| {
+            if (rows[index] != row or action.role.isPrimary()) continue;
+            if (left_count != 0) left += metrics.footer_gap;
+            result.slots[index] = .{
+                .id = action.id,
+                .role = action.role,
+                .bounds = .{
+                    .x = left,
+                    .y = first_row_y + @as(i32, @intCast(row)) * (metrics.button_height + metrics.footer_gap),
+                    .width = widths[index],
+                    .height = metrics.button_height,
+                },
+                .enabled = action.enabled,
+            };
+            left += widths[index];
+            left_count += 1;
+        }
+        const validation_width = @max(0, right - left);
+        if (validation_width > best_validation_width) {
+            best_validation_width = validation_width;
+            result.validation = .{
+                .x = left,
+                .y = if (row_count == 1) 0 else first_row_y + @as(i32, @intCast(row)) * (metrics.button_height + metrics.footer_gap),
+                .width = validation_width,
+                .height = if (row_count == 1) height else metrics.button_height,
+            };
+        }
     }
     result.count = actions.len;
-    result.validation = .{
-        .x = left,
-        .y = 0,
-        .width = @max(0, right - left),
-        .height = height,
-    };
     return result;
 }
 
@@ -627,7 +687,13 @@ pub const Host = struct {
         if (actions.len > max_footer_actions) return error.TooManyFooterActions;
         @memcpy(self.footer_actions[0..actions.len], actions);
         self.footer_action_count = actions.len;
-        if (self.hwnd != null and self.viewport != null) try self.layoutFooter();
+        if (self.hwnd != null and self.viewport != null) {
+            for (actions) |action| {
+                const button = c.GetDlgItem(self.hwnd, action.id);
+                if (button != null) _ = c.EnableWindow(button, @intFromBool(action.enabled));
+            }
+            try self.refreshOwnerGeometry();
+        }
     }
 
     pub fn createFooterButton(self: *Host, id: u16, label: [*:0]const u16) !c.HWND {
@@ -648,7 +714,7 @@ pub const Host = struct {
             null,
         ) orelse return error.SheetFooterButtonCreationFailed;
         _ = c.EnableWindow(button, @intFromBool(action.enabled));
-        try self.layoutFooter();
+        try self.refreshOwnerGeometry();
         return button;
     }
 
@@ -702,7 +768,23 @@ pub const Host = struct {
 
     pub fn refreshOwnerGeometry(self: *Host) !void {
         self.options.layout_input.owner = try ownerClientRect(self.owner);
+        try self.syncFooterActions();
+        self.options.layout_input.footer_minimum_width = footerMinimumWidth(
+            self.footer_actions[0..self.footer_action_count],
+            Metrics.forDpi(self.options.layout_input.dpi),
+        );
+        self.options.layout_input.footer_minimum_height = 0;
+        const width_layout = layout(self.options.layout_input);
+        const footer = try measureFooter(
+            width_layout.footer.width,
+            0,
+            self.options.layout_input.dpi,
+            self.footer_actions[0..self.footer_action_count],
+        );
+        self.options.layout_input.footer_minimum_height = footer.required_height;
         self.current_layout = layout(self.options.layout_input);
+        if (self.footer_action_count != 0 and self.current_layout.footer.height < footer.required_height)
+            return error.SheetOwnerTooSmall;
         const bounds = self.current_layout.sheet;
         if (c.SetWindowPos(self.hwnd, null, bounds.x, bounds.y, bounds.width, bounds.height, c.SWP_NOZORDER | c.SWP_NOACTIVATE) == 0)
             return error.SheetHostMoveFailed;
@@ -767,23 +849,28 @@ pub const Host = struct {
         return null;
     }
 
-    fn layoutFooter(self: *Host) !void {
-        var measured_actions = self.footer_actions;
-        for (measured_actions[0..self.footer_action_count], 0..) |*action, index| {
+    fn syncFooterActions(self: *Host) !void {
+        for (self.footer_actions[0..self.footer_action_count]) |*action| {
             const button = c.GetDlgItem(self.hwnd, action.id);
             if (button == null) continue;
             const font = AppFont.getForDpi(AppFont.control_size, true, self.options.layout_input.dpi) orelse
                 return error.SheetFooterFontCreationFailed;
             _ = c.SendMessageW(button, c.WM_SETFONT, @intFromPtr(font), 0);
             action.measured_text_width = try measureFooterActionLabel(button, self.options.layout_input.dpi);
-            self.footer_actions[index].measured_text_width = action.measured_text_width;
+            action.enabled = c.IsWindowEnabled(button) != 0;
         }
+    }
+
+    fn layoutFooter(self: *Host) !void {
+        try self.syncFooterActions();
         const footer = try measureFooter(
             self.current_layout.footer.width,
             self.current_layout.footer.height,
             self.options.layout_input.dpi,
-            measured_actions[0..self.footer_action_count],
+            self.footer_actions[0..self.footer_action_count],
         );
+        if (self.footer_action_count != 0 and footer.required_height > self.current_layout.footer.height)
+            return error.SheetOwnerTooSmall;
         self.footer_layout = footer;
         for (footer.slice()) |slot| {
             const button = c.GetDlgItem(self.hwnd, slot.id);
@@ -796,7 +883,6 @@ pub const Host = struct {
                 slot.bounds.height,
                 1,
             ) == 0) return error.SheetFooterButtonMoveFailed;
-            _ = c.EnableWindow(button, @intFromBool(slot.enabled));
         }
     }
 
@@ -1203,17 +1289,69 @@ test "dialog framework: footer measures roles long labels hints and validation r
     }
 }
 
-test "dialog framework: footer slots clamp when owner is narrower than measured footer" {
-    const actions = [_]FooterAction{
-        .{ .id = 2, .role = .cancel, .measured_text_width = 140 },
-        .{ .id = 1, .role = .destructive, .measured_text_width = 180, .return_hint = true },
-    };
-    const footer = try measureFooter(120, 44, 96, &actions);
-    try std.testing.expect(footer.measured_minimum_width > 120);
-    try std.testing.expectEqual(@as(i32, 0), footer.validation.width);
-    for (footer.slice()) |slot| {
-        try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= 120);
-        try std.testing.expect(slot.bounds.width >= 0);
+test "dialog framework: narrow footer uses deterministic measured multi-row slots at every DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = [_]FooterAction{
+            .{ .id = 2, .role = .cancel, .measured_text_width = Dpi.scale(60, dpi) },
+            .{ .id = 3, .role = .secondary, .measured_text_width = Dpi.scale(150, dpi) },
+            .{ .id = 1, .role = .destructive, .measured_text_width = Dpi.scale(100, dpi), .return_hint = true },
+        };
+        const width = Dpi.scale(300, dpi);
+        const footer = try measureFooter(width, Metrics.forDpi(dpi).footer_height, dpi, &actions);
+        const repeated = try measureFooter(width, Metrics.forDpi(dpi).footer_height, dpi, &actions);
+        try std.testing.expect(footer.measured_minimum_width > width);
+        try std.testing.expect(footer.row_count > 1);
+        try std.testing.expect(footer.required_height > Metrics.forDpi(dpi).footer_height);
+        try std.testing.expectEqual(footer.row_count, repeated.row_count);
+        try std.testing.expectEqual(footer.required_height, repeated.required_height);
+        try std.testing.expect(footer.validation.width >= 0 and footer.validation.height >= 0);
+        for (footer.slice(), repeated.slice(), actions) |slot, repeated_slot, action| {
+            try std.testing.expectEqualDeep(slot, repeated_slot);
+            try std.testing.expectEqual(actionWidth(action, Metrics.forDpi(dpi)), slot.bounds.width);
+            try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= width);
+            try std.testing.expect(slot.bounds.y >= 0 and slot.bounds.bottom() <= footer.required_height);
+        }
+    }
+}
+
+test "dialog framework: measured footer widens when possible and grows a bounded narrow sheet" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const actions = [_]FooterAction{
+            .{ .id = 2, .role = .cancel, .measured_text_width = Dpi.scale(60, dpi) },
+            .{ .id = 3, .role = .secondary, .measured_text_width = Dpi.scale(150, dpi) },
+            .{ .id = 1, .role = .primary, .measured_text_width = Dpi.scale(100, dpi), .return_hint = true },
+        };
+        const wide_footer = try measureFooter(Dpi.scale(900, dpi), Metrics.forDpi(dpi).footer_height, dpi, &actions);
+        var wide_input = testInput(dpi, .{
+            .x = 13,
+            .y = 17,
+            .width = Dpi.scale(1000, dpi),
+            .height = Dpi.scale(800, dpi),
+        }, 360);
+        wide_input.desired_width = 300;
+        wide_input.footer_minimum_width = wide_footer.measured_minimum_width;
+        const widened = layout(wide_input);
+        try std.testing.expect(widened.sheet.width >= wide_footer.measured_minimum_width);
+
+        var narrow_input = testInput(dpi, .{
+            .x = 13,
+            .y = 17,
+            .width = Dpi.scale(340, dpi),
+            .height = Dpi.scale(800, dpi),
+        }, 360);
+        narrow_input.desired_width = 300;
+        const baseline = layout(narrow_input);
+        const available_width = narrow_input.owner.width - Metrics.forDpi(dpi).outer_margin * 2;
+        const narrow_footer = try measureFooter(available_width, Metrics.forDpi(dpi).footer_height, dpi, &actions);
+        narrow_input.footer_minimum_width = narrow_footer.measured_minimum_width;
+        narrow_input.footer_minimum_height = narrow_footer.required_height;
+        const wrapped = layout(narrow_input);
+        try std.testing.expectEqual(available_width, wrapped.sheet.width);
+        try std.testing.expect(wrapped.footer.height >= narrow_footer.required_height);
+        try std.testing.expect(wrapped.sheet.height > baseline.sheet.height);
+        try std.testing.expect(wrapped.viewport.height >= 0);
+        try std.testing.expect(wrapped.sheet.x >= narrow_input.owner.x and wrapped.sheet.right() <= narrow_input.owner.right());
+        try std.testing.expect(wrapped.sheet.y >= narrow_input.owner.y and wrapped.sheet.bottom() <= narrow_input.owner.bottom());
     }
 }
 
@@ -1280,6 +1418,66 @@ test "dialog framework: footer measures current DPI labels and paints configured
         }
         try std.testing.expect(changed_pixels > 0);
         try std.testing.expectEqual(Tokens.dialog_primary_button, buttonFillColor(.destructive, true, false));
+    }
+}
+
+test "dialog framework: host feeds measured footer width into sheet geometry" {
+    const owner = try hiddenOwner(1200, 900);
+    defer _ = c.DestroyWindow(owner);
+    var input = testInput(96, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, 400);
+    input.desired_width = 300;
+    input.minimum_width = 240;
+    var host: Host = .{};
+    try host.init(owner, .{ .layout_input = input });
+    defer host.deinit();
+    const actions = [_]FooterAction{
+        .{ .id = 2, .role = .cancel, .measured_text_width = 120 },
+        .{ .id = 3, .role = .secondary, .measured_text_width = 240 },
+        .{ .id = 1, .role = .primary, .measured_text_width = 180, .return_hint = true },
+    };
+    try host.configureFooter(&actions);
+    _ = try host.createFooterButton(2, std.unicode.utf8ToUtf16LeStringLiteral("Cancel this operation").ptr);
+    _ = try host.createFooterButton(3, std.unicode.utf8ToUtf16LeStringLiteral("Create another workspace").ptr);
+    _ = try host.createFooterButton(1, std.unicode.utf8ToUtf16LeStringLiteral("Apply workspace changes").ptr);
+    const footer = host.footer_layout.?;
+    try std.testing.expect(host.current_layout.sheet.width >= footer.measured_minimum_width);
+    try std.testing.expectEqual(@as(usize, 1), footer.row_count);
+    for (footer.slice(), host.footer_actions[0..host.footer_action_count]) |slot, action|
+        try std.testing.expectEqual(actionWidth(action, Metrics.forDpi(96)), slot.bounds.width);
+}
+
+test "dialog framework: narrow owner host grows deterministic footer rows at every DPI" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        const owner = try hiddenOwner(Dpi.scale(340, dpi), Dpi.scale(800, dpi));
+        defer _ = c.DestroyWindow(owner);
+        var host: Host = .{};
+        try host.init(owner, .{
+            .layout_input = testInput(dpi, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, 360),
+        });
+        defer host.deinit();
+        const baseline_height = host.current_layout.sheet.height;
+        const actions = [_]FooterAction{
+            .{ .id = 2, .role = .cancel, .measured_text_width = Dpi.scale(130, dpi) },
+            .{ .id = 3, .role = .secondary, .measured_text_width = Dpi.scale(160, dpi) },
+            .{ .id = 1, .role = .primary, .measured_text_width = Dpi.scale(160, dpi), .return_hint = true },
+        };
+        try host.configureFooter(&actions);
+        _ = try host.createFooterButton(2, std.unicode.utf8ToUtf16LeStringLiteral("Cancel this operation").ptr);
+        _ = try host.createFooterButton(3, std.unicode.utf8ToUtf16LeStringLiteral("Create another workspace").ptr);
+        _ = try host.createFooterButton(1, std.unicode.utf8ToUtf16LeStringLiteral("Apply workspace changes").ptr);
+        const footer = host.footer_layout.?;
+        try std.testing.expect(footer.row_count > 1);
+        try std.testing.expectEqual(footer.required_height, host.current_layout.footer.height);
+        try std.testing.expect(host.current_layout.sheet.height > baseline_height);
+        try std.testing.expect(footer.validation.width >= 0 and footer.validation.height >= 0);
+        for (footer.slice(), host.footer_actions[0..host.footer_action_count]) |slot, action| {
+            try std.testing.expectEqual(actionWidth(action, Metrics.forDpi(dpi)), slot.bounds.width);
+            try std.testing.expect(slot.bounds.x >= 0 and slot.bounds.right() <= host.current_layout.footer.width);
+            try std.testing.expect(slot.bounds.y >= 0 and slot.bounds.bottom() <= host.current_layout.footer.height);
+        }
+        const owner_bounds = try ownerClientRect(owner);
+        try std.testing.expect(host.current_layout.sheet.x >= owner_bounds.x and host.current_layout.sheet.right() <= owner_bounds.right());
+        try std.testing.expect(host.current_layout.sheet.y >= owner_bounds.y and host.current_layout.sheet.bottom() <= owner_bounds.bottom());
     }
 }
 

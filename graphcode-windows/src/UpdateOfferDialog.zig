@@ -176,10 +176,23 @@ fn createContent(hwnd: c.HWND) void {
     active_state.labels[3] = createStatic(hwnd, active_state.allocator, active_state.reason, 22, 108, 576, active_state.content_extent - 124);
 }
 
+fn applyControlFontsForDpi(state: *State, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.DialogFontCreationFailed;
+    for (state.labels) |label| {
+        if (label != null) _ = c.SendMessageW(label, c.WM_SETFONT, @intFromPtr(font), 1);
+    }
+    for ([_]u16{ later_id, release_notes_id, install_id }) |id| {
+        if (c.GetDlgItem(state.host.?.hwnd, id)) |button| {
+            _ = c.SendMessageW(button, c.WM_SETFONT, @intFromPtr(font), 1);
+        }
+    }
+}
+
 fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
     const state: *State = @ptrCast(@alignCast(context.?));
     if (state.content_root == null) return;
     const dpi = state.host.?.options.layout_input.dpi;
+    try applyControlFontsForDpi(state, dpi);
     const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(dpi).scrollbar_width else 0;
     const content_width = @max(0, layout.viewport.width - scrollbar);
     if (c.MoveWindow(
@@ -442,6 +455,53 @@ fn queriedDefaultId(hwnd: c.HWND) ?u16 {
     const reply: usize = @bitCast(c.SendMessageW(hwnd, c.DM_GETDEFID, 0, 0));
     if (reply >> 16 != c.DC_HASDEFID) return null;
     return @truncate(reply);
+}
+
+fn controlFont(control: c.HWND) c.HFONT {
+    return Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control, c.WM_GETFONT, 0, 0)));
+}
+
+fn expectControlFontForDpi(control: c.HWND, dpi: u32) !void {
+    const font = controlFont(control);
+    try std.testing.expectEqual(AppFont.getForDpi(AppFont.control_size, false, dpi), font);
+    var info = std.mem.zeroes(c.LOGFONTW);
+    try std.testing.expect(c.GetObjectW(font, @sizeOf(c.LOGFONTW), &info) != 0);
+    try std.testing.expectEqual(-Dpi.scale(AppFont.control_size, dpi), info.lfHeight);
+}
+
+test "hidden update offer refreshes every control font across DPI transitions" {
+    try registerClass();
+    const owner = try hiddenOwner();
+    defer _ = c.DestroyWindow(owner);
+    active_state = .{
+        .allocator = std.testing.allocator,
+        .version = "1.2.3",
+        .reason = "A verified Windows update is ready.",
+        .installable = true,
+    };
+    active = true;
+    defer active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+    try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
+
+    var font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        for (active_state.labels) |label| try expectControlFontForDpi(label, dpi);
+        for ([_]u16{ later_id, release_notes_id, install_id }) |id| {
+            try expectControlFontForDpi(c.GetDlgItem(host.hwnd, id), dpi);
+        }
+        const current = controlFont(active_state.labels[0]);
+        if (font_96 == null) {
+            font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != font_96);
+        } else {
+            try std.testing.expectEqual(font_96, current);
+        }
+    }
 }
 
 test "hidden update offer Return submits the enabled hinted Install action" {

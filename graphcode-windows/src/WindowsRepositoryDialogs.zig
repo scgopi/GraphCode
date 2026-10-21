@@ -703,10 +703,26 @@ fn createRepositorySheet(host: *SheetFramework.Host, parent: c.HWND) !void {
     try host.relayout();
 }
 
+fn applyControlFontForDpi(control: c.HWND, font: c.HFONT) void {
+    if (control != null) _ = c.SendMessageW(control, c.WM_SETFONT, @intFromPtr(font), 1);
+}
+
+fn applyRepositoryControlFontsForDpi(state: *RepositoryDialogState, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.RepositoryDialogFontCreationFailed;
+    for (state.labels) |label| applyControlFontForDpi(label, font);
+    for (state.edits) |edit| applyControlFontForDpi(edit, font);
+    applyControlFontForDpi(state.destination_hint, font);
+    applyControlFontForDpi(state.error_label, font);
+    applyControlFontForDpi(state.browse, font);
+    applyControlFontForDpi(c.GetDlgItem(state.host.?.hwnd, id_cancel), font);
+    applyControlFontForDpi(c.GetDlgItem(state.host.?.hwnd, id_accept), font);
+}
+
 fn layoutRepositorySheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
     const state: *RepositoryDialogState = @ptrCast(@alignCast(context.?));
     if (state.content_root == null) return;
     state.dpi = state.host.?.options.layout_input.dpi;
+    try applyRepositoryControlFontsForDpi(state, state.dpi);
     const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
     const content_width = @max(0, layout.viewport.width - scrollbar);
     if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
@@ -1281,10 +1297,17 @@ fn createOperationSheet(host: *SheetFramework.Host, parent: c.HWND, title: []con
     try host.relayout();
 }
 
+fn applyOperationControlFontsForDpi(state: *OperationDialogState, dpi: u32) !void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, dpi) orelse return error.OperationDialogFontCreationFailed;
+    applyControlFontForDpi(state.label, font);
+    applyControlFontForDpi(state.cancel, font);
+}
+
 fn layoutOperationSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
     const state: *OperationDialogState = @ptrCast(@alignCast(context.?));
     if (state.content_root == null) return;
     state.dpi = state.host.?.options.layout_input.dpi;
+    try applyOperationControlFontsForDpi(state, state.dpi);
     const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
     const content_width = @max(0, layout.viewport.width - scrollbar);
     if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
@@ -1632,6 +1655,79 @@ test "clone refuses non-empty destinations without deleting sentinels" {
 
 fn hiddenRepositoryOwner() !c.HWND {
     return c.CreateWindowExW(0, std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr, null, c.WS_POPUP, 20, 20, 920, 700, null, null, c.GetModuleHandleW(null), null) orelse error.RepositoryDialogCreationFailed;
+}
+
+fn controlFont(control: c.HWND) c.HFONT {
+    return Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control, c.WM_GETFONT, 0, 0)));
+}
+
+fn expectControlFontForDpi(control: c.HWND, dpi: u32) !void {
+    const font = controlFont(control);
+    try std.testing.expectEqual(AppFont.getForDpi(AppFont.control_size, false, dpi), font);
+    var info = std.mem.zeroes(c.LOGFONTW);
+    try std.testing.expect(c.GetObjectW(font, @sizeOf(c.LOGFONTW), &info) != 0);
+    try std.testing.expectEqual(-Dpi.scale(AppFont.control_size, dpi), info.lfHeight);
+}
+
+test "hidden repository and operation dialogs refresh every control font across DPI transitions" {
+    try registerRepositoryDialogClass();
+    try registerOperationDialogClass();
+    const owner = try hiddenRepositoryOwner();
+    defer _ = c.DestroyWindow(owner);
+
+    repository_dialog_state = .{
+        .allocator = std.testing.allocator,
+        .parent = owner,
+        .kind = .clone,
+        .initial = .{ "https://example.test/org/repository.git", "C:\\src\\repository", "", "" },
+    };
+    repository_dialog_active = true;
+    var repository_host: SheetFramework.Host = .{};
+    try createRepositorySheet(&repository_host, owner);
+    try std.testing.expect(c.IsWindowVisible(repository_host.hwnd) == 0);
+    var repository_font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try repository_host.refreshForDpi(dpi);
+        for (repository_dialog_state.labels) |label| try expectControlFontForDpi(label, dpi);
+        for (repository_dialog_state.edits) |edit| try expectControlFontForDpi(edit, dpi);
+        try expectControlFontForDpi(repository_dialog_state.destination_hint, dpi);
+        try expectControlFontForDpi(repository_dialog_state.error_label, dpi);
+        try expectControlFontForDpi(repository_dialog_state.browse, dpi);
+        try expectControlFontForDpi(c.GetDlgItem(repository_host.hwnd, id_cancel), dpi);
+        try expectControlFontForDpi(c.GetDlgItem(repository_host.hwnd, id_accept), dpi);
+        const current = controlFont(repository_dialog_state.edits[0]);
+        if (repository_font_96 == null) {
+            repository_font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != repository_font_96);
+        } else {
+            try std.testing.expectEqual(repository_font_96, current);
+        }
+    }
+    repository_host.deinit();
+    repository_dialog_active = false;
+
+    operation_dialog_state = .{ .allocator = std.testing.allocator, .parent = owner };
+    operation_dialog_active = true;
+    defer operation_dialog_active = false;
+    var operation_host: SheetFramework.Host = .{};
+    defer operation_host.deinit();
+    try createOperationSheet(&operation_host, owner, "Cloning repository", "Starting clone…");
+    try std.testing.expect(c.IsWindowVisible(operation_host.hwnd) == 0);
+    var operation_font_96: c.HFONT = null;
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try operation_host.refreshForDpi(dpi);
+        try expectControlFontForDpi(operation_dialog_state.label, dpi);
+        try expectControlFontForDpi(operation_dialog_state.cancel, dpi);
+        const current = controlFont(operation_dialog_state.label);
+        if (operation_font_96 == null) {
+            operation_font_96 = current;
+        } else if (dpi == 192) {
+            try std.testing.expect(current != operation_font_96);
+        } else {
+            try std.testing.expectEqual(operation_font_96, current);
+        }
+    }
 }
 
 test "dialog framework: repository ingress and operation dialogs use hidden sheets" {

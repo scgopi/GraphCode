@@ -1,5 +1,6 @@
 const std = @import("std");
 const Manager = @import("WorkspaceManager.zig");
+const Lifecycle = @import("WorkspaceLifecycle.zig");
 const NativeForms = @import("NativeForms.zig");
 const Win32 = @import("Win32.zig");
 const c = Win32.c;
@@ -527,12 +528,22 @@ fn hiddenOwner() !c.HWND {
 test "dialog framework: workspace manager uses hidden sheet viewport and role footer" {
     const owner = try hiddenOwner();
     defer _ = c.DestroyWindow(owner);
-    var model = try Manager.Model.init(std.testing.allocator, &.{}, "", &.{});
+    const unavailable = Lifecycle.Workspace{
+        .name = "unavailable",
+        .path = "C:\\fixture\\.graphcode-unavailable",
+        .identity = "c:/fixture/.graphcode-unavailable",
+        .is_default = false,
+    };
+    var model = try Manager.Model.init(std.testing.allocator, &.{unavailable}, "", &.{.unavailable});
     defer model.deinit();
     var work = Manager.SummaryWork{};
-    const cached = try std.testing.allocator.alloc(CachedRow, 0);
-    defer std.testing.allocator.free(cached);
-    var dialog = Dialog{ .model = &model, .work = &work, .cached = cached };
+    const cached = try std.testing.allocator.alloc(CachedRow, model.rows.len);
+    @memset(cached, .{});
+    defer {
+        for (cached) |entry| if (entry.text) |value| std.testing.allocator.free(value);
+        std.testing.allocator.free(cached);
+    }
+    var dialog = Dialog{ .model = &model, .work = &work, .selection = 0, .cached = cached };
     active = &dialog;
     defer active = null;
     var klass: c.WNDCLASSW = std.mem.zeroes(c.WNDCLASSW);
@@ -544,6 +555,8 @@ test "dialog framework: workspace manager uses hidden sheet viewport and role fo
     var host: SheetFramework.Host = .{};
     defer host.deinit();
     try createSheet(&host, owner, &dialog);
+    _ = try syncRows(&dialog);
+    try syncDetails(&dialog);
     try std.testing.expect(c.IsWindowVisible(host.hwnd) == 0);
     try std.testing.expect(c.GetWindowLongPtrW(host.hwnd, c.GWL_STYLE) & c.WS_CAPTION == 0);
     var title: [64]u16 = [_]u16{0} ** 64;
@@ -566,6 +579,17 @@ test "dialog framework: workspace manager uses hidden sheet viewport and role fo
     try std.testing.expect(host.footer_layout.?.slotFor(done_id).?.role == .primary);
     for ([_]u32{ 192, 96, 144 }) |dpi| {
         try host.refreshForDpi(dpi);
+        try std.testing.expect(c.IsWindowEnabled(dialog.open) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.rename) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.delete) == 0);
+        try std.testing.expect(c.IsWindowEnabled(dialog.new) != 0);
+        for (host.footer_actions[0..host.footer_action_count]) |action| {
+            if (action.id == open_id or action.id == rename_id or action.id == delete_id)
+                try std.testing.expect(!action.enabled);
+        }
+        try std.testing.expect(!host.footer_layout.?.slotFor(open_id).?.enabled);
+        try std.testing.expect(!host.footer_layout.?.slotFor(rename_id).?.enabled);
+        try std.testing.expect(!host.footer_layout.?.slotFor(delete_id).?.enabled);
         try std.testing.expectEqual(dpi, dialog.dpi);
         try std.testing.expectEqual(
             AppFont.getForDpi(AppFont.control_size, false, dpi),

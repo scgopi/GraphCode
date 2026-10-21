@@ -352,7 +352,9 @@ fn createSheet(host: *SheetFramework.Host, parent: c.HWND) !void {
 fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
     const state: *DialogState = @ptrCast(@alignCast(context.?));
     if (state.content_root == null) return;
-    state.dpi = state.host.?.options.layout_input.dpi;
+    state.dpi = Dpi.normalize(state.host.?.options.layout_input.dpi);
+    refreshControlFonts(state);
+    refreshEnabledStates(state);
     const scrollbar = if (layout.scroll.visible) SheetFramework.Metrics.forDpi(state.dpi).scrollbar_width else 0;
     const content_width = @max(0, layout.viewport.width - scrollbar);
     if (c.MoveWindow(state.content_root, 0, -layout.scroll.offset, content_width, @max(layout.scroll.extent, layout.viewport.height), 1) == 0)
@@ -371,6 +373,26 @@ fn layoutSheet(context: ?*anyopaque, layout: SheetFramework.Layout) !void {
         if (c.MoveWindow(entry.hwnd, Dpi.scale(entry.x, state.dpi), Dpi.scale(entry.y, state.dpi), entry.width orelse width, Dpi.scale(entry.height, state.dpi), 1) == 0)
             return error.CodespaceDialogLayoutFailed;
     };
+}
+
+fn refreshControlFonts(state: *DialogState) void {
+    const font = AppFont.getForDpi(AppFont.control_size, false, state.dpi);
+    for ([_]c.HWND{
+        state.labels[0],
+        state.labels[1],
+        state.list_box,
+        state.status_label,
+        state.labels[2],
+        state.path_edit,
+        state.error_label,
+        if (state.host) |host| c.GetDlgItem(host.hwnd, id_cancel) else null,
+        state.create_button,
+        state.retry_button,
+        state.accept_button,
+    }) |control_handle| {
+        if (control_handle != null)
+            _ = c.SendMessageW(control_handle, c.WM_SETFONT, @intFromPtr(font), 1);
+    }
 }
 
 fn footerTextWidth(hwnd: c.HWND, dpi: u32, text: []const u16, fallback: i32) i32 {
@@ -682,6 +704,11 @@ fn refreshPresentation() void {
     setControlText(state.status_label, model.statusText());
     _ = c.ShowWindow(state.status_label, if (model.statusText().len == 0) c.SW_HIDE else c.SW_SHOW);
     setControlText(state.error_label, model.inline_failure orelse "");
+    refreshEnabledStates(state);
+}
+
+fn refreshEnabledStates(state: *DialogState) void {
+    const model = state.model;
     const busy = model.phase == .validating or model.phase == .abandoning or model.phase == .loading;
     _ = c.EnableWindow(state.list_box, @intFromBool(model.phase == .ready));
     _ = c.EnableWindow(state.path_edit, @intFromBool(model.phase == .ready));
@@ -980,6 +1007,29 @@ test "dialog framework: codespace dialog uses hidden sheet native fields and fix
         SheetFramework.Metrics.forDpi(dialog_state.dpi).scrollbar_width,
         (viewport.right - viewport.left) - (content.right - content.left),
     );
+    for ([_]u32{ 96, 192, 96 }) |dpi| {
+        try host.refreshForDpi(dpi);
+        try std.testing.expectEqual(dpi, dialog_state.dpi);
+        const expected_font = AppFont.getForDpi(AppFont.control_size, false, dpi);
+        for ([_]c.HWND{
+            dialog_state.labels[0],
+            dialog_state.labels[1],
+            dialog_state.list_box,
+            dialog_state.status_label,
+            dialog_state.labels[2],
+            dialog_state.path_edit,
+            dialog_state.error_label,
+            c.GetDlgItem(host.hwnd, id_cancel),
+            dialog_state.create_button,
+            dialog_state.retry_button,
+            dialog_state.accept_button,
+        }) |control_handle| {
+            try std.testing.expectEqual(
+                expected_font,
+                Win32.opaquePointerFromInt(c.HFONT, @bitCast(c.SendMessageW(control_handle, c.WM_GETFONT, 0, 0))),
+            );
+        }
+    }
     for ([_]u32{ 96, 144, 192 }) |dpi| {
         const actions = codespaceFooterActions(host.hwnd, dpi);
         const width = Dpi.scale(640, dpi);
@@ -990,4 +1040,33 @@ test "dialog framework: codespace dialog uses hidden sheet native fields and fix
         try std.testing.expect(footer.slotFor(id_accept).?.bounds.width >=
             actions[3].measured_text_width + SheetFramework.Metrics.forDpi(dpi).return_hint_width);
     }
+}
+
+test "dialog framework: Add enabled state survives DPI refresh while submittable and busy" {
+    try registerClass();
+    const owner = try hiddenCodespaceOwner();
+    defer _ = c.DestroyWindow(owner);
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    model.applyLoaded(try testList(std.testing.allocator,
+        \\[{"name":"dev-widget","displayName":"widget","repository":"octo/widget","state":"Available"}]
+    ));
+    dialog_state = .{ .allocator = std.testing.allocator, .parent = owner, .model = &model, .dpi = 96 };
+    dialog_active = true;
+    defer dialog_active = false;
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try createSheet(&host, owner);
+
+    try std.testing.expect(model.canSubmit());
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) != 0);
+    try host.refreshForDpi(192);
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) != 0);
+
+    model.phase = .validating;
+    refreshPresentation();
+    try std.testing.expect(!model.canSubmit());
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) == 0);
+    try host.refreshForDpi(96);
+    try std.testing.expect(c.IsWindowEnabled(dialog_state.accept_button) == 0);
 }
