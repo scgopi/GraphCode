@@ -215,6 +215,22 @@ public static class GraphCodeUiaGateState {
     }, IntPtr.Zero);
     return result;
   }
+  public static int CountVisibleOwnedSheetsByContentClass(
+      uint processId, IntPtr expectedOwner, string contentClass) {
+    int count = 0;
+    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+      uint owner;
+      GetWindowThreadProcessId(window, out owner);
+      if (owner == processId && IsWindowVisible(window) &&
+          GetWindow(window, 4) == expectedOwner &&
+          String.Equals(WindowClass(window), "GraphCodeSheetHost", StringComparison.Ordinal) &&
+          String.Equals(SheetContentClass(window), contentClass, StringComparison.Ordinal)) {
+        count++;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return count;
+  }
   public static IntPtr FindVisibleOwnedSheet(uint processId, string title) {
     IntPtr result = IntPtr.Zero;
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
@@ -1548,17 +1564,32 @@ function Wait-UiaOwnedSheetByContentClass(
   [int] $timeoutMilliseconds = 5000
 ) {
   $watch = [Diagnostics.Stopwatch]::StartNew()
+  $lastIdentity = $null
   do {
     $handle = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
       [uint32]$processId, $owner, $contentClass
     )
     if ($handle -ne [IntPtr]::Zero) {
-      $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-      $null = Assert-UiaOwnedSheet $element $processId $owner $expectedHostTitle $contentClass $label
-      return $element
+      try {
+        $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        $identity = Get-UiaOwnedSheetIdentity $element
+        $lastIdentity = $identity
+        if (Test-MultiProjectOwnedSheetIdentity $identity $processId $owner `
+            $expectedHostTitle $contentClass) {
+          return $element
+        }
+        Write-Host ("UIA_OWNED_SHEET_RETRY label='$label' reason=identity-drift identity=" +
+          ($identity | ConvertTo-Json -Compress))
+      } catch {
+        Write-Host "UIA_OWNED_SHEET_RETRY label='$label' reason=unavailable error='$($_.Exception.Message)'"
+      }
     }
     Start-Sleep -Milliseconds 50
   } while ($watch.ElapsedMilliseconds -lt $timeoutMilliseconds)
+  if ($null -ne $lastIdentity) {
+    Write-Host ("UIA_OWNED_SHEET_TIMEOUT label='$label' lastIdentity=" +
+      ($lastIdentity | ConvertTo-Json -Compress))
+  }
   return $null
 }
 
@@ -4246,6 +4277,14 @@ public static class GraphCodeMultiProjectRenameNative {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename GetMonitorInfo");
     return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
   }
+  private static bool ContainsScreenPoint(IntPtr window, int x, int y) {
+    Rect rect;
+    if (!GetClientRect(window, out rect)) return false;
+    var first = new Point { X=rect.Left, Y=rect.Top };
+    var last = new Point { X=rect.Right, Y=rect.Bottom };
+    if (!ClientToScreen(window, ref first) || !ClientToScreen(window, ref last)) return false;
+    return x >= first.X && x < last.X && y >= first.Y && y < last.Y;
+  }
   public static IntPtr ChildAt(IntPtr window, int x, int y) {
     var point = new Point { X=x, Y=y };
     if (!ScreenToClient(window, ref point)) throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename ScreenToClient");
@@ -4253,6 +4292,11 @@ public static class GraphCodeMultiProjectRenameNative {
     var rootClass = new System.Text.StringBuilder(128);
     var childClass = new System.Text.StringBuilder(128);
     GetClassName(window, rootClass, rootClass.Capacity);
+    if (direct == IntPtr.Zero &&
+        String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal)) {
+      IntPtr viewport = FindWindowEx(window, IntPtr.Zero, "GraphCodeSheetViewport", null);
+      if (ContainsScreenPoint(viewport, x, y)) direct = viewport;
+    }
     GetClassName(direct, childClass, childClass.Capacity);
     if (!String.Equals(rootClass.ToString(), "GraphCodeSheetHost", StringComparison.Ordinal) ||
         !String.Equals(childClass.ToString(), "GraphCodeSheetViewport", StringComparison.Ordinal))
@@ -4262,11 +4306,14 @@ public static class GraphCodeMultiProjectRenameNative {
     var viewportPoint = new Point { X=x, Y=y };
     if (!ScreenToClient(direct, ref viewportPoint))
       throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename viewport ScreenToClient");
-    if (RealChildWindowFromPoint(direct, viewportPoint) != content) return direct;
+    IntPtr viewportChild = RealChildWindowFromPoint(direct, viewportPoint);
+    if (viewportChild != content &&
+        !(viewportChild == IntPtr.Zero && ContainsScreenPoint(content, x, y))) return direct;
     var contentPoint = new Point { X=x, Y=y };
     if (!ScreenToClient(content, ref contentPoint))
       throw new Win32Exception(Marshal.GetLastWin32Error(), "Rename content ScreenToClient");
-    return RealChildWindowFromPoint(content, contentPoint);
+    IntPtr nested = RealChildWindowFromPoint(content, contentPoint);
+    return nested == IntPtr.Zero ? content : nested;
   }
 }
 '@
@@ -9009,17 +9056,54 @@ try {
     $cancelWindow $cancelModel $cancelModel.Current.AutomationId `
     "product-settings-escape"
   Require ($null -ne $cancelFocus.Focused) "Product Settings model control could not retain foreground focus; focused=$(Format-AutomationElement $cancelFocus.Candidate); $(Get-FocusDiagnostics $cancelWindow)"
+  $cancelViewport = [GraphCodeUiaGateState]::FindChild(
+    $cancelWindow, "GraphCodeSheetViewport"
+  )
+  $cancelContent = [GraphCodeUiaGateState]::FindChild(
+    $cancelViewport, "GraphCodeProductSettings"
+  )
+  Require (($cancelViewport -ne [IntPtr]::Zero) -and ($cancelContent -ne [IntPtr]::Zero)) `
+    "Product Settings Escape path could not resolve its owned content window"
+  $underlyingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($underlyingUpdateCount -eq 1) `
+    "Product Settings Escape requires exactly one underlying update offer; found $underlyingUpdateCount"
+  $underlyingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($underlyingUpdateSheet -ne [IntPtr]::Zero) `
+    "Product Settings Escape could not resolve its required underlying update offer"
+  $underlyingUpdateElement =
+    [System.Windows.Automation.AutomationElement]::FromHandle($underlyingUpdateSheet)
+  $underlyingUpdateIdentity = Assert-UiaOwnedSheet `
+    $underlyingUpdateElement $settingsProcess.Id $settingsShellWindow `
+    "GraphCode Update Available" "GraphCodeUpdateOffer" `
+    "Product Settings underlying update offer"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
-    [IntPtr]$cancelModel.Current.NativeWindowHandle, 0x1B
-  )) "Product Settings focused control rejected Escape"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingCancelSettings = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-      [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
-    )
-    if ($remainingCancelSettings -eq [IntPtr]::Zero) { break }
-  }
-  Require ($remainingCancelSettings -eq [IntPtr]::Zero) "Escape did not cancel and close Product Settings"
+    $cancelContent, 0x1B
+  )) "Product Settings content window rejected Escape"
+  Require (Wait-UiaOwnedSheetGoneByContentClass $settingsProcess.Id $settingsShellWindow `
+    "GraphCodeProductSettings") "Escape did not cancel and close Product Settings"
+  $remainingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($remainingUpdateCount -eq 1) `
+    "Product Settings Escape did not preserve exactly one underlying update offer; found $remainingUpdateCount"
+  $remainingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
+  )
+  Require ($remainingUpdateSheet -eq $underlyingUpdateSheet) `
+    "Product Settings Escape replaced the underlying update offer handle"
+  $remainingUpdateElement =
+    [System.Windows.Automation.AutomationElement]::FromHandle($remainingUpdateSheet)
+  $remainingUpdateIdentity = Assert-UiaOwnedSheet `
+    $remainingUpdateElement $settingsProcess.Id $settingsShellWindow `
+    "GraphCode Update Available" "GraphCodeUpdateOffer" `
+    "Product Settings preserved update offer"
+  Require (($remainingUpdateIdentity.handle -eq $underlyingUpdateIdentity.handle) -and
+           ($remainingUpdateIdentity.contentClass -ceq $underlyingUpdateIdentity.contentClass)) `
+    "Product Settings Escape changed the underlying update offer identity"
   Require (([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath))) -eq
            ([Convert]::ToBase64String($savedSettingsBytes))) `
     "Escape changed persisted Product Settings"

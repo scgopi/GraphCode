@@ -860,6 +860,14 @@ pub const Host = struct {
         return null;
     }
 
+    fn dialogManagerCancelAction(self: *const Host, wparam: c.WPARAM, lparam: c.LPARAM) ?u16 {
+        if (wparam != c.IDCANCEL or lparam != 0) return null;
+        for (self.footer_actions[0..self.footer_action_count]) |action| {
+            if (action.role == .cancel and action.id != c.IDCANCEL) return action.id;
+        }
+        return null;
+    }
+
     fn syncFooterActions(self: *Host) !void {
         for (self.footer_actions[0..self.footer_action_count]) |*action| {
             const button = c.GetDlgItem(self.hwnd, action.id);
@@ -946,6 +954,10 @@ fn hostProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) c
         if (host) |value| value.hwnd = hwnd;
     }
     const value = host orelse return c.DefWindowProcW(hwnd, message, wparam, lparam);
+    if (message == c.WM_COMMAND) {
+        if (value.dialogManagerCancelAction(wparam, lparam)) |command|
+            return c.SendMessageW(hwnd, c.WM_COMMAND, command, 0);
+    }
     if (value.options.on_message) |callback| {
         var result: c.LRESULT = 0;
         if (callback(value.options.context, hwnd, message, wparam, lparam, &result)) return result;
@@ -1748,4 +1760,68 @@ test "dialog framework: hidden host viewport and content recurse Tab through IsD
     message.wParam = c.VK_TAB;
     try std.testing.expect(c.IsDialogMessageW(host.hwnd, &message) != 0);
     try std.testing.expectEqual(previous_active, c.GetActiveWindow());
+}
+
+const DialogCommandProbe = struct {
+    observed: ?u16 = null,
+
+    fn onMessage(
+        context: ?*anyopaque,
+        _: c.HWND,
+        message: c.UINT,
+        wparam: c.WPARAM,
+        _: c.LPARAM,
+        result: *c.LRESULT,
+    ) bool {
+        if (message != c.WM_COMMAND) return false;
+        const probe: *DialogCommandProbe = @ptrCast(@alignCast(context.?));
+        probe.observed = @truncate(wparam);
+        result.* = 0;
+        return true;
+    }
+};
+
+test "dialog framework: dialog-manager cancel dispatches the configured cancel action only" {
+    const owner = try hiddenOwner(900, 700);
+    defer _ = c.DestroyWindow(owner);
+    var probe: DialogCommandProbe = .{};
+    var host: Host = .{};
+    try host.init(owner, .{
+        .layout_input = testInput(96, .{ .x = 0, .y = 0, .width = 1, .height = 1 }, 400),
+        .context = &probe,
+        .on_message = DialogCommandProbe.onMessage,
+    });
+    defer host.deinit();
+
+    try host.configureFooter(&.{
+        .{ .id = 6192, .role = .cancel, .measured_text_width = 48 },
+        .{ .id = 6184, .role = .primary, .measured_text_width = 48 },
+    });
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, c.IDCANCEL, 0);
+    try std.testing.expectEqual(@as(?u16, 6192), probe.observed);
+
+    probe.observed = null;
+    try host.configureFooter(&.{
+        .{ .id = c.IDCANCEL, .role = .cancel, .measured_text_width = 48 },
+        .{ .id = 6184, .role = .primary, .measured_text_width = 48 },
+    });
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, c.IDCANCEL, 0);
+    try std.testing.expectEqual(@as(?u16, c.IDCANCEL), probe.observed);
+
+    probe.observed = null;
+    try host.configureFooter(&.{.{ .id = 6184, .role = .primary, .measured_text_width = 48 }});
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, c.IDCANCEL, 0);
+    try std.testing.expectEqual(@as(?u16, c.IDCANCEL), probe.observed);
+
+    probe.observed = null;
+    try host.configureFooter(&.{
+        .{ .id = 6192, .role = .cancel, .measured_text_width = 48 },
+        .{ .id = 6184, .role = .primary, .measured_text_width = 48 },
+    });
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, 6112, 0);
+    try std.testing.expectEqual(@as(?u16, 6112), probe.observed);
+
+    probe.observed = null;
+    _ = c.SendMessageW(host.hwnd, c.WM_COMMAND, c.IDCANCEL, 1);
+    try std.testing.expectEqual(@as(?u16, c.IDCANCEL), probe.observed);
 }

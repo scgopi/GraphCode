@@ -3760,6 +3760,37 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm"') {
     throw "RED: UIA native-form checks still depend on desktop Window control discovery instead of the owned captionless sheet"
   }
+  function Test-OwnedSheetRetrySource([string] $source) {
+    $start = $source.IndexOf("function Wait-UiaOwnedSheetByContentClass(")
+    $end = if ($start -ge 0) {
+      $source.IndexOf("function Wait-UiaOwnedSheetGoneByContentClass(", $start)
+    } else { -1 }
+    if ($start -lt 0 -or $end -le $start) { return $false }
+    $body = $source.Substring($start, $end - $start)
+    $verifiedReturn = [regex]::Matches(
+      $body,
+      '(?s)if \(Test-MultiProjectOwnedSheetIdentity \$identity \$processId \$owner\s*`\s*[\r\n]+\s*\$expectedHostTitle \$contentClass\) \{\s*return \$element\s*\}'
+    )
+    return $verifiedReturn.Count -eq 1 -and
+      ([regex]::Matches($body, 'return \$element').Count -eq 1) -and
+      $body -match 'Get-UiaOwnedSheetIdentity \$element' -and
+      $body -match 'UIA_OWNED_SHEET_RETRY' -and
+      $body -match 'Start-Sleep -Milliseconds 50' -and
+      $body -match '\$watch\.ElapsedMilliseconds -lt \$timeoutMilliseconds' -and
+      $body -notmatch 'Assert-UiaOwnedSheet \$element'
+  }
+  $unconditionalOwnedSheetReturnMutant = [regex]::Replace(
+    $uiaLiveGateSource,
+    '(?s)if \(Test-MultiProjectOwnedSheetIdentity \$identity \$processId \$owner\s*`\s*[\r\n]+\s*\$expectedHostTitle \$contentClass\) \{\s*return \$element\s*\}',
+    "if (Test-MultiProjectOwnedSheetIdentity `$identity `$processId `$owner ```r`n" +
+      "    `$expectedHostTitle `$contentClass) { `$null = `$true }`r`n" +
+      "return `$element",
+    1
+  )
+  if (-not (Test-OwnedSheetRetrySource $uiaLiveGateSource) -or
+      (Test-OwnedSheetRetrySource $unconditionalOwnedSheetReturnMutant)) {
+    throw "RED: UIA owned-sheet acquisition throws on stale handles instead of retrying exact identity"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)function Wait-UiaOwnedSheetGoneByContentClass\(.*?\$sheetGone = \[GraphCodeUiaGateState\]::FindVisibleOwnedSheetByContentClass\(.*?if \(\$sheetGone -and \[GraphCodeUiaGateState\]::WindowIsEnabled\(\$owner\)\)') {
     throw "RED: UIA sheet-close waits return before modal teardown re-enables the owner"
   }
@@ -4016,6 +4047,56 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$cancelFocus = Retain-FocusWithRetry' -or
       $uiaLiveGateSource -notmatch 'Product Settings model control could not retain foreground focus') {
     throw "RED: UIA live gate does not prove foreground ownership before accepting row focus"
+  }
+  function Test-StackedProductSettingsEscapeSource([string] $source) {
+    $start = $source.IndexOf('$cancelViewport = [GraphCodeUiaGateState]::FindChild(')
+    $end = if ($start -ge 0) {
+      $source.IndexOf('Require (([Convert]::ToBase64String(', $start)
+    } else { -1 }
+    if ($start -lt 0 -or $end -le $start) { return $false }
+    $block = ([regex]::Replace($source.Substring($start, $end - $start), '\s+', ' ')).Trim()
+    $required = @(
+      '$cancelViewport = [GraphCodeUiaGateState]::FindChild(',
+      '"GraphCodeSheetViewport"',
+      '$cancelContent = [GraphCodeUiaGateState]::FindChild(',
+      '"GraphCodeProductSettings"',
+      '$underlyingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(',
+      'Require ($underlyingUpdateCount -eq 1)',
+      '$underlyingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(',
+      'Require ($underlyingUpdateSheet -ne [IntPtr]::Zero)',
+      '$underlyingUpdateIdentity = Assert-UiaOwnedSheet',
+      '"GraphCode Update Available" "GraphCodeUpdateOffer"',
+      'PostKeyboard( $cancelContent, 0x1B',
+      'Wait-UiaOwnedSheetGoneByContentClass $settingsProcess.Id $settingsShellWindow',
+      '"GraphCodeProductSettings"',
+      '$remainingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(',
+      'Require ($remainingUpdateCount -eq 1)',
+      '$remainingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(',
+      'Require ($remainingUpdateSheet -eq $underlyingUpdateSheet)',
+      '$remainingUpdateIdentity = Assert-UiaOwnedSheet',
+      '"GraphCode Update Available" "GraphCodeUpdateOffer"',
+      '$remainingUpdateIdentity.contentClass -ceq $underlyingUpdateIdentity.contentClass'
+    )
+    $offset = 0
+    foreach ($needle in $required) {
+      $next = $block.IndexOf($needle, $offset, [StringComparison]::Ordinal)
+      if ($next -lt 0) { return $false }
+      $offset = $next + $needle.Length
+    }
+    return $block -notmatch 'if \(\$underlyingUpdateSheet -ne \[IntPtr\]::Zero\)'
+  }
+  $optionalUnderlyingUpdateMutant = $uiaLiveGateSource.Replace(
+    'Require ($underlyingUpdateCount -eq 1)',
+    '$null = ($underlyingUpdateCount -eq 1)'
+  )
+  $replacedUnderlyingUpdateMutant = $uiaLiveGateSource.Replace(
+    'Require ($remainingUpdateSheet -eq $underlyingUpdateSheet)',
+    '$null = ($remainingUpdateSheet -eq $underlyingUpdateSheet)'
+  )
+  if (-not (Test-StackedProductSettingsEscapeSource $uiaLiveGateSource) -or
+      (Test-StackedProductSettingsEscapeSource $optionalUnderlyingUpdateMutant) -or
+      (Test-StackedProductSettingsEscapeSource $replacedUnderlyingUpdateMutant)) {
+    throw "RED: UIA live gate does not preserve the exact required underlying update sheet across Product Settings Escape"
   }
   if ($uiaLiveGateSource -notmatch 'function Wait-ForDesktopElement' -or
       $uiaLiveGateSource -notmatch 'function Wait-ForDesktopElementGone' -or
