@@ -3760,6 +3760,21 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm"') {
     throw "RED: UIA native-form checks still depend on desktop Window control discovery instead of the owned captionless sheet"
   }
+  if ($uiaLiveGateSource -notmatch '(?s)\$renameDialog = Wait-UiaOwnedSheetByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent" \$fixtureRenameTitle' -or
+      $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeWindowsDialogContent"') {
+    throw "RED: UIA Rename checks still depend on desktop Window control discovery instead of the owned captionless prompt sheet"
+  }
+  if ($uiaLiveGateSource -match '\$(deleteLoopCondition|updateWindowCondition|nodeFormCondition|sidebarNodeFormCondition|templatePickerCondition|deleteLoopsCondition|deleteEdgeCondition|edgeDialogCondition|renameLiveCondition)\b' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeWindowsDialogContent"\s+\$deleteLoopTitle' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeNativeForm"\s+"Update node"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeNativeForm"\s+"Create or edit node"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeNativeForm"\s+"Choose a saved template"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeWindowsDialogContent"\s+"Delete All Loops"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeWindowsDialogContent"\s+"Delete Edge"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeNativeForm"\s+"Edit edge"' -or
+      $uiaLiveGateSource -notmatch '(?s)"GraphCodeWindowsDialogContent"\s+\$renameLiveTitle') {
+    throw "RED: migrated captionless sheets still use desktop Window discovery instead of owned content-class lookup"
+  }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_INPUT' -or
       $uiaLiveGateSource -notmatch 'UIA_RENAME_OUTCOME' -or
@@ -3952,10 +3967,7 @@ Start-Sleep -Seconds 60
     throw "RED: UIA live gate does not reacquire GraphCode shell foreground within a bounded deadline before command paths, or performs the invasive Alt-tap activation even when already foreground"
   }
   if ($uiaLiveGateSource -notmatch '(?s)function Wait-ForDesktopElement\(.*?\[switch\] \$RecoverForeground.*?\$remainingMilliseconds = \[Math\]::Max\(.*?\$recoveryTimeout = \[Math\]::Min\(1000, \$remainingMilliseconds\).*?UIA_WAIT_FOREGROUND_RECOVERY label=\$label.*?Ensure-ShellForeground.*?-TimeoutMilliseconds \$recoveryTimeout' -or
-      $uiaLiveGateSource -notmatch 'UIA_WAIT_DIAGNOSTICS label=\$label foregroundRecoveries=\$foregroundRecoveries' -or
-      $uiaLiveGateSource -notmatch '(?s)-label "project-row New Loop node form".*?-RecoverForeground' -or
-      $uiaLiveGateSource -notmatch '(?s)-label "empty global New Loop node form".*?-RecoverForeground' -or
-      $uiaLiveGateSource -notmatch '(?s)-label "empty project New Loop node form".*?-RecoverForeground') {
+      $uiaLiveGateSource -notmatch 'UIA_WAIT_DIAGNOSTICS label=\$label foregroundRecoveries=\$foregroundRecoveries') {
     throw "RED: UIA modal waits do not boundedly reacquire foreground after a post-command foreground loss"
   }
   if ($uiaLiveGateSource -notmatch '(?s)Require \(\$null -ne \$projectNewLoop\) "project row omitted New Loop"\s*[\r\n]+\s*Require \(Ensure-ShellForeground \$shellWindow "project-row New Loop"\)\s*`\s*[\r\n]+\s*"GraphCode shell did not reacquire foreground before invoking project-row New Loop"\s*[\r\n]+\s*\$projectNewLoop\.GetCurrentPattern' -or
@@ -4025,7 +4037,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'actionPopupClosed = \$edgePopupClosed' -or
       $uiaLiveGateSource -notmatch 'UIA_CANVAS_EDGE_ACTION_CLICK_EVIDENCE' -or
       $uiaLiveGateSource -notmatch 'actionClick = \$editEdgeClickEvidence' -or
-      $uiaLiveGateSource -notmatch 'NameProperty, "Edit edge"' -or
+      $uiaLiveGateSource -notmatch '(?s)Wait-UiaOwnedSheetByContentClass \$process\.Id \$shellWindow\s*`\s*[\r\n]+\s*"GraphCodeNativeForm" "Edit edge"' -or
       $uiaLiveGateSource -notmatch 'Create or edit edge' -or
       $uiaLiveGateSource -notmatch 'editActionDialogOpened = \$canvasEdgeEditDialogOpened' -or
       $uiaLiveGateSource -notmatch 'daemonCommandUnchanged = \$canvasEdgeDaemonCommandUnchanged' -or
