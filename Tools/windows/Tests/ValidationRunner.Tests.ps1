@@ -3695,11 +3695,26 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -match '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "GraphCode Update Available"') {
     throw "RED: UIA gate does not use and verify the shared owned update sheet when desktop-tree lookup omits it"
   }
-  if ($uiaLiveGateSource -notmatch 'SendMessageTimeoutW' -or
-      $uiaLiveGateSource -notmatch '0x0001 \| 0x0002, 5000' -or
-      $uiaLiveGateSource -notmatch "action=submit-invalid phase=before" -or
-      $uiaLiveGateSource -notmatch "action=validation-enumeration phase=before" -or
-      $uiaLiveGateSource -notmatch "action=close-wait phase=before") {
+  $sendCommand = [regex]::Match(
+    $uiaLiveGateSource,
+    '(?s)public static bool SendCommand\(IntPtr window, uint command\)\s*\{(?<body>.*?)\n\s*\}'
+  )
+  $sendCommandBody = if ($sendCommand.Success) { $sendCommand.Groups["body"].Value } else { "" }
+  $ingressBlock = [regex]::Match(
+    $uiaLiveGateSource,
+    '(?s)foreach \(\$ingress in @\(.*?\)\) \{(?<body>.*?)\n\s*\}\n\s*foreach \(\$nativeForm in @\('
+  )
+  $ingressBody = if ($ingressBlock.Success) { $ingressBlock.Groups["body"].Value } else { "" }
+  if (-not $sendCommand.Success -or
+      $sendCommandBody -notmatch 'if \(window == IntPtr\.Zero\) return false;' -or
+      $sendCommandBody -notmatch '(?s)return SendMessageTimeout\(\s*window, 0x0111, \(UIntPtr\)command, IntPtr\.Zero,\s*0x0001 \| 0x0002, 5000, out result\s*\) != IntPtr\.Zero;' -or
+      -not $ingressBlock.Success -or
+      $ingressBody -notmatch "action=submit-invalid phase=before" -or
+      $ingressBody -notmatch "action=submit-invalid phase=after" -or
+      $ingressBody -notmatch "action=validation-enumeration phase=before" -or
+      $ingressBody -notmatch "action=validation-enumeration phase=after" -or
+      $ingressBody -notmatch "action=close-wait phase=before" -or
+      $ingressBody -notmatch "action=close-wait phase=after") {
     throw "RED: UIA ingress commands and scene transitions are not bounded and attributable"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
