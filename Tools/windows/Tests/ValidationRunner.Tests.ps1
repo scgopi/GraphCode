@@ -3695,26 +3695,65 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -match '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "GraphCode Update Available"') {
     throw "RED: UIA gate does not use and verify the shared owned update sheet when desktop-tree lookup omits it"
   }
-  $sendCommand = [regex]::Match(
-    $uiaLiveGateSource,
-    '(?s)public static bool SendCommand\(IntPtr window, uint command\)\s*\{(?<body>.*?)\n\s*\}'
+  function Test-BoundedIngressSource([string] $source) {
+    function Test-TextOrder([string] $text, [string[]] $needles) {
+      $offset = 0
+      foreach ($needle in $needles) {
+        $next = $text.IndexOf($needle, $offset, [StringComparison]::Ordinal)
+        if ($next -lt 0) { return $false }
+        $offset = $next + $needle.Length
+      }
+      return $true
+    }
+    $sendCommand = [regex]::Match(
+      $source,
+      '(?s)public static bool SendCommand\(IntPtr window, uint command\)\s*\{(?<body>.*?)\n\s*\}'
+    )
+    $sendCommandBody = if ($sendCommand.Success) {
+      ([regex]::Replace($sendCommand.Groups["body"].Value, '\s+', ' ')).Trim()
+    } else { "" }
+    $expectedSendCommand = "if (window == IntPtr.Zero) return false; UIntPtr result; " +
+      "return SendMessageTimeout( window, 0x0111, (UIntPtr)command, IntPtr.Zero, " +
+      "0x0001 | 0x0002, 5000, out result ) != IntPtr.Zero;"
+    $ingressStart = $source.IndexOf('foreach ($ingress in @(')
+    $ingressEnd = if ($ingressStart -ge 0) {
+      $source.IndexOf('foreach ($nativeForm in @(', $ingressStart)
+    } else { -1 }
+    $ingressBody = if ($ingressStart -ge 0 -and $ingressEnd -gt $ingressStart) {
+      $source.Substring($ingressStart, $ingressEnd - $ingressStart)
+    } else { "" }
+    return $sendCommand.Success -and
+      $sendCommandBody -ceq $expectedSendCommand -and
+      $ingressBody.Length -gt 0 -and
+      (Test-TextOrder $ingressBody @(
+        "action=submit-invalid phase=before",
+        "[GraphCodeUiaGateState]::SendCommand(",
+        "action=submit-invalid phase=after"
+      )) -and
+      (Test-TextOrder $ingressBody @(
+        "action=validation-enumeration phase=before",
+        '$validationContent = @(',
+        ".FindAll(",
+        "action=validation-enumeration phase=after"
+      )) -and
+      (Test-TextOrder $ingressBody @(
+        "[GraphCodeUiaGateState]::PostClose(",
+        "action=close-wait phase=before",
+        "Wait-UiaOwnedSheetGoneByContentClass",
+        "action=close-wait phase=after"
+      ))
+  }
+  $deadCallMutant = $uiaLiveGateSource.Replace(
+    "return SendMessageTimeout(",
+    "if (false) return SendMessageTimeout("
   )
-  $sendCommandBody = if ($sendCommand.Success) { $sendCommand.Groups["body"].Value } else { "" }
-  $ingressBlock = [regex]::Match(
-    $uiaLiveGateSource,
-    '(?s)foreach \(\$ingress in @\(.*?\)\) \{(?<body>.*?)\n\s*\}\n\s*foreach \(\$nativeForm in @\('
+  $reorderedMarkerMutant = $uiaLiveGateSource.Replace(
+    "action=submit-invalid phase=after",
+    "action=submit-invalid phase=before"
   )
-  $ingressBody = if ($ingressBlock.Success) { $ingressBlock.Groups["body"].Value } else { "" }
-  if (-not $sendCommand.Success -or
-      $sendCommandBody -notmatch 'if \(window == IntPtr\.Zero\) return false;' -or
-      $sendCommandBody -notmatch '(?s)return SendMessageTimeout\(\s*window, 0x0111, \(UIntPtr\)command, IntPtr\.Zero,\s*0x0001 \| 0x0002, 5000, out result\s*\) != IntPtr\.Zero;' -or
-      -not $ingressBlock.Success -or
-      $ingressBody -notmatch "action=submit-invalid phase=before" -or
-      $ingressBody -notmatch "action=submit-invalid phase=after" -or
-      $ingressBody -notmatch "action=validation-enumeration phase=before" -or
-      $ingressBody -notmatch "action=validation-enumeration phase=after" -or
-      $ingressBody -notmatch "action=close-wait phase=before" -or
-      $ingressBody -notmatch "action=close-wait phase=after") {
+  if (-not (Test-BoundedIngressSource $uiaLiveGateSource) -or
+      (Test-BoundedIngressSource $deadCallMutant) -or
+      (Test-BoundedIngressSource $reorderedMarkerMutant)) {
     throw "RED: UIA ingress commands and scene transitions are not bounded and attributable"
   }
   if ($uiaLiveGateSource -notmatch 'UIA_RENAME_DISPATCH' -or
