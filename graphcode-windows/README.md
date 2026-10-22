@@ -1326,8 +1326,8 @@ unsigned Windows ZIP to an existing release. Package metadata and `SIGNING.txt`
 state that the artifact is not code signed; the SHA-256 sidecar detects download
 corruption but does not authenticate the publisher. Optional Authenticode
 packaging support remains documented in `Tools\windows\PACKAGING.md`, but it is
-not a release prerequisite. There is not yet an automatic install/relaunch path
-in the native updater.
+not a release prerequisite. The native updater can download, verify, install,
+and relaunch an attached Windows package.
 
 ## Update checks
 
@@ -1341,14 +1341,20 @@ only an explicit Check for Updates action or banner click opens the offer.
 
 An offer opens only the HTTPS release overview or a single-segment version-tag
 page in that repository; encoded paths, dot segments, query/fragment additions,
-and backslash separators are rejected. It is a project-release notification,
-not proof of an installable Windows artifact: the dialog notes that assets may target other
-platforms and that Windows installation/relaunch is not implemented.
-No installer is downloaded or executed.
+and backslash separators are rejected. Install is enabled only when the release
+contains the standard Windows package. Before starting it, GraphCode checks the
+identified same-user workspace windows. If others are open, a confirmation names
+them and offers Quit It/Them & Install, Install Anyway, or Cancel. Quitting uses
+the existing explicit Exit command and one shared ten-second wait; workspace
+daemons and their sessions keep running. Unidentified or ambiguous workspace
+ownership blocks the install rather than being treated as no other windows.
 
 `Tools\windows\Tests\WindowsShell.Tests.ps1` runs the native updater contracts,
 including realistic GitHub response fields, URL handoff validation, stable/beta
-selection, malformed consumed fields, and allocation-failure cleanup.
+selection, malformed consumed fields, allocation-failure cleanup, workspace
+guard routing, exact confirmation copy, and the bounded quit deadline. These are
+source/unit and hidden-window contracts, not a live multi-workspace upgrade,
+relaunch, session-continuity, UI Automation, physical-input, or screenshot proof.
 
 ## Tray lifecycle coverage
 
