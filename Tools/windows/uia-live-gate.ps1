@@ -10553,17 +10553,38 @@ try {
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
+  $postCreateWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $createdNodeId
+  $postCreateWorkspace = Wait-ForGraphChildren $renameRoot $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-loop-bar-' } `
+    { param($items)
+      @($items | Where-Object {
+        $_.Current.AutomationId -ceq $postCreateWorkspaceId -and
+        $_.Current.Name -ceq "Selected loop workspace"
+      }).Count -eq 1 }
+  Require (@($postCreateWorkspace.Items | Where-Object {
+    $_.Current.AutomationId -ceq $postCreateWorkspaceId -and
+    $_.Current.Name -ceq "Selected loop workspace"
+  }).Count -eq 1) `
+    "New Loop exact-ID open outcome did not activate exactly one created-loop workspace"
   $postCreateOverviewDestination = Find-FragmentByIdWithRetry $renameRoot "overview-destination" $rawWalker
   Require ($null -ne $postCreateOverviewDestination) `
     "New Loop exact-ID open outcome omitted the connected-shell graph destination"
   $postCreateOverviewDestination.GetCurrentPattern(
     [System.Windows.Automation.InvokePattern]::Pattern
   ).Invoke()
-  $postCreateOverview = Wait-ForGraphChildren $renameRoot $rawWalker { $true } {
-    param($items) $null -ne (Find-FragmentById $renameRoot "graph" $rawWalker)
-  }
-  Require ($null -ne $postCreateOverview.Graph) `
-    "New Loop exact-ID open outcome did not return to the graph destination before sketch/custody"
+  $postCreateOverview = Wait-ForGraphChildren $renameRoot $rawWalker `
+    { $_.Current.AutomationId -match '^(workspace-loop-bar-|workspace-show-graph-|canvas-card-)' } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' }).Count -eq 0) -and
+      (@($items | Where-Object { $_.Current.AutomationId -match '^canvas-card-' }).Count -gt 0) }
+  Require ($null -ne $postCreateOverview.Graph -and
+    @($postCreateOverview.Items | Where-Object {
+      $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-'
+    }).Count -eq 0 -and
+    @($postCreateOverview.Items | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-'
+    }).Count -gt 0) `
+    "New Loop exact-ID workspace did not settle on an active graph before sketch/custody"
 
   # --- Connected sketch promotion and custody child (ledger rows 100, 94) ---
   function Read-SketchStub {
