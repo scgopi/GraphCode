@@ -407,7 +407,7 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     }
 
     updateConditionalVisibility(state);
-    refreshNodeTitleLabel(state);
+    refreshNodeDynamicLabels(state);
     resetNodeTypeScroll(state);
     refreshNodeCueBanners(state);
     setStaticText(state, state.validation, "");
@@ -415,9 +415,10 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
 }
 
-fn refreshNodeTitleLabel(state: *DialogState) void {
+fn refreshNodeDynamicLabels(state: *DialogState) void {
     if (state.kind != .node) return;
     setStaticText(state, state.labels[0], newLoopFieldLabel(state.values[1], 0));
+    setStaticText(state, state.labels[4], newLoopFieldLabel(state.values[1], 4));
 }
 
 fn resetNodeTypeScroll(state: *DialogState) void {
@@ -6442,6 +6443,33 @@ test "new loop: type switch resets scroll and exposes stable Goal fields from th
     try std.testing.expect(c.GetWindowRect(state.content_root, &root_rect) != 0);
     _ = c.MapWindowPoints(null, host.viewport, @ptrCast(&root_rect), 2);
     try std.testing.expectEqual(@as(i32, 0), root_rect.top);
+}
+
+test "new loop: switching from Main exposes the stable Turn first-instruction label" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{
+        .title = "",
+        .loop_type = "sketch",
+        .first_instruction = "Capture the current change",
+    });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+
+    selectTile(&state, choiceIndex(.loop_type, "turnBased"));
+    refreshSheetLayout(&state);
+    try std.testing.expectEqualStrings("turnBased", state.values[1]);
+    try std.testing.expectEqual(@as(c_int, 9104), c.GetDlgCtrlID(state.edits[4]));
+    try std.testing.expect(c.GetWindowLongPtrW(state.edits[4], c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.labels[4], c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    var wide: [64]u16 = undefined;
+    const length = c.GetWindowTextW(state.labels[4], &wide, @intCast(wide.len));
+    var text: [128]u8 = undefined;
+    const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expectEqualStrings("First instruction", text[0..written]);
 }
 
 test "new loop: reentrant layout tolerates zero tiles then restores five-tile geometry" {
