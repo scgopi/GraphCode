@@ -6312,6 +6312,24 @@ try {
   }
   Write-Host ("UIA_COMPOSITE_NAVIGATION_EVIDENCE=" + ($compositeNavigationEvidence | ConvertTo-Json -Compress))
 
+  # Opening-fit settles asynchronously after the Back navigation. Connector
+  # evidence is about native hover/drag routing, not opening-fit geometry, so
+  # put the live project canvas at its identity transform and reacquire its
+  # fragments before deriving pointer coordinates.
+  $connectorActual = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker
+  Require ($null -ne $connectorActual) `
+    "connector isolation omitted Actual Size after composite navigation"
+  $connectorActual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $connectorProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -match '^canvas-card-' -and
+      $_.Current.Name -in @("UIA loop A", "UIA loop B") } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.Name -ceq "UIA loop A" }).Count -eq 1) -and
+      (@($items | Where-Object { $_.Current.Name -ceq "UIA loop B" }).Count -eq 1) -and
+      ($items.Count -eq 2) }
+  $graph = $connectorProbe.Graph
+  $connectorProjectCards = @($connectorProbe.Items)
+
   # Connector handles: GraphCanvas.drawNode paints a circular 14pt handle with a
   # light '+' glyph (RGB 0xE6E6E6) at the outgoing connector position
   # (card.Right, card's vertical midpoint) with no dedicated UIA element, and
@@ -6323,8 +6341,8 @@ try {
   # treats the resulting native "Create or edit edge" dialog's locked From/To fields
   # as the ground truth evidence that the drop routed to the correct source/target
   # loop IDs.
-  $connectorSourceCard = @($restoredProjectCards | Where-Object { $_.Current.Name -eq "UIA loop A" })[0]
-  $connectorTargetCard = @($restoredProjectCards | Where-Object { $_.Current.Name -eq "UIA loop B" })[0]
+  $connectorSourceCard = @($connectorProjectCards | Where-Object { $_.Current.Name -ceq "UIA loop A" })[0]
+  $connectorTargetCard = @($connectorProjectCards | Where-Object { $_.Current.Name -ceq "UIA loop B" })[0]
   Require (($null -ne $connectorSourceCard) -and ($null -ne $connectorTargetCard)) `
     "missing project cards before the connector handle check"
   $process.Refresh()

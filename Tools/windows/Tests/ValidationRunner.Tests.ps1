@@ -4689,6 +4689,29 @@ Start-Sleep -Seconds 60
       $stubDaemonSource -notmatch 'if \(\$renameApplied -or \$createApplied -or \$edgeApplied(?: -or \$promotionApplied)?\)') {
     throw "RED: edge workflow does not use unique connector dragging and locked endpoints while preserving edit/CAS and no-mutation proofs"
   }
+  $compositeEvidenceIndex = $uiaLiveGateSource.IndexOf(
+    'UIA_COMPOSITE_NAVIGATION_EVIDENCE=', [StringComparison]::Ordinal)
+  $connectorActualIndex = $uiaLiveGateSource.IndexOf(
+    '$connectorActual = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker',
+    [Math]::Max(0, $compositeEvidenceIndex), [StringComparison]::Ordinal)
+  $connectorActualInvokeIndex = $uiaLiveGateSource.IndexOf(
+    '$connectorActual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()',
+    [Math]::Max(0, $connectorActualIndex), [StringComparison]::Ordinal)
+  $connectorReacquireIndex = $uiaLiveGateSource.IndexOf(
+    '$connectorProbe = Wait-ForGraphChildren $root $rawWalker',
+    [Math]::Max(0, $connectorActualInvokeIndex), [StringComparison]::Ordinal)
+  $connectorSourceIndex = $uiaLiveGateSource.IndexOf(
+    '$connectorSourceCard = @($connectorProjectCards',
+    [Math]::Max(0, $connectorReacquireIndex), [StringComparison]::Ordinal)
+  if ($compositeEvidenceIndex -lt 0 -or
+      $connectorActualIndex -le $compositeEvidenceIndex -or
+      $connectorActualInvokeIndex -le $connectorActualIndex -or
+      $connectorReacquireIndex -le $connectorActualInvokeIndex -or
+      $connectorSourceIndex -le $connectorReacquireIndex -or
+      $uiaLiveGateSource -notmatch '(?s)\$connectorProbe = Wait-ForGraphChildren \$root \$rawWalker.*?UIA loop A.*?UIA loop B.*?\$items\.Count -eq 2' -or
+      $uiaLiveGateSource -notmatch '\$connectorTargetCard = @\(\$connectorProjectCards') {
+    throw "RED: connector evidence does not reset Actual Size and reacquire the exact parent cards after composite navigation"
+  }
   $connectorCardSelectorAst = $edgeTextGateAst.Find({
       param($node)
       $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
