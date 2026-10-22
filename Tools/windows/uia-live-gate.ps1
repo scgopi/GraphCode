@@ -11409,6 +11409,40 @@ try {
   $custodyExpectedAutomationId = Get-SketchCardAutomationId $custodyId
   $custodyRenderWait = Wait-SketchGraphCard "UIA custody child" $custodyId `
     ([int]$custodyAfter.graphSequence)
+  $custodyWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $custodyId
+  $custodyWorkspace = Wait-ForGraphChildren $renameRoot $rawWalker `
+    { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' } `
+    { param($items)
+      (@($items | Where-Object {
+        $_.Current.AutomationId -ceq $custodyWorkspaceId -and
+        $_.Current.Name -ceq "Selected loop workspace"
+      }).Count -eq 1) -and
+      (@($items | Where-Object {
+        $_.Current.AutomationId -match '^workspace-show-graph-' -and
+        $_.Current.Name -ceq "Show in Graph"
+      }).Count -eq 1) }
+  $custodyShowGraph = @($custodyWorkspace.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and
+    $_.Current.Name -ceq "Show in Graph"
+  }) | Select-Object -First 1
+  Require ($null -ne $custodyShowGraph) `
+    "custody exact-ID workspace omitted its native Show in Graph action"
+  $custodyShowGraph.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $custodyGraphReturn = Wait-ForGraphChildren $renameRoot $rawWalker `
+    { $_.Current.AutomationId -match '^(workspace-loop-bar-|workspace-show-graph-|canvas-card-)' } `
+    { param($items)
+      (@($items | Where-Object {
+        $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-'
+      }).Count -eq 0) -and
+      (@($items | Where-Object {
+        $_.Current.AutomationId -ceq $custodyExpectedAutomationId -and
+        $_.Current.Name -ceq "UIA custody child"
+      }).Count -eq 1) }
+  Require (@($custodyGraphReturn.Items | Where-Object {
+    $_.Current.AutomationId -ceq $custodyExpectedAutomationId -and
+    $_.Current.Name -ceq "UIA custody child"
+  }).Count -eq 1) `
+    "custody exact-ID workspace did not return to the rendered child graph card"
   $custodyRendered = Open-SketchNodeMenu "UIA custody child" -SkipActualSize -ExpectedCardId $custodyExpectedAutomationId
   Require (@($custodyRendered.items | Where-Object { $_.Id -eq 5119 -and $_.Enabled }).Count -eq 1) `
     "republished custody child was not hit-tested as an unresolved node"

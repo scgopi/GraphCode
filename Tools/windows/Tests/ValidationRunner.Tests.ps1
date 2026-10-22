@@ -4298,12 +4298,36 @@ Start-Sleep -Seconds 60
   $custodyInstructionReadback = $uiaLiveGateSource.IndexOf(
     '$custodyInstructionAfterBackend = Sketch-Field 9104',
     [Math]::Max(0, $custodyBackendChange), [StringComparison]::Ordinal)
+  $custodyRenderWaitIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyRenderWait = Wait-SketchGraphCard',
+    [Math]::Max(0, $custodyInstructionReadback), [StringComparison]::Ordinal)
+  $custodyWorkspaceIdIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $custodyId',
+    [Math]::Max(0, $custodyRenderWaitIndex), [StringComparison]::Ordinal)
+  $custodyWorkspaceWaitIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyWorkspace = Wait-ForGraphChildren $renameRoot $rawWalker',
+    [Math]::Max(0, $custodyWorkspaceIdIndex), [StringComparison]::Ordinal)
+  $custodyShowGraphInvokeIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyShowGraph.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()',
+    [Math]::Max(0, $custodyWorkspaceWaitIndex), [StringComparison]::Ordinal)
+  $custodyGraphReturnIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyGraphReturn = Wait-ForGraphChildren $renameRoot $rawWalker',
+    [Math]::Max(0, $custodyShowGraphInvokeIndex), [StringComparison]::Ordinal)
+  $custodyFinalMenuIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyRendered = Open-SketchNodeMenu "UIA custody child"',
+    [Math]::Max(0, $custodyGraphReturnIndex), [StringComparison]::Ordinal)
   if ($firstCustodyOpen -lt 0 -or $firstCustodyCancel -le $firstCustodyOpen -or
       $secondCustodyOpen -le $firstCustodyCancel -or
       $custodyTurnSelection -le $secondCustodyOpen -or
       $custodyInstructionType -le $custodyTurnSelection -or
       $custodyBackendChange -le $custodyInstructionType -or
       $custodyInstructionReadback -le $custodyBackendChange -or
+      $custodyRenderWaitIndex -le $custodyInstructionReadback -or
+      $custodyWorkspaceIdIndex -le $custodyRenderWaitIndex -or
+      $custodyWorkspaceWaitIndex -le $custodyWorkspaceIdIndex -or
+      $custodyShowGraphInvokeIndex -le $custodyWorkspaceWaitIndex -or
+      $custodyGraphReturnIndex -le $custodyShowGraphInvokeIndex -or
+      $custodyFinalMenuIndex -le $custodyGraphReturnIndex -or
       $uiaLiveGateSource.IndexOf(
         '$custodyTurnTile = Assert-SketchControl 9600',
         $custodyTurnSelection + 1, [StringComparison]::Ordinal) -ge 0) {
@@ -4355,6 +4379,11 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$custodyCommand\.projectPath -ceq "graphcode://stub/project"' -or
       $uiaLiveGateSource -match '\$custodyLogged = \(Read-DaemonCommandLog' -or
       $uiaLiveGateSource -match '\(\$custodyLogged \| ConvertTo-Json' -or
+      $uiaLiveGateSource -notmatch '\$custodyWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" \$custodyId' -or
+      $uiaLiveGateSource -notmatch '\$custodyWorkspace = Wait-ForGraphChildren \$renameRoot \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$custodyShowGraph\.GetCurrentPattern\(\[System\.Windows\.Automation\.InvokePattern\]::Pattern\)\.Invoke\(\)' -or
+      $uiaLiveGateSource -notmatch '\$custodyGraphReturn = Wait-ForGraphChildren \$renameRoot \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$custodyRendered = Open-SketchNodeMenu "UIA custody child"' -or
       $uiaLiveGateSource -notmatch 'instructionUnchanged = \(\$custodySubmitFields\.firstInstruction -ceq \$custodyFirstInstruction\)' -or
       $uiaLiveGateSource -notmatch 'firstInstruction -ceq \$custodyFirstInstruction' -or
       $uiaLiveGateSource -notmatch 'daemonCountsBefore = \$beforeCounts; daemonCountsAfter = \$afterCounts' -or
