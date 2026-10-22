@@ -407,11 +407,17 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     }
 
     updateConditionalVisibility(state);
+    refreshNodeTitleLabel(state);
     resetNodeTypeScroll(state);
     refreshNodeCueBanners(state);
     setStaticText(state, state.validation, "");
     refreshRecap(state);
     for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
+}
+
+fn refreshNodeTitleLabel(state: *DialogState) void {
+    if (state.kind != .node) return;
+    setStaticText(state, state.labels[0], newLoopFieldLabel(state.values[1], 0));
 }
 
 fn resetNodeTypeScroll(state: *DialogState) void {
@@ -6323,9 +6329,9 @@ test "new loop: type switch resets scroll and exposes stable Goal fields from th
     var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
     defer freeValues(&state);
     try initializeNodeDraft(&state, .{
-        .title = "Prior turn",
-        .loop_type = "turnBased",
-        .first_instruction = "Review the current change",
+        .title = "",
+        .loop_type = "sketch",
+        .first_instruction = "Capture the current change",
     });
     var host: SheetFramework.Host = .{};
     defer host.deinit();
@@ -6357,6 +6363,7 @@ test "new loop: type switch resets scroll and exposes stable Goal fields from th
         try std.testing.expect(state.visible[index]);
         try std.testing.expect(state.edits[index] != null);
         try std.testing.expect(c.GetWindowLongPtrW(state.edits[index], c.GWL_STYLE) & c.WS_VISIBLE != 0);
+        try std.testing.expect(c.GetWindowLongPtrW(state.labels[index], c.GWL_STYLE) & c.WS_VISIBLE != 0);
         var wide: [128]u16 = undefined;
         const length = c.GetWindowTextW(state.labels[index], &wide, @intCast(wide.len));
         var text: [256]u8 = undefined;
