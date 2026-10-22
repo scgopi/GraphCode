@@ -41,6 +41,7 @@ pub const Node = struct {
     first_instruction: []u8 = &.{},
     check_description: []u8 = &.{},
     model_tier: []u8 = &.{},
+    heartbeat_interval_seconds: ?f64 = null,
     poll_interval_seconds: ?f64 = null,
     stall_after_seconds: ?f64 = null,
     /// Whole Unix seconds; see `unixSecondsFromReferenceDate`.
@@ -1643,6 +1644,7 @@ fn cloneNode(allocator: std.mem.Allocator, node: Node) !Node {
         .state = &.{},
         .activity = &.{},
         .presence = &.{},
+        .heartbeat_interval_seconds = node.heartbeat_interval_seconds,
         .poll_interval_seconds = node.poll_interval_seconds,
         .stall_after_seconds = node.stall_after_seconds,
         .created_at = node.created_at,
@@ -2150,6 +2152,7 @@ fn decodeNodes(
             .state = &.{},
             .activity = &.{},
             .presence = &.{},
+            .heartbeat_interval_seconds = fields.get("heartbeatIntervalSeconds").float(),
             .poll_interval_seconds = scopedFallback(&fields, &goal, "goal", "pollIntervalSeconds").float(),
             .stall_after_seconds = scopedFallback(&fields, &goal, "goal", "stallAfterSeconds").float(),
             .created_at = unixSecondsFromReferenceDate(fields.get("createdAt")),
@@ -2626,6 +2629,28 @@ test "sketch promotion first instruction survives decode clones and source repla
     try std.testing.expectEqualStrings("new", model.graph.?.nodes.items[0].first_instruction);
     copy.first_instruction[0] = 'x';
     try std.testing.expectEqualStrings("new", model.graphFor("A").?.nodes.items[0].first_instruction);
+}
+
+test "node heartbeat cadence survives decode clones and source replacement" {
+    const allocator = std.testing.allocator;
+    var model = Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"modern","title":"Modern","loopType":"timeBased","triggerPrompt":"Inspect reports","heartbeatIntervalSeconds":3600},{"id":"legacy","title":"Legacy","loopType":"timeBased","triggerPrompt":"/loop 1h Inspect reports"},{"id":"null","title":"Null","loopType":"timeBased","triggerPrompt":"/every daily Inspect reports","heartbeatIntervalSeconds":null},{"id":"invalid","title":"Invalid","loopType":"timeBased","heartbeatIntervalSeconds":"60"}],"edges":[]}}
+    );
+    const graph = model.graphFor("A").?;
+    try std.testing.expectEqual(@as(?f64, 3600), graph.nodes.items[0].heartbeat_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, null), graph.nodes.items[1].heartbeat_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, null), graph.nodes.items[2].heartbeat_interval_seconds);
+    try std.testing.expectEqual(@as(?f64, null), graph.nodes.items[3].heartbeat_interval_seconds);
+    const copy = try cloneNode(allocator, graph.nodes.items[0]);
+    defer freeNode(allocator, copy);
+    try std.testing.expectEqual(graph.nodes.items[0].heartbeat_interval_seconds, copy.heartbeat_interval_seconds);
+
+    _ = try model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"A"},"nodes":[{"id":"modern","title":"Modern","loopType":"timeBased","triggerPrompt":"Inspect reports","heartbeatIntervalSeconds":90}],"edges":[]}}
+    );
+    try std.testing.expectEqual(@as(?f64, 90), model.graphFor("A").?.nodes.items[0].heartbeat_interval_seconds);
 }
 
 test "sketch promotion first instruction single owner cleans every clone and decode allocation failure" {

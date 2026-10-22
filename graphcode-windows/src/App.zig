@@ -5643,6 +5643,19 @@ pub const App = struct {
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
     }
 
+    fn existingNodeTemplateDraft(node: GraphModel.Node) Forms.NodeDraft {
+        return .{
+            .title = node.title,
+            .loop_type = node.loop_type,
+            .first_instruction = if (node.trigger_prompt.len != 0) node.trigger_prompt else node.check_description,
+            .goal_summary = node.goal_summary,
+            .trigger_prompt = node.trigger_prompt,
+            .heartbeat_interval_seconds = node.heartbeat_interval_seconds,
+            .claude_permissions = "",
+            .copilot_permissions = "",
+        };
+    }
+
     fn saveSelectedNodeAsTemplate(self: *App, index: usize) void {
         const graph = self.model.graph orelse return;
         if (index >= graph.nodes.items.len) return;
@@ -5659,22 +5672,7 @@ pub const App = struct {
         } orelse return;
         defer result.deinit(self.allocator);
         const node = graph.nodes.items[index];
-        const draft = Forms.NodeDraft{
-            .title = self.allocator.dupe(u8, node.title) catch return,
-            .loop_type = self.allocator.dupe(u8, node.loop_type) catch return,
-            .first_instruction = self.allocator.dupe(u8, if (node.trigger_prompt.len != 0) node.trigger_prompt else node.check_description) catch return,
-            .goal_summary = self.allocator.dupe(u8, node.goal_summary) catch return,
-            .trigger_prompt = self.allocator.dupe(u8, node.trigger_prompt) catch return,
-            .claude_permissions = "",
-            .copilot_permissions = "",
-        };
-        defer {
-            self.allocator.free(draft.title);
-            self.allocator.free(draft.loop_type);
-            self.allocator.free(draft.first_instruction);
-            self.allocator.free(draft.goal_summary);
-            self.allocator.free(draft.trigger_prompt);
-        }
+        const draft = existingNodeTemplateDraft(node);
         var template = TemplateLibrary.fromDraft(self.allocator, result.values[0], draft) catch {
             self.setStatus("A template needs a name and prompt");
             return;
@@ -23941,6 +23939,35 @@ test "new loop: remembered type defaults to Main and ignores Composite" {
     try std.testing.expect(RememberedNewLoopType.fromWire("proactive") == null);
     try std.testing.expect(RememberedNewLoopType.fromWire("composite") == null);
     try std.testing.expect(RememberedNewLoopType.fromWire("goalBased").? == .goal);
+}
+
+test "existing node template draft preserves timed heartbeat and raw trigger text" {
+    const modern = GraphModel.Node{
+        .id = @constCast("timed"),
+        .title = @constCast("Timed"),
+        .loop_type = @constCast("timeBased"),
+        .state = @constCast("running"),
+        .activity = &.{},
+        .presence = &.{},
+        .trigger_prompt = @constCast("/loop daily Inspect reports"),
+        .heartbeat_interval_seconds = 21600,
+    };
+    const modern_draft = App.existingNodeTemplateDraft(modern);
+    try std.testing.expectEqualStrings(modern.trigger_prompt, modern_draft.trigger_prompt);
+    try std.testing.expectEqual(modern.heartbeat_interval_seconds, modern_draft.heartbeat_interval_seconds);
+    var modern_template = try TemplateLibrary.fromDraft(std.testing.allocator, "Modern", modern_draft);
+    defer modern_template.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(modern.trigger_prompt, modern_template.body);
+    try std.testing.expectEqualStrings("6h", modern_template.cadence.?);
+
+    var legacy = modern;
+    legacy.trigger_prompt = @constCast("  /every daily Inspect reports  ");
+    legacy.heartbeat_interval_seconds = null;
+    const legacy_draft = App.existingNodeTemplateDraft(legacy);
+    var legacy_template = try TemplateLibrary.fromDraft(std.testing.allocator, "Legacy", legacy_draft);
+    defer legacy_template.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(legacy.trigger_prompt, legacy_template.body);
+    try std.testing.expectEqual(@as(?[]u8, null), legacy_template.cadence);
 }
 
 test "new loop: pending creation owns the exact client id and project" {

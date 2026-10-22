@@ -480,6 +480,30 @@ test "new loop: saved timed templates retain heartbeat cadence" {
     });
     defer custom.deinit(allocator);
     try std.testing.expectEqualStrings("90s", custom.cadence.?);
+
+    var directive_looking = try fromDraft(allocator, "Literal directive", .{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "/loop daily Review new failures",
+        .heartbeat_interval_seconds = 21600,
+    });
+    defer directive_looking.deinit(allocator);
+    try std.testing.expectEqualStrings("/loop daily Review new failures", directive_looking.body);
+    try std.testing.expectEqualStrings("6h", directive_looking.cadence.?);
+
+    for ([_][]const u8{
+        "/loop 1h Inspect reports",
+        "  /every daily Inspect reports  ",
+    }) |prompt| {
+        var legacy = try fromDraft(allocator, "Legacy review", .{
+            .title = "",
+            .loop_type = "timeBased",
+            .trigger_prompt = prompt,
+        });
+        defer legacy.deinit(allocator);
+        try std.testing.expectEqualStrings(prompt, legacy.body);
+        try std.testing.expectEqual(@as(?[]u8, null), legacy.cadence);
+    }
 }
 
 test "new loop: composite templates carry their graph and save vocabulary" {
