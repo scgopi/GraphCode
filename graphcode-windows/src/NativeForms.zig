@@ -186,7 +186,7 @@ const NodeKeyboardAction = union(enum) {
 
 fn nodeKeyboardAction(key: u16, control_down: bool) ?NodeKeyboardAction {
     if (!control_down) return null;
-    if (key >= '1' and key <= '5') return .{ .tile = key - '1' };
+    if (key >= '1' and key <= '5') return .{ .tile = loop_type_shortcut_order[key - '1'] };
     if (key == 'T') return .templates;
     return null;
 }
@@ -280,12 +280,15 @@ fn tileColor(red: u8, green: u8, blue: u8) u32 {
 }
 
 const loop_type_choices = [_]Choice{
+    .{ .label = "Turn-based", .value = "turnBased", .description = "Pauses for you each turn", .accent = tileColor(213, 81, 129) },
+    .{ .label = "Time-based", .value = "timeBased", .description = "Runs again on a schedule", .accent = tileColor(201, 133, 0) },
+    .{ .label = "Goal-based", .value = "goalBased", .description = "Works until a condition is met", .accent = tileColor(25, 158, 112) },
+    .{ .label = "Proactive", .value = "proactive", .description = "A group of loops, armed later", .accent = tileColor(144, 133, 233) },
     .{ .label = "Main", .value = "sketch", .description = "Just start. No goal, no schedule, nothing to fill in.", .accent = tileColor(211, 218, 227) },
-    .{ .label = "Goal", .value = "goalBased", .description = "Works until a condition is met", .accent = tileColor(25, 158, 112) },
-    .{ .label = "Timed", .value = "timeBased", .description = "Runs again on a schedule", .accent = tileColor(201, 133, 0) },
-    .{ .label = "Turn", .value = "turnBased", .description = "Pauses for you each turn", .accent = tileColor(213, 81, 129) },
-    .{ .label = "Composite", .value = "proactive", .description = "A group of loops, armed later", .accent = tileColor(144, 133, 233) },
 };
+const loop_type_main_tile: usize = 4;
+const loop_type_committed_visual_order = [_]usize{ 2, 1, 0, 3 };
+const loop_type_shortcut_order = [_]usize{ 4, 2, 1, 0, 3 };
 const backend_choices = [_]Choice{
     .{ .label = "Use workspace default", .value = "" },
     .{ .label = "Claude Code", .value = "claudeCode" },
@@ -2992,7 +2995,12 @@ fn createTileButtons(hwnd: c.HWND, state: *DialogState, index: usize) c.HWND {
     const options = choices(state.choice_groups[index]);
     state.tile_count = @min(options.len, max_tiles);
     var first: c.HWND = null;
-    for (0..state.tile_count) |i| {
+    const creation_order = if (state.choice_groups[index] == .loop_type)
+        loop_type_shortcut_order[0..state.tile_count]
+    else
+        null;
+    for (0..state.tile_count) |position| {
+        const i = if (creation_order) |order| order[position] else position;
         const wide = utf8ToWideZ(state.allocator, options[i].label) catch continue;
         defer state.allocator.free(wide);
         const button = c.CreateWindowExW(
@@ -3288,15 +3296,14 @@ fn layoutNodeForm(state: *DialogState) void {
         y += scaled(state, 66);
     }
 
-    if (state.tile_count != 0)
-        layoutContentControl(state.tile_buttons[0], margin, y, width, scaled(state, 60), true, clientHeight(hwnd));
+    if (state.tile_count > loop_type_main_tile)
+        layoutContentControl(state.tile_buttons[loop_type_main_tile], margin, y, width, scaled(state, 60), true, clientHeight(hwnd));
     y += scaled(state, 72);
     layoutContentControl(state.committed_rule, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
     y += scaled(state, 30);
     const tile_width = @divTrunc(width - gap, 2);
-    if (state.tile_count > 1) {
-        for (1..state.tile_count) |index| {
-            const offset = index - 1;
+    if (state.tile_count == loop_type_choices.len) {
+        for (loop_type_committed_visual_order, 0..) |index, offset| {
             const col: i32 = @intCast(offset % 2);
             const tile_row: i32 = @intCast(offset / 2);
             layoutContentControl(state.tile_buttons[index], margin + col * (tile_width + gap), y + tile_row * scaled(state, 86), tile_width, scaled(state, 76), true, clientHeight(hwnd));
@@ -4150,9 +4157,9 @@ test "numeric form values reject malformed input instead of substituting default
 }
 
 test "guided choices map human labels to stable wire values" {
-    try std.testing.expectEqual(@as(usize, 1), choiceIndex(.loop_type, "goalBased"));
-    try std.testing.expectEqualStrings("goalBased", choiceValue(.loop_type, 1, "turnBased"));
-    try std.testing.expectEqualStrings("composite", choiceValue(.loop_type, 4, "composite"));
+    try std.testing.expectEqual(@as(usize, 2), choiceIndex(.loop_type, "goalBased"));
+    try std.testing.expectEqualStrings("goalBased", choiceValue(.loop_type, 2, "turnBased"));
+    try std.testing.expectEqualStrings("composite", choiceValue(.loop_type, 3, "composite"));
     try std.testing.expectEqualStrings("copilotCLI", choiceValue(.backend, 2, ""));
     try std.testing.expectEqualStrings("onFailure", choiceValue(.edge_condition, 2, "always"));
     try std.testing.expectEqualStrings("script", choiceValue(.transform, 2, "none"));
@@ -6051,29 +6058,61 @@ test "loop type teaching tiles carry the exact macOS accent colors" {
     // Turn #D55181, Composite #9085E9. tileColor packs a
     // COLORREF (0x00BBGGRR) so these render as the true RGB on screen,
     // unlike the pre-existing R/B-swapped literals elsewhere in this codebase.
-    try std.testing.expectEqual(@as(u32, 0x00_E3_DA_D3), loop_type_choices[0].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_70_9E_19), loop_type_choices[1].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_00_85_C9), loop_type_choices[2].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_81_51_D5), loop_type_choices[3].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_E9_85_90), loop_type_choices[4].accent);
-    try std.testing.expectEqualStrings("Main", loop_type_choices[0].label);
+    try std.testing.expectEqual(@as(u32, 0x00_81_51_D5), loop_type_choices[0].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_00_85_C9), loop_type_choices[1].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_70_9E_19), loop_type_choices[2].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_E9_85_90), loop_type_choices[3].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_E3_DA_D3), loop_type_choices[4].accent);
+    try std.testing.expectEqualStrings("Turn-based", loop_type_choices[0].label);
     try std.testing.expect(loop_type_choices[0].description.len > 0);
     try std.testing.expect(loop_type_choices[4].description.len > 0);
 }
 
-test "new loop: chooser exposes Main then Goal Timed Turn Composite" {
+test "new loop: stable tile ids preserve legacy names while visual order matches macOS" {
     const expected = [_]struct { label: []const u8, value: []const u8 }{
+        .{ .label = "Turn-based", .value = "turnBased" },
+        .{ .label = "Time-based", .value = "timeBased" },
+        .{ .label = "Goal-based", .value = "goalBased" },
+        .{ .label = "Proactive", .value = "proactive" },
         .{ .label = "Main", .value = "sketch" },
-        .{ .label = "Goal", .value = "goalBased" },
-        .{ .label = "Timed", .value = "timeBased" },
-        .{ .label = "Turn", .value = "turnBased" },
-        .{ .label = "Composite", .value = "proactive" },
     };
     try std.testing.expectEqual(expected.len, loop_type_choices.len);
     for (loop_type_choices, 0..) |actual, index| {
         const want = expected[index];
         try std.testing.expectEqualStrings(want.label, actual.label);
         try std.testing.expectEqualStrings(want.value, actual.value);
+    }
+    try std.testing.expectEqual(@as(usize, 4), loop_type_main_tile);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 1, 0, 3 }, &loop_type_committed_visual_order);
+    try std.testing.expectEqualSlices(usize, &.{ 4, 2, 1, 0, 3 }, &loop_type_shortcut_order);
+}
+
+test "new loop: native stable tile ids expose exact names" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{ .title = "", .loop_type = "sketch", .first_instruction = "" });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const expected = [_][]const u8{ "Turn-based", "Time-based", "Goal-based", "Proactive", "Main" };
+    for (expected, 0..) |name, index| {
+        const button = c.GetDlgItem(state.content_root, @intCast(tile_base_id + index)) orelse
+            return error.TestControlCreationFailed;
+        try std.testing.expectEqual(@as(c_int, @intCast(tile_base_id + index)), c.GetDlgCtrlID(button));
+        var wide: [64]u16 = undefined;
+        const length = c.GetWindowTextW(button, &wide, @intCast(wide.len));
+        var text: [64]u8 = undefined;
+        const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+        try std.testing.expectEqualStrings(name, text[0..written]);
+    }
+    try std.testing.expectEqual(state.tile_buttons[loop_type_main_tile], state.edits[1]);
+    for (loop_type_shortcut_order[0 .. loop_type_shortcut_order.len - 1], loop_type_shortcut_order[1..]) |current, next| {
+        try std.testing.expectEqual(
+            state.tile_buttons[next],
+            c.GetNextDlgTabItem(state.content_root, state.tile_buttons[current], 0),
+        );
     }
 }
 
@@ -6324,15 +6363,15 @@ test "new loop: reentrant layout tolerates zero tiles then restores five-tile ge
         try std.testing.expect(c.GetWindowRect(button, rect) != 0);
         _ = c.MapWindowPoints(null, state.content_root, @ptrCast(rect), 2);
     }
-    try std.testing.expect(rects[0].right - rects[0].left > rects[1].right - rects[1].left);
-    try std.testing.expectEqual(rects[1].top, rects[2].top);
-    try std.testing.expectEqual(rects[3].top, rects[4].top);
-    try std.testing.expect(rects[3].top > rects[1].top);
+    try std.testing.expect(rects[4].right - rects[4].left > rects[2].right - rects[2].left);
+    try std.testing.expectEqual(rects[2].top, rects[1].top);
+    try std.testing.expectEqual(rects[0].top, rects[3].top);
+    try std.testing.expect(rects[0].top > rects[2].top);
 }
 
 test "new loop: keyboard and template footer contracts are type-aware" {
-    for (0..5) |index|
-        try std.testing.expectEqual(index, nodeKeyboardAction(@intCast('1' + index), true).?.tile);
+    for (loop_type_shortcut_order, 0..) |tile, index|
+        try std.testing.expectEqual(tile, nodeKeyboardAction(@intCast('1' + index), true).?.tile);
     try std.testing.expect(nodeKeyboardAction('1', false) == null);
     try std.testing.expect(nodeKeyboardAction('6', true) == null);
     try std.testing.expect(nodeKeyboardAction('T', true).? == .templates);
