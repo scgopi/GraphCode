@@ -12,6 +12,7 @@ $root = [IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $rehearsal = $false
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
+$rehearsalActions = [Collections.Generic.List[object]]::new()
 $peerScript = Join-Path $root 'inputs\offline-peer-source.ps1'
 $fixturePath = Join-Path $root 'fixtures\fixture.json'
 $journalPath = $null
@@ -582,19 +583,26 @@ function Wait-CapVisibleElement {
         [Parameter(Mandatory)][string]$Name,
         [string]$AutomationId,
         [string]$AutomationIdPrefix,
-        [switch]$AllowOffscreen
+        [switch]$AllowOffscreen,
+        [scriptblock]$FindElement
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
-    return Wait-CapAutomationElement -Window $Window -ProcessIdentity $ProcessIdentity `
-        -Name $Name -AutomationId $AutomationId -AutomationIdPrefix $AutomationIdPrefix `
-        -AllowOffscreen:$AllowOffscreen -DeadlineUtc $leaseDeadlineUtc `
-        -BeforePoll { Assert-CapWorkerDeadline "UIA element $Name" } -FindElement {
+    $actionDeadlineUtc = Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc
+    $resolver = if ($FindElement) {
+        $FindElement
+    } else {
+        {
             param([ref]$Snapshot)
             Find-CapAutomationElement -RootHandle $Window -ProcessIdentity $ProcessIdentity `
                 -Name $Name -AutomationId $AutomationId -AutomationIdPrefix $AutomationIdPrefix `
                 -AllowOffscreen:$AllowOffscreen -RefusalSnapshot $Snapshot
         }
+    }
+    return Wait-CapAutomationElement -Window $Window -ProcessIdentity $ProcessIdentity `
+        -Name $Name -AutomationId $AutomationId -AutomationIdPrefix $AutomationIdPrefix `
+        -AllowOffscreen:$AllowOffscreen -DeadlineUtc $actionDeadlineUtc `
+        -BeforePoll { Assert-CapWorkerDeadline "UIA element $Name" } -FindElement $resolver
 }
 
 function Invoke-CapSceneAction {
@@ -607,8 +615,9 @@ function Invoke-CapSceneAction {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapWorkerDeadline "before action $Action"
+    $actionDeadlineUtc = Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc
     $result = Invoke-CapAction -Action $Action -Name $Name -SubjectId $SubjectId -RootHandle $AppRun.Window `
-        -ProcessIdentity $AppRun.Run.Identity -DeadlineUtc $leaseDeadlineUtc `
+        -ProcessIdentity $AppRun.Run.Identity -DeadlineUtc $actionDeadlineUtc `
         -BeforeElementPoll { Assert-CapWorkerDeadline "UIA element for action $Action" }
     if ($AppRun.PSObject.Properties['DActions']) {$AppRun.DActions.Add($result)}
     if ($AppRun.PSObject.Properties['SActions']) {$AppRun.SActions.Add($result)}
@@ -773,6 +782,7 @@ function New-CapManifest {
         leaseDeadlineUtc = $leaseDeadlineUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
         guiLaunches = @($applicationRuns | Where-Object { -not $rehearsal } | ForEach-Object { $_.Run.Identity.Pid })
         rehearsalLaunches = @($rehearsalLaunches)
+        rehearsalActions = @($rehearsalActions)
         guiOperations = if ($rehearsal) { 'NotExecuted: UIA, HWND, PrintWindow, native input and desktop capture' } else { 'See images' }
         fixtureSha256 = $fixtureHash
         fixtureSourceSha256 = $fixtureSourceHash
@@ -846,7 +856,9 @@ function Start-CapGraphCodeApp {
         @{
             TEMP = $Roots.Temp; TMP = $Roots.Temp; USERPROFILE = $Roots.Profile
             HOME = $Roots.Profile; LOCALAPPDATA = $Roots.Local
-            CAP_REHEARSAL_BEHAVIOR = $job.rehearsalTarget.behavior
+            CAP_REHEARSAL_BEHAVIOR = if ($job.rehearsalTarget.behavior -ceq 'action-target-absent') {
+                'timeout'
+            } else { $job.rehearsalTarget.behavior }
             CAP_REHEARSAL_OUTPUT = $outputDirectory
         }
     } else {
@@ -1493,6 +1505,37 @@ function Invoke-CapRealLaunchRehearsal {
     }
     $rehearsalLaunches.Add($launch)
     try {
+        if ($job.rehearsalTarget.behavior -ceq 'action-target-absent') {
+            $action = [pscustomobject]@{
+                action = 'open-loop'
+                targetAppeared = $false
+                startedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+                actionDeadlineUtc = $null
+                workerDeadlineUtc = $leaseDeadlineUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                failedUtc = $null
+                workerReserveMilliseconds = $null
+            }
+            $rehearsalActions.Add($action)
+            try {
+                $action.actionDeadlineUtc = (
+                    Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc
+                ).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+                $null = Wait-CapVisibleElement -Window ([IntPtr]1) -ProcessIdentity $run.Identity `
+                    -Name 'Never appearing rehearsal action target' -FindElement {
+                        param([ref]$Snapshot)
+                        $Snapshot.Value = @{ EmissionAttempted = $true }
+                        throw "Expected exactly one visible UIA element Name='Never appearing rehearsal action target'; found=0."
+                    }
+                $action.targetAppeared = $true
+                throw 'Never-appearing rehearsal action target unexpectedly resolved.'
+            } finally {
+                $failed = [DateTimeOffset]::UtcNow
+                $action.failedUtc = $failed.ToString('o')
+                $action.workerReserveMilliseconds = (
+                    [DateTimeOffset]::new($leaseDeadlineUtc) - $failed
+                ).TotalMilliseconds
+            }
+        }
         $timeout = [int]$job.rehearsalTarget.timeoutMilliseconds
         if ($timeout -lt 500 -or $timeout -gt 10000) { throw 'Rehearsal target timeout must be 500..10000 ms.' }
         $deadline = [DateTime]::UtcNow.AddMilliseconds($timeout)
