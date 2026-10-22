@@ -250,6 +250,7 @@ function Assert-CapPreflightReport {
             'prebuilt fixture binder accepts exact artifacts and refuses missing or tampered bytes',
             'journal phase timing records open copy total without changing budget or retry limits',
             'umbrella safety-net kill refuses clean release for an unreceipted member',
+            'never-appearing action target preserves cleanup reserve and proves zero-survivor release',
             'real zmx job lifecycle through actual command with target normal',
             'real zmx job lifecycle through actual command with target nonzero',
             'real zmx job lifecycle through actual command with target timeout'
@@ -270,7 +271,7 @@ function Assert-CapPreflightReport {
         }
         if ($job.PSObject.Properties['sceneAdapter'] -and
             $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')) {
-            $expectedMatchedPreflight = 184L
+            $expectedMatchedPreflight = 185L
             if ($preflight.executed -ne $expectedMatchedPreflight -or
                 $preflight.skipped -isnot [long] -or $preflight.skipped -ne 0) {
                 throw "Matched scene preflight requires exactly $expectedMatchedPreflight passing current contracts and zero skips."
@@ -999,7 +1000,10 @@ try {
     if ($rehearsal) {
         if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -ne $false -or
             $job.rehearsalTarget.arguments -isnot [array] -or
-            $job.rehearsalTarget.behavior -notin @('normal', 'nonzero', 'timeout', 'primary-cleanup', 'receipt-block', 'trace-readonly')) {
+            $job.rehearsalTarget.behavior -notin @(
+                'normal', 'nonzero', 'timeout', 'primary-cleanup', 'receipt-block', 'trace-readonly',
+                'action-target-absent'
+            )) {
             throw 'Expected an explicitly no-desktop rehearsal job with an exact target argument vector.'
         }
         $targetPath = Assert-CapSupervisorPath $job.rehearsalTarget.path

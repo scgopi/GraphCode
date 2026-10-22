@@ -9,6 +9,7 @@ param(
     [switch]$JournalTimingContractOnly,
     [switch]$JournalFirstOpenContractOnly,
     [switch]$JournalObservationContractOnly,
+    [switch]$ActionBudgetContractOnly,
     [switch]$PreflightReportContractOnly,
     [switch]$NativeBindingsContractOnly,
     [ValidateSet('All','Accepted')][string]$NativeBindingCase = 'All',
@@ -1914,6 +1915,8 @@ function Invoke-CapCaptureCommand {
         [string]$Name,
         [AllowEmptyCollection()][AllowEmptyString()][string[]]$Arguments = @(),
         [string]$Behavior = 'normal',
+        [ValidateRange(91, 1800)][int]$LeaseSeconds = 300,
+        [ValidateRange(1, 1800)][int]$ChildSeconds = 45,
         [string]$LeaseMutation = '',
         [string]$AdmissionMutation = '',
         [switch]$RealSeed,
@@ -1957,7 +1960,7 @@ function Invoke-CapCaptureCommand {
         head = $job.head; jobManifestSha256 = $jobHash
         moduleSha256 = $sourceHashesBefore[$modulePath]; workerSha256 = $sourceHashesBefore[$workerPath]
         supervisorSha256 = $sourceHashesBefore[$supervisorPath]; preflightReceiptSha256 = $null
-        grantedUtc = $now.AddSeconds(-1).ToString('o'); expiresUtc = $now.AddMinutes(5).ToString('o'); maxMinutes = 15
+        grantedUtc = $now.AddSeconds(-1).ToString('o'); expiresUtc = $now.AddSeconds($LeaseSeconds).ToString('o'); maxMinutes = 15
     }
     if ($AdmissionMutation) {
         $lease.lane = $job.lane
@@ -1992,7 +1995,7 @@ function Invoke-CapCaptureCommand {
     )
     $argumentsToSupervisor | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $owned 'command-arguments.json') -Encoding utf8NoBOM
     $child = Invoke-CapBoundedChild -FilePath (Join-Path $PSHOME 'pwsh.exe') -Arguments $argumentsToSupervisor `
-        -Directory $owned -Role "rehearsal-supervisor-$Name"
+        -Directory $owned -Role "rehearsal-supervisor-$Name" -Seconds $ChildSeconds
     [IO.File]::WriteAllText((Join-Path $owned 'command-stdout.log'), $child.stdout)
     [IO.File]::WriteAllText((Join-Path $owned 'command-stderr.log'), $child.stderr)
     $receiptPath = Join-Path $output 'lease-release.json'
@@ -2004,6 +2007,75 @@ function Invoke-CapCaptureCommand {
         receiptPath = $receiptPath; commandArguments = $argumentsToSupervisor
         receiptSha256 = if ($receipt) { (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash } else { $null }
         leaseSha256 = $leaseHash
+    }
+}
+
+function Invoke-CapActionBudgetContract {
+    Invoke-CapTest 'never-appearing action target preserves cleanup reserve and proves zero-survivor release' {
+        $offsetNow = [DateTimeOffset]::Parse(
+            '2026-10-22T05:30:00+05:30',
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $capped = Get-CapActionDeadline `
+            -WorkerDeadlineUtc ([DateTime]::SpecifyKind([DateTime]'2026-10-22T00:00:50', [DateTimeKind]::Utc)) `
+            -NowUtc $offsetNow -MaximumWaitSeconds 10 -CleanupReserveSeconds 30
+        $reserved = Get-CapActionDeadline `
+            -WorkerDeadlineUtc ([DateTime]::SpecifyKind([DateTime]'2026-10-22T00:00:35', [DateTimeKind]::Utc)) `
+            -NowUtc $offsetNow -MaximumWaitSeconds 10 -CleanupReserveSeconds 30
+        Assert-CapTest ($capped -ceq [DateTime]::SpecifyKind([DateTime]'2026-10-22T00:00:10', [DateTimeKind]::Utc) -and
+            $reserved -ceq [DateTime]::SpecifyKind([DateTime]'2026-10-22T00:00:04', [DateTimeKind]::Utc)) `
+            'Action deadline did not use offset-safe minimum cap/reserve arithmetic.'
+        $null = Assert-CapRejects {
+            Get-CapActionDeadline `
+                -WorkerDeadlineUtc ([DateTime]::SpecifyKind([DateTime]'2026-10-22T00:00:29', [DateTimeKind]::Utc)) `
+                -NowUtc $offsetNow -MaximumWaitSeconds 10 -CleanupReserveSeconds 30
+        } 'Insufficient action wait budget'
+        $null = Assert-CapRejects {
+            Get-CapActionDeadline -WorkerDeadlineUtc ([DateTime]'2026-10-22T00:50:00') -NowUtc $offsetNow
+        } 'explicitly UTC'
+        $runtimeWorkerDeadline = [DateTime]::UtcNow.AddSeconds(32)
+        $runtimeActionDeadline = Get-CapActionDeadline -WorkerDeadlineUtc $runtimeWorkerDeadline
+        $runtimeFailure = Assert-CapRejects {
+            Wait-CapAutomationElement -Window ([IntPtr]1) -ProcessIdentity ([pscustomobject]@{ Pid = $PID }) `
+                -Name 'Reserve runtime target' -DeadlineUtc $runtimeActionDeadline -FindElement {
+                    param([ref]$Snapshot)
+                    $Snapshot.Value = @{ EmissionAttempted = $true }
+                    throw "Expected exactly one visible UIA element Name='Reserve runtime target'; found=0."
+                }
+        } 'did not become available'
+        $runtimeReserveMilliseconds = ($runtimeWorkerDeadline - [DateTime]::UtcNow).TotalMilliseconds
+        Assert-CapTest ($runtimeReserveMilliseconds -ge 30000) `
+            "Action poll crossed its cleanup reserve: $runtimeReserveMilliseconds milliseconds remain."
+
+        $run = Invoke-CapCaptureCommand -Name 'action-target-absent' `
+            -Behavior 'action-target-absent' -LeaseSeconds 155 -ChildSeconds 90
+        Assert-CapTest ($run.child.exitCode -ne 0 -and $null -ne $run.receipt) `
+            'Missing action target did not produce the expected failed release.'
+        Assert-CapTest ($run.receipt.status -ceq 'FAILED_ZERO_SURVIVORS' -and
+            $run.receipt.cleanupState -ceq 'KERNEL_EXIT_AND_EOF_PROVEN' -and
+            $run.receipt.kernelVerifiedSurvivors.Count -eq 0 -and
+            $null -ne $run.receipt.journalFinalBinding) `
+            "Missing action target did not preserve a proven zero-survivor release: $($run.receipt.status)."
+        $reference = $run.receipt.journalFinalBinding.manifest
+        $manifestPath = Join-Path $run.output $reference.name
+        Assert-CapTest ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -ceq $reference.sha256) `
+            'Action-timeout manifest is not the exact final journal binding.'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -DateKind String
+        $action = $manifest.rehearsalActions[0]
+        Assert-CapTest ($manifest.status -ceq 'FAILED' -and
+            $manifest.rehearsalActions.Count -eq 1 -and $action.targetAppeared -eq $false -and
+            [double]$action.workerReserveMilliseconds -ge 30000) `
+            "Never-appearing target consumed the cleanup/journal reserve: $($action.workerReserveMilliseconds)ms remained."
+        return [ordered]@{
+            status = $run.receipt.status
+            cleanupState = $run.receipt.cleanupState
+            workerReserveMilliseconds = $action.workerReserveMilliseconds
+            journalFinalBinding = $run.receipt.journalFinalBinding
+            survivors = $run.receipt.kernelVerifiedSurvivors.Count
+            offsetArithmetic = @($capped.ToString('o'), $reserved.ToString('o'))
+            runtimeReserveMilliseconds = $runtimeReserveMilliseconds
+            runtimeFailure = $runtimeFailure
+        }
     }
 }
 
@@ -5241,7 +5313,7 @@ function Invoke-CapSelectorRefusalContracts {
                     throw
                 }
             }
-            $leaseDeadlineUtc = $meter.deadline
+            $leaseDeadlineUtc = $meter.deadline.AddSeconds(31)
             try {
                 $meter.selected = Wait-CapVisibleElement -Window ([IntPtr]77) -ProcessIdentity ([pscustomobject]@{ Pid = 4242 }) `
                     -Name Alpha -AutomationIdPrefix 'open-project-'
@@ -5731,7 +5803,7 @@ public sealed class CapHiddenActionFixture : IRawElementProviderFragmentRoot, ID
                 . ([scriptblock]::Create($definitions[0].Extent.Text))
             }
             function Write-CapWorkerLog { param([string]$Message) Write-CapTrace 'HiddenActionWorkerLog' @{ message = $Message } }
-            $leaseDeadlineUtc = [DateTime]::UtcNow.AddSeconds(15)
+            $leaseDeadlineUtc = [DateTime]::UtcNow.AddSeconds(45)
             $detail.deadlineUtc = $leaseDeadlineUtc.ToString('o')
             $detail.beganUtc = [DateTime]::UtcNow.ToString('o')
             $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -5798,7 +5870,8 @@ public sealed class CapHiddenActionFixture : IRawElementProviderFragmentRoot, ID
             $snapshot.candidates[0].AutomationId.value -ceq 'open-project-848' -and
             $snapshot.candidates[0].ProcessId.value -eq $PID -and
             $snapshot.heldContext.identity.CreationFileTimeUtc.value -eq $detail.creationFileTimeUtc -and
-            $snapshot.terminalObservation.waitDeadlineUtc -ceq $detail.deadlineUtc) `
+            [DateTimeOffset]::Parse($snapshot.terminalObservation.waitDeadlineUtc).UtcDateTime -le
+                [DateTimeOffset]::Parse($detail.deadlineUtc).UtcDateTime.AddSeconds(-30)) `
             'Terminal native candidates lost typed selector, ownership, generation or original deadline.'
         return $detail
     }
@@ -6268,6 +6341,20 @@ $target = $null
 try {
     $prebuilt = Read-CapPrebuiltFixtures $PrebuiltFixtureManifest $PrebuiltFixtureManifestSha256
     $target = $prebuilt.Target
+    if ($ActionBudgetContractOnly) {
+        Invoke-CapActionBudgetContract
+        $passed = @($results | Where-Object passed -EQ $true).Count
+        $failed = @($results | Where-Object passed -EQ $false).Count
+        $report = [pscustomobject]@{
+            suite = 'UiCaptureActionBudgetContract'; executed = $results.Count
+            passed = $passed; failed = $failed; cases = @($results)
+            gui = 'NotExecuted'; images = 0
+        }
+        $report | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+        $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+        if ($results.Count -ne 1 -or $passed -ne 1 -or $failed -ne 0) { exit 1 }
+        exit 0
+    }
     if ($SeedPathContractOnly) {
         Invoke-CapSeedPathContracts -ExitWaitOnly:($SeedPathCase -ceq 'ExitWait')
         $passed = @($results | Where-Object passed -EQ $true).Count
@@ -6691,6 +6778,7 @@ try {
                 return [ordered]@{ exit = $run.child.exitCode; output = $run.output; releaseSha256 = $run.receiptSha256 }
             }
         }
+        Invoke-CapActionBudgetContract
 
         Invoke-CapTest 'real pre-identity attestation failure rolls back its held process and EOF' {
             $receipt = Test-CapManagedProcessRollback -ProcessPath (Join-Path $PSHOME 'pwsh.exe') `
@@ -7371,6 +7459,6 @@ try {
 }
 [ordered]@{ suite = $suiteName; executed = $results.Count; passed = $passed; failed = $failed; skipped = 0; artifacts = $scratch } |
     ConvertTo-Json -Compress
-$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 184 } else { 181 }
+$expectedCount = if ($JournalContractOnly) { 10 } elseif ($LaunchContractOnly) { 2 } elseif ($RequireRealSeed) { 185 } else { 182 }
 if ($results.Count -ne $expectedCount -or $failed -ne 0 -or $passed -ne $results.Count) { exit 1 }
 exit 0

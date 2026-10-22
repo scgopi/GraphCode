@@ -39,10 +39,21 @@ unique groups; a higher count is not accepted.
 
 Those **177 / 180** totals are the pre-DPI historical boundary. The
 `S_MATCHED_V12_DPI_V1` harness change adds four no-desktop top-level groups,
-so current merged-source registration becomes **181 default / 184 with
-`-RequireRealSeed`**. Current matched preflight requires exactly **184**,
+so that merged-source registration became **181 default / 184 with
+`-RequireRealSeed`**. The action-budget repair adds one no-desktop real-worker
+contract, making current registration **182 default / 185 with
+`-RequireRealSeed`**. Current matched preflight requires exactly **185**,
 zero skips, the ten existing matched/S2 identities once, and all four DPI
 identities once. Historical reports retain their original denominators.
+
+Every scene action and its associated visibility probe now waits for at most
+**10 seconds** and must stop at least **30 seconds before the worker deadline**,
+whichever comes first. The calculation holds one additional second ahead of
+that published reserve so the final bounded poll sleep cannot consume it.
+Deadline selection uses UTC `DateTimeOffset` arithmetic. If the target never appears,
+the worker retains time to stop held process generations, publish the terminal
+journal and bind the failed manifest; the supervisor must release
+`FAILED_ZERO_SURVIVORS`, not `CLEANUP_UNPROVEN`.
 
 ## DPI-parametric matched adapter
 
@@ -91,7 +102,7 @@ The four focused groups cover:
 | DPI manifest | 36 simulated raw records and DPI/resampling/logical/work-area mutations |
 
 These contracts launch no GraphCode window and capture no images. A future live
-run still requires a source-reviewed job, exact 184-case preflight, warned
+run still requires a source-reviewed job, exact 185-case preflight, warned
 one-attempt lease and sufficiently large DPI-192 RDP work area.
 
 An exact macOS @2x 1440x900 logical reference has a 2880x1800 client raster and

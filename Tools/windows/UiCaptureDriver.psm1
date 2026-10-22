@@ -1400,7 +1400,10 @@ function Wait-CapAutomationElement {
                 return & $FindElement ([ref]$lastSnapshot)
             } catch {
                 if ($_.Exception.Message -notmatch 'found=0\.') { throw }
-                Start-Sleep -Milliseconds 100
+                $remainingMilliseconds = ($DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds
+                if ($remainingMilliseconds -ge 1) {
+                    Start-Sleep -Milliseconds ([Math]::Min(100, [Math]::Floor($remainingMilliseconds)))
+                }
             }
         }
         throw "UIA element '$Name' did not become available before the reserved deadline."
@@ -1410,6 +1413,30 @@ function Wait-CapAutomationElement {
             -Name $Name -AutomationId $AutomationId -AutomationIdPrefix $AutomationIdPrefix -AllowOffscreen:$AllowOffscreen
         throw
     }
+}
+
+function Get-CapActionDeadline {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][DateTime]$WorkerDeadlineUtc,
+        [DateTimeOffset]$NowUtc = [DateTimeOffset]::UtcNow,
+        [ValidateRange(1, 300)][int]$MaximumWaitSeconds = 10,
+        [ValidateRange(1, 300)][int]$CleanupReserveSeconds = 30
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($WorkerDeadlineUtc.Kind -ne [DateTimeKind]::Utc) {
+        throw 'Action deadline requires an explicitly UTC worker deadline.'
+    }
+    $now = $NowUtc.ToUniversalTime()
+    $workerDeadline = [DateTimeOffset]::new($WorkerDeadlineUtc)
+    $reservedDeadline = $workerDeadline.AddSeconds(-($CleanupReserveSeconds + 1))
+    $cappedDeadline = $now.AddSeconds($MaximumWaitSeconds)
+    $actionDeadline = if ($cappedDeadline -lt $reservedDeadline) { $cappedDeadline } else { $reservedDeadline }
+    if ($actionDeadline -le $now) {
+        throw 'Insufficient action wait budget before the worker cleanup and journal reserve.'
+    }
+    return $actionDeadline.UtcDateTime
 }
 
 function Resolve-CapAutomationCandidate {
@@ -5358,7 +5385,7 @@ Export-ModuleMember -Function @(
     'Set-CapTracePath',
     'Write-CapTrace',
     'Write-CapTerminalSelectorRefusal',
-    'Wait-CapAutomationElement',
+    'Wait-CapAutomationElement','Get-CapActionDeadline',
     'Get-CapTraceFailures',
     'Assert-CapArtifactPath',
     'Assert-CapZmxLeasePath',
