@@ -3285,16 +3285,19 @@ fn layoutNodeForm(state: *DialogState) void {
         y += scaled(state, 66);
     }
 
-    layoutContentControl(state.tile_buttons[0], margin, y, width, scaled(state, 60), true, clientHeight(hwnd));
+    if (state.tile_count != 0)
+        layoutContentControl(state.tile_buttons[0], margin, y, width, scaled(state, 60), true, clientHeight(hwnd));
     y += scaled(state, 72);
     layoutContentControl(state.committed_rule, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
     y += scaled(state, 30);
     const tile_width = @divTrunc(width - gap, 2);
-    for (1..state.tile_count) |index| {
-        const offset = index - 1;
-        const col: i32 = @intCast(offset % 2);
-        const tile_row: i32 = @intCast(offset / 2);
-        layoutContentControl(state.tile_buttons[index], margin + col * (tile_width + gap), y + tile_row * scaled(state, 86), tile_width, scaled(state, 76), true, clientHeight(hwnd));
+    if (state.tile_count > 1) {
+        for (1..state.tile_count) |index| {
+            const offset = index - 1;
+            const col: i32 = @intCast(offset % 2);
+            const tile_row: i32 = @intCast(offset / 2);
+            layoutContentControl(state.tile_buttons[index], margin + col * (tile_width + gap), y + tile_row * scaled(state, 86), tile_width, scaled(state, 76), true, clientHeight(hwnd));
+        }
     }
     y += scaled(state, 182);
 
@@ -6186,6 +6189,74 @@ test "new loop: all five layouts keep the SheetFramework footer fixed at every D
             try std.testing.expect(form.scroll.extent >= form.viewport.height or !form.scroll.visible);
         }
     }
+}
+
+test "new loop: reentrant layout tolerates zero tiles then restores five-tile geometry" {
+    try registerClass();
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = owner,
+        .dpi = Dpi.base_dpi,
+    };
+    state.values[1] = @constCast("sketch");
+    state.values[21] = @constCast("1h");
+    state.values[26] = @constCast("daily");
+    var host: SheetFramework.Host = .{};
+    state.sheet = &host;
+    try host.init(owner, .{
+        .layout_input = formLayoutInput(&state),
+        .context = &state,
+        .on_layout = sheetLayout,
+        .on_message = sheetMessage,
+    });
+    defer host.deinit();
+    state.content_root = c.CreateWindowExW(
+        c.WS_EX_CONTROLPARENT,
+        class_name.ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.WS_CLIPCHILDREN,
+        0,
+        0,
+        host.current_layout.viewport.width,
+        host.current_layout.viewport.height,
+        host.viewport,
+        null,
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return error.TestWindowCreationFailed;
+    layoutNodeForm(&state);
+    try std.testing.expectEqual(@as(usize, 0), state.tile_count);
+
+    for (0..5) |index| {
+        state.tile_buttons[index] = c.CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("BUTTON").ptr,
+            null,
+            c.WS_CHILD | c.WS_VISIBLE,
+            0,
+            0,
+            0,
+            0,
+            state.content_root,
+            childId(tile_base_id + index),
+            c.GetModuleHandleW(null),
+            null,
+        ) orelse return error.TestControlCreationFailed;
+    }
+    state.tile_count = 5;
+    layoutNodeForm(&state);
+    var rects: [5]c.RECT = undefined;
+    for (state.tile_buttons[0..5], &rects) |button, *rect| {
+        try std.testing.expect(c.GetWindowRect(button, rect) != 0);
+        _ = c.MapWindowPoints(null, state.content_root, @ptrCast(rect), 2);
+    }
+    try std.testing.expect(rects[0].right - rects[0].left > rects[1].right - rects[1].left);
+    try std.testing.expectEqual(rects[1].top, rects[2].top);
+    try std.testing.expectEqual(rects[3].top, rects[4].top);
+    try std.testing.expect(rects[3].top > rects[1].top);
 }
 
 test "new loop: keyboard and template footer contracts are type-aware" {

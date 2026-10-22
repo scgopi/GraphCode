@@ -3957,7 +3957,7 @@ pub const App = struct {
                         self.setStatus(primary_status.?);
                         return;
                     } orelse continue;
-                    defer name.deinit();
+                    defer name.deinit(self.allocator);
                     var template = TemplateLibrary.fromDraft(self.allocator, name.values[0], current) catch {
                         self.setStatus("A template needs a name and prompt");
                         continue;
@@ -26439,7 +26439,7 @@ const SheetCancel = struct {
     }
 
     fn form() c.HWND {
-        return c.FindWindowW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeNativeForm"), null);
+        return c.FindWindowW(std.unicode.utf8ToUtf16LeStringLiteral("GraphCodeSheetHost"), null);
     }
 
     fn fire(_: c.HWND, _: c.UINT, id: c.UINT_PTR, _: c.DWORD) callconv(.winapi) void {
