@@ -1425,10 +1425,10 @@ fn nodeRecapText(state: *const DialogState) []const u8 {
     const loop_type = state.values[1];
     const trigger = if (std.mem.eql(u8, loop_type, "timeBased"))
         NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[23], state.values[24]) catch
-            return state.allocator.dupe(u8, "Recap unavailable") catch &.{}
+            return state.allocator.dupe(u8, "Recap: unavailable") catch &.{}
     else if (NewLoopSheet.isComposite(loop_type))
         NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch
-            return state.allocator.dupe(u8, "Recap unavailable") catch &.{}
+            return state.allocator.dupe(u8, "Recap: unavailable") catch &.{}
     else
         state.allocator.dupe(u8, "") catch return &.{};
     defer state.allocator.free(trigger);
@@ -1446,8 +1446,11 @@ fn nodeRecapText(state: *const DialogState) []const u8 {
         .metric_direction = state.values[11],
         .token_budget = NewLoopSheet.parseBudget(state.values[25]),
     };
-    return NewLoopSheet.recap(state.allocator, draft, if (selected_worktree) |choice| choice.branch else "") catch
-        state.allocator.dupe(u8, "Recap unavailable") catch &.{};
+    const summary = NewLoopSheet.recap(state.allocator, draft, if (selected_worktree) |choice| choice.branch else "") catch
+        return state.allocator.dupe(u8, "Recap: unavailable") catch &.{};
+    defer state.allocator.free(summary);
+    return std.fmt.allocPrint(state.allocator, "Recap: {s}", .{summary}) catch
+        state.allocator.dupe(u8, "Recap: unavailable") catch &.{};
 }
 
 fn measureTextWidth(hwnd: c.HWND, state: *const DialogState, text: []const u8) i32 {
@@ -4240,7 +4243,7 @@ test "clicking a loop-type teaching tile refreshes the pre-submit recap" {
 
     var rendered_buffer: [512]u8 = undefined;
     const rendered = Probe.text(recap_window, &rendered_buffer);
-    try std.testing.expectEqualStrings("Starts now, works toward the goal, and resolves when its session finishes.", rendered);
+    try std.testing.expectEqualStrings("Recap: Starts now, works toward the goal, and resolves when its session finishes.", rendered);
 }
 
 test "node worktree picker has an honest empty state and binds only real choices" {
@@ -6133,13 +6136,49 @@ test "new loop: recap uses type-specific outcome copy" {
     state.values[1] = @constCast("sketch");
     const main = nodeRecapText(&state);
     defer std.testing.allocator.free(main);
-    try std.testing.expect(std.mem.startsWith(u8, main, "Opens a session"));
+    try std.testing.expect(std.mem.startsWith(u8, main, "Recap: Opens a session"));
 
     state.values[1] = @constCast("proactive");
     state.values[0] = @constCast("Nightly sweep");
     const composite = nodeRecapText(&state);
     defer std.testing.allocator.free(composite);
+    try std.testing.expect(std.mem.startsWith(u8, composite, "Recap: "));
     try std.testing.expect(std.mem.indexOf(u8, composite, "It won't run") != null);
+}
+
+test "new loop: owner-drawn recap exposes stable accessible text and dynamic updates" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    const recap_window = createOwnerDrawStatic(owner, recap_id);
+    if (recap_window == null) return error.RecapWindowCreationFailed;
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null, .recap = recap_window };
+    state.values[0] = try std.testing.allocator.dupe(u8, "");
+    state.values[1] = try std.testing.allocator.dupe(u8, "turnBased");
+    state.values[2] = try std.testing.allocator.dupe(u8, "");
+    state.values[4] = try std.testing.allocator.dupe(u8, "Review this change");
+    state.values[5] = try std.testing.allocator.dupe(u8, "false");
+    defer {
+        for ([_]usize{ 0, 1, 2, 4, 5 }) |index| std.testing.allocator.free(state.values[index]);
+    }
+    refreshRecap(&state);
+    var wide: [1024]u16 = undefined;
+    var length = c.GetWindowTextW(recap_window, &wide, @intCast(wide.len));
+    var text: [2048]u8 = undefined;
+    var written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expect(std.mem.startsWith(u8, text[0..written], "Recap: Waits until you open it"));
+    state.allocator.free(state.values[1]);
+    state.values[1] = try state.allocator.dupe(u8, "goalBased");
+    state.values[6] = try state.allocator.dupe(u8, "Ship the release");
+    state.values[7] = try state.allocator.dupe(u8, "");
+    state.values[10] = try state.allocator.dupe(u8, "");
+    state.values[11] = try state.allocator.dupe(u8, "maximize");
+    defer {
+        for ([_]usize{ 6, 7, 10, 11 }) |index| state.allocator.free(state.values[index]);
+    }
+    refreshRecap(&state);
+    length = c.GetWindowTextW(recap_window, &wide, @intCast(wide.len));
+    written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expect(std.mem.startsWith(u8, text[0..written], "Recap: Starts now"));
 }
 
 test "new loop: selected type exposes only its macOS fields" {
