@@ -572,7 +572,7 @@ fn nodeWithTemplatesImpl(
     }
 
     try initializeNodeDialog(state, initial);
-    const accepted = try show(state, "New Node", &.{});
+    const accepted = try show(state, NewLoopSheet.host_title, &.{});
     return finishNodeDialog(allocator, state, initial, accepted, &attachments_transferred, validation, continuation, DraftAttachments.discardAllChecked);
 }
 
@@ -1528,7 +1528,7 @@ fn createSheetControls(state: *DialogState) !void {
         createStatic(body, state, "worktrees", 221, 242, 90, 20, &state.policy_statics[4]);
         createStatic(body, state, "The notice removes nothing; it only surfaces cleanup work.", 18, 276, 530, 32, &state.policy_statics[5]);
     } else if (state.kind == .node) {
-        createStatic(body, state, "New Node", 18, 16, 360, 26, &state.header_title);
+        createStatic(body, state, NewLoopSheet.visible_header, 18, 16, 360, 26, &state.header_title);
         const project_line = try std.fmt.allocPrint(state.allocator, "in {s}", .{state.project_name});
         defer state.allocator.free(project_line);
         createStatic(body, state, project_line, 18, 44, 360, 20, &state.header_project);
@@ -6072,6 +6072,11 @@ test "new loop: chooser exposes Main then Goal Timed Turn Composite" {
         try std.testing.expectEqualStrings(want.label, actual.label);
         try std.testing.expectEqualStrings(want.value, actual.value);
     }
+}
+
+test "new loop: captionless host identity stays distinct from the visible macOS header" {
+    try std.testing.expectEqualStrings("Create or edit node", NewLoopSheet.host_title);
+    try std.testing.expectEqualStrings("New Node", NewLoopSheet.visible_header);
 }
 
 test "new loop: primary labels follow the selected type" {

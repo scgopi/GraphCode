@@ -1,6 +1,9 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
 
+pub const host_title = "Create or edit node";
+pub const visible_header = "New Node";
+
 pub const Choice = struct {
     label: []const u8,
     value: []const u8,
