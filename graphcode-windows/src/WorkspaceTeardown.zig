@@ -3,6 +3,7 @@ const Lifecycle = @import("WorkspaceLifecycle.zig");
 const Manager = @import("WorkspaceManager.zig");
 const DaemonClient = @import("DaemonClient.zig");
 const Win32 = @import("Win32.zig");
+const WorkspaceLayout = @import("WorkspaceLayout.zig");
 const ZmxSession = @import("ZmxSession.zig");
 const c = Win32.c;
 
@@ -71,37 +72,51 @@ pub fn collectSessionIds(allocator: std.mem.Allocator, path: []const u8) ![][]u8
         for (ids.items) |id| allocator.free(id);
         ids.deinit(allocator);
     }
+    var known = std.StringHashMap(void).init(allocator);
+    defer known.deinit();
     const projects_path = try std.fs.path.join(allocator, &.{ path, "projects" });
     defer allocator.free(projects_path);
-    var projects = std.fs.openDirAbsolute(projects_path, .{ .iterate = true }) catch
-        return ids.toOwnedSlice(allocator);
-    defer projects.close();
-    var iterator = projects.iterate();
-    var entries: usize = 0;
-    var remaining: usize = Manager.max_workspace_bytes;
-    while (iterator.next() catch null) |entry| {
-        entries += 1;
-        if (entries > Manager.max_entries) break;
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-        const bytes = projects.readFileAlloc(
-            allocator,
-            entry.name,
-            @min(Manager.max_file_bytes, remaining),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => continue,
-        };
-        defer allocator.free(bytes);
-        remaining -= bytes.len;
-        try appendSessionIds(allocator, &ids, bytes, entry.name);
+    if (std.fs.openDirAbsolute(projects_path, .{ .iterate = true })) |projects_value| {
+        var projects = projects_value;
+        defer projects.close();
+        var iterator = projects.iterate();
+        var entries: usize = 0;
+        var remaining: usize = Manager.max_workspace_bytes;
+        while (iterator.next() catch null) |entry| {
+            entries += 1;
+            if (entries > Manager.max_entries) break;
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+            const bytes = projects.readFileAlloc(
+                allocator,
+                entry.name,
+                @min(Manager.max_file_bytes, remaining),
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => continue,
+            };
+            defer allocator.free(bytes);
+            remaining -= bytes.len;
+            try appendGraphSessionIds(allocator, &ids, &known, bytes, entry.name);
+        }
+    } else |_| {}
+    const layouts_path = try std.fs.path.join(
+        allocator,
+        &.{ path, WorkspaceLayout.layouts_directory_name },
+    );
+    defer allocator.free(layouts_path);
+    const layout_ids = try WorkspaceLayout.scanPaneIds(allocator, layouts_path);
+    defer WorkspaceLayout.freeScannedPaneIds(allocator, layout_ids);
+    for (layout_ids) |id| {
+        try appendUniqueOwnedId(allocator, &ids, &known, id);
     }
     return ids.toOwnedSlice(allocator);
 }
 
-fn appendSessionIds(
+fn appendGraphSessionIds(
     allocator: std.mem.Allocator,
     ids: *std.ArrayListUnmanaged([]u8),
+    known: *std.StringHashMap(void),
     bytes: []const u8,
     name: []const u8,
 ) !void {
@@ -119,8 +134,22 @@ fn appendSessionIds(
         if (node != .object) continue;
         const id = node.object.get("id") orelse continue;
         if (id != .string or !isSessionId(id.string)) continue;
-        try ids.append(allocator, try allocator.dupe(u8, id.string));
+        try appendUniqueOwnedId(allocator, ids, known, id.string);
     }
+}
+
+fn appendUniqueOwnedId(
+    allocator: std.mem.Allocator,
+    ids: *std.ArrayListUnmanaged([]u8),
+    known: *std.StringHashMap(void),
+    id: []const u8,
+) !void {
+    if (known.contains(id)) return;
+    const owned = try allocator.dupe(u8, id);
+    errdefer allocator.free(owned);
+    try known.put(owned, {});
+    errdefer _ = known.remove(owned);
+    try ids.append(allocator, owned);
 }
 
 /// Session ids are UUIDs on both platforms, so an id that is not one is not ours to end.
@@ -709,6 +738,74 @@ test "workspace session ids come from saved graphs and skip sidecars and unreada
         if (std.mem.eql(u8, id, "22222222-2222-4222-8222-222222222222")) seen_second = true;
     }
     try std.testing.expect(seen_first and seen_second);
+}
+
+test "workspace session ids include saved layout panes" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir("projects");
+    try temporary.dir.makeDir("terminal-layouts");
+    try temporary.dir.writeFile(.{
+        .sub_path = "projects\\alpha.json",
+        .data =
+        \\{"id":"44444444-4444-4444-8444-444444444444","project":{"path":"C:\\work\\alpha","name":"Alpha","lastOpenedAt":1},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"One","loopType":"manual"}],"edges":[]}
+        ,
+    });
+    try temporary.dir.writeFile(.{
+        .sub_path = "terminal-layouts\\11111111-1111-4111-8111-111111111111.json",
+        .data =
+        \\{"schemaVersion":2,"project":"C:\\work\\alpha","loop":"11111111-1111-4111-8111-111111111111","selectedTab":0,"tabs":[{"id":1,"direction":"horizontal","focused":0,"panes":[{"id":"11111111-1111-4111-8111-111111111111","agent":true},{"id":"22222222-2222-4222-8222-222222222222","agent":false}]}]}
+        ,
+    });
+    try temporary.dir.writeFile(.{
+        .sub_path = "terminal-layouts\\project.alpha.json",
+        .data =
+        \\{"schemaVersion":2,"project":"C:\\work\\alpha","selectedTab":0,"tabs":[{"id":1,"direction":"vertical","focused":0,"panes":[{"id":"33333333-3333-4333-8333-333333333333","agent":false}]}]}
+        ,
+    });
+    const path = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+    const ids = try collectSessionIds(allocator, path);
+    defer freeSessionIds(allocator, ids);
+    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    var seen_graph = false;
+    var seen_loop_shell = false;
+    var seen_project_shell = false;
+    for (ids) |id| {
+        if (std.mem.eql(u8, id, "11111111-1111-4111-8111-111111111111")) seen_graph = true;
+        if (std.mem.eql(u8, id, "22222222-2222-4222-8222-222222222222")) seen_loop_shell = true;
+        if (std.mem.eql(u8, id, "33333333-3333-4333-8333-333333333333")) seen_project_shell = true;
+    }
+    try std.testing.expect(seen_graph and seen_loop_shell and seen_project_shell);
+}
+
+test "workspace session ids retain prefixed saved layout panes" {
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.makeDir("terminal-layouts");
+    try temporary.dir.writeFile(.{
+        .sub_path = "terminal-layouts\\prefixed.json",
+        .data =
+        \\{"schemaVersion":2,"project":"C:\\work\\alpha","selectedTab":0,"tabs":[{"id":1,"direction":"horizontal","focused":0,"panes":[{"id":"gate-723-22222222-2222-4222-8222-222222222222","agent":false}]}]}
+        ,
+    });
+    const path = try temporary.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+    const ids = try collectSessionIds(allocator, path);
+    defer freeSessionIds(allocator, ids);
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    try std.testing.expectEqualStrings(
+        "gate-723-22222222-2222-4222-8222-222222222222",
+        ids[0],
+    );
+    const argv = try killArgv(allocator, "zmx.exe", ids);
+    defer freeKillArgv(allocator, argv);
+    try std.testing.expectEqualStrings(
+        "graphcode-gate-723-22222222-2222-4222-8222-222222222222",
+        argv[2],
+    );
 }
 
 test "workspace session ids are empty for a workspace that saved nothing" {

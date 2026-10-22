@@ -702,6 +702,108 @@ pub fn freeLoopRecords(allocator: std.mem.Allocator, records: []LoopRecord) void
 }
 
 const max_scanned_layouts: usize = 1024;
+const max_scanned_layout_bytes: usize = 16 * 1024 * 1024;
+const max_layout_file_bytes: usize = 4 * 1024 * 1024;
+
+pub fn freeScannedPaneIds(allocator: std.mem.Allocator, ids: [][]u8) void {
+    for (ids) |id| allocator.free(id);
+    allocator.free(ids);
+}
+
+/// Every pane id persisted in current-schema layout files under `root`, including
+/// project-level and loop-level layouts. Discovery is read-only and best effort: files
+/// that are unreadable, malformed, foreign, or over budget are skipped.
+pub fn scanPaneIds(allocator: std.mem.Allocator, root: []const u8) ![][]u8 {
+    var ids: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (ids.items) |id| allocator.free(id);
+        ids.deinit(allocator);
+    }
+    var known = std.StringHashMap(void).init(allocator);
+    defer known.deinit();
+    var directory = std.fs.cwd().openDir(root, .{ .iterate = true }) catch
+        return ids.toOwnedSlice(allocator);
+    defer directory.close();
+    var iterator = directory.iterate();
+    var seen: usize = 0;
+    var remaining = max_scanned_layout_bytes;
+    while (iterator.next() catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        seen += 1;
+        if (seen > max_scanned_layouts or remaining == 0) break;
+        const data = directory.readFileAlloc(
+            allocator,
+            entry.name,
+            @min(max_layout_file_bytes, remaining),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        defer allocator.free(data);
+        remaining -= data.len;
+        const file_ids = parsePaneIds(allocator, data) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        defer freeScannedPaneIds(allocator, file_ids);
+        for (file_ids) |id| {
+            if (known.contains(id)) continue;
+            const owned = try allocator.dupe(u8, id);
+            errdefer allocator.free(owned);
+            try known.put(owned, {});
+            errdefer _ = known.remove(owned);
+            try ids.append(allocator, owned);
+        }
+    }
+    return ids.toOwnedSlice(allocator);
+}
+
+fn parsePaneIds(allocator: std.mem.Allocator, data: []const u8) ![][]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    defer parsed.deinit();
+    const root = try object(parsed.value);
+    const version = try integer(try field(root, "schemaVersion"));
+    if (version != schema_version) return error.UnsupportedSchema;
+    const project = try string(try field(root, "project"));
+    if (project.len == 0) return error.ProjectMismatch;
+    if (root.get("loop")) |encoded_loop| {
+        if ((try string(encoded_loop)).len == 0) return error.LoopMismatch;
+    }
+    const selected_index = try nonNegativeIndex(try field(root, "selectedTab"));
+    const tab_values = try array(try field(root, "tabs"));
+    if (tab_values.len != 0 and selected_index >= tab_values.len) return error.InvalidTopology;
+
+    var ids: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (ids.items) |id| allocator.free(id);
+        ids.deinit(allocator);
+    }
+    var known = std.StringHashMap(void).init(allocator);
+    defer known.deinit();
+    for (tab_values) |encoded_tab| {
+        const tab = try object(encoded_tab);
+        _ = try positiveU64(try field(tab, "id"));
+        const direction = try string(try field(tab, "direction"));
+        if (!std.mem.eql(u8, direction, "horizontal") and
+            !std.mem.eql(u8, direction, "vertical")) return error.InvalidDirection;
+        const focused = try nonNegativeIndex(try field(tab, "focused"));
+        const pane_values = try array(try field(tab, "panes"));
+        if (pane_values.len == 0 or focused >= pane_values.len) return error.InvalidTopology;
+        for (pane_values) |encoded_pane| {
+            const pane = try object(encoded_pane);
+            const id = try string(try field(pane, "id"));
+            if (id.len == 0 or id.len > 128 or known.contains(id))
+                return error.DuplicateSurfaceID;
+            _ = try boolean(try field(pane, "agent"));
+            const owned = try allocator.dupe(u8, id);
+            errdefer allocator.free(owned);
+            try known.put(owned, {});
+            errdefer _ = known.remove(owned);
+            try ids.append(allocator, owned);
+        }
+    }
+    return ids.toOwnedSlice(allocator);
+}
 
 /// The loop-scoped layouts saved in `root`, best effort: unreadable or foreign files are skipped.
 pub fn scanLoopLayouts(allocator: std.mem.Allocator, root: []const u8) ![]LoopRecord {
@@ -1032,6 +1134,73 @@ test "scanning loop layouts reports only loop-scoped files and skips everything 
     defer freeLoopRecords(std.testing.allocator, missing);
     try std.testing.expectEqual(@as(usize, 0), missing.len);
     try std.testing.expect(records[0].modified_ns > 0);
+}
+
+test "workspace deletion scans project and loop layout panes without duplicates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+    var scoped = try Layout.initForLoop(
+        std.testing.allocator,
+        "C:\\work\\alpha",
+        "11111111-1111-4111-8111-111111111111",
+    );
+    defer scoped.deinit();
+    try scoped.addTab("11111111-1111-4111-8111-111111111111", true);
+    try scoped.addTab("22222222-2222-4222-8222-222222222222", false);
+    const scoped_path = try loopLayoutPath(
+        std.testing.allocator,
+        root,
+        "11111111-1111-4111-8111-111111111111",
+    );
+    defer std.testing.allocator.free(scoped_path);
+    try scoped.save(scoped_path);
+    var project_level = try Layout.init(std.testing.allocator, "C:\\work\\alpha");
+    defer project_level.deinit();
+    try project_level.addTab("11111111-1111-4111-8111-111111111111", true);
+    try project_level.addTab("33333333-3333-4333-8333-333333333333", false);
+    const project_path = try projectLayoutPath(std.testing.allocator, root, "C:\\work\\alpha");
+    defer std.testing.allocator.free(project_path);
+    try project_level.save(project_path);
+    try tmp.dir.writeFile(.{ .sub_path = "malformed.json", .data = "{" });
+    try tmp.dir.writeFile(.{
+        .sub_path = "future.json",
+        .data =
+        \\{"schemaVersion":3,"project":"C:\\work\\alpha","selectedTab":0,"tabs":[]}
+        ,
+    });
+    try tmp.dir.writeFile(.{ .sub_path = "ignored.txt", .data = "{}" });
+
+    const ids = try scanPaneIds(std.testing.allocator, root);
+    defer freeScannedPaneIds(std.testing.allocator, ids);
+    try std.testing.expectEqual(@as(usize, 3), ids.len);
+    var agent = false;
+    var loop_shell = false;
+    var project_shell = false;
+    for (ids) |id| {
+        if (std.mem.eql(u8, id, "11111111-1111-4111-8111-111111111111")) agent = true;
+        if (std.mem.eql(u8, id, "22222222-2222-4222-8222-222222222222")) loop_shell = true;
+        if (std.mem.eql(u8, id, "33333333-3333-4333-8333-333333333333")) project_shell = true;
+    }
+    try std.testing.expect(agent and loop_shell and project_shell);
+
+    const missing = try scanPaneIds(std.testing.allocator, "C:\\no\\such\\layouts");
+    defer freeScannedPaneIds(std.testing.allocator, missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
+
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, directory: []const u8) !void {
+            const scanned = try scanPaneIds(allocator, directory);
+            defer freeScannedPaneIds(allocator, scanned);
+            try std.testing.expectEqual(@as(usize, 3), scanned.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Probe.run,
+        .{root},
+    );
 }
 
 test "a layout is set aside under a name that never replaces an earlier one" {
