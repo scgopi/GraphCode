@@ -738,7 +738,35 @@ fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void
 
 fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     const allocator = state.allocator;
-    const timed = NewLoopSheet.parseTimedPrompt(if (std.mem.eql(u8, initial.loop_type, "timeBased")) initial.trigger_prompt else "");
+    const time_based = std.mem.eql(u8, initial.loop_type, "timeBased");
+    const legacy_timed = time_based and
+        initial.heartbeat_interval_seconds == null and
+        NewLoopSheet.legacyTimedPrompt(initial.trigger_prompt) != null;
+    const timed = if (legacy_timed)
+        NewLoopSheet.parseTimedPrompt(initial.trigger_prompt)
+    else
+        NewLoopSheet.TimedPrompt{ .task = if (time_based) initial.trigger_prompt else "" };
+    var heartbeat_custom: ?[]u8 = null;
+    defer if (heartbeat_custom) |value| allocator.free(value);
+    var timed_cadence = timed.cadence;
+    var timed_custom = timed.custom;
+    if (time_based and !legacy_timed) {
+        if (initial.heartbeat_interval_seconds) |seconds| {
+            if (seconds == 900) {
+                timed_cadence = "15m";
+            } else if (seconds == 3600) {
+                timed_cadence = "1h";
+            } else if (seconds == 21600) {
+                timed_cadence = "6h";
+            } else if (seconds == 86400) {
+                timed_cadence = "24h";
+            } else {
+                timed_cadence = "custom";
+                heartbeat_custom = try std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+                timed_custom = heartbeat_custom.?;
+            }
+        }
+    }
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, if (std.mem.eql(u8, initial.loop_type, "composite")) "proactive" else initial.loop_type);
     state.values[2] = try allocator.dupe(u8, initial.check_description);
@@ -760,8 +788,8 @@ fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
     state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
     state.values[20] = try allocator.dupe(u8, initial.created_by);
-    state.values[21] = try allocator.dupe(u8, timed.cadence);
-    state.values[22] = try allocator.dupe(u8, timed.custom);
+    state.values[21] = try allocator.dupe(u8, timed_cadence);
+    state.values[22] = try allocator.dupe(u8, timed_custom);
     state.values[23] = try allocator.dupe(u8, timed.task);
     state.values[24] = try allocator.dupe(u8, timed.stop_after);
     state.values[25] = try dupOptionalIntText(allocator, initial.token_budget);
@@ -771,7 +799,45 @@ fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     state.values[28] = try allocator.dupe(u8, initial.created_from_template_id);
     state.values[29] = try allocator.dupe(u8, initial.template_follow_id);
     state.values[30] = try allocator.dupe(u8, initial.template_follow_name);
-    for (0..31) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    state.values[31] = try allocator.dupe(u8, initial.trigger_prompt);
+    state.values[32] = try dupOptionalFloatText(allocator, initial.heartbeat_interval_seconds);
+    for (0..33) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+}
+
+const TimedDraftFields = struct {
+    trigger_prompt: []u8,
+    heartbeat_interval_seconds: ?f64,
+
+    fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.trigger_prompt);
+    }
+};
+
+fn timedDraftFields(
+    allocator: std.mem.Allocator,
+    values: *const [256][]u8,
+    initial_trigger_prompt: []const u8,
+    initial_heartbeat_interval_seconds: ?f64,
+) !TimedDraftFields {
+    if (initial_heartbeat_interval_seconds == null) {
+        if (NewLoopSheet.legacyTimedPrompt(initial_trigger_prompt)) |parsed| {
+            if (std.mem.eql(u8, values[21], parsed.cadence) and
+                std.mem.eql(u8, values[22], parsed.custom) and
+                std.mem.eql(u8, values[3], parsed.task) and
+                std.mem.eql(u8, values[24], parsed.stop_after))
+            {
+                return .{
+                    .trigger_prompt = try allocator.dupe(u8, initial_trigger_prompt),
+                    .heartbeat_interval_seconds = initial_heartbeat_interval_seconds,
+                };
+            }
+        }
+    }
+    const seconds = try NewLoopSheet.cadenceSeconds(values[21], values[22]);
+    return .{
+        .trigger_prompt = try allocator.dupe(u8, std.mem.trim(u8, values[3], " \t\r\n")),
+        .heartbeat_interval_seconds = seconds,
+    };
 }
 
 fn buildNodeDraft(
@@ -801,20 +867,26 @@ fn buildNodeDraftUnchecked(
         parseOptionalFloat(values[9]) catch return error.InvalidNumericInput
     else
         initial.stall_after_seconds;
+    const timed = std.mem.eql(u8, values[1], "timeBased");
+    const timed_fields = if (timed)
+        try timedDraftFields(allocator, values, initial.trigger_prompt, initial.heartbeat_interval_seconds)
+    else
+        null;
+    defer if (timed_fields) |fields| fields.deinit(allocator);
     var result = Forms.NodeDraft{ .title = &.{}, .loop_type = &.{}, .check_description = &.{}, .trigger_prompt = &.{}, .first_instruction = &.{}, .goal_summary = &.{}, .goal_predicate = &.{}, .metric_command = &.{}, .metric_direction = &.{}, .model_tier = &.{}, .worktree_repository = &.{}, .worktree_id = &.{}, .worktree_path = &.{}, .worktree_branch = &.{}, .subgraph_json = &.{}, .created_by = &.{} };
     errdefer result.deinit(allocator);
     result.title = try allocator.dupe(u8, if (std.mem.eql(u8, values[1], "sketch")) "" else values[0]);
     result.loop_type = try allocator.dupe(u8, values[1]);
     result.check_description = try allocator.dupe(u8, values[2]);
-    const trigger = if (std.mem.eql(u8, values[1], "timeBased"))
-        try NewLoopSheet.cadencePrompt(allocator, values[21], values[22], values[3], values[24])
+    const trigger = if (timed)
+        try allocator.dupe(u8, timed_fields.?.trigger_prompt)
     else if (NewLoopSheet.isComposite(values[1]))
         try NewLoopSheet.schedulePrompt(allocator, values[26], values[27])
     else
         try allocator.dupe(u8, initial.trigger_prompt);
     defer allocator.free(trigger);
     result.trigger_prompt = try allocator.dupe(u8, trigger);
-    result.heartbeat_interval_seconds = if (std.mem.eql(u8, values[1], "timeBased")) initial.heartbeat_interval_seconds else null;
+    result.heartbeat_interval_seconds = if (timed) timed_fields.?.heartbeat_interval_seconds else null;
     result.first_instruction = try allocator.dupe(u8, values[4]);
     result.pauses_before_writes_only = std.mem.eql(u8, values[5], "true");
     result.goal_summary = try allocator.dupe(u8, if (goal_based) values[6] else "");
@@ -1444,8 +1516,9 @@ fn loopTypeDisplayName(loop_type: []const u8) []const u8 {
 
 fn nodeRecapText(state: *const DialogState) []const u8 {
     const loop_type = state.values[1];
-    const trigger = if (std.mem.eql(u8, loop_type, "timeBased"))
-        NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[3], state.values[24]) catch
+    const timed = std.mem.eql(u8, loop_type, "timeBased");
+    const trigger = if (timed)
+        state.allocator.dupe(u8, std.mem.trim(u8, state.values[3], " \t\r\n")) catch
             return state.allocator.dupe(u8, "Recap: unavailable") catch &.{}
     else if (NewLoopSheet.isComposite(loop_type))
         NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch
@@ -1459,6 +1532,11 @@ fn nodeRecapText(state: *const DialogState) []const u8 {
         .loop_type = loop_type,
         .check_description = state.values[2],
         .trigger_prompt = trigger,
+        .heartbeat_interval_seconds = if (timed)
+            NewLoopSheet.cadenceSeconds(state.values[21], state.values[22]) catch
+                return state.allocator.dupe(u8, "Recap: unavailable") catch &.{}
+        else
+            null,
         .first_instruction = state.values[4],
         .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
         .goal_summary = state.values[6],
@@ -3945,6 +4023,7 @@ fn validationReason(state: *DialogState) ?[]const u8 {
         .node => {
             const loop_type = state.values[1];
             const goal_based = std.mem.eql(u8, loop_type, "goalBased");
+            const timed = std.mem.eql(u8, loop_type, "timeBased");
             const invalid_goal = NewLoopSheet.requiredFieldReason(loop_type) orelse "";
             const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch
                 return if (goal_based) invalid_goal else "Enter a valid number of seconds between goal checks.";
@@ -3956,8 +4035,15 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                     poll <= 0 or
                     (stall != null and (!std.math.isFinite(stall.?) or stall.? <= 0))))
                 return invalid_goal;
-            if (std.mem.eql(u8, loop_type, "timeBased") and std.mem.trim(u8, state.values[3], " \t\r\n").len == 0)
+            if (timed and std.mem.trim(u8, state.values[3], " \t\r\n").len == 0)
                 return NewLoopSheet.requiredFieldReason(loop_type);
+            const initial_heartbeat = parseOptionalFloat(state.values[32]) catch return "Choose a valid positive cadence.";
+            const timed_fields = if (timed)
+                timedDraftFields(state.allocator, &state.values, state.values[31], initial_heartbeat) catch
+                    return "Choose a valid positive cadence."
+            else
+                null;
+            defer if (timed_fields) |fields| fields.deinit(state.allocator);
             if (std.mem.eql(u8, loop_type, "turnBased") and std.mem.trim(u8, state.values[4], " \t\r\n").len == 0)
                 return NewLoopSheet.requiredFieldReason(loop_type);
             if (goal_based and std.mem.trim(u8, state.values[25], " \t\r\n").len != 0 and NewLoopSheet.parseBudget(state.values[25]) == null)
@@ -3965,8 +4051,8 @@ fn validationReason(state: *DialogState) ?[]const u8 {
             const backend: ?[]const u8 = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else state.values[12];
             const selected_worktree = selectedWorktreeChoice(state);
             const preserves_initial_worktree = state.node_worktree_choices.len == 0;
-            const trigger = if (std.mem.eql(u8, state.values[1], "timeBased"))
-                NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[3], state.values[24]) catch return "Unable to compose the timed instruction."
+            const trigger = if (timed)
+                state.allocator.dupe(u8, timed_fields.?.trigger_prompt) catch return "Unable to validate the new loop."
             else if (NewLoopSheet.isComposite(state.values[1]))
                 NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch return "Unable to compose the intended schedule."
             else
@@ -3977,7 +4063,7 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                 .loop_type = state.values[1],
                 .check_description = if (std.mem.eql(u8, state.values[1], "turnBased")) state.values[2] else "",
                 .trigger_prompt = trigger,
-                .heartbeat_interval_seconds = null,
+                .heartbeat_interval_seconds = if (timed) timed_fields.?.heartbeat_interval_seconds else null,
                 .first_instruction = if (std.mem.eql(u8, state.values[1], "turnBased") or std.mem.eql(u8, state.values[1], "sketch")) state.values[4] else "",
                 .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
                 .goal_summary = if (goal_based) state.values[6] else "",
@@ -6322,6 +6408,108 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("proactive");
     try std.testing.expectEqualStrings("Name it to continue", validationReason(&state).?);
+}
+
+test "new loop: Time cadence builds heartbeat seconds with a raw trimmed task" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    defer freeValues(&state);
+    const initial = Forms.NodeDraft{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "  Check reports  ",
+        .heartbeat_interval_seconds = 3600,
+    };
+    try initializeNodeDraft(&state, initial);
+    var standard = try buildNodeDraft(std.testing.allocator, &state, initial);
+    defer standard.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Check reports", standard.trigger_prompt);
+    try std.testing.expectEqual(@as(?f64, 3600), standard.heartbeat_interval_seconds);
+
+    state.allocator.free(state.values[24]);
+    state.values[24] = try state.allocator.dupe(u8, "2 runs");
+    state.allocator.free(state.values[21]);
+    state.values[21] = try state.allocator.dupe(u8, "custom");
+    state.allocator.free(state.values[22]);
+    state.values[22] = try state.allocator.dupe(u8, "30m");
+    var custom = try buildNodeDraft(std.testing.allocator, &state, initial);
+    defer custom.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Check reports", custom.trigger_prompt);
+    try std.testing.expect(std.mem.indexOf(u8, custom.trigger_prompt, "Stop after") == null);
+    try std.testing.expectEqual(@as(?f64, 1800), custom.heartbeat_interval_seconds);
+}
+
+test "new loop: heartbeat makes a directive-looking Time task modern raw text" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    defer freeValues(&state);
+    const initial = Forms.NodeDraft{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "/loop daily Inspect reports",
+        .heartbeat_interval_seconds = 21600,
+    };
+    try initializeNodeDraft(&state, initial);
+    try std.testing.expectEqualStrings("6h", state.values[21]);
+    try std.testing.expectEqualStrings(initial.trigger_prompt, state.values[3]);
+    var round_trip = try buildNodeDraft(std.testing.allocator, &state, initial);
+    defer round_trip.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(initial.trigger_prompt, round_trip.trigger_prompt);
+    try std.testing.expectEqual(initial.heartbeat_interval_seconds, round_trip.heartbeat_interval_seconds);
+}
+
+test "new loop: malformed Time cadence refuses submission" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    defer freeValues(&state);
+    const initial = Forms.NodeDraft{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "Check reports",
+        .heartbeat_interval_seconds = 3600,
+    };
+    try initializeNodeDraft(&state, initial);
+    state.allocator.free(state.values[21]);
+    state.values[21] = try state.allocator.dupe(u8, "custom");
+    state.allocator.free(state.values[22]);
+    state.values[22] = try state.allocator.dupe(u8, "not-a-duration");
+    try std.testing.expectError(error.InvalidHeartbeat, buildNodeDraft(std.testing.allocator, &state, initial));
+    try std.testing.expectEqualStrings("Choose a valid positive cadence.", validationReason(&state).?);
+}
+
+test "new loop: legacy loop prompt initializes controls and round trips unchanged" {
+    for ([_]struct {
+        prompt: []const u8,
+        cadence: []const u8,
+        custom: []const u8,
+    }{
+        .{ .prompt = "/loop 1h Inspect reports", .cadence = "1h", .custom = "" },
+        .{ .prompt = "  /loop daily Inspect reports  ", .cadence = "custom", .custom = "daily" },
+    }) |sample| {
+        var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+        defer freeValues(&state);
+        const initial = Forms.NodeDraft{
+            .title = "",
+            .loop_type = "timeBased",
+            .trigger_prompt = sample.prompt,
+        };
+        try initializeNodeDraft(&state, initial);
+        try std.testing.expectEqualStrings(sample.cadence, state.values[21]);
+        try std.testing.expectEqualStrings(sample.custom, state.values[22]);
+        try std.testing.expectEqualStrings("Inspect reports", state.values[3]);
+        try std.testing.expectEqualStrings("", state.values[24]);
+
+        var round_trip = try buildNodeDraft(std.testing.allocator, &state, initial);
+        defer round_trip.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(initial.trigger_prompt, round_trip.trigger_prompt);
+        try std.testing.expectEqual(initial.heartbeat_interval_seconds, round_trip.heartbeat_interval_seconds);
+
+        if (std.mem.eql(u8, sample.custom, "daily")) {
+            state.allocator.free(state.values[3]);
+            state.values[3] = try state.allocator.dupe(u8, "Inspect changed reports");
+            var migrated = try buildNodeDraft(std.testing.allocator, &state, initial);
+            defer migrated.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("Inspect changed reports", migrated.trigger_prompt);
+            try std.testing.expectEqual(@as(?f64, 86400), migrated.heartbeat_interval_seconds);
+        }
+    }
 }
 
 test "new loop: invalid committed types expose exact accessible validation before generic Composite copy" {

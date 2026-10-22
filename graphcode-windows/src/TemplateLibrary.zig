@@ -1,5 +1,6 @@
 const std = @import("std");
 const Forms = @import("Forms.zig");
+const NewLoopSheet = @import("NewLoopSheet.zig");
 
 /// Windows reads the same human-editable markdown files as GraphcodeKit:
 /// project templates take precedence over the per-user library.
@@ -82,12 +83,9 @@ fn applyFields(
     if (std.mem.eql(u8, shape, "goalBased")) {
         try replaceFn(allocator, &draft.goal_summary, template.body);
     } else if (std.mem.eql(u8, shape, "timeBased")) {
-        const prompt = if (template.cadence) |cadence|
-            try std.fmt.allocPrint(allocator, "/loop {s} {s}", .{ cadence, template.body })
-        else
-            try allocator.dupe(u8, template.body);
-        defer allocator.free(prompt);
-        try replaceFn(allocator, &draft.trigger_prompt, prompt);
+        try replaceFn(allocator, &draft.trigger_prompt, template.body);
+        if (template.cadence) |cadence|
+            draft.heartbeat_interval_seconds = try NewLoopSheet.cadenceSeconds(cadence, "");
     } else if (std.mem.eql(u8, shape, "proactive")) {
         if (template.graph_json) |graph| try replaceFn(allocator, &draft.subgraph_json, graph);
     } else {
@@ -134,6 +132,10 @@ pub fn fromDraft(allocator: std.mem.Allocator, name: []const u8, draft: Forms.No
         .body = try allocator.dupe(u8, body),
         .shape = try allocator.dupe(u8, shapeWord(draft.loop_type)),
         .done_check = try duplicateOptional(allocator, draft.goal_predicate),
+        .cadence = if (std.mem.eql(u8, draft.loop_type, "timeBased"))
+            if (draft.heartbeat_interval_seconds) |seconds| try NewLoopSheet.cadenceText(allocator, seconds) else null
+        else
+            null,
         .metric = try duplicateOptional(allocator, draft.metric_command),
         .backend = if (draft.backend) |backend| try duplicateOptional(allocator, backend) else null,
         .graph_json = try duplicateOptional(allocator, draft.subgraph_json),
@@ -439,7 +441,7 @@ test "new loop: full template settings apply editable draft metadata" {
     var template = Template{
         .id = try allocator.dupe(u8, "11111111-1111-4111-8111-111111111111"),
         .name = try allocator.dupe(u8, "Nightly review"),
-        .body = try allocator.dupe(u8, "Review new failures"),
+        .body = try allocator.dupe(u8, "/loop daily Review new failures"),
         .shape = try allocator.dupe(u8, "timed"),
         .done_check = try allocator.dupe(u8, "test"),
         .cadence = try allocator.dupe(u8, "6h"),
@@ -449,12 +451,35 @@ test "new loop: full template settings apply editable draft metadata" {
     defer template.deinit(allocator);
     try applyOwned(&draft, template, allocator);
     try std.testing.expectEqualStrings("timeBased", draft.loop_type);
-    try std.testing.expectEqualStrings("/loop 6h Review new failures", draft.trigger_prompt);
+    try std.testing.expectEqualStrings("/loop daily Review new failures", draft.trigger_prompt);
+    try std.testing.expectEqual(@as(?f64, 21600), draft.heartbeat_interval_seconds);
     try std.testing.expectEqualStrings("test", draft.goal_predicate);
     try std.testing.expectEqualStrings("score", draft.metric_command);
     try std.testing.expectEqualStrings("copilotCLI", draft.backend.?);
     try std.testing.expectEqualStrings(template.id, draft.created_from_template_id);
     try std.testing.expectEqualStrings(template.id, draft.template_follow_id);
+}
+
+test "new loop: saved timed templates retain heartbeat cadence" {
+    const allocator = std.testing.allocator;
+    var saved = try fromDraft(allocator, "Report review", .{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "Review new failures",
+        .heartbeat_interval_seconds = 21600,
+    });
+    defer saved.deinit(allocator);
+    try std.testing.expectEqualStrings("Review new failures", saved.body);
+    try std.testing.expectEqualStrings("6h", saved.cadence.?);
+
+    var custom = try fromDraft(allocator, "Fast review", .{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "Review new failures",
+        .heartbeat_interval_seconds = 90,
+    });
+    defer custom.deinit(allocator);
+    try std.testing.expectEqualStrings("90s", custom.cadence.?);
 }
 
 test "new loop: composite templates carry their graph and save vocabulary" {

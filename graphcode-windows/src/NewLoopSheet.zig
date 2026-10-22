@@ -199,6 +199,45 @@ pub fn backendCanHost(backend: []const u8, loop_type: []const u8) bool {
     return !(isComposite(loop_type) and std.mem.eql(u8, backend, "codex"));
 }
 
+pub fn cadenceSeconds(cadence: []const u8, custom: []const u8) !f64 {
+    const source = std.mem.trim(
+        u8,
+        if (std.mem.eql(u8, cadence, "custom")) custom else cadence,
+        " \t\r\n",
+    );
+    if (std.ascii.eqlIgnoreCase(source, "daily")) return 86400;
+    if (source.len == 0) return error.InvalidHeartbeat;
+    const unit = std.ascii.toLower(source[source.len - 1]);
+    const has_unit = unit == 's' or unit == 'm' or unit == 'h' or unit == 'd';
+    const multiplier: u64 = if (has_unit) switch (unit) {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        else => unreachable,
+    } else 60;
+    const number = if (has_unit) source[0 .. source.len - 1] else source;
+    if (number.len == 0) return error.InvalidHeartbeat;
+    const amount = std.fmt.parseUnsigned(u64, number, 10) catch return error.InvalidHeartbeat;
+    if (amount == 0) return error.InvalidHeartbeat;
+    const seconds = std.math.mul(u64, amount, multiplier) catch return error.InvalidHeartbeat;
+    if (seconds > 9_007_199_254_740_992) return error.InvalidHeartbeat;
+    return @floatFromInt(seconds);
+}
+
+pub fn cadenceText(allocator: std.mem.Allocator, seconds: f64) ![]u8 {
+    if (!std.math.isFinite(seconds) or
+        seconds < 1 or
+        seconds > 9_007_199_254_740_992.0 or
+        @floor(seconds) != seconds)
+        return error.InvalidHeartbeat;
+    if (seconds == 900) return allocator.dupe(u8, "15m");
+    if (seconds == 3600) return allocator.dupe(u8, "1h");
+    if (seconds == 21600) return allocator.dupe(u8, "6h");
+    if (seconds == 86400) return allocator.dupe(u8, "24h");
+    return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+}
+
 pub fn cadencePrompt(allocator: std.mem.Allocator, cadence: []const u8, custom: []const u8, task: []const u8, stop_after: []const u8) ![]u8 {
     const trimmed_task = std.mem.trim(u8, task, " \t\r\n");
     if (trimmed_task.len == 0) return allocator.dupe(u8, "");
@@ -220,12 +259,19 @@ pub const TimedPrompt = struct {
     stop_after: []const u8 = "",
 };
 
-pub fn parseTimedPrompt(prompt: []const u8) TimedPrompt {
-    if (!std.mem.startsWith(u8, prompt, "/loop ")) return .{ .task = prompt };
-    const rest = prompt["/loop ".len..];
-    const separator = std.mem.indexOfScalar(u8, rest, ' ') orelse return .{ .task = prompt };
+pub fn legacyTimedPrompt(prompt: []const u8) ?TimedPrompt {
+    const trimmed = std.mem.trim(u8, prompt, " \t\r\n");
+    const prefix = if (std.mem.startsWith(u8, trimmed, "/loop "))
+        "/loop "
+    else if (std.mem.startsWith(u8, trimmed, "/every "))
+        "/every "
+    else
+        return null;
+    const rest = std.mem.trimLeft(u8, trimmed[prefix.len..], " ");
+    const separator = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
     const interval = rest[0..separator];
-    var task = rest[separator + 1 ..];
+    var task = std.mem.trim(u8, rest[separator + 1 ..], " ");
+    if (interval.len == 0 or task.len == 0) return null;
     var stop: []const u8 = "";
     if (std.mem.lastIndexOf(u8, task, " Stop after ")) |stop_index| {
         stop = std.mem.trimRight(u8, task[stop_index + " Stop after ".len ..], ".");
@@ -239,6 +285,10 @@ pub fn parseTimedPrompt(prompt: []const u8) TimedPrompt {
         .task = task,
         .stop_after = stop,
     };
+}
+
+pub fn parseTimedPrompt(prompt: []const u8) TimedPrompt {
+    return legacyTimedPrompt(prompt) orelse .{ .task = prompt };
 }
 
 pub fn schedulePrompt(allocator: std.mem.Allocator, schedule: []const u8, time: []const u8) ![]u8 {
@@ -278,6 +328,26 @@ pub fn parseBudget(text: []const u8) ?i64 {
     if (trimmed.len == 0) return null;
     const value = std.fmt.parseInt(i64, trimmed, 10) catch return null;
     return if (value > 0) value else null;
+}
+
+test "cadence seconds maps presets and custom duration text" {
+    for ([_]struct { cadence: []const u8, seconds: f64 }{
+        .{ .cadence = "15m", .seconds = 900 },
+        .{ .cadence = "1h", .seconds = 3600 },
+        .{ .cadence = "6h", .seconds = 21600 },
+        .{ .cadence = "24h", .seconds = 86400 },
+    }) |sample| {
+        try std.testing.expectEqual(sample.seconds, try cadenceSeconds(sample.cadence, ""));
+    }
+    try std.testing.expectEqual(@as(f64, 90), try cadenceSeconds("custom", "90s"));
+    try std.testing.expectEqual(@as(f64, 1800), try cadenceSeconds("custom", "30"));
+    try std.testing.expectEqual(@as(f64, 86400), try cadenceSeconds("custom", "daily"));
+}
+
+test "cadence seconds rejects malformed unsafe and inexact durations" {
+    for ([_][]const u8{ "", "0s", "0.5s", "1.5s", "1.0000000000000001s", "-1m", "invalid", "NaNs", "Infh", "9007199254740993s", "9223372036854775808s", "1e20s" }) |value| {
+        try std.testing.expectError(error.InvalidHeartbeat, cadenceSeconds("custom", value));
+    }
 }
 
 pub fn recap(allocator: std.mem.Allocator, draft: Forms.NodeDraft, worktree_branch: []const u8) ![]u8 {
