@@ -4277,6 +4277,26 @@ Start-Sleep -Seconds 60
       [double]$retainedCreateNode.heartbeatIntervalSeconds -ne 3600) {
     throw "RED: retained New Loop request history cannot select the create after a later outcome command"
   }
+  $firstCustodyOpen = $uiaLiveGateSource.IndexOf(
+    '$custodyMenuClick = Sketch-ClickMenu $custodyParent 5119',
+    [StringComparison]::Ordinal)
+  $firstCustodyCancel = $uiaLiveGateSource.IndexOf(
+    '$custodyCancel = Sketch-Cancel "New Child"',
+    [Math]::Max(0, $firstCustodyOpen), [StringComparison]::Ordinal)
+  $secondCustodyOpen = $uiaLiveGateSource.IndexOf(
+    '$custodyParent = Open-SketchNodeMenu $renameFinalTitle',
+    [Math]::Max(0, $firstCustodyCancel + 1), [StringComparison]::Ordinal)
+  $custodyTurnSelection = $uiaLiveGateSource.IndexOf(
+    '$custodyTurnTile = Assert-SketchControl 9600',
+    [StringComparison]::Ordinal)
+  if ($firstCustodyOpen -lt 0 -or $firstCustodyCancel -le $firstCustodyOpen -or
+      $secondCustodyOpen -le $firstCustodyCancel -or
+      $custodyTurnSelection -le $secondCustodyOpen -or
+      $uiaLiveGateSource.IndexOf(
+        '$custodyTurnTile = Assert-SketchControl 9600',
+        $custodyTurnSelection + 1, [StringComparison]::Ordinal) -ge 0) {
+    throw "RED: custody Turn selection must occur exactly once, after first cancel and reopened child modal"
+  }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
   }
@@ -4289,6 +4309,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
+      $uiaLiveGateSource -notmatch '(?s)\$custodyCancel = Sketch-Cancel "New Child".*?\$custodyCancelled = Sketch-NoMutation.*?\$custodyParent = Open-SketchNodeMenu \$renameFinalTitle.*?Sketch-ClickMenu \$custodyParent 5119.*?\$custodyModal = Assert-SketchModal "Create or edit node".*?reopened custody child lost inherited backend.*?\$custodyTurnTile = Assert-SketchControl 9600.*?WindowTextOf\(\$custodyTurnTile\) -ceq "Turn-based".*?ClickScreenPoint\(\$custodyTurnTile\).*?ControlById\(\$script:edgeWorkflowWindow, 9104\).*?VisibleStaticTexts\(\$script:edgeWorkflowWindow\).*?First instruction.*?\$custodyFirstInstruction = Sketch-Field 9104' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
       $uiaLiveGateSource -notmatch 'public static bool RevealSubmenuByKeyboard\(IntPtr popup, IntPtr menu, int position\)' -or
       $uiaLiveGateSource -notmatch '\$submenuKeyboardReveal = \[GraphCodeUiaGateState\]::RevealSubmenuByKeyboard\(' -or

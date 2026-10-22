@@ -11316,6 +11316,29 @@ try {
   $custodyModal = Assert-SketchModal "Create or edit node"
   Require ([GraphCodeUiaGateState]::ComboSelection($script:edgeWorkflowWindow, 9112) -ceq
     "2|GitHub Copilot CLI") "reopened custody child lost inherited backend"
+  $custodyTurnTile = Assert-SketchControl 9600
+  Require ([GraphCodeUiaGateState]::WindowTextOf($custodyTurnTile) -ceq "Turn-based") `
+    "reopened custody child stable tile 9600 was not Turn-based"
+  Require (Ensure-ShellForeground $script:edgeWorkflowWindow "custody Turn tile") `
+    "reopened custody child lost foreground before selecting Turn"
+  $custodyTurnHit = [GraphCodeUiaGateState]::ClickScreenPoint($custodyTurnTile)
+  Require ($null -ne $custodyTurnHit -and -not $custodyTurnHit.VisibleEmpty) `
+    "reopened custody child Turn tile has no visible native rectangle"
+  if (-not $custodyTurnHit.HitTarget) {
+    Require ([GraphCodeUiaGateState]::ClickButton($custodyTurnTile)) `
+      "reopened custody child Turn tile direct button fallback failed"
+  }
+  $custodyTurnReady = $false
+  for ($attempt = 0; $attempt -lt 40 -and -not $custodyTurnReady; $attempt++) {
+    $instruction = [GraphCodeUiaGateState]::ControlById($script:edgeWorkflowWindow, 9104)
+    $custodyTurnReady = $instruction -ne [IntPtr]::Zero -and
+      [GraphCodeUiaGateState]::IsControlOwnedBy($script:edgeWorkflowWindow, $instruction, 9104) -and
+      [GraphCodeUiaGateState]::HasVisibleBounds($instruction) -and
+      (@([GraphCodeUiaGateState]::VisibleStaticTexts($script:edgeWorkflowWindow)) -contains "First instruction")
+    if (-not $custodyTurnReady) { Start-Sleep -Milliseconds 50 }
+  }
+  Require $custodyTurnReady `
+    "reopened custody child did not expose Turn field 9104 with exact First instruction label"
   $custodyFirstInstruction = Sketch-Field 9104 "custody instruction inherited baseline"
   Require (-not [string]::IsNullOrWhiteSpace($custodyFirstInstruction)) `
     "custody child form exposed no default first instruction"
