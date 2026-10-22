@@ -174,7 +174,7 @@ pub fn disabledReason(draft: Forms.NodeDraft) ?[]const u8 {
     }
     if (std.mem.eql(u8, loop_type, "sketch")) return null;
     if (std.mem.eql(u8, loop_type, "goalBased") and std.mem.trim(u8, draft.goal_summary, " \t\r\n").len == 0)
-        return "Say what done looks like to continue";
+        return "Say what done looks like and use positive timing values.";
     if (std.mem.eql(u8, loop_type, "timeBased") and std.mem.trim(u8, draft.trigger_prompt, " \t\r\n").len == 0)
         return "Say what to do each time to continue";
     if (std.mem.eql(u8, loop_type, "turnBased") and std.mem.trim(u8, draft.first_instruction, " \t\r\n").len == 0)

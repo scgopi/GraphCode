@@ -345,8 +345,8 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
     }
     if (std.mem.eql(u8, draft.loop_type, "goalBased")) {
         if (std.mem.trim(u8, draft.goal_summary, " \t\r\n").len == 0) return error.InvalidGoal;
-        if (draft.poll_interval_seconds <= 0) return error.InvalidGoal;
-        if (draft.stall_after_seconds) |seconds| if (seconds <= 0) return error.InvalidGoal;
+        if (!std.math.isFinite(draft.poll_interval_seconds) or draft.poll_interval_seconds <= 0) return error.InvalidGoal;
+        if (draft.stall_after_seconds) |seconds| if (!std.math.isFinite(seconds) or seconds <= 0) return error.InvalidGoal;
         if (draft.metric_direction.len != 0 and
             !isMetricDirection(draft.metric_direction))
             return error.UnsupportedMetricDirection;
@@ -929,6 +929,18 @@ test "new loop: cadence budget and template metadata validate by type" {
         .heartbeat_interval_seconds = 0,
     }));
     try validateNode(.{ .title = "", .loop_type = "goalBased", .goal_summary = "Done", .token_budget = 200000 });
+    try std.testing.expectError(error.InvalidGoal, validateNode(.{
+        .title = "",
+        .loop_type = "goalBased",
+        .goal_summary = "Done",
+        .poll_interval_seconds = std.math.nan(f64),
+    }));
+    try std.testing.expectError(error.InvalidGoal, validateNode(.{
+        .title = "",
+        .loop_type = "goalBased",
+        .goal_summary = "Done",
+        .stall_after_seconds = std.math.inf(f64),
+    }));
     try std.testing.expectError(error.InvalidTokenBudget, validateNode(.{
         .title = "",
         .loop_type = "turnBased",

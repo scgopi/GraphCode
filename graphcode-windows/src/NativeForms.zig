@@ -3332,7 +3332,12 @@ fn layoutNodeForm(state: *DialogState) void {
     y += scaled(state, 182);
 
     const loop_type = state.values[1];
-    if (NewLoopSheet.isComposite(loop_type)) {
+    const composite = NewLoopSheet.isComposite(loop_type);
+    if (!composite) {
+        layoutContentControl(state.composite_steps, 0, 0, 0, 0, false, clientHeight(hwnd));
+        layoutContentControl(state.composite_notice, 0, 0, 0, 0, false, clientHeight(hwnd));
+    }
+    if (composite) {
         layoutContentControl(state.composite_steps, margin, y, width, scaled(state, 44), true, clientHeight(hwnd));
         y += scaled(state, 50);
         layoutContentControl(state.composite_notice, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
@@ -3938,8 +3943,17 @@ fn validationReason(state: *DialogState) ?[]const u8 {
         },
         .node => {
             const goal_based = std.mem.eql(u8, state.values[1], "goalBased");
-            const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch return "Enter a valid number of seconds between goal checks.";
-            const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch return "Enter a valid stall timeout, or leave it blank.";
+            const invalid_goal = "Say what done looks like and use positive timing values.";
+            const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch
+                return if (goal_based) invalid_goal else "Enter a valid number of seconds between goal checks.";
+            const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch
+                return if (goal_based) invalid_goal else "Enter a valid stall timeout, or leave it blank.";
+            if (goal_based and
+                (std.mem.trim(u8, state.values[6], " \t\r\n").len == 0 or
+                    !std.math.isFinite(poll) or
+                    poll <= 0 or
+                    (stall != null and (!std.math.isFinite(stall.?) or stall.? <= 0))))
+                return invalid_goal;
             if (goal_based and std.mem.trim(u8, state.values[25], " \t\r\n").len != 0 and NewLoopSheet.parseBudget(state.values[25]) == null)
                 return "Enter a positive whole-number token budget.";
             const backend: ?[]const u8 = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else state.values[12];
@@ -5430,7 +5444,7 @@ test "conditional graph fields and validation follow selected types" {
     updateConditionalVisibility(&node_state);
     try std.testing.expect(node_state.visible[6]);
     try std.testing.expect(!node_state.visible[4]);
-    try std.testing.expectEqualStrings("Say what done looks like to continue", validationReason(&node_state).?);
+    try std.testing.expectEqualStrings("Say what done looks like and use positive timing values.", validationReason(&node_state).?);
 
     var edge_state = DialogState{ .allocator = undefined, .kind = .edge, .parent = null };
     edge_state.field_count = 10;
@@ -6289,7 +6303,7 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     state.values[27] = @constCast("09:00");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("goalBased");
-    try std.testing.expectEqualStrings("Say what done looks like to continue", validationReason(&state).?);
+    try std.testing.expectEqualStrings("Say what done looks like and use positive timing values.", validationReason(&state).?);
     state.values[6] = @constCast("Tests pass");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("timeBased");
@@ -6302,6 +6316,60 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("proactive");
     try std.testing.expectEqualStrings("Name it to continue", validationReason(&state).?);
+}
+
+test "new loop: invalid Goal exposes exact accessible validation before generic Composite copy" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{
+        .title = "",
+        .loop_type = "goalBased",
+        .goal_summary = "",
+        .poll_interval_seconds = 0,
+        .stall_after_seconds = 0,
+    });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    syncValidation(&state);
+
+    var wide: [128]u16 = undefined;
+    const length = c.GetWindowTextW(state.validation, &wide, @intCast(wide.len));
+    var text: [256]u8 = undefined;
+    const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    const expected = "Say what done looks like and use positive timing values.";
+    try std.testing.expectEqualStrings(expected, text[0..written]);
+    try std.testing.expect(c.GetWindowLongPtrW(state.validation, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+    try std.testing.expect(c.GetWindowLongPtrW(state.composite_notice, c.GWL_STYLE) & c.WS_VISIBLE == 0);
+
+    const VisibleStatics = struct {
+        expected: []const u8,
+        found_expected: bool = false,
+        found_generic: bool = false,
+
+        fn visit(hwnd: c.HWND, parameter: c.LPARAM) callconv(.winapi) c.BOOL {
+            const self = Win32.messagePointer(*@This(), parameter);
+            if (c.GetWindowLongPtrW(hwnd, c.GWL_STYLE) & c.WS_VISIBLE == 0) return 1;
+            var class: [32]u16 = undefined;
+            const class_length = c.GetClassNameW(hwnd, &class, @intCast(class.len));
+            const static_class = [_]u16{ 'S', 't', 'a', 't', 'i', 'c' };
+            if (class_length <= 0 or !std.mem.eql(u16, &static_class, class[0..@intCast(class_length)])) return 1;
+            var child_wide: [128]u16 = undefined;
+            const child_length = c.GetWindowTextW(hwnd, &child_wide, @intCast(child_wide.len));
+            var child_text: [256]u8 = undefined;
+            const child_written = std.unicode.utf16LeToUtf8(&child_text, child_wide[0..@intCast(child_length)]) catch return 1;
+            const value = child_text[0..child_written];
+            self.found_expected = self.found_expected or std.mem.eql(u8, value, self.expected);
+            self.found_generic = self.found_generic or std.mem.eql(u8, value, "Nothing runs when you press Create.");
+            return 1;
+        }
+    };
+    var visible = VisibleStatics{ .expected = expected };
+    try std.testing.expect(c.EnumChildWindows(host.hwnd, VisibleStatics.visit, @bitCast(@intFromPtr(&visible))) != 0);
+    try std.testing.expect(visible.found_expected);
+    try std.testing.expect(!visible.found_generic);
 }
 
 test "new loop: all five layouts keep the SheetFramework footer fixed at every DPI" {
