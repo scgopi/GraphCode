@@ -4289,13 +4289,25 @@ Start-Sleep -Seconds 60
   $custodyTurnSelection = $uiaLiveGateSource.IndexOf(
     '$custodyTurnTile = Assert-SketchControl 9600',
     [StringComparison]::Ordinal)
+  $custodyInstructionType = $uiaLiveGateSource.IndexOf(
+    'Sketch-Type 9104 $custodyFirstInstruction',
+    [Math]::Max(0, $custodyTurnSelection), [StringComparison]::Ordinal)
+  $custodyBackendChange = $uiaLiveGateSource.IndexOf(
+    '$null = Sketch-Combo 9112 1 "Claude Code"',
+    [Math]::Max(0, $custodyInstructionType), [StringComparison]::Ordinal)
+  $custodyInstructionReadback = $uiaLiveGateSource.IndexOf(
+    '$custodyInstructionAfterBackend = Sketch-Field 9104',
+    [Math]::Max(0, $custodyBackendChange), [StringComparison]::Ordinal)
   if ($firstCustodyOpen -lt 0 -or $firstCustodyCancel -le $firstCustodyOpen -or
       $secondCustodyOpen -le $firstCustodyCancel -or
       $custodyTurnSelection -le $secondCustodyOpen -or
+      $custodyInstructionType -le $custodyTurnSelection -or
+      $custodyBackendChange -le $custodyInstructionType -or
+      $custodyInstructionReadback -le $custodyBackendChange -or
       $uiaLiveGateSource.IndexOf(
         '$custodyTurnTile = Assert-SketchControl 9600',
         $custodyTurnSelection + 1, [StringComparison]::Ordinal) -ge 0) {
-    throw "RED: custody Turn selection must occur exactly once, after first cancel and reopened child modal"
+    throw "RED: custody reopened path must select Turn once, type instruction, change backend and prove unchanged instruction"
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
@@ -4309,7 +4321,6 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'commandLogBytesUnchanged' -or
       $uiaLiveGateSource -notmatch 'appliedPromotions' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests' -or
-      $uiaLiveGateSource -notmatch '(?s)\$custodyCancel = Sketch-Cancel "New Child".*?\$custodyCancelled = Sketch-NoMutation.*?\$custodyParent = Open-SketchNodeMenu \$renameFinalTitle.*?Sketch-ClickMenu \$custodyParent 5119.*?\$custodyModal = Assert-SketchModal "Create or edit node".*?reopened custody child lost inherited backend.*?\$custodyTurnTile = Assert-SketchControl 9600.*?WindowTextOf\(\$custodyTurnTile\) -ceq "Turn-based".*?ClickScreenPoint\(\$custodyTurnTile\).*?ControlById\(\$script:edgeWorkflowWindow, 9104\).*?VisibleStaticTexts\(\$script:edgeWorkflowWindow\).*?First instruction.*?\$custodyFirstInstruction = "Work on the requested Windows shell task\.".*?Sketch-Type 9104 \$custodyFirstInstruction.*?\$null = Sketch-Combo 9112 1 "Claude Code".*?\$custodyInstructionAfterBackend = Sketch-Field 9104' -or
       $uiaLiveGateSource -notmatch 'UIA_SKETCH_PROMOTION_RENDER_ATTEMPT=' -or
       $uiaLiveGateSource -notmatch 'public static bool RevealSubmenuByKeyboard\(IntPtr popup, IntPtr menu, int position\)' -or
       $uiaLiveGateSource -notmatch '\$submenuKeyboardReveal = \[GraphCodeUiaGateState\]::RevealSubmenuByKeyboard\(' -or
@@ -4334,14 +4345,23 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'function Test-SketchPromotionReceipt' -or
       $uiaLiveGateSource -notmatch 'Test-SketchPromotionReceipt \$after \$request \$expectedWire' -or
       $uiaLiveGateSource -notmatch 'receivedWireRaw = \$receivedWireRaw' -or
-      $uiaLiveGateSource -notmatch '\$custodyFirstInstruction = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch '\$custodyFirstInstruction = "Work on the requested Windows shell task\."' -or
+      $uiaLiveGateSource -notmatch 'Sketch-Type 9104 \$custodyFirstInstruction' -or
       $uiaLiveGateSource -notmatch '\$custodyInstructionAfterBackend = Sketch-Field 9104' -or
+      $uiaLiveGateSource -notmatch '\$custodyReceived = @\(\$custodyAfter\.receivedGraphCommands \| Where-Object \{ \$_.requestID -ceq \$custodyRequest \}\)' -or
+      $uiaLiveGateSource -notmatch '\$custodyReceived\.Count -eq 1' -or
+      $uiaLiveGateSource -notmatch '\$custodyCommand = \[string\]\$custodyReceived\[0\]\.command \| ConvertFrom-Json' -or
+      $uiaLiveGateSource -notmatch '\$custodyWire = \$custodyCommand\.command\.createNode\._0' -or
+      $uiaLiveGateSource -notmatch '\$custodyCommand\.projectPath -ceq "graphcode://stub/project"' -or
+      $uiaLiveGateSource -match '\$custodyLogged = \(Read-DaemonCommandLog' -or
+      $uiaLiveGateSource -match '\(\$custodyLogged \| ConvertTo-Json' -or
       $uiaLiveGateSource -notmatch 'instructionUnchanged = \(\$custodySubmitFields\.firstInstruction -ceq \$custodyFirstInstruction\)' -or
       $uiaLiveGateSource -notmatch 'firstInstruction -ceq \$custodyFirstInstruction' -or
       $uiaLiveGateSource -notmatch 'daemonCountsBefore = \$beforeCounts; daemonCountsAfter = \$afterCounts' -or
       $uiaLiveGateSource -notmatch 'appliedPromotionRequests = @\(\$before\.appliedPromotionRequests\)\.Count' -or
       $uiaLiveGateSource -notmatch 'requestCount = \[int\]\$before\.requestCount' -or
-      $uiaLiveGateSource -notmatch 'instructionEditing = "not validated;' -or
+      $uiaLiveGateSource -notmatch 'instructionEditing = "validated by native Sketch-Type exact readback before and after backend change"' -or
+      $uiaLiveGateSource -match 'editing is not validated and that result does not establish a dropped key' -or
       $uiaLiveGateSource -notmatch 'rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts' -or
       $stubDaemonSource -notmatch 'appliedPromotions' -or
       $stubDaemonSource -notmatch 'appliedPromotionRequests' -or

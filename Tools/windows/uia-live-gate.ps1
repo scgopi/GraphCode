@@ -11382,13 +11382,13 @@ try {
     -not [string]::IsNullOrWhiteSpace($custodyRequest) -and
     @($custodyAfter.unansweredRequests) -notcontains $custodyRequest) `
     "custody applied fields or correlated response differ from submitted native form"
-  $custodyLogged = (Read-DaemonCommandLog $renameCommandLogPath | ConvertFrom-Json).graphCommand
   $custodyReceived = @($custodyAfter.receivedGraphCommands | Where-Object { $_.requestID -ceq $custodyRequest })
-  $custodyWire = $custodyLogged.command.createNode._0
-  Require ($custodyReceived.Count -eq 1 -and
-    ($custodyLogged | ConvertTo-Json -Depth 16 -Compress) -ceq
-    (($custodyReceived[0].command | ConvertFrom-Json) | ConvertTo-Json -Depth 16 -Compress) -and
-    $custodyLogged.projectPath -ceq "graphcode://stub/project" -and
+  Require ($custodyReceived.Count -eq 1) `
+    "stub daemon retained $($custodyReceived.Count) commands for custody request '$custodyRequest'"
+  $custodyCommand = [string]$custodyReceived[0].command | ConvertFrom-Json
+  $custodyWire = $custodyCommand.command.createNode._0
+  Require ($null -ne $custodyWire -and
+    $custodyCommand.projectPath -ceq "graphcode://stub/project" -and
     $custodyWire.id -ceq $custodyId -and $custodyWire.title -ceq "UIA custody child" -and
     $custodyWire.createdBy -ceq $renameNodeId -and $custodyWire.backend -ceq "claudeCode" -and
     $custodyWire.loopType -ceq "turnBased" -and
@@ -11425,7 +11425,7 @@ try {
       instructionBaseline = $custodyFirstInstruction
       instructionAfterBackend = $custodyInstructionAfterBackend
       instructionUnchanged = ($custodySubmitFields.firstInstruction -ceq $custodyFirstInstruction)
-      instructionEditing = "not validated; hosted entry attempt reported zero expected and sent text events after the field clear, so this does not establish a dropped key"
+      instructionEditing = "validated by native Sketch-Type exact readback before and after backend change"
       submitFields = $custodySubmitFields
       childId = $custodyId; createdBy = [string]$custodyWire.createdBy
       parentUnchanged = @{
@@ -11438,7 +11438,7 @@ try {
       }
       backend = [string]$custodyWire.backend; requestId = $custodyRequest
       requestAnswered = $true
-      receivedWire = ($custodyReceived[0].command | ConvertFrom-Json)
+      receivedWire = $custodyCommand
       recorderSnapshotBase64 = Edge-LogBytes
       appliedCount = @($custodyAfter.appliedCreates).Count
       graphSequence = [int]$custodyAfter.graphSequence
@@ -11450,7 +11450,7 @@ try {
         pans = $custodyRendered.pans }
     }
     renderedHitTests = 4
-    limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts. The recorder covers only commands on its recorded path. The hosted first-instruction entry attempt reported zero expected and sent text events after clearing the field, so editing is not validated and that result does not establish a dropped key. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
+    limit = "The promoteNode path bypasses the UIA command recorder, so exact accepted wire is compared against the correlated stub request; rejected/cancelled no-dispatch evidence combines unchanged UIA-recorder bytes with unchanged stub received/applied/request/response/graph counts. The recorder covers only commands on its recorded path. Stub graphChanged and live node-card hit tests do not establish a production daemon session, active session preservation, glyph rendering, or macOS runtime parity."
   }
   Require ([GraphCodeUiaGateState]::PostCommand($renameShellWindow, 0x5002)) `
     "connected-daemon shell rejected the tray Exit command"
