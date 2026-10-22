@@ -4712,6 +4712,18 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$connectorTargetCard = @\(\$connectorProjectCards') {
     throw "RED: connector evidence does not reset Actual Size and reacquire the exact parent cards after composite navigation"
   }
+  if ($uiaLiveGateSource -notmatch '\$readNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
+      $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -notmatch '\$laneOpenedProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneProjectIds' -or
+      $uiaLiveGateSource -notmatch '\$restoredLaneProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneOverviewIds' -or
+      $uiaLiveGateSource -notmatch '\(& \$sameNormalizedLaneGeometry \$laneOpenedGeometry \$laneSnapshotGeometry\)' -or
+      $uiaLiveGateSource -notmatch '\(& \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry\)' -or
+      $uiaLiveGateSource -match '\.Equals\(\$laneSnapshot\.CardBounds\[') {
+    throw "RED: overview/project navigation evidence depends on absolute fitted card coordinates instead of normalized shared geometry"
+  }
   $connectorCardSelectorAst = $edgeTextGateAst.Find({
       param($node)
       $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

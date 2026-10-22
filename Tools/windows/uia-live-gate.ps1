@@ -6472,6 +6472,36 @@ try {
       Y = [int][Math]::Round(($summary.Top + $summary.Bottom) / 2)
     }
   }
+  $readNormalizedLaneGeometry = {
+    param([object[]] $cardBounds)
+    Require ($cardBounds.Count -eq 2) "normalized lane geometry requires exactly two cards"
+    $scale = $cardBounds[0].Width / 250.0
+    Require ($scale -gt 0) "normalized lane geometry has a non-positive scale"
+    $normalized = @($cardBounds | ForEach-Object {
+      [pscustomobject]@{
+        Width = $_.Width / $scale
+        Height = $_.Height / $scale
+      }
+    })
+    Require (([Math]::Abs($normalized[0].Width - 250) -le 1) -and
+      ([Math]::Abs($normalized[1].Width - 250) -le 1) -and
+      ([Math]::Abs($normalized[0].Height - 96) -le 1) -and
+      ([Math]::Abs($normalized[1].Height - 96) -le 1)) `
+      "lane cards do not normalize to the shared 250x96 geometry"
+    return [pscustomobject]@{
+      DeltaX = ($cardBounds[1].Left - $cardBounds[0].Left) / $scale
+      DeltaY = ($cardBounds[1].Top - $cardBounds[0].Top) / $scale
+      XOrder = [Math]::Sign($cardBounds[1].Left - $cardBounds[0].Left)
+      YOrder = [Math]::Sign($cardBounds[1].Top - $cardBounds[0].Top)
+    }
+  }
+  $sameNormalizedLaneGeometry = {
+    param($actual, $expected)
+    return ([Math]::Abs($actual.DeltaX - $expected.DeltaX) -le 1) -and
+      ([Math]::Abs($actual.DeltaY - $expected.DeltaY) -le 1) -and
+      ($actual.XOrder -eq $expected.XOrder) -and
+      ($actual.YOrder -eq $expected.YOrder)
+  }
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
   $surfaceActionPatterns["fit-canvas"].Invoke()
@@ -6503,6 +6533,7 @@ try {
     Start-Sleep -Milliseconds 150
     $laneSnapshot = & $readLaneCaption $graph
   }
+  $laneSnapshotGeometry = & $readNormalizedLaneGeometry $laneSnapshot.CardBounds
   Require ($laneSnapshot.OpenX -gt $laneSnapshot.GraphBounds.Left -and
     $laneSnapshot.ActionsRight -lt $laneSnapshot.GraphBounds.Right -and
     $laneSnapshot.Y -gt $laneSnapshot.GraphBounds.Top -and
@@ -6518,24 +6549,23 @@ try {
   $null = Ensure-ShellForeground $shellWindow "before-lane-open-click"
   Require ([GraphCodeUiaGateState]::PostMouseClickAt($shellWindow, $laneOpenClientX, $laneOpenClientY)) `
     "overview lane Open click was rejected"
-  for ($attempt = 0; $attempt -lt 40; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $laneOpenedCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
-    })
-    $remainingSummaries = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-      $_.Current.Name -match $laneSummaryPattern
-    })
-    if (($laneOpenedCards.Count -eq 2) -and $remainingSummaries.Count -eq 0) { break }
-  }
+  $laneOpenedProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin $laneProjectIds -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $laneOpenedProbe.Graph
+  $laneOpenedCards = @($laneOpenedProbe.Items)
+  $remainingSummaries = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.Name -match $laneSummaryPattern
+  })
+  $laneOpenedGeometry = & $readNormalizedLaneGeometry `
+    @($laneOpenedCards | ForEach-Object { $_.Current.BoundingRectangle })
   $laneOpenSucceeded = ($laneOpenedCards.Count -eq 2) -and
            ((@($laneOpenedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            ($laneOpenedCards[0].Current.AutomationId -ceq $laneProjectIds[0]) -and
            ($laneOpenedCards[1].Current.AutomationId -ceq $laneProjectIds[1]) -and
            ($remainingSummaries.Count -eq 0) -and
            ($graph.Current.BoundingRectangle.Equals($laneSnapshot.GraphBounds)) -and
-           ($laneOpenedCards[0].Current.BoundingRectangle.Equals($laneSnapshot.CardBounds[0])) -and
-           ($laneOpenedCards[1].Current.BoundingRectangle.Equals($laneSnapshot.CardBounds[1])) -and
+           (& $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry) -and
            (-not $laneOpenedCards[0].Current.BoundingRectangle.IntersectsWith($laneOpenedCards[1].Current.BoundingRectangle))
   Require $laneOpenSucceeded "overview lane Open click did not route to the project canvas layout"
   Require (@(Get-DirectChildren $graph $rawWalker | Where-Object {
@@ -6543,14 +6573,18 @@ try {
   }).Count -eq 0) "project canvas retained the old overview node identities"
   Start-Sleep -Milliseconds 200
   $surfaceActionPatterns["overview-destination"].Invoke()
-  Start-Sleep -Milliseconds 250
-  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
-  Require ($null -ne $graph) "missing graph fragment after returning from the project canvas layout"
+  $restoredLaneProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin $laneOverviewIds -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $restoredLaneProbe.Graph
   $restoredLane = & $readLaneCaption $graph
-  Require ($restoredLane.CardBounds[0].Equals($laneSnapshot.CardBounds[0]) -and
-    $restoredLane.CardBounds[1].Equals($laneSnapshot.CardBounds[1])) `
-    "overview did not restore its exact shared card geometry and summary"
-  Require ($restoredLane.ActionsRight -lt $restoredLane.GraphBounds.Right) `
+  $restoredLaneGeometry = & $readNormalizedLaneGeometry $restoredLane.CardBounds
+  Require (& $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry) `
+    "overview did not restore its shared normalized card geometry and summary"
+  Require ($restoredLane.OpenX -gt $restoredLane.GraphBounds.Left -and
+    $restoredLane.ActionsRight -lt $restoredLane.GraphBounds.Right -and
+    $restoredLane.Y -gt $restoredLane.GraphBounds.Top -and
+    $restoredLane.Y -lt $restoredLane.GraphBounds.Bottom) `
     "restored overview Worktrees action is outside the viewport"
   $laneWorktreesScreenX = $restoredLane.WorktreesX
   $laneWorktreesScreenY = $restoredLane.Y
