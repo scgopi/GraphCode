@@ -10006,11 +10006,6 @@ try {
     if ($null -eq $stubResult) { return -1 }
     return @(@($stubResult.commands) | Where-Object { $_ -eq "graphCommand" }).Count
   }
-  function Test-NodeCreationLogHasCreate {
-    if (-not (Test-Path -LiteralPath $renameCommandLogPath)) { return $false }
-    $logText = Read-DaemonCommandLog $renameCommandLogPath
-    return ($logText -match '"createNode"')
-  }
   $nodeSheetTitle = "Create or edit node"
   $nodeSheetFieldLabels = @{
     9100 = "Name (optional)"; 9102 = "What are you checking for? (optional)"
@@ -10037,6 +10032,7 @@ try {
   $nodeSheetTimedReason = "Say what to do each time to continue."
   $nodeSheetCreatedTitle = "UIA created timed loop"
   $nodeSheetTriggerPrompt = "Summarize new commits"
+  $expectedHeartbeatIntervalSeconds = 3600
   $expectedCreateLoopType = "timeBased"
   $expectedCreateBackend = "copilotCLI"
   $expectedModelTier = "capable"
@@ -10410,14 +10406,6 @@ try {
      ([GraphCodeUiaGateState]::WindowTextOf($nodeSheetWindow)) + "'; visible text: " +
      (@([GraphCodeUiaGateState]::VisibleStaticTexts($nodeSheetWindow)) -join " | "))
 
-  $nodeSheetDispatchedCommand = $null
-  for ($index = 0; $index -lt 100 -and $null -eq $nodeSheetDispatchedCommand; $index++) {
-    if (Test-NodeCreationLogHasCreate) {
-      $nodeSheetDispatchedCommand = ConvertFrom-Json -InputObject (Read-DaemonCommandLog $renameCommandLogPath)
-    } else {
-      Start-Sleep -Milliseconds 50
-    }
-  }
   $nodeSheetStubAfter = $null
   $nodeSheetAppliedCreate = $null
   for ($index = 0; $index -lt 100 -and $null -eq $nodeSheetAppliedCreate; $index++) {
@@ -10428,8 +10416,8 @@ try {
     if ($null -eq $nodeSheetAppliedCreate) { Start-Sleep -Milliseconds 100 }
   }
   Require ($null -ne $nodeSheetAppliedCreate) `
-    ("stub daemon never received and applied the created node '$nodeSheetCreatedTitle'; command log createNode=" +
-     "$($null -ne $nodeSheetDispatchedCommand); stub result: " + (Read-UiaTextFile $renameStubResultPath) +
+    ("stub daemon never received and applied the created node '$nodeSheetCreatedTitle'; stub result: " +
+     (Read-UiaTextFile $renameStubResultPath) +
      "; stub stderr: " + (Read-UiaTextFile $renameStubErrorPath))
   $appliedParts = ([string]$nodeSheetAppliedCreate).Split("|")
   $createdNodeId = $appliedParts[0]
@@ -10437,10 +10425,19 @@ try {
   $createdRequestId = [string](@($nodeSheetStubAfter.appliedCreateRequests)[$createdPosition])
   $createdRequestAnswered = (-not [string]::IsNullOrEmpty($createdRequestId)) -and
     -not (@($nodeSheetStubAfter.unansweredRequests) -contains $createdRequestId)
+  $nodeSheetReceivedCommands = @($nodeSheetStubAfter.receivedGraphCommands | Where-Object {
+    $_.requestID -ceq $createdRequestId
+  })
+  Require ($nodeSheetReceivedCommands.Count -eq 1) `
+    "stub daemon retained $($nodeSheetReceivedCommands.Count) commands for createNode request '$createdRequestId'"
+  $nodeSheetDispatchedCommand = $nodeSheetReceivedCommands[0].command | ConvertFrom-Json
+  $wireNode = $nodeSheetDispatchedCommand.command.createNode._0
+  Require ($null -ne $wireNode) `
+    "retained request '$createdRequestId' was not the expected createNode command"
   Write-Host ("UIA_NODE_CREATION_DISPATCH nodeId=$createdNodeId title='$($appliedParts[1])' " +
     "loopType=$($appliedParts[2]) backend=$($appliedParts[3]) modelTier=$($appliedParts[4]) " +
     "triggerPrompt='$($appliedParts[5])' requestID=$createdRequestId answered=$createdRequestAnswered " +
-    "commandLogCreateNode=$($null -ne $nodeSheetDispatchedCommand)")
+    "retainedCreateNode=$($null -ne $wireNode) heartbeatIntervalSeconds=$($wireNode.heartbeatIntervalSeconds)")
   Require ($createdNodeId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') `
     "node creation dispatched a non-UUID node id '$createdNodeId'"
   Require ($appliedParts[2] -eq $expectedCreateLoopType) `
@@ -10453,20 +10450,28 @@ try {
     "node creation dispatched triggerPrompt '$($appliedParts[5])', expected '$nodeSheetTriggerPrompt'"
   Require $createdRequestAnswered `
     "stub daemon did not answer the createNode request '$createdRequestId'"
-  $nodeSheetDispatched = $null
-  if ($null -ne $nodeSheetDispatchedCommand) {
-    $wireNode = $nodeSheetDispatchedCommand.graphCommand.command.createNode._0
-    Require ([string]$wireNode.id -eq $createdNodeId) `
-      "command log createNode id '$($wireNode.id)' differs from the daemon-applied id '$createdNodeId'"
-    $nodeSheetDispatched = [ordered]@{
-      nodeId = [string]$wireNode.id
-      projectPath = [string]$nodeSheetDispatchedCommand.graphCommand.projectPath
-      title = [string]$wireNode.title
-      loopType = [string]$wireNode.loopType
-      triggerPrompt = [string]$wireNode.triggerPrompt
-      backend = [string]$wireNode.backend
-      modelTier = [string]$wireNode.modelTier
-    }
+  Require ([string]$wireNode.id -eq $createdNodeId) `
+    "retained createNode id '$($wireNode.id)' differs from the daemon-applied id '$createdNodeId'"
+  Require ([string]$nodeSheetDispatchedCommand.projectPath -ceq "graphcode://stub/project" -and
+    [string]$wireNode.title -ceq $nodeSheetCreatedTitle -and
+    [string]$wireNode.loopType -ceq $expectedCreateLoopType -and
+    [string]$wireNode.backend -ceq $expectedCreateBackend -and
+    [string]$wireNode.modelTier -ceq $expectedModelTier -and
+    [string]$wireNode.triggerPrompt -ceq $nodeSheetTriggerPrompt -and
+    [double]$wireNode.heartbeatIntervalSeconds -eq $expectedHeartbeatIntervalSeconds) `
+    ("retained createNode Time wire differs: projectPath='$($nodeSheetDispatchedCommand.projectPath)' " +
+     "title='$($wireNode.title)' loopType='$($wireNode.loopType)' backend='$($wireNode.backend)' " +
+     "modelTier='$($wireNode.modelTier)' triggerPrompt='$($wireNode.triggerPrompt)' " +
+     "heartbeatIntervalSeconds='$($wireNode.heartbeatIntervalSeconds)'")
+  $nodeSheetDispatched = [ordered]@{
+    nodeId = [string]$wireNode.id
+    projectPath = [string]$nodeSheetDispatchedCommand.projectPath
+    title = [string]$wireNode.title
+    loopType = [string]$wireNode.loopType
+    triggerPrompt = [string]$wireNode.triggerPrompt
+    heartbeatIntervalSeconds = [double]$wireNode.heartbeatIntervalSeconds
+    backend = [string]$wireNode.backend
+    modelTier = [string]$wireNode.modelTier
   }
 
   $renderedSidebar = @()

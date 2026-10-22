@@ -4242,14 +4242,39 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'reasonClearedOnTypeChange = ' -or
       $uiaLiveGateSource -notmatch 'SendKeyInput\(' -or
       $uiaLiveGateSource -notmatch 'ComboSelection\(' -or
-      $uiaLiveGateSource -notmatch 'graphCommand\.command\.createNode\._0' -or
+      $uiaLiveGateSource -notmatch '\$wireNode\s*=\s*\$nodeSheetDispatchedCommand\.command\.createNode\._0' -or
       $uiaLiveGateSource -notmatch 'node creation dispatched modelTier' -or
       $uiaLiveGateSource -notmatch 'appliedCreates' -or
+      $uiaLiveGateSource -match 'Test-NodeCreationLogHasCreate' -or
+      $uiaLiveGateSource -match '(?s)for \(\$index = 0; \$index -lt 100 -and \$null -eq \$nodeSheetDispatchedCommand; \$index\+\+\).*?Start-Sleep -Milliseconds 50' -or
+      $uiaLiveGateSource -notmatch '\$nodeSheetReceivedCommands\s*=\s*@\(\$nodeSheetStubAfter\.receivedGraphCommands\s*\|\s*Where-Object' -or
+      $uiaLiveGateSource -notmatch '\$nodeSheetReceivedCommands\.Count -eq 1' -or
+      $uiaLiveGateSource -notmatch '\$nodeSheetReceivedCommands\[0\]\.command\s*\|\s*ConvertFrom-Json' -or
+      $uiaLiveGateSource -notmatch '\[double\]\$wireNode\.heartbeatIntervalSeconds -eq \$expectedHeartbeatIntervalSeconds' -or
       $uiaLiveGateSource -notmatch 'afterTileClick = ' -or
       $uiaLiveGateSource -notmatch 'afterEdit = ' -or
       $uiaLiveGateSource -notmatch 'renderedSidebarCount -gt 0' -or
       $uiaLiveGateSource -notmatch 'renderedCardCount -gt 0') {
     throw "RED: UIA live gate does not drive the node creation sheet through conditional fields, rejected input, and a daemon-rendered create"
+  }
+  $retainedNodeHistory = @(
+    [pscustomobject]@{
+      requestID = "create-request"
+      command = '{"projectPath":"graphcode://stub/project","command":{"createNode":{"_0":{"id":"11111111-1111-4111-8111-111111111111","title":"UIA created timed loop","loopType":"timeBased","triggerPrompt":"Summarize new commits","heartbeatIntervalSeconds":3600,"backend":"copilotCLI","modelTier":"capable"}}}}'
+    },
+    [pscustomobject]@{
+      requestID = "outcome-request"
+      command = '{"projectPath":"graphcode://stub/project","command":{"openNode":{"_0":"11111111-1111-4111-8111-111111111111"}}}'
+    }
+  )
+  $retainedCreate = @($retainedNodeHistory | Where-Object { $_.requestID -ceq "create-request" })
+  $retainedCreateCommand = $retainedCreate[0].command | ConvertFrom-Json
+  $retainedCreateNode = $retainedCreateCommand.command.createNode._0
+  if ($retainedCreate.Count -ne 1 -or
+      [string]$retainedCreateCommand.projectPath -cne "graphcode://stub/project" -or
+      [string]$retainedCreateNode.triggerPrompt -cne "Summarize new commits" -or
+      [double]$retainedCreateNode.heartbeatIntervalSeconds -ne 3600) {
+    throw "RED: retained New Loop request history cannot select the create after a later outcome command"
   }
   if ($uiaLiveGateSource -notmatch '(?s)nodeCreationSheet = \$nodeCreationSheetEvidence.*?\}\s*\|\s*ConvertTo-Json -Depth 8 -Compress') {
     throw "RED: UIA final summary omits the parsable node creation sheet evidence"
