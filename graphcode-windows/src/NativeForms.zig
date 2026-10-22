@@ -1532,7 +1532,7 @@ fn createSheetControls(state: *DialogState) !void {
         const project_line = try std.fmt.allocPrint(state.allocator, "in {s}", .{state.project_name});
         defer state.allocator.free(project_line);
         createStatic(body, state, project_line, 18, 44, 360, 20, &state.header_project);
-        state.header_templates = createButtonLabelled(body, state, "Templates  Ctrl+T", templates_id, 400, 18, 148, 32);
+        state.header_templates = createButtonLabelled(body, state, "Templates", templates_id, 400, 18, 148, 32);
         _ = c.EnableWindow(state.header_templates, @intFromBool(state.templates_available));
         if (state.values[28].len != 0) {
             const applied_name = if (state.values[30].len != 0) state.values[30] else Forms.resolvedTitle(state.values[0]);
@@ -6077,6 +6077,33 @@ test "new loop: chooser exposes Main then Goal Timed Turn Composite" {
 test "new loop: captionless host identity stays distinct from the visible macOS header" {
     try std.testing.expectEqualStrings("Create or edit node", NewLoopSheet.host_title);
     try std.testing.expectEqualStrings("New Node", NewLoopSheet.visible_header);
+}
+
+test "new loop: Templates action has exact accessible name stable id and dispatch" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = owner,
+        .templates_available = true,
+    };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{ .title = "", .loop_type = "sketch", .first_instruction = "" });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    const button = c.GetDlgItem(state.content_root, templates_id) orelse return error.TestControlCreationFailed;
+    try std.testing.expectEqual(@as(c_int, templates_id), c.GetDlgCtrlID(button));
+    var wide: [64]u16 = undefined;
+    const length = c.GetWindowTextW(button, &wide, @intCast(wide.len));
+    var text: [64]u8 = undefined;
+    const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+    try std.testing.expectEqualStrings("Templates", text[0..written]);
+    var result: c.LRESULT = 0;
+    try std.testing.expect(handleFormMessage(state.content_root, &state, c.WM_COMMAND, templates_id, 0, &result));
+    try std.testing.expect(state.template_requested);
+    try std.testing.expect(state.closed);
 }
 
 test "new loop: primary labels follow the selected type" {
