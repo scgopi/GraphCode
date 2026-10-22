@@ -418,7 +418,13 @@ class RemoteBridgeTests(unittest.TestCase):
 
     def test_rotation_allows_only_bounded_previous_generation(self):
         old_state = BridgeStateStore(self.state_path).read()
-        new_state = self.bridge.rotate(overlap_seconds=0.4)
+        # The privacy-race wrapper scales socket deadlines under CPU contention.
+        # Scale this window too, without exceeding the bridge's hard maximum.
+        overlap_seconds = min(
+            1.5 * TIMEOUT_MULTIPLIER,
+            self.bridge.max_previous_overlap_seconds,
+        )
+        new_state = self.bridge.rotate(overlap_seconds=overlap_seconds)
 
         self.assertEqual(new_state["generation"], old_state["generation"] + 1)
         self.assertEqual(
@@ -434,10 +440,16 @@ class RemoteBridgeTests(unittest.TestCase):
         )
         self.assertLessEqual(
             new_state["previous"]["expires_at"],
-            time.time() + 0.5,
+            new_state["issued_at"] + overlap_seconds,
         )
 
-        time.sleep(0.45)
+        time.sleep(
+            max(
+                0.0,
+                new_state["previous"]["expires_at"] - time.time(),
+            )
+            + 0.05 * TIMEOUT_MULTIPLIER
+        )
         expired_response = self.raw_request(old_state, {"command": "old"})
 
         self.assertEqual(
