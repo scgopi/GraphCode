@@ -167,6 +167,17 @@ pub fn primaryLabel(loop_type: []const u8) []const u8 {
     return "Create loop";
 }
 
+pub fn requiredFieldReason(loop_type: []const u8) ?[]const u8 {
+    const canonical = canonicalLoopType(loop_type);
+    if (std.mem.eql(u8, canonical, "goalBased"))
+        return "Say what done looks like and use positive timing values.";
+    if (std.mem.eql(u8, canonical, "timeBased"))
+        return "Say what to do each time to continue.";
+    if (std.mem.eql(u8, canonical, "turnBased"))
+        return "Add a first instruction to continue.";
+    return null;
+}
+
 pub fn disabledReason(draft: Forms.NodeDraft) ?[]const u8 {
     const loop_type = canonicalLoopType(draft.loop_type);
     if (draft.backend) |backend| {
@@ -174,11 +185,11 @@ pub fn disabledReason(draft: Forms.NodeDraft) ?[]const u8 {
     }
     if (std.mem.eql(u8, loop_type, "sketch")) return null;
     if (std.mem.eql(u8, loop_type, "goalBased") and std.mem.trim(u8, draft.goal_summary, " \t\r\n").len == 0)
-        return "Say what done looks like and use positive timing values.";
+        return requiredFieldReason(loop_type);
     if (std.mem.eql(u8, loop_type, "timeBased") and std.mem.trim(u8, draft.trigger_prompt, " \t\r\n").len == 0)
-        return "Say what to do each time to continue";
+        return requiredFieldReason(loop_type);
     if (std.mem.eql(u8, loop_type, "turnBased") and std.mem.trim(u8, draft.first_instruction, " \t\r\n").len == 0)
-        return "Add a first instruction to continue";
+        return requiredFieldReason(loop_type);
     if (isComposite(loop_type) and std.mem.trim(u8, draft.title, " \t\r\n").len == 0)
         return "Name it to continue";
     return null;

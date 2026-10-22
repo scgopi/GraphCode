@@ -3943,8 +3943,9 @@ fn validationReason(state: *DialogState) ?[]const u8 {
             draft.deinit(state.allocator);
         },
         .node => {
-            const goal_based = std.mem.eql(u8, state.values[1], "goalBased");
-            const invalid_goal = "Say what done looks like and use positive timing values.";
+            const loop_type = state.values[1];
+            const goal_based = std.mem.eql(u8, loop_type, "goalBased");
+            const invalid_goal = NewLoopSheet.requiredFieldReason(loop_type) orelse "";
             const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch
                 return if (goal_based) invalid_goal else "Enter a valid number of seconds between goal checks.";
             const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch
@@ -3955,6 +3956,10 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                     poll <= 0 or
                     (stall != null and (!std.math.isFinite(stall.?) or stall.? <= 0))))
                 return invalid_goal;
+            if (std.mem.eql(u8, loop_type, "timeBased") and std.mem.trim(u8, state.values[3], " \t\r\n").len == 0)
+                return NewLoopSheet.requiredFieldReason(loop_type);
+            if (std.mem.eql(u8, loop_type, "turnBased") and std.mem.trim(u8, state.values[4], " \t\r\n").len == 0)
+                return NewLoopSheet.requiredFieldReason(loop_type);
             if (goal_based and std.mem.trim(u8, state.values[25], " \t\r\n").len != 0 and NewLoopSheet.parseBudget(state.values[25]) == null)
                 return "Enter a positive whole-number token budget.";
             const backend: ?[]const u8 = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else state.values[12];
@@ -6308,42 +6313,32 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     state.values[6] = @constCast("Tests pass");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("timeBased");
-    try std.testing.expectEqualStrings("Say what to do each time to continue", validationReason(&state).?);
+    try std.testing.expectEqualStrings("Say what to do each time to continue.", validationReason(&state).?);
     state.values[3] = @constCast("Check reports");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("turnBased");
-    try std.testing.expectEqualStrings("Add a first instruction to continue", validationReason(&state).?);
+    try std.testing.expectEqualStrings("Add a first instruction to continue.", validationReason(&state).?);
     state.values[4] = @constCast("Review the change");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("proactive");
     try std.testing.expectEqualStrings("Name it to continue", validationReason(&state).?);
 }
 
-test "new loop: invalid Goal exposes exact accessible validation before generic Composite copy" {
+test "new loop: invalid committed types expose exact accessible validation before generic Composite copy" {
     const owner = try hiddenNativeControlHost();
     defer _ = c.DestroyWindow(owner);
     var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
     defer freeValues(&state);
     try initializeNodeDraft(&state, .{
         .title = "",
-        .loop_type = "goalBased",
-        .goal_summary = "",
-        .poll_interval_seconds = 0,
-        .stall_after_seconds = 0,
+        .loop_type = "sketch",
+        .goal_summary = "Tests pass",
+        .trigger_prompt = "Check reports",
+        .first_instruction = "Review the change",
     });
     var host: SheetFramework.Host = .{};
     defer host.deinit();
     try initHiddenForm(owner, &state, &host);
-    syncValidation(&state);
-
-    var wide: [128]u16 = undefined;
-    const length = c.GetWindowTextW(state.validation, &wide, @intCast(wide.len));
-    var text: [256]u8 = undefined;
-    const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
-    const expected = "Say what done looks like and use positive timing values.";
-    try std.testing.expectEqualStrings(expected, text[0..written]);
-    try std.testing.expect(c.GetWindowLongPtrW(state.validation, c.GWL_STYLE) & c.WS_VISIBLE != 0);
-    try std.testing.expect(c.GetWindowLongPtrW(state.composite_notice, c.GWL_STYLE) & c.WS_VISIBLE == 0);
 
     const VisibleStatics = struct {
         expected: []const u8,
@@ -6367,10 +6362,43 @@ test "new loop: invalid Goal exposes exact accessible validation before generic 
             return 1;
         }
     };
-    var visible = VisibleStatics{ .expected = expected };
-    try std.testing.expect(c.EnumChildWindows(host.hwnd, VisibleStatics.visit, @bitCast(@intFromPtr(&visible))) != 0);
-    try std.testing.expect(visible.found_expected);
-    try std.testing.expect(!visible.found_generic);
+
+    const cases = [_]struct {
+        loop_type: []const u8,
+        field: usize,
+        expected: []const u8,
+        valid: []const u8,
+    }{
+        .{ .loop_type = "goalBased", .field = 6, .expected = "Say what done looks like and use positive timing values.", .valid = "Tests pass" },
+        .{ .loop_type = "timeBased", .field = 3, .expected = "Say what to do each time to continue.", .valid = "Check reports" },
+        .{ .loop_type = "turnBased", .field = 4, .expected = "Add a first instruction to continue.", .valid = "Review the change" },
+    };
+    for (cases) |case| {
+        selectTile(&state, choiceIndex(.loop_type, case.loop_type));
+        refreshSheetLayout(&state);
+        setStaticText(&state, state.edits[case.field], "");
+        readValue(&state, case.field);
+        syncValidation(&state);
+
+        var wide: [128]u16 = undefined;
+        const length = c.GetWindowTextW(state.validation, &wide, @intCast(wide.len));
+        var text: [256]u8 = undefined;
+        const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+        try std.testing.expectEqualStrings(case.expected, text[0..written]);
+        try std.testing.expect(c.GetWindowLongPtrW(state.validation, c.GWL_STYLE) & c.WS_VISIBLE != 0);
+        try std.testing.expect(c.GetWindowLongPtrW(state.composite_notice, c.GWL_STYLE) & c.WS_VISIBLE == 0);
+        var visible = VisibleStatics{ .expected = case.expected };
+        try std.testing.expect(c.EnumChildWindows(host.hwnd, VisibleStatics.visit, @bitCast(@intFromPtr(&visible))) != 0);
+        try std.testing.expect(visible.found_expected);
+        try std.testing.expect(!visible.found_generic);
+        try std.testing.expect(c.IsWindowEnabled(c.GetDlgItem(host.hwnd, ok_id)) == 0);
+
+        setStaticText(&state, state.edits[case.field], case.valid);
+        readValue(&state, case.field);
+        syncValidation(&state);
+        try std.testing.expect(validationReason(&state) == null);
+        try std.testing.expect(c.IsWindowEnabled(c.GetDlgItem(host.hwnd, ok_id)) != 0);
+    }
 }
 
 test "new loop: all five layouts keep the SheetFramework footer fixed at every DPI" {
