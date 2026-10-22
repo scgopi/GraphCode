@@ -10,6 +10,7 @@ const c = Win32.c;
 const Dpi = @import("Dpi.zig");
 const AppFont = @import("AppFont.zig");
 const SheetFramework = @import("SheetFramework.zig");
+const NewLoopSheet = @import("NewLoopSheet.zig");
 
 extern fn graphcode_pick_files(owner: c.HWND, buffer: [*]u16, stride: c.DWORD, max_files: c.DWORD) callconv(.c) c_int;
 
@@ -54,6 +55,29 @@ const DialogState = struct {
     template_options: []const []const u8 = &.{},
     templates_available: bool = false,
     template_requested: bool = false,
+    save_template_requested: bool = false,
+    project_name: []const u8 = "",
+    metric_expanded: bool = false,
+    budget_expanded: bool = false,
+    header_title: c.HWND = null,
+    header_project: c.HWND = null,
+    header_templates: c.HWND = null,
+    committed_rule: c.HWND = null,
+    runs_as_caption: c.HWND = null,
+    composite_steps: c.HWND = null,
+    composite_notice: c.HWND = null,
+    applied_template_chip: c.HWND = null,
+    applied_template_shape: c.HWND = null,
+    metric_chip: c.HWND = null,
+    budget_chip: c.HWND = null,
+    done_check_test: c.HWND = null,
+    done_check_outcome: c.HWND = null,
+    done_check_lock: std.Thread.Mutex = .{},
+    done_check_thread: ?std.Thread = null,
+    done_check_work: ?*DoneCheckWork = null,
+    done_check_running: bool = false,
+    done_check_passed: bool = false,
+    done_check_duration_ms: i64 = 0,
     // Attachments live outside the fixed-index field system entirely (see the
     // "Attachments" comment above `createAttachmentsSection`): they are the one node
     // field with a variable-length, user-editable list of entries rather than a single
@@ -79,10 +103,17 @@ const max_tiles = 8;
 const tile_base_id = 9600;
 const attachment_attach_id = 8;
 const attachment_remove_id = 9;
+const done_check_test_id = 10;
+const metric_chip_id = 11;
+const budget_chip_id = 12;
+const recap_id = 13;
+const composite_steps_id = 14;
+const wm_done_check_complete = c.WM_APP + 0x331;
+const em_setcuebanner = 0x1501;
 
 const Kind = enum { node, edge, update, promotion, settings, jump, template_picker, worktree_policy, worktree_sweep };
 const InputKind = enum { edit, readonly, combo, checkbox, tiles };
-const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform, promotion_pause, promotion_interval };
+const ChoiceGroup = enum { none, loop_type, backend, model_tier, metric_direction, optional_metric_direction, edge_kind, edge_condition, transform, promotion_pause, promotion_interval, cadence, pause, schedule };
 const Choice = struct { label: []const u8, value: []const u8, description: []const u8 = "", accent: u32 = Tokens.canvas_selection };
 pub const EdgeEndpoint = struct { id: []const u8, title: []const u8 };
 pub const WorktreeChoice = struct {
@@ -100,6 +131,7 @@ const ok_id = 1;
 const cancel_id = 2;
 const reveal_id = 3;
 const templates_id = 4;
+const save_template_id = 5;
 
 const form_width: i32 = 760;
 const form_max_height: i32 = 760;
@@ -130,6 +162,7 @@ fn formViewportHeight(hwnd: c.HWND, state: *const DialogState) i32 {
 
 var active_state: bool = false;
 var active_state_storage: DialogState = undefined;
+var node_keyboard_hook: c.HHOOK = null;
 
 const ModalCommand = enum { submit, cancel, close, destroy };
 
@@ -145,6 +178,85 @@ fn acquireModal() !void {
 fn releaseModal() void {
     active_state = false;
 }
+
+const NodeKeyboardAction = union(enum) {
+    tile: usize,
+    templates,
+};
+
+fn nodeKeyboardAction(key: u16, control_down: bool) ?NodeKeyboardAction {
+    if (!control_down) return null;
+    if (key >= '1' and key <= '5') return .{ .tile = key - '1' };
+    if (key == 'T') return .templates;
+    return null;
+}
+
+fn nodeKeyboardHookProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
+    if (code >= 0 and active_state and active_state_storage.kind == .node and wparam == c.PM_REMOVE) {
+        const message = Win32.messagePointer(*c.MSG, lparam);
+        if (nodeKeyboardMessageBelongsToSheet(&active_state_storage, message.hwnd) and
+            routeNodeKeyboardMessage(&active_state_storage, message, c.GetKeyState(c.VK_CONTROL) < 0))
+            return 1;
+    }
+
+    return c.CallNextHookEx(node_keyboard_hook, code, wparam, lparam);
+}
+
+fn nodeKeyboardMessageBelongsToSheet(state: *const DialogState, target: c.HWND) bool {
+    const sheet = state.sheet orelse return false;
+    return target == sheet.hwnd or (target != null and c.IsChild(sheet.hwnd, target) != 0);
+}
+
+fn routeNodeKeyboardMessage(state: *DialogState, message: *c.MSG, control_down: bool) bool {
+    if (message.message != c.WM_KEYDOWN) return false;
+    const key: u16 = @truncate(message.wParam);
+    const action = nodeKeyboardAction(key, control_down) orelse return false;
+    switch (action) {
+        .tile => |tile| {
+            selectTile(state, tile);
+            refreshSheetLayout(state);
+            syncValidation(state);
+        },
+        .templates => {
+            if (state.templates_available and state.content_root != null)
+                _ = c.SendMessageW(state.content_root, c.WM_COMMAND, templates_id, 0);
+        },
+    }
+    message.message = c.WM_NULL;
+    return true;
+}
+
+fn installNodeKeyboardHook() !void {
+    if (node_keyboard_hook != null) return;
+    node_keyboard_hook = c.SetWindowsHookExW(
+        c.WH_GETMESSAGE,
+        @ptrCast(&nodeKeyboardHookProc),
+        null,
+        c.GetCurrentThreadId(),
+    ) orelse return error.NodeKeyboardHookInstallationFailed;
+}
+
+fn uninstallNodeKeyboardHook() void {
+    if (node_keyboard_hook != null) {
+        _ = c.UnhookWindowsHookEx(node_keyboard_hook);
+        node_keyboard_hook = null;
+    }
+}
+
+const NodeKeyboardHookLease = struct {
+    held: bool = false,
+
+    fn acquire(enabled: bool) !NodeKeyboardHookLease {
+        if (!enabled) return .{};
+        try installNodeKeyboardHook();
+        return .{ .held = true };
+    }
+
+    fn deinit(self: *NodeKeyboardHookLease) void {
+        if (self.held) uninstallNodeKeyboardHook();
+        self.held = false;
+    }
+};
 
 pub const ModalLease = struct {
     held: bool = true,
@@ -168,10 +280,11 @@ fn tileColor(red: u8, green: u8, blue: u8) u32 {
 }
 
 const loop_type_choices = [_]Choice{
-    .{ .label = "Turn-based", .value = "turnBased", .description = "Pauses for you each turn", .accent = tileColor(213, 81, 129) },
-    .{ .label = "Time-based", .value = "timeBased", .description = "Runs again on a schedule", .accent = tileColor(201, 133, 0) },
-    .{ .label = "Goal-based", .value = "goalBased", .description = "Works until a condition is met", .accent = tileColor(25, 158, 112) },
-    .{ .label = "Proactive", .value = "proactive", .description = "A group of loops, armed later", .accent = tileColor(144, 133, 233) },
+    .{ .label = "Main", .value = "sketch", .description = "Just start. No goal, no schedule, nothing to fill in.", .accent = tileColor(211, 218, 227) },
+    .{ .label = "Goal", .value = "goalBased", .description = "Works until a condition is met", .accent = tileColor(25, 158, 112) },
+    .{ .label = "Timed", .value = "timeBased", .description = "Runs again on a schedule", .accent = tileColor(201, 133, 0) },
+    .{ .label = "Turn", .value = "turnBased", .description = "Pauses for you each turn", .accent = tileColor(213, 81, 129) },
+    .{ .label = "Composite", .value = "proactive", .description = "A group of loops, armed later", .accent = tileColor(144, 133, 233) },
 };
 const backend_choices = [_]Choice{
     .{ .label = "Use workspace default", .value = "" },
@@ -220,6 +333,23 @@ const promotion_interval_choices = [_]Choice{
     .{ .label = "Daily", .value = "daily" },
     .{ .label = "Custom...", .value = "custom" },
 };
+const cadence_choices = [_]Choice{
+    .{ .label = "15m", .value = "15m" },
+    .{ .label = "1h", .value = "1h" },
+    .{ .label = "6h", .value = "6h" },
+    .{ .label = "Daily", .value = "24h" },
+    .{ .label = "Custom…", .value = "custom" },
+};
+const pause_choices = [_]Choice{
+    .{ .label = "After every turn", .value = "false" },
+    .{ .label = "Only before it writes files", .value = "true" },
+};
+const schedule_choices = [_]Choice{
+    .{ .label = "Daily", .value = "daily" },
+    .{ .label = "Weekdays", .value = "weekdays" },
+    .{ .label = "Weekly", .value = "weekly" },
+    .{ .label = "On a trigger", .value = "onATrigger" },
+};
 
 fn choices(group: ChoiceGroup) []const Choice {
     return switch (group) {
@@ -233,6 +363,9 @@ fn choices(group: ChoiceGroup) []const Choice {
         .transform => &transform_choices,
         .promotion_pause => &promotion_pause_choices,
         .promotion_interval => &promotion_interval_choices,
+        .cadence => &cadence_choices,
+        .pause => &pause_choices,
+        .schedule => &schedule_choices,
         .none => &.{},
     };
 }
@@ -248,8 +381,7 @@ fn choiceIndex(group: ChoiceGroup, value: []const u8) usize {
 fn choiceValue(group: ChoiceGroup, index: usize, previous: []const u8) []const u8 {
     const options = choices(group);
     if (index >= options.len) return previous;
-    if (group == .loop_type and index == 3 and std.mem.eql(u8, previous, "composite"))
-        return previous;
+    if (group == .loop_type and std.mem.eql(u8, options[index].value, "proactive") and std.mem.eql(u8, previous, "composite")) return previous;
     return options[index].value;
 }
 
@@ -263,7 +395,16 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     const value = state.allocator.dupe(u8, next) catch return;
     state.allocator.free(state.values[field_index]);
     state.values[field_index] = value;
+    if (state.kind == .node and !NewLoopSheet.backendCanHost(state.values[12], state.values[field_index])) {
+        const backend = state.allocator.dupe(u8, "claudeCode") catch return;
+        state.allocator.free(state.values[12]);
+        state.values[12] = backend;
+        if (state.edits[12] != null)
+            _ = c.SendMessageW(state.edits[12], c.CB_SETCURSEL, choiceIndex(.backend, "claudeCode"), 0);
+    }
+
     updateConditionalVisibility(state);
+    refreshNodeCueBanners(state);
     setStaticText(state, state.validation, "");
     refreshRecap(state);
     for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
@@ -289,7 +430,7 @@ pub fn node(
 ) !?Forms.NodeDraft {
     return switch (try nodeWithTemplates(parent, allocator, project_path, draft_id, worktree_choices, initial, false)) {
         .draft => |draft| draft,
-        .cancelled, .templates => null,
+        .cancelled, .templates, .save_template => null,
     };
 }
 
@@ -297,6 +438,7 @@ pub const NodeResult = union(enum) {
     cancelled,
     draft: Forms.NodeDraft,
     templates: Forms.NodeDraft,
+    save_template: Forms.NodeDraft,
 };
 
 /// Runs after modal teardown. Success must reach the caller's send without message pumping.
@@ -363,7 +505,7 @@ pub fn nodeGuarded(
 ) !?Forms.NodeDraft {
     return switch (try nodeWithTemplatesGuarded(parent, allocator, project_path, draft_id, worktree_choices, initial, false, validation, continuation)) {
         .draft => |draft| draft,
-        .cancelled => null,
+        .cancelled, .save_template => null,
         .templates => unreachable,
     };
 }
@@ -413,6 +555,7 @@ fn nodeWithTemplatesImpl(
         .parent = parent,
         .templates_available = templates_available,
         .node_worktree_choices = worktree_choices,
+        .project_name = std.fs.path.basename(project_path),
     }, continuation);
     state.attachment_project_path = project_path;
     state.attachment_draft_id = draft_id;
@@ -423,12 +566,13 @@ fn nodeWithTemplatesImpl(
         // client has to take the same responsibility macOS's `cancelNodeForm` does.
         abandonNodeState(state, attachments_transferred, continuation, DraftAttachments.discardAllChecked);
         freeAttachmentState(state);
+        finishDoneCheck(state, false);
         freeValues(state);
         allocator.destroy(state);
     }
 
     try initializeNodeDialog(state, initial);
-    const accepted = try show(state, "Create or edit node", &.{});
+    const accepted = try show(state, "New Node", &.{});
     return finishNodeDialog(allocator, state, initial, accepted, &attachments_transferred, validation, continuation, DraftAttachments.discardAllChecked);
 }
 
@@ -475,7 +619,7 @@ fn finishNodeDialog(
     continuation: ?*NodeContinuation,
     discard: *const fn ([]const u8) anyerror!void,
 ) !NodeResult {
-    if (!accepted and !state.template_requested) return .cancelled;
+    if (!accepted and !state.template_requested and !state.save_template_requested) return .cancelled;
     var draft = if (accepted)
         buildNodeDraft(allocator, state, initial) catch |err| {
             if (continuation == null and state.attachment_dir.len != 0)
@@ -497,7 +641,7 @@ fn finishNodeDialog(
     if (!accepted) {
         if (continuation) |owner| owner.retainDirectory(state);
         attachments_transferred.* = true;
-        return .{ .templates = draft };
+        return if (state.save_template_requested) .{ .save_template = draft } else .{ .templates = draft };
     }
     attachments_transferred.* = true;
     return .{ .draft = draft };
@@ -577,7 +721,7 @@ fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void
 fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     const allocator = state.allocator;
     state.values[0] = try allocator.dupe(u8, initial.title);
-    state.values[1] = try allocator.dupe(u8, initial.loop_type);
+    state.values[1] = try allocator.dupe(u8, if (std.mem.eql(u8, initial.loop_type, "composite")) "proactive" else initial.loop_type);
     state.values[2] = try allocator.dupe(u8, initial.check_description);
     state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
     state.values[4] = try allocator.dupe(u8, initial.first_instruction);
@@ -597,7 +741,19 @@ fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
     state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
     state.values[20] = try allocator.dupe(u8, initial.created_by);
-    for (0..21) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
+    const timed = NewLoopSheet.parseTimedPrompt(if (std.mem.eql(u8, initial.loop_type, "timeBased")) initial.trigger_prompt else "");
+    state.values[21] = try allocator.dupe(u8, timed.cadence);
+    state.values[22] = try allocator.dupe(u8, timed.custom);
+    state.values[23] = try allocator.dupe(u8, timed.task);
+    state.values[24] = try allocator.dupe(u8, timed.stop_after);
+    state.values[25] = try dupOptionalIntText(allocator, initial.token_budget);
+    const schedule = NewLoopSheet.parseSchedulePrompt(if (NewLoopSheet.isComposite(initial.loop_type)) initial.trigger_prompt else "");
+    state.values[26] = try allocator.dupe(u8, schedule.schedule);
+    state.values[27] = try allocator.dupe(u8, schedule.time);
+    state.values[28] = try allocator.dupe(u8, initial.created_from_template_id);
+    state.values[29] = try allocator.dupe(u8, initial.template_follow_id);
+    state.values[30] = try allocator.dupe(u8, initial.template_follow_name);
+    for (0..31) |index| state.initial_values[index] = try allocator.dupe(u8, state.values[index]);
 }
 
 fn buildNodeDraft(
@@ -629,18 +785,27 @@ fn buildNodeDraftUnchecked(
         initial.stall_after_seconds;
     var result = Forms.NodeDraft{ .title = &.{}, .loop_type = &.{}, .check_description = &.{}, .trigger_prompt = &.{}, .first_instruction = &.{}, .goal_summary = &.{}, .goal_predicate = &.{}, .metric_command = &.{}, .metric_direction = &.{}, .model_tier = &.{}, .worktree_repository = &.{}, .worktree_id = &.{}, .worktree_path = &.{}, .worktree_branch = &.{}, .subgraph_json = &.{}, .created_by = &.{} };
     errdefer result.deinit(allocator);
-    result.title = try allocator.dupe(u8, values[0]);
+    result.title = try allocator.dupe(u8, if (std.mem.eql(u8, values[1], "sketch")) "" else values[0]);
     result.loop_type = try allocator.dupe(u8, values[1]);
     result.check_description = try allocator.dupe(u8, values[2]);
-    result.trigger_prompt = try allocator.dupe(u8, values[3]);
+    const trigger = if (std.mem.eql(u8, values[1], "timeBased"))
+        try NewLoopSheet.cadencePrompt(allocator, values[21], values[22], values[23], values[24])
+    else if (NewLoopSheet.isComposite(values[1]))
+        try NewLoopSheet.schedulePrompt(allocator, values[26], values[27])
+    else
+        try allocator.dupe(u8, initial.trigger_prompt);
+    defer allocator.free(trigger);
+    result.trigger_prompt = try allocator.dupe(u8, trigger);
+    result.heartbeat_interval_seconds = if (std.mem.eql(u8, values[1], "timeBased")) initial.heartbeat_interval_seconds else null;
     result.first_instruction = try allocator.dupe(u8, values[4]);
     result.pauses_before_writes_only = std.mem.eql(u8, values[5], "true");
-    result.goal_summary = try allocator.dupe(u8, values[6]);
-    result.goal_predicate = try allocator.dupe(u8, values[7]);
+    result.goal_summary = try allocator.dupe(u8, if (goal_based) values[6] else "");
+    result.goal_predicate = try allocator.dupe(u8, if (goal_based) values[7] else "");
     result.poll_interval_seconds = poll_interval;
     result.stall_after_seconds = stall_after;
-    result.metric_command = try allocator.dupe(u8, values[10]);
-    result.metric_direction = try allocator.dupe(u8, values[11]);
+    result.metric_command = try allocator.dupe(u8, if (goal_based) values[10] else "");
+    result.metric_direction = try allocator.dupe(u8, if (goal_based) values[11] else "maximize");
+    result.token_budget = if (goal_based) NewLoopSheet.parseBudget(values[25]) else null;
     result.backend = if (std.mem.trim(u8, values[12], " \t\r\n").len == 0) null else try allocator.dupe(u8, values[12]);
     result.model_tier = try allocator.dupe(u8, values[13]);
     const preserves_initial_worktree = state.node_worktree_choices.len == 0;
@@ -650,17 +815,16 @@ fn buildNodeDraftUnchecked(
     result.worktree_branch = try allocator.dupe(u8, if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) initial.worktree_branch else "");
     result.subgraph_json = try allocator.dupe(u8, initial.subgraph_json);
     result.created_by = try allocator.dupe(u8, initial.created_by);
+    result.created_from_template_id = try allocator.dupe(u8, values[28]);
+    result.template_follow_id = try allocator.dupe(u8, if (std.mem.eql(u8, values[1], "timeBased") or NewLoopSheet.isComposite(values[1])) values[29] else "");
+    result.template_follow_name = try allocator.dupe(u8, if (std.mem.eql(u8, values[1], "timeBased") or NewLoopSheet.isComposite(values[1])) values[30] else "");
+    result.template_follow_missing = initial.template_follow_missing;
     result.claude_permissions = initial.claude_permissions;
     result.copilot_permissions = initial.copilot_permissions;
     result.briefing_enabled = initial.briefing_enabled;
     result.activity_enabled = initial.activity_enabled;
-    // Only carried when at least one file was staged: an unattached node keeps the
-    // legacy empty `node_id`, so `DaemonClient.sendCreateNodeDraft` still generates a
-    // fresh one at send time exactly as it always has, and the dialog's would-be draft
-    // directory (never created, since nothing was ever ingested into it) is simply
-    // abandoned rather than referenced by a node that has no reason to expect it.
+    result.node_id = try allocator.dupe(u8, state.attachment_draft_id);
     if (state.attachment_count != 0) {
-        result.node_id = try allocator.dupe(u8, state.attachment_draft_id);
         for (0..state.attachment_count) |index| {
             const path = try allocator.dupe(u8, state.attachment_paths[index]);
             errdefer allocator.free(path);
@@ -1175,6 +1339,8 @@ fn show(state: *DialogState, title: []const u8, labels: []const []const u8) !boo
     try sheet.relayout();
     if (sheet.failure) |failure| return failure;
     _ = c.SendMessageW(sheet.hwnd, c.DM_SETDEFID, ok_id, 0);
+    var keyboard_hook = try NodeKeyboardHookLease.acquire(active_state_storage.kind == .node);
+    defer keyboard_hook.deinit();
     try sheet.runModal();
     return active_state_storage.result;
 }
@@ -1200,8 +1366,8 @@ fn formLayoutInput(state: *const DialogState) SheetFramework.LayoutInput {
     return .{
         .owner = .{ .x = 0, .y = 0, .width = 1, .height = 1 },
         .dpi = state.dpi,
-        .desired_width = form_width,
-        .minimum_width = 360,
+        .desired_width = if (state.kind == .node) 520 else form_width,
+        .minimum_width = if (state.kind == .node) 520 else 360,
         .heights = heights,
         .content_extent = content_extent,
         .footer_height = form_footer_height,
@@ -1211,11 +1377,77 @@ fn formLayoutInput(state: *const DialogState) SheetFramework.LayoutInput {
 fn primaryLabel(kind: Kind) []const u8 {
     return switch (kind) {
         .promotion => "Promote",
-        .node => "Create",
+        .node => "Create loop",
         .worktree_policy => "Done",
         .worktree_sweep => "Remove Selected",
         else => "OK",
     };
+}
+
+fn nodePrimaryLabel(state: *const DialogState) []const u8 {
+    return NewLoopSheet.primaryLabel(state.values[1]);
+}
+
+fn newLoopFieldLabel(loop_type: []const u8, index: usize) []const u8 {
+    return switch (index) {
+        0 => if (std.mem.eql(u8, loop_type, "sketch")) "" else "Name",
+        1 => "",
+        2 => "What you're checking for",
+        4 => if (std.mem.eql(u8, loop_type, "sketch")) "Starting note" else "First instruction",
+        5 => "Pause",
+        6 => "What does done look like?",
+        7 => "Done check",
+        10 => "Measured by",
+        11 => "When is the metric better?",
+        12 => "Agent",
+        13 => "Model",
+        14 => "Branch",
+        21 => "How often?",
+        22 => "Custom interval",
+        23 => "What to do each time",
+        24 => "Stop after",
+        25 => "Token budget",
+        26 => "Intended schedule",
+        27 => "Time",
+        else => "",
+    };
+}
+
+fn loopTypeDisplayName(loop_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, loop_type, "sketch")) return "Main";
+    if (std.mem.eql(u8, loop_type, "goalBased")) return "Goal";
+    if (std.mem.eql(u8, loop_type, "timeBased")) return "Timed";
+    if (std.mem.eql(u8, loop_type, "turnBased")) return "Turn";
+    return "Composite";
+}
+
+fn nodeRecapText(state: *const DialogState) []const u8 {
+    const loop_type = state.values[1];
+    const trigger = if (std.mem.eql(u8, loop_type, "timeBased"))
+        NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[23], state.values[24]) catch
+            return state.allocator.dupe(u8, "Recap unavailable") catch &.{}
+    else if (NewLoopSheet.isComposite(loop_type))
+        NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch
+            return state.allocator.dupe(u8, "Recap unavailable") catch &.{}
+    else
+        state.allocator.dupe(u8, "") catch return &.{};
+    defer state.allocator.free(trigger);
+    const selected_worktree = selectedWorktreeChoice(state);
+    const draft = Forms.NodeDraft{
+        .title = state.values[0],
+        .loop_type = loop_type,
+        .check_description = state.values[2],
+        .trigger_prompt = trigger,
+        .first_instruction = state.values[4],
+        .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
+        .goal_summary = state.values[6],
+        .goal_predicate = state.values[7],
+        .metric_command = state.values[10],
+        .metric_direction = state.values[11],
+        .token_budget = NewLoopSheet.parseBudget(state.values[25]),
+    };
+    return NewLoopSheet.recap(state.allocator, draft, if (selected_worktree) |choice| choice.branch else "") catch
+        state.allocator.dupe(u8, "Recap unavailable") catch &.{};
 }
 
 fn measureTextWidth(hwnd: c.HWND, state: *const DialogState, text: []const u8) i32 {
@@ -1234,19 +1466,20 @@ fn measureTextWidth(hwnd: c.HWND, state: *const DialogState, text: []const u8) i
 
 fn footerActions(state: *DialogState, enabled: bool) [3]SheetFramework.FooterAction {
     const host = state.sheet.?.hwnd;
-    const auxiliary = if (state.kind == .worktree_sweep) "Show in Explorer" else "Templates";
+    const auxiliary = if (state.kind == .node) "Save as template…" else "Show in Explorer";
     const has_auxiliary = (state.kind == .node and state.templates_available) or state.kind == .worktree_sweep;
     return .{
         .{ .id = cancel_id, .role = .cancel, .measured_text_width = measureTextWidth(host, state, "Cancel") },
         .{
-            .id = if (has_auxiliary) (if (state.kind == .worktree_sweep) reveal_id else templates_id) else 0,
+            .id = if (has_auxiliary) (if (state.kind == .worktree_sweep) reveal_id else save_template_id) else 0,
             .role = .secondary,
             .measured_text_width = if (has_auxiliary) measureTextWidth(host, state, auxiliary) else 0,
+            .enabled = state.kind != .node or hasBriefToSave(state),
         },
         .{
             .id = ok_id,
             .role = if (state.kind == .worktree_sweep) .destructive else .primary,
-            .measured_text_width = measureTextWidth(host, state, primaryLabel(state.kind)),
+            .measured_text_width = measureTextWidth(host, state, if (state.kind == .node) nodePrimaryLabel(state) else primaryLabel(state.kind)),
             .return_hint = true,
             .enabled = enabled,
         },
@@ -1258,6 +1491,18 @@ fn configureSheetFooter(state: *DialogState) !void {
     const actions = footerActions(state, enabled);
     const has_auxiliary = actions[1].id != 0;
     try state.sheet.?.configureFooter(if (has_auxiliary) &actions else &.{ actions[0], actions[2] });
+}
+
+fn hasBriefToSave(state: *const DialogState) bool {
+    if (state.kind != .node) return false;
+    if (NewLoopSheet.isComposite(state.values[1])) return true;
+    const brief = if (std.mem.eql(u8, state.values[1], "goalBased"))
+        state.values[6]
+    else if (std.mem.eql(u8, state.values[1], "timeBased"))
+        state.values[23]
+    else
+        state.values[4];
+    return std.mem.trim(u8, brief, " \t\r\n").len != 0;
 }
 
 fn createFooterButton(state: *DialogState, id: u16, text: []const u8) !void {
@@ -1282,6 +1527,44 @@ fn createSheetControls(state: *DialogState) !void {
         createPolicyEdit(body, state, 1, 145, 238, 70);
         createStatic(body, state, "worktrees", 221, 242, 90, 20, &state.policy_statics[4]);
         createStatic(body, state, "The notice removes nothing; it only surfaces cleanup work.", 18, 276, 530, 32, &state.policy_statics[5]);
+    } else if (state.kind == .node) {
+        createStatic(body, state, "New Node", 18, 16, 360, 26, &state.header_title);
+        const project_line = try std.fmt.allocPrint(state.allocator, "in {s}", .{state.project_name});
+        defer state.allocator.free(project_line);
+        createStatic(body, state, project_line, 18, 44, 360, 20, &state.header_project);
+        state.header_templates = createButtonLabelled(body, state, "Templates  Ctrl+T", templates_id, 400, 18, 148, 32);
+        _ = c.EnableWindow(state.header_templates, @intFromBool(state.templates_available));
+        if (state.values[28].len != 0) {
+            const applied_name = if (state.values[30].len != 0) state.values[30] else Forms.resolvedTitle(state.values[0]);
+            const chip = try std.fmt.allocPrint(state.allocator, "Template: {s}", .{applied_name});
+            defer state.allocator.free(chip);
+            createStatic(body, state, chip, 18, 0, 530, 24, &state.applied_template_chip);
+            const sentence = try std.fmt.allocPrint(
+                state.allocator,
+                "This template makes it a {s} loop. Every contributed field remains editable.",
+                .{loopTypeDisplayName(state.values[1])},
+            );
+            defer state.allocator.free(sentence);
+            createStatic(body, state, sentence, 18, 0, 530, 32, &state.applied_template_shape);
+        }
+        createStatic(body, state, "OR COMMIT TO SOMETHING", 18, 0, 530, 20, &state.committed_rule);
+        state.composite_steps = createOwnerDrawStatic(body, composite_steps_id);
+        createStatic(body, state, "Nothing runs when you press Create.", 18, 0, 530, 20, &state.composite_notice);
+        createStatic(body, state, "RUNS AS", 18, 0, 530, 20, &state.runs_as_caption);
+        for (0..state.field_count) |index| {
+            if (isNodeStoredOnly(index)) continue;
+            createField(body, state, index);
+        }
+        refreshNodeCueBanners(state);
+        state.done_check_test = createButtonLabelled(body, state, "Test", done_check_test_id, 0, 0, 72, 32);
+        createStatic(body, state, "", 0, 0, 150, 20, &state.done_check_outcome);
+        state.metric_chip = createButtonLabelled(body, state, "+ Track a progress metric", metric_chip_id, 0, 0, 220, 32);
+        state.budget_chip = createButtonLabelled(body, state, "+ Cap its token spend", budget_chip_id, 0, 0, 200, 32);
+        createAttachmentsSection(body, state);
+        const recap = recapText(state);
+        defer if (recap.len != 0) state.allocator.free(recap);
+        state.recap = createOwnerDrawStatic(body, recap_id);
+        setStaticText(state, state.recap, recap);
     } else {
         createStatic(body, state, formIntro(state.kind), 18, 12, 530, 34, &state.intro);
         for (0..state.field_count) |index| createField(body, state, index);
@@ -1295,12 +1578,35 @@ fn createSheetControls(state: *DialogState) !void {
     createStatic(state.sheet.?.hwnd, state, "", 18, 0, 320, 34, &state.validation);
     try configureSheetFooter(state);
     try createFooterButton(state, cancel_id, "Cancel");
-    if (state.kind == .node and state.templates_available)
-        try createFooterButton(state, templates_id, "Templates");
     if (state.kind == .worktree_sweep)
         try createFooterButton(state, reveal_id, "Show in Explorer");
-    try createFooterButton(state, ok_id, primaryLabel(state.kind));
+    if (state.kind == .node and state.templates_available)
+        try createFooterButton(state, save_template_id, "Save as template…");
+    try createFooterButton(state, ok_id, if (state.kind == .node) nodePrimaryLabel(state) else primaryLabel(state.kind));
     syncValidation(state);
+}
+
+fn createOwnerDrawStatic(hwnd: c.HWND, id: u16) c.HWND {
+    const control = c.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("STATIC").ptr,
+        null,
+        c.WS_CHILD | c.WS_VISIBLE | c.SS_OWNERDRAW,
+        0,
+        0,
+        0,
+        0,
+        hwnd,
+        childId(id),
+        c.GetModuleHandleW(null),
+        null,
+    ) orelse return null;
+    AppFont.apply(control, AppFont.control_size, false);
+    return control;
+}
+
+fn isNodeStoredOnly(index: usize) bool {
+    return index >= 15 and index <= 20;
 }
 
 fn sheetLayout(context: ?*anyopaque, layout_value: SheetFramework.Layout) anyerror!void {
@@ -1314,6 +1620,8 @@ fn sheetLayout(context: ?*anyopaque, layout_value: SheetFramework.Layout) anyerr
         return error.FormContentMoveFailed;
     if (state.kind == .worktree_policy)
         layoutPolicy(state)
+    else if (state.kind == .node)
+        layoutNodeForm(state)
     else
         layoutForm(state.content_root, state);
     if (state.sheet.?.footer_layout) |footer| {
@@ -1355,6 +1663,19 @@ fn refreshControlFonts(state: *DialogState) void {
     AppFont.apply(state.intro, AppFont.control_size, true);
     AppFont.apply(state.validation, AppFont.control_size, false);
     AppFont.apply(state.recap, AppFont.control_size, false);
+    AppFont.apply(state.header_title, 16, true);
+    AppFont.apply(state.header_project, 12, false);
+    AppFont.apply(state.header_templates, AppFont.control_size, true);
+    AppFont.apply(state.committed_rule, 11, true);
+    AppFont.apply(state.runs_as_caption, 11, true);
+    AppFont.apply(state.composite_steps, 11, false);
+    AppFont.apply(state.composite_notice, 11, false);
+    AppFont.apply(state.applied_template_chip, 11, true);
+    AppFont.apply(state.applied_template_shape, 11, false);
+    AppFont.apply(state.metric_chip, 11, false);
+    AppFont.apply(state.budget_chip, 11, false);
+    AppFont.apply(state.done_check_test, 11, true);
+    AppFont.apply(state.done_check_outcome, 11, false);
     for (0..state.field_count) |index| {
         AppFont.apply(state.labels[index], AppFont.control_size, true);
         AppFont.apply(state.helps[index], 12, false);
@@ -1363,7 +1684,7 @@ fn refreshControlFonts(state: *DialogState) void {
     for (state.checks) |control| AppFont.apply(control, AppFont.control_size, false);
     for (state.policy_statics) |control| AppFont.apply(control, AppFont.control_size, false);
     if (state.sheet) |sheet| {
-        inline for (.{ ok_id, cancel_id, reveal_id, templates_id }) |id|
+        inline for (.{ ok_id, cancel_id, reveal_id, templates_id, save_template_id }) |id|
             AppFont.apply(c.GetDlgItem(sheet.hwnd, id), AppFont.control_size, false);
     }
 }
@@ -1381,7 +1702,7 @@ fn sheetMessage(
         const focused = c.GetFocus();
         if (focused != null and c.IsChild(hwnd, focused) != 0 and c.IsWindowEnabled(focused) != 0) {
             const focused_id = c.GetDlgCtrlID(focused);
-            if (focused_id == cancel_id or focused_id == templates_id or focused_id == reveal_id or focused_id == ok_id) {
+            if (focused_id == cancel_id or focused_id == templates_id or focused_id == save_template_id or focused_id == reveal_id or focused_id == ok_id) {
                 result.* = @as(c.LRESULT, @intCast(focused_id)) | (@as(c.LRESULT, c.DC_HASDEFID) << 16);
                 return true;
             }
@@ -1502,6 +1823,7 @@ fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT
         _ = c.SelectObject(draw_item.hDC, old_pen);
         _ = c.SelectObject(draw_item.hDC, old_brush);
     }
+
     if (pen != null) _ = c.DeleteObject(pen);
     if (brush != null) _ = c.DeleteObject(brush);
     const chip = c.RECT{
@@ -1530,6 +1852,111 @@ fn drawTile(state: *DialogState, tile_index: usize, draw_item: *c.DRAWITEMSTRUCT
     if ((draw_item.itemState & c.ODS_FOCUS) != 0) _ = c.DrawFocusRect(draw_item.hDC, &bounds);
 }
 
+fn loopTypeAccent(loop_type: []const u8) u32 {
+    const index = choiceIndex(.loop_type, loop_type);
+    return if (index < loop_type_choices.len) loop_type_choices[index].accent else loop_type_choices[0].accent;
+}
+
+fn drawFormRoundedRect(hdc: c.HDC, bounds: SheetFramework.Rect, radius: i32, fill_color: u32, border_color: u32, border_width: i32) !void {
+    const brush = c.CreateSolidBrush(fill_color) orelse return error.FormPaintBrushCreationFailed;
+    defer _ = c.DeleteObject(brush);
+    const pen = c.CreatePen(c.PS_SOLID, @max(1, border_width), border_color) orelse return error.FormPaintPenCreationFailed;
+    defer _ = c.DeleteObject(pen);
+    const old_brush = c.SelectObject(hdc, brush);
+    const old_pen = c.SelectObject(hdc, pen);
+    defer {
+        _ = c.SelectObject(hdc, old_pen);
+        _ = c.SelectObject(hdc, old_brush);
+    }
+    if (c.RoundRect(hdc, bounds.x, bounds.y, bounds.right(), bounds.bottom(), radius * 2, radius * 2) == 0)
+        return error.FormRoundedPaintFailed;
+}
+
+fn drawNodeRecap(state: *DialogState, item: *const c.DRAWITEMSTRUCT) void {
+    const bounds = item.rcItem;
+    const accent = loopTypeAccent(state.values[1]);
+    const background = blendColor(Tokens.dialog_panel, accent, 8);
+    const brush = c.CreateSolidBrush(background);
+    const pen = c.CreatePen(c.PS_SOLID, 1, blendColor(Tokens.dialog_panel, accent, 24));
+    if (brush != null and pen != null) {
+        const old_brush = c.SelectObject(item.hDC, brush);
+        const old_pen = c.SelectObject(item.hDC, pen);
+        _ = c.RoundRect(item.hDC, bounds.left, bounds.top, bounds.right, bounds.bottom, scaled(state, 8), scaled(state, 8));
+        _ = c.SelectObject(item.hDC, old_pen);
+        _ = c.SelectObject(item.hDC, old_brush);
+    }
+    if (pen != null) _ = c.DeleteObject(pen);
+    if (brush != null) _ = c.DeleteObject(brush);
+    const bar_brush = c.CreateSolidBrush(accent);
+    if (bar_brush != null) {
+        var bar = c.RECT{
+            .left = bounds.left + scaled(state, 8),
+            .top = bounds.top + scaled(state, 8),
+            .right = bounds.left + scaled(state, 11),
+            .bottom = bounds.bottom - scaled(state, 8),
+        };
+        _ = c.FillRect(item.hDC, &bar, bar_brush);
+        _ = c.DeleteObject(bar_brush);
+    }
+    var wide: [1024]u16 = undefined;
+    const length = c.GetWindowTextW(item.hwndItem, &wide, @intCast(wide.len));
+    if (length <= 0) return;
+    var text_bounds = c.RECT{
+        .left = bounds.left + scaled(state, 20),
+        .top = bounds.top + scaled(state, 8),
+        .right = bounds.right - scaled(state, 10),
+        .bottom = bounds.bottom - scaled(state, 8),
+    };
+    const old_font = AppFont.selectForDpi(item.hDC, 11, false);
+    defer _ = c.SelectObject(item.hDC, old_font);
+    _ = c.SetTextColor(item.hDC, Tokens.dialog_body_text);
+    _ = c.SetBkMode(item.hDC, c.TRANSPARENT);
+    _ = c.DrawTextW(item.hDC, &wide, length, &text_bounds, c.DT_LEFT | c.DT_VCENTER | c.DT_WORDBREAK);
+}
+
+const composite_steps = [_]struct { phase: []const u8, action: []const u8 }{
+    .{ .phase = "now", .action = "Name it" },
+    .{ .phase = "next", .action = "Add loops inside" },
+    .{ .phase = "then", .action = "Pilot once" },
+    .{ .phase = "finally", .action = "Arm it" },
+};
+
+fn compositeStepHighlighted(index: usize) bool {
+    return index == 0;
+}
+
+fn drawCompositeSteps(state: *DialogState, item: *const c.DRAWITEMSTRUCT) void {
+    const gap = scaled(state, 6);
+    const total_width = item.rcItem.right - item.rcItem.left;
+    const cell_width = @divTrunc(total_width - gap * 3, 4);
+    const accent = loopTypeAccent("proactive");
+    for (composite_steps, 0..) |step, index| {
+        const left = item.rcItem.left + @as(i32, @intCast(index)) * (cell_width + gap);
+        const rect = SheetFramework.Rect{ .x = left, .y = item.rcItem.top, .width = cell_width, .height = item.rcItem.bottom - item.rcItem.top };
+        const highlighted = compositeStepHighlighted(index);
+        drawFormRoundedRect(
+            item.hDC,
+            rect,
+            scaled(state, 8),
+            if (highlighted) blendColor(Tokens.dialog_panel, accent, 14) else blendColor(Tokens.dialog_panel, 0x00FFFFFF, 4),
+            if (highlighted) blendColor(Tokens.dialog_panel, accent, 45) else Tokens.dialog_field_border,
+            1,
+        ) catch {};
+        formDrawText(item.hDC, step.phase, .{
+            .left = rect.x + scaled(state, 8),
+            .top = rect.y + scaled(state, 4),
+            .right = rect.right() - scaled(state, 6),
+            .bottom = rect.y + scaled(state, 18),
+        }, 9, if (highlighted) Tokens.dialog_body_text else Tokens.dialog_muted_text, true);
+        formDrawText(item.hDC, step.action, .{
+            .left = rect.x + scaled(state, 8),
+            .top = rect.y + scaled(state, 18),
+            .right = rect.right() - scaled(state, 6),
+            .bottom = rect.bottom() - scaled(state, 4),
+        }, 11, if (highlighted) Tokens.dialog_title_text else Tokens.dialog_muted_text, highlighted);
+    }
+}
+
 fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, color: u32, bold: bool) void {
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.c_allocator, text) catch return;
     defer std.heap.c_allocator.free(wide);
@@ -1544,7 +1971,7 @@ fn formDrawText(hdc: c.HDC, text: []const u8, bounds_value: c.RECT, size: i32, c
 
 fn configureFields(state: *DialogState) void {
     state.field_count = switch (state.kind) {
-        .node => 15,
+        .node => 28,
         .edge => 10,
         .update => 9,
         .promotion => if (state.promotion_target == .timed) 2 else 1,
@@ -1558,7 +1985,8 @@ fn configureFields(state: *DialogState) void {
         .node => {
             state.input_kinds[1] = .tiles;
             state.choice_groups[1] = .loop_type;
-            state.input_kinds[5] = .checkbox;
+            state.input_kinds[5] = .combo;
+            state.choice_groups[5] = .pause;
             state.input_kinds[11] = .combo;
             state.choice_groups[11] = .metric_direction;
             state.input_kinds[12] = .combo;
@@ -1566,6 +1994,12 @@ fn configureFields(state: *DialogState) void {
             state.input_kinds[13] = .combo;
             state.choice_groups[13] = .model_tier;
             state.input_kinds[14] = .combo;
+            state.input_kinds[21] = .combo;
+            state.choice_groups[21] = .cadence;
+            state.input_kinds[26] = .combo;
+            state.choice_groups[26] = .schedule;
+            state.metric_expanded = state.values[10].len != 0;
+            state.budget_expanded = state.values[25].len != 0;
         },
         .edge => {
             state.input_kinds[0] = if (state.lock_edge_endpoints) .readonly else .combo;
@@ -1601,15 +2035,32 @@ fn configureFields(state: *DialogState) void {
 fn updateConditionalVisibility(state: *DialogState) void {
     switch (state.kind) {
         .node => {
+            @memset(&state.visible, false);
             const loop_type = state.values[1];
             const turn = std.mem.eql(u8, loop_type, "turnBased");
             const timed = std.mem.eql(u8, loop_type, "timeBased");
             const goal = std.mem.eql(u8, loop_type, "goalBased");
+            const sketch = std.mem.eql(u8, loop_type, "sketch");
+            const composite = NewLoopSheet.isComposite(loop_type);
+            state.visible[1] = true;
+            state.visible[0] = !sketch;
             state.visible[2] = turn;
-            state.visible[3] = timed;
-            state.visible[4] = turn;
+            state.visible[4] = turn or sketch;
             state.visible[5] = turn;
-            for (6..12) |index| state.visible[index] = goal;
+            state.visible[6] = goal;
+            state.visible[7] = goal;
+            state.visible[10] = goal and state.metric_expanded;
+            state.visible[11] = goal and state.metric_expanded;
+            state.visible[12] = true;
+            state.visible[13] = true;
+            state.visible[14] = true;
+            state.visible[21] = timed;
+            state.visible[22] = timed and std.mem.eql(u8, state.values[21], "custom");
+            state.visible[23] = timed;
+            state.visible[24] = timed;
+            state.visible[25] = goal and state.budget_expanded;
+            state.visible[26] = composite;
+            state.visible[27] = composite and !std.mem.eql(u8, state.values[26], "onATrigger");
         },
         .edge => {
             state.visible[5] = !std.mem.eql(u8, state.values[4], "none");
@@ -1653,7 +2104,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
     };
     const settings_labels = [_][]const u8{ "Daemon pipe override", "Support directory" };
     return switch (kind) {
-        .node => node_labels[index],
+        .node => if (index < node_labels.len) node_labels[index] else "",
         .edge => edge_labels[index],
         .update => update_labels[index],
         .promotion => "",
@@ -1665,6 +2116,7 @@ fn fieldLabel(kind: Kind, index: usize) []const u8 {
 }
 
 fn stateFieldLabel(state: *const DialogState, index: usize) []const u8 {
+    if (state.kind == .node) return newLoopFieldLabel(state.values[1], index);
     if (state.kind == .promotion) return switch (state.promotion_target) {
         .goal => "What does done look like?",
         .turn => "When should it pause for you?",
@@ -1699,6 +2151,24 @@ fn fieldHelp(kind: Kind, index: usize) []const u8 {
         else => "",
     };
     return "";
+}
+
+fn nodeFieldHelp(index: usize) []const u8 {
+    return switch (index) {
+        2 => "Optional. Shown at each pause and to the loop as the bar it is aiming for.",
+        4 => "The session starts with this task. Main may be left blank and opens quiet.",
+        5 => "Only-before-writes lets reads and searches run through.",
+        6 => "In your own words. The loop is told this, and works toward it.",
+        7 => "Optional. Runs periodically while the loop works. Exit 0 means done.",
+        10 => "A command printing one number. Sampled once per pass, not per poll.",
+        12 => "Use the workspace default unless this loop needs a specific agent.",
+        14 => "This folder creates no worktree binding.",
+        21 => "GraphCode writes the /loop directive for you.",
+        24 => "Optional. Left empty, it keeps running until you stop it.",
+        25 => "Optional. Stops once its backend reports this many tokens spent.",
+        26 => "Local time. Nothing is scheduled until you pilot and arm it.",
+        else => "",
+    };
 }
 
 fn windowProc(hwnd: c.HWND, message: c.UINT, wparam: c.WPARAM, lparam: c.LPARAM) callconv(.winapi) c.LRESULT {
@@ -1753,6 +2223,16 @@ fn handleFormMessage(
         },
         c.WM_DRAWITEM => {
             const draw_item = drawItemFrom(lparam);
+            if (value.kind == .node and draw_item.CtlID == recap_id) {
+                drawNodeRecap(value, draw_item);
+                result.* = 1;
+                return true;
+            }
+            if (value.kind == .node and draw_item.CtlID == composite_steps_id) {
+                drawCompositeSteps(value, draw_item);
+                result.* = 1;
+                return true;
+            }
             if (value.tile_field_index != null and draw_item.CtlID >= tile_base_id and draw_item.CtlID < tile_base_id + max_tiles) {
                 drawTile(value, draw_item.CtlID - tile_base_id, draw_item);
                 result.* = 1;
@@ -1773,6 +2253,31 @@ fn handleFormMessage(
                 return true;
             }
         },
+        c.WM_KEYDOWN => {
+            if (value.kind == .node and c.GetKeyState(c.VK_CONTROL) < 0) {
+                const key: u16 = @truncate(wparam);
+                if (nodeKeyboardAction(key, true)) |action| {
+                    switch (action) {
+                        .tile => |tile| {
+                            selectTile(value, tile);
+                            refreshSheetLayout(value);
+                            syncValidation(value);
+                        },
+                        .templates => {
+                            if (value.templates_available)
+                                _ = c.SendMessageW(hwnd, c.WM_COMMAND, templates_id, 0);
+                        },
+                    }
+                    result.* = 0;
+                    return true;
+                }
+            }
+        },
+        wm_done_check_complete => {
+            finishDoneCheck(value, true);
+            result.* = 0;
+            return true;
+        },
         c.WM_COMMAND => {
             const command = @as(u16, @truncate(wparam));
             const notification: u16 = @truncate(wparam >> 16);
@@ -1780,6 +2285,28 @@ fn handleFormMessage(
                 selectTile(value, command - tile_base_id);
                 refreshSheetLayout(value);
                 syncValidation(value);
+                result.* = 0;
+                return true;
+            }
+            if (value.kind == .node and notification == c.BN_CLICKED and command == metric_chip_id) {
+                value.metric_expanded = true;
+                updateConditionalVisibility(value);
+                refreshSheetLayout(value);
+                syncValidation(value);
+                result.* = 0;
+                return true;
+            }
+            if (value.kind == .node and notification == c.BN_CLICKED and command == budget_chip_id) {
+                value.budget_expanded = true;
+                updateConditionalVisibility(value);
+                refreshSheetLayout(value);
+                syncValidation(value);
+                result.* = 0;
+                return true;
+            }
+            if (value.kind == .node and notification == c.BN_CLICKED and command == done_check_test_id) {
+                readValue(value, 7);
+                runDoneCheck(value);
                 result.* = 0;
                 return true;
             }
@@ -1873,6 +2400,13 @@ fn handleFormMessage(
                 result.* = 0;
                 return true;
             }
+            if (command == save_template_id and value.kind == .node and value.templates_available and hasBriefToSave(value)) {
+                readValues(value);
+                value.save_template_requested = true;
+                applyModalCommand(value, .cancel);
+                result.* = 0;
+                return true;
+            }
             if (command == cancel_id) {
                 applyModalCommand(value, .cancel);
                 result.* = 0;
@@ -1918,9 +2452,112 @@ fn refreshSheetLayout(state: *DialogState) void {
 fn syncValidation(state: *DialogState) void {
     const reason = validationReason(state);
     setStaticText(state, state.validation, reason orelse "");
-    configureSheetFooter(state) catch |failure| if (state.sheet) |sheet| {
-        sheet.failure = failure;
+    if (state.sheet) |sheet| {
+        if (state.kind == .node) setButtonText(state, c.GetDlgItem(sheet.hwnd, ok_id), nodePrimaryLabel(state));
+        configureSheetFooter(state) catch |failure| {
+            sheet.failure = failure;
+        };
+    }
+}
+
+fn setButtonText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
+    if (hwnd == null) return;
+    const wide = utf8ToWideZ(state.allocator, text) catch return;
+    defer state.allocator.free(wide);
+    _ = c.SetWindowTextW(hwnd, wide.ptr);
+}
+
+fn runDoneCheck(state: *DialogState) void {
+    const command = std.mem.trim(u8, state.values[7], " \t\r\n");
+    if (command.len == 0 or state.done_check_running) return;
+    const work = state.allocator.create(DoneCheckWork) catch return;
+    work.* = .{
+        .state = state,
+        .command = state.allocator.dupe(u8, command) catch {
+            state.allocator.destroy(work);
+            return;
+        },
+        .directory = state.allocator.dupe(u8, state.attachment_project_path) catch {
+            state.allocator.free(work.command);
+            state.allocator.destroy(work);
+            return;
+        },
     };
+    state.done_check_running = true;
+    state.done_check_work = work;
+    setButtonText(state, state.done_check_test, "Testing...");
+    _ = c.EnableWindow(state.done_check_test, 0);
+    _ = c.UpdateWindow(state.content_root);
+    state.done_check_thread = std.Thread.spawn(.{}, DoneCheckWork.run, .{work}) catch {
+        state.done_check_running = false;
+        state.done_check_work = null;
+        state.allocator.free(work.directory);
+        state.allocator.free(work.command);
+        state.allocator.destroy(work);
+        setButtonText(state, state.done_check_test, "Test");
+        _ = c.EnableWindow(state.done_check_test, 1);
+        return;
+    };
+}
+
+const DoneCheckWork = struct {
+    state: *DialogState,
+    command: []u8,
+    directory: []u8,
+
+    fn run(work: *DoneCheckWork) void {
+        const started = std.time.milliTimestamp();
+        var child = std.process.Child.init(&.{ "cmd.exe", "/d", "/s", "/c", work.command }, std.heap.c_allocator);
+        child.cwd = work.directory;
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.create_no_window = true;
+        var passed = false;
+        if (child.spawn()) |_| {
+            const wait = c.WaitForSingleObject(child.id, 10_000);
+            if (wait == c.WAIT_TIMEOUT) _ = c.TerminateProcess(child.id, 1);
+            if (child.wait()) |term| passed = switch (term) {
+                .Exited => |code| wait == c.WAIT_OBJECT_0 and code == 0,
+                else => false,
+            } else |_| {}
+        } else |_| {}
+        work.state.done_check_lock.lock();
+        work.state.done_check_passed = passed;
+        work.state.done_check_duration_ms = @max(@as(i64, 0), std.time.milliTimestamp() - started);
+        work.state.done_check_running = false;
+        work.state.done_check_lock.unlock();
+        if (work.state.content_root != null)
+            _ = c.PostMessageW(work.state.content_root, wm_done_check_complete, 0, 0);
+    }
+};
+
+fn finishDoneCheck(state: *DialogState, update_ui: bool) void {
+    if (state.done_check_thread) |thread| {
+        thread.join();
+        state.done_check_thread = null;
+    }
+    if (state.done_check_work) |work| {
+        state.allocator.free(work.directory);
+        state.allocator.free(work.command);
+        state.allocator.destroy(work);
+        state.done_check_work = null;
+    }
+    if (!update_ui) return;
+    state.done_check_lock.lock();
+    const passed = state.done_check_passed;
+    const duration_ms = state.done_check_duration_ms;
+    state.done_check_lock.unlock();
+    const elapsed = @as(f64, @floatFromInt(duration_ms)) / 1000.0;
+    const outcome = std.fmt.allocPrint(
+        state.allocator,
+        "{s} · {d:.1}s",
+        .{ if (passed) "passed" else "did not pass", elapsed },
+    ) catch return;
+    defer state.allocator.free(outcome);
+    setStaticText(state, state.done_check_outcome, outcome);
+    setButtonText(state, state.done_check_test, "Test");
+    _ = c.EnableWindow(state.done_check_test, 1);
 }
 
 fn fieldBounds(state: *const DialogState, x: i32, y: i32, width: i32) SheetFramework.Rect {
@@ -2072,7 +2709,7 @@ fn inputControlHeight(state: *const DialogState, kind: InputKind) i32 {
 const attachment_listbox_id = 6;
 
 fn attachmentsVisible(state: *const DialogState) bool {
-    return state.kind == .node and !std.mem.eql(u8, state.values[1], "proactive");
+    return state.kind == .node and !NewLoopSheet.isComposite(state.values[1]);
 }
 
 /// Which node field a `[image #N]` placeholder is inserted into/removed from — the
@@ -2080,6 +2717,7 @@ fn attachmentsVisible(state: *const DialogState) bool {
 /// ("proactive") loops have no such field, matching macOS hiding attachments entirely
 /// for that loop type.
 fn briefFieldIndex(state: *const DialogState) ?usize {
+    if (std.mem.eql(u8, state.values[1], "sketch")) return 4;
     if (std.mem.eql(u8, state.values[1], "turnBased")) return 4;
     if (std.mem.eql(u8, state.values[1], "timeBased")) return 3;
     if (std.mem.eql(u8, state.values[1], "goalBased")) return 6;
@@ -2482,8 +3120,41 @@ fn createField(hwnd: c.HWND, state: *DialogState, index: usize) void {
             _ = c.SetWindowTextW(input, wide.ptr);
         },
     }
-    createStatic(hwnd, state, fieldHelp(state.kind, index), 18, 0, 530, 18, &state.helps[index]);
+    createStatic(hwnd, state, if (state.kind == .node) nodeFieldHelp(index) else fieldHelp(state.kind, index), 18, 0, 530, 18, &state.helps[index]);
     AppFont.apply(state.helps[index], 12, false);
+}
+
+fn nodePlaceholder(loop_type: []const u8, index: usize) []const u8 {
+    return switch (index) {
+        0 => if (NewLoopSheet.isComposite(loop_type)) "Nightly sweep" else "the loop names itself once it starts",
+        2 => "tests pass and the diff stays small",
+        4 => if (std.mem.eql(u8, loop_type, "sketch"))
+            "e.g. where does the usage cap get read from?"
+        else
+            "Port the settings screen to the new design system",
+        6 => "the crash rate is back under 1%",
+        7 => "swift test 2>/dev/null",
+        10 => "./scripts/score.sh",
+        22 => "30m, 2h, 3d…",
+        23 => "Check for new crash reports and triage anything new",
+        24 => "20 runs, or 3 days",
+        25 => "200000",
+        27 => "09:00",
+        else => "",
+    };
+}
+
+fn setCueBanner(state: *DialogState, control: c.HWND, text: []const u8) void {
+    if (control == null or text.len == 0) return;
+    const wide = utf8ToWideZ(state.allocator, text) catch return;
+    defer state.allocator.free(wide);
+    _ = c.SendMessageW(control, em_setcuebanner, 1, @bitCast(@intFromPtr(wide.ptr)));
+}
+
+fn refreshNodeCueBanners(state: *DialogState) void {
+    if (state.kind != .node) return;
+    for ([_]usize{ 0, 2, 4, 6, 7, 10, 22, 23, 24, 25, 27 }) |index|
+        setCueBanner(state, state.edits[index], nodePlaceholder(state.values[1], index));
 }
 
 fn setStaticText(state: *DialogState, hwnd: c.HWND, text: []const u8) void {
@@ -2502,6 +3173,7 @@ fn showsRecap(kind: Kind) bool {
 }
 
 fn recapText(state: *const DialogState) []const u8 {
+    if (state.kind == .node) return nodeRecapText(state);
     if (state.kind == .promotion) {
         const input = promotionInput(state) catch return state.allocator.dupe(u8, "Unable to read promotion fields.") catch &.{};
         var draft = SketchPromotion.build(state.allocator, input) catch |err| return state.allocator.dupe(u8, promotionErrorReason(err)) catch &.{};
@@ -2513,13 +3185,11 @@ fn recapText(state: *const DialogState) []const u8 {
         }) catch &.{};
     }
     const title = switch (state.kind) {
-        .node => Forms.resolvedTitle(state.values[0]),
         .edge => state.values[2],
         .update => if (hasUpdateChanges(state)) "changed fields" else "no changes yet",
         else => "",
     };
     const detail = switch (state.kind) {
-        .node => state.values[1],
         .edge => state.values[3],
         .update => "review before saving",
         else => "",
@@ -2598,6 +3268,115 @@ fn layoutForm(hwnd: c.HWND, state: *DialogState) void {
     }
 }
 
+fn layoutNodeForm(state: *DialogState) void {
+    const hwnd = state.content_root;
+    const margin = scaled(state, form_margin);
+    const width = formContentWidth(hwnd, state);
+    const gap = scaled(state, 10);
+    const row = scaled(state, form_row_height);
+    var y = scaled(state, 16);
+    layoutContentControl(state.header_title, margin, y, width - scaled(state, 170), scaled(state, 26), true, clientHeight(hwnd));
+    layoutContentControl(state.header_project, margin, y + scaled(state, 28), width - scaled(state, 170), scaled(state, 20), true, clientHeight(hwnd));
+    layoutContentControl(state.header_templates, margin + width - scaled(state, 150), y + scaled(state, 2), scaled(state, 150), scaled(state, 32), true, clientHeight(hwnd));
+    y += scaled(state, 62);
+    if (state.applied_template_chip != null) {
+        layoutContentControl(state.applied_template_chip, margin, y, width, scaled(state, 24), true, clientHeight(hwnd));
+        layoutContentControl(state.applied_template_shape, margin, y + scaled(state, 28), width, scaled(state, 32), true, clientHeight(hwnd));
+        y += scaled(state, 66);
+    }
+
+    layoutContentControl(state.tile_buttons[0], margin, y, width, scaled(state, 60), true, clientHeight(hwnd));
+    y += scaled(state, 72);
+    layoutContentControl(state.committed_rule, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
+    y += scaled(state, 30);
+    const tile_width = @divTrunc(width - gap, 2);
+    for (1..state.tile_count) |index| {
+        const offset = index - 1;
+        const col: i32 = @intCast(offset % 2);
+        const tile_row: i32 = @intCast(offset / 2);
+        layoutContentControl(state.tile_buttons[index], margin + col * (tile_width + gap), y + tile_row * scaled(state, 86), tile_width, scaled(state, 76), true, clientHeight(hwnd));
+    }
+    y += scaled(state, 182);
+
+    const loop_type = state.values[1];
+    if (NewLoopSheet.isComposite(loop_type)) {
+        layoutContentControl(state.composite_steps, margin, y, width, scaled(state, 44), true, clientHeight(hwnd));
+        y += scaled(state, 50);
+        layoutContentControl(state.composite_notice, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
+        y += scaled(state, 28);
+        for ([_]usize{ 0, 26, 27 }) |index| {
+            if (!state.visible[index]) continue;
+            layoutNodeRow(state, index, margin, y, width);
+            y += row;
+        }
+    } else if (std.mem.eql(u8, loop_type, "sketch")) {
+        layoutNodeRow(state, 4, margin, y, width);
+        y += row;
+    } else if (std.mem.eql(u8, loop_type, "goalBased")) {
+        for ([_]usize{ 6, 7 }) |index| {
+            layoutNodeRow(state, index, margin, y, width);
+            y += row;
+        }
+        const show_metric_chip = !state.metric_expanded;
+        const show_budget_chip = !state.budget_expanded;
+        layoutContentControl(state.metric_chip, margin, y, @divTrunc(width - gap, 2), scaled(state, 34), show_metric_chip, clientHeight(hwnd));
+        layoutContentControl(state.budget_chip, margin + @divTrunc(width - gap, 2) + gap, y, @divTrunc(width - gap, 2), scaled(state, 34), show_budget_chip, clientHeight(hwnd));
+        if (show_metric_chip or show_budget_chip) y += scaled(state, 46);
+        for ([_]usize{ 10, 11, 25, 0 }) |index| {
+            if (!state.visible[index]) continue;
+            layoutNodeRow(state, index, margin, y, width);
+            y += row;
+        }
+    } else if (std.mem.eql(u8, loop_type, "timeBased")) {
+        for ([_]usize{ 21, 22, 23, 24, 0 }) |index| {
+            if (!state.visible[index]) continue;
+            layoutNodeRow(state, index, margin, y, width);
+            y += row;
+        }
+    } else {
+        for ([_]usize{ 4, 5, 2, 0 }) |index| {
+            if (!state.visible[index]) continue;
+            layoutNodeRow(state, index, margin, y, width);
+            y += row;
+        }
+    }
+
+    layoutAttachmentsSection(hwnd, state, y);
+    if (attachmentsVisible(state)) y += scaled(state, attachment_section_height);
+
+    layoutContentControl(state.runs_as_caption, margin, y, width, scaled(state, 20), true, clientHeight(hwnd));
+    y += scaled(state, 28);
+    const column_gap = scaled(state, 10);
+    const column_width = @divTrunc(width - column_gap * 2, 3);
+    for ([_]usize{ 12, 13, 14 }, 0..) |index, column| {
+        const x = margin + @as(i32, @intCast(column)) * (column_width + column_gap);
+        layoutContentControl(state.labels[index], x, y, column_width, scaled(state, form_label_height), true, clientHeight(hwnd));
+        layoutFieldControl(state.edits[index], state, fieldBounds(state, x, y + scaled(state, 26), column_width), inputControlHeight(state, state.input_kinds[index]));
+        layoutContentControl(state.helps[index], 0, 0, 0, 0, false, clientHeight(hwnd));
+    }
+    y += scaled(state, 72);
+    layoutContentControl(state.recap, margin, y, width, scaled(state, 58), true, clientHeight(hwnd));
+
+    for (0..state.field_count) |index| {
+        if (index == 1 or index == 12 or index == 13 or index == 14 or state.visible[index]) continue;
+        layoutContentControl(state.labels[index], 0, 0, 0, 0, false, clientHeight(hwnd));
+        layoutContentControl(state.edits[index], 0, 0, 0, 0, false, clientHeight(hwnd));
+        layoutContentControl(state.helps[index], 0, 0, 0, 0, false, clientHeight(hwnd));
+    }
+}
+
+fn layoutNodeRow(state: *DialogState, index: usize, x: i32, y: i32, width: i32) void {
+    const help = nodeFieldHelp(index);
+    const input_width = if (index == 7) @max(scaled(state, 120), width - scaled(state, 86)) else width;
+    layoutContentControl(state.labels[index], x, y, width, scaled(state, form_label_height), true, clientHeight(state.content_root));
+    layoutFieldControl(state.edits[index], state, fieldBounds(state, x, y + scaled(state, 26), input_width), inputControlHeight(state, state.input_kinds[index]));
+    layoutContentControl(state.helps[index], x, y + scaled(state, 62), width, scaled(state, form_help_height), help.len != 0, clientHeight(state.content_root));
+    if (index == 7) {
+        layoutContentControl(state.done_check_test, x + width - scaled(state, 76), y + scaled(state, 26), scaled(state, 76), scaled(state, 32), true, clientHeight(state.content_root));
+        layoutContentControl(state.done_check_outcome, x + width - scaled(state, 230), y + scaled(state, 62), scaled(state, 150), scaled(state, 20), true, clientHeight(state.content_root));
+    }
+}
+
 const tile_columns = 2;
 
 fn layoutTiles(state: *DialogState, index: usize, x: i32, y: i32, width: i32, shown: bool, viewport: i32) void {
@@ -2629,6 +3408,7 @@ fn layoutContentControl(control: c.HWND, x: i32, y: i32, width: i32, height: i32
 
 fn contentHeight(state: *const DialogState) i32 {
     if (state.kind == .worktree_policy) return scaled(state, 350);
+    if (state.kind == .node) return scaled(state, nodeContentHeight(state));
     var y = scaled(state, form_fields_top);
     for (0..state.field_count) |index| {
         if (state.visible[index]) y += rowHeight(state, index);
@@ -2636,6 +3416,28 @@ fn contentHeight(state: *const DialogState) i32 {
     if (state.kind == .node and attachmentsVisible(state)) y += scaled(state, attachment_section_height);
     if (showsRecap(state.kind)) y += scaled(state, 40);
     return y + scaled(state, 16);
+}
+
+fn nodeContentHeight(state: *const DialogState) i32 {
+    var height: i32 = 16 + 62 + 72 + 30 + 182;
+    if (state.values[28].len != 0) height += 66;
+    const loop_type = state.values[1];
+    if (NewLoopSheet.isComposite(loop_type)) {
+        height += 50 + 28;
+        height += 84 * (if (state.visible[27]) @as(i32, 3) else 2);
+    } else if (std.mem.eql(u8, loop_type, "sketch")) {
+        height += 84;
+    } else if (std.mem.eql(u8, loop_type, "goalBased")) {
+        height += 84 * 2;
+        if (!state.metric_expanded or !state.budget_expanded) height += 46;
+        height += 84 * (1 + (if (state.metric_expanded) @as(i32, 2) else 0) + (if (state.budget_expanded) @as(i32, 1) else 0));
+    } else if (std.mem.eql(u8, loop_type, "timeBased")) {
+        height += 84 * (if (state.visible[22]) @as(i32, 5) else 4);
+    } else {
+        height += 84 * 4;
+    }
+    if (attachmentsVisible(state)) height += attachment_section_height;
+    return height + 28 + 72 + 58 + 16;
 }
 
 fn clientHeight(hwnd: c.HWND) i32 {
@@ -3102,26 +3904,35 @@ fn validationReason(state: *DialogState) ?[]const u8 {
         },
         .node => {
             const goal_based = std.mem.eql(u8, state.values[1], "goalBased");
-            const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch
-                return "Enter a valid number of seconds between goal checks.";
-            const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch
-                return "Enter a valid stall timeout, or leave it blank.";
+            const poll = parseRequiredFloat(if (goal_based) state.values[8] else state.initial_values[8]) catch return "Enter a valid number of seconds between goal checks.";
+            const stall = parseOptionalFloat(if (goal_based) state.values[9] else state.initial_values[9]) catch return "Enter a valid stall timeout, or leave it blank.";
+            if (goal_based and std.mem.trim(u8, state.values[25], " \t\r\n").len != 0 and NewLoopSheet.parseBudget(state.values[25]) == null)
+                return "Enter a positive whole-number token budget.";
             const backend: ?[]const u8 = if (std.mem.trim(u8, state.values[12], " \t\r\n").len == 0) null else state.values[12];
             const selected_worktree = selectedWorktreeChoice(state);
             const preserves_initial_worktree = state.node_worktree_choices.len == 0;
-            Forms.validateNode(.{
+            const trigger = if (std.mem.eql(u8, state.values[1], "timeBased"))
+                NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[23], state.values[24]) catch return "Unable to compose the timed instruction."
+            else if (NewLoopSheet.isComposite(state.values[1]))
+                NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch return "Unable to compose the intended schedule."
+            else
+                state.allocator.dupe(u8, "") catch return "Unable to validate the new loop.";
+            defer state.allocator.free(trigger);
+            const draft = Forms.NodeDraft{
                 .title = state.values[0],
                 .loop_type = state.values[1],
-                .check_description = state.values[2],
-                .trigger_prompt = state.values[3],
-                .first_instruction = state.values[4],
+                .check_description = if (std.mem.eql(u8, state.values[1], "turnBased")) state.values[2] else "",
+                .trigger_prompt = trigger,
+                .heartbeat_interval_seconds = null,
+                .first_instruction = if (std.mem.eql(u8, state.values[1], "turnBased") or std.mem.eql(u8, state.values[1], "sketch")) state.values[4] else "",
                 .pauses_before_writes_only = std.mem.eql(u8, state.values[5], "true"),
-                .goal_summary = state.values[6],
-                .goal_predicate = state.values[7],
+                .goal_summary = if (goal_based) state.values[6] else "",
+                .goal_predicate = if (goal_based) state.values[7] else "",
                 .poll_interval_seconds = poll,
                 .stall_after_seconds = stall,
-                .metric_command = state.values[10],
-                .metric_direction = state.values[11],
+                .metric_command = if (goal_based) state.values[10] else "",
+                .metric_direction = if (goal_based) state.values[11] else "maximize",
+                .token_budget = if (goal_based) NewLoopSheet.parseBudget(state.values[25]) else null,
                 .backend = backend,
                 .model_tier = state.values[13],
                 .worktree_repository = if (selected_worktree != null) state.attachment_project_path else if (preserves_initial_worktree) state.values[15] else "",
@@ -3130,7 +3941,12 @@ fn validationReason(state: *DialogState) ?[]const u8 {
                 .worktree_branch = if (selected_worktree) |choice| choice.branch else if (preserves_initial_worktree) state.values[18] else "",
                 .subgraph_json = state.values[19],
                 .created_by = state.values[20],
-            }) catch |err| return formErrorReason(err);
+                .created_from_template_id = state.values[28],
+                .template_follow_id = if (std.mem.eql(u8, state.values[1], "timeBased") or NewLoopSheet.isComposite(state.values[1])) state.values[29] else "",
+                .template_follow_name = if (std.mem.eql(u8, state.values[1], "timeBased") or NewLoopSheet.isComposite(state.values[1])) state.values[30] else "",
+            };
+            if (NewLoopSheet.disabledReason(draft)) |reason| return reason;
+            Forms.validateNode(draft) catch |err| return formErrorReason(err);
         },
         .edge => {
             const cycle_max = parseOptionalInt(state.values[7]) catch return "Maximum passes must be a whole number.";
@@ -3210,10 +4026,13 @@ fn hasUpdateChanges(state: *const DialogState) bool {
 
 fn formErrorReason(err: anyerror) []const u8 {
     return switch (err) {
-        error.EmptyTitle => "Name this proactive loop to continue.",
+        error.EmptyTitle => "Name it to continue.",
         error.MissingFirstInstruction => "Add a first instruction to continue.",
         error.MissingTriggerPrompt => "Say what to do each time to continue.",
         error.InvalidGoal => "Say what done looks like and use positive timing values.",
+        error.InvalidHeartbeat => "Choose a valid positive cadence.",
+        error.InvalidTokenBudget => "Enter a positive whole-number token budget.",
+        error.InvalidTemplate => "The applied template is incomplete or invalid.",
         error.UnsupportedTransform => "Enter the template or script that should carry context.",
         error.InvalidCycleGuard => "Cycle limits must be positive whole numbers.",
         error.SameEndpoint => "Source and target must be different loops.",
@@ -3325,9 +4144,9 @@ test "numeric form values reject malformed input instead of substituting default
 }
 
 test "guided choices map human labels to stable wire values" {
-    try std.testing.expectEqual(@as(usize, 2), choiceIndex(.loop_type, "goalBased"));
-    try std.testing.expectEqualStrings("goalBased", choiceValue(.loop_type, 2, "turnBased"));
-    try std.testing.expectEqualStrings("composite", choiceValue(.loop_type, 3, "composite"));
+    try std.testing.expectEqual(@as(usize, 1), choiceIndex(.loop_type, "goalBased"));
+    try std.testing.expectEqualStrings("goalBased", choiceValue(.loop_type, 1, "turnBased"));
+    try std.testing.expectEqualStrings("composite", choiceValue(.loop_type, 4, "composite"));
     try std.testing.expectEqualStrings("copilotCLI", choiceValue(.backend, 2, ""));
     try std.testing.expectEqualStrings("onFailure", choiceValue(.edge_condition, 2, "always"));
     try std.testing.expectEqualStrings("script", choiceValue(.transform, 2, "none"));
@@ -3350,8 +4169,8 @@ test "form recap describes the pending node, edge, and update" {
     node_state.values[1] = @constCast("goalBased");
     const node_recap = recapText(&node_state);
     defer std.testing.allocator.free(node_recap);
-    try std.testing.expect(std.mem.indexOf(u8, node_recap, "Ship the picker") != null);
-    try std.testing.expect(std.mem.indexOf(u8, node_recap, "goalBased") != null);
+    try std.testing.expect(std.mem.indexOf(u8, node_recap, "Starts now") != null);
+    try std.testing.expect(std.mem.indexOf(u8, node_recap, "works toward the goal") != null);
 
     var edge_state = DialogState{ .allocator = std.testing.allocator, .kind = .edge, .parent = null };
     edge_state.values[2] = @constCast("handoff");
@@ -3411,14 +4230,14 @@ test "clicking a loop-type teaching tile refreshes the pre-submit recap" {
     refreshRecap(&state);
     var seeded_buffer: [512]u8 = undefined;
     const seeded = Probe.text(recap_window, &seeded_buffer);
-    try std.testing.expect(std.mem.indexOf(u8, seeded, "turnBased") != null);
+    try std.testing.expect(std.mem.indexOf(u8, seeded, "Waits until you open it") != null);
 
     selectTile(&state, choiceIndex(.loop_type, "goalBased"));
     try std.testing.expectEqualStrings("goalBased", state.values[1]);
 
     var rendered_buffer: [512]u8 = undefined;
     const rendered = Probe.text(recap_window, &rendered_buffer);
-    try std.testing.expectEqualStrings("Recap: Ship the picker — goalBased", rendered);
+    try std.testing.expectEqualStrings("Starts now, works toward the goal, and resolves when its session finishes.", rendered);
 }
 
 test "node worktree picker has an honest empty state and binds only real choices" {
@@ -3541,7 +4360,7 @@ test "node creation ownership restores the same branch through template handoff"
     defer handoff.deinit(allocator);
     try std.testing.expectEqualStrings("", handoff.first_instruction);
     try TemplateLibrary.applyOwned(&handoff, .{
-        .id = @constCast("template"),
+        .id = @constCast("11111111-1111-4111-8111-111111111111"),
         .name = @constCast("From template"),
         .body = @constCast("A template changes the brief, not its branch."),
         .shape = @constCast("turn"),
@@ -3564,7 +4383,7 @@ test "node creation ownership restores the same branch through template handoff"
         try std.testing.expectEqualStrings(initial.worktree_id, draft.worktree_id);
         try std.testing.expectEqualStrings(initial.worktree_path, draft.worktree_path);
         try std.testing.expectEqualStrings(initial.worktree_branch, draft.worktree_branch);
-        try std.testing.expectEqualStrings("From template", draft.title);
+        try std.testing.expectEqualStrings("Before template", draft.title);
         try std.testing.expectEqualStrings("A template changes the brief, not its branch.", draft.first_instruction);
         try std.testing.expectEqualStrings(initial.backend.?, draft.backend.?);
         try std.testing.expectEqualStrings(initial.model_tier, draft.model_tier);
@@ -3642,7 +4461,12 @@ test "node creation ownership initializer and selected draft release every parti
 }
 
 test "node draft builder preserves every hidden initial field" {
-    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_draft_id = "11111111-1111-4111-8111-111111111111",
+    };
     state.values[1] = @constCast("turnBased");
     state.values[4] = @constCast("Start here");
     state.values[5] = @constCast("false");
@@ -3672,7 +4496,7 @@ test "node draft builder preserves every hidden initial field" {
     try std.testing.expectEqual(initial.briefing_enabled, draft.briefing_enabled);
     try std.testing.expectEqual(initial.activity_enabled, draft.activity_enabled);
     try std.testing.expectEqual(@as(usize, 0), draft.attachment_count);
-    try std.testing.expectEqual(@as(usize, 0), draft.node_id.len);
+    try std.testing.expectEqual(@as(usize, 36), draft.node_id.len);
 
     var hidden_state = state;
     hidden_state.values[8] = @constCast("not-a-number");
@@ -3762,7 +4586,7 @@ fn custodyFormAllocationCase(allocator: std.mem.Allocator, outcome: NodeFormTest
         return err;
     };
     switch (result) {
-        .draft, .templates => |value| {
+        .draft, .templates, .save_template => |value| {
             var draft = value;
             defer draft.deinit(allocator);
             try std.testing.expect(transferred);
@@ -3896,7 +4720,7 @@ test "node submission rejects stale scope at the production transfer boundary" {
             defer draft.deinit(allocator);
             client.sendCreateNodeDraft("original-project", draft);
         },
-        .templates => |value| {
+        .templates, .save_template => |value| {
             var draft = value;
             draft.deinit(allocator);
             return error.UnexpectedTemplateTransfer;
@@ -3992,7 +4816,7 @@ test "node submission transfer outcomes preserve or abandon only the owned leaf"
                 try std.testing.expect(owner.abandon(allocator) == null);
                 if (outcome == .zero_attachments or outcome == .already_gone) {
                     try std.testing.expectEqual(@as(usize, 0), draft.attachment_count);
-                    try std.testing.expectEqual(@as(usize, 0), draft.node_id.len);
+                    try std.testing.expectEqual(@as(usize, 36), draft.node_id.len);
                     try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
                 } else {
                     const bytes = try std.fs.cwd().readFileAlloc(allocator, draft.attachment_paths[0], 128);
@@ -4000,7 +4824,7 @@ test "node submission transfer outcomes preserve or abandon only the owned leaf"
                     try std.testing.expectEqualStrings("original source", bytes);
                 }
             },
-            .templates => |value| {
+            .templates, .save_template => |value| {
                 var draft = value;
                 defer draft.deinit(allocator);
                 try std.testing.expect(outcome == .templates or outcome == .templates_accept or outcome == .templates_empty);
@@ -4009,7 +4833,7 @@ test "node submission transfer outcomes preserve or abandon only the owned leaf"
                 try std.testing.expectEqualStrings(directory, owner.directory);
                 if (outcome == .templates_accept or outcome == .templates_empty) {
                     try @import("TemplateLibrary.zig").applyOwned(&draft, .{
-                        .id = @constCast("template"),
+                        .id = @constCast("11111111-1111-4111-8111-111111111111"),
                         .name = @constCast("Applied template"),
                         .body = @constCast("template [image #1]"),
                         .shape = @constCast("turnBased"),
@@ -4048,13 +4872,13 @@ test "node submission transfer outcomes preserve or abandon only the owned leaf"
                     }, &owner, DraftAttachments.discardAllChecked);
                     var submitted = final.draft;
                     defer submitted.deinit(allocator);
-                    try std.testing.expectEqualStrings("Applied template", submitted.title);
+                    try std.testing.expectEqualStrings("", submitted.title);
                     try std.testing.expectEqualStrings("template [image #1]", submitted.first_instruction);
                     abandonNodeState(reopened, final_transfer, &owner, DraftAttachments.discardAllChecked);
                     try std.testing.expect(owner.abandon(allocator) == null);
                     if (outcome == .templates_empty) {
                         try std.testing.expectEqual(@as(usize, 0), submitted.attachment_count);
-                        try std.testing.expectEqual(@as(usize, 0), submitted.node_id.len);
+                        try std.testing.expectEqual(@as(usize, 36), submitted.node_id.len);
                         try std.testing.expectError(error.FileNotFound, std.fs.cwd().access(staged, .{}));
                     } else {
                         try std.testing.expectEqualStrings(staged, submitted.attachment_paths[0]);
@@ -4572,7 +5396,7 @@ test "conditional graph fields and validation follow selected types" {
     updateConditionalVisibility(&node_state);
     try std.testing.expect(node_state.visible[6]);
     try std.testing.expect(!node_state.visible[4]);
-    try std.testing.expectEqualStrings("Say what done looks like and use positive timing values.", validationReason(&node_state).?);
+    try std.testing.expectEqualStrings("Say what done looks like to continue", validationReason(&node_state).?);
 
     var edge_state = DialogState{ .allocator = undefined, .kind = .edge, .parent = null };
     edge_state.field_count = 10;
@@ -5001,7 +5825,8 @@ test "dialog framework: footer and viewport partition every declared form kind" 
         try initHiddenForm(owner, &state, &host);
         const primary = c.GetDlgItem(host.hwnd, ok_id);
         var primary_rect: c.RECT = undefined;
-        try std.testing.expect(state.intro != null and c.GetParent(state.intro) == state.content_root);
+        const heading = if (kind == .node) state.header_title else state.intro;
+        try std.testing.expect(heading != null and c.GetParent(heading) == state.content_root);
         try std.testing.expect(c.GetParent(state.content_root) == host.viewport);
         try std.testing.expect(primary != null and c.GetParent(primary) == host.hwnd);
         try std.testing.expect(c.GetWindowRect(primary, &primary_rect) != 0);
@@ -5216,17 +6041,226 @@ test "dialog framework: sweep 0 1 and 256 row extents use overflow only at every
 }
 
 test "loop type teaching tiles carry the exact macOS accent colors" {
-    // LoopTypeAppearance.swift: turnBased #D55181, timeBased #C98500,
-    // goalBased #199E70, composite/proactive #9085E9. tileColor packs a
+    // LoopTypeAppearance.swift: Main #D3DAE3, Goal #199E70, Timed #C98500,
+    // Turn #D55181, Composite #9085E9. tileColor packs a
     // COLORREF (0x00BBGGRR) so these render as the true RGB on screen,
     // unlike the pre-existing R/B-swapped literals elsewhere in this codebase.
-    try std.testing.expectEqual(@as(u32, 0x00_81_51_D5), loop_type_choices[0].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_00_85_C9), loop_type_choices[1].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_70_9E_19), loop_type_choices[2].accent);
-    try std.testing.expectEqual(@as(u32, 0x00_E9_85_90), loop_type_choices[3].accent);
-    try std.testing.expectEqualStrings("Turn-based", loop_type_choices[0].label);
+    try std.testing.expectEqual(@as(u32, 0x00_E3_DA_D3), loop_type_choices[0].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_70_9E_19), loop_type_choices[1].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_00_85_C9), loop_type_choices[2].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_81_51_D5), loop_type_choices[3].accent);
+    try std.testing.expectEqual(@as(u32, 0x00_E9_85_90), loop_type_choices[4].accent);
+    try std.testing.expectEqualStrings("Main", loop_type_choices[0].label);
     try std.testing.expect(loop_type_choices[0].description.len > 0);
-    try std.testing.expect(loop_type_choices[3].description.len > 0);
+    try std.testing.expect(loop_type_choices[4].description.len > 0);
+}
+
+test "new loop: chooser exposes Main then Goal Timed Turn Composite" {
+    const expected = [_]struct { label: []const u8, value: []const u8 }{
+        .{ .label = "Main", .value = "sketch" },
+        .{ .label = "Goal", .value = "goalBased" },
+        .{ .label = "Timed", .value = "timeBased" },
+        .{ .label = "Turn", .value = "turnBased" },
+        .{ .label = "Composite", .value = "proactive" },
+    };
+    try std.testing.expectEqual(expected.len, loop_type_choices.len);
+    for (loop_type_choices, 0..) |actual, index| {
+        const want = expected[index];
+        try std.testing.expectEqualStrings(want.label, actual.label);
+        try std.testing.expectEqualStrings(want.value, actual.value);
+    }
+}
+
+test "new loop: primary labels follow the selected type" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("sketch");
+    try std.testing.expectEqualStrings("Start", nodePrimaryLabel(&state));
+    state.values[1] = @constCast("goalBased");
+    try std.testing.expectEqualStrings("Create loop", nodePrimaryLabel(&state));
+    state.values[1] = @constCast("timeBased");
+    try std.testing.expectEqualStrings("Create loop", nodePrimaryLabel(&state));
+    state.values[1] = @constCast("turnBased");
+    try std.testing.expectEqualStrings("Create loop", nodePrimaryLabel(&state));
+    state.values[1] = @constCast("proactive");
+    try std.testing.expectEqualStrings("Create & open", nodePrimaryLabel(&state));
+}
+
+test "new loop: per-type field copy follows the macOS form" {
+    try std.testing.expectEqualStrings("Starting note", newLoopFieldLabel("sketch", 4));
+    try std.testing.expectEqualStrings("What does done look like?", newLoopFieldLabel("goalBased", 6));
+    try std.testing.expectEqualStrings("How often?", newLoopFieldLabel("timeBased", 21));
+    try std.testing.expectEqualStrings("First instruction", newLoopFieldLabel("turnBased", 4));
+    try std.testing.expectEqualStrings("Name", newLoopFieldLabel("proactive", 0));
+}
+
+test "new loop: recap uses type-specific outcome copy" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("sketch");
+    const main = nodeRecapText(&state);
+    defer std.testing.allocator.free(main);
+    try std.testing.expect(std.mem.startsWith(u8, main, "Opens a session"));
+
+    state.values[1] = @constCast("proactive");
+    state.values[0] = @constCast("Nightly sweep");
+    const composite = nodeRecapText(&state);
+    defer std.testing.allocator.free(composite);
+    try std.testing.expect(std.mem.indexOf(u8, composite, "It won't run") != null);
+}
+
+test "new loop: selected type exposes only its macOS fields" {
+    const cases = [_]struct { loop_type: []const u8, visible: []const usize }{
+        .{ .loop_type = "sketch", .visible = &.{ 1, 4, 12, 13, 14 } },
+        .{ .loop_type = "goalBased", .visible = &.{ 0, 1, 6, 7, 12, 13, 14 } },
+        .{ .loop_type = "timeBased", .visible = &.{ 0, 1, 21, 23, 24, 12, 13, 14 } },
+        .{ .loop_type = "turnBased", .visible = &.{ 0, 1, 2, 4, 5, 12, 13, 14 } },
+        .{ .loop_type = "proactive", .visible = &.{ 0, 1, 26, 27, 12, 13, 14 } },
+    };
+    for (cases) |case| {
+        var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+        state.values[1] = @constCast(case.loop_type);
+        state.values[21] = @constCast("1h");
+        state.values[26] = @constCast("daily");
+        configureFields(&state);
+        for (0..state.field_count) |index| {
+            const expected = std.mem.indexOfScalar(usize, case.visible, index) != null;
+            try std.testing.expectEqual(expected, state.visible[index]);
+        }
+    }
+}
+
+test "new loop: primary enablement and disabled reason follow required fields" {
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[0] = @constCast("");
+    state.values[1] = @constCast("sketch");
+    state.values[2] = @constCast("");
+    state.values[4] = @constCast("");
+    state.values[5] = @constCast("false");
+    state.values[6] = @constCast("");
+    state.values[7] = @constCast("");
+    state.values[8] = @constCast("60");
+    state.values[9] = @constCast("");
+    state.initial_values[8] = @constCast("60");
+    state.initial_values[9] = @constCast("");
+    state.values[10] = @constCast("");
+    state.values[11] = @constCast("maximize");
+    state.values[12] = @constCast("");
+    state.values[13] = @constCast("");
+    state.values[21] = @constCast("1h");
+    state.values[22] = @constCast("");
+    state.values[23] = @constCast("");
+    state.values[24] = @constCast("");
+    state.values[25] = @constCast("");
+    state.values[26] = @constCast("daily");
+    state.values[27] = @constCast("09:00");
+    try std.testing.expect(validationReason(&state) == null);
+    state.values[1] = @constCast("goalBased");
+    try std.testing.expectEqualStrings("Say what done looks like to continue", validationReason(&state).?);
+    state.values[6] = @constCast("Tests pass");
+    try std.testing.expect(validationReason(&state) == null);
+    state.values[1] = @constCast("timeBased");
+    try std.testing.expectEqualStrings("Say what to do each time to continue", validationReason(&state).?);
+    state.values[23] = @constCast("Check reports");
+    try std.testing.expect(validationReason(&state) == null);
+    state.values[1] = @constCast("turnBased");
+    try std.testing.expectEqualStrings("Add a first instruction to continue", validationReason(&state).?);
+    state.values[4] = @constCast("Review the change");
+    try std.testing.expect(validationReason(&state) == null);
+    state.values[1] = @constCast("proactive");
+    try std.testing.expectEqualStrings("Name it to continue", validationReason(&state).?);
+}
+
+test "new loop: all five layouts keep the SheetFramework footer fixed at every DPI" {
+    for ([_][]const u8{ "sketch", "goalBased", "timeBased", "turnBased", "proactive" }) |loop_type| {
+        for ([_]u32{ 96, 144, 192 }) |dpi| {
+            var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null, .dpi = dpi };
+            state.values[1] = @constCast(loop_type);
+            state.values[21] = @constCast("1h");
+            state.values[26] = @constCast("daily");
+            configureFields(&state);
+            var input = formLayoutInput(&state);
+            input.owner = .{ .x = 0, .y = 0, .width = Dpi.scale(1024, dpi), .height = Dpi.scale(768, dpi) };
+            const form = SheetFramework.layout(input);
+            try std.testing.expectEqual(form.sheet.height, form.viewport.height + form.footer.height);
+            try std.testing.expectEqual(form.viewport.bottom(), form.footer.y);
+            try std.testing.expect(form.sheet.width <= input.owner.width and form.sheet.height <= input.owner.height);
+            try std.testing.expect(form.scroll.extent >= form.viewport.height or !form.scroll.visible);
+        }
+    }
+}
+
+test "new loop: keyboard and template footer contracts are type-aware" {
+    for (0..5) |index|
+        try std.testing.expectEqual(index, nodeKeyboardAction(@intCast('1' + index), true).?.tile);
+    try std.testing.expect(nodeKeyboardAction('1', false) == null);
+    try std.testing.expect(nodeKeyboardAction('6', true) == null);
+    try std.testing.expect(nodeKeyboardAction('T', true).? == .templates);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    state.values[1] = @constCast("sketch");
+    state.values[4] = @constCast("");
+    try std.testing.expect(!hasBriefToSave(&state));
+    state.values[4] = @constCast("Start here");
+    try std.testing.expect(hasBriefToSave(&state));
+    state.values[1] = @constCast("proactive");
+    state.values[4] = @constCast("");
+    try std.testing.expect(hasBriefToSave(&state));
+}
+
+test "new loop: thread message hook routes shortcuts while a child owns focus" {
+    active_state = true;
+    defer active_state = false;
+    active_state_storage = .{ .allocator = std.testing.allocator, .kind = .node, .parent = null };
+    active_state_storage.tile_field_index = 1;
+    active_state_storage.choice_groups[1] = .loop_type;
+    active_state_storage.values[1] = try std.testing.allocator.dupe(u8, "sketch");
+    active_state_storage.values[12] = try std.testing.allocator.dupe(u8, "");
+    defer std.testing.allocator.free(active_state_storage.values[1]);
+    defer std.testing.allocator.free(active_state_storage.values[12]);
+    var message = std.mem.zeroes(c.MSG);
+    message.message = c.WM_KEYDOWN;
+    message.wParam = '4';
+    try std.testing.expect(routeNodeKeyboardMessage(&active_state_storage, &message, true));
+    try std.testing.expectEqual(@as(c.UINT, c.WM_NULL), message.message);
+    try std.testing.expectEqualStrings("turnBased", active_state_storage.values[1]);
+}
+
+test "new loop: keyboard hook accepts only the sheet and its descendants" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    try std.testing.expect(nodeKeyboardMessageBelongsToSheet(&state, host.hwnd));
+    try std.testing.expect(nodeKeyboardMessageBelongsToSheet(&state, state.tile_buttons[0]));
+    try std.testing.expect(!nodeKeyboardMessageBelongsToSheet(&state, owner));
+    var lease = try NodeKeyboardHookLease.acquire(true);
+    try std.testing.expect(lease.held and node_keyboard_hook != null);
+    lease.deinit();
+    try std.testing.expect(node_keyboard_hook == null);
+}
+
+test "new loop: Main clears hidden title and visual state exposes cue tint and first Composite step" {
+    var state = DialogState{
+        .allocator = std.testing.allocator,
+        .kind = .node,
+        .parent = null,
+        .attachment_draft_id = "11111111-1111-4111-8111-111111111111",
+    };
+    state.values[0] = @constCast("Hidden previous name");
+    state.values[1] = @constCast("sketch");
+    state.values[4] = @constCast("Start here");
+    state.values[5] = @constCast("false");
+    state.values[8] = @constCast("60");
+    state.values[11] = @constCast("maximize");
+    var draft = try buildNodeDraftUnchecked(std.testing.allocator, &state, .{ .title = "Hidden previous name" });
+    defer draft.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("", draft.title);
+    try std.testing.expectEqualStrings("e.g. where does the usage cap get read from?", nodePlaceholder("sketch", 4));
+    try std.testing.expectEqualStrings("Port the settings screen to the new design system", nodePlaceholder("turnBased", 4));
+    try std.testing.expect(recap_id != composite_steps_id);
+    try std.testing.expect(loopTypeAccent("goalBased") != Tokens.dialog_panel);
+    try std.testing.expect(compositeStepHighlighted(0));
+    for (1..composite_steps.len) |index| try std.testing.expect(!compositeStepHighlighted(index));
 }
 
 test "tile rows reserve full teaching-tile height while other rows stay compact" {
@@ -5238,13 +6272,14 @@ test "tile rows reserve full teaching-tile height while other rows stay compact"
     state.visible[0] = true;
     state.visible[1] = true;
     state.visible[2] = true;
+    state.values[1] = @constCast("sketch");
     try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 0));
     try std.testing.expectEqual(@as(i32, tile_row_height), rowHeight(&state, 1));
     try std.testing.expectEqual(@as(i32, form_row_height), rowHeight(&state, 2));
     try std.testing.expectEqual(@as(i32, form_fields_top), fieldTop(&state, 0).?);
     try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height), fieldTop(&state, 1).?);
     try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height + tile_row_height), fieldTop(&state, 2).?);
-    try std.testing.expectEqual(@as(i32, form_fields_top + form_row_height + tile_row_height + form_row_height + attachment_section_height + 40 + 16), contentHeight(&state));
+    try std.testing.expectEqual(@as(i32, 796), contentHeight(&state));
 }
 
 test "native form layout scales design units at common Windows DPI steps" {

@@ -6,6 +6,7 @@ pub const NodeDraft = struct {
     loop_type: []const u8 = "turnBased",
     check_description: []const u8 = "",
     trigger_prompt: []const u8 = "",
+    heartbeat_interval_seconds: ?f64 = null,
     first_instruction: []const u8 = "Work on the requested Windows shell task.",
     pauses_before_writes_only: bool = false,
     goal_summary: []const u8 = "",
@@ -14,6 +15,7 @@ pub const NodeDraft = struct {
     stall_after_seconds: ?f64 = null,
     metric_command: []const u8 = "",
     metric_direction: []const u8 = "maximize",
+    token_budget: ?i64 = null,
     backend: ?[]const u8 = null,
     model_tier: []const u8 = "",
     worktree_repository: []const u8 = "",
@@ -22,6 +24,10 @@ pub const NodeDraft = struct {
     worktree_branch: []const u8 = "",
     subgraph_json: []const u8 = "",
     created_by: []const u8 = "",
+    created_from_template_id: []const u8 = "",
+    template_follow_id: []const u8 = "",
+    template_follow_name: []const u8 = "",
+    template_follow_missing: bool = false,
     claude_permissions: []const u8 = "auto",
     copilot_permissions: []const u8 = "allowEverything",
     briefing_enabled: bool = true,
@@ -59,6 +65,9 @@ pub const NodeDraft = struct {
         freeSlice(allocator, self.worktree_branch);
         freeSlice(allocator, self.subgraph_json);
         freeSlice(allocator, self.created_by);
+        freeSlice(allocator, self.created_from_template_id);
+        freeSlice(allocator, self.template_follow_id);
+        freeSlice(allocator, self.template_follow_name);
         freeSlice(allocator, self.node_id);
         for (self.attachment_paths[0..self.attachment_count]) |path| freeSlice(allocator, path);
         for (self.attachment_ids[0..self.attachment_count]) |id| freeSlice(allocator, id);
@@ -140,7 +149,10 @@ pub const EdgeConfiguration = struct {
             .kind = edge.kind,
             .condition = edge.condition,
             .transform_kind = @tagName(edge.payload_transform),
-            .transform_value = switch (edge.payload_transform) { .none => "", .template, .script => |text| text },
+            .transform_value = switch (edge.payload_transform) {
+                .none => "",
+                .template, .script => |text| text,
+            },
             .guard = if (edge.cycle_guard) |guard| .{ .max_iterations = guard.max_iterations, .until = guard.until, .stop_after_passes = guard.stop_after_passes_without_improvement } else null,
             .spawn_target = edge.spawn_target_project_path,
         };
@@ -148,8 +160,12 @@ pub const EdgeConfiguration = struct {
 
     pub fn draft(self: EdgeConfiguration, from: []const u8, to: []const u8) EdgeDraft {
         return .{
-            .from = from, .to = to, .kind = self.kind, .condition = self.condition,
-            .transform_kind = self.transform_kind, .transform_value = self.transform_value,
+            .from = from,
+            .to = to,
+            .kind = self.kind,
+            .condition = self.condition,
+            .transform_kind = self.transform_kind,
+            .transform_value = self.transform_value,
             .cycle_max_iterations = if (self.guard) |guard| guard.max_iterations else null,
             .cycle_until = if (self.guard) |guard| guard.until orelse "" else "",
             .cycle_stop_after_passes = if (self.guard) |guard| guard.stop_after_passes else null,
@@ -214,7 +230,10 @@ pub fn validateEdgeEdit(initial: EdgeDraft, draft: EdgeDraft) FormError!void {
 
 test "edge editing forms: changing one bound preserves untouched optional text and clearing removes guard" {
     const original = EdgeConfiguration{
-        .kind = "handoff", .condition = "always", .transform_kind = "none", .transform_value = "",
+        .kind = "handoff",
+        .condition = "always",
+        .transform_kind = "none",
+        .transform_value = "",
         .guard = .{ .max_iterations = 3, .until = "", .stop_after_passes = null },
         .spawn_target = "",
     };
@@ -279,13 +298,16 @@ pub const FormError = error{
     InvalidCreatedBy,
     InvalidCycleGuard,
     InvalidNumericInput,
+    InvalidHeartbeat,
+    InvalidTokenBudget,
+    InvalidTemplate,
     MissingFirstInstruction,
     MissingTriggerPrompt,
     EmptyJumpQuery,
     TooManyAttachments,
 };
 
-pub const untitled_fallback = "New Loop";
+pub const untitled_fallback = "NewNode";
 
 pub fn resolvedTitle(title: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, title, " \t\r\n");
@@ -317,6 +339,10 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
     if (std.mem.eql(u8, draft.loop_type, "timeBased") and
         std.mem.trim(u8, draft.trigger_prompt, " \t\r\n").len == 0)
         return error.MissingTriggerPrompt;
+    if (draft.heartbeat_interval_seconds) |seconds| {
+        if (!std.mem.eql(u8, draft.loop_type, "timeBased") or !std.math.isFinite(seconds) or seconds <= 0)
+            return error.InvalidHeartbeat;
+    }
     if (std.mem.eql(u8, draft.loop_type, "goalBased")) {
         if (std.mem.trim(u8, draft.goal_summary, " \t\r\n").len == 0) return error.InvalidGoal;
         if (draft.poll_interval_seconds <= 0) return error.InvalidGoal;
@@ -324,6 +350,9 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
         if (draft.metric_direction.len != 0 and
             !isMetricDirection(draft.metric_direction))
             return error.UnsupportedMetricDirection;
+        if (draft.token_budget) |budget| if (budget <= 0) return error.InvalidTokenBudget;
+    } else if (draft.token_budget != null) {
+        return error.InvalidTokenBudget;
     }
     const has_worktree = draft.worktree_repository.len != 0 or
         draft.worktree_path.len != 0 or draft.worktree_branch.len != 0;
@@ -332,6 +361,18 @@ pub fn validateNode(draft: NodeDraft) FormError!void {
         return error.InvalidWorktree;
     if (draft.subgraph_json.len != 0) try validateSubgraphJson(draft.subgraph_json);
     if (draft.created_by.len != 0 and !isUuid(draft.created_by)) return error.InvalidCreatedBy;
+    if (draft.created_from_template_id.len != 0 and !isUuid(draft.created_from_template_id))
+        return error.InvalidTemplate;
+    if (draft.template_follow_id.len != 0) {
+        if ((!std.mem.eql(u8, draft.loop_type, "timeBased") and
+            !std.mem.eql(u8, draft.loop_type, "composite") and
+            !std.mem.eql(u8, draft.loop_type, "proactive")) or
+            !isUuid(draft.template_follow_id) or
+            std.mem.trim(u8, draft.template_follow_name, " \t\r\n").len == 0)
+            return error.InvalidTemplate;
+    } else if (draft.template_follow_name.len != 0 or draft.template_follow_missing) {
+        return error.InvalidTemplate;
+    }
     // `DraftAttachments.max_attachments` — kept as a literal rather than an import so
     // this validator has no dependency on the file-picker/ingestion module; both sides
     // agree on 8 because that's the fixed-size array `NodeDraft.attachment_paths` is.
@@ -348,7 +389,8 @@ pub fn validateSubgraphJson(value: []const u8) FormError!void {
 }
 
 pub fn isLoopType(value: []const u8) bool {
-    return std.mem.eql(u8, value, "turnBased") or
+    return std.mem.eql(u8, value, "sketch") or
+        std.mem.eql(u8, value, "turnBased") or
         std.mem.eql(u8, value, "timeBased") or
         std.mem.eql(u8, value, "goalBased") or
         std.mem.eql(u8, value, "proactive");
@@ -847,7 +889,7 @@ pub const ContextCommand = enum {
 test "node and edge forms reject invalid drafts explicitly" {
     try std.testing.expectError(error.EmptyTitle, validateNode(.{ .title = " \n", .loop_type = "composite" }));
     try validateNode(.{ .title = " \n", .loop_type = "turnBased" });
-    try std.testing.expectEqualStrings("New Loop", resolvedTitle(" \n"));
+    try std.testing.expectEqualStrings("NewNode", resolvedTitle(" \n"));
     try std.testing.expectError(error.SameEndpoint, validateEdge(.{ .from = "a", .to = "a" }));
     try std.testing.expectError(error.UnsupportedEdgeKind, validateEdge(.{ .from = "a", .to = "b", .kind = "bad" }));
     try validateNode(.{ .title = "Composite", .loop_type = "composite", .subgraph_json = "{\"id\":\"33333333-3333-4333-8333-333333333333\",\"project\":{\"path\":\"C:\\\\work\\\\subgraph\",\"name\":\"subgraph\",\"lastOpenedAt\":1767225600},\"nodes\":[],\"edges\":[]}", .created_by = "11111111-1111-4111-8111-111111111111" });
@@ -856,6 +898,51 @@ test "node and edge forms reject invalid drafts explicitly" {
     var over_capacity = NodeDraft{ .title = "Loop", .attachment_count = 9 };
     try std.testing.expectError(error.TooManyAttachments, validateNode(over_capacity));
     over_capacity.attachment_count = 0;
+}
+
+test "new loop: all five macOS loop types validate with their required fields" {
+    try validateNode(.{ .title = "", .loop_type = "sketch", .first_instruction = "" });
+    try validateNode(.{ .title = "", .loop_type = "goalBased", .goal_summary = "Tests pass" });
+    try validateNode(.{ .title = "", .loop_type = "timeBased", .trigger_prompt = "/loop 1h Check reports" });
+    try validateNode(.{ .title = "", .loop_type = "turnBased", .first_instruction = "Review the change" });
+    try validateNode(.{ .title = "Nightly sweep", .loop_type = "composite" });
+}
+
+test "new loop: blank non-composite titles use the shared NewNode fallback" {
+    try std.testing.expectEqualStrings("NewNode", resolvedTitle(" \n"));
+}
+
+test "new loop: cadence budget and template metadata validate by type" {
+    try validateNode(.{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "Check reports",
+        .heartbeat_interval_seconds = 3600,
+        .created_from_template_id = "11111111-1111-4111-8111-111111111111",
+        .template_follow_id = "11111111-1111-4111-8111-111111111111",
+        .template_follow_name = "Report check",
+    });
+    try std.testing.expectError(error.InvalidHeartbeat, validateNode(.{
+        .title = "",
+        .loop_type = "timeBased",
+        .trigger_prompt = "Check reports",
+        .heartbeat_interval_seconds = 0,
+    }));
+    try validateNode(.{ .title = "", .loop_type = "goalBased", .goal_summary = "Done", .token_budget = 200000 });
+    try std.testing.expectError(error.InvalidTokenBudget, validateNode(.{
+        .title = "",
+        .loop_type = "turnBased",
+        .first_instruction = "Review",
+        .token_budget = 1,
+    }));
+}
+
+test "new loop: generated client ids remain uppercase RFC 4122 identifiers" {
+    var id: [36]u8 = undefined;
+    generateDraftId(&id);
+    try std.testing.expect(isUuid(&id));
+    try std.testing.expect(id[14] == '4');
+    try std.testing.expect(id[19] == '8' or id[19] == '9' or id[19] == 'A' or id[19] == 'B');
 }
 
 test "generateDraftId produces a version-4-shaped, distinct id each call" {

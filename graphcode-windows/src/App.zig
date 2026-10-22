@@ -1542,6 +1542,43 @@ const UiaDynamicTarget = union(enum) {
     header_overflow,
 };
 
+const RememberedNewLoopType = enum {
+    sketch,
+    goal,
+    timed,
+    turn,
+
+    fn wireValue(self: RememberedNewLoopType) []const u8 {
+        return switch (self) {
+            .sketch => "sketch",
+            .goal => "goalBased",
+            .timed => "timeBased",
+            .turn => "turnBased",
+        };
+    }
+
+    fn fromWire(value: []const u8) ?RememberedNewLoopType {
+        if (std.mem.eql(u8, value, "sketch")) return .sketch;
+        if (std.mem.eql(u8, value, "goalBased")) return .goal;
+        if (std.mem.eql(u8, value, "timeBased")) return .timed;
+        if (std.mem.eql(u8, value, "turnBased")) return .turn;
+        return null;
+    }
+};
+
+const PendingCreatedLoop = struct {
+    project_path: []u8,
+    node_id: []u8,
+    loop_type: []u8,
+
+    fn deinit(self: *PendingCreatedLoop, allocator: std.mem.Allocator) void {
+        allocator.free(self.project_path);
+        allocator.free(self.node_id);
+        allocator.free(self.loop_type);
+        self.* = undefined;
+    }
+};
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     window: MainWindow.Window = .{},
@@ -1552,6 +1589,8 @@ pub const App = struct {
     model: GraphModel.Model,
     canvas: GraphCanvas.CanvasState = .{},
     selected_node_id: []u8 = &.{},
+    remembered_new_loop_type: RememberedNewLoopType = .sketch,
+    pending_created_loop: ?PendingCreatedLoop = null,
     selected_edge_project_path: []u8 = &.{},
     selected_edge_id: []u8 = &.{},
     edge_drag_source_id: []u8 = &.{},
@@ -1820,6 +1859,7 @@ pub const App = struct {
         if (self.worktree_state.len != 0) self.allocator.free(self.worktree_state);
         if (self.worktree_reclaim_receipts.len != 0) self.allocator.free(self.worktree_reclaim_receipts);
         if (self.selected_node_id.len != 0) self.allocator.free(self.selected_node_id);
+        self.clearPendingCreatedLoop();
         if (self.selected_edge_project_path.len != 0) self.allocator.free(self.selected_edge_project_path);
         if (self.selected_edge_id.len != 0) self.allocator.free(self.selected_edge_id);
         if (self.edge_drag_source_id.len != 0) self.allocator.free(self.edge_drag_source_id);
@@ -2189,6 +2229,7 @@ pub const App = struct {
                     }
                     self.clampSidebarScroll();
                     refresh(self);
+                    self.completePendingCreatedLoop();
                     if (self.model.currentGraph()) |selected| {
                         if (!selected.project.isGlobal() and
                             selected.worktree_notice == null and
@@ -3608,6 +3649,8 @@ pub const App = struct {
             .popup_surface = self.surface,
             .initial = .{
                 .title = "",
+                .loop_type = self.remembered_new_loop_type.wireValue(),
+                .first_instruction = "",
                 .backend = parent_copy.backend,
                 .created_by = parent_copy.id,
                 .model_tier = try allocator.dupe(u8, settings.default_model),
@@ -3713,6 +3756,59 @@ pub const App = struct {
         }) catch "Node creation did not complete; attachment cleanup also failed. Staged files retained.";
     }
 
+    fn clearPendingCreatedLoop(self: *App) void {
+        if (self.pending_created_loop) |*pending| pending.deinit(self.allocator);
+        self.pending_created_loop = null;
+    }
+
+    fn stageCreatedLoop(self: *App, project_path: []const u8, draft: Forms.NodeDraft) !void {
+        if (draft.node_id.len == 0) return error.MissingCreatedNodeID;
+        self.clearPendingCreatedLoop();
+        var pending = PendingCreatedLoop{
+            .project_path = try self.allocator.dupe(u8, project_path),
+            .node_id = &.{},
+            .loop_type = &.{},
+        };
+        errdefer if (pending.project_path.len != 0) self.allocator.free(pending.project_path);
+        pending.node_id = try self.allocator.dupe(u8, draft.node_id);
+        errdefer self.allocator.free(pending.node_id);
+        pending.loop_type = try self.allocator.dupe(u8, draft.loop_type);
+        self.pending_created_loop = pending;
+    }
+
+    fn pendingCreatedLoopMatches(self: *const App, graph: *const GraphModel.GraphSummary) bool {
+        const pending = self.pending_created_loop orelse return false;
+        return std.mem.eql(u8, pending.project_path, graph.project.path) and
+            GraphModel.findNodeIndexByID(graph.nodes.items, pending.node_id) != null;
+    }
+
+    fn takePendingCreatedLoop(self: *App, graph: *const GraphModel.GraphSummary) ?PendingCreatedLoop {
+        if (!self.pendingCreatedLoopMatches(graph)) return null;
+        const pending = self.pending_created_loop.?;
+        self.pending_created_loop = null;
+        if (RememberedNewLoopType.fromWire(pending.loop_type)) |loop_type|
+            self.remembered_new_loop_type = loop_type;
+        return pending;
+    }
+
+    fn completePendingCreatedLoop(self: *App) void {
+        const pending = self.pending_created_loop orelse return;
+        const graph = self.model.graphFor(pending.project_path) orelse return;
+        var completed = self.takePendingCreatedLoop(graph) orelse return;
+        defer completed.deinit(self.allocator);
+        _ = self.activateLoop(completed.project_path, completed.node_id);
+    }
+
+    fn submitCreatedLoop(self: *App, context: *const NodeCreationContext, draft: Forms.NodeDraft) void {
+        if (context.composite_id == null) {
+            self.stageCreatedLoop(context.project_path, draft) catch {
+                self.setStatus("Unable to remember the created loop");
+                return;
+            };
+        }
+        self.client.sendCreateNodeDraft(context.project_path, draft);
+    }
+
     fn createNode(self: *App) void {
         var context = (self.captureNodeCreationContext() catch {
             self.setStatus("Unable to remember node creation context");
@@ -3748,6 +3844,8 @@ pub const App = struct {
             const settings = self.product_settings orelse return;
             break :blk Forms.NodeDraft{
                 .title = "",
+                .loop_type = self.remembered_new_loop_type.wireValue(),
+                .first_instruction = "",
                 .backend = settings.default_backend,
                 .model_tier = settings.default_model,
                 .claude_permissions = settings.claude_permissions,
@@ -3783,21 +3881,10 @@ pub const App = struct {
                 return;
             } orelse return;
             defer draft.deinit(self.allocator);
-            self.client.sendCreateNodeDraft(path, draft);
+            self.submitCreatedLoop(context, draft);
             return;
         };
         defer templates.deinit();
-        if (templates.templates.items.len == 0) {
-            var draft = NativeForms.nodeGuarded(self.window.hwnd, self.allocator, path, &draft_id_buffer, choices, initial, validation, &continuation) catch |err| {
-                primary_error = err;
-                self.setStatus(nodeFormErrorStatus(err));
-                return;
-            } orelse return;
-            defer draft.deinit(self.allocator);
-            self.client.sendCreateNodeDraft(path, draft);
-            return;
-        }
-
         var labels = std.array_list.Managed([]const u8).init(self.allocator);
         defer {
             for (labels.items) |label| self.allocator.free(label);
@@ -3829,7 +3916,7 @@ pub const App = struct {
                 .draft => |draft| {
                     var submitted = draft;
                     defer submitted.deinit(self.allocator);
-                    self.client.sendCreateNodeDraft(path, submitted);
+                    self.submitCreatedLoop(context, submitted);
                     return;
                 },
                 .templates => |draft| {
@@ -3853,6 +3940,34 @@ pub const App = struct {
                         self.setStatus("Unable to apply selected template");
                         return;
                     };
+                },
+                .save_template => |draft| {
+                    if (owns_current) current.deinit(self.allocator);
+                    current = draft;
+                    owns_current = true;
+                    var name = NativeDialogs.textWithDescription(
+                        self.window.hwnd,
+                        self.allocator,
+                        "Save as Template",
+                        "Name this reusable prompt template. It is stored in your per-user GraphCode library.",
+                        &.{"Template name"},
+                        &.{Forms.resolvedTitle(current.title)},
+                    ) catch {
+                        primary_status = "Unable to open template save sheet";
+                        self.setStatus(primary_status.?);
+                        return;
+                    } orelse continue;
+                    defer name.deinit();
+                    var template = TemplateLibrary.fromDraft(self.allocator, name.values[0], current) catch {
+                        self.setStatus("A template needs a name and prompt");
+                        continue;
+                    };
+                    defer template.deinit(self.allocator);
+                    TemplateLibrary.save(self.allocator, template) catch {
+                        self.setStatus("Unable to save template");
+                        continue;
+                    };
+                    self.setStatus("Saved reusable template");
                 },
             }
         }
@@ -13111,7 +13226,7 @@ test "parity sidebar navigation Jump and worktree tail scrolling preserve folds"
         remote_path,
         "Target project",
         \\[{"id":"target-root","title":"Target root","loopType":"turnBased","state":"idle"},{"id":"target-child","title":"Target child","loopType":"turnBased","state":"idle"}]
-        ,
+    ,
         \\[{"id":"target-edge","from":"target-root","to":"target-child","kind":"handoff"}]
         ,
     );
@@ -13358,8 +13473,8 @@ test "sidebar UIA bounds and hit targets stay clear of the update banner at 1280
                     std.debug.print(
                         "{s} bounds {d},{d},{d},{d} intersect banner {d},{d},{d},{d} at dpi {d} width {d} scroll {d}\n",
                         .{
-                            sink.name(index), bounds.left, bounds.top,  bounds.right,  bounds.bottom,
-                            banner.left,      banner.top,  banner.right, banner.bottom, case.dpi,
+                            sink.name(index), bounds.left,        bounds.top,   bounds.right,  bounds.bottom,
+                            banner.left,      banner.top,         banner.right, banner.bottom, case.dpi,
                             case.width,       app.sidebar_scroll,
                         },
                     );
@@ -17824,7 +17939,7 @@ test "workspace layout: deleting a loop ends the shell sessions of its own tabs 
 
 test "workspace layout: restore drops a pane whose session is gone instead of recreating it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17865,7 +17980,7 @@ fn restoredAliveShell(fixture: *LiveTerminalFixture, session: []const u8) bool {
 
 test "workspace layout: at startup an unreachable agent pane and shell tab keep their retry slots while a live saved pane restores, and both come back" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -17950,7 +18065,7 @@ test "workspace layout: restore keeps a pane whose session zmx could not reach, 
 
 test "workspace layout: a loop's shells are neither ended nor forgotten while zmx cannot reach their session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17972,7 +18087,7 @@ test "workspace layout: a loop's shells are neither ended nor forgotten while zm
 
 test "workspace layout: a shell whose daemon refused the connection is gone: its record is forgotten and nothing is killed" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -17987,7 +18102,7 @@ test "workspace layout: a shell whose daemon refused the connection is gone: its
 
 test "live terminal: opening a loop whose session zmx could not reach waits and attaches only once it answers" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -18143,7 +18258,7 @@ const nodes_full = node_loop_a ++ "," ++
 
 test "workspace layout: a project's first snapshot ends the shells of loops deleted while the shell was closed, once the daemon's own answer agrees, and only those" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const other_project = "C:\\another-project";
     const alias_project = try std.mem.replaceOwned(u8, std.testing.allocator, fixture.project, "\\", "/");
@@ -18186,7 +18301,7 @@ test "workspace layout: a project's first snapshot ends the shells of loops dele
 
 test "workspace layout: an empty or partial first snapshot sweeps nothing that the full snapshot still holds" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-a", &.{ .{ .id = "loop-a", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_two } });
@@ -18221,7 +18336,7 @@ test "workspace layout: an empty or partial first snapshot sweeps nothing that t
 
 test "workspace layout: a layout saved after this shell started is another shell's and is never swept" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Written while this shell runs, as a second shell sharing the support directory would.
     try fixture.saveLoopLayout(fixture.project, "other-shells-loop", &.{ .{ .id = "other-shells-loop", .agent = true }, .{ .id = shell_uuid_one } });
@@ -18828,7 +18943,7 @@ test "workspace layout: a stale or revisionless frame that names the loop again 
 /// A layout older than this shell, with a recorded live shell session, for a loop the project's
 /// first usable snapshot will not name; the shell saw only an empty graph of the project before.
 fn emptyFirstGraphWithOldLayout(fixture: *LiveTerminalFixture) !i128 {
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
     try fixture.setLive(&.{ "loop-a", "loop-d", shell_uuid_two });
@@ -18874,7 +18989,7 @@ test "workspace layout: after a reconnect a project the shell holds no snapshot 
 
 test "workspace layout: a project first opened after a reconnect is left alone too" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18897,7 +19012,7 @@ test "workspace layout: a project first opened after a reconnect is left alone t
 
 test "workspace layout: a reconnect before the shell's first poll or snapshot still ends the age sweep" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18922,7 +19037,7 @@ test "workspace layout: a reconnect before the shell's first poll or snapshot st
 
 test "workspace layout: a snapshot queued before the transport failed arms nothing while the client is not connected" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -18952,7 +19067,7 @@ test "workspace layout: a snapshot queued before the transport failed arms nothi
 
 test "workspace layout: a look the age sweep started for a layout the shell never held does not outlive the connection" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "loop-d", &.{ .{ .id = "loop-d", .agent = true }, .{ .id = shell_uuid_two } });
     try fixture.markOwned("loop-d", &.{shell_uuid_two});
@@ -19325,7 +19440,7 @@ test "workspace layout: an empty graph, and a project the shell does not hold, a
 
 test "workspace layout: a shell session whose uuid is a graph node's id is never ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // Node ids are uuids; the daemon names a loop's session after the uppercase one.
     const node_uuid = shell_uuid_seven;
@@ -19350,7 +19465,7 @@ test "workspace layout: a shell session whose uuid is a graph node's id is never
 
 test "workspace layout: a layout that cannot be attributed to the deleted loop ends nothing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -19373,7 +19488,7 @@ test "workspace layout: a layout that cannot be attributed to the deleted loop e
 
 test "workspace layout: deleting a loop ends only recorded, live, shell-shaped sessions nothing else names" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const foreign = "other-" ++ shell_uuid_two;
     // A layout from an earlier shell, a stale copy or a hand edit can record anything as a
@@ -19403,7 +19518,7 @@ test "workspace layout: deleting a loop ends only recorded, live, shell-shaped s
 
 test "workspace layout: a loop's shells are ended only after a successful session listing" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -19527,7 +19642,7 @@ test "workspace layout: a corrupt, foreign or newer-schema loop layout is kept a
 
 test "workspace layout: a live session that only a layout names is never ended without proof the shell made it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // A foreign session that happens to look like a shell's: lowercase uuid, live, no node's
     // id, named by no other layout. The name shape is not provenance.
@@ -19547,7 +19662,7 @@ test "workspace layout: a live session that only a layout names is never ended w
 
 test "workspace layout: a tab's session is recorded as the shell's own when minted and forgotten once ended" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const workspace = &fixture.workspace;
@@ -19578,7 +19693,7 @@ test "workspace layout: a tab's session is recorded as the shell's own when mint
 
 test "workspace layout: a layout scan cut short by its cap refuses the kill instead of assuming nothing claims it" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -19600,7 +19715,7 @@ test "workspace layout: a layout scan cut short by its cap refuses the kill inst
 
 test "workspace layout: a session another loop's record names is never ended by a different loop's retirement" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     // The window in a second shell sharing this layout directory: it has recorded a fresh
     // session for its own loop-a, while a stale layout of the deleted gone-loop names the uuid.
@@ -19620,7 +19735,7 @@ test "workspace layout: a session another loop's record names is never ended by 
 /// sequence waits for each attach to finish before the next save.
 fn expectClaimAndRecordSeenByAttach(hold_layout: bool) !void {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
 
@@ -19703,7 +19818,7 @@ fn attachStartCount(dir: std.fs.Dir) !usize {
 
 test "workspace layout: New Tab and Split with no free surface slot fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -19743,7 +19858,7 @@ test "workspace layout: New Tab and Split with no free surface slot fail before 
 
 test "workspace layout: New Tab and Split with every free slot reserved by a pending restore fail before claiming a session" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const workspace = &fixture.workspace;
@@ -19825,7 +19940,7 @@ test "workspace layout: a failed rollback save leaves the claim on disk, never a
 
 test "workspace layout: restore drops a loop layout's claimed pane whose session was never started" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const allocator = std.testing.allocator;
     const WorkspaceLayoutFile = @import("WorkspaceLayout.zig");
@@ -19852,7 +19967,7 @@ test "workspace layout: restore drops a loop layout's claimed pane whose session
 
 test "workspace layout: an unreadable unrelated layout defers the cleanup, and the next sweep ends the shell" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     try fixture.saveLoopLayout(fixture.project, "gone-loop", &.{ .{ .id = "gone-loop", .agent = true }, .{ .id = shell_uuid_one } });
     try fixture.markOwned("gone-loop", &.{shell_uuid_one});
@@ -19876,7 +19991,7 @@ test "workspace layout: an unreadable unrelated layout defers the cleanup, and t
 
 test "workspace layout: a corrupt layout that cannot be set aside is left as it is and its loop is not opened" {
     var fixture: LiveTerminalFixture = undefined;
-    try fixture.init(&.{ .{ .id = "loop-a" } });
+    try fixture.init(&.{.{ .id = "loop-a" }});
     defer fixture.deinit();
     const app = &fixture.app;
     const truncated = "{\"schemaVersion\":2,\"project\":\"";
@@ -19982,8 +20097,7 @@ fn expectNewLoopAtTopRight(app: *App) !void {
     const expected = GraphCanvas.addButtonBounds(.{ .left = Tokens.sidebar_width, .top = Tokens.header_height, .right = client.right, .bottom = client.bottom });
     try std.testing.expectEqualDeep((AccessibilityBounds{ .logical = expected }).physicalRect(app.dpi), button.rect);
     try std.testing.expect(App.childTextEquals(app.empty_global_overview_button, "New Node"));
-    try std.testing.expectEqual(@as(c.LONG, c.BS_OWNERDRAW),
-        c.GetWindowLongW(app.empty_global_overview_button, c.GWL_STYLE) & c.BS_TYPEMASK);
+    try std.testing.expectEqual(@as(c.LONG, c.BS_OWNERDRAW), c.GetWindowLongW(app.empty_global_overview_button, c.GWL_STYLE) & c.BS_TYPEMASK);
     try std.testing.expect(!emptyStateButton(app, app.empty_open_folder_button).visible);
 }
 
@@ -23008,7 +23122,7 @@ test "custody child capture owns clicked root B without selecting it or copying 
     try std.testing.expect(child.context.composite_id == null);
     try std.testing.expectEqualStrings(custody_parent_id, child.initial.created_by);
     try std.testing.expectEqualStrings("copilotCLI", child.initial.backend.?);
-    try std.testing.expectEqualStrings("turnBased", child.initial.loop_type);
+    try std.testing.expectEqualStrings("sketch", child.initial.loop_type);
     try std.testing.expectEqualStrings("", child.initial.title);
     try std.testing.expectEqual(@as(usize, 0), app.client.outbound_count);
     try app.prepareChildNodeCreation(&child);
@@ -23811,12 +23925,78 @@ test "custody child cancellation and rejected template continuation discard once
 }
 
 fn deinitNodeSubmissionTestApp(app: *App) void {
+    app.clearPendingCreatedLoop();
     app.client.deinit();
     app.model.deinit();
     app.sidebar_state.deinit();
     app.declared_entry_ids.deinit();
     app.kept_worktree_paths.deinit();
     if (app.worktree_inspection) |*inspection| WorktreeStatus.deinitInspection(app.allocator, inspection);
+}
+
+test "new loop: remembered type defaults to Main and ignores Composite" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    try std.testing.expectEqualStrings("sketch", app.remembered_new_loop_type.wireValue());
+    try std.testing.expect(RememberedNewLoopType.fromWire("proactive") == null);
+    try std.testing.expect(RememberedNewLoopType.fromWire("composite") == null);
+    try std.testing.expect(RememberedNewLoopType.fromWire("goalBased").? == .goal);
+}
+
+test "new loop: pending creation owns the exact client id and project" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    const id = "11111111-1111-4111-8111-111111111111";
+    try app.stageCreatedLoop("A", .{ .title = "", .loop_type = "turnBased", .first_instruction = "Review", .node_id = id });
+    try std.testing.expectEqualStrings("A", app.pending_created_loop.?.project_path);
+    try std.testing.expectEqualStrings(id, app.pending_created_loop.?.node_id);
+    try std.testing.expect(app.pending_created_loop.?.node_id.ptr != id.ptr);
+}
+
+test "new loop: unrelated graph broadcasts do not consume pending creation" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    try app.stageCreatedLoop("A", .{
+        .title = "",
+        .loop_type = "goalBased",
+        .goal_summary = "Done",
+        .node_id = "11111111-1111-4111-8111-111111111111",
+    });
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"22222222-2222-4222-8222-222222222222","title":"Other"}],"edges":[]}}
+    );
+    try std.testing.expect(!app.pendingCreatedLoopMatches(app.model.graphFor("A").?));
+    try std.testing.expect(app.pending_created_loop != null);
+}
+
+test "new loop: exact graph broadcast consumes pending creation and remembers non-composite type" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    const id = "11111111-1111-4111-8111-111111111111";
+    try app.stageCreatedLoop("A", .{ .title = "", .loop_type = "timeBased", .trigger_prompt = "/loop 1h Check", .node_id = id });
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"NewNode","loopType":"timeBased"}],"edges":[]}}
+    );
+    var completed = app.takePendingCreatedLoop(app.model.graphFor("A").?) orelse return error.ExpectedPendingCreation;
+    defer completed.deinit(app.allocator);
+    try std.testing.expectEqualStrings(id, completed.node_id);
+    try std.testing.expect(app.pending_created_loop == null);
+    try std.testing.expect(app.remembered_new_loop_type == .timed);
+}
+
+test "new loop: Composite completion opens by exact id without changing remembered default" {
+    var app = try nodeSubmissionTestApp(std.testing.allocator);
+    defer deinitNodeSubmissionTestApp(&app);
+    app.remembered_new_loop_type = .turn;
+    const id = "11111111-1111-4111-8111-111111111111";
+    try app.stageCreatedLoop("A", .{ .title = "Nightly", .loop_type = "proactive", .node_id = id });
+    _ = try app.model.updateFromFrame(
+        \\{"graphChanged":{"project":{"path":"A","name":"Alpha"},"nodes":[{"id":"11111111-1111-4111-8111-111111111111","title":"Nightly","loopType":"proactive","subGraph":{"nodes":[],"edges":[]}}],"edges":[]}}
+    );
+    var completed = app.takePendingCreatedLoop(app.model.graphFor("A").?) orelse return error.ExpectedPendingCreation;
+    defer completed.deinit(app.allocator);
+    try std.testing.expectEqualStrings("proactive", completed.loop_type);
+    try std.testing.expect(app.remembered_new_loop_type == .turn);
 }
 
 const node_submission_graph =
