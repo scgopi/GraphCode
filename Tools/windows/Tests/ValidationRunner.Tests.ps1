@@ -4251,6 +4251,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$nodeSheetReceivedCommands\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch '\$nodeSheetReceivedCommands\[0\]\.command\s*\|\s*ConvertFrom-Json' -or
       $uiaLiveGateSource -notmatch '\[double\]\$wireNode\.heartbeatIntervalSeconds -eq \$expectedHeartbeatIntervalSeconds' -or
+      $uiaLiveGateSource -notmatch '(?s)UIA_NODE_CREATION_SHEET_EVIDENCE=.*?\$postCreateOverviewDestination = Find-FragmentByIdWithRetry \$renameRoot "overview-destination" \$rawWalker.*?GetCurrentPattern\(\s*\[System\.Windows\.Automation\.InvokePattern\]::Pattern\s*\)\.Invoke\(\).*?Wait-ForGraphChildren \$renameRoot \$rawWalker.*?New Loop exact-ID open outcome did not return to the graph destination before sketch/custody.*?# --- Connected sketch promotion and custody child' -or
       $uiaLiveGateSource -notmatch 'afterTileClick = ' -or
       $uiaLiveGateSource -notmatch 'afterEdit = ' -or
       $uiaLiveGateSource -notmatch 'renderedSidebarCount -gt 0' -or

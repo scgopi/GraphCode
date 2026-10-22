@@ -10553,6 +10553,17 @@ try {
     }
   }
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
+  $postCreateOverviewDestination = Find-FragmentByIdWithRetry $renameRoot "overview-destination" $rawWalker
+  Require ($null -ne $postCreateOverviewDestination) `
+    "New Loop exact-ID open outcome omitted the connected-shell graph destination"
+  $postCreateOverviewDestination.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $postCreateOverview = Wait-ForGraphChildren $renameRoot $rawWalker { $true } {
+    param($items) $null -ne (Find-FragmentById $renameRoot "graph" $rawWalker)
+  }
+  Require ($null -ne $postCreateOverview.Graph) `
+    "New Loop exact-ID open outcome did not return to the graph destination before sketch/custody"
 
   # --- Connected sketch promotion and custody child (ledger rows 100, 94) ---
   function Read-SketchStub {
