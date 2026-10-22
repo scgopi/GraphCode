@@ -10555,23 +10555,28 @@ try {
   Write-Host ("UIA_NODE_CREATION_SHEET_EVIDENCE=" + ($nodeCreationSheetEvidence | ConvertTo-Json -Compress -Depth 8))
   $postCreateWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $createdNodeId
   $postCreateWorkspace = Wait-ForGraphChildren $renameRoot $rawWalker `
-    { $_.Current.AutomationId -match '^workspace-loop-bar-' } `
+    { $_.Current.AutomationId -match '^workspace-(loop-bar|show-graph)-' } `
     { param($items)
-      @($items | Where-Object {
+      (@($items | Where-Object {
         $_.Current.AutomationId -ceq $postCreateWorkspaceId -and
         $_.Current.Name -ceq "Selected loop workspace"
-      }).Count -eq 1 }
+      }).Count -eq 1) -and
+      (@($items | Where-Object {
+        $_.Current.AutomationId -match '^workspace-show-graph-' -and
+        $_.Current.Name -ceq "Show in Graph"
+      }).Count -eq 1) }
   Require (@($postCreateWorkspace.Items | Where-Object {
     $_.Current.AutomationId -ceq $postCreateWorkspaceId -and
     $_.Current.Name -ceq "Selected loop workspace"
   }).Count -eq 1) `
     "New Loop exact-ID open outcome did not activate exactly one created-loop workspace"
-  $postCreateOverviewDestination = Find-FragmentByIdWithRetry $renameRoot "overview-destination" $rawWalker
-  Require ($null -ne $postCreateOverviewDestination) `
-    "New Loop exact-ID open outcome omitted the connected-shell graph destination"
-  $postCreateOverviewDestination.GetCurrentPattern(
-    [System.Windows.Automation.InvokePattern]::Pattern
-  ).Invoke()
+  $postCreateShowGraph = @($postCreateWorkspace.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-show-graph-' -and
+    $_.Current.Name -ceq "Show in Graph"
+  }) | Select-Object -First 1
+  Require ($null -ne $postCreateShowGraph) `
+    "New Loop exact-ID workspace omitted its native Show in Graph action"
+  $postCreateShowGraph.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $postCreateOverview = Wait-ForGraphChildren $renameRoot $rawWalker `
     { $_.Current.AutomationId -match '^(workspace-loop-bar-|workspace-show-graph-|canvas-card-)' } `
     { param($items)
