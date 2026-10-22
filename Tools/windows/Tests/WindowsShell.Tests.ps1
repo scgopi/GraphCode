@@ -539,6 +539,7 @@ foreach ($path in @(
     "src\WorkspaceLayout.zig",
     "src\InputRouter.zig",
     "src\Forms.zig",
+    "src\NewLoopSheet.zig",
     "src\NativeForms.zig",
     "src\ModalTeardown.zig",
     "src\UpdateOfferPresentation.zig",
@@ -722,6 +723,10 @@ Invoke-Native "Codespace ingress dialog executable tests" {
 Invoke-Native "Forms and navigation executable tests" {
   Push-Location $shellRoot
   try { & $zig test src\Forms.zig } finally { Pop-Location }
+}
+Invoke-Native "New Loop sheet executable tests" {
+  Push-Location $shellRoot
+  try { & $zig test src\NewLoopSheet.zig } finally { Pop-Location }
 }
 Invoke-Native "Edge creation captured draft and scope pure tests" {
   $depotRoot = Split-Path (Split-Path $repoRoot -Parent) -Parent
