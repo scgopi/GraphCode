@@ -11339,9 +11339,9 @@ try {
   }
   Require $custodyTurnReady `
     "reopened custody child did not expose Turn field 9104 with exact First instruction label"
-  $custodyFirstInstruction = Sketch-Field 9104 "custody instruction inherited baseline"
-  Require (-not [string]::IsNullOrWhiteSpace($custodyFirstInstruction)) `
-    "custody child form exposed no default first instruction"
+  $custodyFirstInstruction = "Work on the requested Windows shell task."
+  Require ((Sketch-Type 9104 $custodyFirstInstruction) -ceq $custodyFirstInstruction) `
+    "custody child Turn field did not retain the typed first instruction"
   $null = Sketch-Type 9100 "UIA custody child"
   $null = Sketch-Combo 9112 1 "Claude Code"
   $custodyInstructionAfterBackend = Sketch-Field 9104 "custody instruction after backend selection"
