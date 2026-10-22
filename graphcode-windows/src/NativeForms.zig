@@ -407,10 +407,18 @@ fn selectTile(state: *DialogState, tile_index: usize) void {
     }
 
     updateConditionalVisibility(state);
+    resetNodeTypeScroll(state);
     refreshNodeCueBanners(state);
     setStaticText(state, state.validation, "");
     refreshRecap(state);
     for (0..state.tile_count) |i| _ = c.InvalidateRect(state.tile_buttons[i], null, 1);
+}
+
+fn resetNodeTypeScroll(state: *DialogState) void {
+    if (state.kind != .node) return;
+    if (state.sheet) |sheet| sheet.setScrollOffset(0) catch |failure| {
+        sheet.failure = failure;
+    };
 }
 
 fn applyModalCommand(state: *DialogState, command: ModalCommand) void {
@@ -723,10 +731,11 @@ fn restoreStagedAttachments(state: *DialogState, initial: Forms.NodeDraft) !void
 
 fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     const allocator = state.allocator;
+    const timed = NewLoopSheet.parseTimedPrompt(if (std.mem.eql(u8, initial.loop_type, "timeBased")) initial.trigger_prompt else "");
     state.values[0] = try allocator.dupe(u8, initial.title);
     state.values[1] = try allocator.dupe(u8, if (std.mem.eql(u8, initial.loop_type, "composite")) "proactive" else initial.loop_type);
     state.values[2] = try allocator.dupe(u8, initial.check_description);
-    state.values[3] = try allocator.dupe(u8, initial.trigger_prompt);
+    state.values[3] = try allocator.dupe(u8, if (std.mem.eql(u8, initial.loop_type, "timeBased")) timed.task else initial.trigger_prompt);
     state.values[4] = try allocator.dupe(u8, initial.first_instruction);
     state.values[5] = try allocator.dupe(u8, if (initial.pauses_before_writes_only) "true" else "false");
     state.values[6] = try allocator.dupe(u8, initial.goal_summary);
@@ -744,7 +753,6 @@ fn initializeNodeDraft(state: *DialogState, initial: Forms.NodeDraft) !void {
     state.values[18] = try allocator.dupe(u8, initial.worktree_branch);
     state.values[19] = try allocator.dupe(u8, initial.subgraph_json);
     state.values[20] = try allocator.dupe(u8, initial.created_by);
-    const timed = NewLoopSheet.parseTimedPrompt(if (std.mem.eql(u8, initial.loop_type, "timeBased")) initial.trigger_prompt else "");
     state.values[21] = try allocator.dupe(u8, timed.cadence);
     state.values[22] = try allocator.dupe(u8, timed.custom);
     state.values[23] = try allocator.dupe(u8, timed.task);
@@ -792,7 +800,7 @@ fn buildNodeDraftUnchecked(
     result.loop_type = try allocator.dupe(u8, values[1]);
     result.check_description = try allocator.dupe(u8, values[2]);
     const trigger = if (std.mem.eql(u8, values[1], "timeBased"))
-        try NewLoopSheet.cadencePrompt(allocator, values[21], values[22], values[23], values[24])
+        try NewLoopSheet.cadencePrompt(allocator, values[21], values[22], values[3], values[24])
     else if (NewLoopSheet.isComposite(values[1]))
         try NewLoopSheet.schedulePrompt(allocator, values[26], values[27])
     else
@@ -1393,14 +1401,17 @@ fn nodePrimaryLabel(state: *const DialogState) []const u8 {
 
 fn newLoopFieldLabel(loop_type: []const u8, index: usize) []const u8 {
     return switch (index) {
-        0 => if (std.mem.eql(u8, loop_type, "sketch")) "" else "Name",
+        0 => if (std.mem.eql(u8, loop_type, "sketch")) "" else "Name (optional)",
         1 => "",
-        2 => "What you're checking for",
+        2 => "What are you checking for? (optional)",
+        3 => "What should it do each time?",
         4 => if (std.mem.eql(u8, loop_type, "sketch")) "Starting note" else "First instruction",
         5 => "Pause",
         6 => "What does done look like?",
-        7 => "Done check",
-        10 => "Measured by",
+        7 => "Done check command (optional)",
+        8 => "Check every (seconds)",
+        9 => "Declare stalled after (seconds, optional)",
+        10 => "Progress metric command (optional)",
         11 => "When is the metric better?",
         12 => "Agent",
         13 => "Model",
@@ -1427,7 +1438,7 @@ fn loopTypeDisplayName(loop_type: []const u8) []const u8 {
 fn nodeRecapText(state: *const DialogState) []const u8 {
     const loop_type = state.values[1];
     const trigger = if (std.mem.eql(u8, loop_type, "timeBased"))
-        NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[23], state.values[24]) catch
+        NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[3], state.values[24]) catch
             return state.allocator.dupe(u8, "Recap: unavailable") catch &.{}
     else if (NewLoopSheet.isComposite(loop_type))
         NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch
@@ -1505,7 +1516,7 @@ fn hasBriefToSave(state: *const DialogState) bool {
     const brief = if (std.mem.eql(u8, state.values[1], "goalBased"))
         state.values[6]
     else if (std.mem.eql(u8, state.values[1], "timeBased"))
-        state.values[23]
+        state.values[3]
     else
         state.values[4];
     return std.mem.trim(u8, brief, " \t\r\n").len != 0;
@@ -2004,7 +2015,7 @@ fn configureFields(state: *DialogState) void {
             state.choice_groups[21] = .cadence;
             state.input_kinds[26] = .combo;
             state.choice_groups[26] = .schedule;
-            state.metric_expanded = state.values[10].len != 0;
+            state.metric_expanded = true;
             state.budget_expanded = state.values[25].len != 0;
         },
         .edge => {
@@ -2051,18 +2062,21 @@ fn updateConditionalVisibility(state: *DialogState) void {
             state.visible[1] = true;
             state.visible[0] = !sketch;
             state.visible[2] = turn;
+            state.visible[3] = timed;
             state.visible[4] = turn or sketch;
             state.visible[5] = turn;
             state.visible[6] = goal;
             state.visible[7] = goal;
-            state.visible[10] = goal and state.metric_expanded;
-            state.visible[11] = goal and state.metric_expanded;
+            state.visible[8] = goal;
+            state.visible[9] = goal;
+            state.visible[10] = goal;
+            state.visible[11] = goal;
             state.visible[12] = true;
             state.visible[13] = true;
             state.visible[14] = true;
             state.visible[21] = timed;
             state.visible[22] = timed and std.mem.eql(u8, state.values[21], "custom");
-            state.visible[23] = timed;
+            state.visible[23] = false;
             state.visible[24] = timed;
             state.visible[25] = goal and state.budget_expanded;
             state.visible[26] = composite;
@@ -3335,13 +3349,13 @@ fn layoutNodeForm(state: *DialogState) void {
         layoutContentControl(state.metric_chip, margin, y, @divTrunc(width - gap, 2), scaled(state, 34), show_metric_chip, clientHeight(hwnd));
         layoutContentControl(state.budget_chip, margin + @divTrunc(width - gap, 2) + gap, y, @divTrunc(width - gap, 2), scaled(state, 34), show_budget_chip, clientHeight(hwnd));
         if (show_metric_chip or show_budget_chip) y += scaled(state, 46);
-        for ([_]usize{ 10, 11, 25, 0 }) |index| {
+        for ([_]usize{ 8, 9, 10, 11, 25, 0 }) |index| {
             if (!state.visible[index]) continue;
             layoutNodeRow(state, index, margin, y, width);
             y += row;
         }
     } else if (std.mem.eql(u8, loop_type, "timeBased")) {
-        for ([_]usize{ 21, 22, 23, 24, 0 }) |index| {
+        for ([_]usize{ 21, 22, 3, 24, 0 }) |index| {
             if (!state.visible[index]) continue;
             layoutNodeRow(state, index, margin, y, width);
             y += row;
@@ -3382,6 +3396,7 @@ fn layoutNodeRow(state: *DialogState, index: usize, x: i32, y: i32, width: i32) 
     const help = nodeFieldHelp(index);
     const input_width = if (index == 7) @max(scaled(state, 120), width - scaled(state, 86)) else width;
     layoutContentControl(state.labels[index], x, y, width, scaled(state, form_label_height), true, clientHeight(state.content_root));
+    _ = c.ShowWindow(state.edits[index], c.SW_SHOW);
     layoutFieldControl(state.edits[index], state, fieldBounds(state, x, y + scaled(state, 26), input_width), inputControlHeight(state, state.input_kinds[index]));
     layoutContentControl(state.helps[index], x, y + scaled(state, 62), width, scaled(state, form_help_height), help.len != 0, clientHeight(state.content_root));
     if (index == 7) {
@@ -3442,8 +3457,8 @@ fn nodeContentHeight(state: *const DialogState) i32 {
         height += 84;
     } else if (std.mem.eql(u8, loop_type, "goalBased")) {
         height += 84 * 2;
-        if (!state.metric_expanded or !state.budget_expanded) height += 46;
-        height += 84 * (1 + (if (state.metric_expanded) @as(i32, 2) else 0) + (if (state.budget_expanded) @as(i32, 1) else 0));
+        if (!state.budget_expanded) height += 46;
+        height += 84 * (5 + (if (state.budget_expanded) @as(i32, 1) else 0));
     } else if (std.mem.eql(u8, loop_type, "timeBased")) {
         height += 84 * (if (state.visible[22]) @as(i32, 5) else 4);
     } else {
@@ -3925,7 +3940,7 @@ fn validationReason(state: *DialogState) ?[]const u8 {
             const selected_worktree = selectedWorktreeChoice(state);
             const preserves_initial_worktree = state.node_worktree_choices.len == 0;
             const trigger = if (std.mem.eql(u8, state.values[1], "timeBased"))
-                NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[23], state.values[24]) catch return "Unable to compose the timed instruction."
+                NewLoopSheet.cadencePrompt(state.allocator, state.values[21], state.values[22], state.values[3], state.values[24]) catch return "Unable to compose the timed instruction."
             else if (NewLoopSheet.isComposite(state.values[1]))
                 NewLoopSheet.schedulePrompt(state.allocator, state.values[26], state.values[27]) catch return "Unable to compose the intended schedule."
             else
@@ -6167,7 +6182,7 @@ test "new loop: per-type field copy follows the macOS form" {
     try std.testing.expectEqualStrings("What does done look like?", newLoopFieldLabel("goalBased", 6));
     try std.testing.expectEqualStrings("How often?", newLoopFieldLabel("timeBased", 21));
     try std.testing.expectEqualStrings("First instruction", newLoopFieldLabel("turnBased", 4));
-    try std.testing.expectEqualStrings("Name", newLoopFieldLabel("proactive", 0));
+    try std.testing.expectEqualStrings("Name (optional)", newLoopFieldLabel("proactive", 0));
 }
 
 test "new loop: recap uses type-specific outcome copy" {
@@ -6223,8 +6238,8 @@ test "new loop: owner-drawn recap exposes stable accessible text and dynamic upd
 test "new loop: selected type exposes only its macOS fields" {
     const cases = [_]struct { loop_type: []const u8, visible: []const usize }{
         .{ .loop_type = "sketch", .visible = &.{ 1, 4, 12, 13, 14 } },
-        .{ .loop_type = "goalBased", .visible = &.{ 0, 1, 6, 7, 12, 13, 14 } },
-        .{ .loop_type = "timeBased", .visible = &.{ 0, 1, 21, 23, 24, 12, 13, 14 } },
+        .{ .loop_type = "goalBased", .visible = &.{ 0, 1, 6, 7, 8, 9, 10, 11, 12, 13, 14 } },
+        .{ .loop_type = "timeBased", .visible = &.{ 0, 1, 3, 21, 24, 12, 13, 14 } },
         .{ .loop_type = "turnBased", .visible = &.{ 0, 1, 2, 4, 5, 12, 13, 14 } },
         .{ .loop_type = "proactive", .visible = &.{ 0, 1, 26, 27, 12, 13, 14 } },
     };
@@ -6246,6 +6261,7 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     state.values[0] = @constCast("");
     state.values[1] = @constCast("sketch");
     state.values[2] = @constCast("");
+    state.values[3] = @constCast("");
     state.values[4] = @constCast("");
     state.values[5] = @constCast("false");
     state.values[6] = @constCast("");
@@ -6272,7 +6288,7 @@ test "new loop: primary enablement and disabled reason follow required fields" {
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("timeBased");
     try std.testing.expectEqualStrings("Say what to do each time to continue", validationReason(&state).?);
-    state.values[23] = @constCast("Check reports");
+    state.values[3] = @constCast("Check reports");
     try std.testing.expect(validationReason(&state) == null);
     state.values[1] = @constCast("turnBased");
     try std.testing.expectEqualStrings("Add a first instruction to continue", validationReason(&state).?);
@@ -6299,6 +6315,58 @@ test "new loop: all five layouts keep the SheetFramework footer fixed at every D
             try std.testing.expect(form.scroll.extent >= form.viewport.height or !form.scroll.visible);
         }
     }
+}
+
+test "new loop: type switch resets scroll and exposes stable Goal fields from the top" {
+    const owner = try hiddenNativeControlHost();
+    defer _ = c.DestroyWindow(owner);
+    var state = DialogState{ .allocator = std.testing.allocator, .kind = .node, .parent = owner };
+    defer freeValues(&state);
+    try initializeNodeDraft(&state, .{
+        .title = "Prior turn",
+        .loop_type = "turnBased",
+        .first_instruction = "Review the current change",
+    });
+    var host: SheetFramework.Host = .{};
+    defer host.deinit();
+    try initHiddenForm(owner, &state, &host);
+    try std.testing.expect(host.current_layout.scroll.max_offset > 0);
+    try host.setScrollOffset(host.current_layout.scroll.max_offset);
+    try std.testing.expect(host.current_layout.scroll.offset > 0);
+
+    selectTile(&state, choiceIndex(.loop_type, "goalBased"));
+    refreshSheetLayout(&state);
+    try std.testing.expectEqual(@as(i32, 0), host.current_layout.scroll.offset);
+    try std.testing.expectEqual(@as(i32, 0), host.options.layout_input.initial_offset);
+    try std.testing.expectEqualStrings("goalBased", state.values[1]);
+
+    const expected_ids = [_]usize{ 0, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
+    const expected_labels = [_][]const u8{
+        "Name (optional)",
+        "What does done look like?",
+        "Done check command (optional)",
+        "Check every (seconds)",
+        "Declare stalled after (seconds, optional)",
+        "Progress metric command (optional)",
+        "When is the metric better?",
+        "Agent",
+        "Model",
+        "Branch",
+    };
+    for (expected_ids, expected_labels) |index, label| {
+        try std.testing.expect(state.visible[index]);
+        try std.testing.expect(state.edits[index] != null);
+        try std.testing.expect(c.GetWindowLongPtrW(state.edits[index], c.GWL_STYLE) & c.WS_VISIBLE != 0);
+        var wide: [128]u16 = undefined;
+        const length = c.GetWindowTextW(state.labels[index], &wide, @intCast(wide.len));
+        var text: [256]u8 = undefined;
+        const written = try std.unicode.utf16LeToUtf8(&text, wide[0..@intCast(length)]);
+        try std.testing.expectEqualStrings(label, text[0..written]);
+    }
+    var root_rect: c.RECT = undefined;
+    try std.testing.expect(c.GetWindowRect(state.content_root, &root_rect) != 0);
+    _ = c.MapWindowPoints(null, host.viewport, @ptrCast(&root_rect), 2);
+    try std.testing.expectEqual(@as(i32, 0), root_rect.top);
 }
 
 test "new loop: reentrant layout tolerates zero tiles then restores five-tile geometry" {
