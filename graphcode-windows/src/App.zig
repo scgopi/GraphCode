@@ -3049,6 +3049,25 @@ pub const App = struct {
         return hasher.final();
     }
 
+    fn canvasViewContext(self: *const App) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        const surface_tag = @intFromEnum(self.surface);
+        hasher.update(std.mem.asBytes(&surface_tag));
+        if (self.surface == .project) {
+            if (self.currentProject()) |path| {
+                const length: u64 = path.len;
+                hasher.update(std.mem.asBytes(&length));
+                hasher.update(path);
+            }
+            if (self.model.open_composite_id) |id| {
+                const length: u64 = id.len;
+                hasher.update(std.mem.asBytes(&length));
+                hasher.update(id);
+            }
+        }
+        return hasher.final();
+    }
+
     fn selectProject(self: *App, path: []const u8) bool {
         const changed = if (self.model.currentGraph()) |graph|
             !std.mem.eql(u8, graph.project.path, path)
@@ -5694,7 +5713,6 @@ pub const App = struct {
         }
         self.client.setSubgraphAddress(node_id);
         self.clearEdgeSelection();
-        self.canvas.actualSize();
         self.setStatus("Composite group opened · use the breadcrumb to return");
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -5705,7 +5723,6 @@ pub const App = struct {
         self.model.closeComposite();
         self.client.setSubgraphAddress(null);
         self.clearEdgeSelection();
-        self.canvas.actualSize();
         self.setStatus("Returned to project graph");
         self.syncAccessibility();
         _ = c.InvalidateRect(self.window.hwnd, null, 0);
@@ -7592,33 +7609,47 @@ pub const App = struct {
                 self.setStatus(if (self.workspace_controls.activity_enabled) "Activity enabled" else "Activity disabled");
             },
             .zoom_out, .zoom_in => {
-                const client = logicalClientRect(self.window.hwnd, self.dpi);
-                const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
-                self.canvas.zoomBy(
-                    @divTrunc(bounds.left + bounds.right, 2),
-                    @divTrunc(bounds.top + bounds.bottom, 2),
-                    if (action == .zoom_in) 1.1 else 0.9,
-                );
+                self.stepCanvasZoom(if (action == .zoom_in) .in else .out);
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .actual_size => {
-                self.canvas.actualSize();
+                self.actualCanvasSize();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .fit_canvas => {
-                const client = logicalClientRect(self.window.hwnd, self.dpi);
-                const bounds = inputBounds(client.right, client.bottom, self.workspace_controls).canvas;
-                if (!self.refreshCanvasLayout(client)) return;
-                const content = GraphCanvas.contentSize(&self.model, self.surface, &self.canvas);
-                self.canvas.fit(
-                    .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
-                    content.width,
-                    content.height,
-                );
+                self.fitCanvas();
                 _ = c.InvalidateRect(self.window.hwnd, null, 0);
             },
             .none => {},
         }
+    }
+
+    fn stepCanvasZoom(self: *App, direction: GraphCanvas.CanvasState.ZoomDirection) void {
+        if (self.surface == .workspace) return;
+        self.canvas.prepareOpeningFit(self.canvasViewContext());
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        self.canvas.stepZoom(
+            interactiveCanvasBounds(client.right, client.bottom, self.workspace_controls),
+            direction,
+        );
+    }
+
+    fn actualCanvasSize(self: *App) void {
+        if (self.surface == .workspace) return;
+        self.canvas.prepareOpeningFit(self.canvasViewContext());
+        self.canvas.actualSize();
+    }
+
+    fn fitCanvas(self: *App) void {
+        if (self.surface == .workspace) return;
+        const client = logicalClientRect(self.window.hwnd, self.dpi);
+        if (!self.refreshCanvasLayout(client)) return;
+        const content = GraphCanvas.contentSize(&self.model, self.surface, &self.canvas);
+        self.canvas.fit(
+            interactiveCanvasBounds(client.right, client.bottom, self.workspace_controls),
+            content.width,
+            content.height,
+        );
     }
 
     /// The workspace's tabs changed: UIA republishes them so its tab list is the drawn one.
@@ -8420,6 +8451,38 @@ pub const App = struct {
         if (std.mem.eql(u8, self.status_override, "Graph layout unavailable")) {
             self.allocator.free(self.status_override);
             self.status_override = &.{};
+        }
+        if (self.surface != .workspace) {
+            const context = self.canvasViewContext();
+            self.canvas.prepareOpeningFit(context);
+            const ready = switch (self.surface) {
+                .project => if (self.model.currentGraph()) |graph| graph.nodes.items.len != 0 else false,
+                .overview => if (self.canvas.overview_layout) |overview| overview.lanes.len != 0 else false,
+                .quick_chats => self.model.quick_chats.items.len != 0,
+                .workspace => false,
+            };
+            if (ready) {
+                const content = GraphCanvas.contentSize(&self.model, self.surface, &self.canvas);
+                const floor = if (self.surface == .quick_chats)
+                    GraphCanvas.CanvasState.min_fit_scale
+                else
+                    GraphCanvas.CanvasState.default_fit_floor;
+                const vertical_anchor: ?f32 = if (self.surface == .overview)
+                    if (self.canvas.overview_layout) |overview|
+                        if (overview.start_node) |start| start.y else null
+                    else
+                        null
+                else
+                    null;
+                _ = self.canvas.fitOnOpen(
+                    context,
+                    interactiveCanvasBounds(client.right, client.bottom, self.workspace_controls),
+                    content.width,
+                    content.height,
+                    floor,
+                    vertical_anchor,
+                );
+            }
         }
         return true;
     }
@@ -10067,37 +10130,22 @@ fn onWindowMessage(
                     if (app.surface == .quick_chats) app.handleAction(.quick_chat) else app.handleAction(.create_node);
                 },
                 Accessibility.uia_zoom_out_command => {
-                    const client = logicalClientRect(hwnd, app.dpi);
-                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                    app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 0.9);
+                    app.stepCanvasZoom(.out);
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
                 Accessibility.uia_actual_size_command => {
-                    app.canvas.actualSize();
+                    app.actualCanvasSize();
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
                 Accessibility.uia_zoom_in_command => {
-                    const client = logicalClientRect(hwnd, app.dpi);
-                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                    app.canvas.zoomBy(@divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2), 1.1);
+                    app.stepCanvasZoom(.in);
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
                 Accessibility.uia_fit_command => {
-                    const client = logicalClientRect(hwnd, app.dpi);
-                    const bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
-                    if (!app.refreshCanvasLayout(client)) {
-                        result.* = 0;
-                        return true;
-                    }
-                    const content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
-                    app.canvas.fit(
-                        .{ .left = bounds.left, .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom },
-                        content.width,
-                        content.height,
-                    );
+                    app.fitCanvas();
                     app.syncAccessibility();
                     _ = c.InvalidateRect(hwnd, null, 0);
                 },
@@ -10715,16 +10763,11 @@ fn onWindowMessage(
                 };
                 if (app.surface != .workspace) {
                     if (GraphCanvas.hitTestZoomControl(x, y, bounds)) |control| {
-                        const center_x = @divTrunc(bounds.left + bounds.right, 2);
-                        const center_y = @divTrunc(bounds.top + bounds.bottom, 2);
                         switch (control) {
-                            .out => app.canvas.zoomBy(center_x, center_y, 0.9),
-                            .actual => app.canvas.actualSize(),
-                            .in => app.canvas.zoomBy(center_x, center_y, 1.1),
-                            .fit => {
-                                const content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
-                                app.canvas.fit(bounds, content.width, content.height);
-                            },
+                            .out => app.stepCanvasZoom(.out),
+                            .actual => app.actualCanvasSize(),
+                            .in => app.stepCanvasZoom(.in),
+                            .fit => app.fitCanvas(),
                         }
                         app.syncAccessibility();
                         _ = c.InvalidateRect(hwnd, null, 0);
@@ -20302,6 +20345,145 @@ test "native gesture context changes identity across project switches on the sam
     try std.testing.expectEqual(context_project_b, app.pinchGestureContext());
 }
 
+test "canvas zoom step parity uses reciprocal quarter steps at common DPIs" {
+    for ([_]u32{ 96, 144, 192 }) |dpi| {
+        var app = try overviewTestApp(dpi);
+        defer deinitOverviewTestApp(&app);
+
+        app.handleAction(.zoom_in);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.25), app.canvas.zoom, 0.0001);
+        app.handleAction(.zoom_out);
+        try std.testing.expectApproxEqAbs(@as(f32, 1), app.canvas.zoom, 0.0001);
+
+        var result: c.LRESULT = 0;
+        try std.testing.expect(onWindowMessage(
+            &app,
+            app.window.hwnd,
+            c.WM_COMMAND,
+            Accessibility.uia_zoom_in_command,
+            0,
+            &result,
+        ));
+        try std.testing.expectApproxEqAbs(@as(f32, 1.25), app.canvas.zoom, 0.0001);
+        try std.testing.expect(onWindowMessage(
+            &app,
+            app.window.hwnd,
+            c.WM_COMMAND,
+            Accessibility.uia_zoom_out_command,
+            0,
+            &result,
+        ));
+        try std.testing.expectApproxEqAbs(@as(f32, 1), app.canvas.zoom, 0.0001);
+
+        const client = logicalClientRect(app.window.hwnd, dpi);
+        const render_bounds = inputBounds(client.right, client.bottom, app.workspace_controls).canvas;
+        const bounds = c.RECT{
+            .left = render_bounds.left,
+            .top = render_bounds.top,
+            .right = render_bounds.right,
+            .bottom = render_bounds.bottom,
+        };
+        const zoom_in = GraphCanvas.zoomControlBounds(bounds, .in);
+        try nativeClick(
+            &app,
+            physicalCoordinate(@divTrunc(zoom_in.left + zoom_in.right, 2), dpi),
+            physicalCoordinate(@divTrunc(zoom_in.top + zoom_in.bottom, 2), dpi),
+        );
+        try std.testing.expectApproxEqAbs(@as(f32, 1.25), app.canvas.zoom, 0.0001);
+        const zoom_out = GraphCanvas.zoomControlBounds(bounds, .out);
+        try nativeClick(
+            &app,
+            physicalCoordinate(@divTrunc(zoom_out.left + zoom_out.right, 2), dpi),
+            physicalCoordinate(@divTrunc(zoom_out.top + zoom_out.bottom, 2), dpi),
+        );
+        try std.testing.expectApproxEqAbs(@as(f32, 1), app.canvas.zoom, 0.0001);
+    }
+}
+
+test "canvas opening fit parity uses visible responsive bounds and preserves user view" {
+    for ([_]i32{ 451, 452, 671, 672 }) |width| {
+        var app = try overviewTestApp(Dpi.base_dpi);
+        defer deinitOverviewTestApp(&app);
+        try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, width, 900, 0) != 0);
+        app.surface = .project;
+        _ = try app.model.updateFromFrame(
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\fit","name":"Fit"},"nodes":[{"id":"a","title":"A","loopType":"turnBased","state":{"idle":{}}}],"edges":[]}}}
+        );
+
+        const client = logicalClientRect(app.window.hwnd, app.dpi);
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        const visible = interactiveCanvasBounds(client.right, client.bottom, app.workspace_controls);
+        const content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
+        const visible_width: f32 = @floatFromInt(visible.right - visible.left);
+        const visible_height: f32 = @floatFromInt(visible.bottom - visible.top);
+        const raw = @min(
+            visible_width / @as(f32, @floatFromInt(content.width)),
+            visible_height / @as(f32, @floatFromInt(content.height)),
+        );
+        const expected_zoom = std.math.clamp(raw * 0.92, 0.8, 1);
+        const expected_pan_x = @as(f32, @floatFromInt(visible.left)) +
+            (visible_width - @as(f32, @floatFromInt(content.width)) * expected_zoom) / 2 -
+            @as(f32, @floatFromInt(visible.left)) * expected_zoom;
+        try std.testing.expectApproxEqAbs(expected_zoom, app.canvas.zoom, 0.0001);
+        try std.testing.expectApproxEqAbs(expected_pan_x, app.canvas.pan_x, 0.001);
+
+        app.handleAction(.zoom_in);
+        const owned_zoom = app.canvas.zoom;
+        const owned_pan_x = app.canvas.pan_x;
+        const owned_pan_y = app.canvas.pan_y;
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        try std.testing.expectApproxEqAbs(owned_zoom, app.canvas.zoom, 0.0001);
+        try std.testing.expectApproxEqAbs(owned_pan_x, app.canvas.pan_x, 0.001);
+        try std.testing.expectApproxEqAbs(owned_pan_y, app.canvas.pan_y, 0.001);
+
+        app.surface = .overview;
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        const overview_content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
+        const overview_raw = @min(
+            visible_width / @as(f32, @floatFromInt(overview_content.width)),
+            visible_height / @as(f32, @floatFromInt(overview_content.height)),
+        );
+        const expected_overview_zoom = std.math.clamp(overview_raw * 0.92, 0.8, 1);
+        const start = app.canvas.overview_layout.?.start_node.?;
+        const expected_overview_pan_y = @as(f32, @floatFromInt(visible.top)) +
+            visible_height / 2 -
+            (@as(f32, @floatFromInt(visible.top)) + start.y) * expected_overview_zoom;
+        try std.testing.expectApproxEqAbs(expected_overview_zoom, app.canvas.zoom, 0.0001);
+        try std.testing.expectApproxEqAbs(expected_overview_pan_y, app.canvas.pan_y, 0.001);
+
+        app.handleAction(.zoom_in);
+        const owned_overview_zoom = app.canvas.zoom;
+        const owned_overview_pan_x = app.canvas.pan_x;
+        const owned_overview_pan_y = app.canvas.pan_y;
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        try std.testing.expectApproxEqAbs(owned_overview_zoom, app.canvas.zoom, 0.0001);
+        try std.testing.expectApproxEqAbs(owned_overview_pan_x, app.canvas.pan_x, 0.001);
+        try std.testing.expectApproxEqAbs(owned_overview_pan_y, app.canvas.pan_y, 0.001);
+
+        _ = try app.model.updateFromFrame(
+            \\{"version":2,"kind":"event","sequence":2,"event":{"quickChatsListed":[{"id":"33333333-3333-4333-8333-333333333333","title":"Chat A","backend":"claudeCode","createdAt":0,"activity":null},{"id":"44444444-4444-4444-8444-444444444444","title":"Chat B","backend":"copilot","createdAt":1,"activity":null}]}}
+        );
+        app.surface = .quick_chats;
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        const chat_content = GraphCanvas.contentSize(&app.model, app.surface, &app.canvas);
+        const chat_raw = @min(
+            visible_width / @as(f32, @floatFromInt(chat_content.width)),
+            visible_height / @as(f32, @floatFromInt(chat_content.height)),
+        );
+        const expected_chat_zoom = std.math.clamp(chat_raw * 0.92, 0.25, 1);
+        try std.testing.expectApproxEqAbs(expected_chat_zoom, app.canvas.zoom, 0.0001);
+
+        app.handleAction(.zoom_in);
+        const owned_chat_zoom = app.canvas.zoom;
+        const owned_chat_pan_x = app.canvas.pan_x;
+        const owned_chat_pan_y = app.canvas.pan_y;
+        try std.testing.expect(app.refreshCanvasLayout(client));
+        try std.testing.expectApproxEqAbs(owned_chat_zoom, app.canvas.zoom, 0.0001);
+        try std.testing.expectApproxEqAbs(owned_chat_pan_x, app.canvas.pan_x, 0.001);
+        try std.testing.expectApproxEqAbs(owned_chat_pan_y, app.canvas.pan_y, 0.001);
+    }
+}
+
 test "main shell coordinates round trip across common Windows DPI steps" {
     for ([_]u32{ 96, 120, 144, 192 }) |dpi| {
         try std.testing.expectEqual(@as(i32, 220), logicalCoordinate(physicalCoordinate(220, dpi), dpi));
@@ -21353,6 +21535,7 @@ fn noticeTestApp() !App {
         ,
     };
     for (frames) |frame| _ = try app.model.updateFromFrame(frame);
+    app.actualCanvasSize();
     return app;
 }
 
@@ -22038,6 +22221,7 @@ fn expectDpiAccessibilityWithMetrics(surface: GraphCanvas.Surface, canvas: ?[3][
     try workspace.layout.addTab("agent", true);
     try workspace.layout.addTab("shell", false);
     app.workspace = &workspace;
+    if (surface != .workspace) app.actualCanvasSize();
     const physical_layouts = [_][3]i32{ .{ 220, 80, 708 }, .{ 330, 120, 1062 }, .{ 440, 160, 1416 } };
     for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
         app.dpi = dpi;
@@ -22609,6 +22793,7 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         try std.testing.expect(app.selectProject("A"));
         try std.testing.expect(app.selectNodeIndex(3));
         app.openGlobalOverview();
+        app.actualCanvasSize();
         try expectOverviewSelection(&app, .overview, "A", "a4");
         const beta_bounds: [4]i32 = switch (dpi) {
             96 => .{ 382, 672, 632, 768 },
@@ -22640,6 +22825,7 @@ test "cross-project overview Open actions select exact projects and emit DPI sco
         try beta_canvas.expect(&app);
 
         app.openGlobalOverview();
+        app.actualCanvasSize();
         const alpha_point = try overviewTestActionPoint(&app, .{ .project = "A", .action = .open_project });
         try applyOverviewTestLaneAction(&app, alpha_point.x, alpha_point.y, .{ .project = "A", .action = .open_project });
         try expectOverviewSelection(&app, .project, "A", "a1");
@@ -22695,6 +22881,7 @@ test "cross-project overview refresh emits both projects without changing the se
     try std.testing.expect(app.selectProject("B"));
     try std.testing.expect(app.selectNodeIndex(1));
     app.openGlobalOverview();
+    app.actualCanvasSize();
     _ = try app.model.updateFromFrame(
         \\{"version":2,"kind":"event","sequence":3,"event":{"graphChanged":{"id":"Overview Alpha","project":{"path":"A","name":"Overview Alpha"},"nodes":[{"id":"a4","title":"Alpha refreshed","loopType":"turnBased","state":"idle"},{"id":"a1","title":"Alpha 1","loopType":"turnBased","state":"idle"},{"id":"a2","title":"Alpha 2","loopType":"turnBased","state":"idle"},{"id":"a3","title":"Alpha 3","loopType":"turnBased","state":"idle"}],"edges":[]}}}
     );

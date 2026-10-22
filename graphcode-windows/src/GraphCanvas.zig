@@ -13,10 +13,18 @@ pub const connection_failure_message = "GraphCode daemon unavailable. Navigation
 
 pub const CanvasState = struct {
     const NodeOffset = struct { x: f32 = 0, y: f32 = 0 };
+    pub const command_zoom_step: f32 = 1.25;
+    pub const min_fit_scale: f32 = 0.25;
+    pub const default_fit_floor: f32 = 0.8;
+    pub const fit_margin: f32 = 0.92;
+    pub const ZoomDirection = enum { out, in };
 
     pan_x: f32 = 0,
     pan_y: f32 = 0,
     zoom: f32 = 1,
+    opening_fit_context: ?u64 = null,
+    opening_fit_pending: bool = false,
+    transform_touched: bool = false,
     dragging: bool = false,
     drag_x: i32 = 0,
     drag_y: i32 = 0,
@@ -141,8 +149,11 @@ pub const CanvasState = struct {
 
     pub fn updatePan(self: *CanvasState, x: i32, y: i32) void {
         if (!self.dragging) return;
-        self.pan_x = self.start_pan_x + @as(f32, @floatFromInt(x - self.drag_x));
-        self.pan_y = self.start_pan_y + @as(f32, @floatFromInt(y - self.drag_y));
+        const next_x = self.start_pan_x + @as(f32, @floatFromInt(x - self.drag_x));
+        const next_y = self.start_pan_y + @as(f32, @floatFromInt(y - self.drag_y));
+        if (next_x != self.pan_x or next_y != self.pan_y) self.transform_touched = true;
+        self.pan_x = next_x;
+        self.pan_y = next_y;
     }
 
     pub fn endPan(self: *CanvasState) void {
@@ -165,10 +176,13 @@ pub const CanvasState = struct {
             self.endTouchPan();
             return;
         }
-        self.pan_x = self.touch_pan_start_pan_x +
+        const next_x = self.touch_pan_start_pan_x +
             (@as(f32, @floatFromInt(x)) - @as(f32, @floatFromInt(self.touch_pan_start_x)));
-        self.pan_y = self.touch_pan_start_pan_y +
+        const next_y = self.touch_pan_start_pan_y +
             (@as(f32, @floatFromInt(y)) - @as(f32, @floatFromInt(self.touch_pan_start_y)));
+        if (next_x != self.pan_x or next_y != self.pan_y) self.transform_touched = true;
+        self.pan_x = next_x;
+        self.pan_y = next_y;
     }
 
     pub fn endTouchPan(self: *CanvasState) void {
@@ -228,6 +242,7 @@ pub const CanvasState = struct {
             self.node_drag_started = true;
         }
         // ProjectCanvasView's parent DragGesture pans the sheet, not one card.
+        self.transform_touched = true;
         self.pan_x = self.node_drag_pan_x + @as(f32, @floatFromInt(x - self.node_drag_x));
         self.pan_y = self.node_drag_pan_y + @as(f32, @floatFromInt(y - self.node_drag_y));
     }
@@ -363,14 +378,29 @@ pub const CanvasState = struct {
     }
 
     pub fn zoomBy(self: *CanvasState, x: i32, y: i32, factor: f32) void {
+        self.zoomByClamped(x, y, factor, 0.55);
+    }
+
+    fn zoomByClamped(self: *CanvasState, x: i32, y: i32, factor: f32, minimum: f32) void {
         const old_zoom = self.zoom;
-        const next = std.math.clamp(old_zoom * factor, 0.55, 1.8);
+        const next = std.math.clamp(old_zoom * factor, minimum, 1.8);
         if (next == old_zoom) return;
         const world_x = (@as(f32, @floatFromInt(x)) - self.pan_x) / old_zoom;
         const world_y = (@as(f32, @floatFromInt(y)) - self.pan_y) / old_zoom;
+        self.transform_touched = true;
         self.zoom = next;
         self.pan_x = @as(f32, @floatFromInt(x)) - world_x * next;
         self.pan_y = @as(f32, @floatFromInt(y)) - world_y * next;
+    }
+
+    pub fn stepZoom(self: *CanvasState, bounds: c.RECT, direction: ZoomDirection) void {
+        const factor: f32 = if (direction == .in) command_zoom_step else 1 / command_zoom_step;
+        self.zoomByClamped(
+            @divTrunc(bounds.left + bounds.right, 2),
+            @divTrunc(bounds.top + bounds.bottom, 2),
+            factor,
+            min_fit_scale,
+        );
     }
 
     /// Captures the gesture's starting distance/zoom baseline. Per the
@@ -435,25 +465,74 @@ pub const CanvasState = struct {
     }
 
     pub fn actualSize(self: *CanvasState) void {
+        self.transform_touched = true;
         self.zoom = 1;
         self.pan_x = 0;
         self.pan_y = 0;
     }
 
     pub fn fit(self: *CanvasState, bounds: c.RECT, content_width: i32, content_height: i32) void {
-        if (content_width <= 0 or content_height <= 0) return;
-        const viewport_width = @max(1, bounds.right - bounds.left - 48);
-        const viewport_height = @max(1, bounds.bottom - bounds.top - 48);
-        self.zoom = std.math.clamp(@min(
-            @as(f32, @floatFromInt(viewport_width)) / @as(f32, @floatFromInt(content_width)),
-            @as(f32, @floatFromInt(viewport_height)) / @as(f32, @floatFromInt(content_height)),
-        ), 0.55, 1);
-        self.pan_x = @as(f32, @floatFromInt(bounds.left + 24)) +
-            (@as(f32, @floatFromInt(viewport_width)) - @as(f32, @floatFromInt(content_width)) * self.zoom) / 2 -
-            @as(f32, @floatFromInt(bounds.left)) * self.zoom;
-        self.pan_y = @as(f32, @floatFromInt(bounds.top + 24)) +
-            (@as(f32, @floatFromInt(viewport_height)) - @as(f32, @floatFromInt(content_height)) * self.zoom) / 2 -
-            @as(f32, @floatFromInt(bounds.top)) * self.zoom;
+        if (self.applyFit(bounds, content_width, content_height, min_fit_scale, null))
+            self.transform_touched = true;
+    }
+
+    pub fn prepareOpeningFit(self: *CanvasState, context: u64) void {
+        if (self.opening_fit_context != null and self.opening_fit_context.? == context) return;
+        self.cancelInteraction();
+        self.zoom = 1;
+        self.pan_x = 0;
+        self.pan_y = 0;
+        self.opening_fit_context = context;
+        self.opening_fit_pending = true;
+        self.transform_touched = false;
+    }
+
+    pub fn fitOnOpen(
+        self: *CanvasState,
+        context: u64,
+        bounds: c.RECT,
+        content_width: i32,
+        content_height: i32,
+        floor: f32,
+        vertical_anchor: ?f32,
+    ) bool {
+        self.prepareOpeningFit(context);
+        if (!self.opening_fit_pending or self.transform_touched) return false;
+        if (!self.applyFit(bounds, content_width, content_height, floor, vertical_anchor)) return false;
+        self.opening_fit_pending = false;
+        return true;
+    }
+
+    fn applyFit(
+        self: *CanvasState,
+        bounds: c.RECT,
+        content_width: i32,
+        content_height: i32,
+        floor: f32,
+        vertical_anchor: ?f32,
+    ) bool {
+        const viewport_width = bounds.right - bounds.left;
+        const viewport_height = bounds.bottom - bounds.top;
+        if (content_width <= 0 or content_height <= 0 or viewport_width <= 0 or viewport_height <= 0)
+            return false;
+        const width: f32 = @floatFromInt(viewport_width);
+        const height: f32 = @floatFromInt(viewport_height);
+        const scale = std.math.clamp(@min(
+            width / @as(f32, @floatFromInt(content_width)),
+            height / @as(f32, @floatFromInt(content_height)),
+        ) * fit_margin, floor, 1);
+        self.zoom = scale;
+        self.pan_x = @as(f32, @floatFromInt(bounds.left)) +
+            (width - @as(f32, @floatFromInt(content_width)) * scale) / 2 -
+            @as(f32, @floatFromInt(bounds.left)) * scale;
+        self.pan_y = if (vertical_anchor) |anchor|
+            @as(f32, @floatFromInt(bounds.top)) + height / 2 -
+                (@as(f32, @floatFromInt(bounds.top)) + anchor) * scale
+        else
+            @as(f32, @floatFromInt(bounds.top)) +
+                (height - @as(f32, @floatFromInt(content_height)) * scale) / 2 -
+                @as(f32, @floatFromInt(bounds.top)) * scale;
+        return true;
     }
 };
 
@@ -4579,6 +4658,33 @@ test "canvas wheel zoom scales high-resolution trackpad deltas" {
     var state = CanvasState{};
     state.zoomAt(200, 120, 240);
     try std.testing.expectApproxEqAbs(@as(f32, 1.21), state.zoom, 0.01);
+}
+
+test "canvas fit parity applies the macOS margin and explicit floor" {
+    const bounds = rect(0, 0, 800, 600);
+
+    var framed = CanvasState{};
+    framed.fit(bounds, 1600, 900);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.46), framed.zoom, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), framed.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 93), framed.pan_y, 0.001);
+
+    var huge = CanvasState{};
+    huge.fit(bounds, 8000, 6000);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), huge.zoom, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, -600), huge.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -450), huge.pan_y, 0.001);
+}
+
+test "canvas command step parity stays reciprocal below the wheel floor" {
+    const bounds = rect(200, 40, 1000, 640);
+    var state = CanvasState{ .zoom = 0.25, .pan_x = 17, .pan_y = -9 };
+    state.stepZoom(bounds, .in);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3125), state.zoom, 0.0001);
+    state.stepZoom(bounds, .out);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), state.zoom, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 17), state.pan_x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -9), state.pan_y, 0.001);
 }
 
 test "touch pan applies screen deltas and continues through inertia updates" {

@@ -1234,7 +1234,12 @@ formatter as the cards, without a title or coarse age bucket. Project and
 overview own the rail; Quick Chats and loop workspaces do not. Paint, pointer
 routing, and the published Review rectangle share `attentionRailLayout`.
 The notebook pitch is 48 logical pixels at 100%, from macOS
-`NotebookGrid.defaultCellSize`; pan/zoom math and shortcuts are unchanged.
+`NotebookGrid.defaultCellSize`. Discrete zoom commands use reciprocal 1.25/0.8
+steps about the visible canvas centre, while wheel and pinch routing remain
+unchanged. Project and overview canvases fit their first usable content no
+smaller than 80%; Quick Chats may fit to 25%. Later layout refreshes preserve
+the user's pan or zoom, and the transform remains transient rather than joining
+the persisted node-offset layout.
 
 The existing native canvas add button now owner-draws the dark `+ New Node`
 control (or `+ New Chat`), keeping its native command, focus, and invocation
