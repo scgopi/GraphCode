@@ -6447,8 +6447,14 @@ try {
   $readLaneCaption = {
     param($pane)
     $children = @(Get-DirectChildren $pane $rawWalker)
-    $cards = @($children | Where-Object {
+    $unorderedCards = @($children | Where-Object {
       $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -match '^UIA loop '
+    })
+    $cards = @($laneOverviewIds | ForEach-Object {
+      $id = $_
+      $matches = @($unorderedCards | Where-Object { $_.Current.AutomationId -ceq $id })
+      Require ($matches.Count -eq 1) "lane caption requires one exact overview card for $id"
+      $matches[0]
     })
     $summaries = @($children | Where-Object { $_.Current.Name -match $laneSummaryPattern })
     Require ($cards.Count -eq 2) "lane caption snapshot must contain both exact fixture cards"
@@ -6553,20 +6559,41 @@ try {
     { $_.Current.AutomationId -cin $laneProjectIds -and $_.Current.Name -match '^UIA loop ' } `
     { param($items) $items.Count -eq 2 }
   $graph = $laneOpenedProbe.Graph
-  $laneOpenedCards = @($laneOpenedProbe.Items)
+  $laneOpenedCards = @($laneProjectIds | ForEach-Object {
+    $id = $_
+    $matches = @($laneOpenedProbe.Items | Where-Object { $_.Current.AutomationId -ceq $id })
+    Require ($matches.Count -eq 1) "opened project requires one exact card for $id"
+    $matches[0]
+  })
   $remainingSummaries = @(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.Name -match $laneSummaryPattern
   })
   $laneOpenedGeometry = & $readNormalizedLaneGeometry `
     @($laneOpenedCards | ForEach-Object { $_.Current.BoundingRectangle })
+  $laneGraphBoundsEqual = $graph.Current.BoundingRectangle.Equals($laneSnapshot.GraphBounds)
+  $laneNormalizedEqual = & $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry
+  $laneNonOverlap = -not $laneOpenedCards[0].Current.BoundingRectangle.IntersectsWith(
+    $laneOpenedCards[1].Current.BoundingRectangle)
+  $laneOpenNormalizedEvidence = [ordered]@{
+    names = @($laneOpenedCards | ForEach-Object { [string]$_.Current.Name })
+    automationIds = @($laneOpenedCards | ForEach-Object { [string]$_.Current.AutomationId })
+    summaryCount = $remainingSummaries.Count
+    graphBoundsEqual = $laneGraphBoundsEqual
+    normalizedActual = $laneOpenedGeometry
+    normalizedExpected = $laneSnapshotGeometry
+    normalizedEqual = $laneNormalizedEqual
+    nonOverlap = $laneNonOverlap
+  }
+  Write-Host ("UIA_LANE_OPEN_NORMALIZED_EVIDENCE=" +
+    ($laneOpenNormalizedEvidence | ConvertTo-Json -Compress -Depth 4))
   $laneOpenSucceeded = ($laneOpenedCards.Count -eq 2) -and
            ((@($laneOpenedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            ($laneOpenedCards[0].Current.AutomationId -ceq $laneProjectIds[0]) -and
            ($laneOpenedCards[1].Current.AutomationId -ceq $laneProjectIds[1]) -and
            ($remainingSummaries.Count -eq 0) -and
-           ($graph.Current.BoundingRectangle.Equals($laneSnapshot.GraphBounds)) -and
-           (& $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry) -and
-           (-not $laneOpenedCards[0].Current.BoundingRectangle.IntersectsWith($laneOpenedCards[1].Current.BoundingRectangle))
+           $laneGraphBoundsEqual -and
+           $laneNormalizedEqual -and
+           $laneNonOverlap
   Require $laneOpenSucceeded "overview lane Open click did not route to the project canvas layout"
   Require (@(Get-DirectChildren $graph $rawWalker | Where-Object {
     $_.Current.AutomationId -cin $laneOverviewIds
@@ -6578,6 +6605,31 @@ try {
     { param($items) $items.Count -eq 2 }
   $graph = $restoredLaneProbe.Graph
   $restoredLane = & $readLaneCaption $graph
+  if ($restoredLane.ActionsRight -gt $restoredLane.GraphBounds.Right - 20 * $restoredLane.Scale) {
+    $delta = [int][Math]::Floor($restoredLane.GraphBounds.Right -
+      20 * $restoredLane.Scale - $restoredLane.ActionsRight)
+    $blankX = [int]$restoredLane.GraphBounds.Right - 24
+    $blankY = [int]$restoredLane.GraphBounds.Bottom - 120
+    $occupied = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.BoundingRectangle.Contains([double]$blankX, [double]$blankY)
+    })
+    Require ($occupied.Count -eq 0 -and $blankX + $delta -gt $restoredLane.GraphBounds.Left) `
+      "restored lane actions need a pan but no safe blank-canvas gesture fits"
+    $panClientX = 0
+    $panClientY = 0
+    Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $shellWindow, $blankX, $blankY, [ref]$panClientX, [ref]$panClientY
+    )) "could not map the restored lane sheet pan to client coordinates"
+    $null = Ensure-ShellForeground $shellWindow "before-restored-lane-sheet-pan"
+    Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0201, $panClientX, $panClientY)) `
+      "restored lane sheet pan down was rejected"
+    Require ([GraphCodeUiaGateState]::PostMouseMoveAt($shellWindow, $panClientX + $delta, $panClientY)) `
+      "restored lane sheet pan move was rejected"
+    Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $panClientX + $delta, $panClientY)) `
+      "restored lane sheet pan up was rejected"
+    Start-Sleep -Milliseconds 150
+    $restoredLane = & $readLaneCaption $graph
+  }
   $restoredLaneGeometry = & $readNormalizedLaneGeometry $restoredLane.CardBounds
   Require (& $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry) `
     "overview did not restore its shared normalized card geometry and summary"

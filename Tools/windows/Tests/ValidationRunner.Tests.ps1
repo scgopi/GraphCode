@@ -4715,11 +4715,22 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '\$readNormalizedLaneGeometry\s*=\s*\{' -or
       $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
       $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -notmatch '\$cards = @\(\$laneOverviewIds \| ForEach-Object' -or
       $uiaLiveGateSource -notmatch '\$laneOpenedProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
       $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneProjectIds' -or
+      $uiaLiveGateSource -notmatch '\$laneOpenedCards = @\(\$laneProjectIds \| ForEach-Object' -or
+      $uiaLiveGateSource -notmatch 'opened project requires one exact card for \$id' -or
       $uiaLiveGateSource -notmatch '\$restoredLaneProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
       $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneOverviewIds' -or
-      $uiaLiveGateSource -notmatch '\(& \$sameNormalizedLaneGeometry \$laneOpenedGeometry \$laneSnapshotGeometry\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_LANE_OPEN_NORMALIZED_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'normalizedActual = \$laneOpenedGeometry' -or
+      $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
+      $uiaLiveGateSource -notmatch 'normalizedEqual = \$laneNormalizedEqual' -or
+      $uiaLiveGateSource -notmatch 'nonOverlap = \$laneNonOverlap' -or
+      $uiaLiveGateSource -notmatch 'before-restored-lane-sheet-pan' -or
+      $uiaLiveGateSource -notmatch 'restored lane sheet pan down was rejected' -or
+      $uiaLiveGateSource -notmatch 'restored lane sheet pan move was rejected' -or
+      $uiaLiveGateSource -notmatch 'restored lane sheet pan up was rejected' -or
       $uiaLiveGateSource -notmatch '\(& \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry\)' -or
       $uiaLiveGateSource -match '\.Equals\(\$laneSnapshot\.CardBounds\[') {
     throw "RED: overview/project navigation evidence depends on absolute fitted card coordinates instead of normalized shared geometry"
