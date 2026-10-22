@@ -11362,14 +11362,17 @@ try {
   $custodyAfter = $null
   for ($retry = 0; $retry -lt 100; $retry++) {
     $custodyAfter = Read-SketchStub
-    if (@($custodyAfter.appliedCreates).Count -eq 2) { break }
+    if (@($custodyAfter.appliedCreates).Count -eq 2 -and
+        (Edge-GraphCount $custodyAfter) -ge (Edge-GraphCount $custodyBefore) + 2 -and
+        [int]$custodyAfter.requestCount -ge [int]$custodyBefore.requestCount + 2 -and
+        [int]$custodyAfter.responseCount -ge [int]$custodyBefore.responseCount + 2) { break }
     Start-Sleep -Milliseconds 100
   }
   Require (@($custodyAfter.appliedCreates).Count -eq 2 -and
-    (Edge-GraphCount $custodyAfter) -eq (Edge-GraphCount $custodyBefore) + 1 -and
-    [int]$custodyAfter.requestCount -eq [int]$custodyBefore.requestCount + 1 -and
-    [int]$custodyAfter.responseCount -eq [int]$custodyBefore.responseCount + 1 -and
-    @($custodyAfter.receivedGraphCommands).Count -eq @($custodyBefore.receivedGraphCommands).Count + 1 -and
+    (Edge-GraphCount $custodyAfter) -eq (Edge-GraphCount $custodyBefore) + 2 -and
+    [int]$custodyAfter.requestCount -eq [int]$custodyBefore.requestCount + 2 -and
+    [int]$custodyAfter.responseCount -eq [int]$custodyBefore.responseCount + 2 -and
+    @($custodyAfter.receivedGraphCommands).Count -eq @($custodyBefore.receivedGraphCommands).Count + 2 -and
     [int]$custodyAfter.graphSequence -eq [int]$custodyBefore.graphSequence + 1 -and
     [bool]$custodyAfter.correlatedRequests) `
     "custody child not applied exactly once"
@@ -11387,7 +11390,31 @@ try {
     "stub daemon retained $($custodyReceived.Count) commands for custody request '$custodyRequest'"
   $custodyCommand = [string]$custodyReceived[0].command | ConvertFrom-Json
   $custodyWire = $custodyCommand.command.createNode._0
+  $custodyNewCommands = @($custodyAfter.receivedGraphCommands |
+    Select-Object -Skip @($custodyBefore.receivedGraphCommands).Count)
+  $custodyExpectedOutcome = [ordered]@{
+    projectPath = "graphcode://stub/project"
+    command = [ordered]@{ resumeSession = [ordered]@{ _0 = $custodyId } }
+  }
+  $custodyExpectedOutcomeJson = ConvertTo-SketchCanonicalJson $custodyExpectedOutcome
+  $custodyOutcomes = @($custodyNewCommands | Where-Object {
+    if ([string]$_.requestID -ceq $custodyRequest) {
+      $false
+    } else {
+      $candidate = [string]$_.command | ConvertFrom-Json
+      (ConvertTo-SketchCanonicalJson $candidate) -ceq $custodyExpectedOutcomeJson
+    }
+  })
+  $custodyOutcomeCommand = if ($custodyOutcomes.Count -eq 1) {
+    [string]$custodyOutcomes[0].command | ConvertFrom-Json
+  } else { $null }
   Require ($null -ne $custodyWire -and
+    $custodyNewCommands.Count -eq 2 -and
+    $custodyOutcomes.Count -eq 1 -and
+    [string]$custodyOutcomes[0].requestID -cne $custodyRequest -and
+    (ConvertTo-SketchCanonicalJson $custodyOutcomeCommand) -ceq $custodyExpectedOutcomeJson -and
+    -not [string]::IsNullOrWhiteSpace([string]$custodyOutcomes[0].requestID) -and
+    @($custodyAfter.unansweredRequests) -notcontains [string]$custodyOutcomes[0].requestID -and
     $custodyCommand.projectPath -ceq "graphcode://stub/project" -and
     $custodyWire.id -ceq $custodyId -and $custodyWire.title -ceq "UIA custody child" -and
     $custodyWire.createdBy -ceq $renameNodeId -and $custodyWire.backend -ceq "claudeCode" -and
@@ -11472,6 +11499,11 @@ try {
       }
       backend = [string]$custodyWire.backend; requestId = $custodyRequest
       requestAnswered = $true
+      exactIdOutcome = @{
+        requestId = [string]$custodyOutcomes[0].requestID
+        requestAnswered = $true
+        wire = $custodyOutcomeCommand
+      }
       receivedWire = $custodyCommand
       recorderSnapshotBase64 = Edge-LogBytes
       appliedCount = @($custodyAfter.appliedCreates).Count

@@ -4298,9 +4298,27 @@ Start-Sleep -Seconds 60
   $custodyInstructionReadback = $uiaLiveGateSource.IndexOf(
     '$custodyInstructionAfterBackend = Sketch-Field 9104',
     [Math]::Max(0, $custodyBackendChange), [StringComparison]::Ordinal)
+  $custodyCountIndex = $uiaLiveGateSource.IndexOf(
+    '(Edge-GraphCount $custodyAfter) -eq (Edge-GraphCount $custodyBefore) + 2',
+    [Math]::Max(0, $custodyInstructionReadback), [StringComparison]::Ordinal)
+  $custodyNewCommandsIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyNewCommands = @($custodyAfter.receivedGraphCommands |',
+    [Math]::Max(0, $custodyCountIndex), [StringComparison]::Ordinal)
+  $custodyExpectedOutcomeIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyExpectedOutcome = [ordered]@{',
+    [Math]::Max(0, $custodyNewCommandsIndex), [StringComparison]::Ordinal)
+  $custodyOutcomeSelectionIndex = $uiaLiveGateSource.IndexOf(
+    '$custodyOutcomes = @($custodyNewCommands | Where-Object {',
+    [Math]::Max(0, $custodyExpectedOutcomeIndex), [StringComparison]::Ordinal)
+  $custodyOutcomeRequireIndex = $uiaLiveGateSource.IndexOf(
+    '[string]$custodyOutcomes[0].requestID -cne $custodyRequest -and',
+    [Math]::Max(0, $custodyOutcomeSelectionIndex), [StringComparison]::Ordinal)
+  $custodyOutcomeAnsweredIndex = $uiaLiveGateSource.IndexOf(
+    '@($custodyAfter.unansweredRequests) -notcontains [string]$custodyOutcomes[0].requestID -and',
+    [Math]::Max(0, $custodyOutcomeRequireIndex), [StringComparison]::Ordinal)
   $custodyRenderWaitIndex = $uiaLiveGateSource.IndexOf(
     '$custodyRenderWait = Wait-SketchGraphCard',
-    [Math]::Max(0, $custodyInstructionReadback), [StringComparison]::Ordinal)
+    [Math]::Max(0, $custodyOutcomeAnsweredIndex), [StringComparison]::Ordinal)
   $custodyWorkspaceIdIndex = $uiaLiveGateSource.IndexOf(
     '$custodyWorkspaceId = Get-MultiProjectAutomationId "workspace-loop-bar" $custodyId',
     [Math]::Max(0, $custodyRenderWaitIndex), [StringComparison]::Ordinal)
@@ -4322,7 +4340,13 @@ Start-Sleep -Seconds 60
       $custodyInstructionType -le $custodyTurnSelection -or
       $custodyBackendChange -le $custodyInstructionType -or
       $custodyInstructionReadback -le $custodyBackendChange -or
-      $custodyRenderWaitIndex -le $custodyInstructionReadback -or
+      $custodyCountIndex -le $custodyInstructionReadback -or
+      $custodyNewCommandsIndex -le $custodyCountIndex -or
+      $custodyExpectedOutcomeIndex -le $custodyNewCommandsIndex -or
+      $custodyOutcomeSelectionIndex -le $custodyExpectedOutcomeIndex -or
+      $custodyOutcomeRequireIndex -le $custodyOutcomeSelectionIndex -or
+      $custodyOutcomeAnsweredIndex -le $custodyOutcomeRequireIndex -or
+      $custodyRenderWaitIndex -le $custodyOutcomeAnsweredIndex -or
       $custodyWorkspaceIdIndex -le $custodyRenderWaitIndex -or
       $custodyWorkspaceWaitIndex -le $custodyWorkspaceIdIndex -or
       $custodyShowGraphInvokeIndex -le $custodyWorkspaceWaitIndex -or
@@ -4376,6 +4400,15 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$custodyReceived\.Count -eq 1' -or
       $uiaLiveGateSource -notmatch '\$custodyCommand = \[string\]\$custodyReceived\[0\]\.command \| ConvertFrom-Json' -or
       $uiaLiveGateSource -notmatch '\$custodyWire = \$custodyCommand\.command\.createNode\._0' -or
+      $uiaLiveGateSource -notmatch '\[int\]\$custodyAfter\.requestCount -eq \[int\]\$custodyBefore\.requestCount \+ 2' -or
+      $uiaLiveGateSource -notmatch '\[int\]\$custodyAfter\.responseCount -eq \[int\]\$custodyBefore\.responseCount \+ 2' -or
+      $uiaLiveGateSource -notmatch '\$custodyNewCommands\.Count -eq 2' -or
+      $uiaLiveGateSource -notmatch 'Select-Object -Skip @\(\$custodyBefore\.receivedGraphCommands\)\.Count' -or
+      $uiaLiveGateSource -notmatch '\$custodyExpectedOutcomeJson = ConvertTo-SketchCanonicalJson \$custodyExpectedOutcome' -or
+      $uiaLiveGateSource -notmatch '\$custodyOutcomes\.Count -eq 1' -or
+      $uiaLiveGateSource -notmatch '\(ConvertTo-SketchCanonicalJson \$custodyOutcomeCommand\) -ceq \$custodyExpectedOutcomeJson' -or
+      $uiaLiveGateSource -notmatch '-not \[string\]::IsNullOrWhiteSpace\(\[string\]\$custodyOutcomes\[0\]\.requestID\)' -or
+      $uiaLiveGateSource -notmatch 'exactIdOutcome = @\{' -or
       $uiaLiveGateSource -notmatch '\$custodyCommand\.projectPath -ceq "graphcode://stub/project"' -or
       $uiaLiveGateSource -match '\$custodyLogged = \(Read-DaemonCommandLog' -or
       $uiaLiveGateSource -match '\(\$custodyLogged \| ConvertTo-Json' -or
