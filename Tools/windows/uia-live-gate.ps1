@@ -6495,6 +6495,7 @@ try {
       ([Math]::Abs($normalized[1].Height - 96) -le 1)) `
       "lane cards do not normalize to the shared 250x96 geometry"
     return [pscustomobject]@{
+      Scale = $scale
       DeltaX = ($cardBounds[1].Left - $cardBounds[0].Left) / $scale
       DeltaY = ($cardBounds[1].Top - $cardBounds[0].Top) / $scale
       XOrder = [Math]::Sign($cardBounds[1].Left - $cardBounds[0].Left)
@@ -6503,10 +6504,20 @@ try {
   }
   $sameNormalizedLaneGeometry = {
     param($actual, $expected)
-    return ([Math]::Abs($actual.DeltaX - $expected.DeltaX) -le 1) -and
-      ([Math]::Abs($actual.DeltaY - $expected.DeltaY) -le 1) -and
-      ($actual.XOrder -eq $expected.XOrder) -and
-      ($actual.YOrder -eq $expected.YOrder)
+    Require ($actual.Scale -gt 0 -and $expected.Scale -gt 0) `
+      "normalized lane comparison requires positive scales"
+    $tolerance = 1 / $actual.Scale + 1 / $expected.Scale + 0.01
+    $deltaXError = [Math]::Abs($actual.DeltaX - $expected.DeltaX)
+    $deltaYError = [Math]::Abs($actual.DeltaY - $expected.DeltaY)
+    return [pscustomobject]@{
+      Equal = ($deltaXError -le $tolerance) -and
+        ($deltaYError -le $tolerance) -and
+        ($actual.XOrder -eq $expected.XOrder) -and
+        ($actual.YOrder -eq $expected.YOrder)
+      Tolerance = $tolerance
+      DeltaXError = $deltaXError
+      DeltaYError = $deltaYError
+    }
   }
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
@@ -6571,7 +6582,8 @@ try {
   $laneOpenedGeometry = & $readNormalizedLaneGeometry `
     @($laneOpenedCards | ForEach-Object { $_.Current.BoundingRectangle })
   $laneGraphBoundsEqual = $graph.Current.BoundingRectangle.Equals($laneSnapshot.GraphBounds)
-  $laneNormalizedEqual = & $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry
+  $laneNormalizedComparison = & $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry
+  $laneNormalizedEqual = $laneNormalizedComparison.Equal
   $laneNonOverlap = -not $laneOpenedCards[0].Current.BoundingRectangle.IntersectsWith(
     $laneOpenedCards[1].Current.BoundingRectangle)
   $laneOpenNormalizedEvidence = [ordered]@{
@@ -6582,6 +6594,9 @@ try {
     normalizedActual = $laneOpenedGeometry
     normalizedExpected = $laneSnapshotGeometry
     normalizedEqual = $laneNormalizedEqual
+    normalizedTolerance = $laneNormalizedComparison.Tolerance
+    normalizedDeltaXError = $laneNormalizedComparison.DeltaXError
+    normalizedDeltaYError = $laneNormalizedComparison.DeltaYError
     nonOverlap = $laneNonOverlap
   }
   Write-Host ("UIA_LANE_OPEN_NORMALIZED_EVIDENCE=" +
@@ -6631,7 +6646,8 @@ try {
     $restoredLane = & $readLaneCaption $graph
   }
   $restoredLaneGeometry = & $readNormalizedLaneGeometry $restoredLane.CardBounds
-  Require (& $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry) `
+  $restoredLaneComparison = & $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry
+  Require $restoredLaneComparison.Equal `
     "overview did not restore its shared normalized card geometry and summary"
   Require ($restoredLane.OpenX -gt $restoredLane.GraphBounds.Left -and
     $restoredLane.ActionsRight -lt $restoredLane.GraphBounds.Right -and

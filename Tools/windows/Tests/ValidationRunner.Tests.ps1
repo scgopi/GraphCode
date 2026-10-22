@@ -4715,6 +4715,9 @@ Start-Sleep -Seconds 60
   if ($uiaLiveGateSource -notmatch '\$readNormalizedLaneGeometry\s*=\s*\{' -or
       $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
       $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -notmatch 'Scale = \$scale' -or
+      $uiaLiveGateSource -notmatch '\$tolerance = 1 / \$actual\.Scale \+ 1 / \$expected\.Scale \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive scales' -or
       $uiaLiveGateSource -notmatch '\$cards = @\(\$laneOverviewIds \| ForEach-Object' -or
       $uiaLiveGateSource -notmatch '\$laneOpenedProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
       $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneProjectIds' -or
@@ -4726,12 +4729,16 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'normalizedActual = \$laneOpenedGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedEqual = \$laneNormalizedEqual' -or
+      $uiaLiveGateSource -notmatch 'normalizedTolerance = \$laneNormalizedComparison\.Tolerance' -or
+      $uiaLiveGateSource -notmatch 'normalizedDeltaXError = \$laneNormalizedComparison\.DeltaXError' -or
+      $uiaLiveGateSource -notmatch 'normalizedDeltaYError = \$laneNormalizedComparison\.DeltaYError' -or
       $uiaLiveGateSource -notmatch 'nonOverlap = \$laneNonOverlap' -or
       $uiaLiveGateSource -notmatch 'before-restored-lane-sheet-pan' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan down was rejected' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan move was rejected' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan up was rejected' -or
-      $uiaLiveGateSource -notmatch '\(& \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry\)' -or
+      $uiaLiveGateSource -notmatch '\$restoredLaneComparison = & \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry' -or
+      $uiaLiveGateSource -notmatch 'Require \$restoredLaneComparison\.Equal' -or
       $uiaLiveGateSource -match '\.Equals\(\$laneSnapshot\.CardBounds\[') {
     throw "RED: overview/project navigation evidence depends on absolute fitted card coordinates instead of normalized shared geometry"
   }
