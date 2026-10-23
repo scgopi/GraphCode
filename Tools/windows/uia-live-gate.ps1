@@ -4546,16 +4546,20 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
   }
   $pixelWidth = $card[2] - $card[0]
   $pixelHeight = $card[3] - $card[1]
-  $scale = $pixelHeight / 96
+  $scaleSource = if ([Math]::Abs($pixelHeight - 96) -le 1) { "card-height-exact" } else { "card-width-rounded" }
+  $scale = if ($scaleSource -ceq "card-height-exact") { $pixelHeight / 96 } else { $pixelWidth / 250 }
   $normalizedWidth = $pixelWidth / $scale
-  $widthTolerance = if ($scale -lt 1) {
-    96 * (1 + [Math]::Abs($normalizedWidth / 96)) /
-      [Math]::Max(1, $pixelHeight - 1) + 0.01
-  } else {
-    1
-  }
+  $normalizedHeight = $pixelHeight / $scale
+  $widthTolerance = 1
+  $heightTolerance = if ($scaleSource -ceq "card-width-rounded" -and $scale -lt 1) {
+    250 * (1 + [Math]::Abs($normalizedHeight / 250)) /
+      [Math]::Max(1, $pixelWidth - 1) + 0.01
+  } else { 1 }
   if ([Math]::Abs($normalizedWidth - 250) -gt $widthTolerance) {
     throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
+  }
+  if ([Math]::Abs($normalizedHeight - 96) -gt $heightTolerance) {
+    throw "MULTIPROJECT_BOUNDS: overview-card aspect differs from source geometry"
   }
   $minimumLaneWidth = 1522
   $laneCardInset = 82
@@ -4575,8 +4579,13 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
       "GraphCanvas one-root producer contract with caller-supplied summary anchor; not independent native proof"
     } else { "Source-only one-root producer geometry; no native summary supplied" })
     scale = $scale
+    scaleSource = $scaleSource
+    pixelWidth = $pixelWidth
+    pixelHeight = $pixelHeight
     normalizedWidth = $normalizedWidth
+    normalizedHeight = $normalizedHeight
     widthTolerance = $widthTolerance
+    heightTolerance = $heightTolerance
     band = @($laneLeft, $laneTop, $laneRight, ($laneTop + $oneRowLaneHeight * $scale))
     open = @(($anchor[2] + 8 * $scale), $anchor[1], ($anchor[2] + 64 * $scale), $anchor[3])
     summary = $expectedSummary

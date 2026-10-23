@@ -65,10 +65,10 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
   }
   Invoke-MultiCase "compact overview fitted rounding retains source geometry" {
     $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(390,185,500,227)
-    Assert-MultiCase ($geometry.scale -eq 0.4375 -and
-      [Math]::Abs($geometry.normalizedWidth - 251.42857142857142) -lt $geometry.widthTolerance) `
-      "sub-100% integer-rounded card did not retain its source geometry"
-    return "Sub-100% UIA width and height rounding bounded from the observed pixel denominator"
+    Assert-MultiCase ($geometry.scale -eq 0.44 -and $geometry.scaleSource -ceq "card-width-rounded" -and
+      [Math]::Abs($geometry.normalizedHeight - 95.45454545454545) -lt $geometry.heightTolerance) `
+      "sub-100% integer-rounded card height did not retain its source geometry"
+    return "Sub-100% UIA height rounding bounded from the longer observed width denominator"
   }
   Invoke-MultiCase "compact overview rejects obsolete 220x86 card geometry" -Negative {
     $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204) } "MULTIPROJECT_BOUNDS"
@@ -1653,7 +1653,15 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     $compactProjection.cards[3].bounds = @(390,363,640,459)
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $compactProjection $retainedOwners $null 3140) `
       "compact geometry rejected the same exact two-node/two-summary identities and names"
-    return "Original hosted bounds remain unchanged and are rejected; synthetic current-geometry projection of the same four identities is accepted, not a new native capture"
+    $projection = Copy-MultiProjectValue $retainedProjection
+    $projection.canvasBounds = @(228,85,1036,780)
+    $projection.cards[0].bounds = @(900,307,1129,323)
+    $projection.cards[1].bounds = @(88,330,288,406)
+    $projection.cards[2].bounds = @(900,450,1129,466)
+    $projection.cards[3].bounds = @(88,472,288,548)
+    Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $projection $retainedOwners $null 3140) `
+      "complete admitted 80 percent roster was rejected because rounded card height displaced summary geometry"
+    return "Historical 220x86 bounds rejected; synthetic source geometry and exact admitted 80 percent 200x76 node/229x16 summary roster accepted"
   }
   Invoke-MultiCase "source summary identity independent fixture and hosted goldens" {
     Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "A") -ceq
@@ -3994,9 +4002,10 @@ Start-Sleep -Seconds 60
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: explicit complete overview taxonomy lacks $required" }
   }
   foreach ($required in @('$pixelWidth = $card[2] - $card[0]', '$pixelHeight = $card[3] - $card[1]',
-      '$normalizedWidth = $pixelWidth / $scale', '$widthTolerance = if ($scale -lt 1)',
-      '[Math]::Max(1, $pixelHeight - 1) + 0.01', 'normalizedWidth = $normalizedWidth',
-      'widthTolerance = $widthTolerance')) {
+      '$scaleSource = if ([Math]::Abs($pixelHeight - 96) -le 1)', '$pixelWidth / 250',
+      '$normalizedHeight = $pixelHeight / $scale', '$heightTolerance = if ($scaleSource -ceq "card-width-rounded" -and $scale -lt 1)',
+      '[Math]::Max(1, $pixelWidth - 1) + 0.01', 'scaleSource = $scaleSource',
+      'normalizedHeight = $normalizedHeight', 'heightTolerance = $heightTolerance')) {
     if (-not $uiaLiveGateSource.Contains($required)) {
       throw "RED: multi-project fitted card geometry lacks denominator-derived rounding budget: $required"
     }
