@@ -4544,8 +4544,17 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
   if ($card[1] -lt $canvas[1] -or $card[3] -gt $canvas[3]) {
     throw "MULTIPROJECT_BOUNDS: vertically clipped card cannot establish scale"
   }
-  $scale = ($card[3] - $card[1]) / 96
-  if ([Math]::Abs(($card[2] - $card[0]) / $scale - 250) -gt 1) {
+  $pixelWidth = $card[2] - $card[0]
+  $pixelHeight = $card[3] - $card[1]
+  $scale = $pixelHeight / 96
+  $normalizedWidth = $pixelWidth / $scale
+  $widthTolerance = if ($scale -lt 1) {
+    96 * (1 + [Math]::Abs($normalizedWidth / 96)) /
+      [Math]::Max(1, $pixelHeight - 1) + 0.01
+  } else {
+    1
+  }
+  if ([Math]::Abs($normalizedWidth - 250) -gt $widthTolerance) {
     throw "MULTIPROJECT_BOUNDS: overview-card scale differs from source geometry"
   }
   $minimumLaneWidth = 1522
@@ -4566,6 +4575,8 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
       "GraphCanvas one-root producer contract with caller-supplied summary anchor; not independent native proof"
     } else { "Source-only one-root producer geometry; no native summary supplied" })
     scale = $scale
+    normalizedWidth = $normalizedWidth
+    widthTolerance = $widthTolerance
     band = @($laneLeft, $laneTop, $laneRight, ($laneTop + $oneRowLaneHeight * $scale))
     open = @(($anchor[2] + 8 * $scale), $anchor[1], ($anchor[2] + 64 * $scale), $anchor[3])
     summary = $expectedSummary

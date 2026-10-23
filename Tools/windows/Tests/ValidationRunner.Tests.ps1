@@ -63,6 +63,13 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     }
     return "Literal narrow/wide and once-only 144-DPI source geometry"
   }
+  Invoke-MultiCase "compact overview fitted rounding retains source geometry" {
+    $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(390,185,500,227)
+    Assert-MultiCase ($geometry.scale -eq 0.4375 -and
+      [Math]::Abs($geometry.normalizedWidth - 251.42857142857142) -lt $geometry.widthTolerance) `
+      "sub-100% integer-rounded card did not retain its source geometry"
+    return "Sub-100% UIA width and height rounding bounded from the observed pixel denominator"
+  }
   Invoke-MultiCase "compact overview rejects obsolete 220x86 card geometry" -Negative {
     $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(220,34,1200,900) @(262,118,482,204) } "MULTIPROJECT_BOUNDS"
     $null = Reject-MultiCase { Get-MultiProjectLaneGeometry @(358,215,1402,942) @(19,210,268,306) } "MULTIPROJECT_BOUNDS"
@@ -3985,6 +3992,14 @@ Start-Sleep -Seconds 60
       "sourceSummaryCount", "canvasFragmentClasses", "overview-worktree-notice", "source-summary",
       "workspace navigation was not requested", 'Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "source-summary" -and $_.projectPath -ceq $owner.path })[0].bounds)')) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: explicit complete overview taxonomy lacks $required" }
+  }
+  foreach ($required in @('$pixelWidth = $card[2] - $card[0]', '$pixelHeight = $card[3] - $card[1]',
+      '$normalizedWidth = $pixelWidth / $scale', '$widthTolerance = if ($scale -lt 1)',
+      '[Math]::Max(1, $pixelHeight - 1) + 0.01', 'normalizedWidth = $normalizedWidth',
+      'widthTolerance = $widthTolerance')) {
+    if (-not $uiaLiveGateSource.Contains($required)) {
+      throw "RED: multi-project fitted card geometry lacks denominator-derived rounding budget: $required"
+    }
   }
   $metadataObserverAst = [Management.Automation.Language.Parser]::ParseInput($uiaLiveGateSource,[ref]$null,[ref]$null)
   $metadataObserver = $metadataObserverAst.Find({
