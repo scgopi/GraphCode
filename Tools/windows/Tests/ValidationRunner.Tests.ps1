@@ -4716,6 +4716,7 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
       $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
       $uiaLiveGateSource -notmatch 'Scale = \$scale' -or
+      $uiaLiveGateSource -notmatch 'PixelWidth = \[double\]\$cardBounds\[0\]\.Width' -or
       $uiaLiveGateSource -notmatch '\$sizeTolerance = 1 / \$scale \+ 0\.01' -or
       $uiaLiveGateSource -notmatch 'SizeTolerance = \$sizeTolerance' -or
       $uiaLiveGateSource -notmatch 'Widths = @\(\$normalized \| ForEach-Object' -or
@@ -4724,7 +4725,15 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Width - 250\) -le \$sizeTolerance' -or
       $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[0\]\.Height - 96\) -le \$sizeTolerance' -or
       $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Height - 96\) -le \$sizeTolerance' -or
-      $uiaLiveGateSource -notmatch '\$tolerance = 1 / \$actual\.Scale \+ 1 / \$expected\.Scale \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch '\$actualDeltaXBudget = 250 \*' -or
+      $uiaLiveGateSource -notmatch '\$expectedDeltaXBudget = 250 \*' -or
+      $uiaLiveGateSource -notmatch '\$actualDeltaYBudget = 250 \*' -or
+      $uiaLiveGateSource -notmatch '\$expectedDeltaYBudget = 250 \*' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$actual\.PixelWidth - 1\)' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$expected\.PixelWidth - 1\)' -or
+      $uiaLiveGateSource -notmatch '\$deltaXTolerance = \$actualDeltaXBudget \+ \$expectedDeltaXBudget \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch '\$deltaYTolerance = \$actualDeltaYBudget \+ \$expectedDeltaYBudget \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive pixel widths' -or
       $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive scales' -or
       $uiaLiveGateSource -notmatch '\$cards = @\(\$laneOverviewIds \| ForEach-Object' -or
       $uiaLiveGateSource -notmatch '\$laneOpenedProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
@@ -4737,7 +4746,16 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'normalizedActual = \$laneOpenedGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedEqual = \$laneNormalizedEqual' -or
-      $uiaLiveGateSource -notmatch 'normalizedTolerance = \$laneNormalizedComparison\.Tolerance' -or
+      $uiaLiveGateSource -notmatch 'normalizedDeltaXTolerance = \$laneNormalizedComparison\.DeltaXTolerance' -or
+      $uiaLiveGateSource -notmatch 'normalizedDeltaYTolerance = \$laneNormalizedComparison\.DeltaYTolerance' -or
+      $uiaLiveGateSource -notmatch 'normalizedActualDeltaXBudget = \$laneNormalizedComparison\.ActualDeltaXBudget' -or
+      $uiaLiveGateSource -notmatch 'normalizedExpectedDeltaXBudget = \$laneNormalizedComparison\.ExpectedDeltaXBudget' -or
+      $uiaLiveGateSource -notmatch 'normalizedActualDeltaYBudget = \$laneNormalizedComparison\.ActualDeltaYBudget' -or
+      $uiaLiveGateSource -notmatch 'normalizedExpectedDeltaYBudget = \$laneNormalizedComparison\.ExpectedDeltaYBudget' -or
+      $uiaLiveGateSource -notmatch 'ActualDeltaXBudget = \$actualDeltaXBudget' -or
+      $uiaLiveGateSource -notmatch 'ExpectedDeltaXBudget = \$expectedDeltaXBudget' -or
+      $uiaLiveGateSource -notmatch 'ActualDeltaYBudget = \$actualDeltaYBudget' -or
+      $uiaLiveGateSource -notmatch 'ExpectedDeltaYBudget = \$expectedDeltaYBudget' -or
       $uiaLiveGateSource -notmatch 'normalizedDeltaXError = \$laneNormalizedComparison\.DeltaXError' -or
       $uiaLiveGateSource -notmatch 'normalizedDeltaYError = \$laneNormalizedComparison\.DeltaYError' -or
       $uiaLiveGateSource -notmatch 'nonOverlap = \$laneNonOverlap' -or

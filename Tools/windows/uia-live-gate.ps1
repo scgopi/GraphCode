@@ -6497,6 +6497,7 @@ try {
       "lane cards do not normalize to the shared 250x96 geometry"
     return [pscustomobject]@{
       Scale = $scale
+      PixelWidth = [double]$cardBounds[0].Width
       SizeTolerance = $sizeTolerance
       Widths = @($normalized | ForEach-Object { $_.Width })
       Heights = @($normalized | ForEach-Object { $_.Height })
@@ -6510,15 +6511,37 @@ try {
     param($actual, $expected)
     Require ($actual.Scale -gt 0 -and $expected.Scale -gt 0) `
       "normalized lane comparison requires positive scales"
-    $tolerance = 1 / $actual.Scale + 1 / $expected.Scale + 0.01
     $deltaXError = [Math]::Abs($actual.DeltaX - $expected.DeltaX)
     $deltaYError = [Math]::Abs($actual.DeltaY - $expected.DeltaY)
+    Require ($actual.PixelWidth -gt 0 -and $expected.PixelWidth -gt 0) `
+      "normalized lane comparison requires positive pixel widths"
+    # Both the screen-space delta and the card width used as the scale
+    # denominator are differences of integer-rounded UIA coordinates.
+    $actualDeltaXBudget = 250 *
+      (1 + [Math]::Abs($actual.DeltaX / 250)) /
+      [Math]::Max(1, $actual.PixelWidth - 1)
+    $expectedDeltaXBudget = 250 *
+      (1 + [Math]::Abs($expected.DeltaX / 250)) /
+      [Math]::Max(1, $expected.PixelWidth - 1)
+    $actualDeltaYBudget = 250 *
+      (1 + [Math]::Abs($actual.DeltaY / 250)) /
+      [Math]::Max(1, $actual.PixelWidth - 1)
+    $expectedDeltaYBudget = 250 *
+      (1 + [Math]::Abs($expected.DeltaY / 250)) /
+      [Math]::Max(1, $expected.PixelWidth - 1)
+    $deltaXTolerance = $actualDeltaXBudget + $expectedDeltaXBudget + 0.01
+    $deltaYTolerance = $actualDeltaYBudget + $expectedDeltaYBudget + 0.01
     return [pscustomobject]@{
-      Equal = ($deltaXError -le $tolerance) -and
-        ($deltaYError -le $tolerance) -and
+      Equal = ($deltaXError -le $deltaXTolerance) -and
+        ($deltaYError -le $deltaYTolerance) -and
         ($actual.XOrder -eq $expected.XOrder) -and
         ($actual.YOrder -eq $expected.YOrder)
-      Tolerance = $tolerance
+      DeltaXTolerance = $deltaXTolerance
+      DeltaYTolerance = $deltaYTolerance
+      ActualDeltaXBudget = $actualDeltaXBudget
+      ExpectedDeltaXBudget = $expectedDeltaXBudget
+      ActualDeltaYBudget = $actualDeltaYBudget
+      ExpectedDeltaYBudget = $expectedDeltaYBudget
       DeltaXError = $deltaXError
       DeltaYError = $deltaYError
     }
@@ -6598,7 +6621,12 @@ try {
     normalizedActual = $laneOpenedGeometry
     normalizedExpected = $laneSnapshotGeometry
     normalizedEqual = $laneNormalizedEqual
-    normalizedTolerance = $laneNormalizedComparison.Tolerance
+    normalizedDeltaXTolerance = $laneNormalizedComparison.DeltaXTolerance
+    normalizedDeltaYTolerance = $laneNormalizedComparison.DeltaYTolerance
+    normalizedActualDeltaXBudget = $laneNormalizedComparison.ActualDeltaXBudget
+    normalizedExpectedDeltaXBudget = $laneNormalizedComparison.ExpectedDeltaXBudget
+    normalizedActualDeltaYBudget = $laneNormalizedComparison.ActualDeltaYBudget
+    normalizedExpectedDeltaYBudget = $laneNormalizedComparison.ExpectedDeltaYBudget
     normalizedDeltaXError = $laneNormalizedComparison.DeltaXError
     normalizedDeltaYError = $laneNormalizedComparison.DeltaYError
     nonOverlap = $laneNonOverlap
