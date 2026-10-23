@@ -6483,19 +6483,23 @@ try {
     Require ($cardBounds.Count -eq 2) "normalized lane geometry requires exactly two cards"
     $scale = $cardBounds[0].Width / 250.0
     Require ($scale -gt 0) "normalized lane geometry has a non-positive scale"
+    $sizeTolerance = 1 / $scale + 0.01
     $normalized = @($cardBounds | ForEach-Object {
       [pscustomobject]@{
         Width = $_.Width / $scale
         Height = $_.Height / $scale
       }
     })
-    Require (([Math]::Abs($normalized[0].Width - 250) -le 1) -and
-      ([Math]::Abs($normalized[1].Width - 250) -le 1) -and
-      ([Math]::Abs($normalized[0].Height - 96) -le 1) -and
-      ([Math]::Abs($normalized[1].Height - 96) -le 1)) `
+    Require (([Math]::Abs($normalized[0].Width - 250) -le 0.01) -and
+      ([Math]::Abs($normalized[1].Width - 250) -le $sizeTolerance) -and
+      ([Math]::Abs($normalized[0].Height - 96) -le $sizeTolerance) -and
+      ([Math]::Abs($normalized[1].Height - 96) -le $sizeTolerance)) `
       "lane cards do not normalize to the shared 250x96 geometry"
     return [pscustomobject]@{
       Scale = $scale
+      SizeTolerance = $sizeTolerance
+      Widths = @($normalized | ForEach-Object { $_.Width })
+      Heights = @($normalized | ForEach-Object { $_.Height })
       DeltaX = ($cardBounds[1].Left - $cardBounds[0].Left) / $scale
       DeltaY = ($cardBounds[1].Top - $cardBounds[0].Top) / $scale
       XOrder = [Math]::Sign($cardBounds[1].Left - $cardBounds[0].Left)
@@ -6647,6 +6651,14 @@ try {
   }
   $restoredLaneGeometry = & $readNormalizedLaneGeometry $restoredLane.CardBounds
   $restoredLaneComparison = & $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry
+  $restoredLaneNormalizedEvidence = [ordered]@{
+    automationIds = $laneOverviewIds
+    normalizedActual = $restoredLaneGeometry
+    normalizedExpected = $laneSnapshotGeometry
+    comparison = $restoredLaneComparison
+  }
+  Write-Host ("UIA_RESTORED_LANE_NORMALIZED_EVIDENCE=" +
+    ($restoredLaneNormalizedEvidence | ConvertTo-Json -Compress -Depth 4))
   Require $restoredLaneComparison.Equal `
     "overview did not restore its shared normalized card geometry and summary"
   Require ($restoredLane.OpenX -gt $restoredLane.GraphBounds.Left -and

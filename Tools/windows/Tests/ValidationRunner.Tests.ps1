@@ -4716,6 +4716,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
       $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
       $uiaLiveGateSource -notmatch 'Scale = \$scale' -or
+      $uiaLiveGateSource -notmatch '\$sizeTolerance = 1 / \$scale \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch 'SizeTolerance = \$sizeTolerance' -or
+      $uiaLiveGateSource -notmatch 'Widths = @\(\$normalized \| ForEach-Object' -or
+      $uiaLiveGateSource -notmatch 'Heights = @\(\$normalized \| ForEach-Object' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[0\]\.Width - 250\) -le 0\.01' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Width - 250\) -le \$sizeTolerance' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[0\]\.Height - 96\) -le \$sizeTolerance' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Height - 96\) -le \$sizeTolerance' -or
       $uiaLiveGateSource -notmatch '\$tolerance = 1 / \$actual\.Scale \+ 1 / \$expected\.Scale \+ 0\.01' -or
       $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive scales' -or
       $uiaLiveGateSource -notmatch '\$cards = @\(\$laneOverviewIds \| ForEach-Object' -or
@@ -4738,6 +4746,9 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'restored lane sheet pan move was rejected' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan up was rejected' -or
       $uiaLiveGateSource -notmatch '\$restoredLaneComparison = & \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry' -or
+      $uiaLiveGateSource -notmatch 'UIA_RESTORED_LANE_NORMALIZED_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'normalizedActual = \$restoredLaneGeometry' -or
+      $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'Require \$restoredLaneComparison\.Equal' -or
       $uiaLiveGateSource -match '\.Equals\(\$laneSnapshot\.CardBounds\[') {
     throw "RED: overview/project navigation evidence depends on absolute fitted card coordinates instead of normalized shared geometry"
