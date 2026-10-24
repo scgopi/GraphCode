@@ -62,10 +62,37 @@ reset pane published fresh text. Applied selection, visible caret/geometry,
 provider range conformance, and end-to-end accessibility parity remain unverified
 or incomplete.
 
+### Terminal glyph appearance
+
+Every terminal surface applies the additive font contract from the pinned
+Winghostty provider after creation. The primary family is **JetBrains Mono** at
+**11.7 pt**: Ghostty's macOS default 13 pt multiplied by GraphCode's terminal
+scale of 0.9. Ordered fallbacks are `Symbols Nerd Font Mono`,
+`JetBrainsMono Nerd Font Mono`, `CaskaydiaCove Nerd Font Mono`, `Cascadia Mono`,
+`Segoe UI Symbol`, and `Consolas`, so an installed Nerd/Powerline-capable face
+is considered before ordinary Windows symbol and monospace fallbacks. The
+requested weight is 400, the width ratio is 0.6, and rasterization uses the
+provider's grayscale mode, matching the qualified macOS samples' lack of
+chromatic subpixel fringes.
+
+Winghostty owns point-to-device-pixel conversion using each surface's monitor
+DPI. GraphCode keeps legacy `font_scale` neutral at 1.0, reports real DPI
+changes, and continues to provide logical 96-DPI 8x16 cell metrics for grid
+geometry and hit testing. Applying the monitor ratio through both mechanisms
+would scale the terminal twice.
+
+The provider verifies exact installed face selection before using a configured
+family and retains Consolas as its final legacy fallback. GraphCode does not
+currently install these fonts. Unit and provider integration tests therefore
+prove the requested configuration, copied fallback order, DPI ownership, and
+real provider build/link path; they do not prove that a particular target has
+JetBrains Mono or a Nerd Font installed, nor live glyph shape, powerline
+coverage, antialiasing appearance, or visual parity.
+
 ### Terminal VT parser and glyph snapshots
 
 The public `libghostty-vt` C API from the existing Winghostty pin
-`6286560d0aa3103e068b2b7afa81eac373d870c9` is the production default. Set
+`e0a5579f3b470bede72294d661282a391c502ace` is the production default. Set
 `GRAPHCODE_EXPERIMENTAL_TERMINAL_VT=0` before startup only as a rollback to the
 limited legacy parser; an absent variable or exactly `1` enables Ghostty VT.
 Other values, including an empty value, fail workspace initialization with

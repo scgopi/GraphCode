@@ -66,7 +66,7 @@ foreach ($provider in @("winghostty", "zmx")) {
 }
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
-  "6286560d0aa3103e068b2b7afa81eac373d870c9") "Winghostty SHA is not exact"
+  "e0a5579f3b470bede72294d661282a391c502ace") "Winghostty SHA is not exact"
 Assert-Contract ($pins.zmx.sha -eq
   "785b3fd15dcafd1882b495c831a10f98c201b908") "zmx SHA is not exact"
 Assert-Contract ($pins.winghostty.remoteUrl -eq

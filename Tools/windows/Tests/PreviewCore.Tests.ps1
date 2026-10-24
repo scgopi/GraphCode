@@ -27,7 +27,7 @@ function New-ContractArtifact {
     tag = "v1.2.3-alpha"; tagCommit = "b" * 40
     tagMatchesSource = $true; tagMismatchAllowed = $false
     signing = "UNSIGNED (not code signed)"
-    winghosttyCommit = "6286560d0aa3103e068b2b7afa81eac373d870c9"
+    winghosttyCommit = "e0a5579f3b470bede72294d661282a391c502ace"
     zmxCommit = "785b3fd15dcafd1882b495c831a10f98c201b908"
     hashes = [pscustomobject]$hashes
   }

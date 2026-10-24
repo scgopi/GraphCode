@@ -20,6 +20,48 @@ const max_terminal_grid_cells: u64 = 256 * 1024;
 
 const default_grid = GridSize{ .cols = @intCast(columns), .rows = @intCast(rows) };
 
+const terminal_font_primary = "JetBrains Mono";
+const terminal_font_fallbacks = [_][*c]const u8{
+    "Symbols Nerd Font Mono",
+    "JetBrainsMono Nerd Font Mono",
+    "CaskaydiaCove Nerd Font Mono",
+    "Cascadia Mono",
+    "Segoe UI Symbol",
+    "Consolas",
+};
+const terminal_font_point_size: f32 = 13.0 * 0.9;
+const terminal_font_cell_width_ratio: f32 = 0.6;
+const terminal_font_weight: u32 = 400;
+
+fn terminalFontConfig() c.winghostty_font_config {
+    var config: c.winghostty_font_config = undefined;
+    c.winghostty_font_config_init(&config);
+    config.primary_family = terminal_font_primary;
+    config.fallback_families = &terminal_font_fallbacks;
+    config.fallback_count = terminal_font_fallbacks.len;
+    config.point_size = terminal_font_point_size;
+    config.cell_width_ratio = terminal_font_cell_width_ratio;
+    config.weight = terminal_font_weight;
+    // The qualified macOS glyph samples have grayscale edges without chromatic
+    // subpixel fringes. Natural mode still collapses to alpha in this provider,
+    // so grayscale is the closer explicit contract and the easier one to compare.
+    config.raster_mode = c.WINGHOSTTY_FONT_RASTER_GRAYSCALE;
+    return config;
+}
+
+fn applyTerminalFontConfigWith(
+    surface: *c.winghostty_surface,
+    comptime set_font_config: anytype,
+) !void {
+    var config = terminalFontConfig();
+    if (set_font_config(surface, &config) != c.WINGHOSTTY_OK)
+        return error.WinghosttyFontConfigFailed;
+}
+
+fn applyTerminalFontConfig(surface: *c.winghostty_surface) !void {
+    try applyTerminalFontConfigWith(surface, c.winghostty_surface_set_font_config);
+}
+
 const GridSize = struct {
     cols: u16,
     rows: u16,
@@ -583,10 +625,10 @@ pub const Workspace = struct {
     syncing_topology: bool = false,
     syncing_focus: bool = false,
     persisting_layout: bool = false,
-    // The monitor DPI this workspace last propagated to its live terminal surfaces
-    // (see setDpi()). Drives both the font_scale given to new surfaces created via
-    // surfaceOptions() and the DPI/font-scale pushed to already-live surfaces when
-    // the host window moves across a DPI boundary.
+    // The monitor DPI this workspace last propagated to its live terminal surfaces.
+    // Winghostty converts the configured terminal point size and the logical 96-DPI
+    // cell metrics to device pixels from this value; GraphCode must not also encode
+    // the monitor ratio into the legacy font_scale field.
     dpi: u32 = Dpi.base_dpi,
 
     pub fn init(parent: c.HWND, allocator_: std.mem.Allocator) !*Workspace {
@@ -1561,6 +1603,10 @@ pub const Workspace = struct {
             self.waitAttach(index);
             return error.WinghosttySurfaceCreateFailed;
         }
+        applyTerminalFontConfig(self.surfaces[index].surface.?) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
 
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
@@ -1722,6 +1768,10 @@ pub const Workspace = struct {
             self.waitAttach(index);
             return error.WinghosttySurfaceCreateFailed;
         }
+        applyTerminalFontConfig(self.surfaces[index].surface.?) catch |err| {
+            self.destroySurface(index);
+            return err;
+        };
 
         self.surfaces[index].destroyed = false;
         self.surfaces[index].destroying = false;
@@ -2107,24 +2157,17 @@ pub const Workspace = struct {
     }
 
     /// Propagates a real, runtime monitor DPI (from the host window's WM_DPICHANGED)
-    /// down to every live terminal surface, using the two operations winghostty
-    /// actually exposes for this: `winghostty_surface_notify_dpi_changed` (so the
-    /// surface's own DPI-aware internals, e.g. its own child-window DPI query,
-    /// observe the new value) and `winghostty_surface_set_font_scale` (the officially
-    /// supported knob for how large winghostty renders its own glyphs). Deliberately
-    /// does not also scale `options.input.cell_width`/`cell_height` -- those stay at
-    /// their 96-DPI logical baseline in surfaceOptions() so the DPI ratio is applied
-    /// exactly once, through font_scale, rather than twice (once here and again by
-    /// winghostty recomputing cell metrics from the scaled font).
+    /// down to every live terminal surface. Winghostty owns both point-to-pixel
+    /// conversion for the configured 11.7pt font and scaling of the logical 96-DPI
+    /// cell metrics. Sending the same ratio through legacy `font_scale` would apply
+    /// monitor DPI twice.
     pub fn setDpi(self: *Workspace, dpi: u32) void {
         const normalized = Dpi.normalize(dpi);
         if (normalized == self.dpi) return;
         self.dpi = normalized;
-        const font_scale = Dpi.fontScale(normalized);
         for (&self.surfaces) |*slot| {
             const surface = slot.surface orelse continue;
             _ = c.winghostty_surface_notify_dpi_changed(surface, normalized);
-            _ = c.winghostty_surface_set_font_scale(surface, font_scale);
         }
     }
 
@@ -2986,10 +3029,9 @@ pub const Workspace = struct {
         options.visible = if (self.collapsed) 0 else 1;
         options.focus = if (!self.collapsed and index == self.active_surface) 1 else 0;
         options.theme = c.WINGHOSTTY_THEME_DARK;
-        // Use the workspace's last-known runtime monitor DPI so a surface created
-        // after a DPI change (e.g. a new split/tab opened post-move) starts scaled
-        // correctly instead of always assuming 96 DPI/100%.
-        options.font_scale = Dpi.fontScale(self.dpi);
+        // Configured point sizes and the logical cell metrics are DPI-aware inside
+        // Winghostty. Keep this legacy multiplier neutral or monitor DPI is applied twice.
+        options.font_scale = 1.0;
         options.user_data = @ptrCast(self);
         options.callbacks.on_exit = @ptrCast(&onExit);
         options.callbacks.on_title = @ptrCast(&onTitle);
@@ -7333,6 +7375,79 @@ test "onDpiChanged callback adopts the surface's real reported dpi and font scal
 
     try std.testing.expectEqual(@as(u32, 192), workspace.surfaces[0].dpi);
     try std.testing.expectEqual(@as(f32, 2.0), workspace.surfaces[0].reported_font_scale);
+}
+
+test "terminal font sizing leaves monitor DPI conversion to the provider" {
+    var workspace = try minimalWorkspaceForOptionsTest(std.testing.allocator);
+    defer workspace.layout.deinit();
+
+    workspace.dpi = 96;
+    const at_100 = workspace.surfaceOptions(0);
+    workspace.dpi = 144;
+    const at_150 = workspace.surfaceOptions(0);
+
+    try std.testing.expectEqual(@as(f32, 1.0), at_100.font_scale);
+    try std.testing.expectEqual(@as(f32, 1.0), at_150.font_scale);
+    try std.testing.expectEqual(@as(u32, 8), at_100.input.cell_width);
+    try std.testing.expectEqual(@as(u32, 16), at_100.input.cell_height);
+    try std.testing.expectEqual(@as(u32, 8), at_150.input.cell_width);
+    try std.testing.expectEqual(@as(u32, 16), at_150.input.cell_height);
+}
+
+test "terminal font config follows the macOS source defaults and explicit symbol fallbacks" {
+    const config = terminalFontConfig();
+    const expected_fallbacks = [_][]const u8{
+        "Symbols Nerd Font Mono",
+        "JetBrainsMono Nerd Font Mono",
+        "CaskaydiaCove Nerd Font Mono",
+        "Cascadia Mono",
+        "Segoe UI Symbol",
+        "Consolas",
+    };
+
+    try std.testing.expectEqualStrings("JetBrains Mono", std.mem.span(config.primary_family));
+    try std.testing.expectEqual(expected_fallbacks.len, config.fallback_count);
+    for (expected_fallbacks, 0..) |expected, index| {
+        try std.testing.expectEqualStrings(
+            expected,
+            std.mem.span(config.fallback_families[index]),
+        );
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 11.7), config.point_size, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6), config.cell_width_ratio, 0.0001);
+    try std.testing.expectEqual(@as(u32, 400), config.weight);
+    try std.testing.expectEqual(
+        c.WINGHOSTTY_FONT_RASTER_GRAYSCALE,
+        config.raster_mode,
+    );
+}
+
+test "terminal font config application reports provider refusal" {
+    const Probe = struct {
+        var calls: usize = 0;
+        var result: c.winghostty_result = c.WINGHOSTTY_OK;
+
+        fn set(
+            _: *c.winghostty_surface,
+            _: *const c.winghostty_font_config,
+        ) callconv(.c) c.winghostty_result {
+            calls += 1;
+            return result;
+        }
+    };
+    const surface: *c.winghostty_surface = @ptrFromInt(0x1000);
+
+    Probe.calls = 0;
+    Probe.result = c.WINGHOSTTY_OK;
+    try applyTerminalFontConfigWith(surface, Probe.set);
+    try std.testing.expectEqual(@as(usize, 1), Probe.calls);
+
+    Probe.result = c.WINGHOSTTY_INVALID_ARGUMENT;
+    try std.testing.expectError(
+        error.WinghosttyFontConfigFailed,
+        applyTerminalFontConfigWith(surface, Probe.set),
+    );
+    try std.testing.expectEqual(@as(usize, 2), Probe.calls);
 }
 
 fn fillRect(hdc: c.HDC, bounds: c.RECT, color: u32) void {

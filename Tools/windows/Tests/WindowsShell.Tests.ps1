@@ -576,7 +576,7 @@ $pins = Get-Content -LiteralPath (Join-Path $shellRoot "provider-pins.json") -Ra
   ConvertFrom-Json
 Assert-Contract ($pins.schemaVersion -eq 1) "provider pin schema is not 1"
 Assert-Contract ($pins.winghostty.sha -eq
-  "6286560d0aa3103e068b2b7afa81eac373d870c9") "Winghostty pin changed"
+  "e0a5579f3b470bede72294d661282a391c502ace") "Winghostty pin changed"
 Assert-Contract ($pins.zmx.sha -eq
   "785b3fd15dcafd1882b495c831a10f98c201b908") "zmx pin changed"
 Assert-Contract ($pins.winghostty.remoteUrl -eq
@@ -1016,13 +1016,19 @@ Invoke-Native "Terminal input queue tests" {
     $winghosttyRoot = Join-Path $depotRoot "Winghostty-worktrees\host-integration"
   }
   $include = Join-Path $winghosttyRoot "include"
+  $winghosttyLib = Join-Path $winghosttyRoot "zig-out\lib\winghostty-win32-host.lib"
   $terminalVtLib = Join-Path $shellRoot "zig-out\lib\ghostty-vt-static.lib"
   if (-not (Test-Path -LiteralPath $include -PathType Container)) {
     throw "Winghostty headers are required for terminal input tests."
   }
+  if (-not (Test-Path -LiteralPath $winghosttyLib -PathType Leaf)) {
+    throw "The pinned Winghostty host library is required for terminal input tests."
+  }
   Push-Location $shellRoot
   try {
-    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc -luser32 -lgdi32 -ladvapi32 "-I$include" $terminalVtLib
+    & $zig test src\TerminalSurface.zig -target x86_64-windows-msvc -lc -luser32 -lkernel32 `
+      "-I$include" $winghosttyLib $terminalVtLib -lgdi32 -lopengl32 -limm32 -lole32 `
+      -loleaut32 -luiautomationcore -lshell32 -ladvapi32 -lwinhttp
   } finally { Pop-Location }
 }
 Invoke-Native "Windows clipboard encoding tests" {
