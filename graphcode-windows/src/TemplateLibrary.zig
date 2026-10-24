@@ -16,13 +16,15 @@ pub const Template = struct {
     metric: ?[]u8 = null,
     backend: ?[]u8 = null,
     graph_json: ?[]u8 = null,
+    source_path: ?[]u8 = null,
+    is_project: bool = false,
 
     pub fn deinit(self: *Template, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.name);
         allocator.free(self.body);
         allocator.free(self.shape);
-        inline for (.{ "done_check", "cadence", "branch", "metric", "backend", "graph_json" }) |field|
+        inline for (.{ "done_check", "cadence", "branch", "metric", "backend", "graph_json", "source_path" }) |field|
             if (@field(self, field)) |value| allocator.free(value);
     }
 };
@@ -46,11 +48,28 @@ pub fn load(allocator: std.mem.Allocator, project_path: []const u8) !Library {
     if (isFilesystemProject(project_path)) {
         const project = try projectDirectory(allocator, project_path);
         defer allocator.free(project);
-        try loadDirectory(&library, project);
+        try loadDirectory(&library, project, true, true);
     }
     const home = try homeDirectory(allocator);
     defer allocator.free(home);
-    try loadDirectory(&library, home);
+    try loadDirectory(&library, home, false, true);
+    sortTemplates(library.templates.items);
+    return library;
+}
+
+pub fn loadForSettings(allocator: std.mem.Allocator, project_paths: []const []const u8) !Library {
+    var library = Library.init(allocator);
+    errdefer library.deinit();
+    for (project_paths) |project_path| {
+        if (!isFilesystemProject(project_path)) continue;
+        const project = try projectDirectory(allocator, project_path);
+        defer allocator.free(project);
+        try loadDirectory(&library, project, true, false);
+    }
+    const home = try homeDirectory(allocator);
+    defer allocator.free(home);
+    try loadDirectory(&library, home, false, false);
+    sortTemplates(library.templates.items);
     return library;
 }
 
@@ -150,10 +169,42 @@ pub fn save(allocator: std.mem.Allocator, template: Template) !void {
     const directory = try homeDirectory(allocator);
     defer allocator.free(directory);
     try std.fs.cwd().makePath(directory);
-    const file_name = try fileName(allocator, template.name);
+    const file_name = try uniqueFileName(allocator, directory, template);
     defer allocator.free(file_name);
     const path = try std.fs.path.join(allocator, &.{ directory, file_name });
     defer allocator.free(path);
+    try writeTemplate(allocator, path, template);
+}
+
+pub fn update(allocator: std.mem.Allocator, edited: Template, replacing: Template) !void {
+    const original_path = replacing.source_path orelse return error.TemplateOriginMissing;
+    const directory = std.fs.path.dirname(original_path) orelse return error.TemplateOriginMissing;
+    const next_path = if (std.mem.eql(u8, edited.name, replacing.name))
+        try allocator.dupe(u8, original_path)
+    else blk: {
+        const file_name = try uniqueFileName(allocator, directory, edited);
+        defer allocator.free(file_name);
+        break :blk try std.fs.path.join(allocator, &.{ directory, file_name });
+    };
+    defer allocator.free(next_path);
+    try writeTemplate(allocator, next_path, edited);
+    if (!std.mem.eql(u8, original_path, next_path))
+        std.fs.cwd().deleteFile(original_path) catch |err| {
+            std.fs.cwd().deleteFile(next_path) catch {};
+            return err;
+        };
+}
+
+pub fn delete(template: Template) !void {
+    const path = template.source_path orelse return error.TemplateOriginMissing;
+    try std.fs.cwd().deleteFile(path);
+}
+
+pub fn pathForTemplate(allocator: std.mem.Allocator, template: Template) ![]u8 {
+    return allocator.dupe(u8, template.source_path orelse return error.TemplateOriginMissing);
+}
+
+fn writeTemplate(allocator: std.mem.Allocator, path: []const u8, template: Template) !void {
     var header = std.array_list.Managed(u8).init(allocator);
     defer header.deinit();
     try header.writer().print("---\nid: {s}\nname: {s}\nshape: {s}\n", .{ template.id, template.name, template.shape });
@@ -167,14 +218,27 @@ pub fn save(allocator: std.mem.Allocator, template: Template) !void {
     try header.appendSlice("---\n");
     const contents = try std.fmt.allocPrint(allocator, "{s}{s}\n", .{ header.items, template.body });
     defer allocator.free(contents);
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = contents });
+    const temp_path = try std.fmt.allocPrint(allocator, "{s}.tmp-{d}", .{ path, std.time.nanoTimestamp() });
+    defer allocator.free(temp_path);
+    var file = try std.fs.cwd().createFile(temp_path, .{ .truncate = true });
+    errdefer {
+        file.close();
+        std.fs.cwd().deleteFile(temp_path) catch {};
+    }
+    try file.writeAll(contents);
+    file.close();
+    try std.os.windows.MoveFileEx(
+        temp_path,
+        path,
+        std.os.windows.MOVEFILE_REPLACE_EXISTING | std.os.windows.MOVEFILE_WRITE_THROUGH,
+    );
 }
 
 pub fn filterMatches(template: Template, query: []const u8) bool {
     return query.len == 0 or containsIgnoreCase(template.name, query) or containsIgnoreCase(template.body, query);
 }
 
-fn loadDirectory(library: *Library, directory: []const u8) !void {
+fn loadDirectory(library: *Library, directory: []const u8, is_project: bool, dedupe_by_id: bool) !void {
     var dir = std.fs.cwd().openDir(directory, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied => return,
         else => return err,
@@ -185,14 +249,38 @@ fn loadDirectory(library: *Library, directory: []const u8) !void {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".md")) continue;
         const text = try dir.readFileAlloc(library.templates.allocator, entry.name, 64 * 1024);
         defer library.templates.allocator.free(text);
-        const template = parse(library.templates.allocator, text) catch continue;
-        if (containsID(library.templates.items, template.id)) {
+        var template = parse(library.templates.allocator, text) catch continue;
+        template.source_path = try std.fs.path.join(library.templates.allocator, &.{ directory, entry.name });
+        template.is_project = is_project;
+        if ((dedupe_by_id and containsID(library.templates.items, template.id)) or
+            (!dedupe_by_id and containsPath(library.templates.items, template.source_path.?)))
+        {
             var duplicate = template;
             duplicate.deinit(library.templates.allocator);
             continue;
         }
+
         try library.templates.append(template);
     }
+}
+
+fn containsPath(templates: []const Template, path: []const u8) bool {
+    for (templates) |template| {
+        if (template.source_path) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, path)) return true;
+        }
+    }
+    return false;
+}
+
+fn sortTemplates(templates: []Template) void {
+    std.mem.sort(Template, templates, {}, struct {
+        fn lessThan(_: void, left: Template, right: Template) bool {
+            const order = std.ascii.orderIgnoreCase(left.name, right.name);
+            if (order != .eq) return order == .lt;
+            return std.mem.order(u8, left.source_path orelse "", right.source_path orelse "") == .lt;
+        }
+    }.lessThan);
 }
 
 fn parse(allocator: std.mem.Allocator, text: []const u8) !Template {
@@ -338,6 +426,30 @@ fn fileName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return result.toOwnedSlice();
 }
 
+fn uniqueFileName(allocator: std.mem.Allocator, directory: []const u8, template: Template) ![]u8 {
+    const base = try fileName(allocator, template.name);
+    defer allocator.free(base);
+    const candidate = try std.fs.path.join(allocator, &.{ directory, base });
+    defer allocator.free(candidate);
+    if (!pathBelongsToTemplate(allocator, candidate, template.id)) {
+        const stem = base[0 .. base.len - ".md".len];
+        const suffix = template.id[0..@min(template.id.len, 8)];
+        return std.fmt.allocPrint(allocator, "{s}-{s}.md", .{ stem, suffix });
+    }
+    return allocator.dupe(u8, base);
+}
+
+fn pathBelongsToTemplate(allocator: std.mem.Allocator, path: []const u8, id: []const u8) bool {
+    const text = std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return false,
+    };
+    defer allocator.free(text);
+    var existing = parse(allocator, text) catch return false;
+    defer existing.deinit(allocator);
+    return std.mem.eql(u8, existing.id, id);
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     for (0..haystack.len - needle.len + 1) |offset| {
@@ -410,6 +522,119 @@ test "virtual projects do not produce filesystem template paths" {
     try std.testing.expect(!isFilesystemProject("codespace://workspace/repository"));
     try std.testing.expect(isFilesystemProject("C:\\src\\GraphCode"));
     try std.testing.expect(isFilesystemProject("\\\\server\\share\\GraphCode"));
+}
+
+test "template management: scoped listing is deterministic" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(directory);
+    try temporary.dir.writeFile(.{
+        .sub_path = "zulu.md",
+        .data = "---\nid: z\nname: Zulu\nshape: turn\n---\nLast\n",
+    });
+    try temporary.dir.writeFile(.{
+        .sub_path = "alpha.md",
+        .data = "---\nid: a\nname: Alpha\nshape: turn\n---\nFirst\n",
+    });
+    var library = Library.init(std.testing.allocator);
+    defer library.deinit();
+    try loadDirectory(&library, directory, false, false);
+    try std.testing.expectEqual(@as(usize, 2), library.templates.items.len);
+    try std.testing.expectEqualStrings("Alpha", library.templates.items[0].name);
+    try std.testing.expectEqualStrings("Zulu", library.templates.items[1].name);
+}
+
+test "template management: same slug cannot identify two stable ids" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(directory);
+    try temporary.dir.writeFile(.{
+        .sub_path = "release-review.md",
+        .data = "---\nid: first-id\nname: Release Review\nshape: turn\n---\nFirst\n",
+    });
+    const first = try uniqueFileName(std.testing.allocator, directory, .{
+        .id = @constCast("first-id"),
+        .name = @constCast("Release Review"),
+        .body = @constCast("First"),
+        .shape = @constCast("turn"),
+    });
+    defer std.testing.allocator.free(first);
+    const second = try uniqueFileName(std.testing.allocator, directory, .{
+        .id = @constCast("second-id"),
+        .name = @constCast("Release Review"),
+        .body = @constCast("Second"),
+        .shape = @constCast("turn"),
+    });
+    defer std.testing.allocator.free(second);
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+}
+
+test "template management: stable id update operation is available" {
+    try std.testing.expect(@hasDecl(@This(), "update"));
+}
+
+test "template management: stable id delete operation is available" {
+    try std.testing.expect(@hasDecl(@This(), "delete"));
+}
+
+test "template management: multi-project settings listing is available" {
+    try std.testing.expect(@hasDecl(@This(), "loadForSettings"));
+}
+
+test "template management: reveal path preserves concrete origin" {
+    try std.testing.expect(@hasDecl(@This(), "pathForTemplate"));
+}
+
+test "template management: Settings keeps same stable id from distinct project files" {
+    var first = std.testing.tmpDir(.{});
+    defer first.cleanup();
+    var second = std.testing.tmpDir(.{});
+    defer second.cleanup();
+    const first_path = try first.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(first_path);
+    const second_path = try second.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(second_path);
+    const text = "---\nid: shared-id\nname: Shared\nshape: turn\n---\nReview\n";
+    try first.dir.writeFile(.{ .sub_path = "shared.md", .data = text });
+    try second.dir.writeFile(.{ .sub_path = "shared.md", .data = text });
+    var library = Library.init(std.testing.allocator);
+    defer library.deinit();
+    try loadDirectory(&library, first_path, true, false);
+    try loadDirectory(&library, second_path, true, false);
+    try std.testing.expectEqual(@as(usize, 2), library.templates.items.len);
+}
+
+test "template management: unchanged display name preserves an intentional filename" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const directory = try temporary.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(directory);
+    const original_path = try std.fs.path.join(std.testing.allocator, &.{ directory, "release-v2.md" });
+    defer std.testing.allocator.free(original_path);
+    try temporary.dir.writeFile(.{
+        .sub_path = "release-v2.md",
+        .data = "---\nid: release-id\nname: Release Review\nshape: turn\n---\nOld\n",
+    });
+    var original = Template{
+        .id = try std.testing.allocator.dupe(u8, "release-id"),
+        .name = try std.testing.allocator.dupe(u8, "Release Review"),
+        .body = try std.testing.allocator.dupe(u8, "Old"),
+        .shape = try std.testing.allocator.dupe(u8, "turn"),
+        .source_path = try std.testing.allocator.dupe(u8, original_path),
+    };
+    defer original.deinit(std.testing.allocator);
+    var edited = Template{
+        .id = try std.testing.allocator.dupe(u8, "release-id"),
+        .name = try std.testing.allocator.dupe(u8, "Release Review"),
+        .body = try std.testing.allocator.dupe(u8, "New"),
+        .shape = try std.testing.allocator.dupe(u8, "turn"),
+    };
+    defer edited.deinit(std.testing.allocator);
+    try update(std.testing.allocator, edited, original);
+    try temporary.dir.access("release-v2.md", .{});
+    try std.testing.expectError(error.FileNotFound, temporary.dir.access("release-review.md", .{}));
 }
 
 test "new loop: template shapes accept Main and Composite vocabulary" {

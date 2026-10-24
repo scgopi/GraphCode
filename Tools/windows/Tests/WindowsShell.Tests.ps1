@@ -851,7 +851,7 @@ Invoke-Native "Product Settings executable tests" {
   Push-Location $shellRoot
   try {
     & $zig test src\WindowsProductSettings.zig -target x86_64-windows-msvc `
-      -lc -luser32 -lgdi32 "-I$include"
+      -lc -luser32 -lgdi32 -ladvapi32 "-I$include"
   } finally { Pop-Location }
 }
 Invoke-Native "Modal teardown executable tests" {

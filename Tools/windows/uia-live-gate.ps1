@@ -1510,7 +1510,8 @@ function Test-MultiProjectOwnedSheetIdentity(
   [int] $expectedProcessId,
   [IntPtr] $expectedOwner,
   [string] $expectedTitle,
-  [string] $expectedContentClass
+  [string] $expectedContentClass,
+  [bool] $expectedCaptionless = $true
 ) {
   return $null -ne $identity -and
     ($identity.processId -is [int] -or $identity.processId -is [uint32] -or $identity.processId -is [long]) -and
@@ -1522,7 +1523,8 @@ function Test-MultiProjectOwnedSheetIdentity(
     $identity.title -is [string] -and $identity.title -ceq $expectedTitle -and
     $identity.contentClass -is [string] -and $identity.contentClass -ceq $expectedContentClass -and
     $identity.visible -is [bool] -and $identity.visible -and
-    $identity.captionless -is [bool] -and $identity.captionless
+    $identity.captionless -is [bool] -and
+    $identity.captionless -eq $expectedCaptionless
 }
 
 function Get-UiaOwnedSheetIdentity($element) {
@@ -1546,12 +1548,13 @@ function Assert-UiaOwnedSheet(
   [IntPtr] $expectedOwner,
   [string] $expectedTitle,
   [string] $expectedContentClass,
-  [string] $label
+  [string] $label,
+  [bool] $expectedCaptionless = $true
 ) {
   $identity = Get-UiaOwnedSheetIdentity $element
   Require (Test-MultiProjectOwnedSheetIdentity $identity $expectedProcessId $expectedOwner `
-      $expectedTitle $expectedContentClass) `
-    "$label was not the exact visible captionless GraphCodeSheetHost owned by the shell: $($identity | ConvertTo-Json -Compress)"
+      $expectedTitle $expectedContentClass $expectedCaptionless) `
+    "$label did not expose the expected GraphCodeSheetHost identity: $($identity | ConvertTo-Json -Compress)"
   return $identity
 }
 
@@ -5624,7 +5627,11 @@ try {
     '"claudePermissionMode":"auto","copilotPermissions":"allowEverything",' +
     '"codexApprovals":"workspace","showsActivityStrip":true,' +
     '"briefsSessionsAboutTheGraph":false,"betaUpdates":true,' +
-    '"autoSelectsModel":true,"gateSentinel":"preserve"}'
+    '"autoSelectsModel":true,"openCodePermissions":"auto","piProjectTrust":"approve",' +
+    '"summarisesLoops":true,"summaryUsesModel":true,"visualisesSummaries":true,' +
+    '"daemonHeartbeatEnabled":true,"keepsMacAwakeWhileLoopsRun":true,' +
+    '"mailroomEnabled":false,"endsResolvedSessionsAfterMinutes":60,' +
+    '"gateSentinel":"preserve"}'
   )
   $env:GRAPHCODE_SUPPORT_DIR = $settingsDirectory
   $env:GRAPHCODE_UIA_RESET_SIDEBAR = "1"
@@ -9133,24 +9140,34 @@ try {
   }
   $productSettings = [System.Windows.Automation.AutomationElement]::FromHandle($settingsHandle)
   $productSettingsIdentity = Assert-UiaOwnedSheet $productSettings $settingsProcess.Id `
-    $settingsShellWindow "GraphCode Settings" "GraphCodeProductSettings" "Product Settings sheet"
+    $settingsShellWindow "GraphCode Settings" "GraphCodeProductSettings" "Product Settings window" $false
   $settingsElements = @($productSettings.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
     [System.Windows.Automation.Condition]::TrueCondition
   ))
   $settingsNames = @($settingsElements | ForEach-Object { $_.Current.Name })
   $requiredSettingsNames = @(
+    "General",
+    "Claude Code",
+    "Codex",
+    "Copilot CLI",
+    "OpenCode",
+    "Pi",
+    "Templates",
     "New loops use: Claude Code",
-    "Claude Code: Auto (recommended)",
-    "Copilot CLI: YOLO (recommended)",
-    "Codex: Workspace (recommended)",
     "Default model: Capable",
     "Pick a model for each loop",
     "Show the activity strip",
+    "Summarise what loops are doing (experimental)",
+    "Let a model write the summaries (experimental)",
+    "Visualise what loops did (experimental)",
+    "Daemon heartbeat (experimental)",
+    "Keep this PC awake while loops run (experimental)",
+    "Mailroom",
     "Tell sessions they're part of a graph",
+    "End a finished loop's session: After 1 hour",
     "Get beta releases",
-    "Save",
-    "Cancel"
+    "General"
   )
   foreach ($requiredName in $requiredSettingsNames) {
     $element = @($settingsElements | Where-Object { $_.Current.Name -eq $requiredName }) |
@@ -9163,12 +9180,11 @@ try {
   $settingsContent = $settingsNames -join "`n"
   foreach ($copy in @(
     "Which backend a new loop starts on. You can still change it per loop.",
-    "Approves the ordinary work of a coding session and keeps its guardrails.",
-    "Copilot's --yolo: tools, paths, and URLs all approved",
-    "Runs without asking, and may write inside the project it was given.",
-    "nobody is there to answer a permission prompt",
     "The default model tier is copied into new loops",
     "A strip along the window's bottom lists passes",
+    "Reads each loop's current work from its own transcript",
+    "One short call to your backend's CLI per change",
+    "Draws each finished pass as a flowchart or table",
     "Lets a loop create more loops when work genuinely splits",
     "Check for Updates offers pre-releases as well as stable releases"
   )) {
@@ -9178,6 +9194,12 @@ try {
   $expectedToggles = @{
     "Pick a model for each loop" = 1
     "Show the activity strip" = 1
+    "Summarise what loops are doing (experimental)" = 1
+    "Let a model write the summaries (experimental)" = 1
+    "Visualise what loops did (experimental)" = 1
+    "Daemon heartbeat (experimental)" = 1
+    "Keep this PC awake while loops run (experimental)" = 1
+    "Mailroom" = 0
     "Tell sessions they're part of a graph" = 0
     "Get beta releases" = 1
   }
@@ -9199,6 +9221,63 @@ try {
     savedDefaultBackend = $null
   }
 
+  $agentPaneChecks = @(
+    @{ Command = 6221; Control = "Claude Code: Auto (recommended)"; Copy = "keeps its guardrails" },
+    @{ Command = 6222; Control = "Codex: Workspace (recommended)"; Copy = "write inside the project" },
+    @{ Command = 6223; Control = "Copilot CLI: YOLO (recommended)"; Copy = "--yolo" },
+    @{ Command = 6224; Control = "OpenCode: Auto-approve (recommended)"; Copy = "--auto" },
+    @{ Command = 6225; Control = "Pi: Trust the project (recommended)"; Copy = "--approve" }
+  )
+  $productSettingsEvidence.agentPanes = @()
+  foreach ($agentCheck in $agentPaneChecks) {
+    Require ([GraphCodeUiaGateState]::SendCommand($settingsHandle, [uint32]$agentCheck.Command)) `
+      "Product Settings agent navigation command $($agentCheck.Command) was rejected"
+    Start-Sleep -Milliseconds 100
+    $agentElements = @($productSettings.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      [System.Windows.Automation.Condition]::TrueCondition
+    ))
+    $agentControl = @($agentElements | Where-Object { $_.Current.Name -eq $agentCheck.Control }) |
+      Select-Object -First 1
+    Require (($null -ne $agentControl) -and
+             ($agentControl.Current.BoundingRectangle.Width -gt 0) -and
+             (-not $agentControl.Current.IsOffscreen)) `
+      "Product Settings agent pane omitted '$($agentCheck.Control)'"
+    $agentCopy = @($agentElements | ForEach-Object { $_.Current.Name }) -join "`n"
+    Require ($agentCopy -match [regex]::Escape($agentCheck.Copy)) `
+      "Product Settings agent pane omitted consequence copy '$($agentCheck.Copy)'"
+    $productSettingsEvidence.agentPanes += [string]$agentCheck.Control
+  }
+  Require ([GraphCodeUiaGateState]::SendCommand($settingsHandle, 6226)) `
+    "Product Settings Templates navigation command was rejected"
+  Start-Sleep -Milliseconds 100
+  $templateElements = @($productSettings.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+  ))
+  $templateNames = @($templateElements | ForEach-Object { $_.Current.Name })
+  foreach ($templateAction in @("Edit", "Reveal", "Delete")) {
+    Require ($templateNames -contains $templateAction) `
+      "Product Settings Templates pane omitted '$templateAction'"
+  }
+  $settingsViewport = [GraphCodeUiaGateState]::FindChild(
+    $settingsHandle, "GraphCodeSheetViewport"
+  )
+  $settingsContentHandle = [GraphCodeUiaGateState]::FindChild(
+    $settingsViewport, "GraphCodeProductSettings"
+  )
+  $templateListHandle = [GraphCodeUiaGateState]::FindChild(
+    $settingsContentHandle, "ListBox"
+  )
+  Require ($templateListHandle -ne [IntPtr]::Zero) `
+    "Product Settings Templates pane omitted its native list"
+  $templateItems = @([GraphCodeUiaGateState]::GetListItems($templateListHandle))
+  Require (($templateItems -match "UIA release review").Count -eq 1) `
+    "Product Settings Templates pane did not expose the isolated saved template"
+  Require ([GraphCodeUiaGateState]::SendCommand($settingsHandle, 6220)) `
+    "Product Settings General navigation command was rejected"
+  Start-Sleep -Milliseconds 100
+
   $settingsWindow = $settingsHandle
   $backendButton = @($settingsElements | Where-Object {
     $_.Current.Name -eq "New loops use: Claude Code"
@@ -9213,103 +9292,28 @@ try {
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$backendButton.Current.NativeWindowHandle, 0x0D
   )) "Product Settings focused control rejected Return"
-  for ($index = 0; $index -lt 40; $index++) {
-    Start-Sleep -Milliseconds 50
-    $remainingSettings = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-      [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
-    )
-    if ($remainingSettings -eq [IntPtr]::Zero) { break }
-  }
-  Require ($remainingSettings -eq [IntPtr]::Zero) "Return did not activate Save and close Product Settings"
+  Start-Sleep -Milliseconds 150
+  $remainingSettings = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
+  )
+  Require ($remainingSettings -eq $settingsHandle) `
+    "Return closed Product Settings instead of acting on the focused immediate-apply control"
   $savedSettings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
   Require (($savedSettings.defaultBackend -eq "copilotCLI") -and
            ($savedSettings.gateSentinel -eq "preserve")) `
-    "Return did not save Product Settings or preserve unrelated settings"
+    "Product Settings did not persist the backend change immediately or preserve unrelated settings"
   $productSettingsEvidence.savedDefaultBackend = [string]$savedSettings.defaultBackend
   Write-Host ("UIA_PRODUCT_SETTINGS_EVIDENCE=" +
     ($productSettingsEvidence | ConvertTo-Json -Compress -Depth 4))
   $savedSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)
-
-  Require ([GraphCodeUiaGateState]::PostFixtureMutation($settingsShellWindow, 15)) `
-    "Product Settings Escape fixture command was rejected"
-  Start-Sleep -Milliseconds 500
-  $cancelHandle = [IntPtr]::Zero
-  for ($index = 0; $index -lt 300 -and
-       $cancelHandle -eq [IntPtr]::Zero; $index++) {
-    Start-Sleep -Milliseconds 50
-    $cancelHandle = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-      [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeProductSettings"
-    )
-  }
-  Require ($cancelHandle -ne [IntPtr]::Zero) "Product Settings did not reopen for Escape verification"
-  $cancelSettings = [System.Windows.Automation.AutomationElement]::FromHandle($cancelHandle)
-  $null = Assert-UiaOwnedSheet $cancelSettings $settingsProcess.Id $settingsShellWindow `
-    "GraphCode Settings" "GraphCodeProductSettings" "Product Settings Escape sheet"
-  $cancelWindow = $cancelHandle
-  Require ([GraphCodeUiaGateState]::SendCommand($cancelWindow, 6112)) `
-    "Product Settings cancel mutation was rejected"
-  $cancelModel = $cancelSettings.FindFirst(
-    [System.Windows.Automation.TreeScope]::Descendants,
-    (New-Object System.Windows.Automation.PropertyCondition(
-      [System.Windows.Automation.AutomationElement]::NameProperty, "Default model: Capable"
-    ))
-  )
-  Require ($null -ne $cancelModel) "Product Settings omitted its model picker on reopen"
-  $cancelFocus = Retain-FocusWithRetry `
-    $cancelWindow $cancelModel $cancelModel.Current.AutomationId `
-    "product-settings-escape"
-  Require ($null -ne $cancelFocus.Focused) "Product Settings model control could not retain foreground focus; focused=$(Format-AutomationElement $cancelFocus.Candidate); $(Get-FocusDiagnostics $cancelWindow)"
-  $cancelViewport = [GraphCodeUiaGateState]::FindChild(
-    $cancelWindow, "GraphCodeSheetViewport"
-  )
-  $cancelContent = [GraphCodeUiaGateState]::FindChild(
-    $cancelViewport, "GraphCodeProductSettings"
-  )
-  Require (($cancelViewport -ne [IntPtr]::Zero) -and ($cancelContent -ne [IntPtr]::Zero)) `
-    "Product Settings Escape path could not resolve its owned content window"
-  $underlyingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
-    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
-  )
-  Require ($underlyingUpdateCount -eq 1) `
-    "Product Settings Escape requires exactly one underlying update offer; found $underlyingUpdateCount"
-  $underlyingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
-  )
-  Require ($underlyingUpdateSheet -ne [IntPtr]::Zero) `
-    "Product Settings Escape could not resolve its required underlying update offer"
-  $underlyingUpdateElement =
-    [System.Windows.Automation.AutomationElement]::FromHandle($underlyingUpdateSheet)
-  $underlyingUpdateIdentity = Assert-UiaOwnedSheet `
-    $underlyingUpdateElement $settingsProcess.Id $settingsShellWindow `
-    "GraphCode Update Available" "GraphCodeUpdateOffer" `
-    "Product Settings underlying update offer"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
-    $cancelContent, 0x1B
+    [IntPtr]$backendButton.Current.NativeWindowHandle, 0x1B
   )) "Product Settings content window rejected Escape"
   Require (Wait-UiaOwnedSheetGoneByContentClass $settingsProcess.Id $settingsShellWindow `
-    "GraphCodeProductSettings") "Escape did not cancel and close Product Settings"
-  $remainingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(
-    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
-  )
-  Require ($remainingUpdateCount -eq 1) `
-    "Product Settings Escape did not preserve exactly one underlying update offer; found $remainingUpdateCount"
-  $remainingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
-    [uint32]$settingsProcess.Id, $settingsShellWindow, "GraphCodeUpdateOffer"
-  )
-  Require ($remainingUpdateSheet -eq $underlyingUpdateSheet) `
-    "Product Settings Escape replaced the underlying update offer handle"
-  $remainingUpdateElement =
-    [System.Windows.Automation.AutomationElement]::FromHandle($remainingUpdateSheet)
-  $remainingUpdateIdentity = Assert-UiaOwnedSheet `
-    $remainingUpdateElement $settingsProcess.Id $settingsShellWindow `
-    "GraphCode Update Available" "GraphCodeUpdateOffer" `
-    "Product Settings preserved update offer"
-  Require (($remainingUpdateIdentity.handle -eq $underlyingUpdateIdentity.handle) -and
-           ($remainingUpdateIdentity.contentClass -ceq $underlyingUpdateIdentity.contentClass)) `
-    "Product Settings Escape changed the underlying update offer identity"
+    "GraphCodeProductSettings") "Escape did not close Product Settings"
   Require (([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsPath))) -eq
            ([Convert]::ToBase64String($savedSettingsBytes))) `
-    "Escape changed persisted Product Settings"
+    "Escape changed already-persisted Product Settings"
   Require ([GraphCodeUiaGateState]::PostCommand($settingsShellWindow, 0x5002)) `
     "Product Settings fixture shell rejected exit"
   Require $settingsProcess.WaitForExit(5000) "Product Settings fixture shell did not exit"

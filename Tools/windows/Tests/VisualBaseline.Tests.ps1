@@ -697,10 +697,11 @@ Assert-CaptureContract ($referenceFlow -match 'Capture-ContextMenu \x24window ''
   $referenceFlow -match 'Capture-NodeCreationForm \x24window ''node-creation-main''' -and
   $referenceFlow -match 'Capture-NodeCreationForm \x24window ''node-creation-goal-top''') `
   'ReferenceSet dispatches the three production context-menu and requested node-form captures'
-Assert-CaptureContract ($referenceFlow -match "'product-settings-full' 'static-full-page-no-scroll'" -and
+Assert-CaptureContract ($referenceFlow -match "'product-settings-general' 'sidebar-general-immediate-apply'" -and
+  $referenceFlow -match "'product-settings-templates'" -and
   $referenceFlow -match 'scrollBarElementCount = \$settingScrollbars\.Count' -and
   $referenceFlow -match 'capturedWindowClient') `
-  'Product Settings records its actual fixed-page and scroll inspection rather than fabricating scroll states'
+  'Product Settings records the General and Templates panes plus actual scroll inspection'
 Assert-CaptureContract ($referenceFlow -match 'Invoke-VisualElement \x24window ''\^workspace-split-right-'' ''Split Right''' -and
   $referenceFlow -match 'Save-AppClient \x24window ''workspace-single-pane-disconnected''' -and
   $referenceFlow -match 'Save-AppClient \x24window ''workspace-focus-terminal''') `

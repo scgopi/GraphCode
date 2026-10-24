@@ -901,7 +901,23 @@ try {
     Capture-NodeCreationForm $window 'node-creation-goal-top' 'goal-based-done-check-invalid-top'
     Post-Menu $window 4403
     $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
-    Save-AppClient $dialog 'product-settings-full' 'static-full-page-no-scroll'
+    Save-AppClient $dialog 'product-settings-general' 'sidebar-general-immediate-apply'
+    $settingsPanes = @(
+      @{ Id = 6221; Name = 'product-settings-claude' },
+      @{ Id = 6222; Name = 'product-settings-codex' },
+      @{ Id = 6223; Name = 'product-settings-copilot' },
+      @{ Id = 6224; Name = 'product-settings-opencode' },
+      @{ Id = 6225; Name = 'product-settings-pi' },
+      @{ Id = 6226; Name = 'product-settings-templates' }
+    )
+    foreach ($settingsPane in $settingsPanes) {
+      if (-not [VisualWindow]::PostMessage(
+          $dialog, 0x0111, [UIntPtr]([uint32]$settingsPane.Id), [IntPtr]::Zero)) {
+        throw "Could not select Product Settings pane $($settingsPane.Name)"
+      }
+      Start-Sleep -Milliseconds 100
+      Save-AppClient $dialog $settingsPane.Name 'sidebar-pane'
+    }
     $settingScrollbars = @(Read-Elements $dialog | Where-Object {
       $_.Current.ControlType -eq [Windows.Automation.ControlType]::ScrollBar
     })
@@ -915,7 +931,7 @@ try {
   } else {
     Post-Menu $window 4403
     $dialog = Wait-Visual { [VisualWindow]::Find($app.Id, 'GraphCodeProductSettings') } 'Product Settings'
-    Save-AppClient $dialog 'dialog' 'product-settings-unmodified'
+    Save-AppClient $dialog 'dialog' 'product-settings-general'
     if (-not [VisualWindow]::PostMessage($dialog, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
       throw "Could not close Product Settings"
     }

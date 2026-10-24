@@ -4252,20 +4252,42 @@ pub const App = struct {
             return;
         };
         defer current.deinit();
-        const draft = ProductSettings.open(@intFromPtr(self.window.hwnd.?), self.allocator, current) catch {
+        var project_paths = std.array_list.Managed([]const u8).init(self.allocator);
+        defer project_paths.deinit();
+        if (self.model.graph) |graph| project_paths.append(graph.project.path) catch {
+            self.setStatus("Unable to prepare Settings projects");
+            return;
+        };
+        for (self.model.recent_projects.items) |project| project_paths.append(project.path) catch {
+            self.setStatus("Unable to prepare Settings projects");
+            return;
+        };
+        ProductSettings.open(
+            @intFromPtr(self.window.hwnd.?),
+            self.allocator,
+            store,
+            current,
+            project_paths.items,
+            self,
+            &productSettingsChanged,
+        ) catch {
             self.setStatus("Unable to open product settings");
             return;
-        } orelse return;
-        store.save(draft) catch {
-            self.setStatus("Unable to save product settings");
+        };
+    }
+
+    fn productSettingsChanged(context: ?*anyopaque, changed: *const ProductSettings.Settings) void {
+        const self: *App = @ptrCast(@alignCast(context.?));
+        const replacement = changed.clone(self.allocator) catch {
+            self.setStatus("Unable to apply product settings");
             return;
         };
         if (self.product_settings) |*settings| settings.deinit();
-        self.product_settings = draft;
-        self.activity_enabled = draft.activity;
-        self.workspace_controls.activity_enabled = draft.activity;
+        self.product_settings = replacement;
+        self.activity_enabled = changed.activity;
+        self.workspace_controls.activity_enabled = changed.activity;
         self.update_lock.lock();
-        self.update_state = WindowsUpdates.CheckState.configure(draft.beta);
+        self.update_state = WindowsUpdates.CheckState.configure(changed.beta);
         self.update_lock.unlock();
         self.setStatus("Checking for updates…");
         self.requestUpdateCheck(false);
@@ -5666,7 +5688,7 @@ pub const App = struct {
         return .{
             .title = node.title,
             .loop_type = node.loop_type,
-            .first_instruction = if (node.trigger_prompt.len != 0) node.trigger_prompt else node.check_description,
+            .first_instruction = node.first_instruction,
             .goal_summary = node.goal_summary,
             .trigger_prompt = node.trigger_prompt,
             .heartbeat_interval_seconds = node.heartbeat_interval_seconds,
@@ -11627,6 +11649,22 @@ fn setWorkspaceTestEnvironment(name: [*:0]const u16, value: ?[]const u8) !void {
     defer if (wide) |text| std.testing.allocator.free(text);
     if (c.SetEnvironmentVariableW(name, if (wide) |text| text.ptr else null) == 0)
         return error.TestEnvironmentUpdateFailed;
+}
+
+test "save as template preserves a turn loop first instruction" {
+    const node = GraphModel.Node{
+        .id = @constCast("turn"),
+        .title = @constCast("Turn"),
+        .loop_type = @constCast("turnBased"),
+        .state = @constCast("stopped"),
+        .activity = @constCast("idle"),
+        .presence = @constCast("missing"),
+        .first_instruction = @constCast("Preserve this instruction"),
+        .trigger_prompt = @constCast(""),
+        .check_description = @constCast(""),
+    };
+    const draft = App.existingNodeTemplateDraft(node);
+    try std.testing.expectEqualStrings("Preserve this instruction", draft.first_instruction);
 }
 
 test "connection settings invalidate lifecycle attribution until the reserved support is revalidated" {
