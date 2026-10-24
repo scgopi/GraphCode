@@ -399,7 +399,7 @@ try {
     providers = @{
       zmx = @{ sha256 = ('4' * 64); pin = '785b3fd15dcafd1882b495c831a10f98c201b908'
         artifact = '.graphcode-tools\providers\zmx\zig-out\bin\zmx.exe' }
-      winghostty = @{ sha256 = ('5' * 64); pin = '6286560d0aa3103e068b2b7afa81eac373d870c9'
+      winghostty = @{ sha256 = ('5' * 64); pin = 'e0a5579f3b470bede72294d661282a391c502ace'
         artifact = '.graphcode-tools\providers\winghostty\zig-out\lib\winghostty-win32-host.lib' }
     }
     renderer = @{ uiaGate = $false; daemonSupervisorHook = $false }

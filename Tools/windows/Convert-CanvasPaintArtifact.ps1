@@ -980,7 +980,7 @@ namespace GraphCode.PaintArtifactTests
       osVersion = [Environment]::OSVersion.Version.ToString()
       platform = [Environment]::OSVersion.Platform.ToString()
       zigVersion = "0.15.2"
-      winghosttyPin = "6286560d0aa3103e068b2b7afa81eac373d870c9"
+      winghosttyPin = "e0a5579f3b470bede72294d661282a391c502ace"
       pinEvidenceScope = "Expected repository pins; actual Zig executable and Winghostty checkout identity are not measured by the converter."
     }
     dimensions = $receipt.dimensions
