@@ -9289,6 +9289,8 @@ try {
     $settingsWindow $backendButton $backendButton.Current.AutomationId `
     "product-settings-return"
   Require ($null -ne $backendFocus.Focused) "Product Settings backend control could not retain foreground focus; focused=$(Format-AutomationElement $backendFocus.Candidate); $(Get-FocusDiagnostics $settingsWindow)"
+  Require ([GraphCodeUiaGateState]::IsForegroundWindow($settingsWindow)) `
+    "Product Settings window lost foreground ownership before accepting backend focus"
   Require ([GraphCodeUiaGateState]::PostKeyboard(
     [IntPtr]$backendButton.Current.NativeWindowHandle, 0x0D
   )) "Product Settings focused control rejected Return"

@@ -4103,38 +4103,31 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Retain-FocusWithRetry \$shellWindow \$safeFocusRow \$safeRowId "before-retention"' -or
       $uiaLiveGateSource -notmatch '\$backendFocus = Retain-FocusWithRetry' -or
       $uiaLiveGateSource -notmatch 'Product Settings backend control could not retain foreground focus' -or
-      $uiaLiveGateSource -notmatch '\$cancelFocus = Retain-FocusWithRetry' -or
-      $uiaLiveGateSource -notmatch 'Product Settings model control could not retain foreground focus') {
+      $uiaLiveGateSource -notmatch '(?s)Require \(\[GraphCodeUiaGateState\]::IsForegroundWindow\(\$settingsWindow\)\).*?Product Settings window lost foreground ownership before accepting backend focus') {
     throw "RED: UIA live gate does not prove foreground ownership before accepting row focus"
   }
-  function Test-StackedProductSettingsEscapeSource([string] $source) {
-    $start = $source.IndexOf('$cancelViewport = [GraphCodeUiaGateState]::FindChild(')
+  function Test-ImmediateProductSettingsSource([string] $source) {
+    $start = $source.IndexOf('$backendFocus = Retain-FocusWithRetry')
     $end = if ($start -ge 0) {
-      $source.IndexOf('Require (([Convert]::ToBase64String(', $start)
+      $source.IndexOf('Require ([GraphCodeUiaGateState]::PostCommand($settingsShellWindow, 0x5002))', $start)
     } else { -1 }
     if ($start -lt 0 -or $end -le $start) { return $false }
     $block = ([regex]::Replace($source.Substring($start, $end - $start), '\s+', ' ')).Trim()
     $required = @(
-      '$cancelViewport = [GraphCodeUiaGateState]::FindChild(',
-      '"GraphCodeSheetViewport"',
-      '$cancelContent = [GraphCodeUiaGateState]::FindChild(',
-      '"GraphCodeProductSettings"',
-      '$underlyingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(',
-      'Require ($underlyingUpdateCount -eq 1)',
-      '$underlyingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(',
-      'Require ($underlyingUpdateSheet -ne [IntPtr]::Zero)',
-      '$underlyingUpdateIdentity = Assert-UiaOwnedSheet',
-      '"GraphCode Update Available" "GraphCodeUpdateOffer"',
-      'PostKeyboard( $cancelContent, 0x1B',
+      '$backendFocus = Retain-FocusWithRetry',
+      'Require ($null -ne $backendFocus.Focused)',
+      'Require ([GraphCodeUiaGateState]::IsForegroundWindow($settingsWindow))',
+      'Product Settings window lost foreground ownership before accepting backend focus',
+      'PostKeyboard( [IntPtr]$backendButton.Current.NativeWindowHandle, 0x0D',
+      'Require ($remainingSettings -eq $settingsHandle)',
+      '$savedSettings.defaultBackend -eq "copilotCLI"',
+      '$savedSettings.gateSentinel -eq "preserve"',
+      '$savedSettingsBytes = [IO.File]::ReadAllBytes($settingsPath)',
+      'PostKeyboard( [IntPtr]$backendButton.Current.NativeWindowHandle, 0x1B',
       'Wait-UiaOwnedSheetGoneByContentClass $settingsProcess.Id $settingsShellWindow',
       '"GraphCodeProductSettings"',
-      '$remainingUpdateCount = [GraphCodeUiaGateState]::CountVisibleOwnedSheetsByContentClass(',
-      'Require ($remainingUpdateCount -eq 1)',
-      '$remainingUpdateSheet = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(',
-      'Require ($remainingUpdateSheet -eq $underlyingUpdateSheet)',
-      '$remainingUpdateIdentity = Assert-UiaOwnedSheet',
-      '"GraphCode Update Available" "GraphCodeUpdateOffer"',
-      '$remainingUpdateIdentity.contentClass -ceq $underlyingUpdateIdentity.contentClass'
+      '[Convert]::ToBase64String($savedSettingsBytes)',
+      'Escape changed already-persisted Product Settings'
     )
     $offset = 0
     foreach ($needle in $required) {
@@ -4142,20 +4135,20 @@ Start-Sleep -Seconds 60
       if ($next -lt 0) { return $false }
       $offset = $next + $needle.Length
     }
-    return $block -notmatch 'if \(\$underlyingUpdateSheet -ne \[IntPtr\]::Zero\)'
+    return $true
   }
-  $optionalUnderlyingUpdateMutant = $uiaLiveGateSource.Replace(
-    'Require ($underlyingUpdateCount -eq 1)',
-    '$null = ($underlyingUpdateCount -eq 1)'
+  $missingForegroundMutant = $uiaLiveGateSource.Replace(
+    'Require ([GraphCodeUiaGateState]::IsForegroundWindow($settingsWindow))',
+    '$null = [GraphCodeUiaGateState]::IsForegroundWindow($settingsWindow)'
   )
-  $replacedUnderlyingUpdateMutant = $uiaLiveGateSource.Replace(
-    'Require ($remainingUpdateSheet -eq $underlyingUpdateSheet)',
-    '$null = ($remainingUpdateSheet -eq $underlyingUpdateSheet)'
+  $closingReturnMutant = $uiaLiveGateSource.Replace(
+    'Require ($remainingSettings -eq $settingsHandle)',
+    '$null = ($remainingSettings -eq $settingsHandle)'
   )
-  if (-not (Test-StackedProductSettingsEscapeSource $uiaLiveGateSource) -or
-      (Test-StackedProductSettingsEscapeSource $optionalUnderlyingUpdateMutant) -or
-      (Test-StackedProductSettingsEscapeSource $replacedUnderlyingUpdateMutant)) {
-    throw "RED: UIA live gate does not preserve the exact required underlying update sheet across Product Settings Escape"
+  if (-not (Test-ImmediateProductSettingsSource $uiaLiveGateSource) -or
+      (Test-ImmediateProductSettingsSource $missingForegroundMutant) -or
+      (Test-ImmediateProductSettingsSource $closingReturnMutant)) {
+    throw "RED: UIA live gate does not prove immediate Product Settings persistence, foreground focus, Return retention, and Escape close"
   }
   if ($uiaLiveGateSource -notmatch 'function Wait-ForDesktopElement' -or
       $uiaLiveGateSource -notmatch 'function Wait-ForDesktopElementGone' -or
