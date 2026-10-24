@@ -7927,7 +7927,7 @@ pub const App = struct {
         const is_empty = if (is_quick_chats)
             self.model.quick_chats.items.len == 0
         else if (is_overview)
-            self.model.graphs.items.len == 0
+            GraphCanvas.overviewIsEmpty(&self.model, &self.canvas)
         else if (graph) |value|
             value.nodes.items.len == 0
         else
@@ -8980,14 +8980,42 @@ pub const App = struct {
                 }
             },
             .overview => for (self.model.graphs.items, 0..) |graph, graph_index| {
+                const caption = GraphCanvas.overviewLaneCaption(&self.model, graph_index, canvas_rect, &self.canvas);
+                if (caption.title.right <= caption.title.left) continue;
+                if (!graph.project.isGlobal()) {
+                    const summary = GraphCanvas.overviewLaneSummary(self.allocator, &graph) catch return;
+                    defer if (summary) |value| self.allocator.free(value);
+                    const label = if (summary) |value|
+                        std.fmt.allocPrint(self.allocator, "{s}, {s}", .{ GraphCanvas.overviewLaneName(&graph), value })
+                    else
+                        self.allocator.dupe(u8, GraphCanvas.overviewLaneName(&graph));
+                    const owned_label = label catch return;
+                    self.appendAccessibilityElement(
+                        &elements,
+                        &owned_identities,
+                        GraphCanvas.overview_project_kind,
+                        graph.project.path,
+                        owned_label,
+                        4,
+                        .{ .logical = caption.open },
+                        false,
+                        true,
+                    ) catch {
+                        self.allocator.free(owned_label);
+                        return;
+                    };
+                    owned_identities.append(owned_label) catch {
+                        self.allocator.free(owned_label);
+                        return;
+                    };
+                }
                 if (GraphCanvas.overviewWorktreeNotice(&graph)) |presentation| {
-                    const label = presentation.label(self.allocator) catch return;
+                    const label = GraphCanvas.overviewWorktreeChipLabel(self.allocator, presentation) catch return;
                     owned_identities.append(label) catch {
                         self.allocator.free(label);
                         return;
                     };
-                    const bounds = GraphCanvas.overviewLaneCaption(&self.model, graph_index, canvas_rect, &self.canvas).notice.?;
-                    self.appendAccessibilityElement(&elements, &owned_identities, GraphCanvas.overview_worktree_notice_kind, graph.project.path, label, 4, .{ .logical = bounds }, false, true) catch return;
+                    self.appendAccessibilityElement(&elements, &owned_identities, GraphCanvas.overview_worktree_notice_kind, graph.project.path, label, 4, .{ .logical = caption.worktrees }, false, true) catch return;
                 }
                 for (graph.nodes.items, 0..) |node, node_index| {
                     const bounds = GraphCanvas.overviewCardBounds(&self.model, graph_index, node_index, canvas_rect, &self.canvas);
@@ -9220,6 +9248,14 @@ pub const App = struct {
         }
         for (self.model.graphs.items) |graph| {
             if (!graph.project.isGlobal()) {
+                if (self.surface == .overview) {
+                    const identity = GraphCanvas.overviewProjectIdentity(self.allocator, graph.project.path) catch return false;
+                    defer self.allocator.free(identity);
+                    if (Accessibility.worktreeIdentityPayload(identity) == payload) {
+                        if (target != null) return false;
+                        target = .{ .open_project = graph.project.path };
+                    }
+                }
                 const project_identity = std.fmt.allocPrint(self.allocator, "open-project:{s}", .{graph.project.path}) catch return false;
                 defer self.allocator.free(project_identity);
                 if (Accessibility.worktreeIdentityPayload(project_identity) == payload) {
@@ -22065,6 +22101,7 @@ test "worktree notice owned UIA fixture paths encode and preserve exact data saf
 test "worktree notice App resolver owns exact paths across reorder close and allocation failure" {
     var app = try noticeTestApp();
     defer deinitNoticeTestApp(&app);
+    try installNoticeTestInspection(&app, "C:\\notice-a", 8, 1024);
     const payload = Accessibility.worktreeIdentityPayload("overview-worktree-notice:C:\\notice-a");
     const path = (try app.resolveOverviewWorktreeNotice(std.testing.allocator, payload)).?;
     defer std.testing.allocator.free(path);
@@ -22073,12 +22110,11 @@ test "worktree notice App resolver owns exact paths across reorder close and all
     const reordered = (try app.resolveOverviewWorktreeNotice(std.testing.allocator, payload)).?;
     defer std.testing.allocator.free(reordered);
     try std.testing.expectEqualStrings(path, reordered);
-    const remote = (try app.resolveOverviewWorktreeNotice(
+    const remote = try app.resolveOverviewWorktreeNotice(
         std.testing.allocator,
         Accessibility.worktreeIdentityPayload("overview-worktree-notice:ssh://host/repo"),
-    )).?;
-    defer std.testing.allocator.free(remote);
-    try std.testing.expectEqualStrings("ssh://host/repo", remote);
+    );
+    try std.testing.expect(remote == null);
     for (0..4) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
         try std.testing.expectError(error.OutOfMemory, app.resolveOverviewWorktreeNotice(failing.allocator(), payload));
@@ -22097,35 +22133,28 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
     try installNoticeTestInspection(&app, "C:\\notice-a", 8, 1024);
     try installNoticeTestInspection(&app, "C:\\notice-b", 1, 2147483648);
     const expected = [_]DpiExpectedElement{
+        .{ .identity = "overview-project:C:\\notice-a", .present = true, .name = "Same", .eligible = true, .invokable = true },
+        .{ .identity = "overview-project:C:\\notice-b", .present = true, .name = "Same", .eligible = true, .invokable = true },
+        .{ .identity = "overview-project:C:\\notice-c", .present = true, .name = "Unknown", .eligible = true, .invokable = true },
+        .{ .identity = "overview-project:ssh://host/repo", .present = true, .name = "Remote", .eligible = true, .invokable = true },
         .{
             .identity = "overview-worktree-notice:C:\\notice-a",
-            .name = "Last inspected: 8 worktrees - 7 reclaimable",
-            .bounds = .{ .{ 1396, 106, 1682, 126 }, .{ 2094, 159, 2523, 189 }, .{ 2792, 212, 3364, 252 } },
+            .present = true,
+            .name = "8 worktrees · 7 reclaimable",
             .eligible = true,
             .invokable = true,
         },
         .{
             .identity = "overview-worktree-notice:C:\\notice-b",
-            .name = "Last inspected: 1 worktree",
-            .bounds = .{ .{ 1396, 284, 1682, 304 }, .{ 2094, 426, 2523, 456 }, .{ 2792, 568, 3364, 608 } },
+            .present = true,
+            .name = "1 worktree",
             .eligible = true,
             .invokable = true,
         },
-        .{
-            .identity = "overview-worktree-notice:C:\\notice-c",
-            .name = "Worktrees not inspected",
-            .bounds = .{ .{ 1396, 462, 1682, 482 }, .{ 2094, 693, 2523, 723 }, .{ 2792, 924, 3364, 964 } },
-            .eligible = true,
-            .invokable = true,
-        },
-        .{
-            .identity = "overview-worktree-notice:ssh://host/repo",
-            .name = "Worktrees not inspected",
-            .bounds = .{ .{ 1396, 640, 1682, 660 }, .{ 2094, 960, 2523, 990 }, .{ 2792, 1280, 3364, 1320 } },
-            .eligible = true,
-            .invokable = true,
-        },
+        .{ .identity = "overview-worktree-notice:C:\\notice-c" },
+        .{ .identity = "overview-worktree-notice:ssh://host/repo" },
         .{ .identity = "overview-worktree-notice:graphcode://global" },
+        .{ .identity = "overview-project:graphcode://global" },
     };
     const previous = app.model.graphFor("C:\\notice-a").?.worktree_notice.?;
     for ([_]u32{ 96, 144, 192 }, 0..) |dpi, index| {
@@ -22138,9 +22167,9 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
     }
     try app.acceptWorktreePolicy("C:\\notice-a", WorktreeStatus.policyReadOutcome(error.AccessDenied));
     try app.model.recordWorktreeFailure("C:\\notice-b", error.GitFailed);
-    var failures = [_]DpiExpectedElement{ expected[0], expected[1], expected[2] };
-    failures[0].name = "Policy unavailable: 8 worktrees - 7 reclaimable (last inspected) (AccessDenied)";
-    failures[1].name = "Inspection failed: 1 worktree (last inspected) (GitFailed)";
+    var failures = [_]DpiExpectedElement{ expected[0], expected[1], expected[2], expected[3], expected[4], expected[5] };
+    failures[4].name = "Policy unavailable: 8 worktrees - 7 reclaimable (last inspected) (AccessDenied)";
+    failures[5].name = "Inspection failed: 1 worktree (last inspected) (GitFailed)";
     app.dpi = 96;
     var sink = DpiAccessibilitySink{ .expected = &failures, .dpi_index = 0 };
     app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
@@ -22148,6 +22177,50 @@ test "worktree notice App UIA data shares per-lane labels geometry and once-only
     try std.testing.expect(sink.checked);
     try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, GraphCanvas.overviewWorktreeNotice(app.model.graphFor("C:\\notice-a").?).?.state);
     try std.testing.expectEqual(WorktreeStatus.NoticeState.indeterminate, GraphCanvas.overviewWorktreeNotice(app.model.graphFor("C:\\notice-b").?).?.state);
+}
+
+test "empty global summary keeps the overview empty actions until an ordinary folder arrives" {
+    var app = try overviewTestApp(Dpi.base_dpi);
+    defer deinitOverviewTestApp(&app);
+    try std.testing.expect(c.MoveWindow(app.window.hwnd, 0, 0, physicalCoordinate(1200, app.dpi), physicalCoordinate(700, app.dpi), 0) != 0);
+    app.surface = .overview;
+    app.createEmptyStateControls();
+    defer {
+        _ = c.DestroyWindow(app.empty_open_folder_button);
+        _ = c.DestroyWindow(app.empty_global_overview_button);
+    }
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"graphcode://global","name":"Graph"},"nodes":[],"edges":[]}}}
+    );
+    const client = logicalClientRect(app.window.hwnd, app.dpi);
+    try std.testing.expect(app.refreshCanvasLayout(client));
+    app.layoutEmptyStateControls();
+    const open_folder = emptyStateButton(&app, app.empty_open_folder_button);
+    const new_node = emptyStateButton(&app, app.empty_global_overview_button);
+    try std.testing.expect(open_folder.visible);
+    try std.testing.expect(new_node.visible);
+    try std.testing.expect(new_node.rect.left > open_folder.rect.left);
+    try std.testing.expect(new_node.rect.right < open_folder.rect.right);
+    try std.testing.expect(new_node.rect.top > open_folder.rect.bottom);
+
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":2,"event":{"graphChanged":{"project":{"path":"C:\\empty","name":"Empty"},"nodes":[],"edges":[]}}}
+    );
+    try std.testing.expect(app.refreshCanvasLayout(client));
+    app.layoutEmptyStateControls();
+    try std.testing.expect(!emptyStateButton(&app, app.empty_open_folder_button).visible);
+    const canvas = GraphCanvas.renderBounds(client.right, client.bottom, app.workspace_controls);
+    const rail = WorkspaceControls.railPresentation(client.right, app.workspace_controls);
+    const expected = GraphCanvas.addButtonBounds(.{
+        .left = rail.rail_right,
+        .top = canvas.top,
+        .right = canvas.right,
+        .bottom = canvas.bottom,
+    });
+    try std.testing.expectEqualDeep(
+        (AccessibilityBounds{ .logical = expected }).physicalRect(app.dpi),
+        emptyStateButton(&app, app.empty_global_overview_button).rect,
+    );
 }
 
 fn expectDpiAccessibility(surface: GraphCanvas.Surface, canvas: ?[3][4]i32, expected: []const DpiExpectedElement) !void {
@@ -23051,6 +23124,18 @@ fn exerciseOverviewWorktreesFixture() !void {
         try std.testing.expect(app.selectProject(target.other));
         app.openGlobalOverview();
         try std.testing.expect(app.worktree_inspection == null and app.worktree_dialog == null);
+        var observed = WorktreeStatus.Inspection{
+            .entries = std.array_list.Managed(WorktreeStatus.Entry).init(allocator),
+            .project_path = @constCast(target.path),
+            .default_branch = @constCast("main"),
+        };
+        defer observed.entries.deinit();
+        try observed.entries.append(.{
+            .path = @constCast(target.path),
+            .branch = @constCast("main"),
+            .size_complete = true,
+        });
+        try app.model.recordWorktreeInspection(&observed, WorktreeStatus.policyReadOutcome(error.FileNotFound));
         const point = try overviewTestActionPoint(&app, .{ .project = target.path, .action = .inspect_worktrees });
         try applyOverviewTestLaneAction(&app, point.x, point.y, .{ .project = target.path, .action = .inspect_worktrees });
         try expectOverviewSelection(&app, .overview, target.path, target.node);
