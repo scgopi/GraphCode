@@ -3496,6 +3496,7 @@ function Get-MultiProjectAutomationId([string] $kind, [string] $path, [string] $
     "open-project" { "open-project" }
     "project-card" { "canvas-card" }
     "overview-card" { "canvas-card" }
+    "overview-project" { "canvas-card" }
     "overview-worktree-notice" { "canvas-card" }
     "workspace-loop-bar" { "workspace-loop-bar" }
     "workspace-toolbar" { "workspace-toolbar" }
@@ -3540,8 +3541,8 @@ function Test-MultiProjectFragmentRoster($actual, $expected, [int] $processId) {
 function Get-MultiProjectExpectedCanvasRoster([string] $surface, $owners, $selectedOwner) {
   if ($surface -ceq "overview") {
     return ,@($owners | ForEach-Object {
-      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-worktree-notice" $_.path
-        name = "Worktrees not inspected"; classification = "source-summary"; identityKind = "overview-worktree-notice"
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-project" $_.path
+        name = "$($_.name), 1 loop"; classification = "project-caption"; identityKind = "overview-project"
         projectPath = $_.path; nodeID = $null }
       [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-card" $_.path $_.node
         name = $_.title; classification = "node"; identityKind = "overview-card"; projectPath = $_.path; nodeID = $_.node }
@@ -3587,14 +3588,14 @@ function Test-MultiProjectObservedRoster([string] $surface, $projection, $expect
     if ($projection.canvasBounds[2] -le $projection.canvasBounds[0] -or $projection.canvasBounds[3] -le $projection.canvasBounds[1]) { return $false }
     foreach ($owner in $expectedOwners) {
       $nodeId = Get-MultiProjectAutomationId "overview-card" $owner.path $owner.node
-      $summaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $owner.path
+      $captionId = Get-MultiProjectAutomationId "overview-project" $owner.path
       $node = @($projection.cards | Where-Object { $_.automationId -ceq $nodeId })[0]
-      $summary = @($projection.cards | Where-Object { $_.automationId -ceq $summaryId })[0]
+      $caption = @($projection.cards | Where-Object { $_.automationId -ceq $captionId })[0]
       $scale = ($node.bounds[2] - $node.bounds[0]) / 250
       if ([Math]::Abs(($node.bounds[3] - $node.bounds[1]) / $scale - 96) -gt 1) { return $false }
-      $geometry = Get-MultiProjectLaneGeometry $projection.canvasBounds $node.bounds $summary.bounds
+      $geometry = Get-MultiProjectCaptionGeometry $projection.canvasBounds $node.bounds $caption.bounds
       for ($index = 0; $index -lt 4; $index++) {
-        if ([Math]::Abs($summary.bounds[$index] - $geometry.summary[$index]) -gt 1) { return $false }
+        if ([Math]::Abs($caption.bounds[$index] - $geometry.caption[$index]) -gt 1) { return $false }
       }
     }
   }
@@ -4592,6 +4593,33 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
   }
 }
 
+function Get-MultiProjectCaptionGeometry([double[]] $canvas, [double[]] $card, [double[]] $caption) {
+  if ($caption.Count -ne 4 -or $caption[2] -le $caption[0] -or $caption[3] -le $caption[1]) {
+    throw "MULTIPROJECT_BOUNDS: positive exported project caption rectangle required"
+  }
+  $lane = Get-MultiProjectLaneGeometry $canvas $card
+  $expectedCaption = @(
+    ($lane.band[0] + 18 * $lane.scale),
+    ($lane.band[1] + 10 * $lane.scale),
+    ($lane.band[2] - 18 * $lane.scale),
+    ($lane.band[1] + 30 * $lane.scale)
+  )
+  return [ordered]@{
+    provenance = "GraphCanvas non-global caption producer contract; no worktree chip in an uninspected lane"
+    scale = $lane.scale
+    scaleSource = $lane.scaleSource
+    pixelWidth = $lane.pixelWidth
+    pixelHeight = $lane.pixelHeight
+    normalizedWidth = $lane.normalizedWidth
+    normalizedHeight = $lane.normalizedHeight
+    widthTolerance = $lane.widthTolerance
+    heightTolerance = $lane.heightTolerance
+    band = $lane.band
+    caption = $expectedCaption
+    suppliedCaption = $caption
+  }
+}
+
 function Get-MultiProjectClippedRectangle([double[]] $rect, [double[]] $canvas) {
   if ($rect.Count -ne 4 -or $canvas.Count -ne 4) { throw "MULTIPROJECT_BOUNDS: require two measured rectangles" }
   $clipped = @([Math]::Max($rect[0], $canvas[0]), [Math]::Max($rect[1], $canvas[1]),
@@ -5141,10 +5169,10 @@ function Invoke-MultiProjectRenamePhase {
       observedCardCount = $allCards.Count; expectedMatchedCardCount = $cards.Count; owners = $observed.ToArray()
       expectedNodeCardCount = $(if ($surface -ceq "overview") { 2 } else { 1 })
       nodeCardCount = @($canvasClassification | Where-Object { $_.classification -ceq "node" }).Count
-      expectedSourceSummaryCount = $(if ($surface -ceq "overview") { 2 } else { 0 })
-      sourceSummaryCount = @($canvasClassification | Where-Object { $_.classification -ceq "source-summary" }).Count
+      expectedProjectCaptionCount = $(if ($surface -ceq "overview") { 2 } else { 0 })
+      projectCaptionCount = @($canvasClassification | Where-Object { $_.classification -ceq "project-caption" }).Count
       canvasFragmentClasses = $canvasClassification
-      sourceSummaryPolicy = "Ordinary uninspected overview exposes one overview-worktree-notice per exact owner plus its node; all canvas-card fragments remain counted and validated. No filesystem worktree inspection is performed."
+      sourceCaptionPolicy = "Ordinary uninspected overview exposes one overview-project caption per exact owner plus its node and no overview-worktree-notice. All canvas-card fragments remain counted and validated."
       allOwnedProjectIds = @($fragmentProjection.projectRows | ForEach-Object { $_.automationId })
       allOwnedProjectNames = @($fragmentProjection.projectRows | ForEach-Object { $_.name })
       allOwnedCardIds = @($fragmentProjection.cards | ForEach-Object { $_.automationId })
@@ -5182,8 +5210,8 @@ function Invoke-MultiProjectRenamePhase {
     }
     Write-UiaWaitAttribution "multi-project observation: $surface" $observationStartedUtc 0 `
       $multiProcess.Id $multiWindow ([ordered]@{ attempts = $maximumAttempts })
-    $limit = if ($surface -ceq "workspace") { "mandatory owned workspace provider chrome remains unproved" } else { "complete source-supported node/summary roster remains unproved; workspace navigation was not requested" }
-    throw "MULTIPROJECT_IDENTITY: requested=$surface exact owner/node/summary roster and requested markers did not converge; $limit`: $($observation | ConvertTo-Json -Depth 6 -Compress)"
+    $limit = if ($surface -ceq "workspace") { "mandatory owned workspace provider chrome remains unproved" } else { "complete source-supported node/caption roster remains unproved; workspace navigation was not requested" }
+    throw "MULTIPROJECT_IDENTITY: requested=$surface exact owner/node/caption roster and requested markers did not converge; $limit`: $($observation | ConvertTo-Json -Depth 6 -Compress)"
   }
   function Click-MultiProjectRectangle([double[]] $rect, [double[]] $canvas, [switch] $RightClick) {
     $clipped = Get-MultiProjectClippedRectangle $rect $canvas
@@ -5197,11 +5225,11 @@ function Invoke-MultiProjectRenamePhase {
     Invoke-MultiProjectControl "actual-size"
     $overview = Wait-MultiProjectObservation "overview"
     $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
-    $geometry = Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "source-summary" -and $_.projectPath -ceq $owner.path })[0].bounds)
-    while ($geometry.open[2] -gt $overview.canvasBounds[2] - 20) {
+    $geometry = Get-MultiProjectCaptionGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "project-caption" -and $_.projectPath -ceq $owner.path })[0].bounds)
+    while ($geometry.caption[2] -gt $overview.canvasBounds[2] - 20) {
       $canvas = $overview.canvasBounds
       $delta = -[int][Math]::Ceiling([Math]::Min(
-        $geometry.open[2] - $canvas[2] + 20, $canvas[2] - $canvas[0] - 48))
+        $geometry.caption[2] - $canvas[2] + 20, $canvas[2] - $canvas[0] - 48))
       $startX = [int]$canvas[2] - 24
       $startY = [int]$canvas[3] - 120
       Require ($delta -lt 0 -and $startX + $delta -gt $canvas[0]) "multi-project lane pan has no usable displacement"
@@ -5222,9 +5250,9 @@ function Invoke-MultiProjectRenamePhase {
       $overview = Wait-MultiProjectObservation "overview"
       $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
       Require ($row.card.bounds[0] -lt $beforeLeft) "multi-project lane pan made no measured card progress"
-      $geometry = Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "source-summary" -and $_.projectPath -ceq $owner.path })[0].bounds)
+      $geometry = Get-MultiProjectCaptionGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "project-caption" -and $_.projectPath -ceq $owner.path })[0].bounds)
     }
-    $click = Click-MultiProjectRectangle $geometry.open $overview.canvasBounds
+    $click = Click-MultiProjectRectangle $geometry.caption $overview.canvasBounds
     $postedFallback = $false
     try {
       $project = Wait-MultiProjectObservation "project" $owner 10
@@ -6450,12 +6478,8 @@ try {
   Require (($overviewCards.Count -eq 2) -and
            ((@($overviewCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Overview did not expose synchronized cards"
 
-  # Anchor to the product's exported caption, not a second grid formula.
-  # GraphCanvas's caption contract checks these offsets at six zooms and three DPIs.
-  $laneOpenNoticeOffset = 36
-  $laneWorktreesNoticeOffset = 95
-  $laneActionsRightNoticeOffset = 122
-  $laneSummaryPattern = '^(Worktrees not inspected|Last inspected:|Inspection failed:|Policy unavailable:)'
+  # Anchor navigation to the product's exported caption. An uninspected lane has
+  # no worktree chip; the whole non-global caption is the Open-project target.
   $laneNodeIds = @("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
   $laneOverviewIds = @($laneNodeIds | ForEach-Object {
     Get-MultiProjectAutomationId "overview-card" $fixtureProjectPath $_
@@ -6463,7 +6487,8 @@ try {
   $laneProjectIds = @($laneNodeIds | ForEach-Object {
     Get-MultiProjectAutomationId "project-card" $fixtureProjectPath $_
   })
-  $laneSummaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $fixtureProjectPath
+  $laneProjectId = Get-MultiProjectAutomationId "overview-project" $fixtureProjectPath
+  $laneLegacySummaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $fixtureProjectPath
   $readLaneCaption = {
     param($pane)
     $children = @(Get-DirectChildren $pane $rawWalker)
@@ -6476,26 +6501,34 @@ try {
       Require ($matches.Count -eq 1) "lane caption requires one exact overview card for $id"
       $matches[0]
     })
-    $summaries = @($children | Where-Object { $_.Current.Name -match $laneSummaryPattern })
+    $captions = @($children | Where-Object {
+      $_.Current.AutomationId -ceq $laneProjectId
+    })
+    $legacySummaries = @($children | Where-Object {
+      $_.Current.AutomationId -ceq $laneLegacySummaryId
+    })
     Require ($cards.Count -eq 2) "lane caption snapshot must contain both exact fixture cards"
-    Require ($summaries.Count -eq 1) "lane caption snapshot must expose exactly one product summary"
-    Require ($summaries[0].Current.AutomationId -ceq $laneSummaryId) "lane caption summary belongs to the wrong project"
+    Require ($captions.Count -eq 1) "lane caption snapshot must expose exactly one project caption"
+    Require ($captions[0].Current.AutomationId -ceq $laneProjectId) "lane caption belongs to the wrong project"
+    Require ($captions[0].Current.Name -match '^UIA project, 2 loops') `
+      "lane caption omitted its source-derived project name and loop rollup"
+    Require ($legacySummaries.Count -eq 0) `
+      "lane caption snapshot must not expose an uninspected worktree chip"
     Require ($cards[0].Current.AutomationId -ceq $laneOverviewIds[0] -and
       $cards[1].Current.AutomationId -ceq $laneOverviewIds[1]) "lane overview node identities differ from the exact fixture"
     $rectangles = @($cards | ForEach-Object { $_.Current.BoundingRectangle })
-    $summary = $summaries[0].Current.BoundingRectangle
+    $caption = $captions[0].Current.BoundingRectangle
     Require ($rectangles[0].Width -gt 0 -and $rectangles[0].Height -gt 0 -and
-      $summary.Width -gt 0 -and $summary.Height -gt 0) "lane caption snapshot has empty bounds"
+      $caption.Width -gt 0 -and $caption.Height -gt 0) "lane caption snapshot has empty bounds"
     $scale = $rectangles[0].Width / 250.0
     [pscustomobject]@{
       GraphBounds = $pane.Current.BoundingRectangle
       CardBounds = $rectangles
-      SummaryBounds = $summary
+      CaptionBounds = $caption
       Scale = $scale
-      OpenX = [int][Math]::Round($summary.Right + $laneOpenNoticeOffset * $scale)
-      WorktreesX = [int][Math]::Round($summary.Right + $laneWorktreesNoticeOffset * $scale)
-      ActionsRight = $summary.Right + $laneActionsRightNoticeOffset * $scale
-      Y = [int][Math]::Round(($summary.Top + $summary.Bottom) / 2)
+      CaptionRight = $caption.Right
+      OpenX = [int][Math]::Round(($caption.Left + $caption.Right) / 2)
+      Y = [int][Math]::Round(($caption.Top + $caption.Bottom) / 2)
     }
   }
   $readNormalizedLaneGeometry = {
@@ -6572,16 +6605,16 @@ try {
   Start-Sleep -Milliseconds 150
   $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
   $laneSnapshot = & $readLaneCaption $graph
-  if ($laneSnapshot.ActionsRight -gt $laneSnapshot.GraphBounds.Right - 20 * $laneSnapshot.Scale) {
+  if ($laneSnapshot.CaptionRight -gt $laneSnapshot.GraphBounds.Right - 20 * $laneSnapshot.Scale) {
     $delta = [int][Math]::Floor($laneSnapshot.GraphBounds.Right -
-      20 * $laneSnapshot.Scale - $laneSnapshot.ActionsRight)
+      20 * $laneSnapshot.Scale - $laneSnapshot.CaptionRight)
     $blankX = [int]$laneSnapshot.GraphBounds.Right - 24
     $blankY = [int]$laneSnapshot.GraphBounds.Bottom - 120
     $occupied = @(Get-DirectChildren $graph $rawWalker | Where-Object {
       $_.Current.BoundingRectangle.Contains([double]$blankX, [double]$blankY)
     })
     Require ($occupied.Count -eq 0 -and $blankX + $delta -gt $laneSnapshot.GraphBounds.Left) `
-      "lane actions need a pan but no safe blank-canvas gesture fits"
+      "lane caption needs a pan but no safe blank-canvas gesture fits"
     $panClientX = 0
     $panClientY = 0
     Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -6599,10 +6632,10 @@ try {
   }
   $laneSnapshotGeometry = & $readNormalizedLaneGeometry $laneSnapshot.CardBounds
   Require ($laneSnapshot.OpenX -gt $laneSnapshot.GraphBounds.Left -and
-    $laneSnapshot.ActionsRight -lt $laneSnapshot.GraphBounds.Right -and
+    $laneSnapshot.CaptionRight -lt $laneSnapshot.GraphBounds.Right -and
     $laneSnapshot.Y -gt $laneSnapshot.GraphBounds.Top -and
     $laneSnapshot.Y -lt $laneSnapshot.GraphBounds.Bottom) `
-    "actual product lane actions remain outside the graph viewport"
+    "actual product lane caption remains outside the graph viewport"
   $laneOpenScreenX = $laneSnapshot.OpenX
   $laneOpenScreenY = $laneSnapshot.Y
   $laneOpenClientX = 0
@@ -6623,8 +6656,9 @@ try {
     Require ($matches.Count -eq 1) "opened project requires one exact card for $id"
     $matches[0]
   })
-  $remainingSummaries = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.Name -match $laneSummaryPattern
+  $remainingOverviewCaptions = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -ceq $laneProjectId -or
+      $_.Current.AutomationId -ceq $laneLegacySummaryId
   })
   $laneOpenedGeometry = & $readNormalizedLaneGeometry `
     @($laneOpenedCards | ForEach-Object { $_.Current.BoundingRectangle })
@@ -6636,7 +6670,7 @@ try {
   $laneOpenNormalizedEvidence = [ordered]@{
     names = @($laneOpenedCards | ForEach-Object { [string]$_.Current.Name })
     automationIds = @($laneOpenedCards | ForEach-Object { [string]$_.Current.AutomationId })
-    summaryCount = $remainingSummaries.Count
+    captionCount = $remainingOverviewCaptions.Count
     graphBoundsEqual = $laneGraphBoundsEqual
     normalizedActual = $laneOpenedGeometry
     normalizedExpected = $laneSnapshotGeometry
@@ -6657,7 +6691,7 @@ try {
            ((@($laneOpenedCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B") -and
            ($laneOpenedCards[0].Current.AutomationId -ceq $laneProjectIds[0]) -and
            ($laneOpenedCards[1].Current.AutomationId -ceq $laneProjectIds[1]) -and
-           ($remainingSummaries.Count -eq 0) -and
+           ($remainingOverviewCaptions.Count -eq 0) -and
            $laneGraphBoundsEqual -and
            $laneNormalizedEqual -and
            $laneNonOverlap
@@ -6672,16 +6706,16 @@ try {
     { param($items) $items.Count -eq 2 }
   $graph = $restoredLaneProbe.Graph
   $restoredLane = & $readLaneCaption $graph
-  if ($restoredLane.ActionsRight -gt $restoredLane.GraphBounds.Right - 20 * $restoredLane.Scale) {
+  if ($restoredLane.CaptionRight -gt $restoredLane.GraphBounds.Right - 20 * $restoredLane.Scale) {
     $delta = [int][Math]::Floor($restoredLane.GraphBounds.Right -
-      20 * $restoredLane.Scale - $restoredLane.ActionsRight)
+      20 * $restoredLane.Scale - $restoredLane.CaptionRight)
     $blankX = [int]$restoredLane.GraphBounds.Right - 24
     $blankY = [int]$restoredLane.GraphBounds.Bottom - 120
     $occupied = @(Get-DirectChildren $graph $rawWalker | Where-Object {
       $_.Current.BoundingRectangle.Contains([double]$blankX, [double]$blankY)
     })
     Require ($occupied.Count -eq 0 -and $blankX + $delta -gt $restoredLane.GraphBounds.Left) `
-      "restored lane actions need a pan but no safe blank-canvas gesture fits"
+      "restored lane caption needs a pan but no safe blank-canvas gesture fits"
     $panClientX = 0
     $panClientY = 0
     Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -6708,39 +6742,28 @@ try {
   Write-Host ("UIA_RESTORED_LANE_NORMALIZED_EVIDENCE=" +
     ($restoredLaneNormalizedEvidence | ConvertTo-Json -Compress -Depth 4))
   Require $restoredLaneComparison.Equal `
-    "overview did not restore its shared normalized card geometry and summary"
+    "overview did not restore its shared normalized card geometry and caption"
   Require ($restoredLane.OpenX -gt $restoredLane.GraphBounds.Left -and
-    $restoredLane.ActionsRight -lt $restoredLane.GraphBounds.Right -and
+    $restoredLane.CaptionRight -lt $restoredLane.GraphBounds.Right -and
     $restoredLane.Y -gt $restoredLane.GraphBounds.Top -and
     $restoredLane.Y -lt $restoredLane.GraphBounds.Bottom) `
-    "restored overview Worktrees action is outside the viewport"
-  $laneWorktreesScreenX = $restoredLane.WorktreesX
-  $laneWorktreesScreenY = $restoredLane.Y
-  $worktrees = Find-FragmentById $root "worktrees" $rawWalker
-  Require ($null -ne $worktrees) "missing Worktrees fragment before the overview lane Worktrees check"
-  $process.Refresh()
-  $shellWindow = $process.MainWindowHandle
-  $laneWorktreesClientX = 0
-  $laneWorktreesClientY = 0
-  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
-    $shellWindow, $laneWorktreesScreenX, $laneWorktreesScreenY, [ref]$laneWorktreesClientX, [ref]$laneWorktreesClientY
-  )) "could not map the overview lane Worktrees action to client coordinates"
-  $null = Ensure-ShellForeground $shellWindow "before-lane-worktrees-click"
-  Require ([GraphCodeUiaGateState]::PostMouseClickAt($shellWindow, $laneWorktreesClientX, $laneWorktreesClientY)) `
-    "overview lane Worktrees click was rejected"
-  $laneWorktreeRows = @()
-  for ($attempt = 0; $attempt -lt 40; $attempt++) {
-    Start-Sleep -Milliseconds 100
-    $laneWorktreeRows = @(Get-DirectChildren $worktrees $rawWalker | Where-Object {
-      $_.Current.AutomationId -match '^worktree-row-'
-    })
-    if ($laneWorktreeRows.Count -gt 0) { break }
+    "restored overview caption is outside the viewport"
+  $restoredChildren = @(Get-DirectChildren $graph $rawWalker)
+  $restoredLegacyChips = @($restoredChildren | Where-Object {
+    $_.Current.AutomationId -ceq $laneLegacySummaryId
+  })
+  $laneNoWorktreeChipEvidence = [ordered]@{
+    projectPath = $fixtureProjectPath
+    captionId = $laneProjectId
+    captionName = [string](@($restoredChildren | Where-Object {
+      $_.Current.AutomationId -ceq $laneProjectId
+    })[0].Current.Name)
+    legacyChipCount = $restoredLegacyChips.Count
   }
-  Require ($laneWorktreeRows.Count -gt 0) "overview lane Worktrees click did not open worktree inspection"
-  $surfaceActionPatterns["overview-destination"].Invoke()
-  Start-Sleep -Milliseconds 500
-  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
-  Require ($null -ne $graph) "missing graph fragment after returning from worktree inspection"
+  Write-Host ("UIA_LANE_NO_WORKTREE_CHIP_EVIDENCE=" +
+    ($laneNoWorktreeChipEvidence | ConvertTo-Json -Compress))
+  Require ($restoredLegacyChips.Count -eq 0) `
+    "restored uninspected overview lane exposed a worktree chip"
 
   $surfaceActionPatterns["quick-chats-destination"].Invoke()
   $quickChatProbe = Wait-ForGraphChildren $root $rawWalker `

@@ -165,37 +165,31 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       return "Identity guard rejected before any input"
     }
   }
-  Invoke-MultiCase "actual early Worktrees click assignment consumes the exported caption snapshot" {
+  Invoke-MultiCase "actual caption Open assignment consumes the exported caption snapshot" {
     $gateAst = [Management.Automation.Language.Parser]::ParseInput($gateSource, [ref]$null, [ref]$null)
-    $assignments = @($gateAst.FindAll({
+    $openAssignments = @($gateAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+        $node.Left.VariablePath.UserPath -ceq "laneOpenScreenX"
+    }, $true))
+    $worktreeAssignments = @($gateAst.FindAll({
       param($node)
       $node -is [Management.Automation.Language.AssignmentStatementAst] -and
         $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
         $node.Left.VariablePath.UserPath -ceq "laneWorktreesScreenX"
     }, $true))
-    Assert-MultiCase ($assignments.Count -eq 1) "actual Worktrees click assignment missing or ambiguous"
-    $evaluate = [scriptblock]::Create('param($restoredLane) ' + $assignments[0].Extent.Text + '; return $laneWorktreesScreenX')
-    foreach ($case in @(
-      @{ left = 220; right = 1028; expected = 1005; minimum = 978; maximum = 1032 },
-      @{ left = 220; right = 1200; expected = 1131; minimum = 1104; maximum = 1158 },
-      @{ left = 228; right = 1036; expected = 1013; minimum = 986; maximum = 1040 }
-    )) {
-      $snapshot = [pscustomobject]@{ WorktreesX = $case.expected }
+    Assert-MultiCase ($openAssignments.Count -eq 1) "actual caption Open assignment missing or ambiguous"
+    Assert-MultiCase ($worktreeAssignments.Count -eq 0) "uninspected lane still prepares an obsolete Worktrees click"
+    $evaluate = [scriptblock]::Create(
+      'param($laneSnapshot) ' + $openAssignments[0].Extent.Text + '; return $laneOpenScreenX')
+    foreach ($expected in @(614, 866, 1013)) {
+      $snapshot = [pscustomobject]@{ OpenX = $expected }
       $actual = & $evaluate $snapshot
-      Assert-MultiCase ($actual -eq $case.expected -and $actual -ge $case.minimum -and $actual -lt $case.maximum) `
-        "actual production Worktrees point expected $($case.expected), found $actual"
-      $panCardLeft = $case.maximum - 1440 + 18
-      $geometry = Get-MultiProjectLaneGeometry @($case.left,34,$case.right,900) @($panCardLeft,134,($panCardLeft+250),230)
-      $control = @(($geometry.band[2]-72),106,($geometry.band[2]-18),126)
-      $visible = Get-MultiProjectClippedRectangle $control @($case.left,34,$case.right,900)
-      Assert-MultiCase ($actual -ge $visible[0] -and $actual -lt $visible[2]) "actual Worktrees point misses its visible clipped control"
-      if ($case.right - $case.left -eq 808) {
-        $obsolete = $case.right - 69
-        Assert-MultiCase ($obsolete -ge $geometry.open[0] -and $obsolete -lt $geometry.open[2] -and
-          ($obsolete -lt $control[0] -or $obsolete -ge $control[2])) "obsolete narrow point was not rejected as Open rather than Worktrees"
-      }
+      Assert-MultiCase ($actual -eq $expected) `
+        "actual caption Open point expected $expected, found $actual"
     }
-    return "Executed production snapshot-consumer AST with source-only measured pan fixtures; no native UIA or desktop claim"
+    return "Executed production caption snapshot-consumer AST and rejected any uninspected Worktrees click"
   }
   $eventStart = [DateTime]::Parse("2026-10-01T18:29:43.1462496Z").ToUniversalTime()
   $eventEnd = $eventStart.AddSeconds(1)
@@ -1635,9 +1629,9 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       [ordered]@{ automationId = "open-project-2225278778924952707"; name = "Beta"; processId = 3140; bounds = @(20,308,240,334) }
     )
     cards = @(
-      [ordered]@{ automationId = "canvas-card-1669006899659070917"; name = "Worktrees not inspected"; processId = 3140; bounds = @(586,133,872,153) },
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-project" $retainedAlpha; name = "Alpha, 1 loop"; processId = 3140; bounds = @(246,133,1754,153) },
       [ordered]@{ automationId = "canvas-card-1662987038540838399"; name = "Alpha loop"; processId = 3140; bounds = @(270,169,490,255) },
-      [ordered]@{ automationId = "canvas-card-1518601899186967385"; name = "Worktrees not inspected"; processId = 3140; bounds = @(586,329,872,349) },
+      [ordered]@{ automationId = Get-MultiProjectAutomationId "overview-project" $retainedBeta; name = "Beta, 1 loop"; processId = 3140; bounds = @(246,329,1754,349) },
       [ordered]@{ automationId = "canvas-card-1884655564485847249"; name = "Beta loop"; processId = 3140; bounds = @(270,365,490,451) }
     )
     foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
@@ -1647,23 +1641,27 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $retainedProjection $retainedOwners $null 3140)) `
       "historical 220x86 hosted geometry passed the current compact-card predicate"
     $compactProjection = Copy-MultiProjectValue $retainedProjection
-    $compactProjection.cards[0].bounds = @(1404,157,1690,177)
+    $compactProjection.cards[0].bounds = @(326,157,1812,177)
     $compactProjection.cards[1].bounds = @(390,185,640,281)
-    $compactProjection.cards[2].bounds = @(1404,335,1690,355)
+    $compactProjection.cards[2].bounds = @(326,335,1812,355)
     $compactProjection.cards[3].bounds = @(390,363,640,459)
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $compactProjection $retainedOwners $null 3140) `
-      "compact geometry rejected the same exact two-node/two-summary identities and names"
+      "compact geometry rejected the same exact two-node/two-caption identities and names"
     $projection = Copy-MultiProjectValue $retainedProjection
     $projection.canvasBounds = @(228,85,1036,780)
-    $projection.cards[0].bounds = @(900,307,1129,323)
+    $projection.cards[0].bounds = @(37,308,1226,324)
     $projection.cards[1].bounds = @(88,330,288,406)
-    $projection.cards[2].bounds = @(900,450,1129,466)
+    $projection.cards[2].bounds = @(37,450,1226,466)
     $projection.cards[3].bounds = @(88,472,288,548)
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $projection $retainedOwners $null 3140) `
-      "complete admitted 80 percent roster was rejected because rounded card height displaced summary geometry"
-    return "Historical 220x86 bounds rejected; synthetic source geometry and exact admitted 80 percent 200x76 node/229x16 summary roster accepted"
+      "complete admitted 80 percent roster was rejected because rounded card height displaced caption geometry"
+    return "Historical 220x86 bounds rejected; synthetic source geometry and exact admitted 80 percent node/caption roster accepted"
   }
   Invoke-MultiCase "source summary identity independent fixture and hosted goldens" {
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-project" "A") -ceq
+      "canvas-card-1331915895917204893") "Alpha overview caption public hash differs"
+    Assert-MultiCase ((Get-MultiProjectAutomationId "overview-project" "B") -ceq
+      "canvas-card-1331912597382320260") "Beta overview caption public hash differs"
     Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "A") -ceq
       "canvas-card-1294898434078301384") "Alpha source summary public hash differs"
     Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" "B") -ceq
@@ -1672,7 +1670,7 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       "canvas-card-1669006899659070917") "retained hosted Alpha summary identity differs"
     Assert-MultiCase ((Get-MultiProjectAutomationId "overview-worktree-notice" $retainedBeta) -ceq
       "canvas-card-1518601899186967385") "retained hosted Beta summary identity differs"
-    return "Exact overview-worktree-notice:projectPath identities; native parent4 canvas-card prefix"
+    return "Exact overview-project and overview-worktree-notice projectPath identities; native parent4 canvas-card prefix"
   }
   Invoke-MultiCase "workspace marker independent prefix and row-key goldens" {
     Assert-MultiCase ((Get-MultiProjectAutomationId "workspace-loop-bar" $a) -ceq
@@ -1803,9 +1801,9 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         [ordered]@{ automationId = "open-project-1737217821384741551"; name = "Beta"; processId = 4242; bounds = @(12,148,232,174) }
       )
       cards = @(
-        [ordered]@{ automationId = "canvas-card-1294898434078301384"; name = "Worktrees not inspected"; processId = 4242; bounds = @(1396,106,1682,126) },
+        [ordered]@{ automationId = "canvas-card-1331915895917204893"; name = "Alpha, 1 loop"; processId = 4242; bounds = @(318,106,1804,126) },
         [ordered]@{ automationId = "canvas-card-1929002346198335884"; name = "Alpha loop"; processId = 4242; bounds = @(382,134,632,230) },
-        [ordered]@{ automationId = "canvas-card-1294901732613186017"; name = "Worktrees not inspected"; processId = 4242; bounds = @(1396,284,1682,304) },
+        [ordered]@{ automationId = "canvas-card-1331912597382320260"; name = "Beta, 1 loop"; processId = 4242; bounds = @(318,284,1804,304) },
         [ordered]@{ automationId = "canvas-card-1616358459734844849"; name = "Beta loop"; processId = 4242; bounds = @(382,312,632,408) }
       )
       foreignCardFragmentCount = 0; foreignProjectFragmentCount = 0
@@ -1814,8 +1812,8 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
   }
   Invoke-MultiCase "unfiltered ordinary overview roster exactly two owners and cards" {
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" (New-MultiRosterProjection) $rosterOwners $null 4242) `
-      "literal two-owner/two-node plus two-summary whole roster rejected"
-    return "Historical two-card case counts NODE cards: complete owned canvas roster is four (two nodes plus two summaries); no live app claim"
+      "literal two-owner/two-node plus two-caption whole roster rejected"
+    return "Historical two-card case counts NODE cards: complete owned canvas roster is four (two nodes plus two captions); no live app claim"
   }
   Invoke-MultiCase "compact overview roster rejects obsolete card dimensions" -Negative {
     $projection = New-MultiRosterProjection
@@ -1824,21 +1822,21 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       "old 220x86 card passed the actual complete-roster predicate"
     return "Named Alpha node geometry rejected; no broad canvas count"
   }
-  Invoke-MultiCase "compact overview roster rejects obsolete narrow summary position" -Negative {
+  Invoke-MultiCase "compact overview roster rejects obsolete narrow caption position" -Negative {
     $projection = New-MultiRosterProjection
     $projection.canvasBounds = @(220,34,1028,900)
     $projection.cards[0].bounds = @(578,82,864,102)
     $projection.cards[2].bounds = @(578,278,864,298)
     Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
-      "old 760-pixel floor summary positions passed the actual complete-roster predicate"
+      "old 760-pixel floor caption positions passed the actual complete-roster predicate"
     $projection.cards[0].bounds = @(624,82,910,102)
     $projection.cards[2].bounds = @(624,278,910,298)
     Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
-      "obsolete 806-pixel grid summary positions were accepted"
-    $projection.cards[0].bounds = @(1396,106,1682,126)
-    $projection.cards[2].bounds = @(1396,284,1682,304)
+      "obsolete 806-pixel grid caption positions were accepted"
+    $projection.cards[0].bounds = @(318,106,1804,126)
+    $projection.cards[2].bounds = @(318,284,1804,304)
     Assert-MultiCase (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242) `
-      "Mac producer-derived summaries were rejected"
+      "Mac producer-derived captions were rejected"
     return "Exact four-fragment mock roster: old760 and806 grids rejected, shared lane geometry accepted"
   }
   Invoke-MultiCase "fresh owned content cannot bless an overview missing its peer card" -Negative {
@@ -1887,22 +1885,22 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       return "Actual whole-roster predicate rejected $mutation"
     }
   }
-  Invoke-MultiCase "source summary classification keeps full four distinct from two nodes" {
+  Invoke-MultiCase "project caption classification keeps full four distinct from two nodes" {
     $expected = Get-MultiProjectExpectedCanvasRoster "overview" $rosterOwners $null
     Assert-MultiCase ($expected.Count -eq 4 -and @($expected | Where-Object { $_.classification -ceq "node" }).Count -eq 2 -and
-      @($expected | Where-Object { $_.classification -ceq "source-summary" }).Count -eq 2) "source taxonomy collapsed total/loop count"
+      @($expected | Where-Object { $_.classification -ceq "project-caption" }).Count -eq 2) "source taxonomy collapsed total/loop count"
     Assert-MultiCase ($expected[0].projectPath -ceq "A" -and $expected[0].nodeID -eq $null -and
-      $expected[0].identityKind -ceq "overview-worktree-notice") "summary not explicitly owner/kind bound"
-    return "Full roster four, node two, per-owner summary two"
+      $expected[0].identityKind -ceq "overview-project") "caption not explicitly owner/kind bound"
+    return "Full roster four, node two, per-owner caption two"
   }
-  Invoke-MultiCase "source summary geometry is separate from node Open geometry" {
-    $geometry = Get-MultiProjectLaneGeometry @(228,85,1036,780) @(390,185,640,281) @(1404,157,1690,177)
-    Assert-MultiCase (($geometry.summary -join ",") -ceq "1404,157,1690,177" -and
-      ($geometry.open -join ",") -ceq "1698,157,1754,177") "producer summary and supplied-caption Open anchor differ"
-    return "Derived from actual NODE bounds and canvas; not summary-as-node geometry"
+  Invoke-MultiCase "source project caption geometry is separate from node geometry" {
+    $geometry = Get-MultiProjectCaptionGeometry @(228,85,1036,780) @(390,185,640,281) @(326,157,1812,177)
+    Assert-MultiCase (($geometry.caption -join ",") -ceq "326,157,1812,177") `
+      "producer project caption and supplied caption differ"
+    return "Derived from actual NODE bounds and canvas; caption is the Open target"
   }
-  foreach ($mutation in @("two-nodes-unknown", "unknown-summary", "duplicate-summary", "wrong-summary-owner",
-      "wrong-summary-pid", "wrong-summary-name", "wrong-summary-bounds", "summary-as-node-bounds", "hidden-chrome")) {
+  foreach ($mutation in @("two-nodes-unknown", "unknown-caption", "duplicate-caption", "wrong-caption-owner",
+      "wrong-caption-pid", "wrong-caption-name", "wrong-caption-bounds", "caption-as-node-bounds", "hidden-chrome")) {
     Invoke-MultiCase ("classified roster rejects " + $mutation) -Negative {
       $projection = New-MultiRosterProjection
       switch ($mutation) {
@@ -1910,13 +1908,13 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
           $projection.cards = @($projection.cards[1], $projection.cards[3],
             [ordered]@{ automationId = "canvas-card-1999999999999999999"; name = "Unknown loop"; processId = 4242; bounds = @(508,118,728,204) })
         }
-        "unknown-summary" { $projection.cards[0].automationId = "canvas-card-1999999999999999999" }
-        "duplicate-summary" { $projection.cards += $projection.cards[0] }
-        "wrong-summary-owner" { $projection.cards[0].automationId = "canvas-card-1294901732613186017" }
-        "wrong-summary-pid" { $projection.cards[0].processId = 7777 }
-        "wrong-summary-name" { $projection.cards[0].name = "Last inspected" }
-        "wrong-summary-bounds" { $projection.cards[0].bounds = @(750,278,1036,298) }
-        "summary-as-node-bounds" { $projection.cards[1].bounds = $projection.cards[0].bounds }
+        "unknown-caption" { $projection.cards[0].automationId = "canvas-card-1999999999999999999" }
+        "duplicate-caption" { $projection.cards += $projection.cards[0] }
+        "wrong-caption-owner" { $projection.cards[0].automationId = "canvas-card-1331912597382320260" }
+        "wrong-caption-pid" { $projection.cards[0].processId = 7777 }
+        "wrong-caption-name" { $projection.cards[0].name = "Last inspected" }
+        "wrong-caption-bounds" { $projection.cards[0].bounds = @(750,278,1036,298) }
+        "caption-as-node-bounds" { $projection.cards[1].bounds = $projection.cards[0].bounds }
         "hidden-chrome" { $projection.cards = @($projection.cards[1], $projection.cards[3]) }
       }
       Assert-MultiCase (-not (Test-MultiProjectObservedRoster "overview" $projection $rosterOwners $null 4242)) `
@@ -3389,6 +3387,42 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  $laneCaptionStart = $uiaLiveGateSource.IndexOf(
+    '$laneProjectId = Get-MultiProjectAutomationId "overview-project" $fixtureProjectPath',
+    [StringComparison]::Ordinal)
+  $laneCaptionEnd = if ($laneCaptionStart -ge 0) {
+    $uiaLiveGateSource.IndexOf(
+      '$surfaceActionPatterns["quick-chats-destination"].Invoke()',
+      $laneCaptionStart,
+      [StringComparison]::Ordinal)
+  } else { -1 }
+  if ($laneCaptionStart -lt 0 -or $laneCaptionEnd -le $laneCaptionStart) {
+    throw "RED: lane caption gate does not bind the source-derived overview-project identity"
+  }
+  $laneCaptionSource = $uiaLiveGateSource.Substring(
+    $laneCaptionStart, $laneCaptionEnd - $laneCaptionStart)
+  foreach ($required in @(
+      '$captions = @($children | Where-Object',
+      '$_.Current.AutomationId -ceq $laneProjectId',
+      'lane caption snapshot must expose exactly one project caption',
+      'lane caption snapshot must not expose an uninspected worktree chip',
+      'CaptionBounds = $caption',
+      'OpenX = [int][Math]::Round(($caption.Left + $caption.Right) / 2)',
+      'UIA_LANE_NO_WORKTREE_CHIP_EVIDENCE=')) {
+    if (-not $laneCaptionSource.Contains($required)) {
+      throw "RED: lane caption gate lacks the no-summary caption/open-project contract: $required"
+    }
+  }
+  foreach ($obsolete in @(
+      'Worktrees not inspected',
+      '$laneOpenNoticeOffset',
+      '$laneWorktreesNoticeOffset',
+      '$laneActionsRightNoticeOffset',
+      'overview lane Worktrees click')) {
+    if ($laneCaptionSource.Contains($obsolete)) {
+      throw "RED: lane caption gate retains obsolete summary/button contract: $obsolete"
+    }
+  }
   if ($uiaLiveGateSource -notmatch 'function Get-UiaStartupFileDiagnostic' -or
       $uiaLiveGateSource -notmatch 'RedirectStandardOutput' -or
       $uiaLiveGateSource -notmatch 'function Get-UiaPrelaunchDiagnostics' -or
@@ -3996,9 +4030,10 @@ Start-Sleep -Seconds 60
       "foreignProjectFragmentCount", "static Graph destination is not an ordinary project row")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: unfiltered multi-project observer roster lacks $required" }
   }
-  foreach ($required in @("Get-MultiProjectExpectedCanvasRoster", "expectedNodeCardCount", "expectedSourceSummaryCount",
-      "sourceSummaryCount", "canvasFragmentClasses", "overview-worktree-notice", "source-summary",
-      "workspace navigation was not requested", 'Get-MultiProjectLaneGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "source-summary" -and $_.projectPath -ceq $owner.path })[0].bounds)')) {
+  foreach ($required in @("Get-MultiProjectExpectedCanvasRoster", "Get-MultiProjectCaptionGeometry",
+      "expectedNodeCardCount", "expectedProjectCaptionCount", "projectCaptionCount", "canvasFragmentClasses",
+      "overview-project", "project-caption", "workspace navigation was not requested",
+      'Get-MultiProjectCaptionGeometry $overview.canvasBounds $row.card.bounds (@($overview.canvasFragmentClasses | Where-Object { $_.classification -ceq "project-caption" -and $_.projectPath -ceq $owner.path })[0].bounds)')) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: explicit complete overview taxonomy lacks $required" }
   }
   foreach ($required in @('$pixelWidth = $card[2] - $card[0]', '$pixelHeight = $card[3] - $card[1]',
