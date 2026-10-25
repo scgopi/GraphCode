@@ -160,6 +160,18 @@ public static class CapNative {
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern bool WaitNamedPipeW(string name, uint timeout);
 
+  private static IntPtr EnterPerMonitorV2() {
+    IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    if (previous == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot enter per-monitor-v2 DPI awareness: " + Marshal.GetLastWin32Error());
+    return previous;
+  }
+
+  private static void RestoreDpiAwareness(IntPtr previous) {
+    if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot restore the capture thread DPI awareness: " + Marshal.GetLastWin32Error());
+  }
+
   private static long FileTime(NativeFileTime value) {
     return ((long)value.High << 32) | value.Low;
   }
@@ -292,7 +304,12 @@ public static class CapNative {
   }
 
   public static bool SetWindowPosition(IntPtr window, int x, int y, int width, int height) {
-    return SetWindowPos(window, IntPtr.Zero, x, y, width, height, 0x0014);
+    IntPtr previous = EnterPerMonitorV2();
+    try {
+      return SetWindowPos(window, IntPtr.Zero, x, y, width, height, 0x0014);
+    } finally {
+      RestoreDpiAwareness(previous);
+    }
   }
 
   public static int[] AdjustWindowRectForDpi(int clientWidth, int clientHeight, long style, bool hasMenu, long exStyle, uint dpi) {
@@ -305,9 +322,7 @@ public static class CapNative {
   }
 
   public static int[] PrimaryPhysicalWorkArea() {
-    IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
-    if (previous == IntPtr.Zero)
-      throw new InvalidOperationException("Cannot enter per-monitor-v2 DPI awareness: " + Marshal.GetLastWin32Error());
+    IntPtr previous = EnterPerMonitorV2();
     try {
       IntPtr monitor = MonitorFromPoint(new NativePoint { X = 0, Y = 0 }, 1);
       if (monitor == IntPtr.Zero)
@@ -319,8 +334,7 @@ public static class CapNative {
         throw new InvalidOperationException("Primary monitor physical work area is empty.");
       return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
     } finally {
-      if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero)
-        throw new InvalidOperationException("Cannot restore the capture thread DPI awareness: " + Marshal.GetLastWin32Error());
+      RestoreDpiAwareness(previous);
     }
   }
 
@@ -328,53 +342,64 @@ public static class CapNative {
     uint owner;
     if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)expectedPid)
       throw new InvalidOperationException("Window ownership mismatch.");
-    NativeRect outer, client;
-    if (!GetWindowRect(window, out outer) || !GetClientRect(window, out client))
-      throw new InvalidOperationException("Window geometry query failed: " + Marshal.GetLastWin32Error());
-    return new CapWindowSnapshot {
-      OuterBounds = new[] { outer.Left, outer.Top, outer.Right, outer.Bottom },
-      ClientBounds = new[] { client.Left, client.Top, client.Right, client.Bottom },
-      Dpi = GetDpiForWindow(window),
-      Style = GetWindowLongPtr(window, -16).ToInt64(),
-      ExStyle = GetWindowLongPtr(window, -20).ToInt64(),
-      HasMenu = GetMenu(window) != IntPtr.Zero
-    };
+    IntPtr previous = EnterPerMonitorV2();
+    try {
+      NativeRect outer, client;
+      if (!GetWindowRect(window, out outer) || !GetClientRect(window, out client))
+        throw new InvalidOperationException("Window geometry query failed: " + Marshal.GetLastWin32Error());
+      return new CapWindowSnapshot {
+        OuterBounds = new[] { outer.Left, outer.Top, outer.Right, outer.Bottom },
+        ClientBounds = new[] { client.Left, client.Top, client.Right, client.Bottom },
+        Dpi = GetDpiForWindow(window),
+        Style = GetWindowLongPtr(window, -16).ToInt64(),
+        ExStyle = GetWindowLongPtr(window, -20).ToInt64(),
+        HasMenu = GetMenu(window) != IntPtr.Zero
+      };
+    } finally {
+      RestoreDpiAwareness(previous);
+    }
   }
 
   public static CapCaptureResult CaptureWindow(IntPtr window, int expectedPid, string path) {
     uint owner;
-    NativeRect rect;
-    if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)expectedPid ||
-        !GetWindowRect(window, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top)
-      throw new InvalidOperationException("Capture ownership/geometry mismatch.");
-    int width = rect.Right - rect.Left, height = rect.Bottom - rect.Top;
-    using (var bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb))
-    using (var graphics = Graphics.FromImage(bitmap)) {
-      graphics.Clear(Color.Magenta);
-      IntPtr dc = graphics.GetHdc();
-      bool ok;
-      try { ok = PrintWindow(window, dc, 2); }
-      finally { graphics.ReleaseHdc(dc); }
-      if (!ok) throw new InvalidOperationException("PrintWindow(flag=2) failed.");
-      var colors = new System.Collections.Generic.HashSet<int>();
-      int nonMagenta = 0;
-      for (int y = 4; y < bitmap.Height; y += 12) {
-        for (int x = 4; x < bitmap.Width; x += 12) {
-          int color = bitmap.GetPixel(x, y).ToArgb();
-          colors.Add(color);
-          if (color != Color.Magenta.ToArgb()) nonMagenta++;
+    if (window == IntPtr.Zero || GetWindowThreadProcessId(window, out owner) == 0 || owner != (uint)expectedPid)
+      throw new InvalidOperationException("Capture ownership mismatch.");
+    IntPtr previous = EnterPerMonitorV2();
+    try {
+      NativeRect rect;
+      if (!GetWindowRect(window, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top)
+        throw new InvalidOperationException("Capture geometry mismatch.");
+      int width = rect.Right - rect.Left, height = rect.Bottom - rect.Top;
+      using (var bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+      using (var graphics = Graphics.FromImage(bitmap)) {
+        graphics.Clear(Color.Magenta);
+        IntPtr dc = graphics.GetHdc();
+        bool ok;
+        try { ok = PrintWindow(window, dc, 2); }
+        finally { graphics.ReleaseHdc(dc); }
+        if (!ok) throw new InvalidOperationException("PrintWindow(flag=2) failed.");
+        var colors = new System.Collections.Generic.HashSet<int>();
+        int nonMagenta = 0;
+        for (int y = 4; y < bitmap.Height; y += 12) {
+          for (int x = 4; x < bitmap.Width; x += 12) {
+            int color = bitmap.GetPixel(x, y).ToArgb();
+            colors.Add(color);
+            if (color != Color.Magenta.ToArgb()) nonMagenta++;
+          }
         }
+        if (colors.Count < 4 || nonMagenta < 20)
+          throw new InvalidOperationException("PrintWindow pixel check failed: distinct=" + colors.Count + " painted=" + nonMagenta);
+        bitmap.Save(path, ImageFormat.Png);
+        return new CapCaptureResult {
+          Width = width,
+          Height = height,
+          SampledColors = colors.Count,
+          NonMagentaSamples = nonMagenta,
+          Dpi = GetDpiForWindow(window)
+        };
       }
-      if (colors.Count < 4 || nonMagenta < 20)
-        throw new InvalidOperationException("PrintWindow pixel check failed: distinct=" + colors.Count + " painted=" + nonMagenta);
-      bitmap.Save(path, ImageFormat.Png);
-      return new CapCaptureResult {
-        Width = width,
-        Height = height,
-        SampledColors = colors.Count,
-        NonMagentaSamples = nonMagenta,
-        Dpi = GetDpiForWindow(window)
-      };
+    } finally {
+      RestoreDpiAwareness(previous);
     }
   }
 
@@ -1853,6 +1878,134 @@ function Measure-CapZoom {
     }
 }
 
+function Get-CapGraphCodeWindowIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SourceText,
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit,
+        [Parameter(Mandatory)][ValidateRange(1, 960)][uint32]$ExpectedDpi,
+        [Parameter(Mandatory)][int[]]$LogicalClientWH
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($LogicalClientWH.Count -ne 2 -or $LogicalClientWH[0] -le 0 -or $LogicalClientWH[1] -le 0) {
+        throw 'GraphCode source window identity requires two positive logical client dimensions.'
+    }
+    $pattern = '(?s)self\.hwnd\s*=\s*c\.CreateWindowExW\(\s*0,\s*class_name\.ptr,\s*title,\s*' +
+        'c\.WS_OVERLAPPEDWINDOW\s*\|\s*c\.WS_CLIPCHILDREN,\s*c\.CW_USEDEFAULT,\s*c\.CW_USEDEFAULT,\s*' +
+        '(?<width>[0-9]+),\s*(?<height>[0-9]+),\s*null,\s*null,\s*self\.instance,\s*@ptrCast\(self\),\s*' +
+        '\)\s*orelse return error\.WindowCreationFailed;.*?try installMenu\(self\.hwnd\);.*?' +
+        '_ = c\.ShowWindow\(self\.hwnd, c\.SW_SHOW\);'
+    $matches = [regex]::Matches($SourceText, $pattern, [Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if ($matches.Count -ne 1) {
+        throw "GraphCode MainWindow source identity is missing or ambiguous at $SourceCommit."
+    }
+    $requestedOuterWH = @(
+        [int]::Parse($matches[0].Groups['width'].Value, [Globalization.CultureInfo]::InvariantCulture),
+        [int]::Parse($matches[0].Groups['height'].Value, [Globalization.CultureInfo]::InvariantCulture)
+    )
+    if ($requestedOuterWH[0] -le 0 -or $requestedOuterWH[1] -le 0) {
+        throw 'GraphCode MainWindow source requested invalid outer dimensions.'
+    }
+
+    $windowStyleForAdjustment = 0x02CF0000L
+    $windowExStyleForAdjustment = 0x00000000L
+    $expectedRuntimeWindowStyle = 0x16CF0000L
+    $expectedRuntimeWindowExStyle = 0x00000100L
+    $hasMenu = $true
+    $unit = [CapNative]::AdjustWindowRectForDpi(
+        1, 1, $windowStyleForAdjustment, $hasMenu, $windowExStyleForAdjustment, $ExpectedDpi)
+    $nonClientWH = @(([long]$unit[4] - 1L), ([long]$unit[5] - 1L))
+    $initialClientWH = @(
+        ([long]$requestedOuterWH[0] - $nonClientWH[0]),
+        ([long]$requestedOuterWH[1] - $nonClientWH[1])
+    )
+    if ($initialClientWH[0] -le 0 -or $initialClientWH[1] -le 0) {
+        throw 'GraphCode MainWindow source outer dimensions cannot contain the DPI-aware nonclient frame.'
+    }
+    $physicalClientWH = [Collections.Generic.List[long]]::new()
+    foreach ($logical in $LogicalClientWH) {
+        $scaled = [long]$logical * [long]$ExpectedDpi
+        if ($scaled % 96L -ne 0) {
+            throw "GraphCode source logical dimension $logical is not integral at DPI $ExpectedDpi."
+        }
+        $physicalClientWH.Add($scaled / 96L)
+    }
+    $adjusted = [CapNative]::AdjustWindowRectForDpi(
+        [int]$physicalClientWH[0], [int]$physicalClientWH[1], $windowStyleForAdjustment,
+        $hasMenu, $windowExStyleForAdjustment, $ExpectedDpi)
+    return [pscustomobject][ordered]@{
+        sourceContract = 'GRAPHCODE_MAIN_WINDOW_V1'
+        sourceCommit = $SourceCommit
+        expectedWindowDpi = [long]$ExpectedDpi
+        requestedOuterWH = @([long]$requestedOuterWH[0], [long]$requestedOuterWH[1])
+        expectedInitialClientWH = @($initialClientWH)
+        expectedInitialOuterWH = @([long]$requestedOuterWH[0], [long]$requestedOuterWH[1])
+        expectedPhysicalClientWH = @($physicalClientWH)
+        expectedAdjustedOuterWH = @([long]$adjusted[4], [long]$adjusted[5])
+        windowStyleForAdjustment = $windowStyleForAdjustment
+        windowExStyleForAdjustment = $windowExStyleForAdjustment
+        expectedRuntimeWindowStyle = $expectedRuntimeWindowStyle
+        expectedRuntimeWindowExStyle = $expectedRuntimeWindowExStyle
+        hasMenu = $hasMenu
+        geometryDerivation = 'SOURCE_CREATEWINDOWEX_PLUS_WIN32_NORMALIZATION'
+    }
+}
+
+function Assert-CapDpiWindowIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Metrics,
+        [Parameter(Mandatory)]$Identity,
+        [switch]$Initial,
+        [int[]]$ExpectedOuterBounds = @()
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    Assert-CapDataRecord $Metrics @{
+        OuterBounds=[array];ClientBounds=[array];Dpi=[ValueType];Style=[long];ExStyle=[long];HasMenu=[bool]
+    } 'DPI-parametric window metrics'
+    Assert-CapDataRecord $Identity @{
+        sourceContract=[string];sourceCommit=[string];expectedWindowDpi=[long];requestedOuterWH=[array]
+        expectedInitialClientWH=[array];expectedInitialOuterWH=[array]
+        expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array]
+        windowStyleForAdjustment=[long];windowExStyleForAdjustment=[long];expectedRuntimeWindowStyle=[long]
+        expectedRuntimeWindowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+    } 'DPI-parametric source window identity'
+    if ($Metrics.Dpi -ne $Identity.expectedWindowDpi -or
+        $Metrics.Style -ne $Identity.expectedRuntimeWindowStyle -or
+        $Metrics.ExStyle -ne $Identity.expectedRuntimeWindowExStyle -or
+        $Metrics.HasMenu -ne $Identity.hasMenu) {
+        throw "DPI-parametric window identity differs: $(ConvertTo-Json $Metrics -Compress)."
+    }
+    if ($Metrics.OuterBounds.Count -ne 4 -or $Metrics.ClientBounds.Count -ne 4) {
+        throw 'DPI-parametric window identity differs: geometry arrays are invalid.'
+    }
+    $outerWH = @(
+        ([long]$Metrics.OuterBounds[2] - [long]$Metrics.OuterBounds[0]),
+        ([long]$Metrics.OuterBounds[3] - [long]$Metrics.OuterBounds[1])
+    )
+    $clientWH = @(
+        ([long]$Metrics.ClientBounds[2] - [long]$Metrics.ClientBounds[0]),
+        ([long]$Metrics.ClientBounds[3] - [long]$Metrics.ClientBounds[1])
+    )
+    if ($Initial) {
+        if (($outerWH -join ',') -cne ($Identity.expectedInitialOuterWH -join ',') -or
+            ($clientWH -join ',') -cne ($Identity.expectedInitialClientWH -join ',') -or
+            $Metrics.ClientBounds[0] -ne 0 -or $Metrics.ClientBounds[1] -ne 0) {
+            throw "DPI-parametric physical initial geometry differs: $(ConvertTo-Json $Metrics -Compress)."
+        }
+    } else {
+        if ($ExpectedOuterBounds.Count -ne 4 -or
+            ($Metrics.OuterBounds -join ',') -cne ($ExpectedOuterBounds -join ',') -or
+            ($clientWH -join ',') -cne ($Identity.expectedPhysicalClientWH -join ',') -or
+            $Metrics.ClientBounds[0] -ne 0 -or $Metrics.ClientBounds[1] -ne 0) {
+            throw "DPI-parametric positioned window identity differs: $(ConvertTo-Json $Metrics -Compress)."
+        }
+    }
+    return $Metrics
+}
+
 function Get-CapDpiGeometry {
     [CmdletBinding()]
     param(
@@ -1935,35 +2088,41 @@ function Assert-CapMatchedDpiImage {
         logicalClientWH=[array];physicalClientBounds=[array];physicalOuterBounds=[array]
         nonClientWH=[array];rawPixelWH=[array];actualWindowDpi=[long];dpiBase=[long]
         dpiScaleNumerator=[long];dpiScaleDenominator=[long];windowStyle=[long]
-        windowStyleForAdjustment=[long]
+        windowStyleForAdjustment=[long];windowExStyleForAdjustment=[long]
         windowExStyle=[long];hasMenu=[bool];physicalWorkAreaBounds=[array]
         placement=[string];resampled=[bool];clientBounds=[array];outerBounds=[array]
-        width=[long];height=[long];dpi=[long]
+        width=[long];height=[long];dpi=[long];phase=[string]
     } 'DPI-parametric matched image'
+    if ($Image.phase -cnotin @('before','after')) {
+        throw 'DPI-parametric matched image phase identity differs.'
+    }
+    $identity = $Contract.windowIdentities.($Image.phase)
     if ($Image.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
-        $Image.geometrySchemaVersion -ne 2 -or $Image.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+        $Image.geometrySchemaVersion -ne 3 -or $Image.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
         ($Image.logicalClientWH -join ',') -cne ($Contract.logicalClientWH -join ',') -or
         ($Image.physicalClientBounds -join ',') -cne
-            "0,0,$($Contract.expectedPhysicalClientWH[0]),$($Contract.expectedPhysicalClientWH[1])" -or
+            "0,0,$($identity.expectedPhysicalClientWH[0]),$($identity.expectedPhysicalClientWH[1])" -or
         ($Image.clientBounds -join ',') -cne ($Image.physicalClientBounds -join ',') -or
         ($Image.physicalOuterBounds -join ',') -cne ($Image.outerBounds -join ',') -or
-        ($Image.outerBounds[2]-$Image.outerBounds[0]) -ne $Contract.expectedAdjustedOuterWH[0] -or
-        ($Image.outerBounds[3]-$Image.outerBounds[1]) -ne $Contract.expectedAdjustedOuterWH[1] -or
+        ($Image.outerBounds[2]-$Image.outerBounds[0]) -ne $identity.expectedAdjustedOuterWH[0] -or
+        ($Image.outerBounds[3]-$Image.outerBounds[1]) -ne $identity.expectedAdjustedOuterWH[1] -or
         ($Image.nonClientWH -join ',') -cne
-            "$($Contract.expectedAdjustedOuterWH[0]-$Contract.expectedPhysicalClientWH[0]),$($Contract.expectedAdjustedOuterWH[1]-$Contract.expectedPhysicalClientWH[1])" -or
-        ($Image.rawPixelWH -join ',') -cne ($Contract.expectedAdjustedOuterWH -join ',') -or
+            "$($identity.expectedAdjustedOuterWH[0]-$identity.expectedPhysicalClientWH[0]),$($identity.expectedAdjustedOuterWH[1]-$identity.expectedPhysicalClientWH[1])" -or
+        ($Image.rawPixelWH -join ',') -cne ($identity.expectedAdjustedOuterWH -join ',') -or
         ($Image.rawPixelWH -join ',') -cne "$($Image.width),$($Image.height)" -or
-        $Image.width -ne $Contract.expectedAdjustedOuterWH[0] -or
-        $Image.height -ne $Contract.expectedAdjustedOuterWH[1] -or
+        $Image.width -ne $identity.expectedAdjustedOuterWH[0] -or
+        $Image.height -ne $identity.expectedAdjustedOuterWH[1] -or
         $Image.width -ne ($Image.outerBounds[2]-$Image.outerBounds[0]) -or
         $Image.height -ne ($Image.outerBounds[3]-$Image.outerBounds[1]) -or
         $Image.actualWindowDpi -ne $Contract.expectedWindowDpi -or
         $Image.dpi -ne $Contract.expectedWindowDpi -or $Image.dpiBase -ne $Contract.dpiBase -or
         $Image.dpiScaleNumerator -ne $Contract.expectedWindowDpi -or
         $Image.dpiScaleDenominator -ne $Contract.dpiBase -or
-        $Image.windowStyle -ne $Contract.expectedRuntimeWindowStyle -or
-        $Image.windowStyleForAdjustment -ne $Contract.windowStyleForAdjustment -or
-        $Image.windowExStyle -ne $Contract.windowExStyle -or $Image.hasMenu -ne $Contract.hasMenu -or
+        $Image.windowStyle -ne $identity.expectedRuntimeWindowStyle -or
+        $Image.windowStyleForAdjustment -ne $identity.windowStyleForAdjustment -or
+        $Image.windowExStyleForAdjustment -ne $identity.windowExStyleForAdjustment -or
+        $Image.windowExStyle -ne $identity.expectedRuntimeWindowExStyle -or
+        $Image.hasMenu -ne $identity.hasMenu -or
         $Image.physicalWorkAreaBounds.Count -ne 4 -or
         ($Image.physicalWorkAreaBounds[2]-$Image.physicalWorkAreaBounds[0]) -lt
             $Contract.minimumPhysicalWorkAreaWH[0] -or
@@ -1974,7 +2133,7 @@ function Assert-CapMatchedDpiImage {
     }
     return [pscustomobject]@{
         logicalClientWH=@($Image.logicalClientWH)
-        physicalClientWH=@($Contract.expectedPhysicalClientWH)
+        physicalClientWH=@($identity.expectedPhysicalClientWH)
         outerWH=@([long]$Image.width,[long]$Image.height)
         dpi=[long]$Image.actualWindowDpi
         resampled=$false
@@ -3741,30 +3900,62 @@ function Assert-CapSceneContract {
         $contract=$Job.captureContract
         Assert-CapDataRecord $contract @{geometrySchemaVersion=[long];phases=[array];sceneCountPerPhase=[long]
             placement=[string];logicalClientWH=[array];expectedWindowDpi=[long];dpiBase=[long]
-            expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array];minimumPhysicalWorkAreaWH=[array]
-            windowStyleForAdjustment=[long];expectedRuntimeWindowStyle=[long]
-            windowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+            expectedPhysicalClientWH=[array];minimumPhysicalWorkAreaWH=[array]
+            windowIdentities=[pscustomobject];geometryDerivation=[string]
             canvasZoomPercentLogical=[long];rawCaptureResamplingAllowed=[bool]
             cleanupReserveSeconds=[long];estimatedSeconds=[long]} 'DPI-parametric matched geometry'
         Assert-CapDataRecord $Job.binaries.backendFixture @{sha256=[string];sourceSha256=[string]
             networkAllowed=[bool]} 'DPI-parametric matched backend fixture'
         if ($Job.authority.centralCaptureLeaseGrantedByThisArtifact -cne $false -or
-            $Job.authority.sWorkerMayLaunchGui -cne $false -or $contract.geometrySchemaVersion -ne 2 -or
+            $Job.authority.sWorkerMayLaunchGui -cne $false -or $contract.geometrySchemaVersion -ne 3 -or
             ($contract.phases -join ',') -cne 'before,after' -or $contract.sceneCountPerPhase -ne 18 -or
             $contract.placement -cne 'MEASURED_FIT_WORKAREA' -or
             ($contract.logicalClientWH -join ',') -cne '1440,900' -or
             $contract.expectedWindowDpi -ne 192 -or $contract.dpiBase -ne 96 -or
             ($contract.expectedPhysicalClientWH -join ',') -cne '2880,1800' -or
-            ($contract.expectedAdjustedOuterWH -join ',') -cne '2906,1910' -or
             ($contract.minimumPhysicalWorkAreaWH -join ',') -cne '2906,1910' -or
-            $contract.windowStyleForAdjustment -ne 47120384 -or
-            $contract.expectedRuntimeWindowStyle -ne 315555840 -or $contract.windowExStyle -ne 0 -or
-            $contract.hasMenu -cne $true -or $contract.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
+            $contract.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
             $contract.canvasZoomPercentLogical -ne 100 -or $contract.rawCaptureResamplingAllowed -cne $false -or
             $contract.cleanupReserveSeconds -ne 90 -or $contract.estimatedSeconds -lt 1 -or
             $contract.estimatedSeconds -gt 1710 -or
             ($Job.scenes.name -join ',') -cne ((Get-CapMatchedSceneNames) -join ',')) {
             throw 'DPI-parametric matched scene inventory, geometry or non-authority differs.'
+        }
+        foreach ($phase in @('before','after')) {
+            $identity=$contract.windowIdentities.$phase
+            Assert-CapDataRecord $identity @{
+                sourceContract=[string];sourceCommit=[string];expectedWindowDpi=[long]
+                requestedOuterWH=[array];expectedInitialClientWH=[array];expectedInitialOuterWH=[array]
+                expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array]
+                windowStyleForAdjustment=[long];windowExStyleForAdjustment=[long]
+                expectedRuntimeWindowStyle=[long]
+                expectedRuntimeWindowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+            } "DPI-parametric $phase source window identity"
+            Assert-CapDataRecord $Job.binaries.$phase @{
+                source=[string];binaryBuiltAtSource=[string]
+            } "DPI-parametric $phase binary source identity"
+            if ($identity.sourceContract -cne 'GRAPHCODE_MAIN_WINDOW_V1' -or
+                $identity.sourceCommit -cne $Job.binaries.$phase.source -or
+                $identity.sourceCommit -cne $Job.binaries.$phase.binaryBuiltAtSource -or
+                $identity.sourceCommit -cnotmatch '^[a-f0-9]{40}$' -or
+                $identity.expectedWindowDpi -ne 192 -or
+                ($identity.requestedOuterWH -join ',') -cne '1280,820' -or
+                ($identity.expectedInitialClientWH -join ',') -cne '1254,710' -or
+                ($identity.expectedInitialOuterWH -join ',') -cne '1280,820' -or
+                ($identity.expectedPhysicalClientWH -join ',') -cne '2880,1800' -or
+                ($identity.expectedAdjustedOuterWH -join ',') -cne '2906,1910' -or
+                $identity.windowStyleForAdjustment -ne 47120384 -or
+                $identity.windowExStyleForAdjustment -ne 0 -or
+                $identity.expectedRuntimeWindowStyle -ne 382664704 -or
+                $identity.expectedRuntimeWindowExStyle -ne 256 -or
+                $identity.hasMenu -cne $true -or
+                $identity.geometryDerivation -cne 'SOURCE_CREATEWINDOWEX_PLUS_WIN32_NORMALIZATION') {
+                throw "DPI-parametric $phase source window identity differs."
+            }
+        }
+        if ($contract.windowIdentities.before.sourceCommit -cne 'a8b09434fe41a61030fd290f7d065ec6d0db8005' -or
+            $contract.windowIdentities.before.sourceCommit -ceq $contract.windowIdentities.after.sourceCommit) {
+            throw 'DPI-parametric historical baseline window identity differs.'
         }
         foreach ($scene in $Job.scenes) {
             Assert-CapDataRecord $scene @{name=[string];naturalWidthBeforeAfter=[array]} 'DPI matched scene width'
@@ -5457,6 +5648,8 @@ Export-ModuleMember -Function @(
     'Get-CapLogicalZoomEvidence',
     'Get-CapPrimaryPhysicalWorkArea',
     'Measure-CapZoom',
+    'Get-CapGraphCodeWindowIdentity',
+    'Assert-CapDpiWindowIdentity',
     'Get-CapDpiGeometry',
     'Assert-CapMatchedDpiImage',
     'Get-CapWindowMetrics',

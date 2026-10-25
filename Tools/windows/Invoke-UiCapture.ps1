@@ -718,7 +718,7 @@ function Assert-CapMatchedWorkerManifest {
     }
     $isDpi=Test-CapMatchedDpiAdapter
     if ($isDpi -and ($manifest.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
-        $manifest.geometrySchemaVersion -ne 2 -or
+        $manifest.geometrySchemaVersion -ne 3 -or
         ($manifest.logicalClientWH -join ',') -cne ($job.captureContract.logicalClientWH -join ',') -or
         $manifest.expectedWindowDpi -ne $job.captureContract.expectedWindowDpi -or
         $manifest.rawCaptureResamplingAllowed -cne $false)) {
@@ -1046,11 +1046,16 @@ try {
             ($area.Height -lt $contract.minimumPhysicalWorkAreaWH[1])) {
             throw "DPI-parametric physical work area is insufficient: $($area.Width)x$($area.Height)."
         }
-        $dpiGeometryAdmission=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
-            -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
-            -WindowStyle ([long]$contract.windowStyleForAdjustment) `
-            -WindowExStyle ([long]$contract.windowExStyle) -HasMenu ([bool]$contract.hasMenu) `
-            -WorkArea $workArea -ExpectedAdjustedOuterWH @($contract.expectedAdjustedOuterWH)
+        $dpiGeometryAdmission=[ordered]@{}
+        foreach ($phase in @($contract.phases)) {
+            $identity=$contract.windowIdentities.$phase
+            $dpiGeometryAdmission[$phase]=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
+                -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
+                -WindowStyle ([long]$identity.windowStyleForAdjustment) `
+                -WindowExStyle ([long]$identity.windowExStyleForAdjustment) `
+                -HasMenu ([bool]$identity.hasMenu) -WorkArea $workArea `
+                -ExpectedAdjustedOuterWH @($identity.expectedAdjustedOuterWH)
+        }
     }
     if (@(Get-CapPendingLaunches).Count -ne 0) { throw 'Unreturned capture worker launches remain before run authorization.' }
 

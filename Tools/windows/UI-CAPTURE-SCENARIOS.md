@@ -67,10 +67,14 @@ The job separates logical and physical geometry:
 - actual window DPI 192, base DPI 96;
 - physical client 2880x1800;
 - `AdjustWindowRectExForDpi` outer 2906x1910 for
-  `WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN`, extended style 0 and an installed
-  menu;
-- runtime shown-window style `0x12CF0000`, while adjustment uses the
-  source frame style `0x02CF0000`;
+  the source-requested `WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN` frame and an
+  installed menu;
+- separate baseline/current identities generated from each phase's exact
+  `MainWindow.zig` source commit. Both C7 baseline `a8b09434` and current source
+  request outer 1280x820 with style `0x02CF0000` and extended style 0;
+- exact post-creation Win32 identity: shown style `0x16CF0000`
+  (`WS_VISIBLE` and the system-added `WS_CLIPSIBLINGS`) and extended style
+  `0x00000100` (`WS_EX_WINDOWEDGE`);
 - measured fit inside a physical work area at least 2906x1910;
 - no resampling.
 
@@ -79,17 +83,31 @@ temporarily enters per-monitor-v2 awareness on the calling thread, selects the
 primary monitor natively, and reads `GetMonitorInfo` work bounds in physical
 pixels. This preserves taskbar exclusion and physical virtual-screen origins
 without deriving bounds by multiplying DPI-virtualized Windows Forms values.
-The worker queries the actual window DPI/style/menu, derives the physical frame,
-positions it without changing size, and remeasures exact physical client and
-outer bounds before any scene action. A genuinely physical 1920x1032 RDP mode
-refuses before product launch; a 3840x2064 physical work area remains admissible
-when Windows Forms reports its DPI-192 logical equivalent as 1920x1032.
+The worker enters a temporary per-monitor-v2 caller context for `GetWindowRect`,
+`GetClientRect`, `SetWindowPos`, and `PrintWindow`, restoring the prior context
+after every operation. It first requires the exact physical initial identity:
+outer 1280x820 and client 1254x710 at DPI 192, with the phase's exact
+post-creation styles and menu. The failed pre-fix observation
+outer `[49,49,689,459]`, client `[0,0,627,355]` was the same window viewed
+through DPI virtualization; the physical query is `[98,98,1378,918]` with
+client `[0,0,1254,710]`. The worker then derives the target frame from that
+phase's source identity, positions it in the native physical work area, and
+remeasures exact physical client and outer bounds before any scene action.
+Foreign style, extended-style, menu, client, or outer identities still fail
+closed. A genuinely physical 1920x1032 RDP mode refuses before product launch;
+a 3840x2064 physical work area remains admissible when Windows Forms reports
+its DPI-192 logical equivalent as 1920x1032.
 
 UIA bounding rectangles remain physical pixels. Actual-size zoom normalizes
 the physical width by `96 / actualDpi` before comparing with the card's 250
 logical-pixel natural width. A 500-physical-pixel card at DPI 192 is therefore
 250 logical pixels and 100% zoom; the old unnormalized 200% interpretation is
 a negative contract.
+
+Geometry schema 3 stores separate `before` and `after` source identities; an
+assembly must generate each identity from the exact source commit used to build
+that phase and bind it to the phase binary's source fields. This preserves C7
+baseline semantics instead of substituting current-source assumptions.
 
 Each image retains the raw PrintWindow bitmap and records logical client size,
 physical client/outer bounds, nonclient extents, raw pixel dimensions, actual
@@ -101,8 +119,8 @@ The four focused groups cover:
 
 | Group | Boundary |
 | --- | --- |
-| DPI exact frames | 96-DPI 1456x959 and 192-DPI 2906x1910 results, plus the new scene contract |
-| DPI refusals | insufficient/one-pixel-short work areas, non-integral scaling and wrong adjusted outer |
+| DPI exact frames | C7/current source-derived identities, the exact virtualized failed observation, physical 1280x820/1254x710 initial geometry, and 96-DPI 1456x959 / 192-DPI 2906x1910 target frames |
+| DPI refusals | stale style/ex-style, one-pixel client mutations, insufficient/one-pixel-short work areas, non-integral scaling and wrong adjusted outer |
 | DPI logical zoom | physical-to-logical normalization and the old unnormalized mutant |
 | DPI manifest | 36 simulated raw records and DPI/resampling/logical/work-area mutations |
 

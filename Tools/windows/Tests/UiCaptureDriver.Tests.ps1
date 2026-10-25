@@ -2572,17 +2572,39 @@ function New-CapMatchedTestJob {
             offlinePeerReference=@{sha256=('C'*64)}}
         binaries=@{offlineZmx=@{sha256=('D'*64);seedArgumentOrder=@('run',
             'graphcode-11111111-1111-4111-8111-000000000001','-d','cmd.exe','/Q','/K','echo Offline card fixture - no backend')}
+            before=@{source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
+                binaryBuiltAtSource='a8b09434fe41a61030fd290f7d065ec6d0db8005'}
+            after=@{source='49419275298fbec90d7ed21f4189b2af8f0baf74'
+                binaryBuiltAtSource='49419275298fbec90d7ed21f4189b2af8f0baf74'}
             daemon=@{sha256=('E'*64)};backendFixture=@{sha256=('F'*64);networkAllowed=$false
                 sourceSha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
                     [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))}}
     } | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
 }
 
+function Get-CapWindowIdentitySource {
+    param([Parameter(Mandatory)][string]$Commit)
+    $source = @(& git -C (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')) --no-pager show `
+        "${Commit}:graphcode-windows/src/MainWindow.zig")
+    if ($LASTEXITCODE -ne 0 -or $source.Count -eq 0) {
+        throw "Cannot read MainWindow.zig at source commit $Commit."
+    }
+    return ($source -join "`n")
+}
+
 function New-CapMatchedDpiTestJob {
     $job=New-CapMatchedTestJob
     $job.sceneAdapter='S_MATCHED_V12_DPI_V1'
+    $baselineCommit='a8b09434fe41a61030fd290f7d065ec6d0db8005'
+    $currentCommit='49419275298fbec90d7ed21f4189b2af8f0baf74'
+    $beforeIdentity=Get-CapGraphCodeWindowIdentity `
+        -SourceText (Get-CapWindowIdentitySource $baselineCommit) -SourceCommit $baselineCommit `
+        -ExpectedDpi 192 -LogicalClientWH @(1440,900)
+    $afterIdentity=Get-CapGraphCodeWindowIdentity `
+        -SourceText (Get-CapWindowIdentitySource $currentCommit) -SourceCommit $currentCommit `
+        -ExpectedDpi 192 -LogicalClientWH @(1440,900)
     $job.captureContract=[pscustomobject][ordered]@{
-        geometrySchemaVersion=2L
+        geometrySchemaVersion=3L
         phases=@('before','after')
         sceneCountPerPhase=18L
         placement='MEASURED_FIT_WORKAREA'
@@ -2590,12 +2612,11 @@ function New-CapMatchedDpiTestJob {
         expectedWindowDpi=192L
         dpiBase=96L
         expectedPhysicalClientWH=@(2880L,1800L)
-        expectedAdjustedOuterWH=@(2906L,1910L)
         minimumPhysicalWorkAreaWH=@(2906L,1910L)
-        windowStyleForAdjustment=47120384L
-        expectedRuntimeWindowStyle=315555840L
-        windowExStyle=0L
-        hasMenu=$true
+        windowIdentities=[pscustomobject][ordered]@{
+            before=$beforeIdentity
+            after=$afterIdentity
+        }
         geometryDerivation='AdjustWindowRectExForDpi'
         canvasZoomPercentLogical=100L
         rawCaptureResamplingAllowed=$false
@@ -2786,55 +2807,130 @@ function Invoke-CapMatchedDpiContracts {
     Invoke-CapTest 'DPI matched geometry derives exact 96 and 192 physical frames' {
         $job=New-CapMatchedDpiTestJob
         Assert-CapSceneContract -Job $job
-        $style=47120384L
+        $beforeIdentity=$job.captureContract.windowIdentities.before
+        $afterIdentity=$job.captureContract.windowIdentities.after
+        Assert-CapTest ($beforeIdentity.sourceCommit -ceq 'a8b09434fe41a61030fd290f7d065ec6d0db8005' -and
+            $afterIdentity.sourceCommit -ceq '49419275298fbec90d7ed21f4189b2af8f0baf74' -and
+            ($beforeIdentity.requestedOuterWH -join ',') -ceq '1280,820' -and
+            ($beforeIdentity.expectedInitialClientWH -join ',') -ceq '1254,710' -and
+            ($beforeIdentity.expectedInitialOuterWH -join ',') -ceq '1280,820' -and
+            ($beforeIdentity.expectedAdjustedOuterWH -join ',') -ceq '2906,1910' -and
+            $beforeIdentity.windowStyleForAdjustment -eq 47120384L -and
+            $beforeIdentity.windowExStyleForAdjustment -eq 0L -and
+            $beforeIdentity.expectedRuntimeWindowStyle -eq 382664704L -and
+            $beforeIdentity.expectedRuntimeWindowExStyle -eq 256L -and
+            ($beforeIdentity | ConvertTo-Json -Compress) -cne ($afterIdentity | ConvertTo-Json -Compress)) `
+            'C7 baseline and current source-bound window identities were collapsed or differ from Win32 normalization.'
+        $currentSource=Get-CapWindowIdentitySource $afterIdentity.sourceCommit
+        foreach ($mutant in @(
+            $currentSource.Replace('c.WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN',
+                'c.WS_OVERLAPPEDWINDOW | c.WS_CLIPSIBLINGS'),
+            $currentSource.Replace('try installMenu(self.hwnd);',''),
+            ($currentSource + "`n" + $currentSource)
+        )) {
+            $null=Assert-CapRejects {
+                Get-CapGraphCodeWindowIdentity -SourceText $mutant -SourceCommit $afterIdentity.sourceCommit `
+                    -ExpectedDpi 192 -LogicalClientWH @(1440,900)
+            } 'source identity is missing or ambiguous'
+        }
+        $moduleSource=[IO.File]::ReadAllText($modulePath)
+        foreach ($nativeMethod in @('SetWindowPosition','WindowSnapshot','CaptureWindow')) {
+            $pattern="(?s)public static .*? $nativeMethod\(.*?EnterPerMonitorV2\(\).*?finally \{\s*RestoreDpiAwareness\(previous\);"
+            Assert-CapTest ([regex]::Matches($moduleSource,$pattern).Count -eq 1) `
+                "$nativeMethod is not exactly bound to a restored per-monitor-v2 caller context."
+        }
+        $workerSource=[IO.File]::ReadAllText($workerPath)
+        $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
+        Assert-CapTest ($workerSource.Contains('$identity=$contract.windowIdentities.$Phase') -and
+            $workerSource.Contains('$area=Get-CapPrimaryPhysicalWorkArea') -and
+            $supervisorSource.Contains('foreach ($phase in @($contract.phases))')) `
+            'Worker/supervisor phase-specific physical identity consumers differ.'
+        $style=$beforeIdentity.windowStyleForAdjustment
         $at96=Get-CapDpiGeometry -LogicalClientWH @(1440,900) -ExpectedDpi 96 `
-            -WindowStyle $style -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,3000,2000) `
+            -WindowStyle $style -WindowExStyle $beforeIdentity.windowExStyleForAdjustment `
+            -HasMenu $beforeIdentity.hasMenu -WorkArea @(0,0,3000,2000) `
             -ExpectedAdjustedOuterWH @(1456,959)
         $at192=Get-CapDpiGeometry -LogicalClientWH @(1440,900) -ExpectedDpi 192 `
-            -WindowStyle $style -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,3000,2000) `
-            -ExpectedAdjustedOuterWH @(2906,1910)
+            -WindowStyle $style -WindowExStyle $beforeIdentity.windowExStyleForAdjustment `
+            -HasMenu $beforeIdentity.hasMenu -WorkArea @(0,0,3000,2000) `
+            -ExpectedAdjustedOuterWH @($beforeIdentity.expectedAdjustedOuterWH)
         Assert-CapTest (($at96.PhysicalClientWH -join ',') -ceq '1440,900' -and
             ($at96.OuterWH -join ',') -ceq '1456,959' -and
             ($at192.PhysicalClientWH -join ',') -ceq '2880,1800' -and
             ($at192.OuterWH -join ',') -ceq '2906,1910' -and
             ($at192.NonClientWH -join ',') -ceq '26,110' -and -not $at192.Resampled) `
             'DPI-parametric exact frame derivation differs.'
+        $virtualizedObservation=[pscustomobject]@{
+            Dpi=192L;OuterBounds=@(49L,49L,689L,459L);ClientBounds=@(0L,0L,627L,355L)
+            Style=382664704L;ExStyle=256L;HasMenu=$true
+        }
+        $virtualizedRefusal=Assert-CapRejects {
+            Assert-CapDpiWindowIdentity -Metrics $virtualizedObservation -Identity $afterIdentity -Initial
+        } 'physical initial geometry differs'
+        $physicalObservation=[pscustomobject]@{
+            Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+            Style=382664704L;ExStyle=256L;HasMenu=$true
+        }
+        $null=Assert-CapDpiWindowIdentity -Metrics $physicalObservation -Identity $afterIdentity -Initial
+        foreach ($foreign in @(
+            @{metrics=[pscustomobject]@{Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+                Style=315555840L;ExStyle=256L;HasMenu=$true};expected='window identity differs'},
+            @{metrics=[pscustomobject]@{Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+                Style=382664704L;ExStyle=0L;HasMenu=$true};expected='window identity differs'},
+            @{metrics=[pscustomobject]@{Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1253L,710L)
+                Style=382664704L;ExStyle=256L;HasMenu=$true};expected='physical initial geometry differs'}
+        )) {
+            $null=Assert-CapRejects {
+                Assert-CapDpiWindowIdentity -Metrics $foreign.metrics -Identity $afterIdentity -Initial
+            } $foreign.expected
+        }
         $logical192=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
         $physical192=[Drawing.Rectangle]::FromLTRB(0,0,3840,2064)
         $admission192=Invoke-CapSupervisorDpiAdmissionContract -Contract $job.captureContract `
             -ObservedLogicalArea $logical192 -PhysicalWorkArea $physical192
         Assert-CapTest ($admission192.UsesPhysicalProvider -and
-            ($admission192.Geometry.PhysicalWorkAreaBounds -join ',') -ceq '0,0,3840,2064') `
+            ($admission192.Geometry.after.PhysicalWorkAreaBounds -join ',') -ceq '0,0,3840,2064') `
             'DPI192 supervisor admission used the logical 1920x1032 work area instead of the native physical 3840x2064 work area.'
 
         $dpi96Contract=$job.captureContract | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
         $dpi96Contract.expectedWindowDpi=96L
         $dpi96Contract.expectedPhysicalClientWH=@(1440L,900L)
-        $dpi96Contract.expectedAdjustedOuterWH=@(1456L,959L)
         $dpi96Contract.minimumPhysicalWorkAreaWH=@(1456L,959L)
+        foreach ($phase in @('before','after')) {
+            $identity=$dpi96Contract.windowIdentities.$phase
+            $identity.expectedWindowDpi=96L
+            $identity.expectedInitialClientWH=@(1264L,761L)
+            $identity.expectedAdjustedOuterWH=@(1456L,959L)
+        }
         $physical96=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
         $admission96=Invoke-CapSupervisorDpiAdmissionContract -Contract $dpi96Contract `
             -ObservedLogicalArea $physical96 -PhysicalWorkArea $physical96
-        Assert-CapTest (($admission96.Geometry.OuterWH -join ',') -ceq '1456,959' -and
-            ($admission96.Geometry.PhysicalWorkAreaBounds -join ',') -ceq '0,0,1920,1032') `
+        Assert-CapTest (($admission96.Geometry.after.OuterWH -join ',') -ceq '1456,959' -and
+            ($admission96.Geometry.after.PhysicalWorkAreaBounds -join ',') -ceq '0,0,1920,1032') `
             'DPI96 supervisor admission compatibility differs.'
         return @{dpi96=$at96;dpi192=$at192;sceneContract='S_MATCHED_V12_DPI_V1'
-            dpi192Admission=$admission192;dpi96Admission=$admission96}
+            dpi192Admission=$admission192;dpi96Admission=$admission96
+            virtualizedObservation=$virtualizedRefusal;phaseIdentities=2}
     }
     Invoke-CapTest 'DPI matched geometry refuses insufficient work area and invalid scaling' {
-        $arguments=@{LogicalClientWH=@(1440,900);ExpectedDpi=192;WindowStyle=47120384L
-            WindowExStyle=0L;HasMenu=$true;ExpectedAdjustedOuterWH=@(2906,1910)}
+        $job=New-CapMatchedDpiTestJob
+        $identity=$job.captureContract.windowIdentities.after
+        $arguments=@{LogicalClientWH=@(1440,900);ExpectedDpi=192
+            WindowStyle=$identity.windowStyleForAdjustment
+            WindowExStyle=$identity.windowExStyleForAdjustment
+            HasMenu=$identity.hasMenu;ExpectedAdjustedOuterWH=@($identity.expectedAdjustedOuterWH)}
         $small=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,1920,1032)} 'does not fit'
         $shortWidth=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,2905,1910)} 'does not fit'
         $shortHeight=Assert-CapRejects {Get-CapDpiGeometry @arguments -WorkArea @(0,0,2906,1909)} 'does not fit'
         $fractional=Assert-CapRejects {
-            Get-CapDpiGeometry -LogicalClientWH @(1,1) -ExpectedDpi 144 -WindowStyle 47120384L `
-                -WindowExStyle 0 -HasMenu $true -WorkArea @(0,0,100,100)
+            Get-CapDpiGeometry -LogicalClientWH @(1,1) -ExpectedDpi 144 `
+                -WindowStyle $identity.windowStyleForAdjustment `
+                -WindowExStyle $identity.windowExStyleForAdjustment `
+                -HasMenu $identity.hasMenu -WorkArea @(0,0,100,100)
         } 'not integral'
         $outer=Assert-CapRejects {
             Get-CapDpiGeometry @arguments -WorkArea @(0,0,3000,2000) -ExpectedAdjustedOuterWH @(2905,1910)
         } 'adjusted outer size differs'
-        $job=New-CapMatchedDpiTestJob
         $logical192=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
         $physicalShort=[Drawing.Rectangle]::FromLTRB(-3840,0,-935,2064)
         $physicalAdmission=Assert-CapRejects {
@@ -2858,22 +2954,23 @@ function Invoke-CapMatchedDpiContracts {
     Invoke-CapTest 'DPI matched manifest preserves raw logical physical metadata without resampling' {
         $job=New-CapMatchedDpiTestJob
         $contract=$job.captureContract
-        $baseImage=[ordered]@{
-            captureMode='PRINTWINDOW';observedState=@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}
-            evidenceClassification='C8R_RDP_DPI192_QUALIFIED';geometrySchemaVersion=2L
-            geometryDerivation='AdjustWindowRectExForDpi';logicalClientWH=@(1440L,900L)
-            physicalClientBounds=@(0L,0L,2880L,1800L);clientBounds=@(0L,0L,2880L,1800L)
-            physicalOuterBounds=@(0L,0L,2906L,1910L);outerBounds=@(0L,0L,2906L,1910L)
-            nonClientWH=@(26L,110L);rawPixelWH=@(2906L,1910L);width=2906L;height=1910L
-            actualWindowDpi=192L;dpi=192L;dpiBase=96L;dpiScaleNumerator=192L;dpiScaleDenominator=96L
-            windowStyle=315555840L;windowStyleForAdjustment=47120384L;windowExStyle=0L;hasMenu=$true
-            physicalWorkAreaBounds=@(0L,0L,3000L,2000L);placement='MEASURED_FIT_WORKAREA';resampled=$false
-        }
         $images=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {
-            $image=$baseImage | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
-            $image | Add-Member -NotePropertyName phase -NotePropertyValue $phase
-            $image | Add-Member -NotePropertyName scene -NotePropertyValue $scene
-            $image
+            $identity=$contract.windowIdentities.$phase
+            [pscustomobject][ordered]@{
+                captureMode='PRINTWINDOW';observedState=@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}
+                evidenceClassification='C8R_RDP_DPI192_QUALIFIED';geometrySchemaVersion=3L
+                geometryDerivation='AdjustWindowRectExForDpi';logicalClientWH=@(1440L,900L)
+                physicalClientBounds=@(0L,0L,2880L,1800L);clientBounds=@(0L,0L,2880L,1800L)
+                physicalOuterBounds=@(0L,0L,2906L,1910L);outerBounds=@(0L,0L,2906L,1910L)
+                nonClientWH=@(26L,110L);rawPixelWH=@(2906L,1910L);width=2906L;height=1910L
+                actualWindowDpi=192L;dpi=192L;dpiBase=96L;dpiScaleNumerator=192L;dpiScaleDenominator=96L
+                windowStyle=$identity.expectedRuntimeWindowStyle
+                windowStyleForAdjustment=$identity.windowStyleForAdjustment
+                windowExStyleForAdjustment=$identity.windowExStyleForAdjustment
+                windowExStyle=$identity.expectedRuntimeWindowExStyle;hasMenu=$identity.hasMenu
+                physicalWorkAreaBounds=@(0L,0L,3000L,2000L);placement='MEASURED_FIT_WORKAREA';resampled=$false
+                phase=$phase;scene=$scene
+            }
         }})
         $manifest=@{sceneAdapter='S_MATCHED_V12_DPI_V1';lane='S';status='COMPLETE';executionMode='LIVE_CAPTURE'
             backendTurns=0;g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED';images=$images
@@ -2882,7 +2979,8 @@ function Invoke-CapMatchedDpiContracts {
             ConvertTo-Json -Depth 40 | ConvertFrom-Json -DateKind String
         Assert-CapMatchedManifest -Manifest $manifest -Job $job
         foreach ($image in $manifest.images) {$null=Assert-CapMatchedDpiImage -Image $image -Contract $contract}
-        $mutations=@('resampled','dpi','logical','raw','outer','work')
+        $baseImage=$images[18]
+        $mutations=@('resampled','dpi','logical','raw','outer','work','style','adjustment-exstyle','exstyle')
         foreach ($mutation in $mutations) {
             $changed=$baseImage | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
             switch ($mutation) {
@@ -2897,6 +2995,9 @@ function Invoke-CapMatchedDpiContracts {
                     $changed.width=3000L;$changed.height=2000L
                 }
                 'work' {$changed.physicalWorkAreaBounds=@(0L,0L,1920L,1032L)}
+                'style' {$changed.windowStyle=315555840L}
+                'adjustment-exstyle' {$changed.windowExStyleForAdjustment=256L}
+                'exstyle' {$changed.windowExStyle=0L}
             }
             $null=Assert-CapRejects {Assert-CapMatchedDpiImage -Image $changed -Contract $contract} 'DPI-parametric matched image'
         }

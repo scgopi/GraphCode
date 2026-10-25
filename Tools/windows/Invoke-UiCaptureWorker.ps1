@@ -733,7 +733,7 @@ function Save-CapSceneImage {
             $geometry=$AppRun.Placement
             $record | Add-Member -NotePropertyMembers @{
                 evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
-                geometrySchemaVersion=2L
+                geometrySchemaVersion=3L
                 geometryDerivation=$geometry.GeometryDerivation
                 logicalClientWH=@($geometry.LogicalClientWH)
                 physicalClientBounds=@($metrics.ClientBounds)
@@ -746,6 +746,7 @@ function Save-CapSceneImage {
                 dpiScaleDenominator=[long]$geometry.DpiScaleDenominator
                 windowStyle=[long]$metrics.Style
                 windowStyleForAdjustment=[long]$geometry.WindowStyle
+                windowExStyleForAdjustment=[long]$geometry.WindowExStyle
                 windowExStyle=[long]$metrics.ExStyle
                 hasMenu=[bool]$metrics.HasMenu
                 physicalWorkAreaBounds=@($geometry.PhysicalWorkAreaBounds)
@@ -811,7 +812,7 @@ function New-CapManifest {
         $result.backendTurns=0;$result.realRestarts=@($realRestarts)
         if (Test-CapMatchedDpiAdapter) {
             $result.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
-            $result.geometrySchemaVersion=2L
+            $result.geometrySchemaVersion=3L
             $result.logicalClientWH=@($job.captureContract.logicalClientWH)
             $result.expectedWindowDpi=[long]$job.captureContract.expectedWindowDpi
             $result.rawCaptureResamplingAllowed=$false
@@ -919,22 +920,18 @@ function Start-CapGraphCodeApp {
         $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
         $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
     } elseif (Test-CapMatchedDpiAdapter) {
-        Add-Type -AssemblyName System.Windows.Forms
-        $area=[Windows.Forms.Screen]::FromHandle($window).WorkingArea
+        $area=Get-CapPrimaryPhysicalWorkArea
         $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
         $contract=$job.captureContract
-        if ($beforeMetrics.Dpi -ne $contract.expectedWindowDpi -or
-            $beforeMetrics.Style -ne $contract.expectedRuntimeWindowStyle -or
-            $beforeMetrics.ExStyle -ne $contract.windowExStyle -or
-            $beforeMetrics.HasMenu -ne $contract.hasMenu) {
-            throw "DPI-parametric runtime window identity differs: $(ConvertTo-Json $beforeMetrics -Compress)."
-        }
+        $identity=$contract.windowIdentities.$Phase
+        $null=Assert-CapDpiWindowIdentity -Metrics $beforeMetrics -Identity $identity -Initial
         $geometry=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
             -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
-            -WindowStyle ([long]$contract.windowStyleForAdjustment) `
-            -WindowExStyle ([long]$beforeMetrics.ExStyle) -HasMenu ([bool]$beforeMetrics.HasMenu) `
+            -WindowStyle ([long]$identity.windowStyleForAdjustment) `
+            -WindowExStyle ([long]$identity.windowExStyleForAdjustment) `
+            -HasMenu ([bool]$identity.hasMenu) `
             -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom) `
-            -ExpectedAdjustedOuterWH @($contract.expectedAdjustedOuterWH)
+            -ExpectedAdjustedOuterWH @($identity.expectedAdjustedOuterWH)
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
             -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
             -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
@@ -945,14 +942,9 @@ function Start-CapGraphCodeApp {
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
     if (Test-CapMatchedDpiAdapter) {
         $geometry=$appRun.Placement
-        if ($metrics.Dpi -ne $geometry.ActualDpi -or
-            ($metrics.ClientBounds -join ',') -cne "0,0,$($geometry.PhysicalClientWH[0]),$($geometry.PhysicalClientWH[1])" -or
-            ($metrics.OuterBounds -join ',') -cne ($geometry.OuterBounds -join ',') -or
-            $metrics.Style -ne $job.captureContract.expectedRuntimeWindowStyle -or
-            $metrics.ExStyle -ne $geometry.WindowExStyle -or
-            $metrics.HasMenu -ne $geometry.HasMenu) {
-            throw "DPI-parametric window remeasurement differs: $(ConvertTo-Json $metrics -Compress)."
-        }
+        $identity=$job.captureContract.windowIdentities.$Phase
+        $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity `
+            -ExpectedOuterBounds @($geometry.OuterBounds)
     } elseif ($metrics.Dpi -ne 96) {
         throw "Actual app DPI is $($metrics.Dpi), expected 96."
     }
