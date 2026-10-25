@@ -39,6 +39,8 @@ $driverDirectory = Split-Path -Parent $PSScriptRoot
 $modulePath = Join-Path $driverDirectory 'UiCaptureDriver.psm1'
 $supervisorPath = Join-Path $driverDirectory 'Invoke-UiCapture.ps1'
 $workerPath = Join-Path $driverDirectory 'Invoke-UiCaptureWorker.ps1'
+$baselineWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-before.zig'
+$currentWindowSourcePath = Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'
 
 function Write-JournalContractJson {
     param([string]$Path, $Value)
@@ -186,7 +188,8 @@ $scratch = [IO.Path]::GetFullPath($ScratchRoot)
 if (Test-Path -LiteralPath $scratch) { throw "Refusing to replace capture test evidence: $scratch" }
 $null = New-Item -ItemType Directory -Path $scratch
 $sourceHashesBefore = [ordered]@{}
-foreach ($path in @($modulePath, $supervisorPath, $workerPath, $PSCommandPath)) {
+foreach ($path in @($modulePath, $supervisorPath, $workerPath, $PSCommandPath,
+    $baselineWindowSourcePath, $currentWindowSourcePath)) {
     $sourceHashesBefore[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
@@ -1009,7 +1012,7 @@ function Read-CapPrebuiltFixtures {
     if ($manifest.schemaVersion -ne 1 -or $manifest.scenario -cne 'UI_CAPTURE_HARMLESS_AND_CIM_RACE_V1') {
         throw 'PrebuiltFixtureIdentity: unsupported fixture recipe.'
     }
-    foreach ($path in @($modulePath,$supervisorPath,$workerPath,$PSCommandPath)) {
+    foreach ($path in $sourceHashesBefore.Keys) {
         $name = [IO.Path]::GetFileName($path)
         if ($manifest.sources.$name -cne $sourceHashesBefore[$path]) { throw 'PrebuiltFixtureSource: frozen control bytes differ.' }
     }
@@ -2584,12 +2587,12 @@ function New-CapMatchedTestJob {
 
 function Get-CapWindowIdentitySource {
     param([Parameter(Mandatory)][string]$Commit)
-    $source = @(& git -C (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')) --no-pager show `
-        "${Commit}:graphcode-windows/src/MainWindow.zig")
-    if ($LASTEXITCODE -ne 0 -or $source.Count -eq 0) {
-        throw "Cannot read MainWindow.zig at source commit $Commit."
+    $path = switch ($Commit) {
+        'a8b09434fe41a61030fd290f7d065ec6d0db8005' {$baselineWindowSourcePath}
+        '49419275298fbec90d7ed21f4189b2af8f0baf74' {$currentWindowSourcePath}
+        default {throw "No frozen MainWindow identity source is bound to commit $Commit."}
     }
-    return ($source -join "`n")
+    return [IO.File]::ReadAllText($path)
 }
 
 function New-CapMatchedDpiTestJob {
@@ -2822,6 +2825,13 @@ function Invoke-CapMatchedDpiContracts {
             ($beforeIdentity | ConvertTo-Json -Compress) -cne ($afterIdentity | ConvertTo-Json -Compress)) `
             'C7 baseline and current source-bound window identities were collapsed or differ from Win32 normalization.'
         $currentSource=Get-CapWindowIdentitySource $afterIdentity.sourceCommit
+        $actualCurrentSource=[IO.File]::ReadAllText(
+            (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\graphcode-windows\src\MainWindow.zig')))
+        $actualCurrentIdentity=Get-CapGraphCodeWindowIdentity -SourceText $actualCurrentSource `
+            -SourceCommit $afterIdentity.sourceCommit -ExpectedDpi 192 -LogicalClientWH @(1440,900)
+        Assert-CapTest (($actualCurrentIdentity | ConvertTo-Json -Compress) -ceq
+            ($afterIdentity | ConvertTo-Json -Compress)) `
+            'Frozen current window identity source differs from the checked-in production source.'
         foreach ($mutant in @(
             $currentSource.Replace('c.WS_OVERLAPPEDWINDOW | c.WS_CLIPCHILDREN',
                 'c.WS_OVERLAPPEDWINDOW | c.WS_CLIPSIBLINGS'),
