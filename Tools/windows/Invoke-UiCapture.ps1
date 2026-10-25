@@ -1039,8 +1039,7 @@ try {
         $native = @(Assert-CapLiveNativeBindings)
     }
     if (-not $rehearsal -and (Test-CapMatchedDpiAdapter)) {
-        Add-Type -AssemblyName System.Windows.Forms
-        $area=[Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $area=Get-CapPrimaryPhysicalWorkArea
         $contract=$job.captureContract
         $workArea=@($area.Left,$area.Top,$area.Right,$area.Bottom)
         if (($area.Width -lt $contract.minimumPhysicalWorkAreaWH[0]) -or

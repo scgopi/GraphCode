@@ -99,6 +99,17 @@ public static class CapNative {
   private struct NativeRect { public int Left, Top, Right, Bottom; }
 
   [StructLayout(LayoutKind.Sequential)]
+  private struct NativePoint { public int X, Y; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct NativeMonitorInfo {
+    public int Size;
+    public NativeRect Monitor;
+    public NativeRect Work;
+    public uint Flags;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
   private struct NativeFileTime { public uint Low, High; }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -140,6 +151,12 @@ public static class CapNative {
   private static extern bool AdjustWindowRectExForDpi(ref NativeRect rect, uint style, bool hasMenu, uint exStyle, uint dpi);
   [DllImport("user32.dll", SetLastError=true)]
   private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+  [DllImport("user32.dll")]
+  private static extern IntPtr MonitorFromPoint(NativePoint point, uint flags);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern bool GetMonitorInfo(IntPtr monitor, ref NativeMonitorInfo info);
+  [DllImport("user32.dll", SetLastError=true)]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   private static extern bool WaitNamedPipeW(string name, uint timeout);
 
@@ -285,6 +302,26 @@ public static class CapNative {
     if (!AdjustWindowRectExForDpi(ref rect, unchecked((uint)style), hasMenu, unchecked((uint)exStyle), dpi))
       throw new InvalidOperationException("AdjustWindowRectExForDpi failed: " + Marshal.GetLastWin32Error());
     return new[] { rect.Left, rect.Top, rect.Right, rect.Bottom, rect.Right - rect.Left, rect.Bottom - rect.Top };
+  }
+
+  public static int[] PrimaryPhysicalWorkArea() {
+    IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+    if (previous == IntPtr.Zero)
+      throw new InvalidOperationException("Cannot enter per-monitor-v2 DPI awareness: " + Marshal.GetLastWin32Error());
+    try {
+      IntPtr monitor = MonitorFromPoint(new NativePoint { X = 0, Y = 0 }, 1);
+      if (monitor == IntPtr.Zero)
+        throw new InvalidOperationException("Cannot select the primary monitor: " + Marshal.GetLastWin32Error());
+      var info = new NativeMonitorInfo { Size = Marshal.SizeOf<NativeMonitorInfo>() };
+      if (!GetMonitorInfo(monitor, ref info))
+        throw new InvalidOperationException("Cannot query the primary monitor work area: " + Marshal.GetLastWin32Error());
+      if (info.Work.Right <= info.Work.Left || info.Work.Bottom <= info.Work.Top)
+        throw new InvalidOperationException("Primary monitor physical work area is empty.");
+      return new[] { info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom };
+    } finally {
+      if (SetThreadDpiAwarenessContext(previous) == IntPtr.Zero)
+        throw new InvalidOperationException("Cannot restore the capture thread DPI awareness: " + Marshal.GetLastWin32Error());
+    }
   }
 
   public static CapWindowSnapshot WindowSnapshot(IntPtr window, int expectedPid) {
@@ -1772,6 +1809,18 @@ function Get-CapLogicalZoomEvidence {
         DpiBase = 96L
         ZoomPercent = $percent
     }
+}
+
+function Get-CapPrimaryPhysicalWorkArea {
+    [CmdletBinding()]
+    param()
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    $bounds = @([CapNative]::PrimaryPhysicalWorkArea())
+    if ($bounds.Count -ne 4 -or $bounds[2] -le $bounds[0] -or $bounds[3] -le $bounds[1]) {
+        throw 'Primary monitor physical work-area query returned invalid bounds.'
+    }
+    return [Drawing.Rectangle]::FromLTRB($bounds[0],$bounds[1],$bounds[2],$bounds[3])
 }
 
 function Measure-CapZoom {
@@ -5406,6 +5455,7 @@ Export-ModuleMember -Function @(
     'Assert-CapUiaProcessIds',
     'Invoke-CapAction',
     'Get-CapLogicalZoomEvidence',
+    'Get-CapPrimaryPhysicalWorkArea',
     'Measure-CapZoom',
     'Get-CapDpiGeometry',
     'Assert-CapMatchedDpiImage',

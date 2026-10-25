@@ -74,11 +74,16 @@ The job separates logical and physical geometry:
 - measured fit inside a physical work area at least 2906x1910;
 - no resampling.
 
-The supervisor performs the work-area calculation before worker launch. The
-worker queries the actual window DPI/style/menu, derives the physical frame,
+The supervisor performs the work-area calculation before worker launch. It
+temporarily enters per-monitor-v2 awareness on the calling thread, selects the
+primary monitor natively, and reads `GetMonitorInfo` work bounds in physical
+pixels. This preserves taskbar exclusion and physical virtual-screen origins
+without deriving bounds by multiplying DPI-virtualized Windows Forms values.
+The worker queries the actual window DPI/style/menu, derives the physical frame,
 positions it without changing size, and remeasures exact physical client and
-outer bounds before any scene action. A 1920x1032 RDP mode refuses before
-product launch.
+outer bounds before any scene action. A genuinely physical 1920x1032 RDP mode
+refuses before product launch; a 3840x2064 physical work area remains admissible
+when Windows Forms reports its DPI-192 logical equivalent as 1920x1032.
 
 UIA bounding rectangles remain physical pixels. Actual-size zoom normalizes
 the physical width by `96 / actualDpi` before comparing with the card's 250

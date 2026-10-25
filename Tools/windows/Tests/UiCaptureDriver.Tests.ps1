@@ -608,6 +608,9 @@ function Assert-CapRejects {
                 'CapNative|GetMenu|user32.dll|GetMenu',
                 'CapNative|AdjustWindowRectExForDpi|user32.dll|AdjustWindowRectExForDpi',
                 'CapNative|SetWindowPos|user32.dll|SetWindowPos',
+                'CapNative|MonitorFromPoint|user32.dll|MonitorFromPoint',
+                'CapNative|GetMonitorInfo|user32.dll|GetMonitorInfoW',
+                'CapNative|SetThreadDpiAwarenessContext|user32.dll|SetThreadDpiAwarenessContext',
                 'CapNative|PrintWindow|user32.dll|PrintWindow',
                 'CapProcessJob|CreateJobObjectW|kernel32.dll|CreateJobObjectW',
                 'CapProcessJob|SetInformationJobObject|kernel32.dll|SetInformationJobObject',
@@ -621,8 +624,8 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 33 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static33 export contract differs.'
-            return @{ subcases = 33; evidence = 'API export resolution only, no native window or GUI action.' }
+            Assert-CapTest ($actual.Count -eq 36 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static36 export contract differs.'
+            return @{ subcases = 36; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -2734,6 +2737,51 @@ function Invoke-CapMatchedContracts {
     }
 }
 
+function Invoke-CapSupervisorDpiAdmissionContract {
+    param(
+        [Parameter(Mandatory)]$Contract,
+        [Parameter(Mandatory)]$ObservedLogicalArea,
+        [Parameter(Mandatory)]$PhysicalWorkArea
+    )
+    $supervisorAst = [Management.Automation.Language.Parser]::ParseFile(
+        $supervisorPath,[ref]$null,[ref]$null)
+    $admission = @($supervisorAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.Text.TrimStart().StartsWith(
+                'if (-not $rehearsal -and (Test-CapMatchedDpiAdapter))',
+                [StringComparison]::Ordinal)
+    },$true))
+    Assert-CapTest ($admission.Count -eq 1) 'Supervisor DPI admission block is missing or ambiguous.'
+    $source = $admission[0].Extent.Text.Replace(
+        'Add-Type -AssemblyName System.Windows.Forms','')
+    $logicalProvider = '$area=[Windows.Forms.Screen]::PrimaryScreen.WorkingArea'
+    $physicalProvider = '$area=Get-CapPrimaryPhysicalWorkArea'
+    $usesPhysicalProvider = $source.Contains($physicalProvider)
+    if ($source.Contains($logicalProvider)) {
+        $source = $source.Replace($logicalProvider,'$area=$ObservedLogicalArea')
+    } elseif ($usesPhysicalProvider) {
+        $source = $source.Replace($physicalProvider,'$area=$PhysicalWorkArea')
+    } else {
+        throw 'Supervisor DPI work-area provider is missing or ambiguous.'
+    }
+    $job = [pscustomobject]@{ captureContract = $Contract }
+    $rehearsal = $false
+    function Test-CapMatchedDpiAdapter { return $true }
+    $dpiGeometryAdmission = $null
+    $geometry = & ([scriptblock]::Create($source + "`nreturn `$dpiGeometryAdmission"))
+    return [pscustomobject]@{
+        Geometry = $geometry
+        UsesPhysicalProvider = $usesPhysicalProvider
+        ObservedLogicalArea = @(
+            $ObservedLogicalArea.Left,$ObservedLogicalArea.Top,
+            $ObservedLogicalArea.Right,$ObservedLogicalArea.Bottom)
+        PhysicalWorkArea = @(
+            $PhysicalWorkArea.Left,$PhysicalWorkArea.Top,
+            $PhysicalWorkArea.Right,$PhysicalWorkArea.Bottom)
+    }
+}
+
 function Invoke-CapMatchedDpiContracts {
     Invoke-CapTest 'DPI matched geometry derives exact 96 and 192 physical frames' {
         $job=New-CapMatchedDpiTestJob
@@ -2751,7 +2799,27 @@ function Invoke-CapMatchedDpiContracts {
             ($at192.OuterWH -join ',') -ceq '2906,1910' -and
             ($at192.NonClientWH -join ',') -ceq '26,110' -and -not $at192.Resampled) `
             'DPI-parametric exact frame derivation differs.'
-        return @{dpi96=$at96;dpi192=$at192;sceneContract='S_MATCHED_V12_DPI_V1'}
+        $logical192=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
+        $physical192=[Drawing.Rectangle]::FromLTRB(0,0,3840,2064)
+        $admission192=Invoke-CapSupervisorDpiAdmissionContract -Contract $job.captureContract `
+            -ObservedLogicalArea $logical192 -PhysicalWorkArea $physical192
+        Assert-CapTest ($admission192.UsesPhysicalProvider -and
+            ($admission192.Geometry.PhysicalWorkAreaBounds -join ',') -ceq '0,0,3840,2064') `
+            'DPI192 supervisor admission used the logical 1920x1032 work area instead of the native physical 3840x2064 work area.'
+
+        $dpi96Contract=$job.captureContract | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+        $dpi96Contract.expectedWindowDpi=96L
+        $dpi96Contract.expectedPhysicalClientWH=@(1440L,900L)
+        $dpi96Contract.expectedAdjustedOuterWH=@(1456L,959L)
+        $dpi96Contract.minimumPhysicalWorkAreaWH=@(1456L,959L)
+        $physical96=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
+        $admission96=Invoke-CapSupervisorDpiAdmissionContract -Contract $dpi96Contract `
+            -ObservedLogicalArea $physical96 -PhysicalWorkArea $physical96
+        Assert-CapTest (($admission96.Geometry.OuterWH -join ',') -ceq '1456,959' -and
+            ($admission96.Geometry.PhysicalWorkAreaBounds -join ',') -ceq '0,0,1920,1032') `
+            'DPI96 supervisor admission compatibility differs.'
+        return @{dpi96=$at96;dpi192=$at192;sceneContract='S_MATCHED_V12_DPI_V1'
+            dpi192Admission=$admission192;dpi96Admission=$admission96}
     }
     Invoke-CapTest 'DPI matched geometry refuses insufficient work area and invalid scaling' {
         $arguments=@{LogicalClientWH=@(1440,900);ExpectedDpi=192;WindowStyle=47120384L
@@ -2766,8 +2834,15 @@ function Invoke-CapMatchedDpiContracts {
         $outer=Assert-CapRejects {
             Get-CapDpiGeometry @arguments -WorkArea @(0,0,3000,2000) -ExpectedAdjustedOuterWH @(2905,1910)
         } 'adjusted outer size differs'
+        $job=New-CapMatchedDpiTestJob
+        $logical192=[Drawing.Rectangle]::FromLTRB(0,0,1920,1032)
+        $physicalShort=[Drawing.Rectangle]::FromLTRB(-3840,0,-935,2064)
+        $physicalAdmission=Assert-CapRejects {
+            Invoke-CapSupervisorDpiAdmissionContract -Contract $job.captureContract `
+                -ObservedLogicalArea $logical192 -PhysicalWorkArea $physicalShort
+        } 'physical work area is insufficient: 2905x2064'
         return @{currentRdpRefused=$small;onePixelWidth=$shortWidth;onePixelHeight=$shortHeight
-            fractionalScaling=$fractional;wrongOuter=$outer}
+            fractionalScaling=$fractional;wrongOuter=$outer;physicalAdmission=$physicalAdmission}
     }
     Invoke-CapTest 'DPI matched logical zoom normalizes physical UIA width' {
         $dpi96=Get-CapLogicalZoomEvidence -PhysicalWidth 250 -NaturalLogicalWidth 250 -Dpi 96
