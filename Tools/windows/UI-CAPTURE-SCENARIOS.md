@@ -93,6 +93,10 @@ through DPI virtualization; the physical query is `[98,98,1378,918]` with
 client `[0,0,1254,710]`. The worker then derives the target frame from that
 phase's source identity, positions it in the native physical work area, and
 remeasures exact physical client and outer bounds before any scene action.
+The native `CapWindowSnapshot` is copied at that validation boundary into the
+existing complete `PSCustomObject` record, preserving both bounds arrays,
+64-bit DPI/style values and the Boolean menu flag. Dictionaries, missing or
+null fields, and wrong array, numeric or Boolean types still refuse.
 Foreign style, extended-style, menu, client, or outer identities still fail
 closed. A genuinely physical 1920x1032 RDP mode refuses before product launch;
 a 3840x2064 physical work area remains admissible when Windows Forms reports

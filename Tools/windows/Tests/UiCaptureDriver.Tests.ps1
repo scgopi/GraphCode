@@ -22,6 +22,7 @@ param(
     [switch]$DAdapterContractOnly,
     [switch]$MatchedScenarioContractOnly,
     [switch]$MatchedDpiContractOnly,
+    [string]$Schema3JobPath = '',
     [switch]$SeedPathContractOnly,
     [ValidateSet('All','ExitWait')][string]$SeedPathCase = 'All',
     [ValidateSet('All','SceneContract','ActualAdmission','FixtureDirectory')][string]$DAdapterCase = 'All',
@@ -2629,6 +2630,30 @@ function New-CapMatchedDpiTestJob {
     return $job
 }
 
+function Get-CapSchema3MetricsRegressionJob {
+    if ([string]::IsNullOrWhiteSpace($Schema3JobPath)) {
+        return New-CapMatchedDpiTestJob
+    }
+    $path=[IO.Path]::GetFullPath($Schema3JobPath)
+    $bytes=[IO.File]::ReadAllBytes($path)
+    $sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    if ($sha256 -cne 'B85B5F14190394178D9D5BB2BBA8CD4B8C52AC0337EECBF74B04AFF493AE9120') {
+        throw "Schema-3 regression job hash differs: $sha256"
+    }
+    $job=[Text.UTF8Encoding]::new($false,$true).GetString($bytes) |
+        ConvertFrom-Json -DateKind String
+    Assert-CapSceneContract -Job $job
+    if ($job.head -cne 'bc1f9971d6ffe1b7c00a56c6c0ea3eb2beacd221' -or
+        $job.captureContract.windowIdentities.before.sourceCommit -cne
+            'a8b09434fe41a61030fd290f7d065ec6d0db8005' -or
+        $job.captureContract.windowIdentities.after.sourceCommit -cne $job.head -or
+        $job.captureContract.windowIdentities.before.sourceCommit -ceq
+            $job.captureContract.windowIdentities.after.sourceCommit) {
+        throw 'Schema-3 regression job before/after source identity binding differs.'
+    }
+    return $job
+}
+
 function New-CapRestartTestEvidence {
     $project='C:\owned\Matched'
     $node='11111111-1111-4111-8111-000000000001'
@@ -2882,6 +2907,55 @@ function Invoke-CapMatchedDpiContracts {
             Style=382664704L;ExStyle=256L;HasMenu=$true
         }
         $null=Assert-CapDpiWindowIdentity -Metrics $physicalObservation -Identity $afterIdentity -Initial
+        $regressionJob=Get-CapSchema3MetricsRegressionJob
+        $regressionIdentity=$regressionJob.captureContract.windowIdentities.before
+        $nativeMetrics=[CapWindowSnapshot]::new()
+        $nativeMetrics.Dpi=[uint32]$regressionIdentity.expectedWindowDpi
+        $nativeMetrics.OuterBounds=[int[]]@(98,98,1378,918)
+        $nativeMetrics.ClientBounds=[int[]]@(0,0,
+            [int]$regressionIdentity.expectedInitialClientWH[0],
+            [int]$regressionIdentity.expectedInitialClientWH[1])
+        $nativeMetrics.Style=[long]$regressionIdentity.expectedRuntimeWindowStyle
+        $nativeMetrics.ExStyle=[long]$regressionIdentity.expectedRuntimeWindowExStyle
+        $nativeMetrics.HasMenu=[bool]$regressionIdentity.hasMenu
+        $nativeProof=Assert-CapDpiWindowIdentity -Metrics $nativeMetrics `
+            -Identity $regressionIdentity -Initial
+        Assert-CapTest ($nativeProof -is [pscustomobject] -and
+            $nativeProof.Dpi -is [long] -and
+            $nativeProof.OuterBounds -is [array] -and
+            $nativeProof.ClientBounds -is [array] -and
+            ($nativeProof.OuterBounds -join ',') -ceq '98,98,1378,918' -and
+            ($nativeProof.ClientBounds -join ',') -ceq '0,0,1254,710' -and
+            $nativeProof.Style -eq $regressionIdentity.expectedRuntimeWindowStyle -and
+            $nativeProof.ExStyle -eq $regressionIdentity.expectedRuntimeWindowExStyle -and
+            $nativeProof.HasMenu -ceq $regressionIdentity.hasMenu) `
+            'Schema-3 native window metrics did not retain a complete typed record.'
+        $validMetrics=[pscustomobject][ordered]@{
+            Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+            Style=382664704L;ExStyle=256L;HasMenu=$true
+        }
+        $metricMutations=@(
+            @{name='dictionary';value=[ordered]@{
+                Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+                Style=382664704L;ExStyle=256L;HasMenu=$true}},
+            @{name='missing-style';value=[pscustomobject][ordered]@{
+                Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
+                ExStyle=256L;HasMenu=$true}},
+            @{name='null-style';value=($validMetrics | Select-Object *)},
+            @{name='string-dpi';value=($validMetrics | Select-Object *)},
+            @{name='scalar-outer';value=($validMetrics | Select-Object *)},
+            @{name='numeric-menu';value=($validMetrics | Select-Object *)}
+        )
+        $metricMutations[2].value.Style=$null
+        $metricMutations[3].value.Dpi='192'
+        $metricMutations[4].value.OuterBounds=1280L
+        $metricMutations[5].value.HasMenu=1L
+        foreach ($mutation in $metricMutations) {
+            $null=Assert-CapRejects {
+                Assert-CapDpiWindowIdentity -Metrics $mutation.value `
+                    -Identity $regressionIdentity -Initial
+            } 'DPI-parametric window metrics'
+        }
         foreach ($foreign in @(
             @{metrics=[pscustomobject]@{Dpi=192L;OuterBounds=@(98L,98L,1378L,918L);ClientBounds=@(0L,0L,1254L,710L)
                 Style=315555840L;ExStyle=256L;HasMenu=$true};expected='window identity differs'},
@@ -2920,7 +2994,12 @@ function Invoke-CapMatchedDpiContracts {
             'DPI96 supervisor admission compatibility differs.'
         return @{dpi96=$at96;dpi192=$at192;sceneContract='S_MATCHED_V12_DPI_V1'
             dpi192Admission=$admission192;dpi96Admission=$admission96
-            virtualizedObservation=$virtualizedRefusal;phaseIdentities=2}
+            virtualizedObservation=$virtualizedRefusal;phaseIdentities=2
+            nativeMetricsType=$nativeMetrics.GetType().FullName
+            schema3JobSha256=if ($Schema3JobPath) {
+                'B85B5F14190394178D9D5BB2BBA8CD4B8C52AC0337EECBF74B04AFF493AE9120'
+            } else {'GENERATED_CONTRACT'}
+            metricMutationRefusals=$metricMutations.Count}
     }
     Invoke-CapTest 'DPI matched geometry refuses insufficient work area and invalid scaling' {
         $job=New-CapMatchedDpiTestJob

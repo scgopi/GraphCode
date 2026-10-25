@@ -1962,8 +1962,26 @@ function Assert-CapDpiWindowIdentity {
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($Metrics -is [CapWindowSnapshot]) {
+        $Metrics = [pscustomobject][ordered]@{
+            OuterBounds = if ($null -eq $Metrics.OuterBounds) {
+                $null
+            } else {
+                [long[]]@($Metrics.OuterBounds | ForEach-Object { [long]$_ })
+            }
+            ClientBounds = if ($null -eq $Metrics.ClientBounds) {
+                $null
+            } else {
+                [long[]]@($Metrics.ClientBounds | ForEach-Object { [long]$_ })
+            }
+            Dpi = [long]$Metrics.Dpi
+            Style = [long]$Metrics.Style
+            ExStyle = [long]$Metrics.ExStyle
+            HasMenu = [bool]$Metrics.HasMenu
+        }
+    }
     Assert-CapDataRecord $Metrics @{
-        OuterBounds=[array];ClientBounds=[array];Dpi=[ValueType];Style=[long];ExStyle=[long];HasMenu=[bool]
+        OuterBounds=[array];ClientBounds=[array];Dpi=[long];Style=[long];ExStyle=[long];HasMenu=[bool]
     } 'DPI-parametric window metrics'
     Assert-CapDataRecord $Identity @{
         sourceContract=[string];sourceCommit=[string];expectedWindowDpi=[long];requestedOuterWH=[array]
