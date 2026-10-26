@@ -176,6 +176,15 @@ function Assert-CapGreenJob {
     return $jobIdentity.sourceRepository
 }
 
+function Invoke-CapTransitionGit {
+    param([Parameter(Mandatory)][string]$Repository,[Parameter(Mandatory)][string[]]$Arguments)
+    $output=@(& git -C $Repository @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Live transition rehearsal git failed (exit=$LASTEXITCODE): git -C $Repository $($Arguments -join ' '): $($output -join ' ')"
+    }
+    return @($output)
+}
+
 function Assert-CapTransitionJobIdentity {
     Assert-CapDataRecord $job @{ head = [string]; productSourceHead = [string]
         sourceRepository = [string]; executionMode = [string]; desktopAuthorized = [bool]
@@ -189,16 +198,16 @@ function Assert-CapTransitionJobIdentity {
         throw 'Live transition rehearsal job is not explicitly authorized as non-capture evidence.'
     }
     $repository = [IO.Path]::GetFullPath($job.sourceRepository)
-    if ([string](Invoke-CapAdmissionGit $repository @('rev-parse','HEAD')) -cne $job.head -or
-        @(Invoke-CapAdmissionGit $repository @('status','--porcelain','--untracked-files=all')).Count -ne 0) {
+    if ([string](Invoke-CapTransitionGit $repository @('rev-parse','HEAD')) -cne $job.head -or
+        @(Invoke-CapTransitionGit $repository @('status','--porcelain','--untracked-files=all')).Count -ne 0) {
         throw 'Live transition rehearsal source repository is not clean at its exact tooling head.'
     }
     foreach ($commit in @($job.head,$job.productSourceHead,$job.base)) {
-        if ([string](Invoke-CapAdmissionGit $repository @('rev-parse','--verify',"$commit`^{commit}")) -cne $commit) {
+        if ([string](Invoke-CapTransitionGit $repository @('rev-parse','--verify',"$commit`^{commit}")) -cne $commit) {
             throw 'Live transition rehearsal names a missing source commit.'
         }
     }
-    $delta = @(Invoke-CapAdmissionGit $repository @(
+    $delta = @(Invoke-CapTransitionGit $repository @(
         'diff','--name-only','--no-renames','--no-ext-diff','--no-textconv',
         $job.productSourceHead,$job.head,'--'
     ))

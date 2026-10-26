@@ -4170,6 +4170,8 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
     Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and
         $supervisorSource.Contains('RehearsalAuthorizationSha256')) 'Supervisor still requires a capture lease for live transition rehearsal.'
+    Assert-CapTest ($supervisorSource.Contains('function Invoke-CapTransitionGit') -and
+        -not $supervisorSource.Contains('Invoke-CapAdmissionGit $repository')) 'Live transition admission depends on a module-private Git helper.'
     $job=New-CapMatchedDpiTestJob
     $manifest=[pscustomobject]@{
         sceneAdapter=$job.sceneAdapter;lane='S';status='COMPLETE'
