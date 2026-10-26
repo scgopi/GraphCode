@@ -12,7 +12,8 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
             "ConvertTo-SketchCanonicalJson",
             "Test-RetryableUiaError",
             "Test-UpdateBannerClickTarget",
-            "Get-DynamicProjectCardSnapshotDecision"
+            "Get-DynamicProjectCardSnapshotDecision",
+            "Get-ConnectorDragSnapshotDecision"
           ))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
@@ -1943,7 +1944,56 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
           $surface $candidate $expectedDynamic 4242 $graphBounds).ready) `
         "dynamic project-card snapshot accepted $mutation"
     }
-    return "Exact DPI192 frozen card snapshot; identity-present empty bounds and missing/foreign/duplicate/order/surface/viewport/overlap negatives"
+    $connectorGraphBounds = @(600,312,1414,858)
+    $clientBounds = @(147,196,1427,967)
+    $fittedConnectorCards = @(
+      [ordered]@{ automationId = $expectedDynamic[0].automationId; name = $expectedDynamic[0].name
+        processId = 4242; bounds = @(600,552,790,630) },
+      [ordered]@{ automationId = $expectedDynamic[1].automationId; name = $expectedDynamic[1].name
+        processId = 4242; bounds = @(908,552,1114,630) }
+    )
+    $connectorDecision = Get-ConnectorDragSnapshotDecision `
+      $fittedConnectorCards $expectedDynamic 4242 $connectorGraphBounds $clientBounds $false
+    Assert-MultiCase ($connectorDecision.ready -and
+      ($connectorDecision.sourcePoint -join ",") -ceq "790,591" -and
+      ($connectorDecision.targetPoint -join ",") -ceq "1011,591" -and
+      $connectorDecision.targetCenterVisible -and
+      $connectorDecision.sourceCardId -ceq $expectedDynamic[0].automationId -and
+      $connectorDecision.targetCardId -ceq $expectedDynamic[1].automationId) `
+      "exact DPI192 fitted connector drag plan was rejected or changed endpoints"
+    $actualSizeCutoff = Copy-MultiProjectValue $fittedConnectorCards
+    $actualSizeCutoff[0].bounds = @(488,365,988,557)
+    $actualSizeCutoff[1].bounds = @(1264,365,1764,557)
+    $cutoffDecision = Get-ConnectorDragSnapshotDecision `
+      $actualSizeCutoff $expectedDynamic 4242 $connectorGraphBounds $clientBounds $false
+    Assert-MultiCase ($cutoffDecision.ready -and
+      ($cutoffDecision.targetCenter -join ",") -ceq "1514,461" -and
+      -not $cutoffDecision.targetCenterVisible -and
+      ($cutoffDecision.targetPoint -join ",") -ceq "1339,461") `
+      "DPI192 Actual Size target-center cutoff was not corrected to the visible card intersection"
+    foreach ($connectorMutation in @(
+        "wrong-connector", "wrong-target", "wrong-process",
+        "logical-card-space", "logical-client-space", "preexisting-dialog")) {
+      $candidate = Copy-MultiProjectValue $fittedConnectorCards
+      $candidateExpected = Copy-MultiProjectValue $expectedDynamic
+      $candidateClient = @($clientBounds)
+      $preexistingDialog = $false
+      switch ($connectorMutation) {
+        "wrong-connector" { $candidate[0].automationId = "canvas-card-wrong-source" }
+        "wrong-target" { $candidate[1].name = "Wrong target" }
+        "wrong-process" { $candidate[1].processId = 7777 }
+        "logical-card-space" {
+          $candidate[0].bounds = @(248,118,468,204)
+          $candidate[1].bounds = @(488,118,708,204)
+        }
+        "logical-client-space" { $candidateClient = @(0,0,640,410) }
+        "preexisting-dialog" { $preexistingDialog = $true }
+      }
+      Assert-MultiCase (-not (Get-ConnectorDragSnapshotDecision `
+          $candidate $candidateExpected 4242 $connectorGraphBounds $candidateClient $preexistingDialog).ready) `
+        "connector drag snapshot accepted $connectorMutation"
+    }
+    return "Exact DPI192 frozen card and connector snapshots; Actual Size cutoff plus wrong connector/target/process/coordinate-space/preexisting-dialog negatives"
   }
   foreach ($mutation in @("extra-card", "extra-project", "duplicate-card", "duplicate-project",
       "foreign-card-pid", "foreign-project-pid", "foreign-card-count", "foreign-project-count")) {
@@ -4982,20 +5032,29 @@ Start-Sleep -Seconds 60
   $connectorActualInvokeIndex = $uiaLiveGateSource.IndexOf(
     '$connectorActual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()',
     [Math]::Max(0, $connectorActualIndex), [StringComparison]::Ordinal)
-  $connectorReacquireIndex = $uiaLiveGateSource.IndexOf(
-    '$connectorProbe = Wait-ForGraphChildren $root $rawWalker',
+  $connectorRootReconnectIndex = $uiaLiveGateSource.IndexOf(
+    '$root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)',
     [Math]::Max(0, $connectorActualInvokeIndex), [StringComparison]::Ordinal)
-  $connectorSourceIndex = $uiaLiveGateSource.IndexOf(
-    '$connectorSourceCard = @($connectorProjectCards',
-    [Math]::Max(0, $connectorReacquireIndex), [StringComparison]::Ordinal)
+  $connectorCaptureIndex = $uiaLiveGateSource.IndexOf(
+    'Get-DynamicProjectCardCapture $_',
+    [Math]::Max(0, $connectorRootReconnectIndex), [StringComparison]::Ordinal)
+  $connectorDecisionIndex = $uiaLiveGateSource.IndexOf(
+    '$connectorDecision = Get-ConnectorDragSnapshotDecision',
+    [Math]::Max(0, $connectorCaptureIndex), [StringComparison]::Ordinal)
   if ($compositeEvidenceIndex -lt 0 -or
       $connectorActualIndex -le $compositeEvidenceIndex -or
       $connectorActualInvokeIndex -le $connectorActualIndex -or
-      $connectorReacquireIndex -le $connectorActualInvokeIndex -or
-      $connectorSourceIndex -le $connectorReacquireIndex -or
-      $uiaLiveGateSource -notmatch '(?s)\$connectorProbe = Wait-ForGraphChildren \$root \$rawWalker.*?UIA loop A.*?UIA loop B.*?\$items\.Count -eq 2' -or
-      $uiaLiveGateSource -notmatch '\$connectorTargetCard = @\(\$connectorProjectCards') {
-    throw "RED: connector evidence does not reset Actual Size and reacquire the exact parent cards after composite navigation"
+      $connectorRootReconnectIndex -le $connectorActualInvokeIndex -or
+      $connectorCaptureIndex -le $connectorRootReconnectIndex -or
+      $connectorDecisionIndex -le $connectorCaptureIndex -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::ClientScreenBounds\(\$shellWindow\)' -or
+      $uiaLiveGateSource -notmatch 'FindVisibleOwnedSheetByContentClass\(' -or
+      $uiaLiveGateSource -notmatch 'UIA_CONNECTOR_DRAG_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'coordinateSpace = "physical-screen"' -or
+      $uiaLiveGateSource -notmatch 'targetCenterVisible = \$connectorDecision\.targetCenterVisible' -or
+      $uiaLiveGateSource -notmatch '\[GraphCodeUiaGateState\]::PostMouseDragMoveAt\(' -or
+      $uiaLiveGateSource -notmatch '\$visibleTargetBounds = @\(') {
+    throw "RED: connector evidence does not freeze exact physical-screen endpoints and clamp the target to its visible card intersection"
   }
   if ($uiaLiveGateSource -notmatch '\$readNormalizedLaneGeometry\s*=\s*\{' -or
       $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or

@@ -625,6 +625,9 @@ public static class GraphCodeUiaGateState {
   public static bool PostMouseMoveAt(IntPtr window, int clientX, int clientY) {
     return PostMessage(window, 0x0200, UIntPtr.Zero, MouseLParam(clientX, clientY));
   }
+  public static bool PostMouseDragMoveAt(IntPtr window, int clientX, int clientY) {
+    return PostMessage(window, 0x0200, (UIntPtr)0x0001, MouseLParam(clientX, clientY));
+  }
   public static IntPtr SendMouseButtonAt(IntPtr window, uint message, int clientX, int clientY) {
     return SendMessage(window, message, (UIntPtr)0x0001, MouseLParam(clientX, clientY));
   }
@@ -817,6 +820,15 @@ public static class GraphCodeUiaGateState {
     clientX = point.X;
     clientY = point.Y;
     return ok;
+  }
+  public static int[] ClientScreenBounds(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetClientRect(window, out rect)) return null;
+    var topLeft = new ScreenPoint { X = rect.Left, Y = rect.Top };
+    var bottomRight = new ScreenPoint { X = rect.Right, Y = rect.Bottom };
+    if (!ClientToScreen(window, ref topLeft) || !ClientToScreen(window, ref bottomRight))
+      return null;
+    return new[] { topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y };
   }
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
@@ -2678,6 +2690,95 @@ function Get-DynamicProjectCardCapture(
       [double]$bounds.Right,
       [double]$bounds.Bottom
     )
+  }
+}
+
+function Get-ConnectorDragSnapshotDecision(
+  [object[]] $cards,
+  [object[]] $expected,
+  [int] $processId,
+  [double[]] $graphBounds,
+  [double[]] $clientBounds,
+  [bool] $preexistingDialog
+) {
+  $reject = {
+    param([string] $failure)
+    return [ordered]@{
+      ready = $false
+      failure = $failure
+      sourcePoint = @()
+      targetPoint = @()
+      targetCenter = @()
+      targetCenterVisible = $false
+      sourceCardId = ""
+      targetCardId = ""
+    }
+  }
+  if ($preexistingDialog) { return & $reject "preexisting-dialog" }
+  $cardDecision = Get-DynamicProjectCardSnapshotDecision `
+    "project" $cards $expected $processId $graphBounds
+  if (-not $cardDecision.ready) {
+    return & $reject ("cards-" + $cardDecision.failure)
+  }
+  if ($clientBounds -isnot [array] -or $clientBounds.Count -ne 4) {
+    return & $reject "client-bounds"
+  }
+  foreach ($coordinate in $clientBounds) {
+    if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and
+        $coordinate -isnot [double] -and $coordinate -isnot [single] -and
+        $coordinate -isnot [decimal]) -or [double]::IsNaN([double]$coordinate) -or
+        [double]::IsInfinity([double]$coordinate)) {
+      return & $reject "client-bounds"
+    }
+  }
+  if ($clientBounds[2] -le $clientBounds[0] -or
+      $clientBounds[3] -le $clientBounds[1]) {
+    return & $reject "client-bounds"
+  }
+  $source = $cardDecision.cards[0]
+  $target = $cardDecision.cards[1]
+  $sourcePoint = @(
+    [int]$source.bounds[2],
+    [int](($source.bounds[1] + $source.bounds[3]) / 2)
+  )
+  $targetCenter = @(
+    [int](($target.bounds[0] + $target.bounds[2]) / 2),
+    [int](($target.bounds[1] + $target.bounds[3]) / 2)
+  )
+  $inside = {
+    param([int[]] $point, [double[]] $bounds)
+    return $point[0] -ge $bounds[0] -and $point[0] -lt $bounds[2] -and
+      $point[1] -ge $bounds[1] -and $point[1] -lt $bounds[3]
+  }
+  if (-not (& $inside $sourcePoint $graphBounds) -or
+      -not (& $inside $sourcePoint $clientBounds)) {
+    return & $reject "source-point-outside"
+  }
+  $visibleTargetBounds = @(
+    [Math]::Max($target.bounds[0], [Math]::Max($graphBounds[0], $clientBounds[0])),
+    [Math]::Max($target.bounds[1], [Math]::Max($graphBounds[1], $clientBounds[1])),
+    [Math]::Min($target.bounds[2], [Math]::Min($graphBounds[2], $clientBounds[2])),
+    [Math]::Min($target.bounds[3], [Math]::Min($graphBounds[3], $clientBounds[3]))
+  )
+  if ($visibleTargetBounds[2] -le $visibleTargetBounds[0] -or
+      $visibleTargetBounds[3] -le $visibleTargetBounds[1]) {
+    return & $reject "target-not-visible"
+  }
+  $targetPoint = @(
+    [int](($visibleTargetBounds[0] + $visibleTargetBounds[2]) / 2),
+    [int](($visibleTargetBounds[1] + $visibleTargetBounds[3]) / 2)
+  )
+  $targetCenterVisible = (& $inside $targetCenter $graphBounds) -and
+    (& $inside $targetCenter $clientBounds)
+  return [ordered]@{
+    ready = $true
+    failure = $null
+    sourcePoint = $sourcePoint
+    targetPoint = $targetPoint
+    targetCenter = $targetCenter
+    targetCenterVisible = $targetCenterVisible
+    sourceCardId = [string]$source.automationId
+    targetCardId = [string]$target.automationId
   }
 }
 
@@ -6869,23 +6970,79 @@ try {
   }
   Write-Host ("UIA_COMPOSITE_NAVIGATION_EVIDENCE=" + ($compositeNavigationEvidence | ConvertTo-Json -Compress))
 
-  # Opening-fit settles asynchronously after the Back navigation. Connector
-  # evidence is about native hover/drag routing, not opening-fit geometry, so
-  # put the live project canvas at its identity transform and reacquire its
-  # fragments before deriving pointer coordinates.
+  # Keep the established Actual Size hover-paint proof, but do not use the full
+  # target rectangle's centre: at DPI192 the second card extends past the live
+  # client/graph right edge. Reconnect after normalization, freeze exact card
+  # bounds, and choose the centre of the target's visible card intersection.
   $connectorActual = Find-FragmentByIdWithRetry $root "actual-size" $rawWalker
-  Require ($null -ne $connectorActual) `
-    "connector isolation omitted Actual Size after composite navigation"
+  Require (($null -ne $connectorActual) -and
+           ($connectorActual.Current.ProcessId -eq $process.Id) -and
+           ($connectorActual.Current.Name -ceq "Actual size")) `
+    "connector isolation omitted the exact owned Actual Size action"
   $connectorActual.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  $connectorProbe = Wait-ForGraphChildren $root $rawWalker `
-    { $_.Current.AutomationId -match '^canvas-card-' -and
-      $_.Current.Name -in @("UIA loop A", "UIA loop B") } `
-    { param($items)
-      (@($items | Where-Object { $_.Current.Name -ceq "UIA loop A" }).Count -eq 1) -and
-      (@($items | Where-Object { $_.Current.Name -ceq "UIA loop B" }).Count -eq 1) -and
-      ($items.Count -eq 2) }
-  $graph = $connectorProbe.Graph
-  $connectorProjectCards = @($connectorProbe.Items)
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $process.Refresh()
+  $shellWindow = $process.MainWindowHandle
+  $connectorClientBounds = @([GraphCodeUiaGateState]::ClientScreenBounds($shellWindow))
+  Require ($connectorClientBounds.Count -eq 4) `
+    "connector isolation could not resolve the live client screen bounds"
+  $connectorDecision = $null
+  $connectorProjectCards = @()
+  $connectorCaptures = @()
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $connectorProbe = Wait-ForGraphChildren $root $rawWalker `
+      { $_.Current.AutomationId -cin @($dynamicProjectExpected | ForEach-Object { $_.automationId }) } `
+      { param($items) $items.Count -eq 2 } 1 0
+    $graph = $connectorProbe.Graph
+    $connectorProjectCards = @($dynamicProjectExpected | ForEach-Object {
+      $expectedId = $_.automationId
+      @($connectorProbe.Items | Where-Object {
+        $_.Current.AutomationId -ceq $expectedId
+      })[0]
+    })
+    if ($null -ne $graph -and
+        @($connectorProjectCards | Where-Object { $null -ne $_ }).Count -eq 2) {
+      $connectorCaptures = @($connectorProjectCards | ForEach-Object {
+        Get-DynamicProjectCardCapture $_
+      })
+      $connectorGraphBounds = $graph.Current.BoundingRectangle
+      $preexistingEdgeDialog = [GraphCodeUiaGateState]::FindVisibleOwnedSheetByContentClass(
+        [uint32]$process.Id, $shellWindow, "GraphCodeNativeForm"
+      ) -ne [IntPtr]::Zero
+      $connectorDecision = Get-ConnectorDragSnapshotDecision `
+        $connectorCaptures $dynamicProjectExpected $process.Id @(
+          [double]$connectorGraphBounds.Left,
+          [double]$connectorGraphBounds.Top,
+          [double]$connectorGraphBounds.Right,
+          [double]$connectorGraphBounds.Bottom
+        ) $connectorClientBounds $preexistingEdgeDialog
+      if ($connectorDecision.ready) { break }
+    }
+    Start-Sleep -Milliseconds 100
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  }
+  Require (($null -ne $connectorDecision) -and $connectorDecision.ready) `
+    "connector drag did not converge on exact visible DPI192 endpoints: $($connectorDecision.failure)"
+  Write-Host ("UIA_CONNECTOR_DRAG_EVIDENCE=" + ([ordered]@{
+    normalizedBy = "actual-size"
+    attempts = $attempt + 1
+    processId = $process.Id
+    sourceCardId = $connectorDecision.sourceCardId
+    targetCardId = $connectorDecision.targetCardId
+    sourcePoint = $connectorDecision.sourcePoint
+    targetPoint = $connectorDecision.targetPoint
+    targetCenter = $connectorDecision.targetCenter
+    targetCenterVisible = $connectorDecision.targetCenterVisible
+    clientBounds = $connectorClientBounds
+    graphBounds = @(
+      [double]$connectorGraphBounds.Left,
+      [double]$connectorGraphBounds.Top,
+      [double]$connectorGraphBounds.Right,
+      [double]$connectorGraphBounds.Bottom
+    )
+    preexistingDialog = $false
+    coordinateSpace = "physical-screen"
+  } | ConvertTo-Json -Compress -Depth 4))
 
   # Connector handles: GraphCanvas.drawNode paints a circular 14pt handle with a
   # light '+' glyph (RGB 0xE6E6E6) at the outgoing connector position
@@ -6898,14 +7055,8 @@ try {
   # treats the resulting native "Create or edit edge" dialog's locked From/To fields
   # as the ground truth evidence that the drop routed to the correct source/target
   # loop IDs.
-  $connectorSourceCard = @($connectorProjectCards | Where-Object { $_.Current.Name -ceq "UIA loop A" })[0]
-  $connectorTargetCard = @($connectorProjectCards | Where-Object { $_.Current.Name -ceq "UIA loop B" })[0]
-  Require (($null -ne $connectorSourceCard) -and ($null -ne $connectorTargetCard)) `
-    "missing project cards before the connector handle check"
-  $process.Refresh()
-  $shellWindow = $process.MainWindowHandle
-  $connectorScreenX = [int]$connectorSourceCard.Current.BoundingRectangle.Right
-  $connectorScreenY = [int](($connectorSourceCard.Current.BoundingRectangle.Top + $connectorSourceCard.Current.BoundingRectangle.Bottom) / 2)
+  $connectorScreenX = [int]$connectorDecision.sourcePoint[0]
+  $connectorScreenY = [int]$connectorDecision.sourcePoint[1]
   $connectorClientX = 0
   $connectorClientY = 0
   Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -6922,8 +7073,8 @@ try {
   }
   Require $connectorHoverObserved `
     "hovering the outgoing connector did not paint the hover connector handle at (${connectorScreenX},${connectorScreenY})"
-  $connectorTargetScreenX = [int](($connectorTargetCard.Current.BoundingRectangle.Left + $connectorTargetCard.Current.BoundingRectangle.Right) / 2)
-  $connectorTargetScreenY = [int](($connectorTargetCard.Current.BoundingRectangle.Top + $connectorTargetCard.Current.BoundingRectangle.Bottom) / 2)
+  $connectorTargetScreenX = [int]$connectorDecision.targetPoint[0]
+  $connectorTargetScreenY = [int]$connectorDecision.targetPoint[1]
   $connectorTargetClientX = 0
   $connectorTargetClientY = 0
   Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
@@ -6931,8 +7082,17 @@ try {
   )) "could not map the target loop card body to client coordinates"
   Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0201, $connectorClientX, $connectorClientY)) `
     "connector drag mouse-down message was rejected"
-  Require ([GraphCodeUiaGateState]::PostMouseMoveAt($shellWindow, $connectorTargetClientX, $connectorTargetClientY)) `
-    "connector drag mouse-move message was rejected"
+  for ($sample = 1; $sample -le 4; $sample++) {
+    $sampleX = [int][Math]::Round(
+      $connectorClientX + (($connectorTargetClientX - $connectorClientX) * $sample / 4.0)
+    )
+    $sampleY = [int][Math]::Round(
+      $connectorClientY + (($connectorTargetClientY - $connectorClientY) * $sample / 4.0)
+    )
+    Require ([GraphCodeUiaGateState]::PostMouseDragMoveAt($shellWindow, $sampleX, $sampleY)) `
+      "connector drag held mouse-move sample $sample was rejected"
+    Start-Sleep -Milliseconds 25
+  }
   Start-Sleep -Milliseconds 100
   Require ([GraphCodeUiaGateState]::PostMouseButtonAt($shellWindow, 0x0202, $connectorTargetClientX, $connectorTargetClientY)) `
     "connector drag mouse-up message was rejected"
