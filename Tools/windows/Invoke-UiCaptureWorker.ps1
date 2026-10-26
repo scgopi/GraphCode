@@ -169,6 +169,21 @@ function Write-CapWorkerJournalSnapshot {
     param([ValidateSet('Bootstrap','Progress','Terminal')][string]$Kind,
         [string]$Outcome = 'CAPTURING')
     if ($null -eq $journalState) { throw 'Worker journal was not initialized before publication.' }
+    $progressManifest=if ($transitionRehearsal) {
+        [pscustomobject][ordered]@{
+            schemaVersion=1L
+            executionMode='LIVE_TRANSITION_REHEARSAL'
+            evidenceClassification='LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+            status=$Outcome
+            checkpointCount=[long]$checkpoints.Count
+            seedCount=[long]$zmxSeedReceipts.Count
+            restartCount=[long]$realRestarts.Count
+            phaseTransitionCount=[long]$phaseTransitions.Count
+            captures=0L
+        }
+    } else {
+        [pscustomobject](New-CapManifest -Status $Outcome)
+    }
     $null = Publish-CapJournalSnapshot -State $journalState -Kind $Kind -Value ([pscustomobject]@{
         entries = @($journalEntries.ToArray())
         outcome = $Outcome
@@ -176,7 +191,7 @@ function Write-CapWorkerJournalSnapshot {
         ownedProcessSurvivors = @($ownedProcessSurvivors)
         pendingLaunchesRemaining = @($pendingLaunchesRemaining)
         cleanupFailures = @($cleanupFailures.ToArray())
-        progressManifest = [pscustomobject](New-CapManifest -Status $Outcome)
+        progressManifest = $progressManifest
     })
 }
 
@@ -2424,7 +2439,10 @@ try {
     if ($manifestPath -and $job -and $auth -and $journalState) {
         $finalStatus = if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
             (($rehearsal -and $rehearsalLaunches.Count -eq 1 -and $images.Count -eq 0) -or
-            (-not $rehearsal -and $images.Count -eq $(if (Test-CapMatchedAdapter) {36} else {10})))) {
+            ($transitionRehearsal -and $images.Count -eq 0 -and $checkpoints.Count -eq 36 -and
+                $zmxSeedReceipts.Count -eq 22 -and $realRestarts.Count -eq 2 -and $phaseTransitions.Count -eq 1) -or
+            (-not $rehearsal -and -not $transitionRehearsal -and
+                $images.Count -eq $(if (Test-CapMatchedAdapter) {36} else {10})))) {
             'COMPLETE'
         } else { 'FAILED' }
         try {

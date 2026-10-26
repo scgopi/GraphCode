@@ -4182,6 +4182,10 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
         'Job census does not bound the listed-but-unavailable member race.'
     Assert-CapTest ($workerSource.Contains('checkpointCount') -and
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
+    Assert-CapTest ($workerSource.Contains('$progressManifest=if ($transitionRehearsal)') -and
+        $workerSource.Contains('phaseTransitionCount=[long]$phaseTransitions.Count') -and
+        $workerSource.Contains('$transitionRehearsal -and $images.Count -eq 0 -and $checkpoints.Count -eq 36')) `
+        'Transition journal progress or final completion still depends on the full image manifest.'
     Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and
         $supervisorSource.Contains('RehearsalAuthorizationSha256')) 'Supervisor still requires a capture lease for live transition rehearsal.'
     Assert-CapTest ($supervisorSource.Contains('function Invoke-CapTransitionGit') -and
