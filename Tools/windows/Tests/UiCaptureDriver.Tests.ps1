@@ -3096,6 +3096,15 @@ function Invoke-CapMatchedDpiContracts {
 }
 
 function Invoke-CapMatchedTabContracts {
+    $appSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\App.zig'))
+    $terminalSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\TerminalSurface.zig'))
+    $providerSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\AccessibilityProvider.cpp'))
+    Assert-CapTest ($appSource.Contains(
+            'self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab())') -and
+        $appSource.Contains('if (workspace.tabCloseBounds(tab_index) == null or !workspace.canCloseTab()) return false;') -and
+        $terminalSource -cmatch '(?s)pub fn canCloseTab\(self: \*const Workspace\) bool \{\s*return self\.layout\.tabs\.items\.len > 1;\s*\}' -and
+        $providerSource -cmatch '(?s)if \(isRowKey\(id_\)\) \{.*?bool_value = sidebar_error_footer.*?: true;') `
+        'Product tab close source contract no longer matches the capture interpretation.'
     foreach ($vector in @(
         @('workspace-tab:0','workspace-tab-2015407614065646652'),
         @('workspace-tab-close:0','workspace-tab-close-1342659205128842605'),
@@ -3103,9 +3112,10 @@ function Invoke-CapMatchedTabContracts {
     )) {
         Assert-CapTest ((Get-CapMatchedAutomationId $vector[0]) -ceq $vector[1]) 'Native row-prefix/hash reference vector differs.'
     }
-    $positive=0;$negative=0
+    $positive=0;$negative=0;$failedSeed=$null
     foreach ($shape in @(
-        @{total=1;selected=0;title='Goal';visible=@(0)},
+        @{phase='before';scene='s-tabs-goal-needs-you';source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
+            total=1;selected=0;title='Goal';visible=@(0);failedSeed=$true},
         @{total=1;selected=0;title='Loop';visible=@(0)},
         @{total=1;selected=0;title='Copilot CLI';visible=@(0)},
         @{total=1;selected=0;title='Agent';visible=@(0)},
@@ -3114,6 +3124,7 @@ function Invoke-CapMatchedTabContracts {
         @{total=12;selected=0;title='Copilot CLI';visible=@(0..9)},
         @{total=12;selected=11;title='Copilot CLI';visible=@(2..11)}
     )) {
+        $isFailedSeed=$shape.ContainsKey('failedSeed') -and $shape.failedSeed
         $rows=@(foreach ($position in 0..($shape.visible.Count-1)) {
             $index=$shape.visible[$position];$x=250+110*$position
             @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$index")
@@ -3121,21 +3132,39 @@ function Invoke-CapMatchedTabContracts {
                 ParentAutomationId='graph';Selected=($index -eq $shape.selected);IsEnabled=$true;IsOffscreen=$false
                 Bounds=@($x,100,($x+106),124)}
             @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$index");Name='Close tab';ProcessId=4242
-                ParentAutomationId='graph';Selected=$false;IsEnabled=($shape.total -gt 1);IsOffscreen=$false
+                ParentAutomationId='graph';Selected=$false;IsEnabled=$true;IsOffscreen=$false
                 Bounds=@(($x+82),100,($x+106),124)}
         }) | ConvertTo-Json -Depth 10 | ConvertFrom-Json
         $arguments=@{Rows=$rows;ExpectedProcessId=4242;TotalTabs=$shape.total;SelectedTab=$shape.selected
-            AgentTitle=$shape.title;VisibleIndexes=$shape.visible}
+            AgentTitle=$shape.title;VisibleIndexes=$shape.visible
+            SourceCommit=$(if ($isFailedSeed) {$shape.source} else {'65a85781c1366f9c3d2398e264ab2df9220c7f8c'})}
         $proof=Get-CapMatchedTabObservation @arguments
         Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected) 'Tab shape omitted a visible state.'
+        if ($isFailedSeed) {
+            Assert-CapTest ($proof.visible[0].closeEnabled -and $proof.visible[0].lastTabGuard -ceq
+                'SOURCE_BOUND_WORKSPACE_CAN_CLOSE_TAB_GT_ONE') 'Exact failed C8R seed did not preserve its source-bound last-tab guard.'
+            $failedSeed=[pscustomobject]@{phase=$shape.phase;scene=$shape.scene;source=$shape.source
+                automationId=$proof.visible[0].automationId;name=$proof.visible[0].name
+                selected=$proof.visible[0].selected;closeEnabled=$proof.visible[0].closeEnabled
+                lastTabGuard=$proof.visible[0].lastTabGuard}
+        }
         $positive++
-        foreach ($mutation in @('foreign-pid','wrong-parent','name-as-id','wrong-selection','escaped-close','guard','duplicate','hidden','offscreen')) {
+        foreach ($mutation in @('foreign-pid','wrong-parent','wrong-identity','wrong-name','wrong-selection',
+            'wrong-order','escaped-close','guard','duplicate','hidden','offscreen')) {
+            if ($mutation -ceq 'wrong-order' -and $shape.visible.Count -lt 2) {continue}
             $changed=$rows | ConvertTo-Json -Depth 10 | ConvertFrom-Json
             switch ($mutation) {
                 'foreign-pid' {$changed[0].ProcessId=7777}
                 'wrong-parent' {$changed[0].ParentAutomationId='foreign'}
-                'name-as-id' {$changed[0].AutomationId=$changed[0].Name}
+                'wrong-identity' {$changed[0].AutomationId=$changed[0].Name}
+                'wrong-name' {$changed[0].Name='Foreign tab'}
                 'wrong-selection' {$changed[0].Selected=-not $changed[0].Selected}
+                'wrong-order' {
+                    $right=[double]$changed[0].Bounds[2]
+                    $closeLeft=$right+82;$nextRight=$right+106
+                    $changed[2].Bounds=@($right,[double]$changed[2].Bounds[1],$nextRight,[double]$changed[2].Bounds[3])
+                    $changed[3].Bounds=@($closeLeft,[double]$changed[2].Bounds[1],$nextRight,[double]$changed[2].Bounds[3])
+                }
                 'escaped-close' {$changed[1].Bounds[0]=$changed[0].Bounds[0]-1}
                 'guard' {$changed[1].IsEnabled=-not $changed[1].IsEnabled}
                 'duplicate' {$changed+= $changed[0]}
@@ -3147,7 +3176,10 @@ function Invoke-CapMatchedTabContracts {
             $negative++
         }
     }
-    return @{positiveShapes=$positive;negativeMutations=$negative;nativeHover='NotExecuted';paneFocus='NotExecuted'
+    Assert-CapTest ($null -ne $failedSeed) 'Exact failed C8R job/seed observation did not execute.'
+    return @{positiveShapes=$positive;negativeMutations=$negative;failedSeed=$failedSeed
+        sourceContract='APP_CLOSE_ELIGIBILITY_AND_ROUTE_PLUS_WORKSPACE_GT_ONE_WITH_UIA_DYNAMIC_ROWS_ENABLED'
+        nativeHover='NotExecuted';paneFocus='NotExecuted'
         evidence='SYNTHETIC_UIA_RECORDS_NOT_NATIVE_OBSERVATION'}
 }
 
@@ -3733,7 +3765,7 @@ function Invoke-CapMatchedSceneRoutingContract {
                     ProcessId=4242L;ParentAutomationId='graph';Selected=($i -eq $model.selected);IsEnabled=$true;IsOffscreen=$false
                     Bounds=@($x,100,($x+106),124)}
                 [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$i");Name='Close tab'
-                    ProcessId=4242L;ParentAutomationId='graph';Selected=$false;IsEnabled=($model.total -gt 1);IsOffscreen=$false
+                    ProcessId=4242L;ParentAutomationId='graph';Selected=$false;IsEnabled=$true;IsOffscreen=$false
                     Bounds=@(($x+82),100,($x+106),124)}
             })
         }

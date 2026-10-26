@@ -1886,7 +1886,8 @@ function Invoke-CapMatchedScenes {
                 $first=if ($selected -ge $visibleCount) {$selected-$visibleCount+1} else {0}
                 $visible=@($first..($first+$visibleCount-1))
                 $tabs=Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $app.Run.Identity.Pid `
-                    -TotalTabs $total -SelectedTab $selected -AgentTitle $title -VisibleIndexes $visible
+                    -TotalTabs $total -SelectedTab $selected -AgentTitle $title -VisibleIndexes $visible `
+                    -SourceCommit $job.binaries.$Phase.source
                 if ($scene -ceq 's-tabs-hover-close') {
                     $tab=@($tabs.visible | Where-Object index -EQ 1)[0]
                     Set-CapMatchedTabHover -AppRun $app -Bounds $tab.bounds

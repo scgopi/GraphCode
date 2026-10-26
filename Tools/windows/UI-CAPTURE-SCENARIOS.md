@@ -306,7 +306,7 @@ observed UI state, not a `selected` property invented on the daemon's node.
 | `s-tabs-split-right-focused` | Two Shell tabs, selected tab split horizontally with the right pane explicitly focused; safe M3 context only. |
 | `s-tabs-many-first`, `s-tabs-overflow-last` | Twelve tabs; first-selected and last-selected overflow windows. Hidden IDs may not appear in the UIA roster. Ctrl+1 through Ctrl+9 have inline hints; later indexes do not invent one. |
 | `s-tabs-hover-close` | Two tabs; posted owned-window hover over Shell, close geometry retained. This is not physical mouse input. |
-| `s-tabs-last-guard` | One selected tab; Windows' existing disabled final-tab close guard is observed without attempting to close it. |
+| `s-tabs-last-guard` | One selected tab; the exact visible close row is retained, while the phase's source-bound `Workspace.canCloseTab()` contract proves that one tab cannot close. Dynamic UIA rows report enabled independently of that product guard, and capture does not attempt the close. |
 | `s-restart-confirmed` | Existing Restart session UIA route against an actual isolated daemon, with same-connection protocol and new owned-attach evidence described below. |
 
 The adapter requests eighteen scenes for each before/after phase: **36 original

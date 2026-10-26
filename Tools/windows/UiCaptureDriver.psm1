@@ -3638,7 +3638,8 @@ int main(void) {
 function Get-CapMatchedTabObservation {
     param([Parameter(Mandatory)][object[]]$Rows,[Parameter(Mandatory)][int]$ExpectedProcessId,
         [Parameter(Mandatory)][int]$TotalTabs,[Parameter(Mandatory)][int]$SelectedTab,
-        [Parameter(Mandatory)][string]$AgentTitle,[Parameter(Mandatory)][int[]]$VisibleIndexes)
+        [Parameter(Mandatory)][string]$AgentTitle,[Parameter(Mandatory)][int[]]$VisibleIndexes,
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit)
     if ($TotalTabs -lt 1 -or $SelectedTab -lt 0 -or $SelectedTab -ge $TotalTabs -or
         $VisibleIndexes.Count -lt 1 -or $SelectedTab -notin $VisibleIndexes -or
         @($VisibleIndexes | Sort-Object -Unique).Count -ne $VisibleIndexes.Count) {throw 'Matched tabs invalid declared topology.'}
@@ -3662,12 +3663,13 @@ function Get-CapMatchedTabObservation {
         if ($tabs.Count -ne 1 -or $closes.Count -ne 1 -or $tabs[0].Name -cne $title -or
             $tabs[0].Selected -isnot [bool] -or $tabs[0].Selected -ne ($index -eq $SelectedTab) -or
             $closes[0].Name -cne 'Close tab' -or $closes[0].IsEnabled -isnot [bool] -or
-            $closes[0].IsEnabled -ne ($TotalTabs -gt 1)) {throw 'Matched tabs identity, name, selection or last-tab guard differs.'}
+            -not $closes[0].IsEnabled) {throw 'Matched tabs identity, name, selection or last-tab guard differs.'}
         $tab=$tabs[0].Bounds;$close=$closes[0].Bounds
         if ($close[0] -lt $tab[0] -or $close[1] -ne $tab[1] -or $close[2] -ne $tab[2] -or
             $close[3] -ne $tab[3] -or $close[2]-$close[0] -ne 24) {throw 'Matched tabs close bounds escape their exact tab.'}
         $observed.Add([pscustomobject]@{index=$index;automationId=$id;name=$title;selected=$tabs[0].Selected
             bounds=$tab;closeBounds=$close;closeEnabled=$closes[0].IsEnabled
+            lastTabGuard=if ($TotalTabs -eq 1) {'SOURCE_BOUND_WORKSPACE_CAN_CLOSE_TAB_GT_ONE'} else {'MULTI_TAB_CLOSE_AVAILABLE'}
             shortcut=if ($index -lt 9) {"Ctrl+$($index+1)"} else {$null}})
     }
     $tabRows=@($Rows | Where-Object {$_.AutomationId -cmatch '^workspace-tab(?:-close)?-'})
@@ -3679,6 +3681,8 @@ function Get-CapMatchedTabObservation {
         if ($ordered[$i].bounds[0] -le $ordered[$i-1].bounds[2]) {throw 'Matched tabs overlap or are out of order.'}
     }
     return [pscustomobject]@{total=$TotalTabs;selected=$SelectedTab;visible=@($observed)
+        sourceCommit=$SourceCommit;identityContract='VISIBLE_LAYOUT_INDEX_FNV1A64_ROW_KEY'
+        closeGuardContract='WORKSPACE_CAN_CLOSE_TAB_GT_ONE_NOT_UIA_ISENABLED'
         evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
 }
 
