@@ -3102,6 +3102,7 @@ function Invoke-CapMatchedTabContracts {
     Assert-CapTest ($appSource.Contains(
             'self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab())') -and
         $appSource.Contains('if (workspace.tabCloseBounds(tab_index) == null or !workspace.canCloseTab()) return false;') -and
+        $terminalSource.Contains('bounds.right - Dpi.scale(24, self.dpi)') -and
         $terminalSource -cmatch '(?s)pub fn canCloseTab\(self: \*const Workspace\) bool \{\s*return self\.layout\.tabs\.items\.len > 1;\s*\}' -and
         $providerSource -cmatch '(?s)if \(isRowKey\(id_\)\) \{.*?bool_value = sidebar_error_footer.*?: true;') `
         'Product tab close source contract no longer matches the capture interpretation.'
@@ -3115,7 +3116,7 @@ function Invoke-CapMatchedTabContracts {
     $positive=0;$negative=0;$failedSeed=$null
     foreach ($shape in @(
         @{phase='before';scene='s-tabs-goal-needs-you';source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
-            total=1;selected=0;title='Goal';visible=@(0);failedSeed=$true},
+            total=1;selected=0;title='Goal';visible=@(0);closeWidth=48;failedSeed=$true},
         @{total=1;selected=0;title='Loop';visible=@(0)},
         @{total=1;selected=0;title='Copilot CLI';visible=@(0)},
         @{total=1;selected=0;title='Agent';visible=@(0)},
@@ -3127,17 +3128,19 @@ function Invoke-CapMatchedTabContracts {
         $isFailedSeed=$shape.ContainsKey('failedSeed') -and $shape.failedSeed
         $rows=@(foreach ($position in 0..($shape.visible.Count-1)) {
             $index=$shape.visible[$position];$x=250+110*$position
+            $closeWidth=if ($shape.ContainsKey('closeWidth')) {$shape.closeWidth} else {48}
             @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab:$index")
                 Name=$(if ($index -eq 0) {$shape.title} else {'Shell'});ProcessId=4242
                 ParentAutomationId='graph';Selected=($index -eq $shape.selected);IsEnabled=$true;IsOffscreen=$false
                 Bounds=@($x,100,($x+106),124)}
             @{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$index");Name='Close tab';ProcessId=4242
                 ParentAutomationId='graph';Selected=$false;IsEnabled=$true;IsOffscreen=$false
-                Bounds=@(($x+82),100,($x+106),124)}
+                Bounds=@(($x+106-$closeWidth),100,($x+106),124)}
         }) | ConvertTo-Json -Depth 10 | ConvertFrom-Json
         $arguments=@{Rows=$rows;ExpectedProcessId=4242;TotalTabs=$shape.total;SelectedTab=$shape.selected
             AgentTitle=$shape.title;VisibleIndexes=$shape.visible
-            SourceCommit=$(if ($isFailedSeed) {$shape.source} else {'65a85781c1366f9c3d2398e264ab2df9220c7f8c'})}
+            SourceCommit=$(if ($isFailedSeed) {$shape.source} else {'65a85781c1366f9c3d2398e264ab2df9220c7f8c'})
+            ExpectedDpi=192;DpiBase=96}
         $proof=Get-CapMatchedTabObservation @arguments
         Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected) 'Tab shape omitted a visible state.'
         if ($isFailedSeed) {
@@ -3146,11 +3149,13 @@ function Invoke-CapMatchedTabContracts {
             $failedSeed=[pscustomobject]@{phase=$shape.phase;scene=$shape.scene;source=$shape.source
                 automationId=$proof.visible[0].automationId;name=$proof.visible[0].name
                 selected=$proof.visible[0].selected;closeEnabled=$proof.visible[0].closeEnabled
-                lastTabGuard=$proof.visible[0].lastTabGuard}
+                lastTabGuard=$proof.visible[0].lastTabGuard;dpi=192;dpiBase=96
+                bounds=$proof.visible[0].bounds;closeBounds=$proof.visible[0].closeBounds
+                closeBoundsContract=$proof.closeBoundsContract}
         }
         $positive++
         foreach ($mutation in @('foreign-pid','wrong-parent','wrong-identity','wrong-name','wrong-selection',
-            'wrong-order','escaped-close','guard','duplicate','hidden','offscreen')) {
+            'wrong-order','escaped-close','foreign-close','guard','duplicate','hidden','offscreen')) {
             if ($mutation -ceq 'wrong-order' -and $shape.visible.Count -lt 2) {continue}
             $changed=$rows | ConvertTo-Json -Depth 10 | ConvertFrom-Json
             switch ($mutation) {
@@ -3166,6 +3171,11 @@ function Invoke-CapMatchedTabContracts {
                     $changed[3].Bounds=@($closeLeft,[double]$changed[2].Bounds[1],$nextRight,[double]$changed[2].Bounds[3])
                 }
                 'escaped-close' {$changed[1].Bounds[0]=$changed[0].Bounds[0]-1}
+                'foreign-close' {
+                    $foreign=$changed[1] | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+                    $foreign.AutomationId=Get-CapMatchedAutomationId 'workspace-tab-close:99'
+                    $changed += $foreign
+                }
                 'guard' {$changed[1].IsEnabled=-not $changed[1].IsEnabled}
                 'duplicate' {$changed+= $changed[0]}
                 'hidden' {$changed[0].AutomationId=Get-CapMatchedAutomationId 'workspace-tab:99'}

@@ -3639,10 +3639,13 @@ function Get-CapMatchedTabObservation {
     param([Parameter(Mandatory)][object[]]$Rows,[Parameter(Mandatory)][int]$ExpectedProcessId,
         [Parameter(Mandatory)][int]$TotalTabs,[Parameter(Mandatory)][int]$SelectedTab,
         [Parameter(Mandatory)][string]$AgentTitle,[Parameter(Mandatory)][int[]]$VisibleIndexes,
-        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit)
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit,
+        [Parameter(Mandatory)][long]$ExpectedDpi,[Parameter(Mandatory)][long]$DpiBase)
     if ($TotalTabs -lt 1 -or $SelectedTab -lt 0 -or $SelectedTab -ge $TotalTabs -or
         $VisibleIndexes.Count -lt 1 -or $SelectedTab -notin $VisibleIndexes -or
         @($VisibleIndexes | Sort-Object -Unique).Count -ne $VisibleIndexes.Count) {throw 'Matched tabs invalid declared topology.'}
+    if ($ExpectedDpi -le 0 -or $DpiBase -le 0) {throw 'Matched tabs require a positive DPI geometry contract.'}
+    $expectedCloseWidth=[long][Math]::Truncate((24L*$ExpectedDpi+[Math]::Truncate($DpiBase/2))/$DpiBase)
     foreach ($row in $Rows) {
         if ($row.ProcessId -isnot [long] -or $row.ProcessId -ne $ExpectedProcessId -or
             $row.ParentAutomationId -cne 'graph' -or $row.IsOffscreen -isnot [bool] -or $row.IsOffscreen -or
@@ -3665,8 +3668,11 @@ function Get-CapMatchedTabObservation {
             $closes[0].Name -cne 'Close tab' -or $closes[0].IsEnabled -isnot [bool] -or
             -not $closes[0].IsEnabled) {throw 'Matched tabs identity, name, selection or last-tab guard differs.'}
         $tab=$tabs[0].Bounds;$close=$closes[0].Bounds
-        if ($close[0] -lt $tab[0] -or $close[1] -ne $tab[1] -or $close[2] -ne $tab[2] -or
-            $close[3] -ne $tab[3] -or $close[2]-$close[0] -ne 24) {throw 'Matched tabs close bounds escape their exact tab.'}
+        $expectedCloseLeft=$tab[2]-$expectedCloseWidth
+        if ($expectedCloseLeft -lt $tab[0] -or $close[0] -ne $expectedCloseLeft -or
+            $close[1] -ne $tab[1] -or $close[2] -ne $tab[2] -or $close[3] -ne $tab[3]) {
+            throw 'Matched tabs close bounds escape their exact tab.'
+        }
         $observed.Add([pscustomobject]@{index=$index;automationId=$id;name=$title;selected=$tabs[0].Selected
             bounds=$tab;closeBounds=$close;closeEnabled=$closes[0].IsEnabled
             lastTabGuard=if ($TotalTabs -eq 1) {'SOURCE_BOUND_WORKSPACE_CAN_CLOSE_TAB_GT_ONE'} else {'MULTI_TAB_CLOSE_AVAILABLE'}
@@ -3682,6 +3688,7 @@ function Get-CapMatchedTabObservation {
     }
     return [pscustomobject]@{total=$TotalTabs;selected=$SelectedTab;visible=@($observed)
         sourceCommit=$SourceCommit;identityContract='VISIBLE_LAYOUT_INDEX_FNV1A64_ROW_KEY'
+        closeBoundsContract="SOURCE_DPI_SCALED_24_LOGICAL_TO_${expectedCloseWidth}_PHYSICAL"
         closeGuardContract='WORKSPACE_CAN_CLOSE_TAB_GT_ONE_NOT_UIA_ISENABLED'
         evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
 }

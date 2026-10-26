@@ -1818,6 +1818,10 @@ function Invoke-CapMatchedScenes {
     param([string]$Phase)
     $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
     $null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
+    $expectedDpiProperty=$job.captureContract.PSObject.Properties['expectedWindowDpi']
+    $dpiBaseProperty=$job.captureContract.PSObject.Properties['dpiBase']
+    $tabExpectedDpi=if ($expectedDpiProperty) {[long]$expectedDpiProperty.Value} else {[long]$job.captureContract.dpi}
+    $tabDpiBase=if ($dpiBaseProperty) {[long]$dpiBaseProperty.Value} else {96L}
     foreach ($scene in @((Get-CapMatchedSceneNames)[0..16])) {
         Assert-CapWorkerDeadline "matched scene $scene"
         if ([DateTime]::UtcNow -ge $leaseDeadlineUtc.AddSeconds(-90)) {throw 'Matched scenes reached the required cleanup reserve.'}
@@ -1887,7 +1891,8 @@ function Invoke-CapMatchedScenes {
                 $visible=@($first..($first+$visibleCount-1))
                 $tabs=Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $app.Run.Identity.Pid `
                     -TotalTabs $total -SelectedTab $selected -AgentTitle $title -VisibleIndexes $visible `
-                    -SourceCommit $job.binaries.$Phase.source
+                    -SourceCommit $job.binaries.$Phase.source `
+                    -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
                 if ($scene -ceq 's-tabs-hover-close') {
                     $tab=@($tabs.visible | Where-Object index -EQ 1)[0]
                     Set-CapMatchedTabHover -AppRun $app -Bounds $tab.bounds
