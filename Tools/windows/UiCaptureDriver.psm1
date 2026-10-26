@@ -3835,8 +3835,14 @@ function Assert-CapRestartEvidence {
         if ($counter -isnot [long] -or $counter -lt 0) {& $fail 'malformed owner counter'}
         if (-not $restart -and $counter -eq $Evidence.counter) {$baseline=$true}
         if ($restart -and $counter -gt $Evidence.counter) {
+            $state=$nodes[0].state
+            $stateProperties=@()
+            if ($state -is [pscustomobject]) {$stateProperties=@($state.PSObject.Properties)}
+            $stateName=if ($state -is [string]) {$state} elseif ($stateProperties.Count -eq 1) {
+                [string]$stateProperties[0].Name
+            } else {$null}
             if ($row.elapsedMs-$restart.elapsedMs -gt 30000 -or
-                $nodes[0].state -cnotin @('idle','running','awaitingInput','blocked','waiting')) {& $fail 'counter confirmation timed out or loop is not unresolved'}
+                $stateName -cnotin @('idle','running','awaitingInput','blocked','waiting')) {& $fail 'counter confirmation timed out or loop is not unresolved'}
             if (-not $advance) {$advance=$row;$counterAfter=[long]$counter}
         }
     }

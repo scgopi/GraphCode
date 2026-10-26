@@ -2980,6 +2980,7 @@ function Invoke-CapMatchedContracts {
         $null=Assert-CapRestartEvidence -Evidence $responseGraph -ExpectedDaemonSha256 ('e'*64)
         $wrappedGraph=New-CapRestartTestEvidence
         $wrappedGraph.rows[0].frame.event.graphChanged=[pscustomobject]@{_0=$wrappedGraph.rows[0].frame.event.graphChanged}
+        $wrappedGraph.rows[3].frame.event.nodesChanged.nodes[0].state=[pscustomobject]@{idle=[pscustomobject]@{}}
         $null=Assert-CapRestartEvidence -Evidence $wrappedGraph -ExpectedDaemonSha256 ('E'*64)
         $cases=@('ack-only','wrong-owner','connection','generation','duplicate','unrelated-counter','error','timeout',
             'resume-error','no-resume','old-attach','unowned-attach','no-daemon-session','no-pane','stop','early-resume','counter-type',
