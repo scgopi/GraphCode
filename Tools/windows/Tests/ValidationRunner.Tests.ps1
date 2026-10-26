@@ -2065,6 +2065,95 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (($scaled.open -join ",") -ceq "2535,159,2619,189") "144-DPI source-derived bounds differ"
     return "literal band/Open bounds; not UIA caption evidence"
   }
+  $laneOverviewIds = @("overview-card:fixture:a", "overview-card:fixture:b")
+  $laneProjectIds = @("project-card:fixture:a", "project-card:fixture:b")
+  $laneNames = @("UIA loop A", "UIA loop B")
+  function New-MultiLaneCard([string] $automationId, [string] $name, [double[]] $bounds) {
+    return [pscustomobject]@{
+      automationId = $automationId
+      name = $name
+      bounds = $bounds
+    }
+  }
+  function New-MultiLaneCards([string[]] $ids, [double[]] $first, [double[]] $second) {
+    return @(
+      (New-MultiLaneCard $ids[0] $laneNames[0] $first),
+      (New-MultiLaneCard $ids[1] $laneNames[1] $second)
+    )
+  }
+  Invoke-MultiCase "DPI192 fitted destinations retain shared source lane geometry" {
+    $overviewViewport = @(100,0,1200,900)
+    $overview = Get-MultiProjectNormalizedLaneGeometry `
+      (New-MultiLaneCards $laneOverviewIds @(100,100,290,178) @(408,100,614,178)) `
+      $laneOverviewIds $laneNames $overviewViewport 250 96
+    $projectViewport = @(120,0,1200,900)
+    $project = Get-MultiProjectNormalizedLaneGeometry `
+      (New-MultiLaneCards $laneProjectIds @(120,100,324,184) @(450,100,670,184)) `
+      $laneProjectIds $laneNames $projectViewport 250 96
+    $comparison = Compare-MultiProjectNormalizedLaneGeometry $project $overview
+    Assert-MultiCase (($overview.ObservedPixelWidths -join ",") -ceq "190,206" -and
+      ($overview.ObservedPixelHeights -join ",") -ceq "78,78" -and
+      $overview.HorizontalClipping[0] -ceq "left" -and
+      $overview.HorizontalClipping[1] -ceq "none" -and
+      $comparison.equal) "DPI192 190x78/206x78 fitted cards did not preserve source geometry"
+    return "Exact DPI192 clipped/full fitted cards compare through reconstructed source geometry"
+  }
+  foreach ($mutation in @(
+      "wrong-source-width",
+      "wrong-source-height",
+      "wrong-observed-width",
+      "wrong-observed-height",
+      "wrong-order",
+      "overlap",
+      "foreign",
+      "missing",
+      "outside-viewport",
+      "both-clipped",
+      "no-full-peer"
+    )) {
+    Invoke-MultiCase ("DPI192 normalized lane rejects " + $mutation) -Negative {
+      $ids = @($laneOverviewIds)
+      $sourceWidth = 250
+      $sourceHeight = 96
+      $first = @(100,100,290,178)
+      $second = @(350,100,540,178)
+      switch ($mutation) {
+        "wrong-source-width" { $sourceWidth = 249 }
+        "wrong-source-height" { $sourceHeight = 95 }
+        "wrong-observed-width" { $second = @(350,100,520,178) }
+        "wrong-observed-height" { $second = @(350,100,540,160) }
+        "wrong-order" { $ids = @($laneOverviewIds[1], $laneOverviewIds[0]) }
+        "overlap" { $second = @(250,100,440,178) }
+        "foreign" { $ids = @($laneOverviewIds[0], "overview-card:foreign:b") }
+        "missing" {
+          $cards = @((New-MultiLaneCard $laneOverviewIds[0] $laneNames[0] $first))
+          return Reject-MultiCase {
+            Get-MultiProjectNormalizedLaneGeometry `
+              $cards $laneOverviewIds $laneNames @(0,0,1200,900) $sourceWidth $sourceHeight
+          } "MULTIPROJECT_BOUNDS"
+        }
+        "outside-viewport" { $first = @(-1,100,189,178) }
+        "both-clipped" {
+          $first = @(0,100,190,178)
+          $second = @(306,100,500,178)
+        }
+        "no-full-peer" {
+          $first = @(0,100,206,178)
+          $second = @(294,100,500,178)
+        }
+      }
+      $cards = New-MultiLaneCards $ids $first $second
+      $viewport = if ($mutation -cin @("both-clipped", "no-full-peer")) {
+        @(0,0,500,900)
+      } else {
+        @(0,0,1200,900)
+      }
+      return Reject-MultiCase {
+        Get-MultiProjectNormalizedLaneGeometry `
+          $cards $laneOverviewIds $laneNames $viewport $sourceWidth $sourceHeight
+      } "MULTIPROJECT_BOUNDS"
+    }
+  }
   Invoke-MultiCase "live target clipped to viewport" {
     $clipped = Get-MultiProjectClippedRectangle @(100,100,400,400) @(220,34,1200,250)
     Assert-MultiCase (($clipped -join ",") -ceq "220,100,400,250") "visible target clipping differs"
@@ -3522,6 +3611,9 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  $designTokensSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig") -Raw
+  $laneLayoutSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\LaneLayout.zig") -Raw
+  $graphCanvasSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\GraphCanvas.zig") -Raw
   $laneCaptionStart = $uiaLiveGateSource.IndexOf(
     '$laneProjectId = Get-MultiProjectAutomationId "overview-project" $fixtureProjectPath',
     [StringComparison]::Ordinal)
@@ -5056,36 +5148,63 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\$visibleTargetBounds = @\(') {
     throw "RED: connector evidence does not freeze exact physical-screen endpoints and clamp the target to its visible card intersection"
   }
-  if ($uiaLiveGateSource -notmatch '\$readNormalizedLaneGeometry\s*=\s*\{' -or
-      $uiaLiveGateSource -notmatch 'lane cards do not normalize to the shared 250x96 geometry' -or
-      $uiaLiveGateSource -notmatch '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
-      $uiaLiveGateSource -notmatch 'Scale = \$scale' -or
-      $uiaLiveGateSource -notmatch 'PixelWidth = \[double\]\$cardBounds\[0\]\.Width' -or
-      $uiaLiveGateSource -notmatch '\$sizeTolerance = 1 / \$scale \+ 0\.01' -or
-      $uiaLiveGateSource -notmatch 'SizeTolerance = \$sizeTolerance' -or
-      $uiaLiveGateSource -notmatch 'Widths = @\(\$normalized \| ForEach-Object' -or
-      $uiaLiveGateSource -notmatch 'Heights = @\(\$normalized \| ForEach-Object' -or
-      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[0\]\.Width - 250\) -le 0\.01' -or
-      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Width - 250\) -le \$sizeTolerance' -or
-      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[0\]\.Height - 96\) -le \$sizeTolerance' -or
-      $uiaLiveGateSource -notmatch '\[Math\]::Abs\(\$normalized\[1\]\.Height - 96\) -le \$sizeTolerance' -or
+  if ($designTokensSource -notmatch 'pub const loop_card_width: i32 = 250;' -or
+      $designTokensSource -notmatch 'pub const loop_card_height: i32 = 96;' -or
+      $laneLayoutSource -notmatch 'pub const card_width: f32 = 250;' -or
+      $laneLayoutSource -notmatch 'pub const card_height: f32 = 96;' -or
+      $graphCanvasSource -notmatch 'x \+ scaled\(Tokens\.loop_card_width, state\)' -or
+      $graphCanvasSource -notmatch 'y \+ scaled\(Tokens\.loop_card_height, state\)' -or
+      $uiaLiveGateSource -notmatch 'function Get-MultiProjectNormalizedLaneGeometry' -or
+      $uiaLiveGateSource -notmatch 'function Compare-MultiProjectNormalizedLaneGeometry' -or
+      $uiaLiveGateSource -notmatch 'normalized lane source geometry must remain exactly 250x96' -or
+      $uiaLiveGateSource -notmatch 'normalized lane card identity/order differs from the exact fixture' -or
+      $uiaLiveGateSource -notmatch 'normalized lane card is outside the graph viewport' -or
+      $uiaLiveGateSource -notmatch 'normalized lane cards overlap' -or
+      $uiaLiveGateSource -notmatch '\$pixelWidth = \[double\]\(\(\$visibleWidths \| Measure-Object -Maximum\)\.Maximum\)' -or
+      $uiaLiveGateSource -notmatch '\$pixelHeight = \[double\]\(\(\$visibleHeights \| Measure-Object -Maximum\)\.Maximum\)' -or
+      $uiaLiveGateSource -notmatch 'lane card width differs without an exact viewport clipping edge' -or
+      $uiaLiveGateSource -notmatch 'lane card height differs without an exact viewport clipping edge' -or
+      $uiaLiveGateSource -notmatch '\$horizontalFullPeer = \$false' -or
+      $uiaLiveGateSource -notmatch '\$verticalFullPeer = \$false' -or
+      $uiaLiveGateSource -notmatch 'normalized lane requires an unclipped full-size peer on each axis' -or
+      $uiaLiveGateSource -notmatch '\$rect\[2\] - \$pixelWidth' -or
+      $uiaLiveGateSource -notmatch '\$rect\[3\] - \$pixelHeight' -or
+      $uiaLiveGateSource -notmatch 'ScaleX = \$scaleX' -or
+      $uiaLiveGateSource -notmatch 'ScaleY = \$scaleY' -or
+      $uiaLiveGateSource -notmatch 'PixelWidth = \[double\]\$pixelWidth' -or
+      $uiaLiveGateSource -notmatch 'PixelHeight = \[double\]\$pixelHeight' -or
+      $uiaLiveGateSource -notmatch '\$widthTolerance = 1 / \$scaleX \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch '\$heightTolerance = 1 / \$scaleY \+ 0\.01' -or
+      $uiaLiveGateSource -notmatch 'ObservedPixelWidths = \$visibleWidths' -or
+      $uiaLiveGateSource -notmatch 'ObservedPixelHeights = \$visibleHeights' -or
+      $uiaLiveGateSource -notmatch 'HorizontalClipping = \$horizontalClipping' -or
+      $uiaLiveGateSource -notmatch 'VerticalClipping = \$verticalClipping' -or
       $uiaLiveGateSource -notmatch '\$actualDeltaXBudget = 250 \*' -or
       $uiaLiveGateSource -notmatch '\$expectedDeltaXBudget = 250 \*' -or
-      $uiaLiveGateSource -notmatch '\$actualDeltaYBudget = 250 \*' -or
-      $uiaLiveGateSource -notmatch '\$expectedDeltaYBudget = 250 \*' -or
+      $uiaLiveGateSource -notmatch '\$actualDeltaYBudget = 96 \*' -or
+      $uiaLiveGateSource -notmatch '\$expectedDeltaYBudget = 96 \*' -or
       $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$actual\.PixelWidth - 1\)' -or
       $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$expected\.PixelWidth - 1\)' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$actual\.PixelHeight - 1\)' -or
+      $uiaLiveGateSource -notmatch '\[Math\]::Max\(1, \$expected\.PixelHeight - 1\)' -or
       $uiaLiveGateSource -notmatch '\$deltaXTolerance = \$actualDeltaXBudget \+ \$expectedDeltaXBudget \+ 0\.01' -or
       $uiaLiveGateSource -notmatch '\$deltaYTolerance = \$actualDeltaYBudget \+ \$expectedDeltaYBudget \+ 0\.01' -or
-      $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive pixel widths' -or
-      $uiaLiveGateSource -notmatch 'normalized lane comparison requires positive scales' -or
       $uiaLiveGateSource -notmatch '\$cards = @\(\$laneOverviewIds \| ForEach-Object' -or
+      $uiaLiveGateSource -notmatch 'automationId = \[string\]\$_.Current.AutomationId' -or
+      $uiaLiveGateSource -notmatch 'bounds = @\(\$rect.Left, \$rect.Top, \$rect.Right, \$rect.Bottom\)' -or
+      $uiaLiveGateSource -notmatch '\$firstBounds = @\(\$cardCaptures\[0\]\.bounds\)' -or
+      $uiaLiveGateSource -notmatch 'lane overview geometry omitted the exact owned Fit Canvas action' -or
+      $uiaLiveGateSource -notmatch 'opened project lane geometry omitted the exact owned Fit Canvas action' -or
+      $uiaLiveGateSource -notmatch 'restored overview lane geometry omitted the exact owned Fit Canvas action' -or
       $uiaLiveGateSource -notmatch '\$laneOpenedProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
       $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneProjectIds' -or
       $uiaLiveGateSource -notmatch '\$laneOpenedCards = @\(\$laneProjectIds \| ForEach-Object' -or
       $uiaLiveGateSource -notmatch 'opened project requires one exact card for \$id' -or
       $uiaLiveGateSource -notmatch '\$restoredLaneProbe = Wait-ForGraphChildren \$root \$rawWalker' -or
       $uiaLiveGateSource -notmatch '\$_.Current\.AutomationId -cin \$laneOverviewIds' -or
+      $uiaLiveGateSource -notmatch 'Get-MultiProjectNormalizedLaneGeometry `\s*\$laneSnapshot\.Cards \$laneOverviewIds \$laneNames' -or
+      $uiaLiveGateSource -notmatch 'Get-MultiProjectNormalizedLaneGeometry `\s*\$laneOpenedCaptures \$laneProjectIds \$laneNames' -or
+      $uiaLiveGateSource -notmatch 'Compare-MultiProjectNormalizedLaneGeometry `\s*\$laneOpenedGeometry \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'UIA_LANE_OPEN_NORMALIZED_EVIDENCE=' -or
       $uiaLiveGateSource -notmatch 'normalizedActual = \$laneOpenedGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
@@ -5107,11 +5226,14 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'restored lane sheet pan down was rejected' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan move was rejected' -or
       $uiaLiveGateSource -notmatch 'restored lane sheet pan up was rejected' -or
-      $uiaLiveGateSource -notmatch '\$restoredLaneComparison = & \$sameNormalizedLaneGeometry \$restoredLaneGeometry \$laneSnapshotGeometry' -or
+      $uiaLiveGateSource -notmatch 'Compare-MultiProjectNormalizedLaneGeometry `\s*\$restoredLaneGeometry \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'UIA_RESTORED_LANE_NORMALIZED_EVIDENCE=' -or
       $uiaLiveGateSource -notmatch 'normalizedActual = \$restoredLaneGeometry' -or
       $uiaLiveGateSource -notmatch 'normalizedExpected = \$laneSnapshotGeometry' -or
       $uiaLiveGateSource -notmatch 'Require \$restoredLaneComparison\.Equal' -or
+      $uiaLiveGateSource -match '\$readNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -match '\$sameNormalizedLaneGeometry\s*=\s*\{' -or
+      $uiaLiveGateSource -match '\$cardCaptures \| ForEach-Object \{ \$_.bounds \}' -or
       $uiaLiveGateSource -match '\.Equals\(\$laneSnapshot\.CardBounds\[') {
     throw "RED: overview/project navigation evidence depends on absolute fitted card coordinates instead of normalized shared geometry"
   }

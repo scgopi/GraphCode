@@ -4997,6 +4997,167 @@ function Get-MultiProjectLaneGeometry([double[]] $canvas, [double[]] $card, [dou
   }
 }
 
+function Get-MultiProjectNormalizedLaneGeometry(
+  [object[]] $cards,
+  [string[]] $expectedAutomationIds,
+  [string[]] $expectedNames,
+  [double[]] $viewport,
+  [double] $sourceWidth,
+  [double] $sourceHeight
+) {
+  if ($sourceWidth -ne 250 -or $sourceHeight -ne 96) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane source geometry must remain exactly 250x96"
+  }
+  if ($cards.Count -ne 2 -or $expectedAutomationIds.Count -ne 2 -or
+      $expectedNames.Count -ne 2 -or $viewport.Count -ne 4 -or
+      $viewport[2] -le $viewport[0] -or $viewport[3] -le $viewport[1]) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane requires two exact cards and a positive viewport"
+  }
+  $bounds = @()
+  for ($index = 0; $index -lt 2; $index++) {
+    $card = $cards[$index]
+    if ($card.automationId -cne $expectedAutomationIds[$index] -or
+        $card.name -cne $expectedNames[$index] -or
+        @($card.bounds).Count -ne 4) {
+      throw "MULTIPROJECT_BOUNDS: normalized lane card identity/order differs from the exact fixture"
+    }
+    $rect = @($card.bounds)
+    if ($rect[2] -le $rect[0] -or $rect[3] -le $rect[1]) {
+      throw "MULTIPROJECT_BOUNDS: normalized lane card has empty bounds"
+    }
+    if ($rect[0] -lt $viewport[0] -or $rect[1] -lt $viewport[1] -or
+        $rect[2] -gt $viewport[2] -or $rect[3] -gt $viewport[3]) {
+      throw "MULTIPROJECT_BOUNDS: normalized lane card is outside the graph viewport"
+    }
+    $bounds += ,$rect
+  }
+  $nonOverlap = $bounds[0][2] -le $bounds[1][0] -or
+    $bounds[1][2] -le $bounds[0][0] -or
+    $bounds[0][3] -le $bounds[1][1] -or
+    $bounds[1][3] -le $bounds[0][1]
+  if (-not $nonOverlap) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane cards overlap"
+  }
+  $visibleWidths = @($bounds | ForEach-Object { $_[2] - $_[0] })
+  $visibleHeights = @($bounds | ForEach-Object { $_[3] - $_[1] })
+  $pixelWidth = [double](($visibleWidths | Measure-Object -Maximum).Maximum)
+  $pixelHeight = [double](($visibleHeights | Measure-Object -Maximum).Maximum)
+  $scaleX = $pixelWidth / $sourceWidth
+  $scaleY = $pixelHeight / $sourceHeight
+  if ($scaleX -le 0 -or $scaleY -le 0) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane has a non-positive axis scale"
+  }
+  $widthTolerance = 1 / $scaleX + 0.01
+  $heightTolerance = 1 / $scaleY + 0.01
+  $normalizedVisibleWidths = @($visibleWidths | ForEach-Object { $_ / $scaleX })
+  $normalizedVisibleHeights = @($visibleHeights | ForEach-Object { $_ / $scaleY })
+  $effectiveLefts = @()
+  $effectiveTops = @()
+  $horizontalClipping = @()
+  $verticalClipping = @()
+  $horizontalFullPeer = $false
+  $verticalFullPeer = $false
+  for ($index = 0; $index -lt 2; $index++) {
+    $rect = $bounds[$index]
+    $widthIsFull = [Math]::Abs($normalizedVisibleWidths[$index] - $sourceWidth) -le $widthTolerance
+    $heightIsFull = [Math]::Abs($normalizedVisibleHeights[$index] - $sourceHeight) -le $heightTolerance
+    $leftClipped = [Math]::Abs($rect[0] - $viewport[0]) -le 0.01
+    $rightClipped = [Math]::Abs($rect[2] - $viewport[2]) -le 0.01
+    $topClipped = [Math]::Abs($rect[1] - $viewport[1]) -le 0.01
+    $bottomClipped = [Math]::Abs($rect[3] - $viewport[3]) -le 0.01
+    if ($widthIsFull) {
+      $effectiveLefts += $rect[0]
+      $horizontalClipping += "none"
+      if (-not $leftClipped -and -not $rightClipped) { $horizontalFullPeer = $true }
+    } elseif ($visibleWidths[$index] -lt $pixelWidth -and ($leftClipped -xor $rightClipped)) {
+      $effectiveLefts += $(if ($leftClipped) { $rect[2] - $pixelWidth } else { $rect[0] })
+      $horizontalClipping += $(if ($leftClipped) { "left" } else { "right" })
+    } else {
+      throw "MULTIPROJECT_BOUNDS: lane card width differs without an exact viewport clipping edge"
+    }
+    if ($heightIsFull) {
+      $effectiveTops += $rect[1]
+      $verticalClipping += "none"
+      if (-not $topClipped -and -not $bottomClipped) { $verticalFullPeer = $true }
+    } elseif ($visibleHeights[$index] -lt $pixelHeight -and ($topClipped -xor $bottomClipped)) {
+      $effectiveTops += $(if ($topClipped) { $rect[3] - $pixelHeight } else { $rect[1] })
+      $verticalClipping += $(if ($topClipped) { "top" } else { "bottom" })
+    } else {
+      throw "MULTIPROJECT_BOUNDS: lane card height differs without an exact viewport clipping edge"
+    }
+  }
+  if (-not $horizontalFullPeer -or -not $verticalFullPeer) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane requires an unclipped full-size peer on each axis"
+  }
+  return [pscustomobject]@{
+    SourceWidth = $sourceWidth
+    SourceHeight = $sourceHeight
+    ScaleX = $scaleX
+    ScaleY = $scaleY
+    PixelWidth = [double]$pixelWidth
+    PixelHeight = [double]$pixelHeight
+    WidthTolerance = $widthTolerance
+    HeightTolerance = $heightTolerance
+    Widths = @($sourceWidth, $sourceWidth)
+    Heights = @($sourceHeight, $sourceHeight)
+    ObservedPixelWidths = $visibleWidths
+    ObservedPixelHeights = $visibleHeights
+    VisibleWidths = $normalizedVisibleWidths
+    VisibleHeights = $normalizedVisibleHeights
+    HorizontalClipping = $horizontalClipping
+    VerticalClipping = $verticalClipping
+    DeltaX = ($effectiveLefts[1] - $effectiveLefts[0]) / $scaleX
+    DeltaY = ($effectiveTops[1] - $effectiveTops[0]) / $scaleY
+    XOrder = [Math]::Sign($bounds[1][0] - $bounds[0][0])
+    YOrder = [Math]::Sign($bounds[1][1] - $bounds[0][1])
+    NonOverlap = $nonOverlap
+  }
+}
+
+function Compare-MultiProjectNormalizedLaneGeometry($actual, $expected) {
+  if ($actual.SourceWidth -ne 250 -or $expected.SourceWidth -ne 250 -or
+      $actual.SourceHeight -ne 96 -or $expected.SourceHeight -ne 96) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane comparison source geometry differs from 250x96"
+  }
+  if ($actual.ScaleX -le 0 -or $expected.ScaleX -le 0 -or
+      $actual.ScaleY -le 0 -or $expected.ScaleY -le 0 -or
+      $actual.PixelWidth -le 0 -or $expected.PixelWidth -le 0 -or
+      $actual.PixelHeight -le 0 -or $expected.PixelHeight -le 0) {
+    throw "MULTIPROJECT_BOUNDS: normalized lane comparison requires positive axis scales and pixels"
+  }
+  $deltaXError = [Math]::Abs($actual.DeltaX - $expected.DeltaX)
+  $deltaYError = [Math]::Abs($actual.DeltaY - $expected.DeltaY)
+  $actualDeltaXBudget = 250 *
+    (1 + [Math]::Abs($actual.DeltaX / 250)) /
+    [Math]::Max(1, $actual.PixelWidth - 1)
+  $expectedDeltaXBudget = 250 *
+    (1 + [Math]::Abs($expected.DeltaX / 250)) /
+    [Math]::Max(1, $expected.PixelWidth - 1)
+  $actualDeltaYBudget = 96 *
+    (1 + [Math]::Abs($actual.DeltaY / 96)) /
+    [Math]::Max(1, $actual.PixelHeight - 1)
+  $expectedDeltaYBudget = 96 *
+    (1 + [Math]::Abs($expected.DeltaY / 96)) /
+    [Math]::Max(1, $expected.PixelHeight - 1)
+  $deltaXTolerance = $actualDeltaXBudget + $expectedDeltaXBudget + 0.01
+  $deltaYTolerance = $actualDeltaYBudget + $expectedDeltaYBudget + 0.01
+  return [pscustomobject]@{
+    Equal = $actual.NonOverlap -and $expected.NonOverlap -and
+      ($deltaXError -le $deltaXTolerance) -and
+      ($deltaYError -le $deltaYTolerance) -and
+      ($actual.XOrder -eq $expected.XOrder) -and
+      ($actual.YOrder -eq $expected.YOrder)
+    DeltaXTolerance = $deltaXTolerance
+    DeltaYTolerance = $deltaYTolerance
+    ActualDeltaXBudget = $actualDeltaXBudget
+    ExpectedDeltaXBudget = $expectedDeltaXBudget
+    ActualDeltaYBudget = $actualDeltaYBudget
+    ExpectedDeltaYBudget = $expectedDeltaYBudget
+    DeltaXError = $deltaXError
+    DeltaYError = $deltaYError
+  }
+}
+
 function Get-MultiProjectCaptionGeometry([double[]] $canvas, [double[]] $card, [double[]] $caption) {
   if ($caption.Count -ne 4 -or $caption[2] -le $caption[0] -or $caption[3] -le $caption[1]) {
     throw "MULTIPROJECT_BOUNDS: positive exported project caption rectangle required"
@@ -7156,6 +7317,7 @@ try {
   $laneProjectIds = @($laneNodeIds | ForEach-Object {
     Get-MultiProjectAutomationId "project-card" $fixtureProjectPath $_
   })
+  $laneNames = @("UIA loop A", "UIA loop B")
   $laneProjectId = Get-MultiProjectAutomationId "overview-project" $fixtureProjectPath
   $laneLegacySummaryId = Get-MultiProjectAutomationId "overview-worktree-notice" $fixtureProjectPath
   $readLaneCaption = {
@@ -7185,14 +7347,23 @@ try {
       "lane caption snapshot must not expose an uninspected worktree chip"
     Require ($cards[0].Current.AutomationId -ceq $laneOverviewIds[0] -and
       $cards[1].Current.AutomationId -ceq $laneOverviewIds[1]) "lane overview node identities differ from the exact fixture"
-    $rectangles = @($cards | ForEach-Object { $_.Current.BoundingRectangle })
+    $cardCaptures = @($cards | ForEach-Object {
+      $rect = $_.Current.BoundingRectangle
+      [pscustomobject]@{
+        automationId = [string]$_.Current.AutomationId
+        name = [string]$_.Current.Name
+        bounds = @($rect.Left, $rect.Top, $rect.Right, $rect.Bottom)
+      }
+    })
+    $firstBounds = @($cardCaptures[0].bounds)
     $caption = $captions[0].Current.BoundingRectangle
-    Require ($rectangles[0].Width -gt 0 -and $rectangles[0].Height -gt 0 -and
+    Require (($firstBounds[2] - $firstBounds[0]) -gt 0 -and
+      ($firstBounds[3] - $firstBounds[1]) -gt 0 -and
       $caption.Width -gt 0 -and $caption.Height -gt 0) "lane caption snapshot has empty bounds"
-    $scale = $rectangles[0].Width / 250.0
+    $scale = ($firstBounds[2] - $firstBounds[0]) / 250.0
     [pscustomobject]@{
       GraphBounds = $pane.Current.BoundingRectangle
-      CardBounds = $rectangles
+      Cards = $cardCaptures
       CaptionBounds = $caption
       Scale = $scale
       CaptionRight = $caption.Right
@@ -7200,79 +7371,21 @@ try {
       Y = [int][Math]::Round(($caption.Top + $caption.Bottom) / 2)
     }
   }
-  $readNormalizedLaneGeometry = {
-    param([object[]] $cardBounds)
-    Require ($cardBounds.Count -eq 2) "normalized lane geometry requires exactly two cards"
-    $scale = $cardBounds[0].Width / 250.0
-    Require ($scale -gt 0) "normalized lane geometry has a non-positive scale"
-    $sizeTolerance = 1 / $scale + 0.01
-    $normalized = @($cardBounds | ForEach-Object {
-      [pscustomobject]@{
-        Width = $_.Width / $scale
-        Height = $_.Height / $scale
-      }
-    })
-    Require (([Math]::Abs($normalized[0].Width - 250) -le 0.01) -and
-      ([Math]::Abs($normalized[1].Width - 250) -le $sizeTolerance) -and
-      ([Math]::Abs($normalized[0].Height - 96) -le $sizeTolerance) -and
-      ([Math]::Abs($normalized[1].Height - 96) -le $sizeTolerance)) `
-      "lane cards do not normalize to the shared 250x96 geometry"
-    return [pscustomobject]@{
-      Scale = $scale
-      PixelWidth = [double]$cardBounds[0].Width
-      SizeTolerance = $sizeTolerance
-      Widths = @($normalized | ForEach-Object { $_.Width })
-      Heights = @($normalized | ForEach-Object { $_.Height })
-      DeltaX = ($cardBounds[1].Left - $cardBounds[0].Left) / $scale
-      DeltaY = ($cardBounds[1].Top - $cardBounds[0].Top) / $scale
-      XOrder = [Math]::Sign($cardBounds[1].Left - $cardBounds[0].Left)
-      YOrder = [Math]::Sign($cardBounds[1].Top - $cardBounds[0].Top)
-    }
-  }
-  $sameNormalizedLaneGeometry = {
-    param($actual, $expected)
-    Require ($actual.Scale -gt 0 -and $expected.Scale -gt 0) `
-      "normalized lane comparison requires positive scales"
-    $deltaXError = [Math]::Abs($actual.DeltaX - $expected.DeltaX)
-    $deltaYError = [Math]::Abs($actual.DeltaY - $expected.DeltaY)
-    Require ($actual.PixelWidth -gt 0 -and $expected.PixelWidth -gt 0) `
-      "normalized lane comparison requires positive pixel widths"
-    # Both the screen-space delta and the card width used as the scale
-    # denominator are differences of integer-rounded UIA coordinates.
-    $actualDeltaXBudget = 250 *
-      (1 + [Math]::Abs($actual.DeltaX / 250)) /
-      [Math]::Max(1, $actual.PixelWidth - 1)
-    $expectedDeltaXBudget = 250 *
-      (1 + [Math]::Abs($expected.DeltaX / 250)) /
-      [Math]::Max(1, $expected.PixelWidth - 1)
-    $actualDeltaYBudget = 250 *
-      (1 + [Math]::Abs($actual.DeltaY / 250)) /
-      [Math]::Max(1, $actual.PixelWidth - 1)
-    $expectedDeltaYBudget = 250 *
-      (1 + [Math]::Abs($expected.DeltaY / 250)) /
-      [Math]::Max(1, $expected.PixelWidth - 1)
-    $deltaXTolerance = $actualDeltaXBudget + $expectedDeltaXBudget + 0.01
-    $deltaYTolerance = $actualDeltaYBudget + $expectedDeltaYBudget + 0.01
-    return [pscustomobject]@{
-      Equal = ($deltaXError -le $deltaXTolerance) -and
-        ($deltaYError -le $deltaYTolerance) -and
-        ($actual.XOrder -eq $expected.XOrder) -and
-        ($actual.YOrder -eq $expected.YOrder)
-      DeltaXTolerance = $deltaXTolerance
-      DeltaYTolerance = $deltaYTolerance
-      ActualDeltaXBudget = $actualDeltaXBudget
-      ExpectedDeltaXBudget = $expectedDeltaXBudget
-      ActualDeltaYBudget = $actualDeltaYBudget
-      ExpectedDeltaYBudget = $expectedDeltaYBudget
-      DeltaXError = $deltaXError
-      DeltaYError = $deltaYError
-    }
-  }
   $process.Refresh()
   $shellWindow = $process.MainWindowHandle
-  $surfaceActionPatterns["fit-canvas"].Invoke()
-  Start-Sleep -Milliseconds 150
-  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  $laneOverviewFit = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $laneOverviewFit) -and
+           ($laneOverviewFit.Current.ProcessId -eq $process.Id) -and
+           ($laneOverviewFit.Current.Name -ceq "Fit canvas")) `
+    "lane overview geometry omitted the exact owned Fit Canvas action"
+  $laneOverviewFit.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $laneOverviewProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin $laneOverviewIds -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
+  $graph = $laneOverviewProbe.Graph
   $laneSnapshot = & $readLaneCaption $graph
   if ($laneSnapshot.CaptionRight -gt $laneSnapshot.GraphBounds.Right - 20 * $laneSnapshot.Scale) {
     $delta = [int][Math]::Floor($laneSnapshot.GraphBounds.Right -
@@ -7299,7 +7412,10 @@ try {
     Start-Sleep -Milliseconds 150
     $laneSnapshot = & $readLaneCaption $graph
   }
-  $laneSnapshotGeometry = & $readNormalizedLaneGeometry $laneSnapshot.CardBounds
+  $laneSnapshotGeometry = Get-MultiProjectNormalizedLaneGeometry `
+    $laneSnapshot.Cards $laneOverviewIds $laneNames `
+    @($laneSnapshot.GraphBounds.Left, $laneSnapshot.GraphBounds.Top,
+      $laneSnapshot.GraphBounds.Right, $laneSnapshot.GraphBounds.Bottom) 250 96
   Require ($laneSnapshot.OpenX -gt $laneSnapshot.GraphBounds.Left -and
     $laneSnapshot.CaptionRight -lt $laneSnapshot.GraphBounds.Right -and
     $laneSnapshot.Y -gt $laneSnapshot.GraphBounds.Top -and
@@ -7318,6 +7434,18 @@ try {
   $laneOpenedProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -cin $laneProjectIds -and $_.Current.Name -match '^UIA loop ' } `
     { param($items) $items.Count -eq 2 }
+  $laneProjectFit = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $laneProjectFit) -and
+           ($laneProjectFit.Current.ProcessId -eq $process.Id) -and
+           ($laneProjectFit.Current.Name -ceq "Fit canvas")) `
+    "opened project lane geometry omitted the exact owned Fit Canvas action"
+  $laneProjectFit.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $laneOpenedProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin $laneProjectIds -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
   $graph = $laneOpenedProbe.Graph
   $laneOpenedCards = @($laneProjectIds | ForEach-Object {
     $id = $_
@@ -7329,13 +7457,23 @@ try {
     $_.Current.AutomationId -ceq $laneProjectId -or
       $_.Current.AutomationId -ceq $laneLegacySummaryId
   })
-  $laneOpenedGeometry = & $readNormalizedLaneGeometry `
-    @($laneOpenedCards | ForEach-Object { $_.Current.BoundingRectangle })
+  $laneOpenedCaptures = @($laneOpenedCards | ForEach-Object {
+    $rect = $_.Current.BoundingRectangle
+    [pscustomobject]@{
+      automationId = [string]$_.Current.AutomationId
+      name = [string]$_.Current.Name
+      bounds = @($rect.Left, $rect.Top, $rect.Right, $rect.Bottom)
+    }
+  })
+  $laneOpenedGeometry = Get-MultiProjectNormalizedLaneGeometry `
+    $laneOpenedCaptures $laneProjectIds $laneNames `
+    @($graph.Current.BoundingRectangle.Left, $graph.Current.BoundingRectangle.Top,
+      $graph.Current.BoundingRectangle.Right, $graph.Current.BoundingRectangle.Bottom) 250 96
   $laneGraphBoundsEqual = $graph.Current.BoundingRectangle.Equals($laneSnapshot.GraphBounds)
-  $laneNormalizedComparison = & $sameNormalizedLaneGeometry $laneOpenedGeometry $laneSnapshotGeometry
+  $laneNormalizedComparison = Compare-MultiProjectNormalizedLaneGeometry `
+    $laneOpenedGeometry $laneSnapshotGeometry
   $laneNormalizedEqual = $laneNormalizedComparison.Equal
-  $laneNonOverlap = -not $laneOpenedCards[0].Current.BoundingRectangle.IntersectsWith(
-    $laneOpenedCards[1].Current.BoundingRectangle)
+  $laneNonOverlap = $laneOpenedGeometry.NonOverlap
   $laneOpenNormalizedEvidence = [ordered]@{
     names = @($laneOpenedCards | ForEach-Object { [string]$_.Current.Name })
     automationIds = @($laneOpenedCards | ForEach-Object { [string]$_.Current.AutomationId })
@@ -7373,6 +7511,18 @@ try {
   $restoredLaneProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -cin $laneOverviewIds -and $_.Current.Name -match '^UIA loop ' } `
     { param($items) $items.Count -eq 2 }
+  $restoredLaneFit = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $restoredLaneFit) -and
+           ($restoredLaneFit.Current.ProcessId -eq $process.Id) -and
+           ($restoredLaneFit.Current.Name -ceq "Fit canvas")) `
+    "restored overview lane geometry omitted the exact owned Fit Canvas action"
+  $restoredLaneFit.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $restoredLaneProbe = Wait-ForGraphChildren $root $rawWalker `
+    { $_.Current.AutomationId -cin $laneOverviewIds -and $_.Current.Name -match '^UIA loop ' } `
+    { param($items) $items.Count -eq 2 }
   $graph = $restoredLaneProbe.Graph
   $restoredLane = & $readLaneCaption $graph
   if ($restoredLane.CaptionRight -gt $restoredLane.GraphBounds.Right - 20 * $restoredLane.Scale) {
@@ -7400,8 +7550,12 @@ try {
     Start-Sleep -Milliseconds 150
     $restoredLane = & $readLaneCaption $graph
   }
-  $restoredLaneGeometry = & $readNormalizedLaneGeometry $restoredLane.CardBounds
-  $restoredLaneComparison = & $sameNormalizedLaneGeometry $restoredLaneGeometry $laneSnapshotGeometry
+  $restoredLaneGeometry = Get-MultiProjectNormalizedLaneGeometry `
+    $restoredLane.Cards $laneOverviewIds $laneNames `
+    @($restoredLane.GraphBounds.Left, $restoredLane.GraphBounds.Top,
+      $restoredLane.GraphBounds.Right, $restoredLane.GraphBounds.Bottom) 250 96
+  $restoredLaneComparison = Compare-MultiProjectNormalizedLaneGeometry `
+    $restoredLaneGeometry $laneSnapshotGeometry
   $restoredLaneNormalizedEvidence = [ordered]@{
     automationIds = $laneOverviewIds
     normalizedActual = $restoredLaneGeometry
