@@ -4171,6 +4171,11 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
     Assert-CapTest ($workerSource.Contains('$sameConnectionRows=@($rows | Where-Object connection -EQ $restartConnection)') -and
         $supervisorSource.Contains('$connectionRows=@($rows | Where-Object connection -EQ $restart.evidence.connection)')) `
         'Restart evidence does not isolate and rebind the exact Restart connection.'
+    $moduleSource=[IO.File]::ReadAllText($modulePath)
+    Assert-CapTest ($moduleSource.Contains('function Get-CapJobMemberProcess') -and
+        $moduleSource.Contains('after bounded recheck') -and
+        $moduleSource.Contains('for ($attempt=0;$attempt -lt 8;$attempt++)')) `
+        'Job census does not bound the listed-but-unavailable member race.'
     Assert-CapTest ($workerSource.Contains('checkpointCount') -and
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
     Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and

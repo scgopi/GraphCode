@@ -780,6 +780,19 @@ function Wait-CapJobTarget {
     return $record
 }
 
+function Get-CapJobMemberProcess {
+    param($Run,[int]$MemberPid)
+    for ($attempt=0;$attempt -lt 8;$attempt++) {
+        try { return [Diagnostics.Process]::GetProcessById($MemberPid) }
+        catch [ArgumentException] {
+            if ($MemberPid -notin [CapProcessJob]::Members($Run.Job)) {return $null}
+            if ($attempt -eq 7) {throw 'Job member identity unavailable while still listed after bounded recheck.'}
+            Start-Sleep -Milliseconds 25
+        }
+    }
+    throw 'Unreachable job-member process retry state.'
+}
+
 function Get-CapJobMembers {
     [CmdletBinding()]
     param($Run)
@@ -787,11 +800,8 @@ function Get-CapJobMembers {
     foreach ($memberPid in [CapProcessJob]::Members($Run.Job)) {
         if ($memberPid -eq $Run.Identity.Pid) { continue }
         $process = $null
-        try { $process = [Diagnostics.Process]::GetProcessById($memberPid) }
-        catch [ArgumentException] {
-            if ($memberPid -in [CapProcessJob]::Members($Run.Job)) { throw 'Job member identity unavailable while still listed.' }
-            continue
-        }
+        $process = Get-CapJobMemberProcess -Run $Run -MemberPid $memberPid
+        if ($null -eq $process) {continue}
         $retained = $false
         try {
             $access = Read-CapProcessAccess -Process $process -Role 'job-member' `
