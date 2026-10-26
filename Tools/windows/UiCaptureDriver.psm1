@@ -5271,7 +5271,8 @@ function Read-CapJournalSnapshot {
             $snapshot = Read-CapJournalObject $State $State.HighestObserved $transaction -Advance
             $names = Get-CapJournalNames $State
             foreach ($number in $names.Keys) { $State.HighestObserved = [Math]::Max($State.HighestObserved, $number) }
-            if ($snapshot.Reference.sequence -lt $State.HighestObserved) { continue }
+            # A later publication belongs to the next supervisor poll. Chasing a moving head can
+            # discard multiple verified monotonic snapshots until this transaction exhausts.
             for ($number = 1L; $number -le $snapshot.Reference.sequence; $number++) {
                 if (-not $names.ContainsKey($number)) {
                     $null = Read-CapJournalObject $State $number $transaction

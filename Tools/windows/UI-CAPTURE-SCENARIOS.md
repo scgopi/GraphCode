@@ -55,6 +55,24 @@ the worker retains time to stop held process generations, publish the terminal
 journal and bind the failed manifest; the supervisor must release
 `FAILED_ZERO_SURVIVORS`, not `CLEANUP_UNPROVEN`.
 
+## Numbered journal moving head
+
+The supervisor's live journal read accepts the verified monotonic snapshot selected
+at the start of its bounded transaction. Publications that arrive while that
+snapshot is being decoded are recorded as the next observed floor and are consumed
+by the next 200 ms supervisor poll; they do not force the current transaction to
+chase an indefinitely moving head. Open retries remain limited to the existing
+eight attempts, seven retries, one-second I/O budget, and absolute caller deadline.
+
+This preserves fail-closed behavior: a missing highest-observed publication,
+corrupt bytes, foreign binding, stale removal, sequence regression, or expired
+deadline is still refused. Quiescent final verification still reopens every
+numbered publication, verifies the complete predecessor hash chain, binds the
+canonical final stdout record, and requires exact kernel-exit and stream-EOF
+cleanup evidence. The correction adds no capture scenes or top-level preflight
+group, so the registered totals remain **182 default / 185 with
+`-RequireRealSeed`**.
+
 ## DPI-parametric matched adapter
 
 `S_MATCHED_V12_DPI_V1` preserves the V1 fixture, eighteen scene names, actions,

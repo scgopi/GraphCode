@@ -9,6 +9,7 @@ param(
     [switch]$JournalTimingContractOnly,
     [switch]$JournalFirstOpenContractOnly,
     [switch]$JournalObservationContractOnly,
+    [switch]$JournalMovingHeadContractOnly,
     [switch]$ActionBudgetContractOnly,
     [switch]$PreflightReportContractOnly,
     [switch]$NativeBindingsContractOnly,
@@ -410,6 +411,121 @@ function Assert-CapRejects {
         return [pscustomobject]@{ Context = $context; Line = $line; Record = (Read-CapJournalFinalRecord $line $context.Binding) }
     }
 
+    function Invoke-CapJournalMovingHeadContract {
+        $context = New-JournalContractContext 'moving-head-236'
+        $writer = $context.State
+        $reader = New-CapJournalState -Root $context.Root -Directory $writer.Directory `
+            -Binding $context.Binding -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(2)) `
+            -ObservationPath (Join-Path $context.Root 'moving-head-observations.jsonl')
+        $data = [pscustomobject]@{ entries = @(); counter = 1L }
+        $null = Publish-CapJournalSnapshot $writer Bootstrap $data
+        for ($sequence = 2L; $sequence -le 230L; $sequence++) {
+            $null = Publish-CapJournalSnapshot $writer Progress ([pscustomobject]@{
+                entries = @(); counter = $sequence
+            })
+        }
+        $module = Get-Module UiCaptureDriver
+        $original = & $module { (Get-Item Function:Write-CapJournalObservation).ScriptBlock }
+        try {
+            & $module {
+                param($Original,$Writer)
+                $script:CapMovingHeadOriginalObservation = $Original
+                $script:CapMovingHeadWriter = $Writer
+                Set-Item Function:Write-CapJournalObservation -Value {
+                    param($State, [long]$Sequence, [int]$Attempt, [string]$Decision,
+                        [AllowNull()][string]$NativeError, $Transaction, [switch]$TerminalFailure)
+                    & $script:CapMovingHeadOriginalObservation $State $Sequence $Attempt $Decision `
+                        $NativeError $Transaction -TerminalFailure:$TerminalFailure
+                    if ($Decision -cne 'ReadVerified') { return }
+                    $next = switch ($Sequence) {
+                        230L { 236L }
+                        default { 0L }
+                    }
+                    if ($next -gt 0) {
+                        while ($script:CapMovingHeadWriter.Sequence -lt $next) {
+                            $counter = [long]($script:CapMovingHeadWriter.Sequence + 1)
+                            $null = Publish-CapJournalSnapshot $script:CapMovingHeadWriter Progress ([pscustomobject]@{
+                                entries = @(); counter = $counter
+                            })
+                        }
+                        Start-Sleep -Milliseconds 100
+                    } elseif ($Sequence -eq 236L) {
+                        Start-Sleep -Milliseconds 900
+                    }
+                }
+            } $original $writer
+            $reading = Read-CapJournalSnapshot $reader
+        } finally {
+            & $module {
+                param($Original)
+                Set-Item Function:Write-CapJournalObservation -Value $Original
+                Remove-Variable CapMovingHeadOriginalObservation,CapMovingHeadWriter -Scope Script -ErrorAction SilentlyContinue
+            } $original
+        }
+        Assert-CapTest ($reading.State -ceq 'Published' -and
+            $reading.Snapshot.Reference.sequence -eq 230L -and
+            $reader.HighestObserved -ge 230L -and $reader.LastApplied -eq 230L -and
+            $null -eq $reader.FatalError) `
+            'A verified monotonic snapshot was discarded while newer publications kept arriving.'
+        while ($writer.Sequence -lt 236L) {
+            $counter = [long]($writer.Sequence + 1)
+            $null = Publish-CapJournalSnapshot $writer Progress ([pscustomobject]@{
+                entries = @(); counter = $counter
+            })
+        }
+        $cleanup = [pscustomobject]@{
+            entries = @(); ownedProcesses = @(); outcome = 'FAILED'
+            ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @()
+        }
+        $terminal = Publish-CapJournalSnapshot $writer Terminal $cleanup
+        $manifest = [pscustomobject]@{
+            status = 'FAILED'; ownedProcesses = @(); ownedProcessSurvivors = @()
+            pendingLaunchesRemaining = @(); cleanupFailures = @()
+            journal = [pscustomobject]@{
+                protocolVersion = 2L; binding = $context.Binding; directory = $writer.Directory
+                terminal = $terminal; published = @($writer.Published.ToArray())
+            }
+        }
+        $manifestReference = Write-CapImmutableJson -Root $context.Root `
+            -Path (Join-Path $context.Root 'manifest.json') -Value $manifest
+        $record = Read-CapJournalFinalRecord `
+            (Format-CapJournalFinalRecord $context.Binding $manifestReference $terminal) $context.Binding
+        $proof = Read-CapJournalFinalProof $reader $context.Root $record
+        Assert-CapTest ($proof.HashChainVerified -and $proof.Terminal.Reference.sequence -eq 237L -and
+            $proof.Manifest.status -ceq 'FAILED' -and $proof.Manifest.cleanupFailures.Count -eq 0) `
+            'Moving journal head still prevented the exact final stdout binding and kernel-cleanup proof.'
+        $corrupt = New-JournalContractContext 'moving-head-corrupt'
+        $null = Publish-CapJournalSnapshot $corrupt.State Bootstrap ([pscustomobject]@{ entries = @() })
+        [IO.File]::WriteAllText((Join-Path $corrupt.State.Directory '000001.json'), '{"broken":')
+        $corruptRefusal = Assert-CapRejects { Read-CapJournalSnapshot $corrupt.State } 'JournalParse'
+        $missing = New-JournalContractContext 'moving-head-missing'
+        $missing.State.HighestObserved = 1L
+        $missingRefusal = Assert-CapRejects { Read-CapJournalSnapshot $missing.State } 'JournalUnavailable'
+        $foreign = New-JournalContractContext 'moving-head-foreign'
+        $null = Publish-CapJournalSnapshot $foreign.State Bootstrap ([pscustomobject]@{ entries = @() })
+        $foreign.State.Binding = $foreign.State.Binding.PSObject.Copy()
+        $foreign.State.Binding.runId = [guid]::NewGuid().ToString()
+        $foreignRefusal = Assert-CapRejects { Read-CapJournalSnapshot $foreign.State } 'JournalIdentity'
+        $stale = New-JournalContractContext 'moving-head-stale'
+        $null = Publish-CapJournalSnapshot $stale.State Bootstrap ([pscustomobject]@{ entries = @() })
+        $null = Publish-CapJournalSnapshot $stale.State Progress ([pscustomobject]@{ entries = @() })
+        $staleRead = Read-CapJournalSnapshot $stale.State
+        [IO.File]::Move((Join-Path $stale.State.Directory '000002.json'), (Join-Path $stale.Root 'removed-000002.json'))
+        $staleRefusal = Assert-CapRejects { Read-CapJournalSnapshot $stale.State } 'JournalUnavailable'
+        Assert-CapTest ($staleRead.Snapshot.Reference.sequence -eq 2L -and
+            $stale.State.HighestObserved -eq 2L -and $stale.State.LastApplied -eq 2L) `
+            'A stale highest-observed sequence regressed to older evidence.'
+        return @{
+            observedSequence = 230L; announcedDuringRead = 236L; terminalSequence = 237L
+            finalBinding = $record; cleanupProof = 'FAILED_ZERO_SURVIVORS_ELIGIBLE'
+            refusals = @{
+                corrupt = $corruptRefusal; missing = $missingRefusal
+                foreign = $foreignRefusal; stale = $staleRefusal
+            }
+            mode = 'Actual immutable files and production reader/final proof; deterministic observation boundary only.'
+        }
+    }
+
     function Invoke-JournalContractGroups {
         param([switch]$IncludeConcurrent)
         if ($IncludeConcurrent) {
@@ -432,7 +548,10 @@ function Assert-CapRejects {
             $lock = [IO.File]::Open((Join-Path $c.State.Directory '000001.json'), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
             try { $null = Assert-CapRejects { Read-CapJournalSnapshot $c.State } 'JournalUnavailable' }
             finally { $lock.Dispose() }
-            return @{ subcases = 2; realRetry = $progress; exhaustion = 'Observed actual held-file Open retry exhaustion, not a mock.' }
+            $movingHead = Invoke-CapJournalMovingHeadContract
+            return @{ subcases = 3; realRetry = $progress
+                exhaustion = 'Observed actual held-file Open retry exhaustion, not a mock.'
+                movingHead = $movingHead }
         }
         Invoke-CapTest 'numbered journal reader never regresses below its highest observed sequence' {
             $c = New-JournalContractContext 'floor'
@@ -6538,7 +6657,8 @@ if ($PreflightReportContractOnly) {
     exit 0
 }
 
-if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenContractOnly -or $JournalObservationContractOnly) {
+if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenContractOnly -or
+    $JournalObservationContractOnly -or $JournalMovingHeadContractOnly) {
     if ($FixtureContractOnly) {
         Invoke-CapTest 'prebuilt fixture binder accepts exact artifacts and refuses missing or tampered bytes' { Invoke-CapPrebuiltFixtureContract }
     }
@@ -6551,6 +6671,11 @@ if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenCon
             Invoke-CapJournalObservationContract
         }
     }
+    if ($JournalMovingHeadContractOnly) {
+        Invoke-CapTest 'journal moving head preserves a verified snapshot and later final cleanup proof' {
+            Invoke-CapJournalMovingHeadContract
+        }
+    }
     $passed = @($results | Where-Object passed -EQ $true).Count
     $failed = @($results | Where-Object passed -EQ $false).Count
     $report = [pscustomobject]@{ suite = 'UiCaptureSetupContracts'; executed = $results.Count; passed = $passed; failed = $failed
@@ -6560,7 +6685,8 @@ if ($FixtureContractOnly -or $JournalTimingContractOnly -or $JournalFirstOpenCon
     $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
     $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
     if ($results.Count -ne ([int]$FixtureContractOnly.IsPresent + [int]$JournalTimingContractOnly.IsPresent +
-        2 * [int]$JournalFirstOpenContractOnly.IsPresent + [int]$JournalObservationContractOnly.IsPresent) -or $failed -ne 0) { exit 1 }
+        2 * [int]$JournalFirstOpenContractOnly.IsPresent + [int]$JournalObservationContractOnly.IsPresent +
+        [int]$JournalMovingHeadContractOnly.IsPresent) -or $failed -ne 0) { exit 1 }
     exit 0
 }
 
@@ -6632,7 +6758,7 @@ if ($DescendantMetadataContractOnly) {
 
 if ($PrepareFixturesOnly) {
     if ($ReceiptContractOnly -or $FixtureContractOnly -or $JournalTimingContractOnly -or
-        $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or
+        $JournalFirstOpenContractOnly -or $JournalObservationContractOnly -or $JournalMovingHeadContractOnly -or
         $MatchedDpiContractOnly -or $PrebuiltFixtureManifest) {
         throw 'Fixture preparation cannot also consume or run contract suites.'
     }
