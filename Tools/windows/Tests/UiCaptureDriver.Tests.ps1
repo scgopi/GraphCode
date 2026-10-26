@@ -30,6 +30,7 @@ param(
     [string]$PrebuiltFixtureManifest = '',
     [string]$PrebuiltFixtureManifestSha256 = '',
     [switch]$RequireRealSeed,
+    [switch]$RealSeedContractOnly,
     [string]$RealSeedZmxPath = '',
     [string]$RealSeedZmxSha256 = '',
     [ValidateSet('','Writer','Reader')][string]$JournalActor = '',
@@ -2133,6 +2134,116 @@ function Invoke-CapCaptureCommand {
         receiptPath = $receiptPath; commandArguments = $argumentsToSupervisor
         receiptSha256 = if ($receipt) { (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash } else { $null }
         leaseSha256 = $leaseHash
+    }
+}
+
+function Invoke-CapJournalAdoptionDecisionContract {
+    $ast = [Management.Automation.Language.Parser]::ParseFile($supervisorPath, [ref]$null, [ref]$null)
+    $definition = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Test-CapJournalEntryNeedsWorkerReceipt'
+    }, $true))
+    Assert-CapTest ($definition.Count -eq 1) 'Actual journal adoption decision helper is missing or duplicated.'
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+    $entry = [pscustomobject]@{
+        role = 'offline-cmd-peer'; pid = 26852; phase = 'before'
+        creationFileTimeUtc = 134374957433534923L
+        expectedImagePath = 'C:\Windows\System32\cmd.exe'
+        expectedParentPid = 28560; expectedSessionId = 2; windowHandle = 0
+    }
+    function New-AdoptionFailure {
+        param(
+            [string]$Code = 'ProcessIdentityUnavailable',
+            [string]$CallSite = 'Get-CapProcessIdentity.InitialSnapshot',
+            [string]$HandleState = 'GetterException',
+            [string]$IdState = 'Available',
+            [int]$AcquiredPid = 26852,
+            [string]$Role = 'offline-cmd-peer'
+        )
+        $failure = [InvalidOperationException]::new('Injected journal adoption failure.')
+        if ($Code) { $failure.Data['CapCaptureCode'] = $Code }
+        if ($CallSite) { $failure.Data['CallSite'] = $CallSite }
+        if ($HandleState) { $failure.Data['HandleState'] = $HandleState }
+        if ($IdState) { $failure.Data['IdState'] = $IdState }
+        if ($AcquiredPid -gt 0) { $failure.Data['AcquiredPid'] = $AcquiredPid }
+        if ($Role) { $failure.Data['Role'] = $Role }
+        return $failure
+    }
+    $absent = [pscustomobject]@{ State = 'Absent'; Metadata = $null }
+    Assert-CapTest (Test-CapJournalEntryNeedsWorkerReceipt -Failure (New-AdoptionFailure) `
+        -Entry $entry -MetadataState $absent) 'Exact exited-before-adoption state was not deferred to the final worker receipt.'
+    $foreign = New-AdoptionFailure -AcquiredPid 26853
+    Assert-CapTest (-not (Test-CapJournalEntryNeedsWorkerReceipt -Failure $foreign `
+        -Entry $entry -MetadataState $absent)) 'Foreign PID was deferred as the registered generation.'
+    $stale = [pscustomobject]@{ State = 'Complete'; Metadata = [pscustomobject]@{
+        Pid = 26852; CreationFileTimeUtc = 134374957433534924L
+        ImagePath = 'C:\Windows\System32\cmd.exe'; ParentPid = 28560; SessionId = 2
+    } }
+    Assert-CapTest (-not (Test-CapJournalEntryNeedsWorkerReceipt -Failure (New-AdoptionFailure) `
+        -Entry $entry -MetadataState $stale)) 'Stale/reused current metadata was deferred as an exited generation.'
+    $partial = New-AdoptionFailure -HandleState ''
+    Assert-CapTest (-not (Test-CapJournalEntryNeedsWorkerReceipt -Failure $partial `
+        -Entry $entry -MetadataState $absent)) 'Partial typed failure data was deferred without exact classification.'
+    return @{ exactAbsentDeferred = $true; foreignRefused = $true; staleRefused = $true; partialRefused = $true }
+}
+
+function Invoke-CapRealSeedBindingRefusals {
+    param([Parameter(Mandatory)]$Run)
+    $record = $Run.receipt.journalFinalBinding
+    $manifest = Get-Content -LiteralPath (Join-Path $Run.output 'manifest.json') -Raw |
+        ConvertFrom-Json -DateKind String
+    $state = New-CapJournalState -Root $Run.owned -Directory $manifest.journal.directory `
+        -Binding $record.binding -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(10))
+    $canonical = Format-CapJournalFinalRecord -Binding $record.binding `
+        -Manifest $record.manifest -Terminal $record.terminal
+    $missing = Assert-CapRejects {
+        Read-CapJournalFinalRecord -Stdout '' -Binding $record.binding
+    } 'Missing, duplicate, partial or nonfinal stdout binding'
+    $partial = Assert-CapRejects {
+        Read-CapJournalFinalRecord -Stdout $canonical.Substring(0, $canonical.Length - 1) -Binding $record.binding
+    } 'JournalFinalRecord'
+    $foreign = $record | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+    $foreign.binding.leaseId = [guid]::NewGuid().ToString()
+    $foreignRefusal = Assert-CapRejects {
+        Read-CapJournalFinalProof -State $state -OutputDirectory $Run.output -Record $foreign
+    } 'JournalIdentity'
+    $stale = $record | ConvertTo-Json -Depth 20 | ConvertFrom-Json -DateKind String
+    $prior = @($Run.receipt.journalPublishedInventory | Where-Object sequence -LT $record.terminal.sequence)[-1]
+    Assert-CapTest ($null -ne $prior) 'Actual real-seed journal has no prior publication for the stale-binding negative.'
+    $stale.terminal = $prior
+    $staleRefusal = Assert-CapRejects {
+        Read-CapJournalFinalProof -State $state -OutputDirectory $Run.output -Record $stale
+    } 'JournalFinalBinding'
+    return @{ missing = $missing; partial = $partial; foreign = $foreignRefusal; stale = $staleRefusal }
+}
+
+function Invoke-CapRealSeedLifecycleContracts {
+    foreach ($realBehavior in @('normal','nonzero','timeout')) {
+        Invoke-CapTest "real zmx job lifecycle through actual command with target $realBehavior" {
+            $run = Invoke-CapCaptureCommand -Name ('real-seed-' + $realBehavior) -Behavior $realBehavior -RealSeed
+            Assert-CapTest ($null -ne $run.receipt -and $run.receipt.containmentJob.jobActive0 -and
+                $run.receipt.workerStdoutEof -and $run.receipt.workerStderrEof -and
+                $null -ne $run.receipt.journalFinalBinding) 'Real seed command lacks job/EOF/final binding.'
+            $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.json') -Raw | ConvertFrom-Json -DateKind String
+            Assert-CapTest ($manifest.zmxSeeds.Count -eq 2 -and @($manifest.zmxSeeds | Where-Object {
+                $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.daemonCount -lt 1 -or $_.cmdCount -lt 1 -or
+                $_.cleanupStatus -cne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
+                $_.stdoutEof -or $_.stderrEof -or -not $_.outputProof.jobActive0
+            }).Count -eq 0) 'Real two-phase seed census/file closure was not proved.'
+            foreach ($seed in $manifest.zmxSeeds) { $null = Assert-CapJobOutputProof -Root $run.owned -Proof $seed.outputProof }
+            $expectedStatus = if ($realBehavior -eq 'normal') { 'RELEASED_ZERO_SURVIVORS' } else { 'FAILED_ZERO_SURVIVORS' }
+            Assert-CapTest ($run.receipt.status -ceq $expectedStatus -and
+                (($realBehavior -eq 'normal' -and $run.child.exitCode -eq 0) -or
+                ($realBehavior -ne 'normal' -and $run.child.exitCode -ne 0 -and
+                    $run.receipt.workerPrimaryFailure.Count -gt 0))) 'Target primary failure was replaced by successful real seed cleanup.'
+            $adoption = if ($realBehavior -eq 'normal') { Invoke-CapJournalAdoptionDecisionContract } else { $null }
+            $bindingRefusals = if ($realBehavior -eq 'normal') { Invoke-CapRealSeedBindingRefusals -Run $run } else { $null }
+            return @{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256
+                zmxSha256 = $RealSeedZmxSha256; phases = 2; targetBehavior = $realBehavior
+                providerCommit = '785b3fd15dcafd1882b495c831a10f98c201b908'
+                evidenceMode = 'EXECUTED_CURRENT_REAL_ZMX'; adoption = $adoption
+                bindingRefusals = $bindingRefusals }
+        }
     }
 }
 
@@ -6774,6 +6885,22 @@ $target = $null
 try {
     $prebuilt = Read-CapPrebuiltFixtures $PrebuiltFixtureManifest $PrebuiltFixtureManifestSha256
     $target = $prebuilt.Target
+    if ($RealSeedContractOnly) {
+        Invoke-CapRealSeedLifecycleContracts
+        foreach ($path in $sourceHashesBefore.Keys) {
+            Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $sourceHashesBefore[$path]) `
+                "Source changed during real-seed contracts: $path"
+        }
+        $passed = @($results | Where-Object passed -EQ $true).Count
+        $failed = @($results | Where-Object passed -EQ $false).Count
+        $report = [pscustomobject]@{ suite = 'UiCaptureRealZmxLifecycle'; executed = $results.Count
+            passed = $passed; failed = $failed; skipped = 0; cases = @($results)
+            mode = $mode; gui = 'NotExecuted'; images = 0; backendTurns = 0 }
+        $report | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $scratch 'report.json') -Encoding utf8NoBOM
+        $report | Select-Object suite,executed,passed,failed,skipped | ConvertTo-Json -Compress
+        if ($results.Count -ne 3 -or $passed -ne 3 -or $failed -ne 0) { exit 1 }
+        exit 0
+    }
     if ($ActionBudgetContractOnly) {
         Invoke-CapActionBudgetContract
         $passed = @($results | Where-Object passed -EQ $true).Count
@@ -6981,32 +7108,7 @@ try {
             } 'bytes'
             return 'Synthetic descendant output fixture, not root equality or real provider/daemon evidence.'
         }
-        if ($RequireRealSeed) {
-            foreach ($realBehavior in @('normal','nonzero','timeout')) {
-                Invoke-CapTest "real zmx job lifecycle through actual command with target $realBehavior" {
-                    $run = Invoke-CapCaptureCommand -Name ('real-seed-' + $realBehavior) -Behavior $realBehavior -RealSeed
-                    Assert-CapTest ($null -ne $run.receipt -and $run.receipt.containmentJob.jobActive0 -and
-                        $run.receipt.workerStdoutEof -and $run.receipt.workerStderrEof -and
-                        $null -ne $run.receipt.journalFinalBinding) 'Real seed command lacks job/EOF/final binding.'
-                    $manifest = Get-Content -LiteralPath (Join-Path $run.output 'manifest.json') -Raw | ConvertFrom-Json -DateKind String
-                    Assert-CapTest ($manifest.zmxSeeds.Count -eq 2 -and @($manifest.zmxSeeds | Where-Object {
-                        $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.daemonCount -lt 1 -or $_.cmdCount -lt 1 -or
-                        $_.cleanupStatus -cne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
-                        $_.stdoutEof -or $_.stderrEof -or -not $_.outputProof.jobActive0
-                    }).Count -eq 0) 'Real two-phase seed census/file closure was not proved.'
-                    foreach ($seed in $manifest.zmxSeeds) { $null = Assert-CapJobOutputProof -Root $run.owned -Proof $seed.outputProof }
-                    $expectedStatus = if ($realBehavior -eq 'normal') { 'RELEASED_ZERO_SURVIVORS' } else { 'FAILED_ZERO_SURVIVORS' }
-                    Assert-CapTest ($run.receipt.status -ceq $expectedStatus -and
-                        (($realBehavior -eq 'normal' -and $run.child.exitCode -eq 0) -or
-                        ($realBehavior -ne 'normal' -and $run.child.exitCode -ne 0 -and
-                            $run.receipt.workerPrimaryFailure.Count -gt 0))) 'Target primary failure was replaced by successful real seed cleanup.'
-                    return @{ release = $run.receiptPath; releaseSha256 = $run.receiptSha256
-                        zmxSha256 = $RealSeedZmxSha256; phases = 2; targetBehavior = $realBehavior
-                        providerCommit = '785b3fd15dcafd1882b495c831a10f98c201b908'
-                        evidenceMode = 'EXECUTED_CURRENT_REAL_ZMX' }
-                }
-            }
-        }
+        if ($RequireRealSeed) { Invoke-CapRealSeedLifecycleContracts }
         foreach ($mutation in @('accepted', 'lane-d', 'red-ci', 'binary-hash', 'product-diff',
             'ci-head', 'empty-ci', 'source-bytes', 'lease-base', 'duplicate-ci', 'duplicate-json', 'null-build', 'stale-build',
             'omitted-product-diff', 'phase-swap', 'unrelated-base')) {

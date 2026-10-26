@@ -468,6 +468,24 @@ function Assert-CapLease {
     return $leasePath
 }
 
+function Test-CapJournalEntryNeedsWorkerReceipt {
+    param(
+        [Parameter(Mandatory)][Exception]$Failure,
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)]$MetadataState
+    )
+    foreach ($name in @('CapCaptureCode','CallSite','HandleState','IdState','AcquiredPid','Role')) {
+        if (-not $Failure.Data.Contains($name)) { return $false }
+    }
+    return $Failure.Data['CapCaptureCode'] -ceq 'ProcessIdentityUnavailable' -and
+        $Failure.Data['CallSite'] -ceq 'Get-CapProcessIdentity.InitialSnapshot' -and
+        $Failure.Data['HandleState'] -ceq 'GetterException' -and
+        $Failure.Data['IdState'] -ceq 'Available' -and
+        [int]$Failure.Data['AcquiredPid'] -eq [int]$Entry.pid -and
+        $Failure.Data['Role'] -ceq [string]$Entry.role -and
+        $MetadataState.State -ceq 'Absent' -and $null -eq $MetadataState.Metadata
+}
+
 function Add-CapTrackedIdentity {
     param([Parameter(Mandatory)]$Entry)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
@@ -505,6 +523,19 @@ function Add-CapTrackedIdentity {
         $tracked.Add($key, $record)
         return $record
     } catch {
+        $failure = $_.Exception
+        $metadataState = Read-CapProcessMetadataState -Pid ([int]$Entry.pid)
+        if (Test-CapJournalEntryNeedsWorkerReceipt -Failure $failure -Entry $Entry -MetadataState $metadataState) {
+            $untrackedJournalEntries.Add([pscustomobject]@{
+                role = [string]$Entry.role
+                pid = [int]$Entry.pid
+                phase = [string]$Entry.phase
+                creationFileTimeUtc = [long]$Entry.creationFileTimeUtc
+                disposition = 'EXITED_BEFORE_SUPERVISOR_HANDLE_ADOPTION; WORKER_FINAL_KERNEL_EOF_RECEIPT_REQUIRED'
+            })
+            $process.Dispose()
+            return $null
+        }
         $process.Dispose()
         throw
     }

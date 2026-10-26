@@ -73,6 +73,14 @@ cleanup evidence. The correction adds no capture scenes or top-level preflight
 group, so the registered totals remain **182 default / 185 with
 `-RequireRealSeed`**.
 
+An owned journal actor can exit after the worker publishes its generation but
+before the supervisor opens a retained handle. The supervisor defers only the
+exact typed initial-handle race when the recorded PID is unchanged and current
+metadata is absent. It does not infer exit: the final numbered journal must
+still bind that generation to the worker's held-handle kernel-exit receipt and
+its owning stream EOF or contained-job file-closure proof. Foreign, live,
+stale/reused, and partially classified identities remain refusals.
+
 ## DPI-parametric matched adapter
 
 `S_MATCHED_V12_DPI_V1` preserves the V1 fixture, eighteen scene names, actions,
