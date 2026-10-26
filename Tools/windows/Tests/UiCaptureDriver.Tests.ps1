@@ -2978,6 +2978,9 @@ function Invoke-CapMatchedContracts {
             event=$responseGraph.rows[3].frame.event}
         $responseGraph.rows[5].frame.requestID=$responseGraph.rows[5].frame.requestID.ToUpperInvariant()
         $null=Assert-CapRestartEvidence -Evidence $responseGraph -ExpectedDaemonSha256 ('e'*64)
+        $wrappedGraph=New-CapRestartTestEvidence
+        $wrappedGraph.rows[0].frame.event.graphChanged=[pscustomobject]@{_0=$wrappedGraph.rows[0].frame.event.graphChanged}
+        $null=Assert-CapRestartEvidence -Evidence $wrappedGraph -ExpectedDaemonSha256 ('E'*64)
         $cases=@('ack-only','wrong-owner','connection','generation','duplicate','unrelated-counter','error','timeout',
             'resume-error','no-resume','old-attach','unowned-attach','no-daemon-session','no-pane','stop','early-resume','counter-type',
             'old-backend','untyped-ownership')
@@ -3006,7 +3009,7 @@ function Invoke-CapMatchedContracts {
             }
             $null=Assert-CapRejects {Assert-CapRestartEvidence -Evidence $e -ExpectedDaemonSha256 ('E'*64)} 'Restart evidence'
         }
-        return @{positive=2;negative=$cases.Count;mutations=$cases;evidence='SIMULATED_TRANSCRIPT_NOT_DAEMON_EXECUTION'}
+        return @{positive=3;negative=$cases.Count;mutations=$cases;evidence='SIMULATED_TRANSCRIPT_NOT_DAEMON_EXECUTION'}
     }
     Invoke-CapTest 'real restart scene invokes existing UIA route and refuses offline peer authority' {
         return @{route=(Invoke-CapMatchedRestartRouteContract);pending=(Invoke-CapMatchedPendingContract)}
