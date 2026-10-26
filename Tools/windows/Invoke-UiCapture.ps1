@@ -898,8 +898,9 @@ function Assert-CapMatchedWorkerManifest {
         $path=Assert-CapSupervisorPath $restart.transcriptPath
         if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $restart.transcriptSha256) {throw 'Matched restart transcript bytes changed.'}
         $rows=@(Read-CapRestartTranscript -Path $path)
-        if ($rows.Count -lt $restart.evidence.rows.Count -or
-            (ConvertTo-Json -InputObject @($rows[0..($restart.evidence.rows.Count-1)]) -Depth 40 -Compress) -cne
+        $connectionRows=@($rows | Where-Object connection -EQ $restart.evidence.connection)
+        if ($connectionRows.Count -lt $restart.evidence.rows.Count -or
+            (ConvertTo-Json -InputObject @($connectionRows[0..($restart.evidence.rows.Count-1)]) -Depth 40 -Compress) -cne
             (ConvertTo-Json -InputObject @($restart.evidence.rows) -Depth 40 -Compress)) {throw 'Matched restart evidence differs from its real recorded frame prefix.'}
         $null=Assert-CapJobOutputProof -Root $root -Proof $restart.daemonCleanup
     }

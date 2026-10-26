@@ -1839,6 +1839,9 @@ function Get-CapMatchedRestartEvidence {
     })
     if ($restartRows.Count -eq 0) {return $null}
     if ($restartRows.Count -ne 1) {throw 'Restart evidence: duplicate real restart requests'}
+    $restartConnection=[long]$restartRows[0].connection
+    $sameConnectionRows=@($rows | Where-Object connection -EQ $restartConnection)
+    if ($sameConnectionRows.Count -eq 0) {throw 'Restart evidence: restart connection transcript is empty'}
     $daemonSnapshot=[CapNative]::Snapshot($Context.daemonProcess.Handle,$Context.daemonProcess.Id)
     if ($daemonSnapshot.IsExited -or $daemonSnapshot.CreationFileTimeUtc -ne $Context.daemonTarget.creationFileTimeUtc -or
         -not [CapProcessJob]::Contains($Context.daemonRun.Job,$Context.daemonProcess.Handle)) {throw 'Restart evidence: held daemon generation changed'}
@@ -1852,20 +1855,20 @@ function Get-CapMatchedRestartEvidence {
         -not [CapNative]::IsExited($Context.oldBackend.Process.Handle,$Context.oldBackend.Pid)) {return $null}
     $panes=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 1)
     $evidence=[pscustomobject]@{
-        projectPath=$Context.projectPath;nodeId=$Context.nodeId;connection=[long]$restartRows[0].connection
-        counter=[long]$Context.counter;rows=$rows
+        projectPath=$Context.projectPath;nodeId=$Context.nodeId;connection=$restartConnection
+        counter=[long]$Context.counter;rows=$sameConnectionRows
         daemon=[pscustomobject]@{pid=[long]$daemonSnapshot.ProcessId;creationFileTimeUtc=[long]$daemonSnapshot.CreationFileTimeUtc
             held=$true;jobOwned=$true;imageSha256=(Get-FileHash (Join-Path $root 'runtime\graphcoded.exe') -Algorithm SHA256).Hash}
         beforeAttach=[pscustomobject]@{pid=[long]$Context.oldAttach.Pid;creationFileTimeUtc=[long]$Context.oldAttach.CreationFileTimeUtc
             session="graphcode-$($Context.nodeId)";retired=$true}
         afterAttach=[pscustomobject]@{pid=[long]$after.Pid;creationFileTimeUtc=[long]$after.CreationFileTimeUtc
             session="graphcode-$($Context.nodeId)";held=$true;jobOwned=[CapProcessJob]::Contains($AppRun.OwnedJob.Job,$after.Process.Handle)
-            daemonSessionReady=$true;uiaPaneOwned=($panes.Count -eq 1);observedAfterOrdinal=[long]$rows[-1].ordinal
+            daemonSessionReady=$true;uiaPaneOwned=($panes.Count -eq 1);observedAfterOrdinal=[long]$sameConnectionRows[-1].ordinal
             panes=$panes;backendPid=[long]$backend[0].Pid;backendCreationFileTimeUtc=[long]$backend[0].CreationFileTimeUtc
             oldBackendPid=[long]$Context.oldBackend.Pid;oldBackendCreationFileTimeUtc=[long]$Context.oldBackend.CreationFileTimeUtc
             oldBackendExited=$true;appJobId=$AppRun.OwnedJob.JobId}
     }
-    $resumeReplies=@($rows | Where-Object {$_.direction -ceq 'daemon' -and $_.frame.kind -ceq 'response'})
+    $resumeReplies=@($sameConnectionRows | Where-Object {$_.direction -ceq 'daemon' -and $_.frame.kind -ceq 'response'})
     if ($resumeReplies.Count -lt 1) {return $null}
     try {$null=Assert-CapRestartEvidence -Evidence $evidence -ExpectedDaemonSha256 $job.binaries.daemon.sha256}
     catch {

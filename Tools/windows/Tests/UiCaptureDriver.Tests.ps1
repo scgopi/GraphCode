@@ -4168,6 +4168,9 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
     Assert-CapTest ($workerSource.Contains('Assert-CapNoPngArtifacts')) 'Worker does not refuse PNG creation or retention.'
     Assert-CapTest ($workerSource.Contains('function ConvertTo-CapWorkerImagePath') -and
         -not $workerSource.Contains('ConvertTo-CapImagePath (')) 'Restart path normalization still depends on a module-private helper.'
+    Assert-CapTest ($workerSource.Contains('$sameConnectionRows=@($rows | Where-Object connection -EQ $restartConnection)') -and
+        $supervisorSource.Contains('$connectionRows=@($rows | Where-Object connection -EQ $restart.evidence.connection)')) `
+        'Restart evidence does not isolate and rebind the exact Restart connection.'
     Assert-CapTest ($workerSource.Contains('checkpointCount') -and
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
     Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and
