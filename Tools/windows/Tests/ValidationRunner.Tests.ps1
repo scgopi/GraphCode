@@ -11,7 +11,8 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
           ($node.Name -like "*-MultiProject*" -or $node.Name -cin @(
             "ConvertTo-SketchCanonicalJson",
             "Test-RetryableUiaError",
-            "Test-UpdateBannerClickTarget"
+            "Test-UpdateBannerClickTarget",
+            "Get-DynamicProjectCardSnapshotDecision"
           ))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
@@ -1907,7 +1908,42 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     Assert-MultiCase (Test-MultiProjectObservedSurface "project" $true ([ordered]@{
       loopBars = @(); toolbars = @(); foreignWorkspaceFragmentCount = 0
     }) $workspaceOwner 4242) "project-only marker shape rejected"
-    return "Two ordinary project rows, one exact project-card projection"
+    $expectedDynamic = @(
+      [ordered]@{ automationId = "canvas-card-1983941480823304696"; name = "UIA loop A" },
+      [ordered]@{ automationId = "canvas-card-1983940381311676485"; name = "UIA loop B" }
+    )
+    $dynamic = @(
+      [ordered]@{ automationId = $expectedDynamic[0].automationId; name = $expectedDynamic[0].name
+        processId = 4242; bounds = @(496,236,936,408) },
+      [ordered]@{ automationId = $expectedDynamic[1].automationId; name = $expectedDynamic[1].name
+        processId = 4242; bounds = @(976,236,1416,408) }
+    )
+    $graphBounds = @(440,68,2400,1300)
+    Assert-MultiCase ((Get-DynamicProjectCardSnapshotDecision "project" $dynamic $expectedDynamic 4242 $graphBounds).ready) `
+      "exact DPI192 project-card snapshot was rejected"
+    $empty = Copy-MultiProjectValue $dynamic
+    $empty[1].bounds = @(0,0,0,0)
+    $emptyDecision = Get-DynamicProjectCardSnapshotDecision "project" $empty $expectedDynamic 4242 $graphBounds
+    Assert-MultiCase (-not $emptyDecision.ready -and $emptyDecision.failure -ceq "bounds-empty" -and
+      $emptyDecision.cards[1].automationId -ceq $expectedDynamic[1].automationId) `
+      "identity-present DPI192 empty bounds did not fail exactly"
+    foreach ($mutation in @("missing", "foreign", "duplicate", "order", "wrong-surface", "outside-viewport", "overlap")) {
+      $candidate = Copy-MultiProjectValue $dynamic
+      $surface = "project"
+      switch ($mutation) {
+        "missing" { $candidate = @($candidate[0]) }
+        "foreign" { $candidate[1].processId = 7777 }
+        "duplicate" { $candidate[1].automationId = $candidate[0].automationId }
+        "order" { $candidate = @($candidate[1], $candidate[0]) }
+        "wrong-surface" { $surface = "overview" }
+        "outside-viewport" { $candidate[1].bounds = @(2600,236,3040,408) }
+        "overlap" { $candidate[1].bounds = @(700,236,1140,408) }
+      }
+      Assert-MultiCase (-not (Get-DynamicProjectCardSnapshotDecision `
+          $surface $candidate $expectedDynamic 4242 $graphBounds).ready) `
+        "dynamic project-card snapshot accepted $mutation"
+    }
+    return "Exact DPI192 frozen card snapshot; identity-present empty bounds and missing/foreign/duplicate/order/surface/viewport/overlap negatives"
   }
   foreach ($mutation in @("extra-card", "extra-project", "duplicate-card", "duplicate-project",
       "foreign-card-pid", "foreign-project-pid", "foreign-card-count", "foreign-project-count")) {
@@ -4210,6 +4246,13 @@ Start-Sleep -Seconds 60
       "Windows unchanged-title rename was incorrectly treated as a no-op", "observedOwnerCount", "observedCardCount",
       "projectBounds", "sidebarBounds", "source-derived, not a UIA caption")) {
     if (-not $uiaLiveGateSource.Contains($required)) { throw "RED: multi-project live evidence lacks $required" }
+  }
+  if (-not $uiaLiveGateSource.Contains("function Get-DynamicProjectCardSnapshotDecision") -or
+      -not $uiaLiveGateSource.Contains('Get-DynamicProjectCardSnapshotDecision "project"') -or
+      -not $uiaLiveGateSource.Contains("function Get-DynamicProjectCardCapture") -or
+      -not $uiaLiveGateSource.Contains("UIA_DYNAMIC_PROJECT_CARD_EVIDENCE=") -or
+      -not $uiaLiveGateSource.Contains('"fit-canvas"')) {
+    throw "RED: dynamic project cards are not frozen after bounded Fit Canvas normalization and reacquisition"
   }
   if (-not $uiaLiveGateSource.Contains('$matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id') -or
       $uiaLiveGateSource.Contains('if ($null -ne $loopBar) { $matches = $matches -and')) {

@@ -2570,6 +2570,117 @@ function Wait-ForGraphChildren(
   return [pscustomobject]@{ Graph = $liveGraph; Items = $observed; Children = $children }
 }
 
+function Get-DynamicProjectCardSnapshotDecision(
+  [string] $surface,
+  [object[]] $cards,
+  [object[]] $expected,
+  [int] $processId,
+  [double[]] $graphBounds
+) {
+  $reject = {
+    param([string] $failure)
+    return [ordered]@{ ready = $false; failure = $failure; cards = @($cards) }
+  }
+  if ($surface -cne "project") { return & $reject "wrong-surface" }
+  if ($processId -le 0) { return & $reject "invalid-process" }
+  if ($cards -isnot [array] -or $expected -isnot [array] -or
+      $cards.Count -ne $expected.Count -or $expected.Count -ne 2) {
+    return & $reject "card-count"
+  }
+  if ($graphBounds -isnot [array] -or $graphBounds.Count -ne 4) {
+    return & $reject "graph-bounds"
+  }
+  foreach ($coordinate in $graphBounds) {
+    if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and
+        $coordinate -isnot [double] -and $coordinate -isnot [single] -and
+        $coordinate -isnot [decimal]) -or [double]::IsNaN([double]$coordinate) -or
+        [double]::IsInfinity([double]$coordinate)) {
+      return & $reject "graph-bounds"
+    }
+  }
+  if ($graphBounds[2] -le $graphBounds[0] -or $graphBounds[3] -le $graphBounds[1]) {
+    return & $reject "graph-bounds"
+  }
+  $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  for ($index = 0; $index -lt $cards.Count; $index++) {
+    $card = $cards[$index]
+    $target = $expected[$index]
+    if ($card -isnot [Collections.IDictionary] -or $card.Count -ne 4 -or
+        $target -isnot [Collections.IDictionary] -or $target.Count -ne 2) {
+      return & $reject "card-shape"
+    }
+    if (@($card.Keys | Where-Object {
+          @("automationId", "name", "processId", "bounds") -cnotcontains $_
+        }).Count -ne 0 -or
+        @($target.Keys | Where-Object {
+          @("automationId", "name") -cnotcontains $_
+        }).Count -ne 0) {
+      return & $reject "card-shape"
+    }
+    if ($card.automationId -isnot [string] -or -not $seen.Add($card.automationId)) {
+      return & $reject "duplicate-card"
+    }
+    if ($card.automationId -cne $target.automationId -or $card.name -cne $target.name) {
+      return & $reject "card-order"
+    }
+    if (($card.processId -isnot [int] -and $card.processId -isnot [long]) -or
+        $card.processId -ne $processId) {
+      return & $reject "foreign-card"
+    }
+    if ($card.bounds -isnot [array] -or $card.bounds.Count -ne 4) {
+      return & $reject "bounds-shape"
+    }
+    foreach ($coordinate in $card.bounds) {
+      if (($coordinate -isnot [int] -and $coordinate -isnot [long] -and
+          $coordinate -isnot [double] -and $coordinate -isnot [single] -and
+          $coordinate -isnot [decimal]) -or [double]::IsNaN([double]$coordinate) -or
+          [double]::IsInfinity([double]$coordinate)) {
+        return & $reject "bounds-shape"
+      }
+    }
+    if ($card.bounds[2] -le $card.bounds[0] -or $card.bounds[3] -le $card.bounds[1]) {
+      return & $reject "bounds-empty"
+    }
+    if ([Math]::Min($card.bounds[2], $graphBounds[2]) -le
+          [Math]::Max($card.bounds[0], $graphBounds[0]) -or
+        [Math]::Min($card.bounds[3], $graphBounds[3]) -le
+          [Math]::Max($card.bounds[1], $graphBounds[1])) {
+      return & $reject "outside-viewport"
+    }
+  }
+  $first = $cards[0].bounds
+  $second = $cards[1].bounds
+  if ([Math]::Min($first[2], $second[2]) -gt [Math]::Max($first[0], $second[0]) -and
+      [Math]::Min($first[3], $second[3]) -gt [Math]::Max($first[1], $second[1])) {
+    return & $reject "overlap"
+  }
+  return [ordered]@{ ready = $true; failure = $null; cards = @($cards) }
+}
+
+function Get-DynamicProjectCardCapture(
+  [System.Windows.Automation.AutomationElement] $element
+) {
+  $request = New-Object System.Windows.Automation.CacheRequest
+  $request.TreeScope = [System.Windows.Automation.TreeScope]::Element
+  $request.Add([System.Windows.Automation.AutomationElement]::ProcessIdProperty)
+  $request.Add([System.Windows.Automation.AutomationElement]::AutomationIdProperty)
+  $request.Add([System.Windows.Automation.AutomationElement]::NameProperty)
+  $request.Add([System.Windows.Automation.AutomationElement]::BoundingRectangleProperty)
+  $cached = $element.GetUpdatedCache($request)
+  $bounds = $cached.Cached.BoundingRectangle
+  return [ordered]@{
+    automationId = [string]$cached.Cached.AutomationId
+    name = [string]$cached.Cached.Name
+    processId = [int]$cached.Cached.ProcessId
+    bounds = @(
+      [double]$bounds.Left,
+      [double]$bounds.Top,
+      [double]$bounds.Right,
+      [double]$bounds.Bottom
+    )
+  }
+}
+
 # A modal teardown (e.g. dismissing the update-offer dialog via SendCommand)
 # rebuilds the shell's fragment tree, and a $root captured before that teardown
 # can become a permanently dead reference - not a transient blip that
@@ -6507,28 +6618,101 @@ try {
     ForEach-Object { $_.Current.AutomationId } | Where-Object { $_ })
   $null = Assert-FragmentLinks $loops $rawWalker $loopChildIds "RawView Loops"
   $null = Assert-FragmentLinks $loops $controlWalker $loopChildIds "ControlView Loops"
-  $projectCards = @(Get-DirectChildren $graph $rawWalker | Where-Object {
-    $_.Current.AutomationId -match '^canvas-card-' -and
-    $_.Current.Name -in @("UIA loop A", "UIA loop B")
+  # Canvas cards are not virtualized sidebar rows and intentionally do not expose
+  # ScrollItem. Normalize the camera through the source-owned Fit Canvas action,
+  # then reacquire the graph and freeze one exact two-card publication before
+  # reading geometry. Holding the pre-sidebar graph/card handles here samples an
+  # arbitrary later provider state, which is the DPI192 empty-bounds cutoff this
+  # phase is meant to prevent.
+  $dynamicProjectNodeIds = @(
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222"
+  )
+  $dynamicProjectExpected = @(
+    [ordered]@{
+      automationId = Get-MultiProjectAutomationId "project-card" $fixtureProjectPath $dynamicProjectNodeIds[0]
+      name = "UIA loop A"
+    },
+    [ordered]@{
+      automationId = Get-MultiProjectAutomationId "project-card" $fixtureProjectPath $dynamicProjectNodeIds[1]
+      name = "UIA loop B"
+    }
+  )
+  $fitProjectCanvas = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+  Require (($null -ne $fitProjectCanvas) -and
+           ($fitProjectCanvas.Current.ProcessId -eq $process.Id) -and
+           ($fitProjectCanvas.Current.Name -ceq "Fit canvas")) `
+    "dynamic project card normalization omitted the exact owned Fit Canvas action"
+  $fitProjectCanvas.GetCurrentPattern(
+    [System.Windows.Automation.InvokePattern]::Pattern
+  ).Invoke()
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $dynamicProjectDecision = $null
+  $dynamicProjectChildren = @()
+  $dynamicProjectElements = @()
+  $graph = $null
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $graph = Find-FragmentById $root "graph" $rawWalker
+    if ($null -ne $graph) {
+      $dynamicProjectChildren = @(Get-DirectChildren $graph $rawWalker)
+      $dynamicProjectElements = @($dynamicProjectChildren | Where-Object {
+        ($_.Current.AutomationId -cin @($dynamicProjectExpected | ForEach-Object { $_.automationId })) -or
+        ($_.Current.Name -cin @($dynamicProjectExpected | ForEach-Object { $_.name }))
+      })
+      $dynamicProjectCaptures = @($dynamicProjectElements | ForEach-Object {
+        Get-DynamicProjectCardCapture $_
+      })
+      $graphBounds = $graph.Current.BoundingRectangle
+      $dynamicProjectDecision = Get-DynamicProjectCardSnapshotDecision "project" `
+        $dynamicProjectCaptures $dynamicProjectExpected $process.Id @(
+          [double]$graphBounds.Left,
+          [double]$graphBounds.Top,
+          [double]$graphBounds.Right,
+          [double]$graphBounds.Bottom
+        )
+      if ($dynamicProjectDecision.ready) { break }
+    }
+    Start-Sleep -Milliseconds 100
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  }
+  Require (($null -ne $dynamicProjectDecision) -and $dynamicProjectDecision.ready) `
+    "dynamic project cards did not converge after bounded Fit Canvas normalization/reacquisition: $($dynamicProjectDecision.failure)"
+  $projectCards = @($dynamicProjectExpected | ForEach-Object {
+    $expectedId = $_.automationId
+    @($dynamicProjectElements | Where-Object {
+      $_.Current.AutomationId -ceq $expectedId
+    })[0]
   })
-  Require (($projectCards.Count -eq 2) -and
-           ((@($projectCards | ForEach-Object { $_.Current.Name }) -join "|") -eq "UIA loop A|UIA loop B")) "Graph did not expose synchronized project cards"
+  $projectCardIds = @($dynamicProjectDecision.cards | ForEach-Object { $_.automationId })
+  Write-Host ("UIA_DYNAMIC_PROJECT_CARD_EVIDENCE=" + ([ordered]@{
+    surface = "project"
+    normalizedBy = "fit-canvas"
+    attempts = $attempt + 1
+    processId = $process.Id
+    graphBounds = @(
+      [double]$graphBounds.Left,
+      [double]$graphBounds.Top,
+      [double]$graphBounds.Right,
+      [double]$graphBounds.Bottom
+    )
+    cards = $dynamicProjectDecision.cards
+    exactOrder = $projectCardIds
+    nonOverlapping = $true
+    viewportIntersectionRequired = $true
+  } | ConvertTo-Json -Compress -Depth 5))
   foreach ($card in $projectCards) {
-    Require (($card.Current.BoundingRectangle.Width -gt 0) -and
-             ($card.Current.BoundingRectangle.Height -gt 0)) "dynamic project card has empty bounds"
     $null = $card.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   }
-  $projectCardIds = @($projectCards | ForEach-Object { $_.Current.AutomationId })
-  $attentionAction = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+  $attentionAction = @($dynamicProjectChildren | Where-Object {
     $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -eq "Reply"
   }) | Select-Object -First 1
   Require ($null -ne $attentionAction) "NEEDS YOU card omitted its reason-specific Reply action"
   Require (($attentionAction.Current.BoundingRectangle.Width -gt 0) -and
            ($attentionAction.Current.BoundingRectangle.Height -gt 0)) "Reply attention action had empty bounds"
   $null = $attentionAction.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-  $reclaimOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Reclaim" }) | Select-Object -First 1
-  $keepOffer = @(Get-DirectChildren $graph $rawWalker | Where-Object { $_.Current.Name -eq "Keep" }) | Select-Object -First 1
+  $reclaimOffer = @($dynamicProjectChildren | Where-Object { $_.Current.Name -eq "Reclaim" }) | Select-Object -First 1
+  $keepOffer = @($dynamicProjectChildren | Where-Object { $_.Current.Name -eq "Keep" }) | Select-Object -First 1
   Require ($null -ne $reclaimOffer) "resolved card with a reclaimable worktree omitted its Reclaim descendant"
   Require ($null -ne $keepOffer) "resolved card with a reclaimable worktree omitted its Keep descendant"
   Require (($reclaimOffer.Current.BoundingRectangle.Width -gt 0) -and
@@ -6537,7 +6721,7 @@ try {
            ($keepOffer.Current.BoundingRectangle.Height -gt 0)) "Keep descendant had empty bounds"
   $null = $reclaimOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
   $null = $keepOffer.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-  $railReviews = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+  $railReviews = @($dynamicProjectChildren | Where-Object {
     $_.Current.AutomationId -match '^canvas-attention-review-'
   })
   Require ($railReviews.Count -eq 1) "attention rail omitted its single Review button"
