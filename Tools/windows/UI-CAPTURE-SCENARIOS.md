@@ -281,7 +281,7 @@ combined-tree count update and registered-runner rerun.
 | Typed fixture inventory | Eight wire nodes, six qualified card-state records; unchanged graph publication through the actual B peer on a real local pipe; actual worker persistence of the isolated Restart graph and recent-project index |
 | Fixture refusals | Fourteen identity/type/status/wiring/reason/selection/resolution/size/branch/source/date/duplicate/required-project-date mutations |
 | Scene inventory | One accepted complete inventory; eighteen omission refusals; actual worker's seventeen static-scene/eleven seed/one Restart dispatches with simulated dependencies |
-| Tab observations | Eight positive shapes and seventy-two negative mutations of exact owned IDs, parents, selection, close bounds, final-tab eligibility and visibility |
+| Tab observations | Eight positive shapes and ninety-four negative mutations of exact owned IDs, parents, names, selection, order, missing/foreign/duplicate rows, close bounds, final-tab eligibility and visibility |
 | Restart evidence | Two simulated positive transcripts (including UUID casing and response-embedded graph data) and nineteen strict refusal mutations |
 | Restart route | Actual worker function, one simulated positive and one offline-authority refusal; actual pending helper returns null for two incomplete files, retains both diagnostics, and loudly refuses malformed complete JSON |
 | Transparent recorder | Four unchanged framed messages on actual local pipes, one connection, a simulated echo upstream; no daemon or UI |
@@ -330,7 +330,7 @@ observed UI state, not a `selected` property invented on the daemon's node.
 | `s-tabs-two-agent-selected` | Two tabs; blocked agent selected, Shell unselected; the agent's attention indicator remains contextual. |
 | `s-tabs-two-shell-selected` | Two actual Shell tabs after closing the agent tab, second selected. |
 | `s-tabs-split-right-focused` | Two Shell tabs, selected tab split horizontally with the right pane explicitly focused; safe M3 context only. |
-| `s-tabs-many-first`, `s-tabs-overflow-last` | Twelve tabs; first-selected and last-selected overflow windows. Hidden IDs may not appear in the UIA roster. Ctrl+1 through Ctrl+9 have inline hints; later indexes do not invent one. |
+| `s-tabs-many-first`, `s-tabs-overflow-last` | Twelve tabs; first-selected and last-selected overflow windows. Hidden IDs may not appear in the UIA roster, and tab rows do not claim the sidebar-only ScrollItem contract. The first-selected route derives the exact contiguous visible stable-ID window, invokes its nearest edge tab, reacquires the roster, then invokes the exact first-tab ID. Ctrl+1 through Ctrl+9 have inline hints; later indexes do not invent one. |
 | `s-tabs-hover-close` | Two tabs; posted owned-window hover over Shell, close geometry retained. This is not physical mouse input. |
 | `s-tabs-last-guard` | One selected tab; the exact visible close row is retained, while the phase's source-bound `Workspace.canCloseTab()` contract proves that one tab cannot close. Dynamic UIA rows report enabled independently of that product guard, and capture does not attempt the close. |
 | `s-restart-confirmed` | Existing Restart session UIA route against an actual isolated daemon, with same-connection protocol and new owned-attach evidence described below. |

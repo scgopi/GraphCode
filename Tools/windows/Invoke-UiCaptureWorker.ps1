@@ -1579,6 +1579,58 @@ function Read-CapMatchedRows {
     })
 }
 
+function Invoke-CapMatchedTabSelection {
+    param(
+        [Parameter(Mandatory)]$AppRun,
+        [Parameter(Mandatory)][ValidateRange(1,12)][int]$TotalTabs,
+        [Parameter(Mandatory)][ValidateRange(0,11)][int]$SelectedTab,
+        [Parameter(Mandatory)][ValidateRange(0,11)][int]$TargetIndex,
+        [Parameter(Mandatory)][string]$AgentTitle,
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit,
+        [Parameter(Mandatory)][long]$ExpectedDpi,
+        [Parameter(Mandatory)][long]$DpiBase
+    )
+    if ($SelectedTab -ge $TotalTabs -or $TargetIndex -ge $TotalTabs) {
+        throw 'Matched tab selection index is outside the declared topology.'
+    }
+    $observe = {
+        param([int]$ExpectedSelected)
+        $rows = @(Read-CapMatchedRows -AppRun $AppRun)
+        Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $AppRun.Run.Identity.Pid `
+            -TotalTabs $TotalTabs -SelectedTab $ExpectedSelected -AgentTitle $AgentTitle `
+            -SourceCommit $SourceCommit -ExpectedDpi $ExpectedDpi -DpiBase $DpiBase
+    }
+    $before = & $observe $SelectedTab
+    $visible = @($before.visible.index)
+    $bridge = $null
+    if ($TargetIndex -notin $visible) {
+        $first = [int]$visible[0]
+        $last = [int]$visible[-1]
+        $bridge = if ($TargetIndex -lt $first) {$first} elseif ($TargetIndex -gt $last) {$last} else {
+            throw 'Matched tab target is absent from a non-contiguous visible overflow window.'
+        }
+        $bridgeName = if ($bridge -eq 0) {$AgentTitle} else {'Shell'}
+        $null = Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' `
+            -SubjectId ([string]$bridge) -Name $bridgeName
+        $afterBridge = & $observe $bridge
+        if ($TargetIndex -notin @($afterBridge.visible.index)) {
+            throw "Matched tab $TargetIndex remained genuinely unavailable after exact overflow bridge $bridge."
+        }
+    }
+    $targetName = if ($TargetIndex -eq 0) {$AgentTitle} else {'Shell'}
+    $null = Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' `
+        -SubjectId ([string]$TargetIndex) -Name $targetName
+    $after = & $observe $TargetIndex
+    return [pscustomobject]@{
+        target=$TargetIndex
+        bridge=$bridge
+        beforeVisible=$visible
+        afterVisible=@($after.visible.index)
+        selected=$after.selected
+        contract='EXACT_VISIBLE_ID_BRIDGE_REACQUIRE_EXACT_TARGET_ID'
+    }
+}
+
 function Read-CapMatchedPanes {
     param($AppRun,[int]$ExpectedCount,[int]$FocusedIndex=-1)
     $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
@@ -1869,6 +1921,7 @@ function Invoke-CapMatchedScenes {
             } else {
                 $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
                 $total=1;$selected=0;$title=switch ($nodeIndex) {0 {'Goal'};6 {'Loop'};7 {'Agent'};default {'Copilot CLI'}}
+                $tabSelection=$null
                 $newTabs=if ($scene -cin @('s-tabs-many-first','s-tabs-overflow-last')) {11}
                     elseif ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {2}
                     elseif ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close')) {1} else {0}
@@ -1880,17 +1933,20 @@ function Invoke-CapMatchedScenes {
                     $selected=1
                 }
                 if ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close','s-tabs-many-first')) {
-                    if ($total -eq 12) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '2' -Name 'Shell'}
-                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '0' -Name $title
+                    if ($total -eq 12) {
+                        $tabSelection=Invoke-CapMatchedTabSelection -AppRun $app -TotalTabs $total `
+                            -SelectedTab $selected -TargetIndex 0 -AgentTitle $title `
+                            -SourceCommit $job.binaries.$Phase.source `
+                            -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
+                    } else {
+                        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '0' -Name $title
+                    }
                     $selected=0
                 }
                 if ($scene -ceq 's-tabs-split-right-focused') {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-split-right'}
                 $rows=@(Read-CapMatchedRows -AppRun $app)
-                $visibleCount=[Math]::Min(10,$total)
-                $first=if ($selected -ge $visibleCount) {$selected-$visibleCount+1} else {0}
-                $visible=@($first..($first+$visibleCount-1))
                 $tabs=Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $app.Run.Identity.Pid `
-                    -TotalTabs $total -SelectedTab $selected -AgentTitle $title -VisibleIndexes $visible `
+                    -TotalTabs $total -SelectedTab $selected -AgentTitle $title `
                     -SourceCommit $job.binaries.$Phase.source `
                     -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
                 if ($scene -ceq 's-tabs-hover-close') {
@@ -1902,6 +1958,7 @@ function Invoke-CapMatchedScenes {
                 if (@($panes | Where-Object focused).Count -ne 1) {throw 'Matched selected pane did not acquire the reported UIA focus.'}
                 $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
                     tabs=$tabs;panes=$panes;nodeId=$node.id;nodeState=$node.state
+                    tabSelection=$tabSelection
                     hover=if ($scene -ceq 's-tabs-hover-close') {'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'} else {'NOT_REQUESTED'}}
                 Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $null -Phase $Phase
             }

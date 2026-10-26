@@ -3635,12 +3635,50 @@ int main(void) {
 '@
 }
 
+function Get-CapMatchedVisibleTabIndexes {
+    param(
+        [Parameter(Mandatory)][object[]]$Rows,
+        [Parameter(Mandatory)][ValidateRange(1, 12)][int]$TotalTabs
+    )
+    $indexById = @{}
+    foreach ($index in 0..($TotalTabs - 1)) {
+        $id = Get-CapMatchedAutomationId "workspace-tab:$index"
+        if ($indexById.ContainsKey($id)) { throw 'Matched tabs stable identities collide.' }
+        $indexById[$id] = $index
+    }
+    $visible = [Collections.Generic.List[int]]::new()
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    foreach ($row in @($Rows | Where-Object AutomationId -CMatch '^workspace-tab-[0-9]+$')) {
+        $id = [string]$row.AutomationId
+        if (-not $indexById.ContainsKey($id)) {
+            throw 'Matched tabs roster contains hidden, duplicate or foreign tab identities.'
+        }
+        $index = [int]$indexById[$id]
+        if (-not $seen.Add($index)) {
+            throw 'Matched tabs roster contains hidden, duplicate or foreign tab identities.'
+        }
+        $visible.Add($index)
+    }
+    if ($visible.Count -eq 0) { throw 'Matched tabs have no visible stable identities.' }
+    $ordered = @($visible | Sort-Object)
+    for ($position = 1; $position -lt $ordered.Count; $position++) {
+        if ($ordered[$position] -ne $ordered[$position - 1] + 1) {
+            throw 'Matched tabs visible overflow window is not contiguous.'
+        }
+    }
+    return $ordered
+}
+
 function Get-CapMatchedTabObservation {
     param([Parameter(Mandatory)][object[]]$Rows,[Parameter(Mandatory)][int]$ExpectedProcessId,
         [Parameter(Mandatory)][int]$TotalTabs,[Parameter(Mandatory)][int]$SelectedTab,
-        [Parameter(Mandatory)][string]$AgentTitle,[Parameter(Mandatory)][int[]]$VisibleIndexes,
+        [Parameter(Mandatory)][string]$AgentTitle,[int[]]$VisibleIndexes,
         [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$SourceCommit,
         [Parameter(Mandatory)][long]$ExpectedDpi,[Parameter(Mandatory)][long]$DpiBase)
+    $visibilityDerived = -not $PSBoundParameters.ContainsKey('VisibleIndexes')
+    if ($visibilityDerived) {
+        $VisibleIndexes = @(Get-CapMatchedVisibleTabIndexes -Rows $Rows -TotalTabs $TotalTabs)
+    }
     if ($TotalTabs -lt 1 -or $SelectedTab -lt 0 -or $SelectedTab -ge $TotalTabs -or
         $VisibleIndexes.Count -lt 1 -or $SelectedTab -notin $VisibleIndexes -or
         @($VisibleIndexes | Sort-Object -Unique).Count -ne $VisibleIndexes.Count) {throw 'Matched tabs invalid declared topology.'}
@@ -3688,6 +3726,7 @@ function Get-CapMatchedTabObservation {
     }
     return [pscustomobject]@{total=$TotalTabs;selected=$SelectedTab;visible=@($observed)
         sourceCommit=$SourceCommit;identityContract='VISIBLE_LAYOUT_INDEX_FNV1A64_ROW_KEY'
+        visibilityContract=$(if ($visibilityDerived) {'DERIVED_CONTIGUOUS_OWNED_VISIBLE_STABLE_IDS'} else {'DECLARED_VISIBLE_STABLE_IDS'})
         closeBoundsContract="SOURCE_DPI_SCALED_24_LOGICAL_TO_${expectedCloseWidth}_PHYSICAL"
         closeGuardContract='WORKSPACE_CAN_CLOSE_TAB_GT_ONE_NOT_UIA_ISENABLED'
         evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
@@ -5626,7 +5665,7 @@ function Assert-CapNoWorkerTransientArtifacts {
 
 Export-ModuleMember -Function @(
     'Get-CapMatchedSceneNames','Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
-    'Get-CapMatchedTabObservation','Assert-CapRestartEvidence','Initialize-CapMatchedProxy',
+    'Get-CapMatchedVisibleTabIndexes','Get-CapMatchedTabObservation','Assert-CapRestartEvidence','Initialize-CapMatchedProxy',
     'Read-CapRestartTranscript','Assert-CapMatchedManifest','Get-CapMatchedBackendSource',
     'Get-CapDSceneNames',
     'Assert-CapDFixture',

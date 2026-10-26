@@ -3328,12 +3328,17 @@ function Invoke-CapMatchedDpiContracts {
 function Invoke-CapMatchedTabContracts {
     $appSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\App.zig'))
     $terminalSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\TerminalSurface.zig'))
+    $accessibilitySource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\Accessibility.zig'))
     $providerSource=[IO.File]::ReadAllText((Join-Path $driverDirectory '..\..\graphcode-windows\src\AccessibilityProvider.cpp'))
     Assert-CapTest ($appSource.Contains(
             'self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab())') -and
+        $appSource.Contains('const tab_bounds = workspace.visibleTabBounds(tab_index) orelse continue;') -and
         $appSource.Contains('if (workspace.tabCloseBounds(tab_index) == null or !workspace.canCloseTab()) return false;') -and
         $terminalSource.Contains('bounds.right - Dpi.scale(24, self.dpi)') -and
+        $terminalSource.Contains('const first = if (selected >= count) selected - count + 1 else 0;') -and
         $terminalSource -cmatch '(?s)pub fn canCloseTab\(self: \*const Workspace\) bool \{\s*return self\.layout\.tabs\.items\.len > 1;\s*\}' -and
+        $accessibilitySource.Contains('sidebar_scroll: bool = false,') -and
+        $providerSource -cmatch '(?s)bool supportsScrollItem\(\) const \{.*?if \(isRowKey\(id_\)\) return state_->rows\.at\(id_\)\.scrolls;' -and
         $providerSource -cmatch '(?s)if \(isRowKey\(id_\)\) \{.*?bool_value = sidebar_error_footer.*?: true;') `
         'Product tab close source contract no longer matches the capture interpretation.'
     foreach ($vector in @(
@@ -3343,7 +3348,7 @@ function Invoke-CapMatchedTabContracts {
     )) {
         Assert-CapTest ((Get-CapMatchedAutomationId $vector[0]) -ceq $vector[1]) 'Native row-prefix/hash reference vector differs.'
     }
-    $positive=0;$negative=0;$failedSeed=$null
+    $positive=0;$negative=0;$failedSeed=$null;$failedManyFirst=$null
     foreach ($shape in @(
         @{phase='before';scene='s-tabs-goal-needs-you';source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
             total=1;selected=0;title='Goal';visible=@(0);closeWidth=48;failedSeed=$true},
@@ -3353,9 +3358,11 @@ function Invoke-CapMatchedTabContracts {
         @{total=2;selected=0;title='Copilot CLI';visible=@(0,1)},
         @{total=2;selected=1;title='Copilot CLI';visible=@(0,1)},
         @{total=12;selected=0;title='Copilot CLI';visible=@(0..9)},
-        @{total=12;selected=11;title='Copilot CLI';visible=@(2..11)}
+        @{phase='before';scene='s-tabs-many-first';source='a8b09434fe41a61030fd290f7d065ec6d0db8005'
+            total=12;selected=11;title='Copilot CLI';visible=@(4..11);failedManyFirst=$true}
     )) {
         $isFailedSeed=$shape.ContainsKey('failedSeed') -and $shape.failedSeed
+        $isFailedManyFirst=$shape.ContainsKey('failedManyFirst') -and $shape.failedManyFirst
         $rows=@(foreach ($position in 0..($shape.visible.Count-1)) {
             $index=$shape.visible[$position];$x=250+110*$position
             $closeWidth=if ($shape.ContainsKey('closeWidth')) {$shape.closeWidth} else {48}
@@ -3368,9 +3375,10 @@ function Invoke-CapMatchedTabContracts {
                 Bounds=@(($x+106-$closeWidth),100,($x+106),124)}
         }) | ConvertTo-Json -Depth 10 | ConvertFrom-Json
         $arguments=@{Rows=$rows;ExpectedProcessId=4242;TotalTabs=$shape.total;SelectedTab=$shape.selected
-            AgentTitle=$shape.title;VisibleIndexes=$shape.visible
-            SourceCommit=$(if ($isFailedSeed) {$shape.source} else {'65a85781c1366f9c3d2398e264ab2df9220c7f8c'})
+            AgentTitle=$shape.title
+            SourceCommit=$(if ($isFailedSeed -or $isFailedManyFirst) {$shape.source} else {'65a85781c1366f9c3d2398e264ab2df9220c7f8c'})
             ExpectedDpi=192;DpiBase=96}
+        if (-not $isFailedManyFirst) {$arguments.VisibleIndexes=$shape.visible}
         $proof=Get-CapMatchedTabObservation @arguments
         Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected) 'Tab shape omitted a visible state.'
         if ($isFailedSeed) {
@@ -3383,10 +3391,26 @@ function Invoke-CapMatchedTabContracts {
                 bounds=$proof.visible[0].bounds;closeBounds=$proof.visible[0].closeBounds
                 closeBoundsContract=$proof.closeBoundsContract}
         }
+        if ($isFailedManyFirst) {
+            Assert-CapTest (($proof.visible.index -join ',') -ceq '4,5,6,7,8,9,10,11') `
+                'Exact failed many-first roster did not retain the observed DPI192 overflow window.'
+            $failedManyFirst=[pscustomobject]@{
+                lease='94dd0b32-0169-492e-8233-af1b571e61b4'
+                manifestSha256='07B23692C55145F1FCD5D4C2A03D522ABFFE9F56AEAD36954BF143873D5669D2'
+                jobSha256='002629F80DF2CD0221B76FCD8169C21F98E16DC542721D301BD29B4796FC6630'
+                fixtureMappingSha256='6682206FC4EC0558307B62888BA008D24A16EF40C30A25DF1C929FC94FBED838'
+                phase=$shape.phase;scene=$shape.scene;source=$shape.source;dpi=192
+                selected=$shape.selected;visible=@($proof.visible.index)
+                unavailableIndex=2
+                unavailableAutomationId=Get-CapMatchedAutomationId 'workspace-tab:2'
+                terminalFailure="UIA element 'Shell' did not become available before the reserved deadline."
+            }
+        }
         $positive++
         foreach ($mutation in @('foreign-pid','wrong-parent','wrong-identity','wrong-name','wrong-selection',
-            'wrong-order','escaped-close','foreign-close','guard','duplicate','hidden','offscreen')) {
+            'wrong-order','missing','escaped-close','foreign-close','guard','duplicate','hidden','offscreen')) {
             if ($mutation -ceq 'wrong-order' -and $shape.visible.Count -lt 2) {continue}
+            if ($mutation -ceq 'missing' -and $shape.visible.Count -lt 3) {continue}
             $changed=$rows | ConvertTo-Json -Depth 10 | ConvertFrom-Json
             switch ($mutation) {
                 'foreign-pid' {$changed[0].ProcessId=7777}
@@ -3400,6 +3424,7 @@ function Invoke-CapMatchedTabContracts {
                     $changed[2].Bounds=@($right,[double]$changed[2].Bounds[1],$nextRight,[double]$changed[2].Bounds[3])
                     $changed[3].Bounds=@($closeLeft,[double]$changed[2].Bounds[1],$nextRight,[double]$changed[2].Bounds[3])
                 }
+                'missing' {$changed=@($changed[0..1]+$changed[4..($changed.Count-1)])}
                 'escaped-close' {$changed[1].Bounds[0]=$changed[0].Bounds[0]-1}
                 'foreign-close' {
                     $foreign=$changed[1] | ConvertTo-Json -Depth 10 | ConvertFrom-Json
@@ -3416,8 +3441,8 @@ function Invoke-CapMatchedTabContracts {
             $negative++
         }
     }
-    Assert-CapTest ($null -ne $failedSeed) 'Exact failed C8R job/seed observation did not execute.'
-    return @{positiveShapes=$positive;negativeMutations=$negative;failedSeed=$failedSeed
+    Assert-CapTest ($null -ne $failedSeed -and $null -ne $failedManyFirst) 'Exact failed C8R job/scene observations did not execute.'
+    return @{positiveShapes=$positive;negativeMutations=$negative;failedSeed=$failedSeed;failedManyFirst=$failedManyFirst
         sourceContract='APP_CLOSE_ELIGIBILITY_AND_ROUTE_PLUS_WORKSPACE_GT_ONE_WITH_UIA_DYNAMIC_ROWS_ENABLED'
         nativeHover='NotExecuted';paneFocus='NotExecuted'
         evidence='SYNTHETIC_UIA_RECORDS_NOT_NATIVE_OBSERVATION'}
@@ -3948,11 +3973,14 @@ function Invoke-CapSeedPathContracts {
 
 function Invoke-CapMatchedSceneRoutingContract {
     $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $selectionFunction=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Invoke-CapMatchedTabSelection'},$true)
     $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq 'Invoke-CapMatchedScenes'},$true)
-    Assert-CapTest ($null -ne $function) 'Actual matched scene executor is missing.'
+    Assert-CapTest ($null -ne $selectionFunction -and $null -ne $function) 'Actual matched tab selection or scene executor is missing.'
     & {
-        param($Definition)
+        param($SelectionDefinition,$Definition)
+        . ([scriptblock]::Create($SelectionDefinition))
         . ([scriptblock]::Create($Definition))
         $root=Join-Path $scratch 'matched-route-component'
         $runDirectory=Join-Path $root 'runs'
@@ -3966,7 +3994,14 @@ function Invoke-CapMatchedSceneRoutingContract {
         $leaseDeadlineUtc=[DateTime]::UtcNow.AddMinutes(5)
         $captured=[Collections.Generic.List[object]]::new()
         $seeded=[Collections.Generic.List[string]]::new()
-        $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0}
+        $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0;freezeVisibility=$false
+            selections=[Collections.Generic.List[string]]::new()}
+        function Get-MockVisibleIndexes {
+            if ($model.freezeVisibility) {return @(4..11)}
+            $count=[Math]::Min($(if ($model.total -eq 12) {8} else {10}),$model.total)
+            $first=if ($model.selected -ge $count) {$model.selected-$count+1} else {0}
+            return @($first..($first+$count-1))
+        }
         function Assert-CapWorkerDeadline {param($Label)}
         function Initialize-CapPhaseRoot {param($PhaseRoot) [pscustomobject]@{Root=$PhaseRoot}}
         function Start-CapOfflinePeer {param($Roots,$PipeName,$Phase) [pscustomobject]@{mode='SIMULATED_PEER'}}
@@ -3982,7 +4017,13 @@ function Invoke-CapMatchedSceneRoutingContract {
                 'open-loop' {$model.node=@($fixture.graphs[0].nodes | Where-Object title -CEQ $Name)[0]}
                 'workspace-new-tab' {$model.total++;$model.selected=$model.total-1}
                 'workspace-close-tab' {$model.total--;$model.selected=0;$model.removed=$true}
-                'workspace-select-tab' {$model.selected=[int]$SubjectId}
+                'workspace-select-tab' {
+                    if ([int]$SubjectId -notin @(Get-MockVisibleIndexes)) {
+                        throw "UIA element '$Name' did not become available before the reserved deadline."
+                    }
+                    $model.selections.Add("${scene}:$SubjectId")
+                    $model.selected=[int]$SubjectId
+                }
             }
         }
         function Read-CapMatchedRows {
@@ -3994,8 +4035,9 @@ function Invoke-CapMatchedSceneRoutingContract {
                         Bounds=@(250,100,500,196)}
                 })
             }
-            $count=[Math]::Min(10,$model.total)
-            $first=if ($model.selected -ge $count) {$model.selected-$count+1} else {0}
+            $visible=@(Get-MockVisibleIndexes)
+            $count=$visible.Count
+            $first=$visible[0]
             $title=if ($model.removed) {'Shell'} else {switch ($model.node.loopType) {
                 'goalBased' {'Goal'};'timeBased' {'Loop'};default {if ($model.node.PSObject.Properties['backend']) {'Copilot CLI'} else {'Agent'}}
             }}
@@ -4028,9 +4070,24 @@ function Invoke-CapMatchedSceneRoutingContract {
         Invoke-CapMatchedScenes -Phase 'after'
         Assert-CapTest ($captured.Count -eq 17 -and $seeded.Count -eq 11 -and $model.restart -eq 1 -and $model.hover -eq 1 -and
             ($captured.scene -join ',') -ceq (((Get-CapMatchedSceneNames)[0..16]) -join ',')) 'Actual executor lost a scene, seed, Restart dispatch or hover.'
+        $many=@($captured | Where-Object scene -CEQ 's-tabs-many-first')[0]
+        $manySelections=@($model.selections | Where-Object {$_ -cmatch '^s-tabs-many-first:'})
+        Assert-CapTest (($many.observation.tabs.visible.index -join ',') -ceq '0,1,2,3,4,5,6,7' -and
+            ($manySelections -join ',') -ceq 's-tabs-many-first:4,s-tabs-many-first:0') `
+            'Many-first did not bridge through the exact lowest visible tab and reacquire the requested first tab.'
+        $model.total=12;$model.selected=11;$model.node=$fixture.graphs[0].nodes[5];$model.removed=$false
+        $model.freezeVisibility=$true
+        $scene='s-tabs-many-first-unavailable'
+        $unavailable=Assert-CapRejects {
+            Invoke-CapMatchedTabSelection -AppRun ([pscustomobject]@{
+                Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}}
+            }) -TotalTabs 12 -SelectedTab 11 -TargetIndex 0 -AgentTitle 'Copilot CLI' `
+                -SourceCommit $job.binaries.after.source -ExpectedDpi 96 -DpiBase 96
+        } 'remained genuinely unavailable after exact overflow bridge 4'
         return @{scenes=$captured.Count;seedDispatches=$seeded.Count;realRestartDispatches=$model.restart;hoverDispatches=$model.hover
+            manyFirstSelections=$manySelections;unavailableFailure=$unavailable
             evidence='ACTUAL_WORKER_FUNCTION_SIMULATED_DEPENDENCIES_NO_GUI_NO_PROVIDER_NO_IMAGES'}
-    } $function.Extent.Text
+    } $selectionFunction.Extent.Text $function.Extent.Text
 }
 
 function Invoke-CapMatchedRestartRouteContract {
