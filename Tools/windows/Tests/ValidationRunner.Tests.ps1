@@ -3508,7 +3508,32 @@ try {
   if ($null -eq $sidebarOracleHelper) {
     throw "RED: UIA live gate is missing its functional sidebar navigation snapshot oracle"
   }
+  $sidebarBoundsHelper = $uiaAst.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Get-SidebarNavigationBoundsProof"
+    }, $true)
+  if ($null -eq $sidebarBoundsHelper) {
+    throw "RED: UIA live gate is missing its bounded sidebar scroll/reacquire proof"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)\$sidebarScrollTargets = @\(.*?ScrollIntoView\(\).*?Wait-ForRootReconnect.*?Get-SidebarNavigationBoundsProof.*?UIA_SIDEBAR_BOUNDS_EVIDENCE=') {
+    throw "RED: UIA live gate does not scroll, reacquire, and prove each exact sidebar row in a bounded sequence"
+  }
+  $sidebarCaptureHelper = $uiaAst.Find({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "New-SidebarNavigationCapture"
+    }, $true)
+  if ($null -eq $sidebarCaptureHelper -or
+      $uiaLiveGateSource -notmatch '\$sidebarCaptures\.Add\(\(New-SidebarNavigationCapture \$sidebarNavigationChildren\)\)') {
+    throw "RED: UIA live gate retains mutable sidebar handles instead of freezing each reacquired capture"
+  }
+  if ($uiaLiveGateSource -notmatch '(?s)\$needsYouIds = .*?ScrollIntoView\(\).*?Needs-you row remained offscreen after bounded scroll/reacquire.*?UIA_SIDEBAR_SCROLL_RESTORED=overview-destination') {
+    throw "RED: UIA live gate does not bound the later Needs-you row proof and restore the sidebar viewport"
+  }
   . ([scriptblock]::Create($sidebarOracleHelper.Extent.Text))
+  . ([scriptblock]::Create($sidebarCaptureHelper.Extent.Text))
+  . ([scriptblock]::Create($sidebarBoundsHelper.Extent.Text))
   & {
     $sidebarFixtureCount = 0
     $sidebarPositiveCount = 0
@@ -3519,12 +3544,14 @@ try {
       [double] $left,
       [double] $top,
       [double] $right,
-      [double] $bottom
+      [double] $bottom,
+      [int] $processId = 4242
     ) {
       return [pscustomobject]@{
         Current = [pscustomobject]@{
           AutomationId = $automationId
           Name = $name
+          ProcessId = $processId
           BoundingRectangle = [pscustomobject]@{
             Left = $left; Top = $top; Right = $right; Bottom = $bottom
             Width = $right - $left; Height = $bottom - $top
@@ -3561,6 +3588,106 @@ try {
     }
     $sidebarFixtureCount++
     $sidebarPositiveCount++
+    $mutableCaptureChildren = @($sidebarFixture | ForEach-Object {
+      $bounds = $_.Current.BoundingRectangle
+      New-SidebarNavigationElement $_.Current.AutomationId $_.Current.Name `
+        $bounds.Left $bounds.Top $bounds.Right $bounds.Bottom
+    })
+    $frozenCapture = New-SidebarNavigationCapture $mutableCaptureChildren
+    foreach ($element in $mutableCaptureChildren) {
+      $element.Current.BoundingRectangle.Left = 0
+      $element.Current.BoundingRectangle.Top = 0
+      $element.Current.BoundingRectangle.Right = 0
+      $element.Current.BoundingRectangle.Bottom = 0
+      $element.Current.BoundingRectangle.Width = 0
+      $element.Current.BoundingRectangle.Height = 0
+    }
+    $frozenProof = Get-SidebarNavigationBoundsProof @($frozenCapture) 4242
+    if (-not $frozenProof.structureValid -or -not $frozenProof.rowBoundsValid -or
+        -not $frozenProof.controlsValid) {
+      throw "RED: Sidebar capture retained mutable UIA handles instead of point-in-time evidence"
+    }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
+    $dpiInitial = @($sidebarFixture | ForEach-Object {
+      if ($_.Current.Name -in @("Remote Repositories", "Temporary remote")) {
+        New-SidebarNavigationElement $_.Current.AutomationId $_.Current.Name 0 0 0 0
+      } else {
+        $_
+      }
+    })
+    $dpiRemote = @($sidebarFixture | ForEach-Object {
+      if ($_.Current.Name -in @("Remote Repositories", "Temporary remote")) {
+        $_
+      } else {
+        New-SidebarNavigationElement $_.Current.AutomationId $_.Current.Name 0 0 0 0
+      }
+    })
+    $dpiProof = Get-SidebarNavigationBoundsProof @(
+      [pscustomobject]@{ Children = $dpiInitial },
+      [pscustomobject]@{ Children = $dpiRemote }
+    ) 4242
+    if (-not $dpiProof.structureValid -or -not $dpiProof.rowBoundsValid -or
+        -not $dpiProof.controlsValid -or $dpiProof.rowsChecked -ne 6 -or
+        $dpiProof.controlsChecked -ne 6) {
+      throw "RED: Sidebar bounds proof rejected exact DPI192 identities observed across bounded viewport captures"
+    }
+    $sidebarFixtureCount++
+    $sidebarPositiveCount++
+    $missingProof = Get-SidebarNavigationBoundsProof @(
+      [pscustomobject]@{ Children = $dpiInitial },
+      [pscustomobject]@{
+        Children = @($dpiRemote | Where-Object { $_.Current.AutomationId -ne "open-project-2" })
+      }
+    ) 4242
+    if ($missingProof.structureValid) {
+      throw "RED: Sidebar bounds proof accepted a missing owned row"
+    }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
+    $foreignProof = Get-SidebarNavigationBoundsProof @(
+      [pscustomobject]@{ Children = $dpiInitial },
+      [pscustomobject]@{
+        Children = @($dpiRemote | ForEach-Object {
+          if ($_.Current.AutomationId -eq "open-project-2") {
+            New-SidebarNavigationElement $_.Current.AutomationId $_.Current.Name 12 192 220 224 9999
+          } else {
+            $_
+          }
+        })
+      }
+    ) 4242
+    if ($foreignProof.structureValid) {
+      throw "RED: Sidebar bounds proof accepted a foreign-process row"
+    }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
+    $duplicateProof = Get-SidebarNavigationBoundsProof @(
+      [pscustomobject]@{ Children = $dpiInitial },
+      [pscustomobject]@{
+        Children = @($dpiRemote + (New-SidebarNavigationElement "open-project-2" "Temporary remote" 12 192 220 224))
+      }
+    ) 4242
+    if ($duplicateProof.structureValid) {
+      throw "RED: Sidebar bounds proof accepted a duplicate owned row"
+    }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
+    $wrongOrder = @($dpiInitial | Where-Object {
+      $_.Current.AutomationId -notin @("open-project-1", "open-project-2")
+    }) + @(
+      ($dpiInitial | Where-Object { $_.Current.AutomationId -eq "open-project-2" }),
+      ($dpiInitial | Where-Object { $_.Current.AutomationId -eq "open-project-1" })
+    )
+    $wrongOrderProof = Get-SidebarNavigationBoundsProof @(
+      [pscustomobject]@{ Children = $wrongOrder },
+      [pscustomobject]@{ Children = $dpiRemote }
+    ) 4242
+    if ($wrongOrderProof.structureValid) {
+      throw "RED: Sidebar bounds proof accepted wrong open-owner order"
+    }
+    $sidebarFixtureCount++
+    $sidebarNegativeCount++
     $localCollapsed = @($sidebarFixture | Where-Object {
       $_.Current.AutomationId -notin @(
         "open-project-1",
@@ -3629,7 +3756,7 @@ try {
     }
     $sidebarFixtureCount++
     $sidebarPositiveCount++
-    if ($sidebarFixtureCount -ne 7 -or $sidebarPositiveCount -ne 5 -or $sidebarNegativeCount -ne 2) {
+    if ($sidebarFixtureCount -ne 13 -or $sidebarPositiveCount -ne 7 -or $sidebarNegativeCount -ne 6) {
       throw "RED: Sidebar navigation fixture execution count changed unexpectedly"
     }
     Write-Host ("SIDEBAR_NAVIGATION_FIXTURES={0} ({1} positive, {2} negative; App 22->20 restoration has a separate hidden test)" -f `

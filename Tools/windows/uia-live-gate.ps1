@@ -2282,12 +2282,10 @@ function Get-DirectChildren(
 function Get-SidebarNavigationSnapshot([object[]] $children) {
   $destinations = @($children | Where-Object {
     $_.Current.AutomationId -in @("overview-destination", "quick-chats-destination")
-  } | Sort-Object { $_.Current.BoundingRectangle.Top })
+  })
   $recentRows = @($children | Where-Object { $_.Current.AutomationId -match '^project-row-' })
-  $owners = @($children | Where-Object { $_.Current.AutomationId -match '^open-project-' } |
-    Sort-Object { $_.Current.BoundingRectangle.Top })
-  $sections = @($children | Where-Object { $_.Current.AutomationId -match '^sidebar-section-' } |
-    Sort-Object { $_.Current.BoundingRectangle.Top })
+  $owners = @($children | Where-Object { $_.Current.AutomationId -match '^open-project-' })
+  $sections = @($children | Where-Object { $_.Current.AutomationId -match '^sidebar-section-' })
   $controls = @($children | Where-Object {
     $_.Current.AutomationId -match '^(project-new-loop-|project-disclosure-|quick-chat-new-|quick-chats-disclosure-)'
   })
@@ -2342,6 +2340,155 @@ function Get-SidebarNavigationSnapshot([object[]] $children) {
   }
 }
 
+function New-SidebarNavigationCapture([object[]] $children) {
+  return [pscustomobject]@{
+    Children = @($children | ForEach-Object {
+      $bounds = $_.Current.BoundingRectangle
+      [pscustomobject]@{
+        Current = [pscustomobject]@{
+          AutomationId = [string]$_.Current.AutomationId
+          Name = [string]$_.Current.Name
+          ProcessId = [int]$_.Current.ProcessId
+          BoundingRectangle = [pscustomobject]@{
+            Left = [double]$bounds.Left
+            Top = [double]$bounds.Top
+            Right = [double]$bounds.Right
+            Bottom = [double]$bounds.Bottom
+            Width = [double]$bounds.Width
+            Height = [double]$bounds.Height
+          }
+        }
+      }
+    })
+  }
+}
+
+function Get-SidebarNavigationBoundsProof([object[]] $captures, [int] $expectedProcessId) {
+  $result = [ordered]@{
+    structureValid = $false
+    failure = "no captures"
+    rowBoundsValid = $false
+    rowsChecked = 0
+    missingRowIds = @()
+    controlsValid = $false
+    controlsChecked = 0
+    missingControlIds = @()
+  }
+  if ($captures.Count -eq 0) { return [pscustomobject]$result }
+
+  $baselineChildren = @($captures[0].Children)
+  $baseline = Get-SidebarNavigationSnapshot $baselineChildren
+  $expectedDestinationIds = @("overview-destination", "quick-chats-destination")
+  $expectedDestinationNames = @("Graph", "Quick Chats")
+  $expectedOwnerNames = @("UIA project", "Temporary remote")
+  $expectedSectionNames = @("Local Projects", "Remote Repositories")
+  if (($baseline.destinationIds -join "|") -cne ($expectedDestinationIds -join "|") -or
+      ($baseline.destinationNames -join "|") -cne ($expectedDestinationNames -join "|") -or
+      ($baseline.ownerNames -join "|") -cne ($expectedOwnerNames -join "|") -or
+      ($baseline.sectionNames -join "|") -cne ($expectedSectionNames -join "|") -or
+      $baseline.recentRowIds.Count -ne 0) {
+    $result.failure = "baseline identity, name, or order mismatch"
+    return [pscustomobject]$result
+  }
+
+  $rowElements = @($baselineChildren | Where-Object {
+    $_.Current.AutomationId -in $expectedDestinationIds -or
+      $_.Current.AutomationId -match '^open-project-' -or
+      $_.Current.AutomationId -match '^sidebar-section-'
+  })
+  $controlElements = @($baselineChildren | Where-Object {
+    $_.Current.AutomationId -match '^(project-new-loop-|project-disclosure-|quick-chat-new-|quick-chats-disclosure-)'
+  })
+  if ($rowElements.Count -ne 6 -or $controlElements.Count -le 0) {
+    $result.failure = "baseline owned row or control count mismatch"
+    return [pscustomobject]$result
+  }
+  $rowIds = @($rowElements | ForEach-Object { [string]$_.Current.AutomationId })
+  $controlIds = @($controlElements | ForEach-Object { [string]$_.Current.AutomationId })
+  if (@($rowIds | Select-Object -Unique).Count -ne $rowIds.Count -or
+      @($controlIds | Select-Object -Unique).Count -ne $controlIds.Count) {
+    $result.failure = "baseline duplicate identity"
+    return [pscustomobject]$result
+  }
+  if (@($rowElements + $controlElements | Where-Object {
+      [int]$_.Current.ProcessId -ne $expectedProcessId
+    }).Count -ne 0) {
+    $result.failure = "baseline foreign process"
+    return [pscustomobject]$result
+  }
+
+  $visibleRows = @{}
+  $visibleControls = @{}
+  foreach ($capture in $captures) {
+    $children = @($capture.Children)
+    $snapshot = Get-SidebarNavigationSnapshot $children
+    if (($snapshot.destinationIds -join "|") -cne ($baseline.destinationIds -join "|") -or
+        ($snapshot.destinationNames -join "|") -cne ($baseline.destinationNames -join "|") -or
+        ($snapshot.ownerIds -join "|") -cne ($baseline.ownerIds -join "|") -or
+        ($snapshot.ownerNames -join "|") -cne ($baseline.ownerNames -join "|") -or
+        ($snapshot.sectionIds -join "|") -cne ($baseline.sectionIds -join "|") -or
+        ($snapshot.sectionNames -join "|") -cne ($baseline.sectionNames -join "|") -or
+        $snapshot.recentRowIds.Count -ne 0) {
+      $result.failure = "capture identity, name, or order mismatch"
+      return [pscustomobject]$result
+    }
+    $captureRows = @($children | Where-Object { $_.Current.AutomationId -in $rowIds })
+    $captureControls = @($children | Where-Object { $_.Current.AutomationId -in $controlIds })
+    if ($captureRows.Count -ne $rowIds.Count -or $captureControls.Count -ne $controlIds.Count -or
+        @($captureRows | ForEach-Object { [string]$_.Current.AutomationId } |
+          Select-Object -Unique).Count -ne $rowIds.Count -or
+        @($captureControls | ForEach-Object { [string]$_.Current.AutomationId } |
+          Select-Object -Unique).Count -ne $controlIds.Count) {
+      $result.failure = "capture missing or duplicate identity"
+      return [pscustomobject]$result
+    }
+    if (@($captureRows + $captureControls | Where-Object {
+        [int]$_.Current.ProcessId -ne $expectedProcessId
+      }).Count -ne 0) {
+      $result.failure = "capture foreign process"
+      return [pscustomobject]$result
+    }
+    foreach ($row in $captureRows) {
+      $bounds = $row.Current.BoundingRectangle
+      if (($bounds.Width -gt 0) -and ($bounds.Height -gt 0)) {
+        $visibleRows[[string]$row.Current.AutomationId] = $true
+      }
+    }
+    foreach ($control in $captureControls) {
+      $controlBounds = $control.Current.BoundingRectangle
+      if (($controlBounds.Width -le 0) -or ($controlBounds.Height -le 0)) { continue }
+      $automationId = [string]$control.Current.AutomationId
+      $ownerCandidates = if ($automationId -match '^(quick-chat-new-|quick-chats-disclosure-)') {
+        @($captureRows | Where-Object { $_.Current.AutomationId -eq "quick-chats-destination" })
+      } else {
+        @($captureRows | Where-Object {
+          $_.Current.AutomationId -eq "overview-destination" -or
+            $_.Current.AutomationId -match '^open-project-'
+        })
+      }
+      foreach ($owner in $ownerCandidates) {
+        $ownerBounds = $owner.Current.BoundingRectangle
+        if (($controlBounds.Left -ge $ownerBounds.Left) -and
+            ($controlBounds.Top -ge $ownerBounds.Top) -and
+            ($controlBounds.Right -le $ownerBounds.Right) -and
+            ($controlBounds.Bottom -le $ownerBounds.Bottom)) {
+          $visibleControls[$automationId] = $true
+          break
+        }
+      }
+    }
+  }
+  $result.structureValid = $true
+  $result.failure = ""
+  $result.rowsChecked = $visibleRows.Count
+  $result.rowBoundsValid = $visibleRows.Count -eq $rowIds.Count
+  $result.missingRowIds = @($rowIds | Where-Object { -not $visibleRows.ContainsKey($_) })
+  $result.controlsChecked = $visibleControls.Count
+  $result.controlsValid = $visibleControls.Count -eq $controlIds.Count
+  $result.missingControlIds = @($controlIds | Where-Object { -not $visibleControls.ContainsKey($_) })
+  return [pscustomobject]$result
+}
+
 function Assert-Ids([string[]] $actual, [string[]] $expected, [string] $label) {
   Require (@($actual).Count -eq @($expected).Count) "$label count expected $($expected.Count) but found $($actual.Count): $($actual -join ',')"
   Require ((@($actual) -join "|") -eq (@($expected) -join "|")) "$label expected $($expected -join ',') but found $($actual -join ',')"
@@ -2367,6 +2514,22 @@ function Find-FragmentById(
     }
   }
   return $null
+}
+
+function Get-SidebarNavigationChildren(
+  [System.Windows.Automation.AutomationElement] $root,
+  [System.Windows.Automation.AutomationElement] $projects,
+  [System.Windows.Automation.TreeWalker] $walker
+) {
+  $children = @(Get-DirectChildren $projects $walker)
+  foreach ($destinationId in @("overview-destination", "quick-chats-destination")) {
+    if (@($children | Where-Object { $_.Current.AutomationId -eq $destinationId }).Count -ne 0) {
+      continue
+    }
+    $destination = Find-FragmentById $root $destinationId $walker
+    if ($null -ne $destination) { $children += $destination }
+  }
+  return $children
 }
 
 # Reads children of the live "graph" fragment, re-resolving the parent on every attempt
@@ -5966,13 +6129,7 @@ try {
   $quickChatsDestination = Find-FragmentById $root "quick-chats-destination" $rawWalker
   Require ($null -ne $graphDestination) "Graph sidebar destination was not exposed"
   Require ($null -ne $quickChatsDestination) "Quick Chats sidebar destination was not exposed"
-  $sidebarNavigationChildren = @(Get-DirectChildren $projects $rawWalker)
-  if (@($sidebarNavigationChildren | Where-Object { $_.Current.AutomationId -eq "overview-destination" }).Count -eq 0) {
-    $sidebarNavigationChildren += $graphDestination
-  }
-  if (@($sidebarNavigationChildren | Where-Object { $_.Current.AutomationId -eq "quick-chats-destination" }).Count -eq 0) {
-    $sidebarNavigationChildren += $quickChatsDestination
-  }
+  $sidebarNavigationChildren = @(Get-SidebarNavigationChildren $root $projects $rawWalker)
   $sidebarNavigation = Get-SidebarNavigationSnapshot $sidebarNavigationChildren
   Require (($null -ne $graphDestination) -and ($graphDestination.Current.Name -eq "Graph")) `
     "global sidebar destination did not expose the pinned Graph identity"
@@ -5984,12 +6141,57 @@ try {
     "unopened recent folders were projected as sidebar destinations"
   Assert-Ids $sidebarNavigation.ownerNames @("UIA project", "Temporary remote") "open sidebar owner order"
   Assert-Ids $sidebarNavigation.sectionNames @("Local Projects", "Remote Repositories") "open sidebar sections"
-  Require ($sidebarNavigation.rowBoundsValid) "sidebar destinations, sections, or open owners had empty bounds"
-  Require ($sidebarNavigation.controlsValid -and $sidebarNavigation.controlsChecked -gt 0) `
-    "sidebar row controls were missing or outside their owner row"
+  $sidebarCaptures = [Collections.Generic.List[object]]::new()
+  $sidebarCaptures.Add((New-SidebarNavigationCapture $sidebarNavigationChildren))
+  $initialSidebarProof = Get-SidebarNavigationBoundsProof @($sidebarCaptures) $process.Id
+  Require ($initialSidebarProof.structureValid) `
+    "sidebar navigation baseline was missing, duplicated, reordered, stale, or foreign: $($initialSidebarProof.failure)"
+  $sidebarScrollTargets = @(
+    $sidebarNavigation.destinationIds[0],
+    $sidebarNavigation.destinationIds[1],
+    $sidebarNavigation.sectionIds[0],
+    $sidebarNavigation.ownerIds[0],
+    $sidebarNavigation.sectionIds[1],
+    $sidebarNavigation.ownerIds[1]
+  )
+  foreach ($targetId in $sidebarScrollTargets) {
+    $targetMatches = @($sidebarNavigationChildren | Where-Object {
+      $_.Current.AutomationId -ceq $targetId -and $_.Current.ProcessId -eq $process.Id
+    })
+    Require ($targetMatches.Count -eq 1) `
+      "sidebar scroll target '$targetId' was missing, duplicated, stale, or foreign"
+    $scrollItem = $targetMatches[0].GetCurrentPattern(
+      [System.Windows.Automation.ScrollItemPattern]::Pattern
+    )
+    $scrollItem.ScrollIntoView()
+    Start-Sleep -Milliseconds 120
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $projects = Find-FragmentById $root "projects" $rawWalker
+    Require ($null -ne $projects) `
+      "sidebar scroll target '$targetId' did not preserve the Projects fragment"
+    $sidebarNavigationChildren = @(Get-SidebarNavigationChildren $root $projects $rawWalker)
+    $sidebarCaptures.Add((New-SidebarNavigationCapture $sidebarNavigationChildren))
+  }
+  $sidebarBoundsProof = Get-SidebarNavigationBoundsProof @($sidebarCaptures) $process.Id
+  Write-Host ("UIA_SIDEBAR_BOUNDS_EVIDENCE=" + ([ordered]@{
+    captures = $sidebarCaptures.Count
+    targets = $sidebarScrollTargets
+    rowsChecked = $sidebarBoundsProof.rowsChecked
+    missingRowIds = $sidebarBoundsProof.missingRowIds
+    controlsChecked = $sidebarBoundsProof.controlsChecked
+    missingControlIds = $sidebarBoundsProof.missingControlIds
+    structureValid = $sidebarBoundsProof.structureValid
+    failure = $sidebarBoundsProof.failure
+    processId = $process.Id
+  } | ConvertTo-Json -Compress -Depth 4))
+  Require ($sidebarBoundsProof.structureValid) `
+    "sidebar scroll/reacquire changed identity, process, uniqueness, or order: $($sidebarBoundsProof.failure)"
+  Require ($sidebarBoundsProof.rowBoundsValid -and $sidebarBoundsProof.rowsChecked -eq 6) `
+    "sidebar destinations, sections, or open owners were not observed with nonempty bounds after bounded scroll/reacquire"
+  Require ($sidebarBoundsProof.controlsValid -and $sidebarBoundsProof.controlsChecked -gt 0) `
+    "sidebar row controls were not observed inside their exact owner after bounded scroll/reacquire"
   $projectRows = @($sidebarNavigationChildren | Where-Object { $_.Current.AutomationId -match '^project-row-' })
-  $openProjectRows = @($sidebarNavigationChildren | Where-Object { $_.Current.AutomationId -match '^open-project-' } |
-    Sort-Object { $_.Current.BoundingRectangle.Top })
+  $openProjectRows = @($sidebarNavigationChildren | Where-Object { $_.Current.AutomationId -match '^open-project-' })
   Require ($projectRows.Count -eq 0) "unopened recent folders appeared as project rows"
   Require ($openProjectRows.Count -eq 2) "open sidebar owner rows were not both exposed"
   Require (($openProjectRows | ForEach-Object { $_.Current.Name }) -join "|" -eq "UIA project|Temporary remote") `
@@ -6010,13 +6212,36 @@ try {
   Require ($needsYouHeaders[0].Current.Name -eq "Needs you") "Needs-you header name changed"
   Require ($needsYouRows.Count -le 4) "Needs-you exposed more than four sidebar rows"
   $needsYouIds = @($needsYouRows | ForEach-Object { $_.Current.AutomationId })
+  $needsYouNames = @($needsYouRows | ForEach-Object { [string]$_.Current.Name })
   Require (($needsYouIds | Where-Object { $_ -notmatch '^needs-you-row-[0-9]+$' }).Count -eq 0) `
     "Needs-you rows did not use stable dynamic IDs"
   $needsYouRowsChecked = 0
-  foreach ($row in $needsYouRows) {
-    Require ($row.Current.Name.Length -gt 0) "Needs-you row omitted its name"
-    Require (($row.Current.BoundingRectangle.Width -gt 0) -and
-             ($row.Current.BoundingRectangle.Height -gt 0)) "Needs-you row has empty bounds"
+  for ($index = 0; $index -lt $needsYouIds.Count; $index++) {
+    $row = @($needsYouRows | Where-Object {
+      $_.Current.AutomationId -ceq $needsYouIds[$index] -and
+        $_.Current.ProcessId -eq $process.Id
+    })
+    Require ($row.Count -eq 1) "Needs-you row was missing, duplicated, stale, or foreign"
+    Require ($row[0].Current.Name -ceq $needsYouNames[$index] -and
+             $row[0].Current.Name.Length -gt 0) "Needs-you row omitted or changed its name"
+    $row[0].GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView()
+    Start-Sleep -Milliseconds 120
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $projects = Find-FragmentById $root "projects" $rawWalker
+    Require ($null -ne $projects) "Needs-you scroll did not preserve the Projects fragment"
+    $needsYouRows = @(Get-DirectChildren $projects $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^needs-you-row-'
+    })
+    $reacquired = @($needsYouRows | Where-Object {
+      $_.Current.AutomationId -ceq $needsYouIds[$index] -and
+        $_.Current.Name -ceq $needsYouNames[$index] -and
+        $_.Current.ProcessId -eq $process.Id
+    })
+    Require ($reacquired.Count -eq 1) `
+      "Needs-you row changed identity, name, process, or uniqueness after scroll"
+    Require (($reacquired[0].Current.BoundingRectangle.Width -gt 0) -and
+             ($reacquired[0].Current.BoundingRectangle.Height -gt 0)) `
+      "Needs-you row remained offscreen after bounded scroll/reacquire"
     $needsYouRowsChecked++
   }
   Require ($needsYouRowsChecked -eq $needsYouRows.Count) "Needs-you row checks did not cover every row"
@@ -6024,12 +6249,31 @@ try {
     rowCount = $needsYouRows.Count
     rowsChecked = $needsYouRowsChecked
     rowIds = $needsYouIds
-    rowNames = @($needsYouRows | ForEach-Object { [string]$_.Current.Name })
+    rowNames = $needsYouNames
     headerCount = $needsYouHeaders.Count
     headerIds = @($needsYouHeaders | ForEach-Object { [string]$_.Current.AutomationId })
     headerName = [string]$needsYouHeaders[0].Current.Name
   }
   Write-Host ("UIA_NEEDS_YOU_EVIDENCE=" + ($needsYouEvidence | ConvertTo-Json -Compress -Depth 4))
+  $graphDestination = Find-FragmentById $root "overview-destination" $rawWalker
+  Require (($null -ne $graphDestination) -and
+           ($graphDestination.Current.ProcessId -eq $process.Id) -and
+           ($graphDestination.Current.Name -ceq "Graph")) `
+    "sidebar scroll restoration could not reacquire the exact Graph destination"
+  $graphDestination.GetCurrentPattern(
+    [System.Windows.Automation.ScrollItemPattern]::Pattern
+  ).ScrollIntoView()
+  Start-Sleep -Milliseconds 120
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $projects = Find-FragmentById $root "projects" $rawWalker
+  Require ($null -ne $projects) "sidebar scroll restoration lost the Projects fragment"
+  $sidebarNavigationChildren = @(Get-SidebarNavigationChildren $root $projects $rawWalker)
+  $openProjectRows = @($sidebarNavigationChildren | Where-Object {
+    $_.Current.AutomationId -match '^open-project-'
+  })
+  Require ($openProjectRows.Count -eq 2) `
+    "sidebar scroll restoration did not preserve both open owner rows"
+  Write-Host "UIA_SIDEBAR_SCROLL_RESTORED=overview-destination"
   $null = $projects.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
   $null = $openProjectRows[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $projectRowInvoke = $openProjectRows[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
