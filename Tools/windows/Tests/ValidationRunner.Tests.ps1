@@ -8,7 +8,11 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
     foreach ($definition in $ast.FindAll({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-          ($node.Name -like "*-MultiProject*" -or $node.Name -cin @("ConvertTo-SketchCanonicalJson", "Test-RetryableUiaError"))
+          ($node.Name -like "*-MultiProject*" -or $node.Name -cin @(
+            "ConvertTo-SketchCanonicalJson",
+            "Test-RetryableUiaError",
+            "Test-UpdateBannerClickTarget"
+          ))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
   $scratch = Join-Path ([IO.Path]::GetTempPath()) ("gc-mp-" + [guid]::NewGuid().ToString("N"))
@@ -163,6 +167,51 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         'Delete “Alpha renamed”?' "GraphCodeWindowsDialogContent")) `
         "foreign, legacy, hidden, captioned, or invalid Delete sheet identity was accepted"
       return "Identity guard rejected before any input"
+    }
+  }
+  $updateBannerTarget = [ordered]@{
+    processId = 4242
+    automationId = "sidebar-update-banner-83fd6a5f429785e1"
+    name = "Update available"
+    controlType = "ControlType.Button"
+    enabled = $true
+    left = 208.0
+    top = 704.0
+    right = 412.0
+    bottom = 754.0
+  }
+  Invoke-MultiCase "update banner click accepts owned foreground target after Later" {
+    Assert-MultiCase (Test-UpdateBannerClickTarget $updateBannerTarget 4242 ([IntPtr]42) `
+      ([IntPtr]42) 4242 "Update offer deferred") `
+      "owned foreground update banner target was rejected"
+    return "Published UIA bounds, shell foreground and focus, and source-confirmed Later status"
+  }
+  foreach ($targetMutation in @("process", "window", "focus", "status")) {
+    Invoke-MultiCase ("update banner click rejects wrong " + $targetMutation) -Negative {
+      $candidate = [ordered]@{
+        processId = $updateBannerTarget.processId
+        automationId = $updateBannerTarget.automationId
+        name = $updateBannerTarget.name
+        controlType = $updateBannerTarget.controlType
+        enabled = $updateBannerTarget.enabled
+        left = $updateBannerTarget.left
+        top = $updateBannerTarget.top
+        right = $updateBannerTarget.right
+        bottom = $updateBannerTarget.bottom
+      }
+      $foreground = [IntPtr]42
+      $focusedProcessId = 4242
+      $status = "Update offer deferred"
+      switch ($targetMutation) {
+        "process" { $candidate.processId = 7777 }
+        "window" { $foreground = [IntPtr]43 }
+        "focus" { $focusedProcessId = 7777 }
+        "status" { $status = "Update available" }
+      }
+      Assert-MultiCase (-not (Test-UpdateBannerClickTarget $candidate 4242 ([IntPtr]42) `
+        $foreground $focusedProcessId $status)) `
+        "foreign process, foreground window, focus, or stale status was accepted"
+      return "Ownership and source-confirmed status guard rejected before input"
     }
   }
   Invoke-MultiCase "actual caption Open assignment consumes the exported caption snapshot" {
@@ -3743,6 +3792,20 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "An update is available\."' -or
       $uiaLiveGateSource -match '\[System\.Windows\.Automation\.AutomationElement\]::NameProperty, "GraphCode Update Available"') {
     throw "RED: UIA gate does not use and verify the shared owned update sheet when desktop-tree lookup omits it"
+  }
+  if ($uiaLiveGateSource -notmatch 'function Test-UpdateBannerClickTarget' -or
+      $uiaLiveGateSource -notmatch '\$updateBanner\.Current\.BoundingRectangle' -or
+      $uiaLiveGateSource -notmatch 'Test-UpdateBannerClickTarget \$updateBannerTarget \$process\.Id \$shellWindow' -or
+      $uiaLiveGateSource -notmatch 'ScreenToClientPoint\(\s*\$shellWindow, \$updateBannerScreenX, \$updateBannerScreenY' -or
+      $uiaLiveGateSource -notmatch 'UIA_UPDATE_BANNER_CLICK_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'Wait-UiaOwnedSheetGoneByContentClass \$process\.Id \$shellWindow "GraphCodeUpdateOffer"' -or
+      $uiaLiveGateSource -notmatch '\$status\.Current\.Name -ceq "Update offer deferred"' -or
+      $uiaLiveGateSource -notmatch 'RawView after update banner root' -or
+      $uiaLiveGateSource -notmatch '\$projects = Find-FragmentById \$root "projects" \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$loops = Find-FragmentById \$root "loops" \$rawWalker' -or
+      $uiaLiveGateSource -notmatch '\$graph = Find-FragmentById \$root "graph" \$rawWalker' -or
+      $uiaLiveGateSource -match '\$updateBannerViewportBottom|\$updateBannerTop|\$updateBannerBottom') {
+    throw "RED: UIA update-banner click does not use the owned published bounds and source-defined Later contract"
   }
   function Test-BoundedIngressSource([string] $source) {
     function Test-TextOrder([string] $text, [string[]] $needles) {

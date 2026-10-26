@@ -1527,6 +1527,32 @@ function Test-MultiProjectOwnedSheetIdentity(
     $identity.captionless -eq $expectedCaptionless
 }
 
+function Test-UpdateBannerClickTarget(
+  $target,
+  [int] $expectedProcessId,
+  [IntPtr] $expectedShellWindow,
+  [IntPtr] $foregroundWindow,
+  [int] $focusedProcessId,
+  [string] $shellStatus
+) {
+  return $null -ne $target -and
+    ($target.processId -is [int] -or $target.processId -is [uint32] -or $target.processId -is [long]) -and
+    $target.processId -eq $expectedProcessId -and $expectedProcessId -gt 0 -and
+    $expectedShellWindow -ne [IntPtr]::Zero -and
+    $foregroundWindow -eq $expectedShellWindow -and
+    $focusedProcessId -eq $expectedProcessId -and
+    $target.automationId -is [string] -and
+    $target.automationId.StartsWith("sidebar-update-banner-", [StringComparison]::Ordinal) -and
+    $target.automationId.Length -gt "sidebar-update-banner-".Length -and
+    $target.name -is [string] -and $target.name -ceq "Update available" -and
+    $target.controlType -is [string] -and $target.controlType -ceq "ControlType.Button" -and
+    $target.enabled -is [bool] -and $target.enabled -and
+    $target.left -is [double] -and $target.top -is [double] -and
+    $target.right -is [double] -and $target.bottom -is [double] -and
+    $target.right -gt $target.left -and $target.bottom -gt $target.top -and
+    $shellStatus -ceq "Update offer deferred"
+}
+
 function Get-UiaOwnedSheetIdentity($element) {
   if ($null -eq $element) { return $null }
   $handle = [IntPtr]$element.Current.NativeWindowHandle
@@ -5842,27 +5868,61 @@ try {
   Write-Host ("UIA_CONNECTION_FAILURE_BANNER_EVIDENCE=" +
     ($connectionFailureBannerEvidence | ConvertTo-Json -Compress))
 
-  # Sidebar update banner: the existing update-offer assertion above opens the
-  # dialog through GRAPHCODE_UIA_SHOW_UPDATE, which calls showCurrentUpdateOffer()
-  # directly and never exercises Sidebar.updateBannerAt's pixel hit-test or the
-  # real WM_LBUTTONDOWN click-routing in App.zig. Sidebar.updateBannerRect has no
-  # UIA identity of its own, so this replicates its formula against the shell's
-  # live client height (viewport_bottom = client height - the activity strip,
-  # which is the workspace-controls state still in effect this early in the run:
-  # panel hidden, activity strip visible, no ingress error yet) and posts a real
-  # synthetic click at that computed point, rather than asserting the bypass path.
-  $updateBannerClientHeight = [GraphCodeUiaGateState]::ClientHeight($shellWindow)
-  Require ($updateBannerClientHeight -gt 0) `
-    "shell reported zero client height before the sidebar update banner click"
-  $updateBannerViewportBottom = $updateBannerClientHeight - 48
-  $updateBannerTop = $updateBannerViewportBottom - 92
-  $updateBannerBottom = $updateBannerViewportBottom - 42
-  $updateBannerClickX = 108
-  $updateBannerClickY = [int](($updateBannerTop + $updateBannerBottom) / 2)
-  Require (($updateBannerClickY -gt 34) -and ($updateBannerClickY -lt $updateBannerViewportBottom)) `
-    "computed sidebar update banner click point fell outside the live sidebar rail"
-  Require ([GraphCodeUiaGateState]::ClickAt($shellWindow, $updateBannerClickX, $updateBannerClickY)) `
-    "synthetic click on the sidebar update banner's live pixel geometry was rejected"
+  # GRAPHCODE_UIA_SHOW_UPDATE proves the offer sheet directly. This second pass
+  # must prove the actual sidebar hit route. Use the banner fragment's published
+  # screen bounds, which are produced by the same layout as paint and hit-testing,
+  # rather than duplicating logical 96-DPI footer constants in this physical-pixel
+  # process. "Update offer deferred" is the source-defined result of the first
+  # Later action and is a precondition here, never a substitute for the second
+  # dialog actually opening.
+  $updateBanner = @($root.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      (New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        "Update available"
+      ))
+    ) | Where-Object {
+      $_.Current.AutomationId.StartsWith("sidebar-update-banner-", [StringComparison]::Ordinal)
+    }) | Select-Object -First 1
+  Require ($null -ne $updateBanner) `
+    "sidebar update banner did not expose its published UIA target"
+  Require (Ensure-ShellForeground $shellWindow "sidebar update banner click") `
+    "GraphCode shell did not reacquire foreground before the sidebar update banner click"
+  $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+  $updateBannerBounds = $updateBanner.Current.BoundingRectangle
+  $updateBannerTarget = [ordered]@{
+    processId = [int]$updateBanner.Current.ProcessId
+    automationId = [string]$updateBanner.Current.AutomationId
+    name = [string]$updateBanner.Current.Name
+    controlType = [string]$updateBanner.Current.ControlType.ProgrammaticName
+    enabled = [bool]$updateBanner.Current.IsEnabled
+    left = [double]$updateBannerBounds.Left
+    top = [double]$updateBannerBounds.Top
+    right = [double]$updateBannerBounds.Right
+    bottom = [double]$updateBannerBounds.Bottom
+  }
+  $foregroundWindow = [GraphCodeUiaGateState]::CurrentForegroundWindow()
+  Require (Test-UpdateBannerClickTarget $updateBannerTarget $process.Id $shellWindow `
+      $foregroundWindow $focusedElement.Current.ProcessId ([string]$status.Current.Name)) `
+    "sidebar update banner click target lost shell process, window, focus, status, or UIA identity"
+  $updateBannerScreenX = [int](($updateBannerTarget.left + $updateBannerTarget.right) / 2)
+  $updateBannerScreenY = [int](($updateBannerTarget.top + $updateBannerTarget.bottom) / 2)
+  $updateBannerClickX = 0
+  $updateBannerClickY = 0
+  Require ([GraphCodeUiaGateState]::ScreenToClientPoint(
+      $shellWindow, $updateBannerScreenX, $updateBannerScreenY,
+      [ref]$updateBannerClickX, [ref]$updateBannerClickY
+    )) "sidebar update banner bounds could not be converted to shell client coordinates"
+  Write-Host ("UIA_UPDATE_BANNER_CLICK_EVIDENCE=" + ([ordered]@{
+    target = $updateBannerTarget
+    foregroundWindow = $foregroundWindow.ToInt64()
+    focusedProcessId = [int]$focusedElement.Current.ProcessId
+    shellStatus = [string]$status.Current.Name
+    clientPoint = @($updateBannerClickX, $updateBannerClickY)
+  } | ConvertTo-Json -Compress -Depth 4))
+  Require ([GraphCodeUiaGateState]::ClickAt(
+      $shellWindow, $updateBannerClickX, $updateBannerClickY
+    )) "synthetic click on the sidebar update banner's published live geometry was rejected"
   $clickedUpdateDialog = Wait-UiaOwnedSheetByContentClass $process.Id $shellWindow `
     "GraphCodeUpdateOffer" "GraphCode Update Available" "clicked update offer sheet" 2000
   Require ($null -ne $clickedUpdateDialog) `
@@ -5878,7 +5938,21 @@ try {
     "update offer dialog opened by the banner click omitted the offered version text"
   Require ([GraphCodeUiaGateState]::SendCommand([IntPtr]$clickedUpdateDialog.Current.NativeWindowHandle, 9703)) `
     "update offer opened via the banner click could not be dismissed via Later"
-  Start-Sleep -Milliseconds 150
+  Require (Wait-UiaOwnedSheetGoneByContentClass $process.Id $shellWindow "GraphCodeUpdateOffer") `
+    "update offer opened via the banner click remained open after Later"
+  $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+  $status = Find-FragmentById $root "status" $controlWalker
+  Require (($null -ne $status) -and $status.Current.Name -ceq "Update offer deferred") `
+    "banner-clicked update offer did not preserve the source-defined Later status"
+  $rawRootChildren = @(Assert-FragmentLinks $root $rawWalker $expectedRootIds "RawView after update banner root")
+  $controlRootChildren = @(Assert-FragmentLinks $root $controlWalker $expectedRootIds "ControlView after update banner root")
+  $workspaces = Find-FragmentById $root "workspaces" $rawWalker
+  $projects = Find-FragmentById $root "projects" $rawWalker
+  $loops = Find-FragmentById $root "loops" $rawWalker
+  $graph = Find-FragmentById $root "graph" $rawWalker
+  Require (($null -ne $workspaces) -and ($null -ne $projects) -and
+      ($null -ne $loops) -and ($null -ne $graph)) `
+    "update offer teardown did not reconnect the shell fragments used by later phases"
   $process.Refresh()
   Require (-not $process.HasExited) `
     "shell exited with code $($process.ExitCode) after a genuine click on the sidebar update banner"
