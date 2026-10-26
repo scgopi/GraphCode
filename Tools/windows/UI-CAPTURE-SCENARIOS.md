@@ -46,6 +46,28 @@ contract, making current registration **182 default / 185 with
 zero skips, the ten existing matched/S2 identities once, and all four DPI
 identities once. Historical reports retain their original denominators.
 
+## Live transition rehearsal
+
+`LIVE_TRANSITION_REHEARSAL` is a no-lease, non-evidence mode for exercising the
+complete real matched transition sequence before one separately authorized
+capture. It requires a hash-bound rehearsal authorization with
+`authorizedAction=live-transition-rehearsal`,
+`captureEvidenceAuthorized=false`, and `pngAuthorized=false`. It still consumes
+the exact 185-case preflight and uses the real UIA, pinned zmx, daemon, process
+identity, deadline, numbered-journal, and zero-survivor release paths.
+
+The worker replaces each image operation with an immutable typed checkpoint. A
+successful matched run requires exactly **36 checkpoints**, **22 cmd-only
+seeds**, **two real Restarts**, one proven `before` to `after` cleanup
+transition, `images=[]`, `captures=0`, and no `.png` anywhere below the fresh
+owned root. Every checkpoint and final manifest is classified
+`LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE`.
+
+This mode is refused by the matched capture-manifest gate and must not enter a
+capture report, privacy review, parity ledger, or evidence publication. It can
+identify tooling and observer defects only; passing it does not authorize
+capture or establish parity.
+
 Every scene action and its associated visibility probe now waits for at most
 **10 seconds** and must stop at least **30 seconds before the worker deadline**,
 whichever comes first. The calculation holds one additional second ahead of
@@ -337,6 +359,8 @@ observed UI state, not a `selected` property invented on the daemon's node.
 
 The adapter requests eighteen scenes for each before/after phase: **36 original
 images**, **22 cmd-only seed lifecycles**, and **two real-daemon Restart scenes**.
+The live transition rehearsal executes the same order and transitions but emits
+36 non-image checkpoints instead of those images.
 Every static workspace uses its own profile, zmx state, layout and contained app
 job. Card scenes share no live backend. Actual tab and pane ownership, selected
 state, bounds and focus are read before capture; the terminal text/glyphs are

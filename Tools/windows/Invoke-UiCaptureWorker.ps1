@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $rehearsal = $false
+$transitionRehearsal = $false
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $rehearsalActions = [Collections.Generic.List[object]]::new()
 $peerScript = Join-Path $root 'inputs\offline-peer-source.ps1'
@@ -31,6 +32,8 @@ $cleanupFailures = [Collections.Generic.List[string]]::new()
 $cleanupReceipts = [Collections.Generic.List[object]]::new()
 $zmxSeedReceipts = [Collections.Generic.List[object]]::new()
 $images = [Collections.Generic.List[object]]::new()
+$checkpoints = [Collections.Generic.List[object]]::new()
+$phaseTransitions = [Collections.Generic.List[object]]::new()
 $runs = [Collections.Generic.List[object]]::new()
 $seedRuns = [Collections.Generic.List[object]]::new()
 $applicationRuns = [Collections.Generic.List[object]]::new()
@@ -62,6 +65,18 @@ function Write-CapWorkerLog {
     $line = '{0:o} {1}' -f [DateTime]::UtcNow, $Message
     Write-Output $line
     if ($workerLog) { [IO.File]::AppendAllText($workerLog, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }
+}
+
+function Get-CapWorkerAuthorityId {
+    if ($auth -and $auth.PSObject.Properties['authorityId'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$auth.authorityId)) {
+        return [string]$auth.authorityId
+    }
+    if ($auth -and $auth.PSObject.Properties['leaseId'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$auth.leaseId)) {
+        return [string]$auth.leaseId
+    }
+    throw 'Worker authority identity is missing.'
 }
 
 function Test-CapMatchedAdapter {
@@ -216,17 +231,33 @@ function Assert-CapAcceptedInputs {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapSceneContract -Job $job
-    if ($job.authority.centralCaptureLeaseGrantedByThisArtifact -ne $false -or
-        $lease.status -ne 'GRANTED' -or $lease.lane -cne $job.lane -or
-        $lease.authorizedAction -ne 'central-cap-capture' -or
-        $lease.centralPreflightAccepted -ne $true) {
-        throw 'A separate coordinator-granted central-cap lease and preflight acceptance are required.'
-    }
-    if ($lease.leaseId -ne $auth.leaseId -or $lease.head -ne $job.head -or $lease.jobManifestSha256 -ne $jobHash -or
-        $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
-        $lease.supervisorSha256 -ne $auth.supervisorSha256 -or
-        $lease.preflightReceiptSha256 -ne $auth.preflightReceiptSha256) {
-        throw 'Lease receipt hashes do not bind the exact reviewed B job and capture controls.'
+    if ($transitionRehearsal) {
+        if (-not $job.authority.liveTransitionRehearsalApproved -or
+            $job.authority.captureEvidenceAuthorized -or $job.authority.pngAuthorized -or
+            $lease.status -cne 'AUTHORIZED' -or $lease.authorizedAction -cne 'live-transition-rehearsal' -or
+            $lease.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE') {
+            throw 'Live transition rehearsal lacks explicit non-capture authority.'
+        }
+        if ($lease.authorizationId -ne (Get-CapWorkerAuthorityId) -or $lease.head -ne $job.head -or
+            $lease.productSourceHead -ne $job.productSourceHead -or
+            $lease.jobManifestSha256 -ne $jobHash -or $lease.moduleSha256 -ne $moduleHash -or
+            $lease.workerSha256 -ne $workerHash -or $lease.supervisorSha256 -ne $auth.supervisorSha256 -or
+            $lease.preflightReceiptSha256 -ne $auth.preflightReceiptSha256) {
+            throw 'Rehearsal authorization hashes do not bind the exact job and controls.'
+        }
+    } else {
+        if ($job.authority.centralCaptureLeaseGrantedByThisArtifact -ne $false -or
+            $lease.status -ne 'GRANTED' -or $lease.lane -cne $job.lane -or
+            $lease.authorizedAction -ne 'central-cap-capture' -or
+            $lease.centralPreflightAccepted -ne $true) {
+            throw 'A separate coordinator-granted central-cap lease and preflight acceptance are required.'
+        }
+        if ($lease.leaseId -ne (Get-CapWorkerAuthorityId) -or $lease.head -ne $job.head -or $lease.jobManifestSha256 -ne $jobHash -or
+            $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
+            $lease.supervisorSha256 -ne $auth.supervisorSha256 -or
+            $lease.preflightReceiptSha256 -ne $auth.preflightReceiptSha256) {
+            throw 'Lease receipt hashes do not bind the exact reviewed B job and capture controls.'
+        }
     }
     $mappingProof = Assert-CapFixtureMapping -Root $root -FixturePath $fixturePath `
         -SourcePath (Join-Path $root 'inputs\fixture-source.json') -MappingPath (Join-Path $root 'reports\fixture-mapping.json') `
@@ -651,6 +682,87 @@ function Measure-CapSceneZoom {
     return Measure-CapZoom -Element $element -NaturalWidth $NaturalWidth -Dpi $dpi
 }
 
+function Assert-CapNoPngArtifacts {
+    $pngs=@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.png' -ErrorAction Stop)
+    if ($pngs.Count -ne 0) {
+        throw "Live transition rehearsal refuses PNG creation or retention: $($pngs[0].FullName)"
+    }
+}
+
+function Save-CapTransitionCheckpoint {
+    param(
+        [Parameter(Mandatory)]$AppRun,
+        [Parameter(Mandatory)][string]$SceneName,
+        [AllowNull()]$ZoomEvidence,
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)]$Metrics
+    )
+    Assert-CapNoPngArtifacts
+    $index=$checkpoints.Count+1
+    $actions=if ($AppRun.PSObject.Properties['SActions']) {@($AppRun.SActions)} else {@()}
+    $record=[pscustomobject][ordered]@{
+        schemaVersion=1L
+        evidenceClassification='LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        captureMode='NO_IMAGE_CHECKPOINT'
+        checkpointIndex=[long]$index
+        phase=$Phase
+        scene=$SceneName
+        path=$null
+        sha256=$null
+        observedUtc=[DateTime]::UtcNow.ToString('o')
+        workerDeadlineUtc=$leaseDeadlineUtc.ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+        remainingMilliseconds=[long][Math]::Floor(($leaseDeadlineUtc-[DateTime]::UtcNow).TotalMilliseconds)
+        outerBounds=@($Metrics.OuterBounds)
+        clientBounds=@($Metrics.ClientBounds)
+        dpi=[long]$Metrics.Dpi
+        style=[long]$Metrics.Style
+        exStyle=[long]$Metrics.ExStyle
+        hasMenu=[bool]$Metrics.HasMenu
+        zoom=$ZoomEvidence
+        actions=$actions
+        observedState=$AppRun.SObservation
+        sourceHead=if ($Phase -ceq 'before') {$job.binaries.before.source} else {$job.binaries.after.source}
+        binaryBuiltAtSource=if ($Phase -ceq 'before') {$job.binaries.before.binaryBuiltAtSource} else {$job.binaries.after.binaryBuiltAtSource}
+        binarySha256=if ($Phase -ceq 'before') {$job.binaries.before.sha256} else {$job.binaries.after.sha256}
+        fixtureSha256=$fixtureHash
+        fixtureSourceSha256=$fixtureSourceHash
+        fixtureMappingSha256=$fixtureMappingHash
+    }
+    $directory=Join-Path $outputDirectory 'checkpoints'
+    $null=New-Item -ItemType Directory -Path $directory -Force
+    $reference=Write-CapImmutableJson -Root $root -Path (Join-Path $directory ('{0:D2}-{1}-{2}.json' -f $index,$Phase,$SceneName)) -Value $record
+    $checkpoints.Add([pscustomobject]@{reference=$reference;record=$record})
+    if ($AppRun.PSObject.Properties['SActions']) {$AppRun.SActions.Clear()}
+    Assert-CapNoPngArtifacts
+    Write-CapWorkerJournalSnapshot -Kind 'Progress'
+    Write-CapWorkerLog "CHECKPOINT index=$index phase=$Phase scene=$SceneName classification=LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE"
+}
+
+function Save-CapPhaseTransition {
+    Assert-CapNoPngArtifacts
+    if ($checkpoints.Count -ne 18 -or $zmxSeedReceipts.Count -ne 11 -or $realRestarts.Count -ne 1) {
+        throw 'Before-to-after transition requires 18 checkpoints, 11 seeds, and one real Restart.'
+    }
+    if (@($applicationRuns | Where-Object {-not $_.CleanupComplete}).Count -ne 0 -or
+        @($seedRuns | Where-Object {-not $_.CleanupComplete}).Count -ne 0) {
+        throw 'Before-to-after transition requires complete app and seed cleanup.'
+    }
+    $record=[pscustomobject][ordered]@{
+        schemaVersion=1L
+        evidenceClassification='LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        from='before'
+        to='after'
+        checkpointCount=18L
+        seedCount=11L
+        restartCount=1L
+        cleanup='BEFORE_PHASE_RELEASED_ZERO_SURVIVORS'
+        observedUtc=[DateTime]::UtcNow.ToString('o')
+    }
+    $reference=Write-CapImmutableJson -Root $root -Path (Join-Path $outputDirectory 'before-to-after-transition.json') -Value $record
+    $phaseTransitions.Add([pscustomobject]@{reference=$reference;record=$record})
+    Write-CapWorkerJournalSnapshot -Kind 'Progress'
+}
+
 function Save-CapSceneImage {
     param(
         [Parameter(Mandatory)]$AppRun,
@@ -680,6 +792,11 @@ function Save-CapSceneImage {
     }
     if ($ZoomEvidence -and [Math]::Abs([double]$ZoomEvidence.ZoomPercent - 100.0) -gt 1.0) {
         throw "Zoom evidence changed outside the 100% tolerance for $Phase/$SceneName."
+    }
+    if ($transitionRehearsal) {
+        Save-CapTransitionCheckpoint -AppRun $AppRun -SceneName $SceneName -ZoomEvidence $ZoomEvidence `
+            -Phase $Phase -Metrics $metrics
+        return
     }
     $imagePath = Join-Path $outputDirectory "$Phase-$SceneName.png"
     if (Test-Path -LiteralPath $imagePath) { throw "Refusing to replace prior capture image: $imagePath" }
@@ -768,9 +885,16 @@ function New-CapManifest {
         schemaVersion = 1
         status = $Status
         executionMode = if ($mockSceneRun) { 'OFFLINE_MOCK_ONLY' }
-            elseif ($rehearsal) { 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL' } else { 'LIVE_CAPTURE' }
-        leaseId = $auth.leaseId
-        leaseReceiptSha256 = $leaseHash
+            elseif ($rehearsal) { 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL' }
+            elseif ($transitionRehearsal) { 'LIVE_TRANSITION_REHEARSAL' } else { 'LIVE_CAPTURE' }
+        evidenceClassification = if ($transitionRehearsal) {
+            'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        } elseif (Test-CapMatchedDpiAdapter) { 'C8R_RDP_DPI192_QUALIFIED' } else { $null }
+        authorityId = Get-CapWorkerAuthorityId
+        authoritySha256 = if ($auth.PSObject.Properties['authoritySha256']) {$auth.authoritySha256} else {$leaseHash}
+        leaseId = if ($transitionRehearsal) { $null } else { $auth.leaseId }
+        leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+        rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
         jobManifestSha256 = $jobHash
         moduleSha256 = $moduleHash
         workerSha256 = $workerHash
@@ -784,20 +908,27 @@ function New-CapManifest {
         guiLaunches = @($applicationRuns | Where-Object { -not $rehearsal } | ForEach-Object { $_.Run.Identity.Pid })
         rehearsalLaunches = @($rehearsalLaunches)
         rehearsalActions = @($rehearsalActions)
-        guiOperations = if ($rehearsal) { 'NotExecuted: UIA, HWND, PrintWindow, native input and desktop capture' } else { 'See images' }
+        guiOperations = if ($rehearsal) { 'NotExecuted: UIA, HWND, PrintWindow, native input and desktop capture' }
+            elseif ($transitionRehearsal) { 'Real UIA transitions executed; image APIs prohibited' } else { 'See images' }
         fixtureSha256 = $fixtureHash
         fixtureSourceSha256 = $fixtureSourceHash
         fixtureMappingSha256 = $fixtureMappingHash
         zmxSeedExitCodes = @($zmxSeedReceipts | ForEach-Object exitCode)
         zmxSeeds = @($zmxSeedReceipts)
         images = @($images)
+        captures = if ($transitionRehearsal) { 0L } else { [long]$images.Count }
+        checkpoints = @($checkpoints)
+        checkpointCount = [long]$checkpoints.Count
+        phaseTransitions = @($phaseTransitions)
         cleanup = @($cleanupReceipts)
         cleanupFailures = @($cleanupFailures)
         pendingLaunchesRemaining = @($pendingLaunchesRemaining)
         failures = @($cleanupFailures)
         ownedProcessSurvivors = @($ownedProcessSurvivors)
         ownedProcesses = @($ownedProcessReceipts)
-        privacyRequirement = 'Every image requires an individual privacy check before reviewer handoff.'
+        privacyRequirement = if ($transitionRehearsal) {
+            'No images exist; this rehearsal is not capture evidence and must not enter capture reports or ledgers.'
+        } else { 'Every image requires an individual privacy check before reviewer handoff.' }
     }
     if ($job.PSObject.Properties['sceneAdapter'] -and $job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
         $result.sceneAdapter=$job.sceneAdapter;$result.lane='D';$result.requiredSceneNames=@(Get-CapDSceneNames)
@@ -810,7 +941,7 @@ function New-CapManifest {
         $result.sceneAdapter=$job.sceneAdapter;$result.lane='S';$result.requiredSceneNames=@(Get-CapMatchedSceneNames)
         $result.g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
         $result.backendTurns=0;$result.realRestarts=@($realRestarts)
-        if (Test-CapMatchedDpiAdapter) {
+        if ((Test-CapMatchedDpiAdapter) -and -not $transitionRehearsal) {
             $result.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
             $result.geometrySchemaVersion=3L
             $result.logicalClientWH=@($job.captureContract.logicalClientWH)
@@ -1790,6 +1921,7 @@ function Initialize-CapMatchedRestartStore {
     $wirePath=$project.Replace('\','/')
     $graph=$Fixture.graphs[0] | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
     $graph.project.path=$wirePath;$graph.nodes=@($node);$graph.edges=@()
+    $graph.nodes[0].state=[pscustomobject]@{idle=[pscustomobject]@{}}
     $projects=Join-Path $Roots.Support 'projects'
     $null=New-Item -ItemType Directory -Path $projects
     $key='v1-'+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($wirePath))).ToLowerInvariant()
@@ -2023,10 +2155,12 @@ try {
         throw 'Supervisor run authorization hash mismatch.'
     }
     $auth = Get-Content -LiteralPath $AuthorizationPath -Raw | ConvertFrom-Json -DateKind String
-    if ($auth.ownedRoot -ine $root -or $auth.executionMode -notin @('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL')) {
+    if ($auth.ownedRoot -ine $root -or
+        $auth.executionMode -notin @('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL', 'LIVE_TRANSITION_REHEARSAL')) {
         throw 'Worker root or execution mode differs from supervisor authorization.'
     }
     $rehearsal = $auth.executionMode -ceq 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
+    $transitionRehearsal = $auth.executionMode -ceq 'LIVE_TRANSITION_REHEARSAL'
     # Hash the exact source bytes before importing or compiling the native declarations.
     $moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $modulePath).Hash
     $workerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash
@@ -2045,7 +2179,7 @@ try {
     Set-CapTracePath -Path (Join-Path $safeWorkerOutput 'worker-calls.jsonl')
     Write-CapTrace -Command 'Invoke-UiCaptureWorker' -Parameters $PSBoundParameters
     $jobPath = Assert-CapOwnedPath $auth.jobPath
-    $leasePath = [IO.Path]::GetFullPath($auth.leaseReceiptPath)
+    $leasePath = [IO.Path]::GetFullPath($auth.authorityPath)
     $runDirectory = Assert-CapOwnedPath $auth.runDirectory
     $outputDirectory = Assert-CapOwnedPath $auth.outputDirectory
     $journalPath = Assert-CapOwnedPath $auth.processJournalPath
@@ -2061,9 +2195,10 @@ try {
     $preflightHash = if ($rehearsal) { $null }
         else { (Get-FileHash -Algorithm SHA256 -LiteralPath $auth.preflightReceiptPath).Hash }
     $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
+    $authorityHash = $leaseHash
     if ($moduleHash -ne $auth.moduleSha256 -or $workerHash -ne $auth.workerSha256 -or
         $supervisorHash -ne $auth.supervisorSha256 -or $preflightHash -ne $auth.preflightReceiptSha256 -or
-        $leaseHash -ne $auth.leaseReceiptSha256) {
+        $leaseHash -ne $auth.authoritySha256) {
         throw 'A reviewed capture control or authorization input changed after supervisor launch.'
     }
     if ($AuthorizationPath -ine $auth.authorizationPath) {
@@ -2071,13 +2206,15 @@ try {
     }
     $job = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $jobPath; sha256 = $jobHash })
     $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
-    if (-not $rehearsal -and $lease.fixtureMappingSha256 -ne $auth.fixtureMappingSha256) {
+    if (-not $rehearsal -and -not $transitionRehearsal -and
+        $lease.fixtureMappingSha256 -ne $auth.fixtureMappingSha256) {
         throw 'Worker lease does not bind its exact owned-root fixture mapping.'
     }
-    if ($lease.leaseId -ne $auth.leaseId -or $lease.jobManifestSha256 -ne $jobHash -or
+    $authorityId = if ($transitionRehearsal) {$lease.authorizationId} else {$lease.leaseId}
+    if ($authorityId -ne (Get-CapWorkerAuthorityId) -or $lease.jobManifestSha256 -ne $jobHash -or
         $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
         $lease.supervisorSha256 -ne $supervisorHash) {
-        throw 'Worker lease no longer binds the authorized job and controls.'
+        throw 'Worker authority no longer binds the authorized job and controls.'
     }
     $leaseWindow = Get-CapLeaseWindow -GrantedUtc $lease.grantedUtc -ExpiresUtc $lease.expiresUtc `
         -MaximumMinutes ([double]$lease.maxMinutes) -NowUtc ([DateTime]::UtcNow)
@@ -2101,12 +2238,12 @@ try {
         throw 'Worker journal/final manifest paths differ from the numbered protocol authorization.'
     }
     $journalBinding = New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
-        -LeaseId $auth.leaseId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
+        -LeaseId (Get-CapWorkerAuthorityId) -JobSha256 $jobHash -ModuleSha256 $moduleHash `
         -WorkerSha256 $workerHash -SupervisorSha256 $supervisorHash -Identity $selfIdentity
     $journalState = New-CapJournalState -Root $root -Directory $journalPath `
         -Binding $journalBinding -DeadlineUtc $leaseExpiresUtc
     Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
-    if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
+    if (-not $transitionRehearsal -and (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission'])) {
         $identity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
         if (($identity | ConvertTo-Json -Depth 15 -Compress) -cne ($auth.jobIdentity | ConvertTo-Json -Depth 15 -Compress)) {
             throw 'Worker recomputed job identity differs from supervisor authorization.'
@@ -2130,6 +2267,24 @@ try {
                 -OriginalRoot $job.fixture.originalRoot -SceneAdapter $job.sceneAdapter -ExpectedPeerSha256 $job.fixture.offlinePeerReference.sha256
             $fixtureHash=$proof.FixtureSha256
         }
+    } elseif ($transitionRehearsal) {
+        if ($lease.status -cne 'AUTHORIZED' -or
+            $lease.authorizedAction -cne 'live-transition-rehearsal' -or
+            $lease.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE' -or
+            -not $lease.desktopAuthorized -or $lease.captureEvidenceAuthorized -or $lease.pngAuthorized -or
+            $job.executionMode -cne $auth.executionMode -or -not $job.desktopAuthorized -or
+            $job.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE') {
+            throw 'Live transition rehearsal authority could be mistaken for capture authorization.'
+        }
+        Assert-CapAcceptedInputs
+        $zmxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
+        $beforeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-before.exe')).Hash
+        $afterHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-after.exe')).Hash
+        if ($zmxHash -ne $job.binaries.offlineZmx.sha256 -or
+            $beforeHash -ne $job.binaries.before.sha256 -or $afterHash -ne $job.binaries.after.sha256) {
+            throw 'Live transition rehearsal executable hashes differ from the frozen job.'
+        }
+        $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
     } else {
     Assert-CapAcceptedInputs
     $zmxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
@@ -2146,7 +2301,8 @@ try {
     }
     New-Item -ItemType Directory -Path (Split-Path -Parent $manifestPath) -Force | Out-Null
     [IO.File]::WriteAllText($workerLog, '', [Text.UTF8Encoding]::new($false))
-    Write-CapWorkerLog "WORKER_STARTED lease=$($auth.leaseId) head=$($job.head) job=$jobHash deadline=$($leaseDeadlineUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))"
+    if ($transitionRehearsal) { Assert-CapNoPngArtifacts }
+    Write-CapWorkerLog "WORKER_STARTED authority=$(Get-CapWorkerAuthorityId) mode=$($auth.executionMode) head=$($job.head) job=$jobHash deadline=$($leaseDeadlineUtc.ToString('o', [Globalization.CultureInfo]::InvariantCulture))"
     if ($rehearsal) {
         Invoke-CapRealSeedRehearsal
         Invoke-CapRealLaunchRehearsal
@@ -2162,13 +2318,20 @@ try {
     }
     foreach ($phase in @('before', 'after')) {
         Assert-CapWorkerDeadline "starting phase $phase"
+        if ($transitionRehearsal -and $phase -ceq 'after') { Save-CapPhaseTransition }
         if (Test-CapMatchedAdapter) {Invoke-CapMatchedScenes -Phase $phase}
         elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
         else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    $expectedImages=if (Test-CapMatchedAdapter) {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedImages=if ($transitionRehearsal) {0} elseif (Test-CapMatchedAdapter) {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
     $expectedSeeds=if (Test-CapMatchedAdapter) {22} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
     if ($images.Count -ne $expectedImages) { throw "Expected $expectedImages images across before/after; captured $($images.Count)." }
+    if ($transitionRehearsal) {
+        Assert-CapNoPngArtifacts
+        if ($checkpoints.Count -ne 36 -or $phaseTransitions.Count -ne 1 -or $realRestarts.Count -ne 2) {
+            throw 'Live transition rehearsal requires 36 checkpoints, one before-to-after transition, and two real Restarts.'
+        }
+    }
     if ($zmxSeedReceipts.Count -ne $expectedSeeds -or @($zmxSeedReceipts | Where-Object {
         $_.exitCode -ne 0 -or -not $_.daemonReady -or $_.cmdCount -lt 1 -or
         $_.cleanupStatus -ne 'CLEAN_ZERO_SURVIVORS_FILES_CLOSED' -or
@@ -2268,7 +2431,7 @@ try {
 
 if ($journalFinalLine) {
     if (-not $primaryFailure -and $cleanupFailures.Count -eq 0) {
-        try { Write-CapWorkerLog "WORKER_COMPLETE images=$($images.Count) lease=$($auth.leaseId)" }
+        try { Write-CapWorkerLog "WORKER_COMPLETE images=$($images.Count) checkpoints=$($checkpoints.Count) authority=$(Get-CapWorkerAuthorityId)" }
         catch { $cleanupFailures.Add("Completion logging failed: $($_.Exception.Message)") }
     }
     foreach ($run in $runs) {

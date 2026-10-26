@@ -22,6 +22,7 @@ param(
     [switch]$AdvisoryOlderContractOnly,
     [switch]$DAdapterContractOnly,
     [switch]$MatchedScenarioContractOnly,
+    [switch]$LiveTransitionRehearsalContractOnly,
     [switch]$MatchedDpiContractOnly,
     [string]$Schema3JobPath = '',
     [switch]$SeedPathContractOnly,
@@ -399,6 +400,7 @@ function Assert-CapRejects {
         if ($InvalidJobContract) {
             $manifest | Add-Member -NotePropertyMembers @{
                 leaseId = $context.Binding.leaseId; leaseReceiptSha256 = ('B' * 64)
+                authorityId = $context.Binding.leaseId; authoritySha256 = ('B' * 64)
                 jobManifestSha256 = $context.Binding.jobSha256
                 moduleSha256 = $context.Binding.moduleSha256
                 workerSha256 = $context.Binding.workerSha256
@@ -646,6 +648,7 @@ function Assert-CapRejects {
                 $journalProof = Read-CapJournalFinalProof $fixture.Context.State $fixture.Context.Root $fixture.Record
                 $boundWorkerManifest = $journalProof.Manifest
                 $rehearsal = $true
+                $transitionRehearsal = $false
                 $ExecutionMode = 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
                 $ast = [Management.Automation.Language.Parser]::ParseInput(
                     [IO.File]::ReadAllText($supervisorPath), [ref]$null, [ref]$null)
@@ -3012,7 +3015,10 @@ function Invoke-CapMatchedContracts {
         Invoke-CapMatchedProxyContract
     }
     Invoke-CapTest 'matched manifest seals scene inventory and refuses premature restart success' {
-        Invoke-CapMatchedManifestContract
+        return @{
+            capture = Invoke-CapMatchedManifestContract
+            liveTransitionRehearsal = Invoke-CapLiveTransitionRehearsalManifestContract
+        }
     }
 }
 
@@ -4142,10 +4148,55 @@ function Invoke-CapMatchedPersistenceContract {
             $recent.Count -eq 1 -and $recent[0].lastOpenedAt -eq $graph.project.lastOpenedAt -and
             $recent[0].path -ceq $graph.project.path -and $recent[0].name -ceq $graph.project.name -and
             $graph.nodes.Count -eq 1 -and $graph.nodes[0].id -ceq '11111111-1111-4111-8111-000000000001' -and
-            $graph.edges.Count -eq 0) 'Actual restart persistence lost required ProjectRef fields or isolated node ownership.'
+            $graph.nodes[0].state -is [pscustomobject] -and
+            $null -ne $graph.nodes[0].state.PSObject.Properties['idle'] -and
+            $graph.edges.Count -eq 0) 'Actual restart persistence is not a real Swift LoopGraph with the isolated Restart node.'
         return @{graphPath=$store.graphPath;recentPath=$store.recentPath;projects=1;nodes=1
             lastOpenedAt=$graph.project.lastOpenedAt;dateEncoding='SWIFT_REFERENCE_SECONDS'
             evidence='ACTUAL_WORKER_PERSISTENCE_FILE_IO_NOT_DAEMON_EXECUTION'}
+    }
+}
+
+function Invoke-CapLiveTransitionRehearsalManifestContract {
+    $workerSource=[IO.File]::ReadAllText($workerPath)
+    $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
+    foreach ($source in @($workerSource,$supervisorSource)) {
+        Assert-CapTest ($source.Contains('LIVE_TRANSITION_REHEARSAL')) 'Live transition rehearsal execution mode is missing.'
+        Assert-CapTest ($source.Contains('LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE')) 'Live transition evidence refusal classification is missing.'
+    }
+    Assert-CapTest ($workerSource.Contains('Save-CapTransitionCheckpoint')) 'Worker has no typed transition checkpoint writer.'
+    Assert-CapTest ($workerSource.Contains('Assert-CapNoPngArtifacts')) 'Worker does not refuse PNG creation or retention.'
+    Assert-CapTest ($workerSource.Contains('checkpointCount') -and
+        $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
+    Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and
+        $supervisorSource.Contains('RehearsalAuthorizationSha256')) 'Supervisor still requires a capture lease for live transition rehearsal.'
+    $job=New-CapMatchedDpiTestJob
+    $manifest=[pscustomobject]@{
+        sceneAdapter=$job.sceneAdapter;lane='S';status='COMPLETE'
+        executionMode='LIVE_TRANSITION_REHEARSAL'
+        evidenceClassification='LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        images=@();realRestarts=@();g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
+        backendTurns=0
+    }
+    $reportRefusal=Assert-CapRejects {Assert-CapMatchedManifest -Manifest $manifest -Job $job} 'Matched manifest'
+    return @{
+        classification='LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        checkpoints=36
+        seeds=22
+        restarts=2
+        captures=0
+        captureReportRefusal=$reportRefusal
+        evidence='SOURCE_CONTRACT_ONLY_NO_DESKTOP'
+    }
+}
+
+function Invoke-CapLiveTransitionRehearsalContracts {
+    Invoke-CapTest 'matched v12 fixture binds exact node type wiring reason and outcome fields' {
+        $fixture=Get-Content (Join-Path $driverDirectory 'fixtures\matched-v12.json') -Raw | ConvertFrom-Json -DateKind String
+        return @{persistence=(Invoke-CapMatchedPersistenceContract);nodes=$fixture.graphs[0].nodes.Count}
+    }
+    Invoke-CapTest 'matched manifest seals scene inventory and refuses premature restart success' {
+        Invoke-CapLiveTransitionRehearsalManifestContract
     }
 }
 
@@ -6870,6 +6921,19 @@ if ($MatchedScenarioContractOnly) {
     exit 0
 }
 
+if ($LiveTransitionRehearsalContractOnly) {
+    Invoke-CapLiveTransitionRehearsalContracts
+    $passed=@($results | Where-Object passed -EQ $true).Count
+    $failed=@($results | Where-Object passed -EQ $false).Count
+    $report=[pscustomobject][ordered]@{suite='UiCaptureLiveTransitionRehearsal';executed=$results.Count
+        passed=$passed;failed=$failed;skipped=0;gui='NotExecuted';images=0;cases=@($results)
+    }
+    $report | ConvertTo-Json -Depth 25 | Set-Content -LiteralPath (Join-Path $scratch 'live-transition-rehearsal-report.json') -Encoding utf8NoBOM
+    $report | Select-Object suite,executed,passed,failed | ConvertTo-Json -Compress
+    if ($results.Count -ne 2 -or $passed -ne 2 -or $failed -ne 0) {exit 1}
+    exit 0
+}
+
 if ($MatchedDpiContractOnly) {
     Invoke-CapMatchedDpiContracts
     $passed=@($results | Where-Object passed -EQ $true).Count
@@ -7606,7 +7670,8 @@ try {
             . ([scriptblock]::Create($function.Extent.Text))
             $preflight = [ordered]@{
                 suite = 'UiCaptureDriver'; executed = $results.Count; passed = $results.Count; failed = 0
-                mode = $mode; gui = 'NotExecuted'; images = 0; backendTurns = 0; fixture = $target
+                mode = $mode; gui = 'NotExecuted'; images = 0; backendTurns = 0
+                fixture = [pscustomobject]@{ compilerExitCode = 0L }
                 controls = [pscustomobject]@{ moduleSha256 = $sourceHashesBefore[$modulePath]
                     workerSha256 = $sourceHashesBefore[$workerPath]; supervisorSha256 = $sourceHashesBefore[$supervisorPath] }
                 cases = @($results)

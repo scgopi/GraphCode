@@ -4,10 +4,12 @@ param(
     [Parameter(Mandatory)][string]$JobPath,
     [Parameter()][string]$JobSha256,
     [Parameter()][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$FixtureMappingSha256,
-    [ValidateSet('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL')]
+    [ValidateSet('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL', 'LIVE_TRANSITION_REHEARSAL')]
     [string]$ExecutionMode = 'LIVE_CAPTURE',
     [Parameter()][string]$LeaseReceiptPath,
     [Parameter()][string]$LeaseReceiptSha256,
+    [Parameter()][string]$RehearsalAuthorizationPath,
+    [Parameter()][string]$RehearsalAuthorizationSha256,
     [Parameter()][string]$PreflightReceiptPath,
     [Parameter()][string]$PreflightReceiptSha256,
     [switch]$TimeoutProbe
@@ -20,6 +22,7 @@ $requestedOutputDirectory = $OutputDirectory
 $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $workerPath = Join-Path $PSScriptRoot 'Invoke-UiCaptureWorker.ps1'
 $rehearsal = $ExecutionMode -ceq 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
+$transitionRehearsal = $ExecutionMode -ceq 'LIVE_TRANSITION_REHEARSAL'
 $fixtureMappingHashExpected = if ($FixtureMappingSha256) { $FixtureMappingSha256.ToUpperInvariant() }
     else { $null }
 $jobIdentity = $null
@@ -52,6 +55,9 @@ $outputDirectory = $null
 $runDirectory = $null
 $authorizationPath = $null
 $authorizationHash = $null
+$authorityId = $null
+$authorityHash = $null
+$authorityPath = $null
 $deadlineUtc = [DateTime]::MinValue
 $jobHash = $null
 $moduleHash = $null
@@ -168,6 +174,52 @@ function Assert-CapGreenJob {
         if ($actual -ne $inputHashes[$key][1]) { throw "Cap-owned $key input hash mismatch: $actual" }
     }
     return $jobIdentity.sourceRepository
+}
+
+function Assert-CapTransitionJobIdentity {
+    Assert-CapDataRecord $job @{ head = [string]; productSourceHead = [string]
+        sourceRepository = [string]; executionMode = [string]; desktopAuthorized = [bool]
+        authority = [pscustomobject]; binaries = [pscustomobject] } 'Live transition rehearsal job'
+    Assert-CapDataRecord $job.authority @{ liveTransitionRehearsalApproved = [bool]
+        captureEvidenceAuthorized = [bool]; pngAuthorized = [bool] } 'Live transition rehearsal authority'
+    if ($job.executionMode -cne 'LIVE_TRANSITION_REHEARSAL' -or -not $job.desktopAuthorized -or
+        -not $job.authority.liveTransitionRehearsalApproved -or
+        $job.authority.captureEvidenceAuthorized -or $job.authority.pngAuthorized -or
+        $job.productSourceHead -cnotmatch '^[a-f0-9]{40}$' -or $job.head -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'Live transition rehearsal job is not explicitly authorized as non-capture evidence.'
+    }
+    $repository = [IO.Path]::GetFullPath($job.sourceRepository)
+    if ([string](Invoke-CapAdmissionGit $repository @('rev-parse','HEAD')) -cne $job.head -or
+        @(Invoke-CapAdmissionGit $repository @('status','--porcelain','--untracked-files=all')).Count -ne 0) {
+        throw 'Live transition rehearsal source repository is not clean at its exact tooling head.'
+    }
+    foreach ($commit in @($job.head,$job.productSourceHead,$job.base)) {
+        if ([string](Invoke-CapAdmissionGit $repository @('rev-parse','--verify',"$commit`^{commit}")) -cne $commit) {
+            throw 'Live transition rehearsal names a missing source commit.'
+        }
+    }
+    $delta = @(Invoke-CapAdmissionGit $repository @(
+        'diff','--name-only','--no-renames','--no-ext-diff','--no-textconv',
+        $job.productSourceHead,$job.head,'--'
+    ))
+    foreach ($path in $delta) {
+        if ($path -cnotmatch '^(Tools/windows/(UiCaptureDriver\.psm1|Invoke-UiCapture(?:Worker)?\.ps1|UI-CAPTURE-SCENARIOS\.md|Tests/UiCaptureDriver\.Tests\.ps1)|\.github/PULL_REQUEST_TEMPLATE\.md)$') {
+            throw "Live transition rehearsal tooling head changes a product or unrelated path: $path"
+        }
+    }
+    if ($job.binaries.after.source -cne $job.productSourceHead -or
+        $job.binaries.after.binaryBuiltAtSource -cne $job.productSourceHead -or
+        $job.binaries.before.source -cne $job.base -or
+        $job.binaries.before.binaryBuiltAtSource -cne $job.base) {
+        throw 'Live transition rehearsal binary source identities differ from the frozen product sources.'
+    }
+    return [pscustomobject]@{
+        sourceRepository = $repository
+        toolingHead = $job.head
+        productSourceHead = $job.productSourceHead
+        toolingDeltaPaths = $delta
+        attestation = 'NON_CAPTURE_REHEARSAL_HASH_AND_SOURCE_BINDING'
+    }
 }
 
 function Assert-CapLiveNativeBindings {
@@ -422,46 +474,86 @@ function Assert-CapPreflightReport {
 function Assert-CapLease {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    if (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256) {
-        throw 'No coordinator lease was supplied. Offline preflight readiness does not authorize desktop use.'
-    }
-    $leasePath = Assert-CapSupervisorPath $LeaseReceiptPath
-    if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) { throw "Coordinator lease receipt is missing: $leasePath" }
-    $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
-    $script:leaseHash = $leaseHash
-    if ($leaseHash -ne $LeaseReceiptSha256.ToUpperInvariant()) { throw 'Coordinator lease receipt hash mismatch.' }
-    $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
-    Assert-CapDataRecord $lease @{ schemaVersion = [long]; leaseId = [string]; lane = [string]
-        status = [string]; authorizedAction = [string]; head = [string]; jobManifestSha256 = [string]
-        moduleSha256 = [string]; workerSha256 = [string]; supervisorSha256 = [string]
-        grantedUtc = [string]; expiresUtc = [string]; maxMinutes = [long] } 'Coordinator lease'
-    if ($rehearsal) {
-        Assert-CapDataRecord $lease @{ desktopAuthorized = [bool] } 'Rehearsal lease'
+    if ($transitionRehearsal) {
+        if (-not $RehearsalAuthorizationPath -or -not $RehearsalAuthorizationSha256) {
+            throw 'Live transition rehearsal requires an explicit non-capture rehearsal authorization.'
+        }
+        $leasePath = Assert-CapSupervisorPath $RehearsalAuthorizationPath
+        if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) {
+            throw "Rehearsal authorization is missing: $leasePath"
+        }
+        $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
+        if ($leaseHash -ne $RehearsalAuthorizationSha256.ToUpperInvariant()) {
+            throw 'Rehearsal authorization hash mismatch.'
+        }
+        $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
+        Assert-CapDataRecord $lease @{ schemaVersion = [long]; authorizationId = [string]; status = [string]
+            authorizedAction = [string]; evidenceClassification = [string]; desktopAuthorized = [bool]
+            captureEvidenceAuthorized = [bool]; pngAuthorized = [bool]; head = [string]
+            productSourceHead = [string]; jobManifestSha256 = [string]; moduleSha256 = [string]
+            workerSha256 = [string]; supervisorSha256 = [string]; preflightReceiptSha256 = [string]
+            grantedUtc = [string]; expiresUtc = [string]; maxMinutes = [long] } 'Rehearsal authorization'
+        if ($lease.schemaVersion -ne 1 -or $lease.status -cne 'AUTHORIZED' -or
+            $lease.authorizedAction -cne 'live-transition-rehearsal' -or
+            $lease.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE' -or
+            -not $lease.desktopAuthorized -or $lease.captureEvidenceAuthorized -or $lease.pngAuthorized -or
+            $lease.head -cne $job.head -or $lease.productSourceHead -cne $job.productSourceHead -or
+            $lease.jobManifestSha256 -ne $jobHash -or $lease.moduleSha256 -ne $moduleHash -or
+            $lease.workerSha256 -ne $workerHash -or $lease.supervisorSha256 -ne $supervisorHash -or
+            $lease.preflightReceiptSha256 -ne $preflightHash) {
+            throw 'Rehearsal authorization does not bind the exact non-capture job, controls, and preflight.'
+        }
+        $null = [guid]::Parse([string]$lease.authorizationId)
+        $script:authorityId = $lease.authorizationId
+        $script:authorityHash = $leaseHash
+        $script:authorityPath = $leasePath
     } else {
-        Assert-CapDataRecord $lease @{ centralPreflightAccepted = [bool]; preflightReceiptSha256 = [string]
-            fixtureMappingSha256 = [string] } 'Capture lease'
+        if (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256) {
+            throw 'No coordinator lease was supplied. Offline preflight readiness does not authorize desktop use.'
+        }
+        $leasePath = Assert-CapSupervisorPath $LeaseReceiptPath
+        if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) { throw "Coordinator lease receipt is missing: $leasePath" }
+        $leaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
+        $script:leaseHash = $leaseHash
+        if ($leaseHash -ne $LeaseReceiptSha256.ToUpperInvariant()) { throw 'Coordinator lease receipt hash mismatch.' }
+        $lease = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $leasePath; sha256 = $leaseHash })
     }
-    $expectedStatus = if ($rehearsal) { 'REHEARSAL_ONLY' } else { 'GRANTED' }
-    $expectedAction = if ($rehearsal) { 'no-desktop-real-launch-rehearsal' } else { 'central-cap-capture' }
-    if ($lease.schemaVersion -ne 1 -or $lease.status -ne $expectedStatus -or
-        $lease.lane -cne $job.lane -or $lease.authorizedAction -ne $expectedAction -or
-        (-not $rehearsal -and $lease.centralPreflightAccepted -ne $true) -or
-        ($rehearsal -and $lease.desktopAuthorized -ne $false) -or
-        $lease.head -ne $job.head -or $lease.jobManifestSha256 -ne $jobHash -or
-        $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
-        $lease.supervisorSha256 -ne $supervisorHash -or $lease.preflightReceiptSha256 -ne $preflightHash) {
-        throw 'Coordinator lease does not bind the job lane/head and exact worker/preflight hashes.'
+    if (-not $transitionRehearsal) {
+        Assert-CapDataRecord $lease @{ schemaVersion = [long]; leaseId = [string]; lane = [string]
+            status = [string]; authorizedAction = [string]; head = [string]; jobManifestSha256 = [string]
+            moduleSha256 = [string]; workerSha256 = [string]; supervisorSha256 = [string]
+            grantedUtc = [string]; expiresUtc = [string]; maxMinutes = [long] } 'Coordinator lease'
+        if ($rehearsal) {
+            Assert-CapDataRecord $lease @{ desktopAuthorized = [bool] } 'Rehearsal lease'
+        } else {
+            Assert-CapDataRecord $lease @{ centralPreflightAccepted = [bool]; preflightReceiptSha256 = [string]
+                fixtureMappingSha256 = [string] } 'Capture lease'
+        }
+        $expectedStatus = if ($rehearsal) { 'REHEARSAL_ONLY' } else { 'GRANTED' }
+        $expectedAction = if ($rehearsal) { 'no-desktop-real-launch-rehearsal' } else { 'central-cap-capture' }
+        if ($lease.schemaVersion -ne 1 -or $lease.status -ne $expectedStatus -or
+            $lease.lane -cne $job.lane -or $lease.authorizedAction -ne $expectedAction -or
+            (-not $rehearsal -and $lease.centralPreflightAccepted -ne $true) -or
+            ($rehearsal -and $lease.desktopAuthorized -ne $false) -or
+            $lease.head -ne $job.head -or $lease.jobManifestSha256 -ne $jobHash -or
+            $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
+            $lease.supervisorSha256 -ne $supervisorHash -or $lease.preflightReceiptSha256 -ne $preflightHash) {
+            throw 'Coordinator lease does not bind the job lane/head and exact worker/preflight hashes.'
+        }
+        if (-not $rehearsal -and $lease.fixtureMappingSha256 -ne $fixtureMappingHashExpected) {
+            throw 'Live lease does not bind the exact owned-root fixture mapping.'
+        }
+        $null = [guid]::Parse([string]$lease.leaseId)
+        $script:authorityId = $lease.leaseId
+        $script:authorityHash = $leaseHash
+        $script:authorityPath = $leasePath
     }
-    if (-not $rehearsal -and $lease.fixtureMappingSha256 -ne $fixtureMappingHashExpected) {
-        throw 'Live lease does not bind the exact owned-root fixture mapping.'
-    }
-    $null = [guid]::Parse([string]$lease.leaseId)
     $leaseWindow = Get-CapLeaseWindow -GrantedUtc $lease.grantedUtc -ExpiresUtc $lease.expiresUtc `
         -MaximumMinutes ([double]$lease.maxMinutes) -NowUtc ([DateTime]::UtcNow)
     $script:leaseExpiresUtc = $leaseWindow.ExpiresUtc
     $script:deadlineUtc = $leaseWindow.WorkerDeadlineUtc
     if ($script:deadlineUtc -le $leaseWindow.NowUtc.AddMinutes(1)) {
-        throw 'Lease has insufficient remaining time after the reserved 90-second cleanup margin.'
+        throw 'Authorization has insufficient remaining time after the reserved 90-second cleanup margin.'
     }
     $script:lease = $lease
     $script:leaseHash = $leaseHash
@@ -579,15 +671,15 @@ function Read-CapQuiescentWorkerProof {
         throw 'JournalCleanupUnproven: final owned cleanup arrays are not empty.'
     }
     Assert-CapDataRecord $boundWorkerManifest @{
-        leaseId = [string]; jobManifestSha256 = [string]; moduleSha256 = [string]
-        workerSha256 = [string]; supervisorSha256 = [string]; leaseReceiptSha256 = [string]
+        authorityId = [string]; jobManifestSha256 = [string]; moduleSha256 = [string]
+        workerSha256 = [string]; supervisorSha256 = [string]; authoritySha256 = [string]
     } 'Proven worker manifest identity'
-    if ($boundWorkerManifest.leaseId -cne $journalState.Binding.leaseId -or
+    if ($boundWorkerManifest.authorityId -cne $journalState.Binding.leaseId -or
         $boundWorkerManifest.jobManifestSha256 -cne $journalState.Binding.jobSha256 -or
         $boundWorkerManifest.moduleSha256 -cne $journalState.Binding.moduleSha256 -or
         $boundWorkerManifest.workerSha256 -cne $journalState.Binding.workerSha256 -or
         $boundWorkerManifest.supervisorSha256 -cne $journalState.Binding.supervisorSha256 -or
-        $boundWorkerManifest.leaseReceiptSha256 -cne $leaseHash) {
+        $boundWorkerManifest.authoritySha256 -cne $authorityHash) {
         throw 'JournalIdentity: final manifest source/lease fields differ from the proven binding.'
     }
     if ($workerRun.Identity.Process.ExitCode -ne 0 -and $boundWorkerManifest.status -ceq 'COMPLETE') {
@@ -617,7 +709,12 @@ function Get-CapAppSessionPrefix {
     param([Parameter(Mandatory)]$Record)
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
-    $shortLease = $lease.leaseId.Replace('-', '').Substring(0, 8)
+    $boundAuthorityId = if (-not [string]::IsNullOrWhiteSpace([string]$authorityId)) {
+        [string]$authorityId
+    } else {
+        [string]$lease.leaseId
+    }
+    $shortLease = $boundAuthorityId.Replace('-', '').Substring(0, 8)
     if ($Record.Role -like '*-actions') { return "gc-cap-actions-$shortLease-$($Record.Phase)-" }
     return "gc-cap-$shortLease-$($Record.Phase)-"
 }
@@ -806,6 +903,38 @@ function Assert-CapWorkerManifest {
         throw 'Worker exited without exact quiescent manifest/terminal binding.'
     }
     $manifest = $boundWorkerManifest
+    if ($transitionRehearsal) {
+        $expected=@(foreach ($phase in @('before','after')) {
+            foreach ($scene in Get-CapMatchedSceneNames) {"${phase}:$scene"}
+        })
+        $actual=@($manifest.checkpoints | ForEach-Object {"$($_.record.phase):$($_.record.scene)"})
+        if ($manifest.status -cne 'COMPLETE' -or
+            $manifest.executionMode -cne 'LIVE_TRANSITION_REHEARSAL' -or
+            $manifest.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE' -or
+            $manifest.captures -ne 0 -or $manifest.images.Count -ne 0 -or
+            $manifest.checkpointCount -ne 36 -or $manifest.checkpoints.Count -ne 36 -or
+            @($actual | Sort-Object -Unique).Count -ne 36 -or
+            (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
+            $manifest.zmxSeeds.Count -ne 22 -or $manifest.realRestarts.Count -ne 2 -or
+            $manifest.phaseTransitions.Count -ne 1 -or
+            $manifest.failures.Count -ne 0 -or $manifest.cleanupFailures.Count -ne 0 -or
+            $manifest.ownedProcessSurvivors.Count -ne 0 -or $manifest.pendingLaunchesRemaining.Count -ne 0) {
+            throw 'Live transition rehearsal manifest is incomplete or could be mistaken for capture evidence.'
+        }
+        foreach ($checkpoint in $manifest.checkpoints) {
+            if ($checkpoint.record.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE' -or
+                $checkpoint.record.captureMode -cne 'NO_IMAGE_CHECKPOINT' -or
+                $checkpoint.record.path -or $checkpoint.record.sha256 -or
+                (Get-FileHash -LiteralPath (Assert-CapSupervisorPath $checkpoint.reference.path) -Algorithm SHA256).Hash -ne
+                    $checkpoint.reference.sha256) {
+                throw 'Live transition rehearsal checkpoint is mutable, image-shaped, or misclassified.'
+            }
+        }
+        if (@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.png' -ErrorAction Stop).Count -ne 0) {
+            throw 'Live transition rehearsal retained a PNG.'
+        }
+        return
+    }
     if ($rehearsal) {
         if ($manifest.status -cne 'COMPLETE' -or $manifest.executionMode -cne $ExecutionMode -or
             $manifest.guiLaunches.Count -ne 0 -or $manifest.images.Count -ne 0 -or
@@ -996,7 +1125,7 @@ try {
     $outputDirectory = Assert-CapSupervisorPath $requestedOutputDirectory
     if (Test-Path -LiteralPath $outputDirectory) { throw "Refusing to replace a prior capture output: $outputDirectory" }
     $null = New-Item -ItemType Directory -Path $outputDirectory
-    $releaseReceiptPath = Join-Path $outputDirectory 'lease-release.json'
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
     $safeOutputInitialized = $true
     $moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $modulePath).Hash
     $workerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $workerPath).Hash
@@ -1008,9 +1137,10 @@ try {
         Invoke-CapTimeoutProbe
         return
     }
-    if (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256 -or
+    if (($transitionRehearsal -and (-not $RehearsalAuthorizationPath -or -not $RehearsalAuthorizationSha256)) -or
+        (-not $transitionRehearsal -and (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256)) -or
         (-not $rehearsal -and (-not $PreflightReceiptPath -or -not $PreflightReceiptSha256))) {
-        throw 'No coordinator lease or accepted preflight receipt was supplied; no desktop slot is authorized.'
+        throw 'No exact desktop authorization and accepted preflight receipt were supplied.'
     }
     $JobPath = Assert-CapSupervisorPath $JobPath
     $preflightPath = if ($rehearsal) { $null } else { Assert-CapSupervisorPath $PreflightReceiptPath }
@@ -1042,12 +1172,21 @@ try {
             throw 'Harmless rehearsal target executable hash mismatch.'
         }
         $sourceRoot = $PSScriptRoot
+    } elseif ($transitionRehearsal) {
+        if ($job.executionMode -cne $ExecutionMode -or -not $job.desktopAuthorized -or
+            $job.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE') {
+            throw 'Expected an explicitly authorized live transition rehearsal job.'
+        }
+        $preflightHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preflightPath).Hash
+        $preflight = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $preflightPath; sha256 = $preflightHash })
     } else {
         $preflightHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preflightPath).Hash
         $preflight = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $preflightPath; sha256 = $preflightHash })
     }
     $null = Assert-CapLease
-    if (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
+    if ($transitionRehearsal) {
+        $jobIdentity = Assert-CapTransitionJobIdentity
+    } elseif (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
         $jobIdentity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
     }
     if ($rehearsal -and $null -ne $job.PSObject.Properties['sceneAdapter'] -and
@@ -1089,8 +1228,12 @@ try {
         }
     }
     if (@(Get-CapPendingLaunches).Count -ne 0) { throw 'Unreturned capture worker launches remain before run authorization.' }
+    if ($transitionRehearsal -and
+        @(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.png' -ErrorAction Stop).Count -ne 0) {
+        throw 'Live transition rehearsal refuses a root that already retains PNG files.'
+    }
 
-    $shortLease = $lease.leaseId.Replace('-', '').Substring(0, 8)
+    $shortLease = $authorityId.Replace('-', '').Substring(0, 8)
     if (-not $rehearsal) {
         if ($root.Length -gt 5) {
             $pathFailure = [IO.PathTooLongException]::new(
@@ -1107,7 +1250,7 @@ try {
     $processJournalPath = Join-Path $runDirectory 'process-journal'
     $manifestPath = Join-Path $outputDirectory 'manifest.json'
     $workerLogPath = Join-Path $outputDirectory 'worker.log'
-    $releaseReceiptPath = Join-Path $outputDirectory 'lease-release.json'
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
     foreach ($path in @($runDirectory)) {
         if (Test-Path -LiteralPath $path) { throw "Refusing to reuse prior capture run path: $path" }
     }
@@ -1121,9 +1264,14 @@ try {
         schemaVersion = 1
         executionMode = $ExecutionMode
         ownedRoot = $root
-        leaseId = $lease.leaseId
-        leaseReceiptPath = $LeaseReceiptPath
-        leaseReceiptSha256 = $leaseHash
+        authorityId = $authorityId
+        authorityPath = $authorityPath
+        authoritySha256 = $authorityHash
+        leaseId = if ($transitionRehearsal) { $null } else { $lease.leaseId }
+        leaseReceiptPath = if ($transitionRehearsal) { $null } else { $LeaseReceiptPath }
+        leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+        rehearsalAuthorizationPath = if ($transitionRehearsal) { $RehearsalAuthorizationPath } else { $null }
+        rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
         jobPath = $JobPath
         jobSha256 = $jobHash
         modulePath = $modulePath
@@ -1151,8 +1299,8 @@ try {
     }
     Write-CapJsonAtomic -Path $authorizationPath -Value $auth
     $authorizationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $authorizationPath).Hash
-    $releaseReceiptPath = Join-Path $outputDirectory 'lease-release.json'
-    Write-CapSupervisorLog "LEASE_ACCEPTED lease=$($lease.leaseId) head=$($job.head) remaining=$([Math]::Round(($leaseExpiresUtc - [DateTime]::UtcNow).TotalSeconds, 1))s reserve=90s"
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
+    Write-CapSupervisorLog "AUTHORIZATION_ACCEPTED id=$authorityId mode=$ExecutionMode head=$($job.head) remaining=$([Math]::Round(($leaseExpiresUtc - [DateTime]::UtcNow).TotalSeconds, 1))s reserve=90s"
     Write-CapSupervisorLog "STARTING_WORKER path=$workerPath sha256=$workerHash authorization=$authorizationHash"
 
     if (@(Get-CapTraceFailures).Count -gt 0) { throw 'Capture tracing failed before worker launch.' }
@@ -1167,7 +1315,7 @@ try {
     ) -WorkingDirectory $runDirectory -Role 'b-capture-worker' -HoldStdin
     [CapProcessJob]::Assign($workerJob, $workerRun.Identity.Process.Handle)
     $journalBinding = New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
-        -LeaseId $lease.leaseId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
+        -LeaseId $authorityId -JobSha256 $jobHash -ModuleSha256 $moduleHash `
         -WorkerSha256 $workerHash -SupervisorSha256 $supervisorHash -Identity $workerRun.Identity
     $journalState = New-CapJournalState -Root $root -Directory $processJournalPath -Binding $journalBinding `
         -DeadlineUtc $deadlineUtc -ObservationPath (Join-Path $diagnosticsDirectory 'journal-read-observations.jsonl')
@@ -1335,9 +1483,17 @@ try {
             workerStarted = $null -ne $workerRun
             workerLaunchAttempted = $workerLaunchAttempted
             pendingLaunchesRemaining = @($pendingLaunchesRemaining)
-            guiOperations = if ($rehearsal) { 'NotExecuted: no-desktop real-launch rehearsal' } else { 'See worker manifest' }
-            leaseId = if ($lease) { $lease.leaseId } else { $null }
-            leaseReceiptSha256 = $leaseHash
+            guiOperations = if ($rehearsal) { 'NotExecuted: no-desktop real-launch rehearsal' }
+                elseif ($transitionRehearsal) { 'Executed real UIA transitions; no images authorized' }
+                else { 'See worker manifest' }
+            evidenceClassification = if ($transitionRehearsal) {
+                'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+            } else { $null }
+            authorityId = $authorityId
+            authoritySha256 = $authorityHash
+            leaseId = if ($transitionRehearsal) { $null } elseif ($lease) { $lease.leaseId } else { $null }
+            leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+            rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
             jobSha256 = $jobHash
             head = if ($job) { $job.head } else { $null }
             moduleSha256 = $moduleHash
@@ -1383,4 +1539,5 @@ if ($cleanupFailures.Count -or $releaseFailure -or -not $releaseWritten) {
     throw "Capture supervisor failed. Primary=$(Get-CapSupervisorFailureText $primaryFailure); cleanup=$($cleanupFailures -join '; '); release=$(Get-CapSupervisorFailureText $releaseFailure); releaseWritten=$releaseWritten"
 }
 if ($primaryFailure) { throw $primaryFailure }
-Write-Output ('{0:o} CAPTURE_COMPLETE output={1} release={2}' -f [DateTime]::UtcNow, $outputDirectory, $releaseReceiptPath)
+Write-Output ('{0:o} {1}_COMPLETE output={2} release={3}' -f [DateTime]::UtcNow,
+    $(if ($transitionRehearsal) {'LIVE_TRANSITION_REHEARSAL'} else {'CAPTURE'}), $outputDirectory, $releaseReceiptPath)
