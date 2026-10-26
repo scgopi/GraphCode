@@ -79,6 +79,18 @@ function Get-CapWorkerAuthorityId {
     throw 'Worker authority identity is missing.'
 }
 
+function ConvertTo-CapWorkerImagePath {
+    param([Parameter(Mandatory)][string]$Path)
+    $value=$Path.Trim()
+    if ($value.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)) {
+        $value='\\'+$value.Substring(8)
+    } elseif ($value.StartsWith('\\?\',[StringComparison]::OrdinalIgnoreCase) -or
+        $value.StartsWith('\??\',[StringComparison]::OrdinalIgnoreCase)) {
+        $value=$value.Substring(4)
+    }
+    return [IO.Path]::GetFullPath($value)
+}
+
 function Test-CapMatchedAdapter {
     return $job.PSObject.Properties['sceneAdapter'] -and
         $job.sceneAdapter -cin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1')
@@ -1800,7 +1812,7 @@ function Get-CapMatchedAttach {
     $tree=@(Get-CapTreeForApp -AppRun $AppRun)
     $session="graphcode-$NodeId"
     $found=@(foreach ($candidate in $tree) {
-        if ($candidate.ExpectedImagePath -ine (ConvertTo-CapImagePath (Join-Path $root 'runtime\zmx.exe'))) {continue}
+        if ($candidate.ExpectedImagePath -ine (ConvertTo-CapWorkerImagePath (Join-Path $root 'runtime\zmx.exe'))) {continue}
         $verified=Assert-CapProcessIdentity -Identity $candidate
         if ($verified.State -ceq 'Exited') {continue}
         $arguments=@([CapNative]::CommandArguments($verified.Metadata.CommandLine))
@@ -1833,8 +1845,8 @@ function Get-CapMatchedRestartEvidence {
     $after=Get-CapMatchedAttach -AppRun $AppRun -NodeId $Context.nodeId
     if ($null -eq $after -or -not [CapNative]::IsExited($Context.oldAttach.Process.Handle,$Context.oldAttach.Pid)) {return $null}
     $members=@(Get-CapJobMembers -Run $Context.daemonRun)
-    $backend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\copilot.exe')))
-    $zmx=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\zmx.exe')))
+    $backend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapWorkerImagePath (Join-Path $root 'runtime\copilot.exe')))
+    $zmx=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapWorkerImagePath (Join-Path $root 'runtime\zmx.exe')))
     if ($backend.Count -ne 1 -or $zmx.Count -lt 1) {return $null}
     if ($backend[0].CreationFileTimeUtc -le $Context.oldBackend.CreationFileTimeUtc -or
         -not [CapNative]::IsExited($Context.oldBackend.Process.Handle,$Context.oldBackend.Pid)) {return $null}
@@ -1973,7 +1985,7 @@ function Invoke-CapMatchedRestartCapture {
         for ($i=0;$i -lt 100;$i++) {
             $old=Get-CapMatchedAttach -AppRun $app -NodeId $node.id
             $members=@(Get-CapJobMembers -Run $daemon)
-            $oldBackend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapImagePath (Join-Path $root 'runtime\copilot.exe')))
+            $oldBackend=@($members | Where-Object ExpectedImagePath -IEQ (ConvertTo-CapWorkerImagePath (Join-Path $root 'runtime\copilot.exe')))
             if ($old -and $oldBackend.Count -eq 1) {break}
             Assert-CapWorkerDeadline 'initial daemon-owned attach';Start-Sleep -Milliseconds 100
         }
