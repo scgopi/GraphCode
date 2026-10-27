@@ -4190,6 +4190,9 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
         'Transition journal progress or final completion still depends on the full image manifest.'
     Assert-CapTest ($supervisorSource.Contains('RehearsalAuthorizationPath') -and
         $supervisorSource.Contains('RehearsalAuthorizationSha256')) 'Supervisor still requires a capture lease for live transition rehearsal.'
+    Assert-CapTest ($supervisorSource.Contains('Assert-CapDataRecord $checkpoint.reference @{name=[string];length=[long];sha256=[string]}') -and
+        $supervisorSource.Contains("Join-Path (Join-Path `$outputDirectory 'checkpoints') `$checkpoint.reference.name")) `
+        'Supervisor does not bind immutable checkpoint names, lengths, and hashes to the authorized directory.'
     Assert-CapTest ($supervisorSource.Contains('function Invoke-CapTransitionGit') -and
         -not $supervisorSource.Contains('Invoke-CapAdmissionGit $repository')) 'Live transition admission depends on a module-private Git helper.'
     $job=New-CapMatchedDpiTestJob

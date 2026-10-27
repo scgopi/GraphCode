@@ -932,11 +932,14 @@ function Assert-CapWorkerManifest {
             throw 'Live transition rehearsal manifest is incomplete or could be mistaken for capture evidence.'
         }
         foreach ($checkpoint in $manifest.checkpoints) {
+            Assert-CapDataRecord $checkpoint.reference @{name=[string];length=[long];sha256=[string]} `
+                'Live transition checkpoint reference'
+            $checkpointPath=Assert-CapSupervisorPath (Join-Path (Join-Path $outputDirectory 'checkpoints') $checkpoint.reference.name)
             if ($checkpoint.record.evidenceClassification -cne 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE' -or
                 $checkpoint.record.captureMode -cne 'NO_IMAGE_CHECKPOINT' -or
                 $checkpoint.record.path -or $checkpoint.record.sha256 -or
-                (Get-FileHash -LiteralPath (Assert-CapSupervisorPath $checkpoint.reference.path) -Algorithm SHA256).Hash -ne
-                    $checkpoint.reference.sha256) {
+                (Get-Item -LiteralPath $checkpointPath).Length -ne $checkpoint.reference.length -or
+                (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash -ne $checkpoint.reference.sha256) {
                 throw 'Live transition rehearsal checkpoint is mutable, image-shaped, or misclassified.'
             }
         }
