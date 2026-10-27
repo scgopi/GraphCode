@@ -5143,9 +5143,12 @@ function New-CapJournalTransaction {
     $createdUtc = [DateTime]::UtcNow
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $remaining = [Math]::Max(0, [Math]::Min(1000.0, ($State.DeadlineUtc - $createdUtc).TotalMilliseconds))
+    $ioDeadlineUtc = $createdUtc.AddMilliseconds($remaining)
+    if ($ioDeadlineUtc -gt $State.DeadlineUtc) { $ioDeadlineUtc = $State.DeadlineUtc }
     return [pscustomobject]@{
         CreatedUtc = $createdUtc
-        DeadlineUtc = if ($ManifestBudget) { $createdUtc.AddMilliseconds($remaining) } else { $State.DeadlineUtc }
+        DeadlineUtc = $State.DeadlineUtc
+        IoDeadlineUtc = if ($ManifestBudget) { $ioDeadlineUtc } else { $null }
         Clock = $clock
         IoClock = if ($ManifestBudget) { $clock } else { $null }
         BudgetMilliseconds = if ($ManifestBudget) { $remaining } else { 1000.0 }
@@ -5177,12 +5180,15 @@ function Format-CapJournalPhaseTiming {
 }
 
 function Assert-CapJournalTime {
-    param($Transaction, [long]$Sequence, [AllowNull()][string]$NativeError = $null)
-    if ([DateTime]::UtcNow -ge $Transaction.DeadlineUtc -or
-        ($null -ne $Transaction.IoClock -and
-            $Transaction.IoClock.Elapsed.TotalMilliseconds -ge $Transaction.BudgetMilliseconds)) {
+    param($Transaction, [long]$Sequence, [AllowNull()][string]$NativeError = $null, [switch]$Io)
+    $hardExhausted = [DateTime]::UtcNow -ge $Transaction.DeadlineUtc
+    $ioExhausted = $Io -and $null -ne $Transaction.IoClock -and (
+        ($Transaction.IoClock.IsRunning -and [DateTime]::UtcNow -ge $Transaction.IoDeadlineUtc) -or
+        $Transaction.IoClock.Elapsed.TotalMilliseconds -ge $Transaction.BudgetMilliseconds)
+    if ($hardExhausted -or $ioExhausted) {
+        $deadlineClass = if ($hardExhausted) { 'hard deadline/exhaustion' } else { 'I/O deadline/exhaustion' }
         $failure = New-CapJournalFailure 'JournalUnavailable' (
-            "sequence=$Sequence HRESULT=$NativeError retries=$($Transaction.Retries); deadline/exhaustion, no late success. $(Format-CapJournalPhaseTiming $Transaction)")
+            "sequence=$Sequence HRESULT=$NativeError retries=$($Transaction.Retries); $deadlineClass, no late success. $(Format-CapJournalPhaseTiming $Transaction)")
         try {
             $attempt = if ($Transaction.Attempts.ContainsKey($Sequence)) { $Transaction.Attempts[$Sequence] } else { 0 }
             Write-CapJournalObservation $Transaction.ObservationState $Sequence $attempt 'DeadlineExhausted' $NativeError $Transaction
@@ -5198,7 +5204,7 @@ function Read-CapJournalObject {
     param($State, [long]$Sequence, $Transaction, [switch]$Advance, [switch]$RetainStream)
     $native = $null
     while ($true) {
-        Assert-CapJournalTime $Transaction $Sequence $native
+        Assert-CapJournalTime $Transaction $Sequence $native -Io
         if (-not $Transaction.Attempts.ContainsKey($Sequence)) { $Transaction.Attempts[$Sequence] = 0 }
         if ($Transaction.Attempts[$Sequence] -ge 8) {
             throw (New-CapJournalFailure 'JournalUnavailable' "sequence=$Sequence HRESULT=$native; eight Open attempts. $(Format-CapJournalPhaseTiming $Transaction)")
@@ -5211,11 +5217,23 @@ function Read-CapJournalObject {
             $now = [DateTime]::UtcNow
             $Transaction.BudgetMilliseconds = [Math]::Max(0, [Math]::Min(1000.0,
                 ($Transaction.DeadlineUtc - $now).TotalMilliseconds))
-            $ioDeadline = $now.AddMilliseconds($Transaction.BudgetMilliseconds)
-            if ($ioDeadline -lt $Transaction.DeadlineUtc) { $Transaction.DeadlineUtc = $ioDeadline }
+            $Transaction.IoDeadlineUtc = $now.AddMilliseconds($Transaction.BudgetMilliseconds)
+            if ($Transaction.IoDeadlineUtc -gt $Transaction.DeadlineUtc) {
+                $Transaction.IoDeadlineUtc = $Transaction.DeadlineUtc
+            }
             $Transaction.IoClock = [Diagnostics.Stopwatch]::StartNew()
+        } elseif (-not $Transaction.IoClock.IsRunning) {
+            $now = [DateTime]::UtcNow
+            $remaining = [Math]::Max(0, [Math]::Min(
+                $Transaction.BudgetMilliseconds - $Transaction.IoClock.Elapsed.TotalMilliseconds,
+                ($Transaction.DeadlineUtc - $now).TotalMilliseconds))
+            $Transaction.IoDeadlineUtc = $now.AddMilliseconds($remaining)
+            if ($Transaction.IoDeadlineUtc -gt $Transaction.DeadlineUtc) {
+                $Transaction.IoDeadlineUtc = $Transaction.DeadlineUtc
+            }
+            $Transaction.IoClock.Start()
         }
-        Assert-CapJournalTime $Transaction $Sequence $native
+        Assert-CapJournalTime $Transaction $Sequence $native -Io
         if ($null -eq $Transaction.PreOpenElapsedMilliseconds) {
             $Transaction.PreOpenElapsedMilliseconds = $Transaction.Clock.Elapsed.TotalMilliseconds
         }
@@ -5245,11 +5263,11 @@ function Read-CapJournalObject {
                 throw (New-CapJournalFailure 'JournalUnavailable' "sequence=$Sequence HRESULT=$native; global retry limit. $(Format-CapJournalPhaseTiming $Transaction)")
             }
             $Transaction.Retries++
-            Assert-CapJournalTime $Transaction $Sequence $native
-            $remaining = [Math]::Min(($Transaction.DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
+            Assert-CapJournalTime $Transaction $Sequence $native -Io
+            $remaining = [Math]::Min(($Transaction.IoDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
                 $Transaction.BudgetMilliseconds - $Transaction.IoClock.Elapsed.TotalMilliseconds)
             if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(100, [Math]::Floor($remaining))) }
-            Assert-CapJournalTime $Transaction $Sequence $native
+            Assert-CapJournalTime $Transaction $Sequence $native -Io
             if ($Advance) {
                 $names = Get-CapJournalNames $State
                 foreach ($number in $names.Keys) { $State.HighestObserved = [Math]::Max($State.HighestObserved, $number) }
@@ -5272,7 +5290,8 @@ function Read-CapJournalObject {
                 throw
             }
             finally { $buffer.Dispose() }
-            Assert-CapJournalTime $Transaction $Sequence
+            $Transaction.IoClock.Stop()
+            Assert-CapJournalTime $Transaction $Sequence -Io
             $envelope = ConvertFrom-CapJournalBytes $bytes
             try {
                 Assert-CapDataRecord $envelope @{ schemaVersion = [long]; sequence = [long]
@@ -5429,7 +5448,7 @@ function Read-CapJournalFinalProof {
         throw (New-CapJournalFailure 'PostTerminalPublication' 'Observed floor exceeds final binding.')
     }
     $transaction = New-CapJournalTransaction $State -ManifestBudget
-    Assert-CapJournalTime $transaction $Record.terminal.sequence
+    Assert-CapJournalTime $transaction $Record.terminal.sequence -Io
     $manifestPath = Assert-CapArtifactPath -Root $State.Root -Path (Join-Path $OutputDirectory $Record.manifest.name)
     $stream = $null
     $held = [Collections.Generic.List[IO.Stream]]::new()
@@ -5438,7 +5457,17 @@ function Read-CapJournalFinalProof {
         $stream = Open-CapJournalManifestStream $State $manifestPath $transaction $Record.terminal.sequence
         $held.Add($stream)
         $memory = [IO.MemoryStream]::new()
-        try { $stream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $memory.Dispose() }
+        try {
+            $copyClock = [Diagnostics.Stopwatch]::StartNew()
+            try { $stream.CopyTo($memory); $bytes = $memory.ToArray() }
+            finally {
+                $elapsed = $copyClock.Elapsed.TotalMilliseconds
+                $transaction.CopyElapsedMilliseconds = if ($null -eq $transaction.CopyElapsedMilliseconds) { $elapsed }
+                    else { $transaction.CopyElapsedMilliseconds + $elapsed }
+            }
+        } finally { $memory.Dispose() }
+        $transaction.IoClock.Stop()
+        Assert-CapJournalTime $transaction $Record.terminal.sequence -Io
         if ($bytes.Length -ne $Record.manifest.length -or
             [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)) -cne $Record.manifest.sha256) {
             throw (New-CapJournalFailure 'JournalHash' 'Final manifest bytes differ.')
@@ -5627,7 +5656,7 @@ function Open-CapJournalManifestStream {
     param($State, [string]$Path, $Transaction, [long]$Sequence)
     $native = $null
     for ($attempt = 1; $attempt -le 8; $attempt++) {
-        Assert-CapJournalTime $Transaction $Sequence $native
+        Assert-CapJournalTime $Transaction $Sequence $native -Io
         if ($null -eq $Transaction.PreOpenElapsedMilliseconds) {
             $Transaction.PreOpenElapsedMilliseconds = $Transaction.Clock.Elapsed.TotalMilliseconds
         }
@@ -5644,8 +5673,8 @@ function Open-CapJournalManifestStream {
             }
             if ($Transaction.Retries -ge 7) { break }
             $Transaction.Retries++
-            Assert-CapJournalTime $Transaction $Sequence $native
-            $remaining = [Math]::Min(($Transaction.DeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
+            Assert-CapJournalTime $Transaction $Sequence $native -Io
+            $remaining = [Math]::Min(($Transaction.IoDeadlineUtc - [DateTime]::UtcNow).TotalMilliseconds,
                 $Transaction.BudgetMilliseconds - $Transaction.IoClock.Elapsed.TotalMilliseconds)
             if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(100, [Math]::Floor($remaining))) }
         }

@@ -5019,13 +5019,13 @@ function Invoke-CapJournalTimingContract {
         $verified[0].copyElapsedMilliseconds -eq $transaction.CopyElapsedMilliseconds -and
         $verified[0].totalElapsedMilliseconds -ge 0) `
         'Existing post-verification observation lacks the actual Open/Copy accumulator values.'
+    $ioElapsed = $transaction.IoClock.Elapsed.TotalMilliseconds
     Start-Sleep -Milliseconds 1050
-    $failure = Assert-CapRejects {
-        & $module { param($Transaction) Assert-CapJournalTime $Transaction 1 } $transaction
-    } 'JournalUnavailable'
-    Assert-CapTest ($failure -match 'openMs=[0-9]' -and $failure -match 'copyMs=[0-9]' -and
-        $failure -match 'totalMs=[0-9]' -and $transaction.BudgetMilliseconds -eq 1000 -and $transaction.Retries -eq 0) `
-        'Deadline message lost actual phases or changed the original timing/retry contract.'
+    & $module { param($Transaction) Assert-CapJournalTime $Transaction 1 -Io } $transaction
+    Assert-CapTest (-not $transaction.IoClock.IsRunning -and
+        $transaction.IoClock.Elapsed.TotalMilliseconds -eq $ioElapsed -and
+        $transaction.BudgetMilliseconds -eq 1000 -and $transaction.Retries -eq 0) `
+        'Post-copy CPU time was still charged to the completed I/O phase.'
     $missing = & $module { param($State) New-CapJournalTransaction $State } $state
     $null = Assert-CapRejects {
         & $module { param($State,$Transaction) Read-CapJournalObject $State 2 $Transaction } $state $missing
@@ -5488,8 +5488,15 @@ function Invoke-CapFirstOpenGroups {
             [pscustomobject]@{ Transaction = $transaction; Read = $read }
         } $state
         Assert-CapTest ($proof.Read.Reference.length -gt 0 -and $proof.Transaction.BudgetMilliseconds -gt 0 -and
-            $proof.Transaction.BudgetMilliseconds -lt 750 -and $proof.Transaction.DeadlineUtc -le $state.DeadlineUtc) `
-            'First Open did not clip its I/O budget to the absolute deadline.'
+            $proof.Transaction.BudgetMilliseconds -lt 750 -and
+            $proof.Transaction.DeadlineUtc -eq $state.DeadlineUtc -and
+            $proof.Transaction.IoDeadlineUtc -le $proof.Transaction.DeadlineUtc) `
+            'First Open did not separate its clipped I/O budget from the absolute deadline.' @{
+                budgetMilliseconds = $proof.Transaction.BudgetMilliseconds
+                transactionDeadlineUtc = $proof.Transaction.DeadlineUtc
+                stateDeadlineUtc = $state.DeadlineUtc
+                ioDeadlineUtc = $proof.Transaction.IoDeadlineUtc
+            }
         Start-Sleep -Milliseconds 800
         $null = Assert-CapRejects {
             & (Get-Module UiCaptureDriver) { param($State,$Transaction) Read-CapJournalObject $State 1 $Transaction } $state $proof.Transaction
@@ -5513,16 +5520,144 @@ function Invoke-CapFirstOpenGroups {
             'Final manifest lost its creation-started 1000ms budget or attempted a late Open.'
         $manifestState.ObservationPath = $manifestState.Directory
         try {
-            & (Get-Module UiCaptureDriver) { param($Transaction) Assert-CapJournalTime $Transaction 1 } $manifestTransaction
+            & (Get-Module UiCaptureDriver) {
+                param($Transaction) Assert-CapJournalTime $Transaction 1 -Io
+            } $manifestTransaction
             throw 'Expired manifest unexpectedly passed with an unavailable observation sink.'
         } catch {
             Assert-CapTest ($_.Exception.Data['CapJournalFailure'] -ceq 'JournalUnavailable' -and
                 $_.Exception.Data.Contains('CapJournalObservationFailure')) `
                 'Failure observation masked the primary JournalUnavailable instead of retaining a secondary diagnostic.'
         }
-        return @{ subcases = 4; delayMilliseconds = $delay.Elapsed.TotalMilliseconds
+
+        $large = New-JournalContractContext 'terminal-post-copy-cpu'
+        $processes = @(
+            foreach ($index in 1..679) {
+                [pscustomobject]@{
+                    pid = [long](10000 + $index); creationFileTimeUtc = [long](20000 + $index)
+                    expectedImagePath = 'C:\fixture\' + ('x' * 1150) + "\process-$index.exe"
+                    role = "terminal-process-$index"; parentPid = 1L; sessionId = 1L
+                    kernelExited = $true; stdoutEof = $true; stderrEof = $true
+                    streamOwnerPid = [long](10000 + $index)
+                    streamOwnerCreationFileTimeUtc = [long](20000 + $index)
+                }
+            }
+        )
+        $entries = @(
+            foreach ($process in $processes) {
+                [pscustomobject]@{
+                    pid = $process.pid; creationFileTimeUtc = $process.creationFileTimeUtc
+                    role = $process.role; expectedImagePath = $process.expectedImagePath
+                    expectedParentPid = $process.parentPid; expectedSessionId = $process.sessionId
+                }
+            }
+        )
+        $bootstrap = [pscustomobject]@{ entries = @(); ownedProcesses = @(); outcome = 'COMPLETE'
+            ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @() }
+        $terminalData = [pscustomobject]@{ entries = $entries; ownedProcesses = $processes; outcome = 'COMPLETE'
+            ownedProcessSurvivors = @(); pendingLaunchesRemaining = @(); cleanupFailures = @() }
+        $null = Publish-CapJournalSnapshot $large.State Bootstrap $bootstrap
+        $largeTerminal = Publish-CapJournalSnapshot $large.State Terminal $terminalData
+        Assert-CapTest ($largeTerminal.length -gt 1480000 -and $entries.Count -eq 679 -and
+            $processes.Count -eq 679) 'Large terminal fixture did not reproduce the official journal scale.' @{
+            terminalBytes = $largeTerminal.length; entries = $entries.Count; processes = $processes.Count
+        }
+        $largeOutput = Join-Path $large.Root 'output'
+        $null = New-Item -ItemType Directory -Path $largeOutput
+        $largeManifest = [pscustomobject]@{
+            status = 'COMPLETE'; ownedProcesses = $processes; ownedProcessSurvivors = @()
+            pendingLaunchesRemaining = @(); cleanupFailures = @()
+            journal = [pscustomobject]@{
+                protocolVersion = 2L; binding = $large.Binding; directory = $large.State.Directory
+                terminal = $largeTerminal; published = @($large.State.Published.ToArray())
+            }
+        }
+        $largeManifestReference = Write-CapImmutableJson -Root $large.Root `
+            -Path (Join-Path $largeOutput 'manifest.json') -Value $largeManifest
+        $largeRecord = Read-CapJournalFinalRecord `
+            (Format-CapJournalFinalRecord $large.Binding $largeManifestReference $largeTerminal) $large.Binding
+        $module = Get-Module UiCaptureDriver
+        $originalDecoder = & $module { (Get-Item Function:ConvertFrom-CapJournalBytes).ScriptBlock }
+        try {
+            & $module {
+                param($Original,$TargetLength)
+                $script:CapPostCopyOriginalDecoder = $Original
+                $script:CapPostCopyTargetLength = $TargetLength
+                Set-Item Function:ConvertFrom-CapJournalBytes -Value {
+                    param([byte[]]$Bytes)
+                    if ($Bytes.Length -eq $script:CapPostCopyTargetLength) {
+                        Start-Sleep -Milliseconds 1200
+                    }
+                    & $script:CapPostCopyOriginalDecoder -Bytes $Bytes
+                }
+            } $originalDecoder $largeTerminal.length
+            $cpuClock = [Diagnostics.Stopwatch]::StartNew()
+            $largeProof = Read-CapJournalFinalProof -State $large.State -OutputDirectory $largeOutput -Record $largeRecord
+            $cpuClock.Stop()
+            Assert-CapTest ($largeProof.HashChainVerified -and
+                $largeProof.Manifest.ownedProcesses.Count -eq 679 -and
+                $cpuClock.Elapsed.TotalMilliseconds -gt 1000) `
+                'Copied immutable terminal bytes did not retain the hard deadline through post-copy validation.' @{
+                    terminalBytes = $largeTerminal.length; processEntries = $processes.Count
+                    elapsedMilliseconds = $cpuClock.Elapsed.TotalMilliseconds
+                }
+
+            $hardReader = New-CapJournalState -Root $large.Root -Directory $large.State.Directory `
+                -Binding $large.Binding -DeadlineUtc ([DateTime]::UtcNow.AddMilliseconds(800))
+            & $module {
+                $script:CapPostCopyDelayMilliseconds = 1200
+                Set-Item Function:ConvertFrom-CapJournalBytes -Value {
+                    param([byte[]]$Bytes)
+                    if ($Bytes.Length -eq $script:CapPostCopyTargetLength) {
+                        Start-Sleep -Milliseconds $script:CapPostCopyDelayMilliseconds
+                    }
+                    & $script:CapPostCopyOriginalDecoder -Bytes $Bytes
+                }
+            }
+            $hardFailure = Assert-CapRejects {
+                Read-CapJournalFinalProof -State $hardReader -OutputDirectory $largeOutput -Record $largeRecord
+            } 'JournalUnavailable'
+            Assert-CapTest ($hardFailure.Contains('hard deadline/exhaustion')) `
+                'Post-copy validation did not retain the absolute caller deadline refusal.' $hardFailure
+        } finally {
+            & $module {
+                param($Original)
+                Set-Item Function:ConvertFrom-CapJournalBytes -Value $Original
+                Remove-Variable CapPostCopyOriginalDecoder,CapPostCopyTargetLength,CapPostCopyDelayMilliseconds `
+                    -Scope Script -ErrorAction SilentlyContinue
+            } $originalDecoder
+        }
+
+        $ioState = New-CapFirstOpenContext 'copy-over-io-budget'
+        $originalReader = & $module { (Get-Item Function:Read-CapJournalObject).ScriptBlock }
+        $copyNeedle = '$stream.CopyTo($buffer); $bytes = $buffer.ToArray()'
+        Assert-CapTest ([regex]::Matches($originalReader.ToString(), [regex]::Escape($copyNeedle)).Count -eq 1) `
+            'Copy deadline seam requires exactly one production CopyTo expression.'
+        $slowCopyReader = [scriptblock]::Create($originalReader.ToString().Replace(
+            $copyNeedle, 'Start-Sleep -Milliseconds 1100; $stream.CopyTo($buffer); $bytes = $buffer.ToArray()'))
+        try {
+            & $module { param($Body) Set-Item Function:Read-CapJournalObject -Value $Body } $slowCopyReader
+            $ioTransaction = & $module { param($State) New-CapJournalTransaction $State } $ioState
+            $ioFailure = Assert-CapRejects {
+                & $module {
+                    param($State,$Transaction) Read-CapJournalObject $State 1 $Transaction
+                } $ioState $ioTransaction
+            } 'JournalUnavailable'
+            Assert-CapTest ($ioFailure.Contains('I/O deadline/exhaustion') -and
+                $ioTransaction.CopyElapsedMilliseconds -ge 1000) `
+                'An over-one-second copy did not retain the fixed I/O refusal.' @{
+                    failure = $ioFailure; copyMilliseconds = $ioTransaction.CopyElapsedMilliseconds
+                }
+        } finally {
+            & $module { param($Body) Set-Item Function:Read-CapJournalObject -Value $Body } $originalReader
+        }
+
+        return @{ subcases = 7; delayMilliseconds = $delay.Elapsed.TotalMilliseconds
             preOpenRefusal = $failure; manifestRefusal = $manifestFailure
-            clippedBudgetMilliseconds = $proof.Transaction.BudgetMilliseconds }
+            clippedBudgetMilliseconds = $proof.Transaction.BudgetMilliseconds
+            terminalBytes = $largeTerminal.length; terminalProcesses = $processes.Count
+            postCopyValidationMilliseconds = $cpuClock.Elapsed.TotalMilliseconds
+            hardDeadlineRefusal = $hardFailure; ioDeadlineRefusal = $ioFailure }
     }
 }
 

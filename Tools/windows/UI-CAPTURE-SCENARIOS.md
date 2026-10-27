@@ -95,6 +95,23 @@ cleanup evidence. The correction adds no capture scenes or top-level preflight
 group, so the registered totals remain **182 default / 185 with
 `-RequireRealSeed`**.
 
+The numbered reader keeps that one-second budget specifically around Open,
+Copy and retry waits. After immutable bytes have copied within the I/O budget,
+the I/O clock stops; UTF-8/JSON decode, payload hash and schema checks, complete
+terminal inventory validation, and final manifest binding remain bounded by the
+unchanged absolute caller or cleanup deadline. A later numbered Open resumes the
+same accumulated I/O clock with only its remaining budget, so post-copy CPU time
+cannot create a false `JournalUnavailable` and cannot grant another second of
+I/O.
+
+The focused contract reproduces the C8R terminal scale with exactly 679 process
+entries and a numbered terminal larger than 1.48 MB, then injects more than one
+second of post-copy validation. It also retains explicit refusals for a copy
+that exceeds the one-second I/O budget and for post-copy validation that exceeds
+the hard caller deadline. This tooling repair does not alter the frozen failed
+lease or promote its result: that run remains `CLEANUP_UNPROVEN` / `UNPROVEN`,
+and another official capture still requires separate renewed authorization.
+
 An owned journal actor can exit after the worker publishes its generation but
 before the supervisor opens a retained handle. The supervisor defers only the
 exact typed initial-handle race when the recorded PID is unchanged and current
