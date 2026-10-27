@@ -13,10 +13,11 @@ import MailroomKit
 /// it for that.
 public enum GraphcodeCommand: Equatable, Sendable {
   case help
-  case listProjects
+  /// `json` prints a JSON array for tools that enumerate projects and workspaces.
+  case listProjects(json: Bool)
   /// The support directories `GRAPHCODE_SUPPORT_DIR` can point every other verb at, read
   /// from disk by `Workspace.all()` — no daemon, since each workspace has its own.
-  case listWorkspaces
+  case listWorkspaces(json: Bool)
   case status(projectPath: String)
   /// `into` is the composite whose sub-graph the loop belongs in, when one was named —
   /// the command is the same, addressed at a nested graph instead of this one.
@@ -90,9 +91,10 @@ public enum GraphcodeCommand: Equatable, Sendable {
     graphcode — drive a graph of loops from the shell.
 
     USAGE
-      graphcode projects
-      graphcode workspaces         every workspace on this machine, * marking the current
-                           one; point GRAPHCODE_SUPPORT_DIR at a path to use it
+      graphcode projects [--json]
+      graphcode workspaces [--json]  every workspace on this machine, * marking the
+                           current one; point GRAPHCODE_SUPPORT_DIR at a path to use it.
+                           --json prints either list as a JSON array
       graphcode status <project-path>
       graphcode node create <project-path> --title <t> --type <main|turn|goal|time|composite> [options]
       graphcode node stop <project-path> <node-id>
@@ -312,13 +314,14 @@ public enum GraphcodeCommand: Equatable, Sendable {
       return .help
 
     case "projects":
-      try validateFlags(arguments, allowed: [])
-      return .listProjects
+      if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
+      try validateFlags(arguments, allowed: ["json"])
+      return .listProjects(json: arguments.contains("--json"))
 
     case "workspaces":
       if arguments.contains(where: isHelpFlag) { throw HelpRequested() }
-      try validateFlags(arguments, allowed: [])
-      return .listWorkspaces
+      try validateFlags(arguments, allowed: ["json"])
+      return .listWorkspaces(json: arguments.contains("--json"))
 
     case "status":
       let path = try take(&arguments, name: "project-path")
@@ -881,6 +884,28 @@ extension GraphcodeCommand {
   public static func render(_ workspaces: [Workspace], current: Workspace) -> String {
     workspaces.map { "\($0.id == current.id ? "*" : " ") \($0.name)  \($0.url.path)" }
       .joined(separator: "\n")
+  }
+
+  public static func renderJSON(_ projects: [ProjectRef]) -> String {
+    encodeListJSON(projects)
+  }
+
+  public static func renderJSON(_ workspaces: [Workspace], current: Workspace) -> String {
+    struct Row: Encodable {
+      var name: String
+      var path: String
+      var current: Bool
+    }
+    return encodeListJSON(
+      workspaces.map { Row(name: $0.name, path: $0.url.path, current: $0.id == current.id) })
+  }
+
+  private static func encodeListJSON(_ rows: some Encodable) -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    encoder.dateEncodingStrategy = .iso8601
+    guard let data = try? encoder.encode(rows) else { return "[]" }
+    return String(decoding: data, as: UTF8.self)
   }
 
   /// The room for a terminal, from the mailbox the daemon answered

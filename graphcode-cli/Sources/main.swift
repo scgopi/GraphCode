@@ -49,8 +49,11 @@ if case .help = command {
 
 // Before the daemon too: the list is read from disk, and the daemon this would dial
 // belongs to just one of the workspaces it lists.
-if case .listWorkspaces = command {
-  print(GraphcodeCommand.render(Workspace.all(), current: .current))
+if case .listWorkspaces(let json) = command {
+  print(
+    json
+      ? GraphcodeCommand.renderJSON(Workspace.all(), current: .current)
+      : GraphcodeCommand.render(Workspace.all(), current: .current))
   exit(0)
 }
 
@@ -218,13 +221,13 @@ do {
   case .help:
     break
 
-  case .listProjects:
+  case .listProjects(let json):
     try sendCommand(.listRecentProjects)
     let event = try client.waitForEvent {
       if case .recentProjectsListed = $0 { return true } else { return false }
     }
     if case .recentProjectsListed(let projects) = event {
-      print(GraphcodeCommand.render(projects))
+      print(json ? GraphcodeCommand.renderJSON(projects) : GraphcodeCommand.render(projects))
     }
 
   case .status(let projectPath):
