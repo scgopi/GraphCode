@@ -4735,7 +4735,18 @@ function Invoke-CapReceiptReadControl {
         if ($null -ne $PublishValue) {
             $temporary = "$Path.publish"
             [IO.File]::WriteAllText($temporary, (ConvertTo-Json $PublishValue -Compress), [Text.UTF8Encoding]::new($false))
-            [IO.File]::Move($temporary, $Path, $true)
+            $publishDeadline=[DateTime]::UtcNow.AddSeconds(2)
+            while ($true) {
+                try {[IO.File]::Move($temporary,$Path,$true);break}
+                catch [UnauthorizedAccessException] {
+                    if ([DateTime]::UtcNow -ge $publishDeadline) {throw}
+                    Start-Sleep -Milliseconds 25
+                }
+                catch [IO.IOException] {
+                    if ([DateTime]::UtcNow -ge $publishDeadline) {throw}
+                    Start-Sleep -Milliseconds 25
+                }
+            }
         }
         if (-not $pending.AsyncWaitHandle.WaitOne(5000)) {
             throw 'RECEIPT_HARNESS_MECHANICAL: production reader exceeded its bounded deadline.'
