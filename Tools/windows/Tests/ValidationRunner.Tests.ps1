@@ -3674,6 +3674,42 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  $uiaTokens = $null
+  $uiaErrors = $null
+  $uiaAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"),
+    [ref]$uiaTokens,
+    [ref]$uiaErrors)
+  if ($uiaErrors.Count -ne 0) {
+    throw "RED: UIA live gate source does not parse"
+  }
+  $chromeClassifier = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Test-MultiProjectSourceSupportedChromeId'
+  }, $true)
+  if ($null -eq $chromeClassifier) {
+    throw "RED: multi-project observer lacks a focused source-supported chrome classifier"
+  }
+  . ([scriptblock]::Create($chromeClassifier.Extent.Text))
+  function Test-MultiProjectAutomationPrefix([string] $value, [string] $prefix) {
+    return $value.StartsWith($prefix, [StringComparison]::Ordinal)
+  }
+  foreach ($identity in @(
+      'wire-node-1000000000000000001',
+      'mark-entry-1000000000000000002',
+      'overview-wire-node-1000000000000000003',
+      'overview-mark-entry-1000000000000000004')) {
+    if (-not (Test-MultiProjectSourceSupportedChromeId $identity 'owned')) {
+      throw "RED: multi-project observer rejects stable recovery control $identity"
+    }
+  }
+  if (Test-MultiProjectSourceSupportedChromeId 'future-unknown-control-1000000000000000005' 'owned') {
+    throw "RED: multi-project observer weakens its census by accepting an unknown element"
+  }
+  if (Test-MultiProjectSourceSupportedChromeId 'overview-wire-node-1000000000000000003' 'foreign') {
+    throw "RED: multi-project observer accepts a foreign recovery control"
+  }
   $designTokensSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig") -Raw
   $laneLayoutSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\LaneLayout.zig") -Raw
   $graphCanvasSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\GraphCanvas.zig") -Raw

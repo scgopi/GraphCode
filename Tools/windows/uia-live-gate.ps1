@@ -4302,6 +4302,23 @@ function Read-MultiProjectMetadataProperty($element, [string] $property) {
   }
 }
 
+function Test-MultiProjectSourceSupportedChromeId([string] $identity, [string] $ownership) {
+  if ($ownership -cne "owned") { return $false }
+  $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
+    "overview-destination", "quick-chats-destination")
+  $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
+    "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
+    "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-", "canvas-attention-review-",
+    "wire-node-", "mark-entry-", "overview-wire-node-", "overview-mark-entry-",
+    "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
+    "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
+    "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
+  return $identity -cmatch '^workspace-restart-session-[0-9]+$' -or
+    $staticIds -ccontains $identity -or @($chromePrefixes | Where-Object {
+      Test-MultiProjectAutomationPrefix $identity $_
+    }).Count -gt 0
+}
+
 function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
   $pidFirst = Read-MultiProjectMetadataProperty $element "ProcessId"
   $identity = Read-MultiProjectMetadataProperty $element "AutomationId"
@@ -4315,19 +4332,8 @@ function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
     elseif (Test-MultiProjectAutomationPrefix $identity.value "open-project-") { $family = "project-fragment" }
     elseif ((Test-MultiProjectAutomationPrefix $identity.value "workspace-loop-bar-") -or
         (Test-MultiProjectAutomationPrefix $identity.value "workspace-toolbar-")) { $family = "workspace-marker" }
-    elseif ($ownership -ceq "owned") {
-      $staticIds = @("canvas-primary-action", "zoom-out", "actual-size", "zoom-in", "fit-canvas",
-        "overview-destination", "quick-chats-destination")
-      $chromePrefixes = @("sidebar-section-", "project-row-", "project-new-loop-", "project-disclosure-",
-        "quick-chats-header-", "quick-chat-new-", "quick-chats-disclosure-", "quick-chat-row-", "sidebar-update-banner-",
-        "header-attention-", "header-worktree-", "header-jump-", "header-toggle-panel-", "canvas-attention-review-",
-        "workspace-show-graph-", "workspace-stop-", "workspace-toggle-panel-", "workspace-detail-sparkline-",
-        "workspace-detail-start-", "workspace-detail-usage-", "workspace-tab-", "workspace-tab-close-",
-        "workspace-new-tab-", "workspace-split-right-", "workspace-split-down-")
-      if ($identity.value -cmatch '^workspace-restart-session-[0-9]+$' -or
-          $staticIds -ccontains $identity.value -or @($chromePrefixes | Where-Object {
-          Test-MultiProjectAutomationPrefix $identity.value $_
-        }).Count -gt 0) { $family = "source-supported-chrome" }
+    elseif (Test-MultiProjectSourceSupportedChromeId $identity.value $ownership) {
+      $family = "source-supported-chrome"
     }
   }
   $ready = $ownership -cin @("owned", "foreign") -and $identity.state -ceq "available" -and
