@@ -3710,6 +3710,52 @@ try {
   if (Test-MultiProjectSourceSupportedChromeId 'overview-wire-node-1000000000000000003' 'foreign') {
     throw "RED: multi-project observer accepts a foreign recovery control"
   }
+  $workspaceMarkerWait = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Wait-MultiProjectWorkspaceMarkerPublication'
+  }, $true)
+  if ($null -eq $workspaceMarkerWait) {
+    throw "RED: multi-project observer lacks a bounded workspace-marker reacquire"
+  }
+  . ([scriptblock]::Create($workspaceMarkerWait.Extent.Text))
+  $clock = @{ Now = [DateTimeOffset]::Parse('2026-10-27T00:00:00Z') }
+  $reads = @{ Count = 0 }
+  $loopBarId = 'workspace-loop-bar-1000000000000000001'
+  $toolbarId = 'workspace-toolbar-1000000000000000002'
+  $delayed = Wait-MultiProjectWorkspaceMarkerPublication {
+    $reads.Count++
+    if ($reads.Count -lt 3) { return @() }
+    return @(
+      [pscustomobject]@{ automationID = [pscustomobject]@{ value = $loopBarId }
+        ownership = 'owned'; observationReady = $true },
+      [pscustomobject]@{ automationID = [pscustomobject]@{ value = $toolbarId }
+        ownership = 'owned'; observationReady = $true }
+    )
+  } $loopBarId $toolbarId $clock.Now.AddSeconds(1) { $clock.Now } {
+    param([int] $Milliseconds)
+    $clock.Now = $clock.Now.AddMilliseconds($Milliseconds)
+  }
+  if ($delayed.attempts -ne 3 -or $delayed.loopBar -cne $loopBarId -or
+      $delayed.toolbar -cne $toolbarId) {
+    throw "RED: delayed exact workspace markers do not satisfy the bounded reacquire"
+  }
+  $clock.Now = [DateTimeOffset]::Parse('2026-10-27T00:00:00Z')
+  $permanentFailure = $null
+  try {
+    $null = Wait-MultiProjectWorkspaceMarkerPublication {
+      @([pscustomobject]@{ automationID = [pscustomobject]@{ value = 'workspace-loop-bar-1999999999999999999' }
+          ownership = 'owned'; observationReady = $true })
+    } $loopBarId $toolbarId $clock.Now.AddMilliseconds(250) { $clock.Now } {
+      param([int] $Milliseconds)
+      $clock.Now = $clock.Now.AddMilliseconds($Milliseconds)
+    }
+  } catch {
+    $permanentFailure = $_.Exception.Message
+  }
+  if ($permanentFailure -cne 'MULTIPROJECT_WORKSPACE_MARKERS: exact owned loop bar and toolbar did not publish before the deadline') {
+    throw "RED: permanent or unknown workspace-marker absence no longer fails closed"
+  }
   $designTokensSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig") -Raw
   $laneLayoutSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\LaneLayout.zig") -Raw
   $graphCanvasSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\GraphCanvas.zig") -Raw

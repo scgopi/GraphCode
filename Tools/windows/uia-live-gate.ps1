@@ -4319,6 +4319,44 @@ function Test-MultiProjectSourceSupportedChromeId([string] $identity, [string] $
     }).Count -gt 0
 }
 
+function Wait-MultiProjectWorkspaceMarkerPublication(
+  [scriptblock] $ReadSnapshot,
+  [string] $ExpectedLoopBarId,
+  [string] $ExpectedToolbarId,
+  [DateTimeOffset] $DeadlineUtc,
+  [scriptblock] $Now = { [DateTimeOffset]::UtcNow },
+  [scriptblock] $Pause = { param([int] $Milliseconds) Start-Sleep -Milliseconds $Milliseconds }
+) {
+  $attempts = 0
+  while ((& $Now) -lt $DeadlineUtc) {
+    $attempts++
+    $rows = @(& $ReadSnapshot)
+    $workspaceRows = @($rows | Where-Object {
+      (Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-loop-bar-") -or
+        (Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-")
+    })
+    $loopBars = @($workspaceRows | Where-Object {
+      $_.automationID.value -ceq $ExpectedLoopBarId -and
+        $_.ownership -ceq "owned" -and $_.observationReady
+    })
+    $toolbars = @($workspaceRows | Where-Object {
+      $_.automationID.value -ceq $ExpectedToolbarId -and
+        $_.ownership -ceq "owned" -and $_.observationReady
+    })
+    if ($workspaceRows.Count -eq 2 -and $loopBars.Count -eq 1 -and $toolbars.Count -eq 1) {
+      return [ordered]@{
+        attempts = $attempts
+        loopBar = $ExpectedLoopBarId
+        toolbar = $ExpectedToolbarId
+      }
+    }
+    $remaining = [int][Math]::Floor(($DeadlineUtc - (& $Now)).TotalMilliseconds)
+    if ($remaining -le 0) { break }
+    & $Pause ([Math]::Min(100, $remaining))
+  }
+  throw "MULTIPROJECT_WORKSPACE_MARKERS: exact owned loop bar and toolbar did not publish before the deadline"
+}
+
 function Get-MultiProjectFragmentMetadata($element, [int] $expectedProcessId) {
   $pidFirst = Read-MultiProjectMetadataProperty $element "ProcessId"
   $identity = Read-MultiProjectMetadataProperty $element "AutomationId"
@@ -5824,6 +5862,7 @@ function Invoke-MultiProjectRenamePhase {
          (Test-MultiProjectAutomationPrefix $_.automationID.value "workspace-toolbar-")) }).Count
     }
     $matches = $matches -and (Test-MultiProjectObservedRoster $surface $fragmentProjection $owners $selectedOwner $multiProcess.Id)
+    $workspaceBaseMatched = $matches
     $matches = Test-MultiProjectObservedSurface $surface $matches $workspaceProjection $selectedOwner $multiProcess.Id
     $expectedProjectIds = @($owners | ForEach-Object { Get-MultiProjectAutomationId "open-project" $_.path })
     $expectedCanvasRoster = Get-MultiProjectExpectedCanvasRoster $surface $owners $selectedOwner
@@ -5869,6 +5908,7 @@ function Invoke-MultiProjectRenamePhase {
       foreignProjectFragmentCount = $foreignProjectCount; foreignCardFragmentCount = $foreignCardCount
       projectRowPolicy = "Exactly two isolated ordinary open-project rows; static Graph destination is not an ordinary project row. Any extra reserved-global row fails; no empty-global UIA lane assertion."
       workspaceMarkers = $workspaceProjection
+      workspaceBaseMatched = $workspaceBaseMatched
       workspaceProofLimit = "Workspace proof requires both owned markers emitted by App only when surface is workspace and its provider exists; absent chrome is a blocker, not project-card/selection proof."
       canvasBounds = $canvas }
   }
@@ -5894,6 +5934,26 @@ function Invoke-MultiProjectRenamePhase {
       Write-Host ("UIA_MULTIPROJECT_OBSERVATION=" + ($observation | ConvertTo-Json -Depth 6 -Compress))
       if ($observation.matched) { return $observation }
       Start-Sleep -Milliseconds 100
+    }
+    if ($surface -ceq "workspace" -and $observation.metadataReady -and $observation.workspaceBaseMatched) {
+      $expectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $selectedOwner.path $selectedOwner.node
+      $expectedToolbarId = Get-MultiProjectAutomationId "workspace-toolbar" $selectedOwner.path
+      $markerDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+      $markerProof = Wait-MultiProjectWorkspaceMarkerPublication {
+        $multiProcess.Refresh()
+        Require (-not $multiProcess.HasExited) "multi-project shell exited while awaiting workspace markers"
+        $multiRoot = [System.Windows.Automation.AutomationElement]::FromHandle($multiWindow)
+        $graph = Find-FragmentByIdWithRetry $multiRoot "graph" $rawWalker
+        if ($null -eq $graph) { return @() }
+        return @(Get-DirectChildren $graph $rawWalker | ForEach-Object {
+          Get-MultiProjectFragmentMetadata $_ $multiProcess.Id
+        })
+      } $expectedLoopBarId $expectedToolbarId $markerDeadline
+      Write-Host ("UIA_MULTIPROJECT_WORKSPACE_MARKER_REACQUIRE=" +
+        ($markerProof | ConvertTo-Json -Compress))
+      $observation = Get-MultiProjectObservation $surface $selectedOwner
+      Write-Host ("UIA_MULTIPROJECT_OBSERVATION=" + ($observation | ConvertTo-Json -Depth 6 -Compress))
+      if ($observation.matched) { return $observation }
     }
     Write-UiaWaitAttribution "multi-project observation: $surface" $observationStartedUtc 0 `
       $multiProcess.Id $multiWindow ([ordered]@{ attempts = $maximumAttempts })
