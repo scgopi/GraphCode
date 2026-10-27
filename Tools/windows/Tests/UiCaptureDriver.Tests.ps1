@@ -4180,6 +4180,8 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
         $moduleSource.Contains('after bounded recheck') -and
         $moduleSource.Contains('for ($attempt=0;$attempt -lt 8;$attempt++)')) `
         'Job census does not bound the listed-but-unavailable member race.'
+    Assert-CapTest ($moduleSource.Contains('($process.parentPid -le 0 -and -not $fileOutput)')) `
+        'Final journal still treats contained-job members as dependent on advisory parent metadata.'
     Assert-CapTest ($workerSource.Contains('checkpointCount') -and
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
     Assert-CapTest ($workerSource.Contains('$progressManifest=if ($transitionRehearsal)') -and

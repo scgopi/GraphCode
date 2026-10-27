@@ -5521,7 +5521,8 @@ function Read-CapJournalFinalProof {
                 ($fileOutput -and ($process.stdoutEof -or $process.stderrEof))) {
                 throw (New-CapJournalFailure 'JournalCleanupUnproven' 'Kernel exit or owning-stream EOF is unproved.')
             }
-            if ($process.pid -le 0 -or $process.creationFileTimeUtc -le 0 -or $process.parentPid -le 0 -or
+            if ($process.pid -le 0 -or $process.creationFileTimeUtc -le 0 -or
+                ($process.parentPid -le 0 -and -not $fileOutput) -or
                 $process.sessionId -lt 0 -or $process.streamOwnerPid -le 0 -or
                 $process.streamOwnerCreationFileTimeUtc -le 0 -or -not [IO.Path]::IsPathFullyQualified($process.expectedImagePath)) {
                 throw (New-CapJournalFailure 'JournalIdentity' 'Invalid cleanup generation identity.')
