@@ -3721,8 +3721,13 @@ function Get-CapMatchedTabObservation {
             $close[1] -ne $tab[1] -or $close[2] -ne $tab[2] -or $close[3] -ne $tab[3]) {
             throw 'Matched tabs close bounds escape their exact tab.'
         }
+        $physicalWidth=[long]$tab[2]-[long]$tab[0]
+        $physicalHeight=[long]$tab[3]-[long]$tab[1]
         $observed.Add([pscustomobject]@{index=$index;automationId=$id;name=$title;selected=$tabs[0].Selected
             bounds=$tab;closeBounds=$close;closeEnabled=$closes[0].IsEnabled
+            physicalWidth=$physicalWidth;physicalHeight=$physicalHeight
+            logicalWidth=[Math]::Round($physicalWidth*$DpiBase/$ExpectedDpi,3)
+            logicalHeight=[Math]::Round($physicalHeight*$DpiBase/$ExpectedDpi,3)
             lastTabGuard=if ($TotalTabs -eq 1) {'SOURCE_BOUND_WORKSPACE_CAN_CLOSE_TAB_GT_ONE'} else {'MULTI_TAB_CLOSE_AVAILABLE'}
             shortcut=if ($index -lt 9) {"Ctrl+$($index+1)"} else {$null}})
     }
@@ -3738,6 +3743,7 @@ function Get-CapMatchedTabObservation {
         sourceCommit=$SourceCommit;identityContract='VISIBLE_LAYOUT_INDEX_FNV1A64_ROW_KEY'
         visibilityContract=$(if ($visibilityDerived) {'DERIVED_CONTIGUOUS_OWNED_VISIBLE_STABLE_IDS'} else {'DECLARED_VISIBLE_STABLE_IDS'})
         closeBoundsContract="SOURCE_DPI_SCALED_24_LOGICAL_TO_${expectedCloseWidth}_PHYSICAL"
+        geometryContract='OWNED_UIA_PHYSICAL_BOUNDS_NORMALIZED_BY_DECLARED_DPI'
         closeGuardContract='WORKSPACE_CAN_CLOSE_TAB_GT_ONE_NOT_UIA_ISENABLED'
         evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
 }

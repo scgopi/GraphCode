@@ -35,6 +35,12 @@ graph command.
 
 Workspace tab pills share the available strip width, with a 92-logical-pixel
 minimum where space permits and a selected-tab window when they overflow.
+The native strip follows the macOS logical chrome measurements at every monitor
+DPI: 25-point tab pills inside a 37-point strip, 22-point pane headers,
+24-by-22-point split/New Tab controls, and a 24-point close target. A
+1440-logical client keeps the normal overflow window; expanding to the
+Mac-observed 1508-logical width admits all twelve minimum-width tabs without
+rescaling or cropping the terminal surface.
 Agent names follow the primary pane: **Goal**, **Loop**, or the recorded backend's
 display name; plain-shell tabs are **Shell**. Missing backend metadata is labeled
 **Agent**, never assumed to be Claude Code. `Ctrl+1` through `Ctrl+9` select those

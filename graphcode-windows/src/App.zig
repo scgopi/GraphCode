@@ -9077,7 +9077,7 @@ pub const App = struct {
                     }
                 }
                 for (0..3) |control_index| {
-                    const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, control_index);
+                    const control_bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, control_index);
                     const action = TerminalSurface.chromeActionForIndex(control_index) orelse unreachable;
                     const kind: []const u8 = switch (action) {
                         .split_right => "workspace-split-right",
@@ -16436,14 +16436,14 @@ const LiveTerminalFixture = struct {
 
     fn newTab(self: *LiveTerminalFixture) !void {
         const workspace = &self.workspace;
-        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, 2);
         try nativeClickCenter(&self.app, bounds);
         try expectNoTerminalFailure(&self.app);
     }
 
     fn splitRight(self: *LiveTerminalFixture) !void {
         const workspace = &self.workspace;
-        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+        const bounds = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, 0);
         try nativeClickCenter(&self.app, bounds);
         try expectNoTerminalFailure(&self.app);
     }
@@ -17878,7 +17878,7 @@ test "workspace surface: native New Tab publishes every drawn tab to UIA and sta
         try fixture.waitFor(LiveTerminalFixture.shows, loop);
         try std.testing.expectEqual(@as(usize, 1), workspace.tabCount());
 
-        const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
+        const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, 2);
         try nativeClickCenter(app, new_tab);
         try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
         try std.testing.expectEqual(workspace.tabCount(), ReopenProbe.uia_tabs);
@@ -20174,7 +20174,7 @@ test "workspace surface: sidebar loop opens, New Tab, and Split Right attach vis
     try expectSameDirectory(fixture.worktree, loop_started_in);
 
     // Native New Tab: a plain shell with no session behind it, started in the loop's worktree.
-    const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 2);
+    const new_tab = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, 2);
     try nativeClickCenter(app, new_tab);
     try expectNoTerminalFailure(app);
     try std.testing.expectEqual(@as(usize, 2), workspace.tabCount());
@@ -20187,7 +20187,7 @@ test "workspace surface: sidebar loop opens, New Tab, and Split Right attach vis
     try fixture.expectTerminalsInWorkspace(1);
 
     // Native Split Right of that shell: a second visible terminal beside it.
-    const split_right = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, 0);
+    const split_right = TerminalWorkspace.chromeControlBounds(workspace.layout_origin_x, workspace.layout_origin_y, workspace.layout_width, workspace.dpi, 0);
     try nativeClickCenter(app, split_right);
     try expectNoTerminalFailure(app);
     const selected = workspace.layout.selectedConst() orelse return error.TestExpectedTab;
@@ -22430,12 +22430,12 @@ test "loop detail UIA rectangles equal painted bounds and omit empty sparklines"
 
 test "DPI UIA terminal tab close and controls retain physical geometry" {
     try expectDpiAccessibility(.workspace, null, &.{
-        .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 84, 462, 106 }, .{ 342, 124, 748, 146 }, .{ 456, 164, 1034, 186 } } },
-        .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 466, 84, 700, 106 }, .{ 754, 124, 1160, 146 }, .{ 1042, 164, 1620, 186 } } },
-        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 676, 84, 700, 106 }, .{ 1124, 124, 1160, 146 }, .{ 1572, 164, 1620, 186 } } },
-        .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 708, 83, 776, 107 }, .{ 1172, 123, 1240, 147 }, .{ 1636, 163, 1704, 187 } } },
-        .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 780, 83, 848, 107 }, .{ 1244, 123, 1312, 147 }, .{ 1708, 163, 1776, 187 } } },
-        .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 852, 83, 920, 107 }, .{ 1316, 123, 1384, 147 }, .{ 1780, 163, 1848, 187 } } },
+        .{ .identity = "workspace-tab:0", .name = "Agent", .bounds = .{ .{ 228, 86, 520, 111 }, .{ 342, 129, 780, 167 }, .{ 456, 172, 1040, 222 } } },
+        .{ .identity = "workspace-tab:1", .name = "Shell", .bounds = .{ .{ 524, 86, 816, 111 }, .{ 786, 129, 1224, 167 }, .{ 1048, 172, 1632, 222 } } },
+        .{ .identity = "workspace-tab-close:1", .bounds = .{ .{ 792, 86, 816, 111 }, .{ 1188, 129, 1224, 167 }, .{ 1584, 172, 1632, 222 } } },
+        .{ .identity = "workspace-split-right:control", .bounds = .{ .{ 844, 86, 868, 108 }, .{ 1266, 129, 1302, 162 }, .{ 1688, 172, 1736, 216 } } },
+        .{ .identity = "workspace-split-down:control", .bounds = .{ .{ 870, 86, 894, 108 }, .{ 1305, 129, 1341, 162 }, .{ 1740, 172, 1788, 216 } } },
+        .{ .identity = "workspace-new-tab:control", .bounds = .{ .{ 896, 86, 920, 108 }, .{ 1344, 129, 1380, 162 }, .{ 1792, 172, 1840, 216 } } },
     });
 }
 
@@ -25687,19 +25687,19 @@ test "Quick Chat parity UIA and Show in Graph preserve chat-only workspace actio
             .identity = "workspace-tab:0",
             .present = true,
             .name = "Shell",
-            .bounds = .{ .{ 8, 4, 246, 26 }, .{ 8, 4, 246, 26 }, .{ 8, 4, 246, 26 } },
+            .bounds = .{ .{ 8, 6, 285, 31 }, .{ 8, 6, 285, 31 }, .{ 8, 6, 285, 31 } },
         },
         .{
             .identity = "workspace-tab:1",
             .present = true,
             .name = "Copilot CLI",
-            .bounds = .{ .{ 250, 4, 489, 26 }, .{ 250, 4, 489, 26 }, .{ 250, 4, 489, 26 } },
+            .bounds = .{ .{ 289, 6, 566, 31 }, .{ 289, 6, 566, 31 }, .{ 289, 6, 566, 31 } },
         },
         .{
             .identity = "workspace-tab:2",
             .present = true,
             .name = "Copilot CLI",
-            .bounds = .{ .{ 493, 4, 732, 26 }, .{ 493, 4, 732, 26 }, .{ 493, 4, 732, 26 } },
+            .bounds = .{ .{ 570, 6, 848, 31 }, .{ 570, 6, 848, 31 }, .{ 570, 6, 848, 31 } },
         },
         .{
             .identity = "workspace-restart-session:chat-b",

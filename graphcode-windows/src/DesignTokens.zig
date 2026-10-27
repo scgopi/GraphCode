@@ -107,7 +107,19 @@ pub const workspace_rail_width: i32 = 212;
 pub const loop_bar_height: i32 = 46;
 pub const loop_detail_width: i32 = 272;
 pub const pane_header_height: i32 = 22;
-pub const tab_bar_height: i32 = 30;
+// LoopWorkspaceView.swift gives the 15-point tab title 5 points of vertical
+// padding inside the pill and 6 more around the strip. Keep these logical
+// measurements distinct so the native shell scales them exactly once.
+pub const tab_pill_height: i32 = 25;
+pub const tab_bar_height: i32 = 37;
+pub const tab_bar_inset: i32 = 8;
+pub const tab_bar_vertical_padding: i32 = 6;
+pub const tab_gap: i32 = 4;
+pub const tab_min_width: i32 = 92;
+pub const tab_controls_gap: i32 = 20;
+pub const tab_control_width: i32 = 24;
+pub const tab_control_height: i32 = 22;
+pub const tab_control_gap: i32 = 2;
 pub const canvas_grid_cell: i32 = 48;
 
 // Shared dark dialog/sheet palette. Values match the already-validated

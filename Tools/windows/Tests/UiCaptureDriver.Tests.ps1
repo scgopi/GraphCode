@@ -3344,7 +3344,7 @@ function Invoke-CapMatchedTabContracts {
             'self.appendAccessibilityElement(&elements, &owned_identities, "workspace-tab-close", close_key, "Close tab", 4, .{ .physical = close_bounds }, false, workspace.canCloseTab())') -and
         $appSource.Contains('const tab_bounds = workspace.visibleTabBounds(tab_index) orelse continue;') -and
         $appSource.Contains('if (workspace.tabCloseBounds(tab_index) == null or !workspace.canCloseTab()) return false;') -and
-        $terminalSource.Contains('bounds.right - Dpi.scale(24, self.dpi)') -and
+        $terminalSource.Contains('bounds.right - Dpi.scale(Tokens.tab_control_width, self.dpi)') -and
         $terminalSource.Contains('const first = if (selected >= count) selected - count + 1 else 0;') -and
         $terminalSource -cmatch '(?s)pub fn canCloseTab\(self: \*const Workspace\) bool \{\s*return self\.layout\.tabs\.items\.len > 1;\s*\}' -and
         $accessibilitySource.Contains('sidebar_scroll: bool = false,') -and
@@ -3390,7 +3390,11 @@ function Invoke-CapMatchedTabContracts {
             ExpectedDpi=192;DpiBase=96}
         if (-not $isFailedManyFirst) {$arguments.VisibleIndexes=$shape.visible}
         $proof=Get-CapMatchedTabObservation @arguments
-        Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected) 'Tab shape omitted a visible state.'
+        Assert-CapTest ($proof.visible.Count -eq $shape.visible.Count -and $proof.selected -eq $shape.selected -and
+            @($proof.visible | Where-Object {$_.physicalWidth -ne 106 -or $_.physicalHeight -ne 24 -or
+                $_.logicalWidth -ne 53 -or $_.logicalHeight -ne 12}).Count -eq 0 -and
+            $proof.geometryContract -ceq 'OWNED_UIA_PHYSICAL_BOUNDS_NORMALIZED_BY_DECLARED_DPI') `
+            'Tab shape omitted a visible state or exact physical/logical geometry.'
         if ($isFailedSeed) {
             Assert-CapTest ($proof.visible[0].closeEnabled -and $proof.visible[0].lastTabGuard -ceq
                 'SOURCE_BOUND_WORKSPACE_CAN_CLOSE_TAB_GT_ONE') 'Exact failed C8R seed did not preserve its source-bound last-tab guard.'
@@ -3399,6 +3403,8 @@ function Invoke-CapMatchedTabContracts {
                 selected=$proof.visible[0].selected;closeEnabled=$proof.visible[0].closeEnabled
                 lastTabGuard=$proof.visible[0].lastTabGuard;dpi=192;dpiBase=96
                 bounds=$proof.visible[0].bounds;closeBounds=$proof.visible[0].closeBounds
+                physicalWidth=$proof.visible[0].physicalWidth;physicalHeight=$proof.visible[0].physicalHeight
+                logicalWidth=$proof.visible[0].logicalWidth;logicalHeight=$proof.visible[0].logicalHeight
                 closeBoundsContract=$proof.closeBoundsContract}
         }
         if ($isFailedManyFirst) {
