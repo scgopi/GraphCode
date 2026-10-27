@@ -1267,6 +1267,10 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
           row.identity.rfind("attention-action:", 0) == 0 ? L"attention-action-" :
+          row.identity.rfind("wire-node:", 0) == 0 ? L"wire-node-" :
+          row.identity.rfind("mark-entry:", 0) == 0 ? L"mark-entry-" :
+          row.identity.rfind("overview-wire-node:", 0) == 0 ? L"overview-wire-node-" :
+          row.identity.rfind("overview-mark-entry:", 0) == 0 ? L"overview-mark-entry-" :
           row.identity.rfind("canvas-attention-review:", 0) == 0 ? L"canvas-attention-review-" :
           row.identity.rfind("workspace-toolbar:", 0) == 0 ? L"workspace-toolbar-" :
           row.identity.rfind("workspace-loop-bar:", 0) == 0 ? L"workspace-loop-bar-" :

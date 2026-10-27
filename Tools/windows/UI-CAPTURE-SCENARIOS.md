@@ -358,7 +358,7 @@ observed UI state, not a `selected` property invented on the daemon's node.
 
 | Scene names | State and comparison boundary |
 | --- | --- |
-| `s-goal-unwired-selected`, `s-goal-unwired-unselected` | Goal / `goalBased` / `awaitingInput`, no inbound or outbound edge; M6 unwired NEEDS YOU context. Both selection variants are recorded. Recovery-control equivalence is **not** inferred from the fixture or a warm face. |
+| `s-goal-unwired-selected`, `s-goal-unwired-unselected` | Goal / `goalBased` / `awaitingInput`, no inbound or outbound edge; M6 unwired NEEDS YOU context. Both selection variants are recorded with owned, visible `Wire it up` and `Mark as entry` UIA controls. Each scene captures the unchanged unwired state first, then invokes the exact stable control IDs: Wire enters the existing edge-drag route and is cancelled with Escape; Mark changes the card to entry and removes both unwired controls while preserving the same card identity. These observations prove the live Windows routes, not paired macOS visual equivalence by themselves. |
 | `s-main-cycle-selected`, `s-main-cycle-unselected` | Main / `sketch` / `blocked`, two unfired blocking handoff edges form a closed cycle with no external entry; M1 Main-cycle context. |
 | `s-main-stopped-reclaim` | Actual Main / `sketch` / `stopped` ENTRY, null resolution, separate worktree binding; M4 Main STOPPED entry context. `GraphStore.swift` clears resolution outside succeeded/failed. |
 | `s-goal-done-reclaim` | Actual Goal / `goalBased` / `succeeded` interior, predicate resolution and separate worktree binding; controls/context only against M4, **not** an equivalent Main outcome. |

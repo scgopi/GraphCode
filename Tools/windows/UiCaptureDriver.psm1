@@ -1023,7 +1023,8 @@ function Get-CapActionSpec {
     param(
         [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
             'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-            'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')][string]$Action,
+            'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+            'wire-node','mark-entry')][string]$Action,
         [string]$Name,
         [string]$SubjectId
     )
@@ -1065,6 +1066,20 @@ function Get-CapActionSpec {
             if ($SubjectId -cnotmatch '^(?:[0-9]|1[01])$') {throw 'Matched tab close requires its bounded index.'}
             return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId "workspace-tab-close:$SubjectId")
                 AutomationIdPrefix=$null;Name='Close tab';CommandId=$null}
+        }
+        'wire-node' {
+            if ($SubjectId -cnotmatch '^wire-node:.+:[0-9A-Fa-f-]{36}$') {
+                throw 'Wire it up requires its exact stable control identity.'
+            }
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId $SubjectId)
+                AutomationIdPrefix=$null;Name='Wire it up';CommandId=$null}
+        }
+        'mark-entry' {
+            if ($SubjectId -cnotmatch '^mark-entry:.+:[0-9A-Fa-f-]{36}$') {
+                throw 'Mark as entry requires its exact stable control identity.'
+            }
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId $SubjectId)
+                AutomationIdPrefix=$null;Name='Mark as entry';CommandId=$null}
         }
         'open-loop' {
             if ([string]::IsNullOrWhiteSpace($Name)) { throw 'open-loop requires a loop name.' }
@@ -1760,7 +1775,8 @@ function Invoke-CapAction {
     if ($Action -in @('reply', 'reclaim', 'keep')) { throw "Mutating graph action '$Action' is prohibited by the capture contract." }
     if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
         'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')) {
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+        'wire-node','mark-entry')) {
         throw "Unsupported capture action '$Action'."
     }
     if ($WindowProcessResolver -and -not $Invoker) { throw 'A custom HWND resolver is allowed only with the action mock.' }
@@ -1800,7 +1816,8 @@ function Invoke-CapAction {
     $null = Assert-CapRootProcess -RootHandle $RootHandle -ProcessIdentity $ProcessIdentity -WindowProcessResolver $WindowProcessResolver
     $null = Assert-CapUiaProcessIds -ExpectedProcessId $ProcessIdentity.Pid -ObservedProcessIds @([int]$current.ProcessId)
     if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
-        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab')) {
+        'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
+        'wire-node','mark-entry')) {
         if (-not $current.IsEnabled) { throw 'D action target is disabled.' }
         if ($current.ControlType -ne [System.Windows.Automation.ControlType]::Button -and
             $current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { throw 'D action target has an unexpected control type.' }

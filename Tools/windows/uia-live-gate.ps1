@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory)] [string] $Shell,
   [string] $Zmx = "",
   [string[]] $ArgumentList = @(),
-  [switch] $SidebarParityOnly
+  [switch]$SidebarParityOnly,
+  [switch]$UnwiredRecoveryOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -7077,6 +7078,95 @@ try {
     nonOverlapping = $true
     viewportIntersectionRequired = $true
   } | ConvertTo-Json -Compress -Depth 5))
+  if ($UnwiredRecoveryOnly) {
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 16)) `
+      "unwired recovery fixture mutation was rejected"
+    Start-Sleep -Milliseconds 150
+    $fitRecoveryCanvas = Find-FragmentByIdWithRetry $root "fit-canvas" $rawWalker
+    Require ($null -ne $fitRecoveryCanvas) `
+      "unwired recovery fixture could not find Fit Canvas"
+    $fitRecoveryCanvas.GetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern
+    ).Invoke()
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $recoveryChildren = @(Get-DirectChildren $graph $rawWalker)
+    $wireControls = @($recoveryChildren | Where-Object {
+      $_.Current.AutomationId -match '^wire-node-' -and $_.Current.Name -ceq 'Wire it up'
+    })
+    $markEntryControls = @($recoveryChildren | Where-Object {
+      $_.Current.AutomationId -match '^mark-entry-' -and $_.Current.Name -ceq 'Mark as entry'
+    })
+    Require ($wireControls.Count -eq 1) `
+      "unwired recovery fixture did not expose exactly one stable Wire it up control"
+    Require ($markEntryControls.Count -eq 1) `
+      "unwired recovery fixture did not expose exactly one stable Mark as entry control"
+    foreach ($control in @($wireControls[0], $markEntryControls[0])) {
+      Require (($control.Current.BoundingRectangle.Width -gt 0) -and
+               ($control.Current.BoundingRectangle.Height -gt 0)) `
+        "$($control.Current.Name) exposed empty bounds"
+      $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    }
+
+    $wireAutomationId = [string]$wireControls[0].Current.AutomationId
+    $markEntryAutomationId = [string]$markEntryControls[0].Current.AutomationId
+    $wireControls[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $wireStatus = $null
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+      $wireStatus = Find-FragmentById $root "status" $rawWalker
+      if ($null -ne $wireStatus -and
+          $wireStatus.Current.Name -ceq 'Choose a target loop to wire this entry') { break }
+      Start-Sleep -Milliseconds 50
+    }
+    Require (($null -ne $wireStatus) -and
+             ($wireStatus.Current.Name -ceq 'Choose a target loop to wire this entry')) `
+      "Wire it up Invoke did not enter the existing edge-drag route"
+    $wireStatusText = [string]$wireStatus.Current.Name
+    Require ([GraphCodeUiaGateState]::PostKeyboard($shellWindow, 0x1B)) `
+      "Wire it up edge-drag route could not be cancelled with Escape"
+    Start-Sleep -Milliseconds 100
+
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $markEntryControl = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -ceq $markEntryAutomationId -and
+        $_.Current.Name -ceq 'Mark as entry'
+    }) | Select-Object -First 1
+    Require ($null -ne $markEntryControl) `
+      "Mark as entry disappeared before its stable Invoke route was exercised"
+    $markEntryControl.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $postMarkChildren = @()
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+      $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+      $postMarkChildren = @(Get-DirectChildren $graph $rawWalker)
+      if (@($postMarkChildren | Where-Object {
+        $_.Current.AutomationId -in @($wireAutomationId, $markEntryAutomationId)
+      }).Count -eq 0) { break }
+      Start-Sleep -Milliseconds 50
+    }
+    Require (@($postMarkChildren | Where-Object {
+      $_.Current.AutomationId -in @($wireAutomationId, $markEntryAutomationId)
+    }).Count -eq 0) `
+      "Mark as entry did not change the graph role and remove the unwired recovery controls"
+    $markedCard = @($postMarkChildren | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq 'UIA loop C'
+    })
+    Require ($markedCard.Count -eq 1) `
+      "Mark as entry did not preserve the same stable loop card"
+    $markedStatus = Find-FragmentById $root "status" $rawWalker
+    Require (($null -ne $markedStatus) -and
+             ($markedStatus.Current.Name -ceq 'Marked as an entry for this session')) `
+      "Mark as entry did not report its existing graph-model result"
+    Write-Host ("UIA_UNWIRED_RECOVERY_EVIDENCE=" + ([ordered]@{
+      mode = "focused-live-gate"
+      wireAutomationId = $wireAutomationId
+      wireStatus = $wireStatusText
+      markEntryAutomationId = $markEntryAutomationId
+      markEntryStatus = [string]$markedStatus.Current.Name
+      controlsRemovedAfterEntry = $true
+      cardPreserved = [string]$markedCard[0].Current.AutomationId
+    } | ConvertTo-Json -Compress))
+    return
+  }
   foreach ($card in $projectCards) {
     $null = $card.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $null = $card.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
@@ -9499,6 +9589,83 @@ try {
     Require (@($unwiredLoopItems | Where-Object { $_.Id -eq $absentId }).Count -eq 0) `
       "unwired loop context menu unexpectedly offered composite-only command $absentId : $unwiredLoopDescription"
   }
+
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  $unwiredRecoveryChildren = @(Get-DirectChildren $graph $rawWalker)
+  $wireControls = @($unwiredRecoveryChildren | Where-Object {
+    $_.Current.AutomationId -match '^wire-node-' -and $_.Current.Name -ceq 'Wire it up'
+  })
+  $markEntryControls = @($unwiredRecoveryChildren | Where-Object {
+    $_.Current.AutomationId -match '^mark-entry-' -and $_.Current.Name -ceq 'Mark as entry'
+  })
+  Require ($wireControls.Count -eq 1) `
+    "unwired canvas card did not expose exactly one stable Wire it up control"
+  Require ($markEntryControls.Count -eq 1) `
+    "unwired canvas card did not expose exactly one stable Mark as entry control"
+  foreach ($control in @($wireControls[0], $markEntryControls[0])) {
+    Require (($control.Current.BoundingRectangle.Width -gt 0) -and
+             ($control.Current.BoundingRectangle.Height -gt 0)) `
+      "$($control.Current.Name) exposed empty bounds"
+    $null = $control.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+  }
+
+  $wireAutomationId = [string]$wireControls[0].Current.AutomationId
+  $markEntryAutomationId = [string]$markEntryControls[0].Current.AutomationId
+  $wireControls[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $wireStatus = $null
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $wireStatus = Find-FragmentById $root "status" $rawWalker
+    if ($null -ne $wireStatus -and
+        $wireStatus.Current.Name -ceq 'Choose a target loop to wire this entry') { break }
+    Start-Sleep -Milliseconds 50
+  }
+  Require (($null -ne $wireStatus) -and
+           ($wireStatus.Current.Name -ceq 'Choose a target loop to wire this entry')) `
+    "Wire it up Invoke did not enter the existing edge-drag route"
+  $wireStatusText = [string]$wireStatus.Current.Name
+  Require ([GraphCodeUiaGateState]::PostKeyboard($shellWindow, 0x1B)) `
+    "Wire it up edge-drag route could not be cancelled with Escape"
+  Start-Sleep -Milliseconds 100
+
+  $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+  $markEntryControl = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+    $_.Current.AutomationId -ceq $markEntryAutomationId -and
+      $_.Current.Name -ceq 'Mark as entry'
+  }) | Select-Object -First 1
+  Require ($null -ne $markEntryControl) `
+    "Mark as entry disappeared before its stable Invoke route was exercised"
+  $markEntryControl.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $postMarkChildren = @()
+  for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $postMarkChildren = @(Get-DirectChildren $graph $rawWalker)
+    if (@($postMarkChildren | Where-Object {
+      $_.Current.AutomationId -in @($wireAutomationId, $markEntryAutomationId)
+    }).Count -eq 0) { break }
+    Start-Sleep -Milliseconds 50
+  }
+  Require (@($postMarkChildren | Where-Object {
+    $_.Current.AutomationId -in @($wireAutomationId, $markEntryAutomationId)
+  }).Count -eq 0) `
+    "Mark as entry did not change the graph role and remove the unwired recovery controls"
+  $markedCard = @($postMarkChildren | Where-Object {
+    $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq 'UIA loop C'
+  })
+  Require ($markedCard.Count -eq 1) `
+    "Mark as entry did not preserve the same stable loop card"
+  $markedStatus = Find-FragmentById $root "status" $rawWalker
+  Require (($null -ne $markedStatus) -and
+           ($markedStatus.Current.Name -ceq 'Marked as an entry for this session')) `
+    "Mark as entry did not report its existing graph-model result"
+  Write-Host ("UIA_UNWIRED_RECOVERY_EVIDENCE=" + ([ordered]@{
+    wireAutomationId = $wireAutomationId
+    wireStatus = $wireStatusText
+    markEntryAutomationId = $markEntryAutomationId
+    markEntryStatus = [string]$markedStatus.Current.Name
+    controlsRemovedAfterEntry = $true
+    cardPreserved = [string]$markedCard[0].Current.AutomationId
+  } | ConvertTo-Json -Compress))
+
   $liveStatusAfterLoopMenus = Find-FragmentById $root "status" $rawWalker
   Require ($null -ne $liveStatusAfterLoopMenus) `
     "shell UIA tree stopped answering after the loop context menus were dismissed"

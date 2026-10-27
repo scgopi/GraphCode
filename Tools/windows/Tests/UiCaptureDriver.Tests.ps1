@@ -4011,6 +4011,7 @@ function Invoke-CapMatchedSceneRoutingContract {
         $captured=[Collections.Generic.List[object]]::new()
         $seeded=[Collections.Generic.List[string]]::new()
         $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0;freezeVisibility=$false
+            wireArmed=$false;marked=$false
             selections=[Collections.Generic.List[string]]::new()}
         function Get-MockVisibleIndexes {
             if ($model.freezeVisibility) {return @(4..11)}
@@ -4024,7 +4025,7 @@ function Invoke-CapMatchedSceneRoutingContract {
         function Start-CapOfflineSeed {param($Roots,$Phase,$SessionName) $seeded.Add($SessionName);[pscustomobject]@{mode='SIMULATED_SEED'}}
         function Start-CapGraphCodeApp {
             param($Roots,$Phase,$PipeName,$SessionPrefix)
-            $model.total=1;$model.selected=0;$model.node=$null;$model.removed=$false
+            $model.total=1;$model.selected=0;$model.node=$null;$model.removed=$false;$model.wireArmed=$false;$model.marked=$false
             [pscustomobject]@{Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}};Window=[IntPtr]1;Phase=$Phase}
         }
         function Invoke-CapSceneAction {
@@ -4040,8 +4041,41 @@ function Invoke-CapMatchedSceneRoutingContract {
                     $model.selections.Add("${scene}:$SubjectId")
                     $model.selected=[int]$SubjectId
                 }
+                'wire-node' {$model.wireArmed=$true}
+                'mark-entry' {$model.marked=$true}
             }
         }
+        function New-CapMockElement([string]$Id,[string]$Name,[int]$ProcessId,[double[]]$Bounds) {
+            $current=[pscustomobject]@{AutomationId=$Id;Name=$Name;ProcessId=$ProcessId
+                BoundingRectangle=[pscustomobject]@{Left=$Bounds[0];Top=$Bounds[1];Right=$Bounds[2];Bottom=$Bounds[3]
+                    Width=($Bounds[2]-$Bounds[0]);Height=($Bounds[3]-$Bounds[1])}}
+            $element=[pscustomobject]@{Current=$current}
+            $element | Add-Member -MemberType ScriptMethod -Name GetCurrentPattern -Value {param($Pattern) [pscustomobject]@{}}
+            return $element
+        }
+        function Find-CapAutomationElement {
+            param($RootHandle,$ProcessIdentity,$ExpectedProcessId,$Name,$AutomationId)
+            if ($AutomationId -ceq 'graph') {return (New-CapMockElement 'graph' 'Graph' 4242 @(0,0,1200,900))}
+            if ($AutomationId -ceq 'status') {return (New-CapMockElement 'status' $Name 4242 @(0,880,1200,900))}
+            throw "Unexpected matched routing automation lookup: $AutomationId / $Name"
+        }
+        function Get-CapDirectChildren {
+            param($Parent)
+            $rows=[Collections.Generic.List[object]]::new()
+            foreach ($node in $fixture.graphs[0].nodes) {
+                $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("project-card:"+$fixture.graphs[0].project.path+":"+$node.id)) `
+                    $node.title 4242 @(250,100,500,196)))
+            }
+            if ($scene -cmatch '^s-goal-unwired-' -and -not $model.marked) {
+                $nodeId=@($fixture.states | Where-Object scene -CEQ $scene)[0].nodeId
+                $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("wire-node:"+$fixture.graphs[0].project.path+":"+$nodeId)) `
+                    'Wire it up' 4242 @(261,131,334,151)))
+                $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("mark-entry:"+$fixture.graphs[0].project.path+":"+$nodeId)) `
+                    'Mark as entry' 4242 @(340,131,426,151)))
+            }
+            return $rows.ToArray()
+        }
+        function Send-CapMatchedEscape {param($AppRun) $model.wireArmed=$false;return $true}
         function Read-CapMatchedRows {
             param($AppRun)
             if ($scene -cnotmatch '^s-tabs-') {

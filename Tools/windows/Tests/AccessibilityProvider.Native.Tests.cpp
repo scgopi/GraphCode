@@ -459,6 +459,57 @@ static void nativeBannerInvokeChecks(IRawElementProviderSimple *provider, HWND h
   if (projects) projects->Release();
 }
 
+static void nativeUnwiredRecoveryChecks(IRawElementProviderSimple *provider, HWND hwnd,
+                                        IRawElementProviderFragment *root) {
+  const char *identities[] = {
+      "wire-node:C:\\fixture:goal",
+      "mark-entry:C:\\fixture:goal",
+  };
+  const char *names[] = {"Wire it up", "Mark as entry"};
+  const int parents[] = {4, 4};
+  const int none[] = {0, 0};
+  const int actions[] = {1, 1};
+  const int bounds[] = {300, 120, 373, 140, 379, 120, 465, 140};
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  check(update(provider, "Unwired recovery", identities, names, parents, none, none, actions,
+               bounds, 2, 0, 1, 0, 0, 0, 0) == S_OK,
+        "unwired recovery publication succeeds");
+
+  auto *projects = child(root, NavigateDirection_FirstChild);
+  auto *loops = child(projects, NavigateDirection_NextSibling);
+  auto *worktrees = child(loops, NavigateDirection_NextSibling);
+  auto *graph = child(worktrees, NavigateDirection_NextSibling);
+  auto *wire = child(graph, NavigateDirection_FirstChild);
+  auto *mark_entry = child(wire, NavigateDirection_NextSibling);
+  check(stringProperty(wire, UIA_AutomationIdPropertyId).rfind(L"wire-node-", 0) == 0,
+        "Wire it up uses its stable AutomationId prefix");
+  check(stringProperty(mark_entry, UIA_AutomationIdPropertyId).rfind(L"mark-entry-", 0) == 0,
+        "Mark as entry uses its stable AutomationId prefix");
+  checkName(wire, L"Wire it up");
+  checkName(mark_entry, L"Mark as entry");
+  check(invokable(wire) && invokable(mark_entry),
+        "both unwired recovery controls expose Invoke");
+
+  auto *invoke = static_cast<IInvokeProvider *>(pattern(wire, UIA_InvokePatternId));
+  posted_commands.clear();
+  if (invoke) {
+    check(invoke->Invoke() == S_OK, "Wire it up Invoke succeeds");
+    invoke->Release();
+  }
+  drainMessages(hwnd);
+  const uint64_t expected = 0x8000000000000000ULL |
+      identityPayload("wire-node:C:\\fixture:goal");
+  check(posted_commands.size() == 1 && posted_commands[0] == expected,
+        "Wire it up posts its exact stable identity once");
+
+  if (mark_entry) mark_entry->Release();
+  if (wire) wire->Release();
+  if (graph) graph->Release();
+  if (worktrees) worktrees->Release();
+  if (loops) loops->Release();
+  if (projects) projects->Release();
+}
+
 static void nativeQuickChatRestartChecks(IRawElementProviderSimple *provider, HWND hwnd,
                                           IRawElementProviderFragment *root) {
   check(!IsWindowVisible(hwnd), "Quick Chat restart is tested against a hidden provider window");
@@ -692,6 +743,7 @@ static void nativeCommandAndScrollChecks() {
     if (root) {
       nativeHeaderOverflowChecks(provider, capture, root);
       nativeBannerInvokeChecks(provider, capture, root);
+      nativeUnwiredRecoveryChecks(provider, capture, root);
       nativeQuickChatRestartChecks(provider, capture, root);
       nativeQuickChatWorkspaceBarChecks(provider, root);
       nativeScrollChecks(provider, capture, root);
