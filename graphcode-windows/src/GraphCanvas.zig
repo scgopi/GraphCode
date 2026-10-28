@@ -865,6 +865,9 @@ pub fn headerWorktreeNotice(model: *const GraphModel.Model, inspection: *const W
 }
 pub const AttentionAction = enum { none, reply, inspect };
 pub const ReclaimAction = enum { reclaim, keep };
+pub const UnwiredAction = enum { wire, mark_entry };
+pub const UnwiredHit = struct { node_index: usize, action: UnwiredAction };
+pub const OverviewUnwiredHit = struct { graph_index: usize, node_index: usize, action: UnwiredAction };
 pub const ReclaimHit = struct { node_index: usize, action: ReclaimAction };
 
 pub fn attentionRailBounds(width: i32) c.RECT {
@@ -1453,6 +1456,12 @@ fn cachedOverviewLane(state: *const CanvasState, graph_index: usize) ?*const Lan
     return null;
 }
 
+pub fn overviewNodeRole(state: *const CanvasState, graph_index: usize, node_index: usize) ?LaneLayout.Role {
+    const lane = cachedOverviewLane(state, graph_index) orelse return null;
+    if (node_index >= lane.layout.roles.len) return null;
+    return lane.layout.roles[node_index];
+}
+
 pub fn overviewLaneName(graph: *const GraphModel.GraphSummary) []const u8 {
     return if (graph.project.isGlobal()) "No folder" else graph.project.name;
 }
@@ -1794,6 +1803,31 @@ pub fn hitTestOverview(
             if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) {
                 return .{ .graph_index = graph_index, .node_index = node_index };
             }
+        }
+    }
+    return null;
+}
+
+pub fn hitTestOverviewUnwiredAction(
+    model: *const GraphModel.Model,
+    x: i32,
+    y: i32,
+    state: *const CanvasState,
+    graph_bounds: c.RECT,
+) ?OverviewUnwiredHit {
+    if (!insideGraph(x, y, graph_bounds)) return null;
+    var graph_index = model.graphs.items.len;
+    while (graph_index > 0) {
+        graph_index -= 1;
+        const graph = &model.graphs.items[graph_index];
+        const lane = cachedOverviewLane(state, graph_index) orelse continue;
+        var node_index = graph.nodes.items.len;
+        while (node_index > 0) {
+            node_index -= 1;
+            if (node_index >= lane.layout.roles.len or lane.layout.roles[node_index] != .unwired) continue;
+            const actions = unwiredActionBounds(overviewCardBounds(model, graph_index, node_index, graph_bounds, state), state);
+            if (insideGraph(x, y, actions.wire)) return .{ .graph_index = graph_index, .node_index = node_index, .action = .wire };
+            if (insideGraph(x, y, actions.mark_entry)) return .{ .graph_index = graph_index, .node_index = node_index, .action = .mark_entry };
         }
     }
     return null;
@@ -3009,13 +3043,13 @@ fn drawLoopCard(
     drawCardBody(hdc, allocator, node, bounds, state.zoom, role, attention, action, reclaim) catch |err| {
         std.log.warn("Card {s} presentation failed: {s}", .{ node.id, @errorName(err) });
     };
-    if (action) |primary_action| {
+    if (role != .unwired) if (action) |primary_action| {
         const action_bounds = attentionActionBounds(bounds, state);
         fill(hdc, action_bounds, 0x000A9FFF);
         drawTextRect(hdc, allocator, attentionActionLabelFor(primary_action), action_bounds, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
-    }
+    };
 
-    if (show_reclaim and reclaim != null) {
+    if (role != .unwired and show_reclaim and reclaim != null) {
         const offer = reclaimOfferBounds(bounds);
         roundedControl(hdc, offer.reclaim, scaled(5, state), 0x003A3535, 0x00534F4F);
         drawCardText(hdc, allocator, "Reclaim", rect(offer.reclaim.left + scaled(9, state), offer.reclaim.top, offer.reclaim.right, offer.reclaim.bottom), 11 * state.zoom, .semibold, 0x00D7D7D7, false) catch |err| {
@@ -3064,6 +3098,56 @@ pub fn attentionActionBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
 
 fn attentionActionBoundsForZoom(bounds: c.RECT, zoom: f32) c.RECT {
     return rect(bounds.right - scaledValue(77, zoom), bounds.top + scaledValue(51, zoom), bounds.right - scaledValue(11, zoom), bounds.top + scaledValue(68, zoom));
+}
+
+pub const UnwiredActionBounds = struct { wire: c.RECT, mark_entry: c.RECT };
+
+pub fn unwiredActionBounds(bounds: c.RECT, state: *const CanvasState) UnwiredActionBounds {
+    return unwiredActionBoundsForZoom(bounds, state.zoom);
+}
+
+fn unwiredActionBoundsForZoom(bounds: c.RECT, zoom: f32) UnwiredActionBounds {
+    return .{
+        .wire = rect(
+            bounds.left + scaledValue(11, zoom),
+            bounds.top + scaledValue(31, zoom),
+            bounds.left + scaledValue(84, zoom),
+            bounds.top + scaledValue(51, zoom),
+        ),
+        .mark_entry = rect(
+            bounds.left + scaledValue(90, zoom),
+            bounds.top + scaledValue(31, zoom),
+            bounds.left + scaledValue(176, zoom),
+            bounds.top + scaledValue(51, zoom),
+        ),
+    };
+}
+
+pub fn hitTestUnwiredAction(
+    nodes: []const GraphModel.Node,
+    edges: []const GraphModel.Edge,
+    declared_entries: []const []const u8,
+    x: i32,
+    y: i32,
+    state: *const CanvasState,
+) ?UnwiredHit {
+    var index = nodes.len;
+    while (index > 0) {
+        index -= 1;
+        if (!nodeIsUnwired(nodes[index].id, edges, declared_entries)) continue;
+        const actions = unwiredActionBounds(nodeBounds(index, state), state);
+        if (insideGraph(x, y, actions.wire)) return .{ .node_index = index, .action = .wire };
+        if (insideGraph(x, y, actions.mark_entry)) return .{ .node_index = index, .action = .mark_entry };
+    }
+    return null;
+}
+
+fn nodeIsUnwired(node_id: []const u8, edges: []const GraphModel.Edge, declared_entries: []const []const u8) bool {
+    for (edges) |edge| {
+        if (std.mem.eql(u8, edge.from, node_id) or std.mem.eql(u8, edge.to, node_id)) return false;
+    }
+    for (declared_entries) |id| if (std.mem.eql(u8, id, node_id)) return false;
+    return true;
 }
 
 pub fn attentionActionVisible(node: GraphModel.Node, nodes: []const GraphModel.Node, edges: []const GraphModel.Edge) bool {
@@ -3912,9 +3996,16 @@ fn drawCardBody(
     const layout = cardTextLayout(bounds, zoom, pill_width);
     try drawCardText(hdc, allocator, node.title, layout.title, 14.5 * zoom, .card_title, 0x00F4F4F4, true);
     try drawCardPill(hdc, allocator, presentation, layout.pill, zoom);
-    const live = if (reclaim) |offer| try reclaimLine(allocator, offer) else try cardLiveLine(allocator, node);
-    defer allocator.free(live);
-    try drawCardText(hdc, allocator, live, layout.live, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+    if (role == .unwired) {
+        const actions = unwiredActionBoundsForZoom(bounds, zoom);
+        roundedControl(hdc, actions.wire, scaledValue(5, zoom), 0x003A3535, 0x003A3535);
+        try drawCardText(hdc, allocator, "Wire it up", actions.wire, 11 * zoom, .semibold, 0x00D9D9D9, false);
+        try drawCardText(hdc, allocator, "Mark as entry", actions.mark_entry, 11 * zoom, .regular, 0x00808080, false);
+    } else {
+        const live = if (reclaim) |offer| try reclaimLine(allocator, offer) else try cardLiveLine(allocator, node);
+        defer allocator.free(live);
+        try drawCardText(hdc, allocator, live, layout.live, 10.5 * zoom, .card_mono, 0x009F9C9C, true);
+    }
     const chip_in_detail = drawCardMetaRow(hdc, allocator, node, layout, zoom, role) catch |err| switch (err) {
         error.CardMetadataTooWide => blk: {
             std.log.warn("Card {s} fixed metadata does not fit: {s}", .{ node.id, @errorName(err) });
@@ -3923,6 +4014,7 @@ fn drawCardBody(
         },
         else => return err,
     };
+    if (role == .unwired) return;
     if (action == null and reclaim == null and node.metric_sample_count >= 2 and node.metric_direction.len != 0) {
         var detail_bounds = layout.detail;
         if (chip_in_detail) {
@@ -6113,6 +6205,25 @@ test "card live detail 764 production fixtures contain real trends and human-act
     try std.testing.expectEqualStrings("pass 2 · Rendering synthetic content", live);
 }
 
+test "unwired loop card paints inline recovery controls instead of the old detail hint" {
+    var node = parityTestNode();
+    node.activity = @constCast("No connections · right-click to recover");
+    var dib = try ParityDib.init(320, 160);
+    defer dib.deinit();
+    const bounds = rect(20, 20, 270, 116);
+    const rows = cardTextLayout(bounds, 1, 80);
+    fill(dib.dc, rect(0, 0, 320, 160), Tokens.loop_card_bottom);
+    drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &.{}, .unwired, false, null, false, null, true);
+    try std.testing.expect(c.GdiFlush() != 0);
+
+    const wire = rect(bounds.left + 11, bounds.top + 31, bounds.left + 84, bounds.top + 51);
+    const mark_entry = rect(bounds.left + 90, bounds.top + 31, bounds.left + 176, bounds.top + 51);
+    try std.testing.expect(dib.count(wire, 0x003A3535) > 20);
+    try std.testing.expect(dib.count(wire, 0x00D9D9D9) > 0);
+    try std.testing.expect(dib.count(mark_entry, 0x00808080) > 0);
+    try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x009F9C9C));
+}
+
 test "card live detail 764 attention alone does not hide a real metric" {
     var node = cardLiveDetailMetricNode();
     node.state = @constCast("failed");
@@ -7033,7 +7144,11 @@ fn verifyPaint764CardPixels(
         try std.testing.expect(dib.count(chip_bounds, chip.fill) > 20);
     }
     if (!attention and role == .unwired) {
-        try std.testing.expect(dib.count(rows.detail, 0x007ACDFF) > 0);
+        const actions = unwiredActionBoundsForZoom(bounds, zoom);
+        try std.testing.expect(dib.count(actions.wire, 0x003A3535) > 20);
+        try std.testing.expect(dib.count(actions.wire, 0x00D9D9D9) > 0);
+        try std.testing.expect(dib.count(actions.mark_entry, 0x00808080) > 0);
+        try std.testing.expectEqual(@as(usize, 0), dib.count(rows.detail, 0x009F9C9C));
     }
 }
 
@@ -9008,7 +9123,7 @@ test "loop card parity paint 764 overview preserves entry role content" {
     }
 }
 
-test "loop card parity paint 764 overview paints primary action within owning card" {
+test "loop card parity paint 764 overview unwired attention uses recovery controls" {
     const allocator = std.testing.allocator;
     var fixture = try paint764FixtureModel(allocator, .overview);
     defer fixture.model.deinit();
@@ -9037,33 +9152,27 @@ test "loop card parity paint 764 overview paints primary action within owning ca
         viewport_bounds.bottom,
     );
     const card = overviewCardBounds(&fixture.model, 0, node_index, graph_bounds, &state);
-    const action = attentionActionBounds(card, &state);
-    const action_pixels = overview.count(action, 0x000A9FFF);
-    if (action_pixels == 0) {
-        std.debug.print(
-            "paint764 overview action RED node={s} expected={s} pixels-inside-action={d}\n",
-            .{ node.id, attentionActionLabel(node), action_pixels },
-        );
-        return error.Paint764OverviewPrimaryActionMissing;
+    try std.testing.expectEqual(@as(?LaneLayout.Role, .unwired), overviewNodeRole(&state, 0, node_index));
+    const actions = unwiredActionBounds(card, &state);
+    try std.testing.expect(overview.count(actions.wire, 0x003A3535) > 20);
+    try std.testing.expect(overview.count(actions.wire, 0x00D9D9D9) > 0);
+    try std.testing.expect(overview.count(actions.mark_entry, 0x00808080) > 0);
+    try std.testing.expectEqual(@as(usize, 0), overview.count(attentionActionBounds(card, &state), 0x000A9FFF));
+    for ([_]struct { bounds: c.RECT, action: UnwiredAction }{
+        .{ .bounds = actions.wire, .action = .wire },
+        .{ .bounds = actions.mark_entry, .action = .mark_entry },
+    }) |expected| {
+        const hit = hitTestOverviewUnwiredAction(
+            &fixture.model,
+            expected.bounds.left + 1,
+            expected.bounds.top + 1,
+            &state,
+            graph_bounds,
+        ) orelse return error.Paint764OverviewRecoveryHitMissing;
+        try std.testing.expectEqual(@as(usize, 0), hit.graph_index);
+        try std.testing.expectEqual(node_index, hit.node_index);
+        try std.testing.expectEqual(expected.action, hit.action);
     }
-    var label_pixels: usize = 0;
-    var y = action.top;
-    while (y < action.bottom) : (y += 1) {
-        var x = action.left;
-        while (x < action.right) : (x += 1) {
-            if (c.GetPixel(overview.dc, x, y) != 0x000A9FFF) label_pixels += 1;
-        }
-    }
-    if (label_pixels == 0) return error.Paint764OverviewPrimaryActionLabelMissing;
-    const hit = hitTestOverview(
-        &fixture.model,
-        action.left + @divTrunc(action.right - action.left, 2),
-        action.top + @divTrunc(action.bottom - action.top, 2),
-        &state,
-        graph_bounds,
-    ) orelse return error.Paint764OverviewActionHitMissing;
-    try std.testing.expectEqual(@as(usize, 0), hit.graph_index);
-    try std.testing.expectEqual(node_index, hit.node_index);
 }
 
 test "loop card parity both production renderers paint named pill and mono meta regions" {
@@ -9080,7 +9189,7 @@ test "loop card parity both production renderers paint named pill and mono meta 
     var state = try modelTestState(&model, .{ .pan_x = 1200 }, viewport);
     defer state.deinitLayout();
     fill(dib.dc, rect(0, 0, 2200, 500), 0);
-    drawNode(dib.dc, allocator, node, 0, null, &.{node}, &.{}, .unwired, null, &.{}, &state);
+    drawNode(dib.dc, allocator, node, 0, null, &.{node}, &.{}, .entry, null, &.{}, &state);
     const project = nodeBounds(0, &state);
     const presentation = cardState(node);
     const old = try selectCardFont(dib.dc, 10, .card_state);
@@ -9096,7 +9205,7 @@ test "loop card parity both production renderers paint named pill and mono meta 
     try std.testing.expect(dib.count(project_rows.meta, 0x00979595) > 0);
     const project_pill_pixels = dib.count(project_rows.pill, presentation.fill);
     fill(dib.dc, rect(0, 0, 2200, 500), 0);
-    try drawOverview(dib.dc, allocator, &model, viewport, &state, &.{});
+    try drawOverview(dib.dc, allocator, &model, viewport, &state, &.{"parity-card"});
     const overview = overviewCardBounds(&model, 0, 0, viewport, &state);
     const overview_rows = cardTextLayout(overview, 1, pill_width);
     try std.testing.expect(c.GdiFlush() != 0);
@@ -9226,7 +9335,7 @@ test "loop card parity existing action fills use hit bounds and never paint over
         var state = try cardTestState(.{ .zoom = zoom, .pan_x = 252 - 382 * zoom, .pan_y = 84 - 134 * zoom });
         defer state.deinitLayout();
         fill(dib.dc, rect(0, 0, 1200, 500), 0);
-        for (nodes, 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &.{}, .unwired, &inspection, &.{}, &state);
+        for (nodes, 0..) |node, index| drawNode(dib.dc, allocator, node, index, null, &nodes, &.{}, .interior, &inspection, &.{}, &state);
         const attention = attentionActionBounds(nodeBounds(0, &state), &state);
         const offer = reclaimOfferBounds(nodeBounds(1, &state));
         try std.testing.expect(c.GdiFlush() != 0);

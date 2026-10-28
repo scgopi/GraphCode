@@ -684,6 +684,11 @@ function Invoke-CapSceneAction {
     Assert-CapWorkerDeadline "after action $Action"
 }
 
+function Send-CapMatchedEscape {
+    param([Parameter(Mandatory)]$AppRun)
+    return [GraphCodeUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
+}
+
 function Measure-CapSceneZoom {
     param(
         [Parameter(Mandatory)]$AppRun,
@@ -2075,11 +2080,75 @@ function Invoke-CapMatchedScenes {
                 $zoom=Measure-CapSceneZoom -AppRun $app -Scene $probe -NaturalWidth 250
                 $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
                     fixtureState=$state[0];card=$card[0];wireState='HASH_BOUND_STATIC_PEER_NOT_LIVE_BACKEND'}
+                $recovery=$null
                 if ($scene -cmatch '^s-goal-unwired-') {
+                    $wireIdentity="wire-node:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
+                    $markIdentity="mark-entry:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
+                    $wireId=Get-CapMatchedAutomationId $wireIdentity
+                    $markId=Get-CapMatchedAutomationId $markIdentity
+                    $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                    $children=@(Get-CapDirectChildren -Parent $graph)
+                    $wire=@($children | Where-Object {$_.Current.AutomationId -ceq $wireId -and
+                        $_.Current.Name -ceq 'Wire it up'})
+                    $mark=@($children | Where-Object {$_.Current.AutomationId -ceq $markId -and
+                        $_.Current.Name -ceq 'Mark as entry'})
+                    if ($wire.Count -ne 1 -or $mark.Count -ne 1) {
+                        throw "Matched unwired Goal omitted exact inline recovery controls for $scene."
+                    }
+                    foreach ($control in @($wire[0],$mark[0])) {
+                        if ($control.Current.ProcessId -ne $app.Run.Identity.Pid -or
+                            $control.Current.BoundingRectangle.Width -le 0 -or
+                            $control.Current.BoundingRectangle.Height -le 0) {
+                            throw "Matched unwired Goal recovery control was not owned and visible for $scene."
+                        }
+                        $null=$control.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+                    }
+                    $recovery=[pscustomobject]@{wireIdentity=$wireIdentity;wireAutomationId=$wireId
+                        markIdentity=$markIdentity;markAutomationId=$markId}
                     $app.SObservation | Add-Member -NotePropertyName recoveryControls -NotePropertyValue `
-                        'REFERENCE_ONLY: Wire it up / Mark as entry; Windows control equivalence requires C8 review'
+                        ([pscustomobject]@{wire=[pscustomobject]@{name='Wire it up';automationId=$wireId
+                                bounds=@($wire[0].Current.BoundingRectangle.Left,$wire[0].Current.BoundingRectangle.Top,
+                                    $wire[0].Current.BoundingRectangle.Right,$wire[0].Current.BoundingRectangle.Bottom)}
+                            markEntry=[pscustomobject]@{name='Mark as entry';automationId=$markId
+                                bounds=@($mark[0].Current.BoundingRectangle.Left,$mark[0].Current.BoundingRectangle.Top,
+                                    $mark[0].Current.BoundingRectangle.Right,$mark[0].Current.BoundingRectangle.Bottom)}})
                 }
                 Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $zoom -Phase $Phase
+                if ($null -ne $recovery) {
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $recovery.wireIdentity
+                    $wireStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' `
+                        -AutomationId 'status'
+                    if ($null -eq $wireStatus) {throw "Wire it up did not expose its armed result for $scene."}
+                    if (-not (Send-CapMatchedEscape -AppRun $app)) {
+                        throw "Wire it up could not be cancelled after matched evidence for $scene."
+                    }
+                    Start-Sleep -Milliseconds 100
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'mark-entry' -SubjectId $recovery.markIdentity
+                    $entryStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Marked as an entry for this session' `
+                        -AutomationId 'status'
+                    if ($null -eq $entryStatus) {throw "Mark as entry did not expose its result for $scene."}
+                    $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                    $after=@(Get-CapDirectChildren -Parent $graph)
+                    if (@($after | Where-Object {$_.Current.AutomationId -cin @(
+                        $recovery.wireAutomationId,$recovery.markAutomationId)}).Count -ne 0) {
+                        throw "Mark as entry left stale unwired controls for $scene."
+                    }
+                    $cardAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $cardId -and
+                        $_.Current.Name -ceq $card[0].Name})
+                    if ($cardAfter.Count -ne 1 -or $cardAfter[0].Current.ProcessId -ne $app.Run.Identity.Pid) {
+                        throw "Mark as entry did not preserve the owned Goal card for $scene."
+                    }
+                    $app.SObservation | Add-Member -NotePropertyName recoveryRoutes -NotePropertyValue `
+                        ([pscustomobject]@{wire=[pscustomobject]@{automationId=$recovery.wireAutomationId
+                                result='Choose a target loop to wire this entry';cancelledWith='Escape'}
+                            markEntry=[pscustomobject]@{automationId=$recovery.markAutomationId
+                                result='Marked as an entry for this session';controlsRemoved=$true
+                                cardPreserved=$cardAfter[0].Current.AutomationId}})
+                }
             } else {
                 $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
                 $total=1;$selected=0;$title=switch ($nodeIndex) {0 {'Goal'};6 {'Loop'};7 {'Agent'};default {'Copilot CLI'}}

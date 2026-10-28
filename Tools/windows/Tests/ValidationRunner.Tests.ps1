@@ -3674,6 +3674,129 @@ try {
     throw "RED: Windows shell validation does not execute the UI Automation live gate"
   }
   $uiaLiveGateSource = Get-Content (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1") -Raw
+  $uiaTokens = $null
+  $uiaErrors = $null
+  $uiaAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $repoRoot "Tools\windows\uia-live-gate.ps1"),
+    [ref]$uiaTokens,
+    [ref]$uiaErrors)
+  if ($uiaErrors.Count -ne 0) {
+    throw "RED: UIA live gate source does not parse"
+  }
+  $chromeClassifier = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Test-MultiProjectSourceSupportedChromeId'
+  }, $true)
+  if ($null -eq $chromeClassifier) {
+    throw "RED: multi-project observer lacks a focused source-supported chrome classifier"
+  }
+  . ([scriptblock]::Create($chromeClassifier.Extent.Text))
+  function Test-MultiProjectAutomationPrefix([string] $value, [string] $prefix) {
+    return $value.StartsWith($prefix, [StringComparison]::Ordinal)
+  }
+  foreach ($identity in @(
+      'wire-node-1000000000000000001',
+      'mark-entry-1000000000000000002',
+      'overview-wire-node-1000000000000000003',
+      'overview-mark-entry-1000000000000000004')) {
+    if (-not (Test-MultiProjectSourceSupportedChromeId $identity 'owned')) {
+      throw "RED: multi-project observer rejects stable recovery control $identity"
+    }
+  }
+  if (Test-MultiProjectSourceSupportedChromeId 'future-unknown-control-1000000000000000005' 'owned') {
+    throw "RED: multi-project observer weakens its census by accepting an unknown element"
+  }
+  if (Test-MultiProjectSourceSupportedChromeId 'overview-wire-node-1000000000000000003' 'foreign') {
+    throw "RED: multi-project observer accepts a foreign recovery control"
+  }
+  $workspaceMarkerWait = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Wait-MultiProjectWorkspaceMarkerPublication'
+  }, $true)
+  if ($null -eq $workspaceMarkerWait) {
+    throw "RED: multi-project observer lacks a bounded workspace-marker reacquire"
+  }
+  if ($workspaceMarkerWait.Extent.Text -match
+      'Invoke-MultiProjectControl|PostOwned|ClickOwned|PostMouse|InvokePattern') {
+    throw "RED: workspace-marker reacquire replays navigation or input"
+  }
+  . ([scriptblock]::Create($workspaceMarkerWait.Extent.Text))
+  $clock = @{ Now = [DateTimeOffset]::Parse('2026-10-27T00:00:00Z') }
+  $reads = @{ Count = 0 }
+  $loopBarId = 'workspace-loop-bar-1000000000000000001'
+  $toolbarId = 'workspace-toolbar-1000000000000000002'
+  $delayed = Wait-MultiProjectWorkspaceMarkerPublication {
+    $reads.Count++
+    if ($reads.Count -lt 3) { return @() }
+    return @(
+      [pscustomobject]@{ automationID = [pscustomobject]@{ value = $loopBarId }
+        ownership = 'owned'; observationReady = $true },
+      [pscustomobject]@{ automationID = [pscustomobject]@{ value = $toolbarId }
+        ownership = 'owned'; observationReady = $true }
+    )
+  } $loopBarId $toolbarId $clock.Now.AddSeconds(1) { $clock.Now } {
+    param([int] $Milliseconds)
+    $clock.Now = $clock.Now.AddMilliseconds($Milliseconds)
+  }
+  if ($delayed.attempts -ne 3 -or $delayed.loopBar -cne $loopBarId -or
+      $delayed.toolbar -cne $toolbarId) {
+    throw "RED: delayed exact workspace markers do not satisfy the bounded reacquire"
+  }
+  $clock.Now = [DateTimeOffset]::Parse('2026-10-27T00:00:00Z')
+  $permanentFailure = $null
+  try {
+    $null = Wait-MultiProjectWorkspaceMarkerPublication {
+      @([pscustomobject]@{ automationID = [pscustomobject]@{ value = 'workspace-loop-bar-1999999999999999999' }
+          ownership = 'owned'; observationReady = $true })
+    } $loopBarId $toolbarId $clock.Now.AddMilliseconds(250) { $clock.Now } {
+      param([int] $Milliseconds)
+      $clock.Now = $clock.Now.AddMilliseconds($Milliseconds)
+    }
+  } catch {
+    $permanentFailure = $_.Exception.Message
+  }
+  if ($permanentFailure -cne 'MULTIPROJECT_WORKSPACE_MARKERS: exact owned loop bar and toolbar did not publish before the deadline') {
+    throw "RED: permanent or unknown workspace-marker absence no longer fails closed"
+  }
+  $cardActivation = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Get-MultiProjectCardActivationRectangle'
+  }, $true)
+  if ($null -eq $cardActivation) {
+    throw "RED: multi-project loop activation lacks a recovery-control-safe card target"
+  }
+  . ([scriptblock]::Create($cardActivation.Extent.Text))
+  [double[]]$activation = Get-MultiProjectCardActivationRectangle @(0.0, 0.0, 250.0, 96.0)
+  if (($activation -join ',') -cne '0,0,250,24') {
+    throw "RED: card activation target does not retain the source-sized title strip"
+  }
+  foreach ($recovery in @(
+      @(11.0, 31.0, 84.0, 51.0),
+      @(90.0, 31.0, 176.0, 51.0))) {
+    $overlaps = $activation[0] -lt $recovery[2] -and $activation[2] -gt $recovery[0] -and
+      $activation[1] -lt $recovery[3] -and $activation[3] -gt $recovery[1]
+    if ($overlaps) {
+      throw "RED: multi-project card activation still lands on an unwired recovery control"
+    }
+  }
+  $invalidActivation = $null
+  try { $null = Get-MultiProjectCardActivationRectangle @(0.0, 0.0, 0.0, 96.0) }
+  catch { $invalidActivation = $_.Exception.Message }
+  if ($invalidActivation -cne 'MULTIPROJECT_BOUNDS: positive card rectangle required for activation') {
+    throw "RED: invalid multi-project card activation bounds no longer fail closed"
+  }
+  $openLoop = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Open-MultiProjectLoop'
+  }, $true)
+  if ($null -eq $openLoop -or
+      -not $openLoop.Extent.Text.Contains('Get-MultiProjectCardActivationRectangle $row.card.bounds')) {
+    throw "RED: live multi-project loop navigation still clicks the whole card rectangle"
+  }
   $designTokensSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig") -Raw
   $laneLayoutSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\LaneLayout.zig") -Raw
   $graphCanvasSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\GraphCanvas.zig") -Raw

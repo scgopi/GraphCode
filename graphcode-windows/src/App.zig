@@ -1523,6 +1523,11 @@ const UiaDynamicTarget = union(enum) {
         path: []const u8,
         action: GraphCanvas.ReclaimAction,
     },
+    unwired_action: struct {
+        project_path: []const u8,
+        node_id: []const u8,
+        action: GraphCanvas.UnwiredAction,
+    },
     quick_chat: []const u8,
     workspace_show_graph,
     workspace_loop_restart,
@@ -5119,6 +5124,18 @@ pub const App = struct {
         );
         _ = c.SetCapture(self.window.hwnd);
         self.setStatus("Choose a target loop to wire this entry");
+    }
+
+    fn applyUnwiredAction(self: *App, index: usize, action: GraphCanvas.UnwiredAction) bool {
+        const graph = self.model.graph orelse return false;
+        if (index >= graph.nodes.items.len or !self.nodeIsUnwired(graph.nodes.items[index].id)) return false;
+        switch (action) {
+            .wire => self.beginWireSelectedNode(index),
+            .mark_entry => self.markSelectedNodeAsEntry(index),
+        }
+        self.syncAccessibility();
+        _ = c.InvalidateRect(self.window.hwnd, null, 0);
+        return true;
     }
 
     fn showNodeContextMenu(self: *App, index: usize, x: i32, y: i32) void {
@@ -8949,10 +8966,14 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "project-card", key, node.title, 4, .{ .logical = bounds }, self.model.selected_index == index, false) catch return;
-                    if (GraphCanvas.attentionActionVisible(node, graph.nodes.items, graph.edges.items)) {
+                    if (self.nodeIsUnwired(node.id)) {
+                        const actions = GraphCanvas.unwiredActionBounds(bounds, &self.canvas);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "wire-node", key, "Wire it up", 4, .{ .logical = actions.wire }, false, true) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "mark-entry", key, "Mark as entry", 4, .{ .logical = actions.mark_entry }, false, true) catch return;
+                    } else if (GraphCanvas.attentionActionVisible(node, graph.nodes.items, graph.edges.items)) {
                         self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, .{ .logical = GraphCanvas.attentionActionBounds(bounds, &self.canvas) }, false, false) catch return;
                     }
-                    if (GraphCanvas.hasReclaimOffer(node, current_inspection, self.kept_worktree_paths.items)) {
+                    if (!self.nodeIsUnwired(node.id) and GraphCanvas.hasReclaimOffer(node, current_inspection, self.kept_worktree_paths.items)) {
                         const offer = GraphCanvas.reclaimOfferBounds(bounds);
                         self.appendAccessibilityElement(&elements, &owned_identities, "reclaim", key, "Reclaim", 4, .{ .logical = offer.reclaim }, false, false) catch return;
                         self.appendAccessibilityElement(&elements, &owned_identities, "keep", key, "Keep", 4, .{ .logical = offer.keep }, false, false) catch return;
@@ -9044,6 +9065,11 @@ pub const App = struct {
                     const key = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ graph.project.path, node.id }) catch return;
                     defer self.allocator.free(key);
                     self.appendAccessibilityElement(&elements, &owned_identities, "overview-card", key, node.title, 4, .{ .logical = bounds }, false, false) catch return;
+                    if (GraphCanvas.overviewNodeRole(&self.canvas, graph_index, node_index) == .unwired) {
+                        const actions = GraphCanvas.unwiredActionBounds(bounds, &self.canvas);
+                        self.appendAccessibilityElement(&elements, &owned_identities, "overview-wire-node", key, "Wire it up", 4, .{ .logical = actions.wire }, false, true) catch return;
+                        self.appendAccessibilityElement(&elements, &owned_identities, "overview-mark-entry", key, "Mark as entry", 4, .{ .logical = actions.mark_entry }, false, true) catch return;
+                    }
                 }
             },
             .quick_chats => for (self.model.quick_chats.items, 0..) |chat, index| {
@@ -9308,6 +9334,14 @@ pub const App = struct {
                 defer self.allocator.free(project_card_identity);
                 const attention_identity = std.fmt.allocPrint(self.allocator, "attention-action:{s}", .{key}) catch return false;
                 defer self.allocator.free(attention_identity);
+                const wire_identity = std.fmt.allocPrint(self.allocator, "wire-node:{s}", .{key}) catch return false;
+                defer self.allocator.free(wire_identity);
+                const mark_entry_identity = std.fmt.allocPrint(self.allocator, "mark-entry:{s}", .{key}) catch return false;
+                defer self.allocator.free(mark_entry_identity);
+                const overview_wire_identity = std.fmt.allocPrint(self.allocator, "overview-wire-node:{s}", .{key}) catch return false;
+                defer self.allocator.free(overview_wire_identity);
+                const overview_mark_entry_identity = std.fmt.allocPrint(self.allocator, "overview-mark-entry:{s}", .{key}) catch return false;
+                defer self.allocator.free(overview_mark_entry_identity);
                 const reclaim_identity = std.fmt.allocPrint(self.allocator, "reclaim:{s}", .{key}) catch return false;
                 defer self.allocator.free(reclaim_identity);
                 const keep_identity = std.fmt.allocPrint(self.allocator, "keep:{s}", .{key}) catch return false;
@@ -9321,6 +9355,20 @@ pub const App = struct {
                 {
                     if (target != null) return false;
                     target = .{ .loop = .{ .project_path = graph.project.path, .node_id = node.id } };
+                }
+                if (Accessibility.worktreeIdentityPayload(wire_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .unwired_action = .{ .project_path = graph.project.path, .node_id = node.id, .action = .wire } };
+                }
+                if (Accessibility.worktreeIdentityPayload(mark_entry_identity) == payload) {
+                    if (target != null) return false;
+                    target = .{ .unwired_action = .{ .project_path = graph.project.path, .node_id = node.id, .action = .mark_entry } };
+                }
+                if (Accessibility.worktreeIdentityPayload(overview_wire_identity) == payload or
+                    Accessibility.worktreeIdentityPayload(overview_mark_entry_identity) == payload)
+                {
+                    if (target != null) return false;
+                    target = .{ .open_project = graph.project.path };
                 }
                 if (Accessibility.worktreeIdentityPayload(reclaim_identity) == payload) {
                     if (target != null) return false;
@@ -9532,6 +9580,12 @@ pub const App = struct {
                 self.openSelectedNode();
             },
             .composite_back => self.closeCompositeGroup(),
+            .unwired_action => |route| {
+                const active = self.model.graph orelse return false;
+                if (!std.mem.eql(u8, active.project.path, route.project_path)) return false;
+                const index = GraphModel.findNodeIndexByID(active.nodes.items, route.node_id) orelse return false;
+                if (!self.applyUnwiredAction(index, route.action)) return false;
+            },
             .reclaim_offer => |offer| switch (offer.action) {
                 .reclaim => self.reclaimWorktreeOffer(offer.path),
                 .keep => self.keepWorktreeOffer(offer.path),
@@ -10837,6 +10891,17 @@ fn onWindowMessage(
                     .overview => {
                         if (app.applyOverviewLaneAction(x, y, bounds)) {
                             _ = c.InvalidateRect(hwnd, null, 0);
+                        } else if (GraphCanvas.hitTestOverviewUnwiredAction(&app.model, x, y, &app.canvas, bounds)) |hit| {
+                            const graph = app.model.graphs.items[hit.graph_index];
+                            if (app.selectProject(graph.project.path)) {
+                                app.surface = .project;
+                                app.workspace_controls.panel_visible = false;
+                                app.layoutWorkspace();
+                                app.layoutEmptyStateControls();
+                                app.rebindWorkspace(graph.project.path);
+                            }
+                            app.syncAccessibility();
+                            _ = c.InvalidateRect(hwnd, null, 0);
                         } else if (GraphCanvas.hitTestOverview(&app.model, x, y, &app.canvas, bounds)) |hit| {
                             const graph = app.model.graphs.items[hit.graph_index];
                             _ = app.activateLoop(graph.project.path, graph.nodes.items[hit.node_index].id);
@@ -10867,6 +10932,15 @@ fn onWindowMessage(
                             app.inspectWorktrees();
                         } else if (GraphCanvas.hitTestCompositeBack(&app.model, x, y, bounds)) {
                             app.closeCompositeGroup();
+                        } else if (GraphCanvas.hitTestUnwiredAction(
+                            graph.nodes.items,
+                            graph.edges.items,
+                            app.declared_entry_ids.items,
+                            x,
+                            y,
+                            &app.canvas,
+                        )) |hit| {
+                            _ = app.applyUnwiredAction(hit.node_index, hit.action);
                         } else if (GraphCanvas.hitTestReclaimOffer(
                             graph.nodes.items,
                             app.currentWorktreeInspection(),
@@ -22578,7 +22652,7 @@ test "loop card parity UIA actions share painted logical bounds and scale once" 
         app.surface = .project;
         app.canvas = .{ .zoom = 1.25, .pan_x = -37, .pan_y = 23 };
         _ = try app.model.updateFromFrame(
-            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Card parity"},"nodes":[{"id":"question","title":"Named question","state":"running","presence":"awaitingInput"},{"id":"resolved","title":"Safe reclaim","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-1"}},{"id":"ordinary","title":"Ordinary idle","state":"idle"},{"id":"unsafe","title":"Primary checkout","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-0"}}],"edges":[]}}}
+            \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\notice-a","name":"Card parity"},"nodes":[{"id":"question","title":"Named question","state":"running","presence":"awaitingInput"},{"id":"resolved","title":"Safe reclaim","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-1"}},{"id":"ordinary","title":"Ordinary idle","state":"idle"},{"id":"unsafe","title":"Primary checkout","state":"succeeded","worktreeBinding":{"path":"C:\\notice-a\\tree-0"}}],"edges":[{"id":"question-resolved","from":"question","to":"resolved","kind":"handoff"},{"id":"resolved-ordinary","from":"resolved","to":"ordinary","kind":"handoff"},{"id":"ordinary-unsafe","from":"ordinary","to":"unsafe","kind":"handoff"}]}}}
         );
         try std.testing.expect(app.model.selectProject("C:\\notice-a"));
         try installNoticeTestInspection(&app, "C:\\notice-a", 2, 1024);
@@ -22598,6 +22672,97 @@ test "loop card parity UIA actions share painted logical bounds and scale once" 
         for (app.kept_worktree_paths.items) |path| app.allocator.free(path);
         app.kept_worktree_paths.clearRetainingCapacity();
     }
+}
+
+test "unwired inline recovery controls route pointer and stable UIA invokes to existing effects" {
+    const Sink = struct {
+        expected_wire: c.RECT,
+        expected_mark_entry: c.RECT,
+        wire_seen: usize = 0,
+        mark_entry_seen: usize = 0,
+        failure: ?anyerror = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.check(elements) catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+            for (elements) |element| {
+                const expected = if (std.mem.eql(u8, element.identity, "wire-node:C:\\recovery:goal"))
+                    self.expected_wire
+                else if (std.mem.eql(u8, element.identity, "mark-entry:C:\\recovery:goal"))
+                    self.expected_mark_entry
+                else
+                    continue;
+                if (std.mem.startsWith(u8, element.identity, "wire-node:")) {
+                    self.wire_seen += 1;
+                    try std.testing.expectEqualStrings("Wire it up", element.name);
+                } else {
+                    self.mark_entry_seen += 1;
+                    try std.testing.expectEqualStrings("Mark as entry", element.name);
+                }
+                try std.testing.expect(element.invokable);
+                try std.testing.expectEqualDeep(
+                    [4]i32{ expected.left, expected.top, expected.right, expected.bottom },
+                    [4]i32{ element.left, element.top, element.right, element.bottom },
+                );
+            }
+        }
+    };
+
+    var app = try overviewTestApp(96);
+    defer deinitOverviewTestApp(&app);
+    defer for (app.declared_entry_ids.items) |id| app.allocator.free(id);
+    app.surface = .project;
+    app.workspace_controls.rail_visible = false;
+    _ = try app.model.updateFromFrame(
+        \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\recovery","name":"Recovery"},"nodes":[{"id":"goal","title":"Goal","loopType":"goalBased","state":"idle"},{"id":"target","title":"Target","loopType":"sketch","state":"idle"}],"edges":[]}}}
+    );
+    try std.testing.expect(app.model.selectProject("C:\\recovery"));
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1200, .bottom = 900 }));
+    const bounds = GraphCanvas.nodeBounds(0, &app.canvas);
+    const wire = c.RECT{ .left = bounds.left + 11, .top = bounds.top + 31, .right = bounds.left + 84, .bottom = bounds.top + 51 };
+    const mark_entry = c.RECT{ .left = bounds.left + 90, .top = bounds.top + 31, .right = bounds.left + 176, .bottom = bounds.top + 51 };
+    const target_bounds = GraphCanvas.nodeBounds(1, &app.canvas);
+    const target_mark_entry = c.RECT{ .left = target_bounds.left + 90, .top = target_bounds.top + 31, .right = target_bounds.left + 176, .bottom = target_bounds.top + 51 };
+
+    var sink = Sink{ .expected_wire = wire, .expected_mark_entry = mark_entry };
+    app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+    if (sink.failure) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), sink.wire_seen);
+    try std.testing.expectEqual(@as(usize, 1), sink.mark_entry_seen);
+
+    const wire_lparam: c.LPARAM = @intCast((wire.left + 2) | ((wire.top + 2) << 16));
+    var result: c.LRESULT = 0;
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, wire_lparam, &result));
+    try std.testing.expectEqualStrings("goal", app.edge_drag_source_id);
+    try std.testing.expect(app.canvas.edge_dragging);
+    try std.testing.expectEqualStrings("Choose a target loop to wire this entry", app.status());
+    app.cancelCanvasInteraction();
+
+    const mark_lparam: c.LPARAM = @intCast((target_mark_entry.left + 2) | ((target_mark_entry.top + 2) << 16));
+    try std.testing.expect(onWindowMessage(&app, app.window.hwnd, c.WM_LBUTTONDOWN, 0, mark_lparam, &result));
+    try std.testing.expect(app.nodeIsDeclaredEntry("target"));
+    try std.testing.expect(!app.nodeIsUnwired("target"));
+
+    const wire_identity = "wire-node:C:\\recovery:goal";
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(wire_identity)));
+    try std.testing.expectEqualStrings("goal", app.edge_drag_source_id);
+    try std.testing.expect(app.canvas.edge_dragging);
+    app.cancelCanvasInteraction();
+
+    const mark_identity = "mark-entry:C:\\recovery:goal";
+    try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload(mark_identity)));
+    try std.testing.expect(app.nodeIsDeclaredEntry("goal"));
+    try std.testing.expect(!app.nodeIsUnwired("goal"));
+    try std.testing.expectEqualStrings("Marked as an entry for this session", app.status());
+    try std.testing.expect(app.refreshCanvasLayout(.{ .left = 0, .top = 0, .right = 1200, .bottom = 900 }));
+    try std.testing.expectEqual(@as(@TypeOf(app.canvas.project_layout.?.roles[0]), .entry), app.canvas.project_layout.?.roles[0]);
+    try std.testing.expectEqual(@as(@TypeOf(app.canvas.project_layout.?.roles[1]), .entry), app.canvas.project_layout.?.roles[1]);
 }
 
 fn loadActivationTestFixture(app: *App) !void {
