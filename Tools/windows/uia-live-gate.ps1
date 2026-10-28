@@ -5935,8 +5935,8 @@ function Invoke-MultiProjectRenamePhase {
       if ($observation.matched) { return $observation }
       Start-Sleep -Milliseconds 100
     }
-    if ($surface -ceq "workspace" -and $observation.metadataReady -and $observation.workspaceBaseMatched) {
-      $expectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $selectedOwner.path $selectedOwner.node
+    if ($surface -ceq "workspace" -and $observation.metadataReady -and $null -ne $selectedOwner) {
+      $expectedLoopBarId = Get-MultiProjectAutomationId "workspace-loop-bar" $selectedOwner.node
       $expectedToolbarId = Get-MultiProjectAutomationId "workspace-toolbar" $selectedOwner.path
       $markerDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
       $markerProof = Wait-MultiProjectWorkspaceMarkerPublication {

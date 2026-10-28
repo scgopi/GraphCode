@@ -3718,6 +3718,10 @@ try {
   if ($null -eq $workspaceMarkerWait) {
     throw "RED: multi-project observer lacks a bounded workspace-marker reacquire"
   }
+  if ($workspaceMarkerWait.Extent.Text -match
+      'Invoke-MultiProjectControl|PostOwned|ClickOwned|PostMouse|InvokePattern') {
+    throw "RED: workspace-marker reacquire replays navigation or input"
+  }
   . ([scriptblock]::Create($workspaceMarkerWait.Extent.Text))
   $clock = @{ Now = [DateTimeOffset]::Parse('2026-10-27T00:00:00Z') }
   $reads = @{ Count = 0 }
