@@ -3683,6 +3683,12 @@ try {
   if ($uiaErrors.Count -ne 0) {
     throw "RED: UIA live gate source does not parse"
   }
+  if ($uiaLiveGateSource -notmatch '\[switch\]\$CycleHierarchyOnly' -or
+      $uiaLiveGateSource -notmatch 'PostFixtureMutation\(\$shellWindow, 23\)' -or
+      $uiaLiveGateSource -notmatch 'UIA_CYCLE_HIERARCHY_EVIDENCE=' -or
+      $uiaLiveGateSource -notmatch 'UIA_CYCLE_HIERARCHY_SHA256=') {
+    throw "RED: UIA live gate does not exercise and hash both exact cycle-card hierarchy scenes"
+  }
   $chromeClassifier = $uiaAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

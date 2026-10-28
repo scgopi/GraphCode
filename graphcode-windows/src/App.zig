@@ -7039,6 +7039,24 @@ pub const App = struct {
             _ = c.InvalidateRect(self.window.hwnd, null, 0);
             return;
         }
+        if (mutation == 23) {
+            self.applyUiaFixtureGraph(.project, "Cycle hierarchy", 56,
+                \\[{"id":"20000000-0000-4000-8000-000000000001","title":"Main","loopType":"sketch","backend":"copilotCLI","state":"blocked","createdAt":814011000,"firstInstruction":"Offline closed cycle"},{"id":"20000000-0000-4000-8000-000000000002","title":"Cycle peer","loopType":"sketch","backend":"copilotCLI","state":"blocked","createdAt":814011000,"firstInstruction":"Offline closed cycle peer"},{"id":"77777777-7777-4777-8777-777777777777","title":"Other","loopType":"sketch","state":"idle","createdAt":814011000}]
+            ,
+                \\[{"id":"50000000-0000-4000-8000-000000000001","from":"20000000-0000-4000-8000-000000000001","to":"20000000-0000-4000-8000-000000000002","kind":"handoff","blocksTarget":true},{"id":"50000000-0000-4000-8000-000000000002","from":"20000000-0000-4000-8000-000000000002","to":"20000000-0000-4000-8000-000000000001","kind":"handoff","blocksTarget":true}]
+            ) catch |err| {
+                self.reportWorktreeError("Unable to prepare cycle hierarchy UIA fixture", err);
+                return;
+            };
+            _ = self.model.setSelectedID("20000000-0000-4000-8000-000000000001");
+            self.surface = .project;
+            self.workspace_controls.panel_visible = false;
+            self.layoutWorkspace();
+            self.layoutEmptyStateControls();
+            self.syncAccessibility();
+            _ = c.InvalidateRect(self.window.hwnd, null, 0);
+            return;
+        }
         const dialog = if (self.worktree_dialog) |*value| value else return;
         const target_path = if (mutation == 2 or mutation == 3) self.ownedUiaFixturePath(if (mutation == 2) .safe else .unsafe) catch |err| {
             self.reportWorktreeError("UIA fixture owner unavailable", err);
@@ -8972,6 +8990,10 @@ pub const App = struct {
                         self.appendAccessibilityElement(&elements, &owned_identities, "mark-entry", key, "Mark as entry", 4, .{ .logical = actions.mark_entry }, false, true) catch return;
                     } else if (GraphCanvas.attentionActionVisible(node, graph.nodes.items, graph.edges.items)) {
                         self.appendAccessibilityElement(&elements, &owned_identities, "attention-action", key, GraphCanvas.attentionActionLabel(node), 4, .{ .logical = GraphCanvas.attentionActionBounds(bounds, &self.canvas) }, false, false) catch return;
+                    }
+                    if (GraphCanvas.projectNodeRole(&self.canvas, index) == .cycle_only) {
+                        self.appendAccessibilityElement(&elements, &owned_identities, "cycle-reason", key, "cycle · no entry point", 4, .{ .logical = GraphCanvas.cycleReasonBounds(bounds, &self.canvas) }, false, false) catch return;
+                        elements.items[elements.items.len - 1].invokable = false;
                     }
                     if (!self.nodeIsUnwired(node.id) and GraphCanvas.hasReclaimOffer(node, current_inspection, self.kept_worktree_paths.items)) {
                         const offer = GraphCanvas.reclaimOfferBounds(bounds);
@@ -22671,6 +22693,74 @@ test "loop card parity UIA actions share painted logical bounds and scale once" 
         try std.testing.expectEqual(@as(usize, 1), sink.seen);
         for (app.kept_worktree_paths.items) |path| app.allocator.free(path);
         app.kept_worktree_paths.clearRetainingCapacity();
+    }
+}
+
+test "closed cycle UIA separates the footer reason from Inspect and preserves selected activation" {
+    const Sink = struct {
+        selected: bool,
+        checked: bool = false,
+        card_seen: usize = 0,
+        action_seen: usize = 0,
+        reason_seen: usize = 0,
+        failure: ?anyerror = null,
+
+        fn syncCanvasBounds(_: *@This(), _: c.RECT) void {}
+
+        fn syncElements(self: *@This(), _: []const u8, elements: []const Accessibility.DynamicElement, _: WorktreeStatus.Policy, _: Accessibility.WorktreeCapabilities) void {
+            self.checked = true;
+            self.check(elements) catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn check(self: *@This(), elements: []const Accessibility.DynamicElement) !void {
+            var action_bottom: i32 = 0;
+            var reason_top: i32 = 0;
+            for (elements) |element| {
+                if (std.mem.eql(u8, element.identity, "project-card:C:\\cycle:main")) {
+                    self.card_seen += 1;
+                    try std.testing.expectEqual(self.selected, element.selected);
+                    try std.testing.expect(element.invokable);
+                } else if (std.mem.eql(u8, element.identity, "attention-action:C:\\cycle:main")) {
+                    self.action_seen += 1;
+                    try std.testing.expectEqualStrings("Inspect", element.name);
+                    try std.testing.expect(element.invokable);
+                    action_bottom = element.bottom;
+                } else if (std.mem.eql(u8, element.identity, "cycle-reason:C:\\cycle:main")) {
+                    self.reason_seen += 1;
+                    try std.testing.expectEqualStrings("cycle · no entry point", element.name);
+                    try std.testing.expect(!element.invokable);
+                    reason_top = element.top;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 1), self.card_seen);
+            try std.testing.expectEqual(@as(usize, 1), self.action_seen);
+            try std.testing.expectEqual(@as(usize, 1), self.reason_seen);
+            try std.testing.expect(action_bottom > 0 and action_bottom <= reason_top);
+        }
+    };
+
+    for ([_]u32{ 96, 192 }) |dpi| {
+        for ([_]bool{ false, true }) |selected| {
+            var app = try overviewTestApp(dpi);
+            defer deinitOverviewTestApp(&app);
+            app.surface = .project;
+            _ = try app.model.updateFromFrame(
+                \\{"version":2,"kind":"event","sequence":1,"event":{"graphChanged":{"project":{"path":"C:\\cycle","name":"Cycle"},"nodes":[{"id":"main","title":"Main","loopType":"sketch","backend":"copilotCLI","state":"blocked","firstInstruction":"Closed cycle"},{"id":"peer","title":"Cycle peer","loopType":"sketch","backend":"copilotCLI","state":"blocked","firstInstruction":"Closed cycle peer"},{"id":"other","title":"Other","loopType":"sketch","state":"idle"}],"edges":[{"id":"a","from":"main","to":"peer","kind":"handoff","blocksTarget":true},{"id":"b","from":"peer","to":"main","kind":"handoff","blocksTarget":true}]}}}
+            );
+            try std.testing.expect(app.model.selectProject("C:\\cycle"));
+            try std.testing.expect(app.selectNodeIndex(if (selected) 0 else 2));
+            var sink = Sink{ .selected = selected };
+            app.syncAccessibilityTo(&sink, .{ .left = 0, .top = 0, .right = 1200, .bottom = 900 });
+            try std.testing.expect(sink.checked);
+            if (sink.failure) |err| return err;
+            if (selected) {
+                try std.testing.expect(app.applyUiaDynamicInvoke(Accessibility.worktreeIdentityPayload("project-card:C:\\cycle:main")));
+                try std.testing.expectEqual(GraphCanvas.Surface.workspace, app.surface);
+                try std.testing.expectEqualStrings("main", app.model.selected().?.id);
+            }
+        }
     }
 }
 

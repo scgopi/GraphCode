@@ -4,7 +4,8 @@ param(
   [string] $Zmx = "",
   [string[]] $ArgumentList = @(),
   [switch]$SidebarParityOnly,
-  [switch]$UnwiredRecoveryOnly
+  [switch]$UnwiredRecoveryOnly,
+  [switch]$CycleHierarchyOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -6630,9 +6631,11 @@ try {
     bottom = [double]$updateBannerBounds.Bottom
   }
   $foregroundWindow = [GraphCodeUiaGateState]::CurrentForegroundWindow()
-  Require (Test-UpdateBannerClickTarget $updateBannerTarget $process.Id $shellWindow `
-      $foregroundWindow $focusedElement.Current.ProcessId ([string]$status.Current.Name)) `
-    "sidebar update banner click target lost shell process, window, focus, status, or UIA identity"
+  if (-not $CycleHierarchyOnly) {
+    Require (Test-UpdateBannerClickTarget $updateBannerTarget $process.Id $shellWindow `
+        $foregroundWindow $focusedElement.Current.ProcessId ([string]$status.Current.Name)) `
+      "sidebar update banner click target lost shell process, window, focus, status, or UIA identity"
+  }
   $updateBannerScreenX = [int](($updateBannerTarget.left + $updateBannerTarget.right) / 2)
   $updateBannerScreenY = [int](($updateBannerTarget.top + $updateBannerTarget.bottom) / 2)
   $updateBannerClickX = 0
@@ -7154,6 +7157,165 @@ try {
     nonOverlapping = $true
     viewportIntersectionRequired = $true
   } | ConvertTo-Json -Compress -Depth 5))
+  if ($CycleHierarchyOnly) {
+    Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 23)) `
+      "cycle hierarchy fixture mutation was rejected"
+    Start-Sleep -Milliseconds 200
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $selectedChildren = @(Get-DirectChildren $graph $rawWalker)
+    $selectedCard = @($selectedChildren | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq 'Main'
+    })
+    $otherCard = @($selectedChildren | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq 'Other'
+    })
+    $selectedInspect = @($selectedChildren | Where-Object {
+      $_.Current.AutomationId -match '^attention-action-' -and $_.Current.Name -ceq 'Inspect'
+    })
+    $selectedReason = @($selectedChildren | Where-Object {
+      $_.Current.AutomationId -match '^cycle-reason-' -and $_.Current.Name -ceq 'cycle · no entry point'
+    })
+    Require ($selectedCard.Count -eq 1 -and $otherCard.Count -eq 1) `
+      "selected cycle fixture did not expose exact Main and Other cards"
+    Require ($selectedInspect.Count -eq 2 -and $selectedReason.Count -eq 2) `
+      "selected cycle fixture did not expose two separate cycle actions and footer reasons"
+    $mainInspect = @($selectedInspect | Where-Object {
+      $_.Current.BoundingRectangle.Left -ge $selectedCard[0].Current.BoundingRectangle.Left -and
+        $_.Current.BoundingRectangle.Right -le $selectedCard[0].Current.BoundingRectangle.Right -and
+        $_.Current.BoundingRectangle.Top -ge $selectedCard[0].Current.BoundingRectangle.Top -and
+        $_.Current.BoundingRectangle.Bottom -le $selectedCard[0].Current.BoundingRectangle.Bottom
+    })
+    $mainReason = @($selectedReason | Where-Object {
+      $_.Current.BoundingRectangle.Left -ge $selectedCard[0].Current.BoundingRectangle.Left -and
+        $_.Current.BoundingRectangle.Right -le $selectedCard[0].Current.BoundingRectangle.Right -and
+        $_.Current.BoundingRectangle.Top -ge $selectedCard[0].Current.BoundingRectangle.Top -and
+        $_.Current.BoundingRectangle.Bottom -le $selectedCard[0].Current.BoundingRectangle.Bottom
+    })
+    Require ($mainInspect.Count -eq 1 -and $mainReason.Count -eq 1) `
+      "selected Main cycle card did not own one Inspect and one footer reason geometry"
+    $selectedState = $selectedCard[0].GetCurrentPattern(
+      [System.Windows.Automation.SelectionItemPattern]::Pattern
+    ).Current.IsSelected
+    Require $selectedState "s-main-cycle-selected did not retain selected card state"
+    Require ($mainInspect[0].Current.ControlType -eq [System.Windows.Automation.ControlType]::Button -and
+             $mainReason[0].Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) `
+      "s-main-cycle-selected exposed incorrect action/reason control types"
+    $null = $mainInspect[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    $reasonInvoke = $null
+    Require (-not $mainReason[0].TryGetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern, [ref]$reasonInvoke
+    )) "s-main-cycle-selected footer reason incorrectly exposed Invoke"
+    Require ($mainInspect[0].Current.BoundingRectangle.Bottom -le
+             $mainReason[0].Current.BoundingRectangle.Top) `
+      "s-main-cycle-selected did not keep Inspect above its footer reason"
+    $selectedEvidence = [ordered]@{
+      scene = 's-main-cycle-selected'
+      cardAutomationId = [string]$selectedCard[0].Current.AutomationId
+      selected = [bool]$selectedState
+      inspectAutomationId = [string]$mainInspect[0].Current.AutomationId
+      inspectBounds = @($mainInspect[0].Current.BoundingRectangle.Left,
+        $mainInspect[0].Current.BoundingRectangle.Top,
+        $mainInspect[0].Current.BoundingRectangle.Right,
+        $mainInspect[0].Current.BoundingRectangle.Bottom)
+      reasonAutomationId = [string]$mainReason[0].Current.AutomationId
+      reasonBounds = @($mainReason[0].Current.BoundingRectangle.Left,
+        $mainReason[0].Current.BoundingRectangle.Top,
+        $mainReason[0].Current.BoundingRectangle.Right,
+        $mainReason[0].Current.BoundingRectangle.Bottom)
+    }
+
+    $selectedCard[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 150
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $showGraph = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -ceq 'Show in Graph'
+    })
+    Require ($showGraph.Count -eq 1) `
+      "selected Main cycle card activation did not enter its workspace"
+    $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 150
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $otherCard = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^canvas-card-' -and $_.Current.Name -ceq 'Other'
+    })
+    Require ($otherCard.Count -eq 1) "Other card disappeared before unselected cycle evidence"
+    $otherCard[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 150
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $showGraph = @(Get-DirectChildren $graph $rawWalker | Where-Object {
+      $_.Current.AutomationId -match '^workspace-show-graph-' -and $_.Current.Name -ceq 'Show in Graph'
+    })
+    Require ($showGraph.Count -eq 1) "Other card activation did not enter its workspace"
+    $showGraph[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 150
+
+    $root = Wait-ForRootReconnect $process @($rawWalker, $controlWalker)
+    $graph = Find-FragmentByIdWithRetry $root "graph" $rawWalker
+    $unselectedChildren = @(Get-DirectChildren $graph $rawWalker)
+    $unselectedCard = @($unselectedChildren | Where-Object {
+      $_.Current.AutomationId -ceq $selectedEvidence.cardAutomationId -and $_.Current.Name -ceq 'Main'
+    })
+    $unselectedInspect = @($unselectedChildren | Where-Object {
+      $_.Current.AutomationId -ceq $selectedEvidence.inspectAutomationId -and $_.Current.Name -ceq 'Inspect'
+    })
+    $unselectedReason = @($unselectedChildren | Where-Object {
+      $_.Current.AutomationId -ceq $selectedEvidence.reasonAutomationId -and
+        $_.Current.Name -ceq 'cycle · no entry point'
+    })
+    Require ($unselectedCard.Count -eq 1 -and $unselectedInspect.Count -eq 1 -and
+             $unselectedReason.Count -eq 1) `
+      "s-main-cycle-unselected did not preserve stable card/action/reason identities"
+    $unselectedState = $unselectedCard[0].GetCurrentPattern(
+      [System.Windows.Automation.SelectionItemPattern]::Pattern
+    ).Current.IsSelected
+    Require (-not $unselectedState) "s-main-cycle-unselected remained selected"
+    Require ($unselectedInspect[0].Current.BoundingRectangle.Bottom -le
+             $unselectedReason[0].Current.BoundingRectangle.Top) `
+      "s-main-cycle-unselected did not keep Inspect above its footer reason"
+    $unselectedReasonInvoke = $null
+    Require (-not $unselectedReason[0].TryGetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern, [ref]$unselectedReasonInvoke
+    )) "s-main-cycle-unselected footer reason incorrectly exposed Invoke"
+    $evidence = [ordered]@{
+      mode = 'focused-live-uia'
+      projectRoot = [Environment]::GetEnvironmentVariable('GRAPHCODE_GATE_CWD')
+      selected = $selectedEvidence
+      unselected = [ordered]@{
+        scene = 's-main-cycle-unselected'
+        cardAutomationId = [string]$unselectedCard[0].Current.AutomationId
+        selected = [bool]$unselectedState
+        inspectAutomationId = [string]$unselectedInspect[0].Current.AutomationId
+        inspectBounds = @($unselectedInspect[0].Current.BoundingRectangle.Left,
+          $unselectedInspect[0].Current.BoundingRectangle.Top,
+          $unselectedInspect[0].Current.BoundingRectangle.Right,
+          $unselectedInspect[0].Current.BoundingRectangle.Bottom)
+        reasonAutomationId = [string]$unselectedReason[0].Current.AutomationId
+        reasonBounds = @($unselectedReason[0].Current.BoundingRectangle.Left,
+          $unselectedReason[0].Current.BoundingRectangle.Top,
+          $unselectedReason[0].Current.BoundingRectangle.Right,
+          $unselectedReason[0].Current.BoundingRectangle.Bottom)
+      }
+      selectedActivation = [ordered]@{
+        invokedCardAutomationId = [string]$selectedCard[0].Current.AutomationId
+        workspaceShowGraphObserved = $true
+        stableIdentityAfterReturn = [string]$unselectedCard[0].Current.AutomationId
+      }
+    }
+    $json = $evidence | ConvertTo-Json -Compress -Depth 8
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+      $sha256 = [Convert]::ToHexString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($json)))
+    } finally {
+      $hasher.Dispose()
+    }
+    Write-Host "UIA_CYCLE_HIERARCHY_EVIDENCE=$json"
+    Write-Host "UIA_CYCLE_HIERARCHY_SHA256=$sha256"
+    return
+  }
   if ($UnwiredRecoveryOnly) {
     Require ([GraphCodeUiaGateState]::PostFixtureMutation($shellWindow, 16)) `
       "unwired recovery fixture mutation was rejected"
