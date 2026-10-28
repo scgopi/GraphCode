@@ -172,8 +172,8 @@ function Assert-WorkspaceTabSelectors {
         $node.Left.Extent.Text -match '\.Current\.AutomationId$' -and
         $node.Right.Extent.Text -ceq "'^workspace-tab-[0-9]+$'"
     }, $true))
-  Assert-Contract ($predicates.Count -eq 7) `
-    "expected seven actual-tab selectors in the UIA live gate, found $($predicates.Count)"
+  Assert-Contract ($predicates.Count -eq 10) `
+    "expected ten actual-tab selectors in the UIA live gate, found $($predicates.Count)"
   $graphWait = $ast.Find({
       param($node)
       $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
