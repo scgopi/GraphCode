@@ -510,6 +510,65 @@ static void nativeUnwiredRecoveryChecks(IRawElementProviderSimple *provider, HWN
   if (projects) projects->Release();
 }
 
+static void nativeCycleHierarchyChecks(IRawElementProviderSimple *provider, HWND hwnd,
+                                       IRawElementProviderFragment *root) {
+  const char *identities[] = {
+      "attention-action:C:\\fixture:main",
+      "cycle-reason:C:\\fixture:main",
+  };
+  const char *names[] = {"Inspect", "cycle \xC2\xB7 no entry point"};
+  const int parents[] = {4, 4};
+  const int none[] = {0, 0};
+  const int actions[] = {1, 0};
+  const int bounds[] = {
+      412, 151, 478, 168,
+      261, 175, 478, 188,
+  };
+  auto update = reinterpret_cast<FullUpdate>(&gc_uia_update);
+  check(update(provider, "Cycle hierarchy", identities, names, parents, none, none, actions, bounds,
+               2, 0, 1, 0, 0, 0, 0) == S_OK,
+        "cycle hierarchy publication succeeds");
+
+  auto *projects = child(root, NavigateDirection_FirstChild);
+  auto *loops = child(projects, NavigateDirection_NextSibling);
+  auto *worktrees = child(loops, NavigateDirection_NextSibling);
+  auto *graph = child(worktrees, NavigateDirection_NextSibling);
+  auto *inspect = child(graph, NavigateDirection_FirstChild);
+  auto *reason = child(inspect, NavigateDirection_NextSibling);
+  check(stringProperty(inspect, UIA_AutomationIdPropertyId).rfind(L"attention-action-", 0) == 0,
+        "Inspect keeps its stable action automation id");
+  check(stringProperty(reason, UIA_AutomationIdPropertyId).rfind(L"cycle-reason-", 0) == 0,
+        "cycle reason has a stable metadata automation id");
+  checkName(inspect, L"Inspect");
+  checkName(reason, L"cycle \u00b7 no entry point");
+  check(invokable(inspect), "Inspect remains invokable");
+  check(!invokable(reason), "cycle reason is metadata, not an action");
+
+  IRawElementProviderSimple *reason_simple = nullptr;
+  check(reason && reason->QueryInterface(IID_PPV_ARGS(&reason_simple)) == S_OK && reason_simple,
+        "cycle reason exposes native UIA properties");
+  if (reason_simple) {
+    VARIANT control_type;
+    VariantInit(&control_type);
+    check(reason_simple->GetPropertyValue(UIA_ControlTypePropertyId, &control_type) == S_OK &&
+              control_type.vt == VT_I4 && control_type.lVal == UIA_TextControlTypeId,
+          "cycle reason is exposed as Text");
+    VariantClear(&control_type);
+    reason_simple->Release();
+  }
+  POINT origin{0, 0};
+  ClientToScreen(hwnd, &origin);
+  checkRect(inspect, origin, 412, 151, 66, 17, "Inspect retains its body action bounds");
+  checkRect(reason, origin, 261, 175, 217, 13, "cycle reason occupies the footer bounds");
+
+  if (reason) reason->Release();
+  if (inspect) inspect->Release();
+  if (graph) graph->Release();
+  if (worktrees) worktrees->Release();
+  if (loops) loops->Release();
+  if (projects) projects->Release();
+}
+
 static void nativeQuickChatRestartChecks(IRawElementProviderSimple *provider, HWND hwnd,
                                           IRawElementProviderFragment *root) {
   check(!IsWindowVisible(hwnd), "Quick Chat restart is tested against a hidden provider window");
@@ -744,6 +803,7 @@ static void nativeCommandAndScrollChecks() {
       nativeHeaderOverflowChecks(provider, capture, root);
       nativeBannerInvokeChecks(provider, capture, root);
       nativeUnwiredRecoveryChecks(provider, capture, root);
+      nativeCycleHierarchyChecks(provider, capture, root);
       nativeQuickChatRestartChecks(provider, capture, root);
       nativeQuickChatWorkspaceBarChecks(provider, root);
       nativeScrollChecks(provider, capture, root);

@@ -1462,6 +1462,12 @@ pub fn overviewNodeRole(state: *const CanvasState, graph_index: usize, node_inde
     return lane.layout.roles[node_index];
 }
 
+pub fn projectNodeRole(state: *const CanvasState, node_index: usize) ?LaneLayout.Role {
+    const layout = state.project_layout orelse return null;
+    if (node_index >= layout.roles.len) return null;
+    return layout.roles[node_index];
+}
+
 pub fn overviewLaneName(graph: *const GraphModel.GraphSummary) []const u8 {
     return if (graph.project.isGlobal()) "No folder" else graph.project.name;
 }
@@ -3045,8 +3051,24 @@ fn drawLoopCard(
     };
     if (role != .unwired) if (action) |primary_action| {
         const action_bounds = attentionActionBounds(bounds, state);
-        fill(hdc, action_bounds, 0x000A9FFF);
-        drawTextRect(hdc, allocator, attentionActionLabelFor(primary_action), action_bounds, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        if (primary_action == .inspect) {
+            roundedControl(hdc, action_bounds, scaled(5, state), 0x000A9FFF, 0x000A9FFF);
+            drawCardText(
+                hdc,
+                allocator,
+                attentionActionLabelFor(primary_action),
+                action_bounds,
+                11 * state.zoom,
+                .semibold,
+                0x00241703,
+                false,
+            ) catch |err| {
+                std.log.warn("Attention action label unavailable: {s}", .{@errorName(err)});
+            };
+        } else {
+            fill(hdc, action_bounds, 0x000A9FFF);
+            drawTextRect(hdc, allocator, attentionActionLabelFor(primary_action), action_bounds, scaled(9, state), 0x00241703, c.DT_CENTER | c.DT_SINGLELINE | c.DT_VCENTER);
+        }
     };
 
     if (role != .unwired and show_reclaim and reclaim != null) {
@@ -3098,6 +3120,15 @@ pub fn attentionActionBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
 
 fn attentionActionBoundsForZoom(bounds: c.RECT, zoom: f32) c.RECT {
     return rect(bounds.right - scaledValue(77, zoom), bounds.top + scaledValue(51, zoom), bounds.right - scaledValue(11, zoom), bounds.top + scaledValue(68, zoom));
+}
+
+pub fn cycleReasonBounds(bounds: c.RECT, state: *const CanvasState) c.RECT {
+    return rect(
+        bounds.left + scaledValue(11, state.zoom),
+        bounds.bottom - scaledValue(21, state.zoom),
+        bounds.right - scaledValue(11, state.zoom),
+        bounds.bottom - scaledValue(8, state.zoom),
+    );
 }
 
 pub const UnwiredActionBounds = struct { wire: c.RECT, mark_entry: c.RECT };
@@ -3671,6 +3702,81 @@ test "paint export: loop-outcomes" {
     std.debug.print("loop outcome export: 4 scenes x 3 repeats, matching RGB hashes; production decoder/card paint; no desktop capture\n", .{});
 }
 
+const cycleCardEvidenceFrame =
+    \\{"graphChanged":{"project":{"path":"A","name":"Cycle fixture"},"nodes":[{"id":"main","title":"Main","loopType":"sketch","backend":"copilotCLI","state":"blocked","createdAt":1,"firstInstruction":"Offline closed cycle"},{"id":"peer","title":"Cycle peer","loopType":"sketch","backend":"copilotCLI","state":"blocked","createdAt":1,"firstInstruction":"Offline closed cycle peer"}],"edges":[{"id":"a","from":"main","to":"peer","kind":"handoff","blocksTarget":true},{"id":"b","from":"peer","to":"main","kind":"handoff","blocksTarget":true}]}}
+;
+
+test "paint export: cycle-card-hierarchy" {
+    const allocator = std.testing.allocator;
+    const root = std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_EXPORT_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer allocator.free(root);
+    if (root.len == 0) return error.PaintExportDirectoryEmpty;
+    const commit = try std.process.getEnvVarOwned(allocator, "GRAPHCODE_PAINT_SOURCE_COMMIT");
+    defer allocator.free(commit);
+    if (commit.len != 40) return error.PaintExportSourceCommitInvalid;
+    for (commit) |character| if (!std.ascii.isHex(character)) return error.PaintExportSourceCommitInvalid;
+    var directory = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer directory.close();
+    var iterator = directory.iterate();
+    if (try iterator.next() != null) return error.PaintExportRootNotEmpty;
+    try chrome764Native();
+
+    var model = GraphModel.Model.init(allocator);
+    defer model.deinit();
+    _ = try model.updateFromFrame(cycleCardEvidenceFrame);
+    const graph = model.graph.?;
+    const roles = try resolveCardRoles(allocator, graph.nodes.items, graph.edges.items, &.{});
+    defer allocator.free(roles);
+    try std.testing.expectEqual(NodeRole.cycle_only, roles[0]);
+    try std.testing.expectEqual(AttentionAction.inspect, primaryCardAction(graph.nodes.items[0]).?);
+
+    var fixture_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(cycleCardEvidenceFrame, &fixture_hash, .{});
+    var receipt = std.array_list.Managed(u8).init(allocator);
+    defer receipt.deinit();
+    try receipt.writer().print(
+        "{{\"evidenceClass\":\"privacy-safe raw unresampled offscreen component paint\",\"sourceCommit\":\"{s}\",\"fixtureSha256\":\"{x}\",\"logicalDpi\":96,\"width\":360,\"height\":190,\"zoom\":1,\"scenes\":[",
+        .{ commit, &fixture_hash },
+    );
+    for ([_]bool{ false, true }, 0..) |selected, scene_index| {
+        var first_rgb: [32]u8 = undefined;
+        const scene = if (selected) "s-main-cycle-selected-component" else "s-main-cycle-unselected-component";
+        for (0..3) |repeat| {
+            const dib = try ParityDib.init(360, 190);
+            defer dib.deinit();
+            fill(dib.dc, rect(0, 0, 360, 190), Tokens.canvas_tone);
+            const bounds = rect(55, 47, 55 + Tokens.loop_card_width, 47 + Tokens.loop_card_height);
+            drawLoopCardShadow(dib.dc, allocator, graph.nodes.items[0], bounds, &.{}, .cycle_only, false, selected);
+            drawLoopCard(dib.dc, allocator, graph.nodes.items[0], bounds, &.{}, .cycle_only, false, .inspect, selected, null, true);
+            const rgb = try dib.rgbSha256(allocator);
+            if (repeat == 0) first_rgb = rgb else try std.testing.expectEqualSlices(u8, &first_rgb, &rgb);
+            const name = try std.fmt.allocPrint(allocator, "{s}-{d}.bmp", .{ scene, repeat + 1 });
+            defer allocator.free(name);
+            const path = try std.fs.path.join(allocator, &.{ root, name });
+            defer allocator.free(path);
+            const digest = try dib.writeBmp(allocator, path);
+            if (repeat == 0) {
+                if (scene_index != 0) try receipt.append(',');
+                try receipt.writer().print(
+                    "{{\"scene\":\"{s}\",\"nodeId\":\"main\",\"selected\":{},\"file\":\"{s}\",\"repeats\":3,\"bmpSha256\":\"{x}\",\"rgbSha256\":\"{x}\"}}",
+                    .{ scene, selected, name, &digest, &rgb },
+                );
+            }
+        }
+    }
+    try receipt.appendSlice("]}\n");
+    var file = try directory.createFile("cycle-card-hierarchy-receipt.json", .{ .exclusive = true });
+    defer file.close();
+    try file.writeAll(receipt.items);
+    var fixture_file = try directory.createFile("cycle-card-hierarchy-frame.json", .{ .exclusive = true });
+    defer fixture_file.close();
+    try fixture_file.writeAll(cycleCardEvidenceFrame);
+    std.debug.print("cycle card export: 2 scenes x 3 repeats, matching RGB hashes; raw unresampled offscreen component paint; no desktop capture\n", .{});
+}
+
 fn cardPilotName(pilot: []const u8) []const u8 {
     if (std.mem.eql(u8, pilot, "notPiloted")) return "Not piloted";
     if (std.mem.eql(u8, pilot, "piloting")) return "Piloting";
@@ -3928,6 +4034,20 @@ fn cardMetaForWidth(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.N
     return result;
 }
 
+fn cardMetaForWidthAllowingFullElision(hdc: c.HDC, allocator: std.mem.Allocator, node: GraphModel.Node, now: u64, width: i32) ![]u8 {
+    if (cardMetaForWidth(hdc, allocator, node, now, width)) |meta| return meta else |err| switch (err) {
+        error.CardMetadataTooWide => {},
+        else => return err,
+    }
+    const full = try nodeMetadata(allocator, node, node.worktree_branch, now);
+    defer allocator.free(full);
+    const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, full);
+    defer allocator.free(wide);
+    const shortened = try cardBranchForWidth(hdc, allocator, wide, width) orelse return error.CardMetadataTooWide;
+    defer allocator.free(shortened);
+    return std.unicode.utf16LeToUtf8Alloc(allocator, shortened);
+}
+
 fn drawCardText(hdc: c.HDC, allocator: std.mem.Allocator, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, ellipsis: bool) !void {
     if (text.len == 0 or bounds.right <= bounds.left) return;
     const wide = try std.unicode.utf8ToUtf16LeAlloc(allocator, text);
@@ -4083,7 +4203,7 @@ fn cardRoleChip(role: NodeRole) ?CardRoleChip {
             .stroke = blendCardColor(0x000A9FFF, Tokens.loop_card_bottom, 28),
             .padding = 6,
             .radius = 5,
-            .font_size = 9.5,
+            .font_size = 10,
             .font_style = .card_mono,
         },
         .interior, .unwired => null,
@@ -4123,6 +4243,16 @@ fn cardMetaPresentation(
     const gap = scaledValue(5, zoom);
     const reserved_bounds = rect(full_text_bounds.left, full_text_bounds.top, full_text_bounds.right - chip_width - gap, full_text_bounds.bottom);
     const now: u64 = @intCast(@max(0, std.time.timestamp()));
+    if (role == .cycle_only) return .{
+        .text = try cardMetaForWidthAllowingFullElision(
+            hdc,
+            allocator,
+            node,
+            now,
+            reserved_bounds.right - reserved_bounds.left,
+        ),
+        .chip_in_detail = false,
+    };
     const meta = cardMetaForWidth(hdc, allocator, node, now, reserved_bounds.right - reserved_bounds.left) catch |err| switch (err) {
         error.CardMetadataTooWide => return .{
             .text = try cardMetaForWidth(hdc, allocator, node, now, full_text_bounds.right - full_text_bounds.left),
@@ -9744,6 +9874,55 @@ test "card roles use Mac sequencing reachability including spawn but not message
         }
     }
     try std.testing.expect(label_pixels > 0);
+}
+
+test "closed cycle card keeps Inspect in the body and its reason in the metadata footer" {
+    var node = graphRoleTestNode("cycle-hierarchy");
+    node.title = @constCast("Main");
+    node.state = @constCast("blocked");
+    node.backend = @constCast("copilotCLI");
+    node.created_at = 1;
+    const nodes = [_]GraphModel.Node{node};
+    const chip = cardRoleChip(.cycle_only).?;
+
+    for ([_]f32{ 0.55, 1, 1.8 }) |zoom| {
+        var state = try cardTestState(.{ .zoom = zoom, .pan_x = 140, .pan_y = 30 });
+        defer state.deinitLayout();
+        const dib = try ParityDib.init(1600, 600);
+        defer dib.deinit();
+        const bounds = nodeBounds(0, &state);
+        for ([_]bool{ false, true }) |selected| {
+            fill(dib.dc, rect(0, 0, 1600, 600), Tokens.canvas_tone);
+            drawLoopCard(dib.dc, std.testing.allocator, node, bounds, &state, .cycle_only, false, .inspect, selected, null, true);
+            try std.testing.expect(c.GdiFlush() != 0);
+            const presentation = cardState(node);
+            const old_font = try selectCardFont(dib.dc, 10 * zoom, .card_state);
+            const pill_width = (try measuredText(dib.dc, std.testing.allocator, presentation.word)) + scaledValue(22, zoom);
+            _ = c.SelectObject(dib.dc, old_font);
+            const layout = cardTextLayout(bounds, zoom, pill_width);
+            const role = try cardMetaPresentation(dib.dc, std.testing.allocator, node, layout, zoom, .cycle_only);
+            defer std.testing.allocator.free(role.text);
+            try std.testing.expect(!role.chip_in_detail);
+
+            const chip_width = try cardRoleChipWidth(dib.dc, std.testing.allocator, .cycle_only, zoom);
+            const chip_height = scaledValue(14, zoom);
+            const chip_top = @divTrunc(layout.meta.top + layout.meta.bottom - chip_height, 2);
+            const chip_bounds = rect(layout.meta.right - chip_width, chip_top, layout.meta.right, chip_top + chip_height);
+            const action = attentionActionBounds(bounds, &state);
+            try std.testing.expect(action.bottom <= layout.meta.top);
+            try std.testing.expect(chip_bounds.top >= layout.meta.top - scaledValue(1, zoom));
+            try std.testing.expect(chip_bounds.bottom <= layout.meta.bottom + scaledValue(1, zoom));
+            try std.testing.expect(chip_bounds.left >= bounds.left and chip_bounds.right <= bounds.right);
+            try std.testing.expect(dib.count(action, 0x000A9FFF) > 0);
+            try std.testing.expect(dib.count(chip_bounds, chip.fill) > 0);
+            try std.testing.expectEqual(@as(usize, 0), dib.count(rect(layout.detail.left, layout.detail.top, action.left, layout.detail.bottom), chip.fill));
+            try std.testing.expectEqual(@as(?usize, 0), hitTestAttentionAction(&nodes, &.{}, action.left + 1, action.top + 1, &state));
+        }
+    }
+    try std.testing.expectEqual(@as(f32, 10), chip.font_size);
+    try std.testing.expectEqual(blendCardColor(0x000A9FFF, Tokens.loop_card_bottom, 12), chip.fill);
+    try std.testing.expectEqual(blendCardColor(0x007ACDFF, Tokens.loop_card_bottom, 90), chip.ink);
+    try std.testing.expectEqual(blendCardColor(0x000A9FFF, Tokens.loop_card_bottom, 28), chip.stroke.?);
 }
 
 test "safe resolved worktrees expose distinct reclaim and keep targets" {

@@ -264,11 +264,12 @@ class Node final : public IRawElementProviderSimple,
                  property == UIA_IsContentElementPropertyId) {
         if (isRowKey(id_)) {
           const Row &row = state_->rows.at(id_);
-          const bool sidebar_error_footer =
+          const bool static_text =
               row.identity.rfind("sidebar-error-footer:", 0) == 0 ||
               row.identity.rfind("workspace-toolbar:", 0) == 0 ||
-              row.identity.rfind("worktree-loading:", 0) == 0;
-          bool_value = sidebar_error_footer
+              row.identity.rfind("worktree-loading:", 0) == 0 ||
+              row.identity.rfind("cycle-reason:", 0) == 0;
+          bool_value = static_text
               ? (property != UIA_IsKeyboardFocusablePropertyId)
               : true;
           if (property == UIA_IsEnabledPropertyId && isHeader(row.identity))
@@ -1267,6 +1268,7 @@ class Node final : public IRawElementProviderSimple,
           row.identity.rfind("quick-chat-workspace:", 0) == 0 ? L"quick-chat-workspace-" :
           row.identity.rfind("loop-disclosure:", 0) == 0 ? L"loop-disclosure-" :
           row.identity.rfind("attention-action:", 0) == 0 ? L"attention-action-" :
+          row.identity.rfind("cycle-reason:", 0) == 0 ? L"cycle-reason-" :
           row.identity.rfind("wire-node:", 0) == 0 ? L"wire-node-" :
           row.identity.rfind("mark-entry:", 0) == 0 ? L"mark-entry-" :
           row.identity.rfind("overview-wire-node:", 0) == 0 ? L"overview-wire-node-" :
@@ -1322,6 +1324,7 @@ class Node final : public IRawElementProviderSimple,
         return UIA_TextControlTypeId;
       }
       if (row.identity.rfind("worktree-loading:", 0) == 0) return UIA_TextControlTypeId;
+      if (row.identity.rfind("cycle-reason:", 0) == 0) return UIA_TextControlTypeId;
       const bool action =
           row.identity.rfind("sidebar-section:", 0) == 0 ||
           row.identity.rfind("needs-you-header:", 0) == 0 ||

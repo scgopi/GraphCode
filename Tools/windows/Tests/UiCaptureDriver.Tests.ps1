@@ -2917,6 +2917,11 @@ function Invoke-CapMatchedContracts {
         $proof=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot 'C:\fixture'
         Assert-CapTest ($proof.states.Count -eq 6 -and $proof.nodes -eq 8 -and $proof.macSource -ceq
             '2ccf303a04f995184aae1d4b738a9eca0f71b79e') 'Matched fixture typed inventory differs.'
+        $workerSource=Get-Content -LiteralPath $workerPath -Raw
+        Assert-CapTest ($workerSource.Contains("cycle-reason:") -and
+            $workerSource.Contains("Matched cycle card did not keep Inspect above the footer reason") -and
+            $workerSource.Contains("controlType='Text';invokable=`$false")) `
+            'Matched cycle scenes do not require separate body action and footer-reason UIA evidence.'
         $wire=Invoke-CapPeerWireCase -Peer B -Case clean -Source (Get-CapBPeerSource) `
             -FixturePath (Join-Path $driverDirectory 'fixtures\matched-v12.json') -CaseRoot (Join-Path $scratch 'matched-fixture-wire')
         return @{fixture=$proof;wire=$wire;qualifiedStates=$proof.states.Count;nodes=$proof.nodes
@@ -3349,7 +3354,7 @@ function Invoke-CapMatchedTabContracts {
         $terminalSource -cmatch '(?s)pub fn canCloseTab\(self: \*const Workspace\) bool \{\s*return self\.layout\.tabs\.items\.len > 1;\s*\}' -and
         $accessibilitySource.Contains('sidebar_scroll: bool = false,') -and
         $providerSource -cmatch '(?s)bool supportsScrollItem\(\) const \{.*?if \(isRowKey\(id_\)\) return state_->rows\.at\(id_\)\.scrolls;' -and
-        $providerSource -cmatch '(?s)if \(isRowKey\(id_\)\) \{.*?bool_value = sidebar_error_footer.*?: true;') `
+        $providerSource -cmatch '(?s)if \(isRowKey\(id_\)\) \{.*?bool_value = static_text.*?: true;') `
         'Product tab close source contract no longer matches the capture interpretation.'
     foreach ($vector in @(
         @('workspace-tab:0','workspace-tab-2015407614065646652'),
@@ -4047,10 +4052,18 @@ function Invoke-CapMatchedSceneRoutingContract {
         }
         function New-CapMockElement([string]$Id,[string]$Name,[int]$ProcessId,[double[]]$Bounds) {
             $current=[pscustomobject]@{AutomationId=$Id;Name=$Name;ProcessId=$ProcessId
+                ControlType=$(if ($Id -clike 'cycle-reason-*') {[Windows.Automation.ControlType]::Text}
+                    else {[Windows.Automation.ControlType]::Button})
                 BoundingRectangle=[pscustomobject]@{Left=$Bounds[0];Top=$Bounds[1];Right=$Bounds[2];Bottom=$Bounds[3]
                     Width=($Bounds[2]-$Bounds[0]);Height=($Bounds[3]-$Bounds[1])}}
             $element=[pscustomobject]@{Current=$current}
             $element | Add-Member -MemberType ScriptMethod -Name GetCurrentPattern -Value {param($Pattern) [pscustomobject]@{}}
+            $element | Add-Member -MemberType ScriptMethod -Name TryGetCurrentPattern -Value {
+                param($Pattern,[ref]$Value)
+                if ($this.Current.AutomationId -clike 'cycle-reason-*') {return $false}
+                $Value.Value=[pscustomobject]@{}
+                return $true
+            }
             return $element
         }
         function Find-CapAutomationElement {
@@ -4072,6 +4085,13 @@ function Invoke-CapMatchedSceneRoutingContract {
                     'Wire it up' 4242 @(261,131,334,151)))
                 $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("mark-entry:"+$fixture.graphs[0].project.path+":"+$nodeId)) `
                     'Mark as entry' 4242 @(340,131,426,151)))
+            }
+            if ($scene -cmatch '^s-main-cycle-') {
+                $nodeId=@($fixture.states | Where-Object scene -CEQ $scene)[0].nodeId
+                $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("attention-action:"+$fixture.graphs[0].project.path+":"+$nodeId)) `
+                    'Inspect' 4242 @(412,151,478,168)))
+                $rows.Add((New-CapMockElement (Get-CapMatchedAutomationId ("cycle-reason:"+$fixture.graphs[0].project.path+":"+$nodeId)) `
+                    'cycle · no entry point' 4242 @(261,175,478,188)))
             }
             return $rows.ToArray()
         }

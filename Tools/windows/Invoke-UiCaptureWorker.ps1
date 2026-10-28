@@ -2114,6 +2114,48 @@ function Invoke-CapMatchedScenes {
                                 bounds=@($mark[0].Current.BoundingRectangle.Left,$mark[0].Current.BoundingRectangle.Top,
                                     $mark[0].Current.BoundingRectangle.Right,$mark[0].Current.BoundingRectangle.Bottom)}})
                 }
+                if ($scene -cmatch '^s-main-cycle-') {
+                    $actionIdentity="attention-action:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
+                    $reasonIdentity="cycle-reason:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
+                    $actionId=Get-CapMatchedAutomationId $actionIdentity
+                    $reasonId=Get-CapMatchedAutomationId $reasonIdentity
+                    $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                    $children=@(Get-CapDirectChildren -Parent $graph)
+                    $inspect=@($children | Where-Object {$_.Current.AutomationId -ceq $actionId -and
+                        $_.Current.Name -ceq 'Inspect'})
+                    $reason=@($children | Where-Object {$_.Current.AutomationId -ceq $reasonId -and
+                        $_.Current.Name -ceq 'cycle · no entry point'})
+                    if ($inspect.Count -ne 1 -or $reason.Count -ne 1) {
+                        throw "Matched cycle card omitted its separate Inspect action or footer reason for $scene."
+                    }
+                    if ($inspect[0].Current.ProcessId -ne $app.Run.Identity.Pid -or
+                        $reason[0].Current.ProcessId -ne $app.Run.Identity.Pid -or
+                        $inspect[0].Current.ControlType -ne [Windows.Automation.ControlType]::Button -or
+                        $reason[0].Current.ControlType -ne [Windows.Automation.ControlType]::Text) {
+                        throw "Matched cycle card exposed the wrong UIA ownership or control types for $scene."
+                    }
+                    $null=$inspect[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
+                    $reasonPattern=$null
+                    if ($reason[0].TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern,[ref]$reasonPattern)) {
+                        throw "Matched cycle footer reason incorrectly exposed Invoke for $scene."
+                    }
+                    $inspectBounds=$inspect[0].Current.BoundingRectangle
+                    $reasonBounds=$reason[0].Current.BoundingRectangle
+                    if ($inspectBounds.Width -le 0 -or $inspectBounds.Height -le 0 -or
+                        $reasonBounds.Width -le 0 -or $reasonBounds.Height -le 0 -or
+                        $inspectBounds.Bottom -gt $reasonBounds.Top) {
+                        throw "Matched cycle card did not keep Inspect above the footer reason for $scene."
+                    }
+                    $app.SObservation | Add-Member -NotePropertyName cycleHierarchy -NotePropertyValue `
+                        ([pscustomobject]@{inspect=[pscustomobject]@{name='Inspect';automationId=$actionId
+                                controlType='Button';invokable=$true;bounds=@($inspectBounds.Left,$inspectBounds.Top,
+                                    $inspectBounds.Right,$inspectBounds.Bottom)}
+                            reason=[pscustomobject]@{name='cycle · no entry point';automationId=$reasonId
+                                controlType='Text';invokable=$false;bounds=@($reasonBounds.Left,$reasonBounds.Top,
+                                    $reasonBounds.Right,$reasonBounds.Bottom)}
+                            selected=[bool]$state[0].selected;cardIdentity=$card[0].AutomationId})
+                }
                 Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $zoom -Phase $Phase
                 if ($null -ne $recovery) {
                     $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $recovery.wireIdentity
