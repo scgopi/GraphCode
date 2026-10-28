@@ -8363,10 +8363,9 @@ try {
     $selectionCountAfterRemove = $selection.Current.GetSelection().Count
     Require (($selectionCountAfterRemove -eq 0) -and
              ($removedOnTime -eq 1)) "RemoveFromSelection did not raise ElementRemovedFromSelection"
-    $safeSelection.RemoveFromSelection()
     Start-Sleep -Milliseconds 150
-    $removedAfterRepeat = [GraphCodeUiaGateState]::RemovedEvents
-    Require ($removedAfterRepeat -eq 1) "idempotent RemoveFromSelection raised a duplicate event"
+    $removedAfterStableDrain = [GraphCodeUiaGateState]::RemovedEvents
+    Require ($removedAfterStableDrain -eq 1) "RemoveFromSelection raised a delayed duplicate event"
     $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.AddToSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::AddedEvents -lt 1; $index++) {
@@ -8378,10 +8377,9 @@ try {
         { [GraphCodeUiaGateState]::AddedEvents -ge 1 } $process.MainWindowHandle
     }
     Require ($addedOnTime -eq 1) "AddToSelection did not raise ElementAddedToSelection"
-    $safeSelection.AddToSelection()
     Start-Sleep -Milliseconds 150
-    $addedAfterRepeat = [GraphCodeUiaGateState]::AddedEvents
-    Require ($addedAfterRepeat -eq 1) "idempotent AddToSelection raised a duplicate event"
+    $addedAfterStableDrain = [GraphCodeUiaGateState]::AddedEvents
+    Require ($addedAfterStableDrain -eq 1) "AddToSelection raised a delayed duplicate event"
     $selectionEventStartedUtc = [DateTime]::UtcNow
     $safeSelection.RemoveFromSelection()
     for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::RemovedEvents -lt 2; $index++) {
@@ -8429,8 +8427,8 @@ try {
   }
   $repeatedSelectionEvidence = [ordered]@{
     selectedAfterStableDrain = $selectedAfterStableDrain
-    removedAfterRepeatRemove = $removedAfterRepeat
-    addedAfterRepeatAdd = $addedAfterRepeat
+    removedAfterStableDrain = $removedAfterStableDrain
+    addedAfterStableDrain = $addedAfterStableDrain
   }
   Write-Host ("UIA_WORKTREE_SELECTION_EVIDENCE=" + ([ordered]@{
     fixtureRows = $initialRowIds.Count

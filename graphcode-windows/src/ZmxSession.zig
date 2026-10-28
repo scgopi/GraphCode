@@ -72,7 +72,7 @@ pub fn child(
     result.cwd = cwd;
     result.stdin_behavior = if (stdio == .attach) .Pipe else .Ignore;
     result.stdout_behavior = if (stdio == .attach or stdio == .capture) .Pipe else .Ignore;
-    result.stderr_behavior = .Ignore;
+    result.stderr_behavior = if (stdio == .control) .Pipe else .Ignore;
     result.create_no_window = true;
     return result;
 }
@@ -91,7 +91,7 @@ test "zmx children keep their stdio contract and never open a console window" {
     const control = child(std.testing.allocator, &kill_argv, null, .control);
     try std.testing.expectEqual(std.process.Child.StdIo.Ignore, control.stdin_behavior);
     try std.testing.expectEqual(std.process.Child.StdIo.Ignore, control.stdout_behavior);
-    try std.testing.expectEqual(std.process.Child.StdIo.Ignore, control.stderr_behavior);
+    try std.testing.expectEqual(std.process.Child.StdIo.Pipe, control.stderr_behavior);
     try std.testing.expect(control.cwd == null);
     try std.testing.expectEqual(true, control.create_no_window);
 }

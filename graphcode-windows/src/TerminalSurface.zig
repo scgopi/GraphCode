@@ -389,6 +389,8 @@ pub const Surface = struct {
     last_resize_size: ?GridSize = null,
     attempted_resize_size: ?GridSize = null,
     pending_resize_size: ?GridSize = null,
+    resize_retry_count: u8 = 0,
+    resize_retry_due_ms: i64 = 0,
     // Counts batches whose cell, accessibility, and redraw publication calls all succeeded.
     output_events: usize = 0,
     output_result: TerminalOutputResult = .{},
@@ -461,6 +463,11 @@ pub const Surface = struct {
         self.input_bytes = 0;
         self.output_events = 0;
         self.output_result = .{};
+        self.last_resize_size = null;
+        self.attempted_resize_size = null;
+        self.pending_resize_size = null;
+        self.resize_retry_count = 0;
+        self.resize_retry_due_ms = 0;
     }
 
     /// Forgets every selection of this surface, the mouse's and the accessibility layer's.
@@ -3008,6 +3015,7 @@ pub const Workspace = struct {
     pub fn destroySurface(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
+        if (self.resizeTargetsSurface(index)) self.stopResizeChild();
         slot.destroying = true;
         self.releaseDeliveredMouse(index);
         self.waitAttach(index);
@@ -3026,6 +3034,14 @@ pub const Workspace = struct {
             slot.project_path = &.{};
         }
         self.resetSessionState(index);
+    }
+
+    fn resizeTargetsSurface(self: *const Workspace, index: usize) bool {
+        if (index >= self.surfaces.len) return false;
+        if (self.resize_child_surface == index) return true;
+        const session = self.surfaces[index].session_name;
+        return session.len != 0 and self.resize_child_session.len != 0 and
+            std.mem.eql(u8, session, self.resize_child_session);
     }
 
     /// The part of a surface's teardown that runs while its attach is still alive: drops the
@@ -3315,16 +3331,33 @@ pub const Workspace = struct {
             if (c.GetExitCodeProcess(child.id, &exit_code) == 0) {
                 _ = child.kill() catch {};
                 _ = child.wait() catch {};
-                self.finishResizeControl(false, "terminal PTY resize status unavailable");
+                self.finishResizeControl(false, false, "terminal PTY resize status unavailable");
             } else if (exit_code != c.STILL_ACTIVE) {
+                const stderr = if (child.stderr) |stream|
+                    stream.readToEndAlloc(self.allocator, 4096) catch &.{}
+                else
+                    &.{};
+                defer if (stderr.len != 0) self.allocator.free(stderr);
                 _ = child.wait() catch {};
-                self.finishResizeControl(exit_code == 0, "terminal PTY resize command failed");
+                if (exit_code != 0) {
+                    const size = self.resize_child_size orelse GridSize{ .cols = 0, .rows = 0 };
+                    std.log.err(
+                        "terminal PTY resize failed session={s} cols={d} rows={d} exit={d} stderr={s}",
+                        .{ self.resize_child_session, size.cols, size.rows, exit_code, stderr },
+                    );
+                }
+                const retryable = exit_code != 0 and
+                    (std.mem.indexOf(u8, stderr, "ConnectionRefused") != null or
+                        std.mem.indexOf(u8, stderr, "FILE_NOT_FOUND") != null);
+                self.finishResizeControl(exit_code == 0, retryable, "terminal PTY resize command failed");
             }
         }
         if (self.resize_child != null) return;
+        const now_ms = std.time.milliTimestamp();
         for (&self.surfaces, 0..) |*slot, index| {
             const size = slot.pending_resize_size orelse continue;
             if (slot.attach == null or slot.surface == null) continue;
+            if (now_ms < slot.resize_retry_due_ms) continue;
             var args: [4][]const u8 = undefined;
             var size_buffer: [16]u8 = undefined;
             var session_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
@@ -3364,7 +3397,7 @@ pub const Workspace = struct {
         }
     }
 
-    fn finishResizeControl(self: *Workspace, succeeded: bool, failure_message: []const u8) void {
+    fn finishResizeControl(self: *Workspace, succeeded: bool, retryable: bool, failure_message: []const u8) void {
         const index = self.resize_child_surface orelse max_surfaces;
         const size = self.resize_child_size;
         if (index < self.surfaces.len and size != null and
@@ -3377,8 +3410,17 @@ pub const Workspace = struct {
             if (succeeded) {
                 slot.last_resize_size = size;
                 slot.attempted_resize_size = null;
+                slot.resize_retry_count = 0;
+                slot.resize_retry_due_ms = 0;
+            } else if (retryable and slot.surface != null and !slot.destroying and
+                slot.resize_retry_count < 5)
+            {
+                slot.resize_retry_count += 1;
+                slot.resize_retry_due_ms = std.time.milliTimestamp() + 100;
+                slot.pending_resize_size = size;
             } else {
                 slot.attempted_resize_size = size;
+                slot.resize_retry_due_ms = 0;
                 self.setInputError(failure_message);
             }
         } else if (!succeeded) {
@@ -8815,6 +8857,60 @@ test "pane resize requests coalesce, deduplicate and suppress failed retries" {
     workspace.queueResize(0, default_grid);
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].pending_resize_size.?);
     try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
+}
+
+test "surface teardown cancels only its owned PTY resize and preserves later status" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.surfaces[0].session_name = try allocator.dupe(u8, "session-a");
+    workspace.surfaces[1].session_name = try allocator.dupe(u8, "session-b");
+    defer allocator.free(workspace.surfaces[1].session_name);
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = .{ .cols = 120, .rows = 32 };
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+
+    try std.testing.expect(workspace.resizeTargetsSurface(0));
+    try std.testing.expect(!workspace.resizeTargetsSurface(1));
+    try std.testing.expect(!workspace.resizeTargetsSurface(workspace.surfaces.len));
+
+    workspace.destroySurface(0);
+
+    try std.testing.expect(workspace.resize_child == null);
+    try std.testing.expect(workspace.resize_child_surface == null);
+    try std.testing.expect(workspace.resize_child_size == null);
+    try std.testing.expectEqualStrings("", workspace.resize_child_session);
+    try std.testing.expect(workspace.inputStatus("Project relocation is unavailable") == null);
+}
+
+test "PTY resize retries a not-yet-published zmx endpoint and surfaces exhaustion" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.surfaces[0].session_name = try allocator.dupe(u8, "session-a");
+    defer allocator.free(workspace.surfaces[0].session_name);
+    workspace.surfaces[0].surface = @ptrFromInt(1);
+    defer workspace.surfaces[0].surface = null;
+    const size = GridSize{ .cols = 50, .rows = 10 };
+
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = size;
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+    workspace.finishResizeControl(false, true, "terminal PTY resize command failed");
+
+    try std.testing.expectEqual(size, workspace.surfaces[0].pending_resize_size.?);
+    try std.testing.expectEqual(@as(u8, 1), workspace.surfaces[0].resize_retry_count);
+    try std.testing.expect(workspace.surfaces[0].resize_retry_due_ms > 0);
+    try std.testing.expect(workspace.inputStatus("Project relocation is unavailable") == null);
+
+    workspace.surfaces[0].resize_retry_count = 5;
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = size;
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+    workspace.finishResizeControl(false, true, "terminal PTY resize command failed");
+
+    try std.testing.expectEqualStrings("terminal PTY resize command failed", workspace.inputStatus("").?);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
 }
 
 test "workspace tab chrome separates selection and close affordances" {
