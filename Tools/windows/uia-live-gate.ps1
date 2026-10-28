@@ -2582,6 +2582,93 @@ function Wait-ForGraphChildren(
   return [pscustomobject]@{ Graph = $liveGraph; Items = $observed; Children = $children }
 }
 
+function Get-WorkspaceTabMountDecision(
+  [object[]] $Before,
+  [object[]] $AfterNew,
+  [object[]] $Mounted,
+  [object[]] $SwitchedInitial,
+  [object[]] $SwitchedNew
+) {
+  $reject = {
+    param([string] $failure)
+    return [pscustomobject]@{ ready = $false; failure = $failure }
+  }
+  $validRows = {
+    param([object[]] $rows)
+    if ($rows -isnot [array]) { return $false }
+    foreach ($row in $rows) {
+      if ($row -isnot [Collections.IDictionary] -or
+          @($row.Keys | Where-Object {
+            @("automationId", "name", "selected") -cnotcontains $_
+          }).Count -ne 0 -or
+          $row.automationId -isnot [string] -or $row.automationId.Length -eq 0 -or
+          $row.name -isnot [string] -or $row.selected -isnot [bool]) {
+        return $false
+      }
+    }
+    return $true
+  }
+  foreach ($rows in @($Before, $AfterNew, $Mounted, $SwitchedInitial, $SwitchedNew)) {
+    if (-not (& $validRows @($rows))) { return & $reject "row-shape" }
+  }
+  if ($Before.Count -ne 1 -or $Before[0].name -cne "Goal" -or -not $Before[0].selected) {
+    return & $reject "initial-tab"
+  }
+  $initialId = $Before[0].automationId
+  if ($AfterNew.Count -lt 1 -or $AfterNew.Count -gt 2) {
+    return & $reject "post-new-visible-count"
+  }
+  $newRows = @($AfterNew | Where-Object { $_.name -ceq "Shell" })
+  if ($newRows.Count -ne 1 -or -not $newRows[0].selected -or
+      $newRows[0].automationId -ceq $initialId) {
+    return & $reject "new-tab"
+  }
+  $newId = $newRows[0].automationId
+  if ($AfterNew.Count -eq 2) {
+    $retained = @($AfterNew | Where-Object { $_.automationId -ceq $initialId })
+    if ($retained.Count -ne 1 -or $retained[0].name -cne "Goal" -or $retained[0].selected) {
+      return & $reject "post-new-initial"
+    }
+  }
+  $checkPair = {
+    param([object[]] $rows, [string] $selectedId, [string] $failure)
+    if ($rows.Count -ne 2) { return $failure }
+    if (@($rows | Where-Object { $_.automationId -ceq $initialId -and $_.name -ceq "Goal" }).Count -ne 1 -or
+        @($rows | Where-Object { $_.automationId -ceq $newId -and $_.name -ceq "Shell" }).Count -ne 1 -or
+        @($rows | Where-Object { $_.selected }).Count -ne 1 -or
+        @($rows | Where-Object { $_.automationId -ceq $selectedId -and $_.selected }).Count -ne 1) {
+      return $failure
+    }
+    return $null
+  }
+  $failure = & $checkPair $Mounted $newId "mounted-pair"
+  if ($null -ne $failure) { return & $reject $failure }
+  $failure = & $checkPair $SwitchedInitial $initialId "initial-switch"
+  if ($null -ne $failure) { return & $reject $failure }
+  $failure = & $checkPair $SwitchedNew $newId "new-switch"
+  if ($null -ne $failure) { return & $reject $failure }
+  return [pscustomobject]@{
+    ready = $true
+    failure = $null
+    initialId = $initialId
+    newId = $newId
+    overflowObserved = $AfterNew.Count -eq 1
+  }
+}
+
+function Get-WorkspaceTabState([object[]] $Elements) {
+  return @($Elements | ForEach-Object {
+    $selection = $_.GetCurrentPattern(
+      [System.Windows.Automation.SelectionItemPattern]::Pattern
+    )
+    [ordered]@{
+      automationId = $_.Current.AutomationId
+      name = $_.Current.Name
+      selected = [bool]$selection.Current.IsSelected
+    }
+  })
+}
+
 function Get-DynamicProjectCardSnapshotDecision(
   [string] $surface,
   [object[]] $cards,
@@ -7925,18 +8012,42 @@ try {
     $_.Current.AutomationId -match '^workspace-tab-[0-9]+$'
   })
   Require ($workspaceTabs.Count -ge 1) "workspace omitted its initial terminal tab before the mounted-tab preservation check"
-  $initialWorkspaceTabId = $workspaceTabs[0].Current.AutomationId
+  $initialTabState = @(Get-WorkspaceTabState $workspaceTabs)
+  $initialWorkspaceTabId = $initialTabState[0].automationId
   Require ($null -ne $newTab) "workspace omitted New Tab before mounted-tab preservation check"
   $newTab.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-  $mountedProbe = Wait-ForGraphChildren $root $rawWalker `
+  # At DPI192 the initial 1280-physical-pixel window has only 627 logical client
+  # pixels. With the detail panel expanded, the Mac-sized tab/control chrome has
+  # room for exactly the selected tab, so the original Goal correctly leaves the
+  # visible roster after New Tab selects Shell. Observe that bounded overflow
+  # state first, then collapse the detail panel to expose both mounted tabs.
+  $afterNewProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' } `
-    { param($items) $items.Count -ge 2 }
+    { param($items)
+      @($items | Where-Object { $_.Current.Name -ceq "Shell" }).Count -eq 1 }
+  $graph = $afterNewProbe.Graph
+  $afterNewTabs = @($afterNewProbe.Items)
+  $afterNewState = @(Get-WorkspaceTabState $afterNewTabs)
+  $collapseToggle = @($afterNewProbe.Children | Where-Object {
+    $_.Current.AutomationId -match '^workspace-toggle-panel-' -and
+      $_.Current.Name -eq "Collapse loop panel"
+  }) | Select-Object -First 1
+  Require ($null -ne $collapseToggle) `
+    "New Tab did not retain the expanded detail-panel control needed to reveal the mounted roster"
+  $collapseToggle.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+  $mountedProbe = Wait-ForGraphChildren $root $rawWalker `
+    { ($_.Current.AutomationId -match '^workspace-tab-[0-9]+$') -or
+      ($_.Current.AutomationId -match '^workspace-toggle-panel-' -and
+       $_.Current.Name -eq "Expand loop panel") } `
+    { param($items)
+      (@($items | Where-Object { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' }).Count -eq 2) -and
+      (@($items | Where-Object { $_.Current.Name -eq "Expand loop panel" }).Count -eq 1) }
   $graph = $mountedProbe.Graph
-  $workspaceTabs = @($mountedProbe.Items)
+  $workspaceTabs = @($mountedProbe.Items | Where-Object {
+    $_.Current.AutomationId -match '^workspace-tab-[0-9]+$'
+  })
   Require ($workspaceTabs.Count -ge 2) "New Tab did not expose a mounted background tab"
-  Require (($workspaceTabs[0].Current.Name -ceq "Goal") -and
-           ($workspaceTabs[1].Current.Name -ceq "Shell")) `
-    "New Tab did not retain the Goal title and expose the new Shell title"
+  $mountedState = @(Get-WorkspaceTabState $workspaceTabs)
   $workspaceCloseButtons = @($mountedProbe.Children | Where-Object {
     $_.Current.AutomationId -match '^workspace-tab-close-[0-9]+$'
   })
@@ -7952,7 +8063,7 @@ try {
     Require (($closeChild.Current.Name -ceq "Close tab") -and ($owners.Count -eq 1)) `
       "workspace close child $($closeChild.Current.AutomationId) was not inside exactly one actual tab"
   }
-  $newWorkspaceTabId = $workspaceTabs[1].Current.AutomationId
+  $newWorkspaceTabId = @($mountedState | Where-Object { $_.name -ceq "Shell" })[0].automationId
   $workspaceTabs[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   # Wait for both tabs to be present again after the switch remounts them, then assert
   # identity. The wait covers only the precondition (two tabs exist); it deliberately
@@ -7962,21 +8073,23 @@ try {
     { param($items) $items.Count -ge 2 }
   $graph = $switchProbe.Graph
   $workspaceTabs = @($switchProbe.Items)
-  Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
-           ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
-    "switching to the mounted background tab changed terminal tab identity"
+  $switchedInitialState = @(Get-WorkspaceTabState $workspaceTabs)
   $workspaceTabs[1].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
   $switchBackProbe = Wait-ForGraphChildren $root $rawWalker `
     { $_.Current.AutomationId -match '^workspace-tab-[0-9]+$' } `
     { param($items) $items.Count -ge 2 }
   $graph = $switchBackProbe.Graph
   $workspaceTabs = @($switchBackProbe.Items)
-  Require (($workspaceTabs[0].Current.AutomationId -eq $initialWorkspaceTabId) -and
-           ($workspaceTabs[1].Current.AutomationId -eq $newWorkspaceTabId)) `
-    "switching back from the mounted background tab changed terminal tab identity"
+  $switchedNewState = @(Get-WorkspaceTabState $workspaceTabs)
+  $tabMountDecision = Get-WorkspaceTabMountDecision `
+    $initialTabState $afterNewState $mountedState $switchedInitialState $switchedNewState
+  Require $tabMountDecision.ready `
+    "mounted terminal tab contract failed permanently: $($tabMountDecision.failure)"
   Write-Host ("UIA_WORKSPACE_TAB_EVIDENCE=" + ([ordered]@{
     owner = $expectedWorkspaceLoopBarId
     parent = "graph"
+    overflowObserved = $tabMountDecision.overflowObserved
+    afterNew = $afterNewState
     tabs = @($workspaceTabs | ForEach-Object {
       $rect = $_.Current.BoundingRectangle
       Require (($rect.Width -gt 0) -and ($rect.Height -gt 0)) `
