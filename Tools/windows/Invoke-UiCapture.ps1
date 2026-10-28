@@ -4,12 +4,14 @@ param(
     [Parameter(Mandatory)][string]$JobPath,
     [Parameter()][string]$JobSha256,
     [Parameter()][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$FixtureMappingSha256,
-    [ValidateSet('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL', 'LIVE_TRANSITION_REHEARSAL')]
+    [ValidateSet('LIVE_CAPTURE','FOCUSED_LIVE_CAPTURE','NO_DESKTOP_REAL_LAUNCH_REHEARSAL','LIVE_TRANSITION_REHEARSAL')]
     [string]$ExecutionMode = 'LIVE_CAPTURE',
     [Parameter()][string]$LeaseReceiptPath,
     [Parameter()][string]$LeaseReceiptSha256,
     [Parameter()][string]$RehearsalAuthorizationPath,
     [Parameter()][string]$RehearsalAuthorizationSha256,
+    [Parameter()][string]$FocusedAuthorizationPath,
+    [Parameter()][string]$FocusedAuthorizationSha256,
     [Parameter()][string]$PreflightReceiptPath,
     [Parameter()][string]$PreflightReceiptSha256,
     [switch]$TimeoutProbe
@@ -23,6 +25,8 @@ $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $workerPath = Join-Path $PSScriptRoot 'Invoke-UiCaptureWorker.ps1'
 $rehearsal = $ExecutionMode -ceq 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
 $transitionRehearsal = $ExecutionMode -ceq 'LIVE_TRANSITION_REHEARSAL'
+$focusedCapture = $ExecutionMode -ceq 'FOCUSED_LIVE_CAPTURE'
+$matchedCapturePlan = $null
 $fixtureMappingHashExpected = if ($FixtureMappingSha256) { $FixtureMappingSha256.ToUpperInvariant() }
     else { $null }
 $jobIdentity = $null
@@ -483,6 +487,58 @@ function Assert-CapPreflightReport {
 function Assert-CapLease {
     if (Get-Command Write-CapTrace -ErrorAction SilentlyContinue) { Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters }
 
+    if ($focusedCapture) {
+        if (-not $FocusedAuthorizationPath -or -not $FocusedAuthorizationSha256) {
+            throw 'Focused live capture requires an explicit exact-source authorization.'
+        }
+        $leasePath=Assert-CapSupervisorPath $FocusedAuthorizationPath
+        if (-not (Test-Path -LiteralPath $leasePath -PathType Leaf)) {
+            throw "Focused authorization is missing: $leasePath"
+        }
+        $leaseHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $leasePath).Hash
+        if ($leaseHash -ne $FocusedAuthorizationSha256.ToUpperInvariant()) {
+            throw 'Focused authorization hash mismatch.'
+        }
+        $lease=Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{path=$leasePath;sha256=$leaseHash})
+        Assert-CapDataRecord $lease @{schemaVersion=[long];authorizationId=[string];status=[string]
+            authorizedAction=[string];evidenceClassification=[string];officialParityEvidence=[bool]
+            desktopAuthorized=[bool];captureEvidenceAuthorized=[bool];pngAuthorized=[bool]
+            lane=[string];head=[string];sourceTree=[string];jobManifestSha256=[string]
+            moduleSha256=[string];workerSha256=[string];supervisorSha256=[string]
+            preflightReceiptSha256=[string];fixtureMappingSha256=[string]
+            beforeBinarySha256=[string];afterBinarySha256=[string];sceneNames=[array];phases=[array]
+            grantedUtc=[string];expiresUtc=[string];maxMinutes=[long]} 'Focused authorization'
+        $plan=Get-CapMatchedCapturePlan -Job $job
+        if ($lease.schemaVersion -ne 1 -or $lease.status -cne 'AUTHORIZED' -or
+            $lease.authorizedAction -cne 'focused-matched-capture' -or
+            $lease.evidenceClassification -cne $plan.evidenceClassification -or
+            $lease.officialParityEvidence -cne $false -or -not $lease.desktopAuthorized -or
+            -not $lease.captureEvidenceAuthorized -or -not $lease.pngAuthorized -or
+            $lease.lane -cne $job.lane -or $lease.head -cne $job.head -or
+            $lease.sourceTree -cne $job.captureTree -or $lease.jobManifestSha256 -ne $jobHash -or
+            $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
+            $lease.supervisorSha256 -ne $supervisorHash -or
+            $lease.preflightReceiptSha256 -ne $preflightHash -or
+            $lease.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or
+            ($lease.sceneNames -join ',') -cne ($plan.sceneNames -join ',') -or
+            ($lease.phases -join ',') -cne ($plan.phases -join ',')) {
+            throw 'Focused authorization does not bind the exact current job, controls, preflight and scene plan.'
+        }
+        $null=[guid]::Parse([string]$lease.authorizationId)
+        $script:authorityId=$lease.authorizationId
+        $script:authorityHash=$leaseHash
+        $script:authorityPath=$leasePath
+        $leaseWindow=Get-CapLeaseWindow -GrantedUtc $lease.grantedUtc -ExpiresUtc $lease.expiresUtc `
+            -MaximumMinutes ([double]$lease.maxMinutes) -NowUtc ([DateTime]::UtcNow)
+        $script:leaseExpiresUtc=$leaseWindow.ExpiresUtc
+        $script:deadlineUtc=$leaseWindow.WorkerDeadlineUtc
+        if ($script:deadlineUtc -le $leaseWindow.NowUtc.AddMinutes(1)) {
+            throw 'Focused authorization has insufficient remaining time after the reserved 90-second cleanup margin.'
+        }
+        $script:lease=$lease
+        $script:leaseHash=$leaseHash
+        return $leasePath
+    }
     if ($transitionRehearsal) {
         if (-not $RehearsalAuthorizationPath -or -not $RehearsalAuthorizationSha256) {
             throw 'Live transition rehearsal requires an explicit non-capture rehearsal authorization.'
@@ -842,10 +898,15 @@ function Assert-CapNoTrackedSurvivors {
 
 function Assert-CapMatchedWorkerManifest {
     Assert-CapMatchedManifest -Manifest $manifest -Job $job
+    $plan=Get-CapMatchedCapturePlan -Job $job
     if ($manifest.head -cne $job.head -or $manifest.base -cne $job.base -or
         $manifest.moduleSha256 -ne $moduleHash -or $manifest.workerSha256 -ne $workerHash -or
         $manifest.supervisorSha256 -ne $supervisorHash -or $manifest.jobManifestSha256 -ne $jobHash -or
-        $manifest.leaseReceiptSha256 -ne $leaseHash -or $manifest.preflightReceiptSha256 -ne $preflightHash -or
+        $(if ($focusedCapture) {
+            $manifest.focusedAuthorizationSha256 -ne $leaseHash
+        } else {
+            $manifest.leaseReceiptSha256 -ne $leaseHash
+        }) -or $manifest.preflightReceiptSha256 -ne $preflightHash -or
         $manifest.fixtureSourceSha256 -ne $job.fixture.sha256 -or $manifest.fixtureSha256 -ne $fixtureHashExpected -or
         $manifest.fixtureMappingSha256 -ne $fixtureMappingHashExpected -or $manifest.failures.Count -ne 0) {
         throw 'Matched manifest provenance differs from its lease-bound job.'
@@ -854,7 +915,9 @@ function Assert-CapMatchedWorkerManifest {
         if ($manifest.$field -isnot [array] -or $manifest.$field.Count -ne 0) {throw "Matched manifest has unproved $field."}
     }
     $isDpi=Test-CapMatchedDpiAdapter
-    if ($isDpi -and ($manifest.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
+    if ($isDpi -and ($manifest.evidenceClassification -cne $plan.evidenceClassification -or
+        ($null -ne $plan.officialParityEvidence -and
+            $manifest.officialParityEvidence -cne $plan.officialParityEvidence) -or
         $manifest.geometrySchemaVersion -ne 3 -or
         ($manifest.logicalClientWH -join ',') -cne ($job.captureContract.logicalClientWH -join ',') -or
         $manifest.expectedWindowDpi -ne $job.captureContract.expectedWindowDpi -or
@@ -873,7 +936,8 @@ function Assert-CapMatchedWorkerManifest {
             $image.height -ne ($image.outerBounds[3]-$image.outerBounds[1])) {throw 'Matched image geometry, state or provenance differs.'}
         if ($isDpi) {
             $contract=$job.captureContract
-            $null=Assert-CapMatchedDpiImage -Image $image -Contract $contract
+            $null=Assert-CapMatchedDpiImage -Image $image -Contract $contract `
+                -ExpectedEvidenceClassification $plan.evidenceClassification
         } elseif (($image.clientBounds -join ',') -cne '0,0,1440,900' -or $image.dpi -ne 96) {
             throw 'Matched V1 image geometry differs.'
         }
@@ -882,9 +946,12 @@ function Assert-CapMatchedWorkerManifest {
         $path=Assert-CapSupervisorPath $image.path
         if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $image.sha256) {throw 'Matched image bytes changed.'}
     }
-    $expectedSeeds=@(foreach ($phase in @('before','after')) {foreach ($scene in (Get-CapMatchedSceneNames)[6..16]) {"$phase-$scene"}})
+    $expectedSeeds=@(foreach ($phase in $plan.phases) {
+        foreach ($scene in @($plan.sceneNames | Where-Object {$_ -cmatch '^s-tabs-'})) {"$phase-$scene"}
+    })
     $actualSeeds=@($manifest.zmxSeeds | ForEach-Object phase)
-    if ($actualSeeds.Count -ne 22 -or @($actualSeeds | Sort-Object -Unique).Count -ne 22 -or
+    if ($actualSeeds.Count -ne $expectedSeeds.Count -or
+        @($actualSeeds | Sort-Object -Unique).Count -ne $expectedSeeds.Count -or
         (($actualSeeds | Sort-Object) -join ',') -cne (($expectedSeeds | Sort-Object) -join ',')) {throw 'Matched seed inventory differs.'}
     foreach ($seed in $manifest.zmxSeeds) {
         if ($seed.exitCode -ne 0 -or -not $seed.daemonReady -or $seed.cmdCount -lt 1 -or
@@ -1138,7 +1205,8 @@ try {
     $outputDirectory = Assert-CapSupervisorPath $requestedOutputDirectory
     if (Test-Path -LiteralPath $outputDirectory) { throw "Refusing to replace a prior capture output: $outputDirectory" }
     $null = New-Item -ItemType Directory -Path $outputDirectory
-    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'}
+        elseif ($focusedCapture) {'focused-release.json'} else {'lease-release.json'})
     $safeOutputInitialized = $true
     $moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $modulePath).Hash
     $workerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $workerPath).Hash
@@ -1151,7 +1219,9 @@ try {
         return
     }
     if (($transitionRehearsal -and (-not $RehearsalAuthorizationPath -or -not $RehearsalAuthorizationSha256)) -or
-        (-not $transitionRehearsal -and (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256)) -or
+        ($focusedCapture -and (-not $FocusedAuthorizationPath -or -not $FocusedAuthorizationSha256)) -or
+        (-not $transitionRehearsal -and -not $focusedCapture -and
+            (-not $LeaseReceiptPath -or -not $LeaseReceiptSha256)) -or
         (-not $rehearsal -and (-not $PreflightReceiptPath -or -not $PreflightReceiptSha256))) {
         throw 'No exact desktop authorization and accepted preflight receipt were supplied.'
     }
@@ -1171,7 +1241,16 @@ try {
         }
         $fixtureMappingHashExpected = $job.fixture.mappingSha256
     }
-    if ($rehearsal) {
+    if ($focusedCapture) {
+        if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -cne $true -or
+            $job.evidenceClassification -cne 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2') {
+            throw 'Expected an explicitly authorized focused matched capture job.'
+        }
+        $preflightHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $preflightPath).Hash
+        $preflight=Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{
+            path=$preflightPath;sha256=$preflightHash
+        })
+    } elseif ($rehearsal) {
         if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -ne $false -or
             $job.rehearsalTarget.arguments -isnot [array] -or
             $job.rehearsalTarget.behavior -notin @(
@@ -1197,7 +1276,9 @@ try {
         $preflight = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $preflightPath; sha256 = $preflightHash })
     }
     $null = Assert-CapLease
-    if ($transitionRehearsal) {
+    if ($focusedCapture) {
+        $jobIdentity=Assert-CapFocusedJobIdentity -Root $root -Job $job -Authorization $lease -JobSha256 $jobHash
+    } elseif ($transitionRehearsal) {
         $jobIdentity = Assert-CapTransitionJobIdentity
     } elseif (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission']) {
         $jobIdentity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
@@ -1216,6 +1297,7 @@ try {
         $sourceRoot = Assert-CapGreenJob
         $null = Assert-CapPreflightReport
     }
+    if (Test-CapMatchedAdapter) {$matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job}
     $exports = @(Get-Command -Module UiCaptureDriver | Sort-Object Name)
     if ($exports.Count -lt 30) { throw "Capture driver exports unavailable: count=$($exports.Count)." }
     if (-not $rehearsal) {
@@ -1263,7 +1345,8 @@ try {
     $processJournalPath = Join-Path $runDirectory 'process-journal'
     $manifestPath = Join-Path $outputDirectory 'manifest.json'
     $workerLogPath = Join-Path $outputDirectory 'worker.log'
-    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'}
+        elseif ($focusedCapture) {'focused-release.json'} else {'lease-release.json'})
     foreach ($path in @($runDirectory)) {
         if (Test-Path -LiteralPath $path) { throw "Refusing to reuse prior capture run path: $path" }
     }
@@ -1280,11 +1363,13 @@ try {
         authorityId = $authorityId
         authorityPath = $authorityPath
         authoritySha256 = $authorityHash
-        leaseId = if ($transitionRehearsal) { $null } else { $lease.leaseId }
-        leaseReceiptPath = if ($transitionRehearsal) { $null } else { $LeaseReceiptPath }
-        leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+        leaseId = if ($transitionRehearsal -or $focusedCapture) { $null } else { $lease.leaseId }
+        leaseReceiptPath = if ($transitionRehearsal -or $focusedCapture) { $null } else { $LeaseReceiptPath }
+        leaseReceiptSha256 = if ($transitionRehearsal -or $focusedCapture) { $null } else { $leaseHash }
         rehearsalAuthorizationPath = if ($transitionRehearsal) { $RehearsalAuthorizationPath } else { $null }
         rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
+        focusedAuthorizationPath = if ($focusedCapture) { $FocusedAuthorizationPath } else { $null }
+        focusedAuthorizationSha256 = if ($focusedCapture) { $authorityHash } else { $null }
         jobPath = $JobPath
         jobSha256 = $jobHash
         modulePath = $modulePath
@@ -1312,7 +1397,19 @@ try {
     }
     Write-CapJsonAtomic -Path $authorizationPath -Value $auth
     $authorizationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $authorizationPath).Hash
-    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'} else {'lease-release.json'})
+    if ($focusedCapture) {
+        $null=Assert-CapFocusedPrelaunchPaths -Root $root -Paths ([pscustomobject]@{
+            outputDirectory=$outputDirectory
+            runDirectory=$runDirectory
+            processJournalPath=$processJournalPath
+            authorizationPath=$authorizationPath
+            jobPath=$JobPath
+            preflightPath=$preflightPath
+            authorityPath=$authorityPath
+        })
+    }
+    $releaseReceiptPath = Join-Path $outputDirectory $(if ($transitionRehearsal) {'rehearsal-release.json'}
+        elseif ($focusedCapture) {'focused-release.json'} else {'lease-release.json'})
     Write-CapSupervisorLog "AUTHORIZATION_ACCEPTED id=$authorityId mode=$ExecutionMode head=$($job.head) remaining=$([Math]::Round(($leaseExpiresUtc - [DateTime]::UtcNow).TotalSeconds, 1))s reserve=90s"
     Write-CapSupervisorLog "STARTING_WORKER path=$workerPath sha256=$workerHash authorization=$authorizationHash"
 
@@ -1501,12 +1598,16 @@ try {
                 else { 'See worker manifest' }
             evidenceClassification = if ($transitionRehearsal) {
                 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+            } elseif ($focusedCapture) {
+                'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
             } else { $null }
+            officialParityEvidence = if ($focusedCapture) {$false} else {$null}
             authorityId = $authorityId
             authoritySha256 = $authorityHash
-            leaseId = if ($transitionRehearsal) { $null } elseif ($lease) { $lease.leaseId } else { $null }
-            leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+            leaseId = if ($transitionRehearsal -or $focusedCapture) { $null } elseif ($lease) { $lease.leaseId } else { $null }
+            leaseReceiptSha256 = if ($transitionRehearsal -or $focusedCapture) { $null } else { $leaseHash }
             rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
+            focusedAuthorizationSha256 = if ($focusedCapture) { $authorityHash } else { $null }
             jobSha256 = $jobHash
             head = if ($job) { $job.head } else { $null }
             moduleSha256 = $moduleHash
@@ -1535,6 +1636,10 @@ try {
             containmentJob = $workerJobReceipt
             journalPublishedInventory = if ($journalProof) { ,@($journalProof.Inventory) } else { $null }
             captures = if ($manifest) { $manifest.images.Count } else { 0 }
+            focusedReleaseStatus = if ($focusedCapture) {
+                if ($cleanupProven -and -not $survivors.Count) {'FOCUSED_RELEASE_ZERO_SURVIVORS'}
+                else {'FOCUSED_RELEASE_CLEANUP_UNPROVEN'}
+            } else {$null}
             sourceHashesBeforeImport = [ordered]@{ module = $moduleHash; worker = $workerHash; supervisor = $supervisorHash }
             }
             Write-CapJsonAtomic -Path $releaseReceiptPath -Value $release -FinalRelease
@@ -1553,4 +1658,5 @@ if ($cleanupFailures.Count -or $releaseFailure -or -not $releaseWritten) {
 }
 if ($primaryFailure) { throw $primaryFailure }
 Write-Output ('{0:o} {1}_COMPLETE output={2} release={3}' -f [DateTime]::UtcNow,
-    $(if ($transitionRehearsal) {'LIVE_TRANSITION_REHEARSAL'} else {'CAPTURE'}), $outputDirectory, $releaseReceiptPath)
+    $(if ($transitionRehearsal) {'LIVE_TRANSITION_REHEARSAL'}
+        elseif ($focusedCapture) {'FOCUSED_CAPTURE'} else {'CAPTURE'}), $outputDirectory, $releaseReceiptPath)

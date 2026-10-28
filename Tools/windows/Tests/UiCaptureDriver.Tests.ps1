@@ -2956,6 +2956,57 @@ function Invoke-CapMatchedContracts {
         $job=New-CapMatchedTestJob
         Assert-CapSceneContract -Job $job
         Assert-CapTest ($job.scenes.Count -eq 18) 'Expected eighteen bounded matched scenes.'
+        $focused=New-CapMatchedDpiTestJob
+        $focused | Add-Member -NotePropertyName focusedCapture -NotePropertyValue ([pscustomobject]@{
+            schemaVersion=1L
+            phases=@('after')
+            sceneNames=@(
+                's-tabs-agent-unknown','s-tabs-backend-idle','s-tabs-goal-needs-you','s-tabs-loop-running',
+                's-tabs-two-agent-selected','s-tabs-two-shell-selected','s-tabs-split-right-focused',
+                's-tabs-many-first','s-tabs-overflow-last','s-tabs-hover-close','s-tabs-last-guard'
+            )
+            evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+            officialParityEvidence=$false
+        })
+        $focused | Add-Member -NotePropertyName head -NotePropertyValue $focused.binaries.after.source
+        $focused.binaries.before.source=$focused.head
+        $focused.binaries.before.binaryBuiltAtSource=$focused.head
+        $focused.captureContract.windowIdentities.before=$focused.captureContract.windowIdentities.after |
+            ConvertTo-Json -Depth 10 | ConvertFrom-Json -DateKind String
+        Assert-CapSceneContract -Job $focused
+        $plan=Get-CapMatchedCapturePlan -Job $focused
+        Assert-CapTest ($plan.phases.Count -eq 1 -and $plan.phases[0] -ceq 'after' -and
+            $plan.sceneNames.Count -eq 11 -and $plan.includeRestart -eq $false -and
+            $plan.evidenceClassification -ceq 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2') `
+            'Focused matched plan did not preserve the exact after-only F2 inventory.'
+        $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
+        $workerSource=[IO.File]::ReadAllText($workerPath)
+        $prepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-FocusedUiCapture.ps1'))
+        Assert-CapTest ($supervisorSource.Contains("'FOCUSED_LIVE_CAPTURE'") -and
+            $supervisorSource.Contains('FocusedAuthorizationPath') -and
+            $supervisorSource.Contains('Assert-CapFocusedPrelaunchPaths') -and
+            $workerSource.Contains('function Read-CapMatchedChromeControls') -and
+            $workerSource.Contains('Read-CapMatchedChromeControls -AppRun $app') -and
+            $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
+            $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
+            $prepareSource.Contains("evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'") -and
+            $prepareSource.Contains('expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString(''o'')') -and
+            $prepareSource.Contains('$null=New-Item -ItemType Directory -Path $destinationProjectRoot') -and
+            -not $prepareSource.Contains("Join-Path `$PreparedFixtureRoot 'projects'")) `
+            'Focused supervisor, worker chrome reader or checked-in preparation entry point is not wired.'
+        $focusedMutations=@('missing','extra','wrong-scene','wrong-phase','wrong-classification','parity-overclaim')
+        foreach ($mutation in $focusedMutations) {
+            $changed=$focused | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+            switch ($mutation) {
+                'missing' {$changed.focusedCapture.sceneNames=@($changed.focusedCapture.sceneNames[1..10])}
+                'extra' {$changed.focusedCapture.sceneNames+= 's-restart-confirmed'}
+                'wrong-scene' {$changed.focusedCapture.sceneNames[0]='s-main-cycle-selected'}
+                'wrong-phase' {$changed.focusedCapture.phases=@('before')}
+                'wrong-classification' {$changed.focusedCapture.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'}
+                'parity-overclaim' {$changed.focusedCapture.officialParityEvidence=$true}
+            }
+            $null=Assert-CapRejects {Get-CapMatchedCapturePlan -Job $changed} 'Focused matched capture'
+        }
         foreach ($seconds in @(810,1710)) {
             $job.captureContract.estimatedSeconds=[long]$seconds
             Assert-CapSceneContract -Job $job
@@ -2968,11 +3019,15 @@ function Invoke-CapMatchedContracts {
             $changed.scenes=@($changed.scenes | Where-Object name -CNE $name)
             $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} 'Matched scene'
         }
-        return @{positive=3;negative=($names.Count+1);budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
-            names=$names;routing=(Invoke-CapMatchedSceneRoutingContract)}
+        return @{positive=4;negative=($names.Count+1+$focusedMutations.Count)
+            budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
+            names=$names;focused=$plan;focusedMutations=$focusedMutations
+            prelaunchPaths=(Invoke-CapFocusedPrelaunchPathContract)
+            expectedImageCounts=(Invoke-CapFocusedExpectedImageCountContract)
+            routing=(Invoke-CapMatchedSceneRoutingContract)}
     }
     Invoke-CapTest 'matched tab observations preserve exact owned IDs parents selection and close bounds' {
-        Invoke-CapMatchedTabContracts
+        return @{tabs=(Invoke-CapMatchedTabContracts);chrome=(Invoke-CapMatchedChromeControlContracts)}
     }
     Invoke-CapTest 'real restart transcript requires daemon confirmation resume and new owned attach' {
         $evidence=New-CapRestartTestEvidence
@@ -3466,6 +3521,54 @@ function Invoke-CapMatchedTabContracts {
     return @{positiveShapes=$positive;negativeMutations=$negative;failedSeed=$failedSeed;failedManyFirst=$failedManyFirst
         sourceContract='APP_CLOSE_ELIGIBILITY_AND_ROUTE_PLUS_WORKSPACE_GT_ONE_WITH_UIA_DYNAMIC_ROWS_ENABLED'
         nativeHover='NotExecuted';paneFocus='NotExecuted'
+        evidence='SYNTHETIC_UIA_RECORDS_NOT_NATIVE_OBSERVATION'}
+}
+
+function Invoke-CapMatchedChromeControlContracts {
+    $specs=@(
+        @{identity='workspace-split-right:control';name='Split Right';left=100},
+        @{identity='workspace-split-down:control';name='Split Down';left=152},
+        @{identity='workspace-new-tab:control';name='New Tab';left=204}
+    )
+    $rows=@($specs | ForEach-Object {
+        [pscustomobject]@{
+            AutomationId=(Get-CapMatchedAutomationId $_.identity)
+            Name=$_.name
+            ProcessId=4242L
+            ParentAutomationId='graph'
+            ControlType='Button'
+            Invokable=$true
+            IsEnabled=$true
+            IsOffscreen=$false
+            Bounds=@([long]$_.left,100L,([long]$_.left+48L),144L)
+        }
+    })
+    $proof=@(Get-CapMatchedChromeControlObservation -Rows $rows -ExpectedProcessId 4242 `
+        -ExpectedDpi 192 -DpiBase 96)
+    Assert-CapTest ($proof.Count -eq 3 -and ($proof.name -join ',') -ceq
+        'Split Right,Split Down,New Tab' -and
+        @($proof | Where-Object {$_.physicalWidth -ne 48 -or $_.physicalHeight -ne 44 -or
+            $_.logicalWidth -ne 24 -or $_.logicalHeight -ne 22}).Count -eq 0) `
+        'Focused chrome controls lost exact stable IDs, order or DPI192 geometry.'
+    $mutations=@('missing','duplicate','foreign','wrong-bounds','wrong-owner','wrong-type','not-invokable')
+    foreach ($mutation in $mutations) {
+        $changed=$rows | ConvertTo-Json -Depth 10 | ConvertFrom-Json -DateKind String
+        switch ($mutation) {
+            'missing' {$changed=@($changed[0..1])}
+            'duplicate' {$changed+= $changed[0]}
+            'foreign' {$changed[0].AutomationId=Get-CapMatchedAutomationId 'workspace-split-right:foreign'}
+            'wrong-bounds' {$changed[0].Bounds[2]=[long]$changed[0].Bounds[2]-1}
+            'wrong-owner' {$changed[0].ProcessId=7777L}
+            'wrong-type' {$changed[0].ControlType='Text'}
+            'not-invokable' {$changed[0].Invokable=$false}
+        }
+        $null=Assert-CapRejects {
+            Get-CapMatchedChromeControlObservation -Rows $changed -ExpectedProcessId 4242 `
+                -ExpectedDpi 192 -DpiBase 96
+        } 'Matched chrome control'
+    }
+    return @{positive=1;negative=$mutations.Count;mutations=$mutations
+        stableIds=@($proof.automationId);expectedPhysicalWH=@(48,44);expectedLogicalWH=@(24,22)
         evidence='SYNTHETIC_UIA_RECORDS_NOT_NATIVE_OBSERVATION'}
 }
 
@@ -4015,8 +4118,10 @@ function Invoke-CapMatchedSceneRoutingContract {
         $leaseDeadlineUtc=[DateTime]::UtcNow.AddMinutes(5)
         $captured=[Collections.Generic.List[object]]::new()
         $seeded=[Collections.Generic.List[string]]::new()
+        $focusedCapture=$false
         $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0;freezeVisibility=$false
             wireArmed=$false;marked=$false
+            deadlineFailure=$false;captureFailure=$false;appCleanup=0;seedCleanup=0;peerCleanup=0;chromeReads=0
             selections=[Collections.Generic.List[string]]::new()}
         function Get-MockVisibleIndexes {
             if ($model.freezeVisibility) {return @(4..11)}
@@ -4024,7 +4129,7 @@ function Invoke-CapMatchedSceneRoutingContract {
             $first=if ($model.selected -ge $count) {$model.selected-$count+1} else {0}
             return @($first..($first+$count-1))
         }
-        function Assert-CapWorkerDeadline {param($Label)}
+        function Assert-CapWorkerDeadline {param($Label) if ($model.deadlineFailure) {throw 'Focused deadline injected.'}}
         function Initialize-CapPhaseRoot {param($PhaseRoot) [pscustomobject]@{Root=$PhaseRoot}}
         function Start-CapOfflinePeer {param($Roots,$PipeName,$Phase) [pscustomobject]@{mode='SIMULATED_PEER'}}
         function Start-CapOfflineSeed {param($Roots,$Phase,$SessionName) $seeded.Add($SessionName);[pscustomobject]@{mode='SIMULATED_SEED'}}
@@ -4125,23 +4230,68 @@ function Invoke-CapMatchedSceneRoutingContract {
             param($AppRun,$ExpectedCount,$FocusedIndex)
             @(foreach ($i in 0..($ExpectedCount-1)) {[pscustomobject]@{focused=($i -eq $FocusedIndex);index=$i;mode='SIMULATED_PANE'}})
         }
+        function Read-CapMatchedChromeControls {
+            param($AppRun,$ExpectedDpi,$DpiBase)
+            $model.chromeReads++
+            @('Split Right','Split Down','New Tab' | ForEach-Object {
+                [pscustomobject]@{name=$_;physicalWidth=48L;physicalHeight=44L
+                    logicalWidth=24;logicalHeight=22;controlType='Button';invokable=$true}
+            })
+        }
         function Set-CapMatchedTabHover {param($AppRun,$Bounds) $model.hover++}
         function Measure-CapSceneZoom {param($AppRun,$Scene,$NaturalWidth) [pscustomobject]@{ZoomPercent=100;mode='SIMULATED_ZOOM'}}
         function Save-CapSceneImage {
             param($AppRun,$SceneName,$ZoomEvidence,$Phase)
+            if ($model.captureFailure -and $SceneName -ceq 's-tabs-agent-unknown') {
+                throw 'Focused image failure injected.'
+            }
             Assert-CapTest ($AppRun.SObservation.readSucceeded -and $AppRun.SObservation.evidenceMode -ceq
                 'OWNED_UIA_READ_NOT_VISUAL_PARITY') 'Actual executor skipped its state predicate before capture.'
             $captured.Add([pscustomobject]@{scene=$SceneName;phase=$Phase;observation=$AppRun.SObservation;image='NOT_CAPTURED_COMPONENT_ONLY'})
         }
-        function Close-CapGraphCodeApp {param($AppRun,[switch]$NormalExit)}
-        function Close-CapOfflineSeed {param($SeedRun)}
-        function Close-CapPeer {param($PeerRun,$Label)}
+        function Close-CapGraphCodeApp {param($AppRun,[switch]$NormalExit) $model.appCleanup++}
+        function Close-CapOfflineSeed {param($SeedRun) $model.seedCleanup++}
+        function Close-CapPeer {param($PeerRun,$Label) $model.peerCleanup++}
         function Invoke-CapMatchedRestartCapture {param($Phase,$Fixture) $model.restart++}
         Invoke-CapMatchedScenes -Phase 'after'
         Assert-CapTest ($captured.Count -eq 17 -and $seeded.Count -eq 11 -and $model.restart -eq 1 -and $model.hover -eq 1 -and
             ($captured.scene -join ',') -ceq (((Get-CapMatchedSceneNames)[0..16]) -join ',')) 'Actual executor lost a scene, seed, Restart dispatch or hover.'
+        $captured.Clear();$seeded.Clear();$model.restart=0;$model.hover=0;$model.selections.Clear()
+        $focusedScenes=@(
+            's-tabs-agent-unknown','s-tabs-backend-idle','s-tabs-goal-needs-you','s-tabs-loop-running',
+            's-tabs-two-agent-selected','s-tabs-two-shell-selected','s-tabs-split-right-focused',
+            's-tabs-many-first','s-tabs-overflow-last','s-tabs-hover-close','s-tabs-last-guard'
+        )
+        $scene='s-tabs-agent-unknown'
+        $legacyRows=@(Read-CapMatchedRows -AppRun ([pscustomobject]@{
+            Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}}
+        }))
+        $legacyControls=@($legacyRows | Where-Object {$_.Name -cin @('Split Right','Split Down','New Tab')})
+        Assert-CapTest ($legacyControls.Count -eq 0) `
+            'Legacy wrapper mismatch no longer reproduces: matched rows unexpectedly returned chrome controls.'
+        $focusedCapture=$true
+        Invoke-CapMatchedScenes -Phase 'after' -SceneNames $focusedScenes -SkipRestart
+        Assert-CapTest ($captured.Count -eq 11 -and $seeded.Count -eq 11 -and $model.restart -eq 0 -and
+            $model.chromeReads -eq 11 -and
+            @($captured | Where-Object {$_.observation.chromeControls.Count -ne 3}).Count -eq 0 -and
+            ($captured.scene -join ',') -ceq ($focusedScenes -join ',')) `
+            'Focused executor did not reuse the canonical scene setup and assertions for all eleven F2 scenes.'
+        $focusedSceneCount=$captured.Count;$focusedSeedCount=$seeded.Count
+        $focusedRestartCount=$model.restart;$focusedHoverCount=$model.hover
         $many=@($captured | Where-Object scene -CEQ 's-tabs-many-first')[0]
         $manySelections=@($model.selections | Where-Object {$_ -cmatch '^s-tabs-many-first:'})
+        $captured.Clear();$seeded.Clear();$model.appCleanup=0;$model.seedCleanup=0;$model.peerCleanup=0
+        $model.captureFailure=$true
+        $cleanupFailure=Assert-CapRejects {
+            Invoke-CapMatchedScenes -Phase 'after' -SceneNames $focusedScenes -SkipRestart
+        } 'Focused image failure injected'
+        Assert-CapTest ($model.appCleanup -ge 1 -and $model.seedCleanup -eq 1 -and $model.peerCleanup -eq 1) `
+            'Focused scene failure did not run canonical app, seed and peer cleanup.'
+        $model.captureFailure=$false;$model.deadlineFailure=$true
+        $deadlineFailure=Assert-CapRejects {
+            Invoke-CapMatchedScenes -Phase 'after' -SceneNames $focusedScenes -SkipRestart
+        } 'Focused deadline injected'
+        $model.deadlineFailure=$false
         Assert-CapTest (($many.observation.tabs.visible.index -join ',') -ceq '0,1,2,3,4,5,6,7' -and
             ($manySelections -join ',') -ceq 's-tabs-many-first:4,s-tabs-many-first:0') `
             'Many-first did not bridge through the exact lowest visible tab and reacquire the requested first tab.'
@@ -4154,10 +4304,75 @@ function Invoke-CapMatchedSceneRoutingContract {
             }) -TotalTabs 12 -SelectedTab 11 -TargetIndex 0 -AgentTitle 'Copilot CLI' `
                 -SourceCommit $job.binaries.after.source -ExpectedDpi 96 -DpiBase 96
         } 'remained genuinely unavailable after exact overflow bridge 4'
-        return @{scenes=$captured.Count;seedDispatches=$seeded.Count;realRestartDispatches=$model.restart;hoverDispatches=$model.hover
+        return @{scenes=$focusedSceneCount;seedDispatches=$focusedSeedCount
+            realRestartDispatches=$focusedRestartCount;hoverDispatches=$focusedHoverCount
+            legacyExpectedControls=3;legacyObservedControls=$legacyControls.Count
+            cleanupFailure=$cleanupFailure;deadlineFailure=$deadlineFailure
             manyFirstSelections=$manySelections;unavailableFailure=$unavailable
             evidence='ACTUAL_WORKER_FUNCTION_SIMULATED_DEPENDENCIES_NO_GUI_NO_PROVIDER_NO_IMAGES'}
     } $selectionFunction.Extent.Text $function.Extent.Text
+}
+
+function Invoke-CapFocusedPrelaunchPathContract {
+    $caseRoot=Join-Path $scratch 'focused-prelaunch-paths'
+    $output=Join-Path $caseRoot 'outputs'
+    $run=Join-Path $caseRoot 'runs\one'
+    $journal=Join-Path $run 'process-journal'
+    $null=New-Item -ItemType Directory -Path $output,$journal -Force
+    $files=[ordered]@{
+        authorizationPath=Join-Path $run 'supervisor-authorization.json'
+        jobPath=Join-Path $caseRoot 'job.json'
+        preflightPath=Join-Path $caseRoot 'preflight.json'
+        authorityPath=Join-Path $caseRoot 'focused-authorization.json'
+    }
+    foreach ($path in $files.Values) {[IO.File]::WriteAllText($path,'{}',[Text.UTF8Encoding]::new($false))}
+    $proof=& {
+        $outputDirectory=$output
+        $runDirectory=$run
+        . $workerPath -OwnedRoot $caseRoot -DefinitionsOnly
+        Assert-CapTest ($null -eq $outputDirectory -and $null -eq $runDirectory) `
+            'Legacy pre-import path ordering no longer reproduces its reset-to-null failure.'
+        $paths=[pscustomobject]@{
+            outputDirectory=$output;runDirectory=$run;processJournalPath=$journal
+            authorizationPath=$files.authorizationPath;jobPath=$files.jobPath
+            preflightPath=$files.preflightPath;authorityPath=$files.authorityPath
+        }
+        Assert-CapFocusedPrelaunchPaths -Root $caseRoot -Paths $paths
+    }
+    foreach ($mutation in @('null','outside','missing')) {
+        $changed=$proof | ConvertTo-Json -Depth 10 | ConvertFrom-Json -DateKind String
+        switch ($mutation) {
+            'null' {$changed.jobPath=''}
+            'outside' {$changed.authorityPath=Join-Path (Split-Path -Parent $caseRoot) 'foreign.json'}
+            'missing' {$changed.preflightPath=Join-Path $caseRoot 'missing.json'}
+        }
+        $null=Assert-CapRejects {Assert-CapFocusedPrelaunchPaths -Root $caseRoot -Paths $changed} 'Focused prelaunch'
+    }
+    return @{validated=@($proof.PSObject.Properties.Name);mutations=@('null','outside','missing')
+        initializationOrder='WORKER_DEFINITIONS_FIRST_PATH_BINDING_SECOND'}
+}
+
+function Invoke-CapFocusedExpectedImageCountContract {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-CapWorkerExpectedImageCount'},$true)
+    Assert-CapTest ($null -ne $function) 'Focused expected-image count helper is missing.'
+    & {
+        param($Definition)
+        . ([scriptblock]::Create($Definition))
+        $transitionRehearsal=$false
+        $job=[pscustomobject]@{sceneAdapter='S_MATCHED_V12_DPI_V1'}
+        $matchedCapturePlan=[pscustomobject]@{phases=@('after');sceneNames=@(1..11);includeRestart=$false}
+        function Test-CapMatchedAdapter {return $true}
+        $focused=Get-CapWorkerExpectedImageCount
+        $matchedCapturePlan=[pscustomobject]@{phases=@('before','after');sceneNames=@(1..17);includeRestart=$true}
+        $full=Get-CapWorkerExpectedImageCount
+        $transitionRehearsal=$true
+        $transition=Get-CapWorkerExpectedImageCount
+        Assert-CapTest ($focused -eq 11 -and $full -eq 36 -and $transition -eq 0) `
+            'Worker terminal status image counts drifted from focused/full/rehearsal plans.'
+        [pscustomobject]@{focused=$focused;full=$full;transition=$transition}
+    } $function.Extent.Text
 }
 
 function Invoke-CapMatchedRestartRouteContract {
@@ -4401,7 +4616,38 @@ function Invoke-CapMatchedManifestContract {
         }
         $null=Assert-CapRejects {Assert-CapMatchedManifest -Manifest $m -Job $job} $(if ($case -ceq 'ack-only') {'Restart evidence'} else {'Matched manifest'})
     }
-    return @{positive=1;negative=6;images=36;realRestarts=2;evidence='SIMULATED_MANIFEST_NOT_CAPTURE'}
+    $focusedJob=New-CapMatchedDpiTestJob
+    $focusedJob | Add-Member -NotePropertyName focusedCapture -NotePropertyValue ([pscustomobject]@{
+        schemaVersion=1L;phases=@('after');sceneNames=@(Get-CapMatchedFocusedSceneNames)
+        evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2';officialParityEvidence=$false
+    })
+    $focused=@{
+        sceneAdapter='S_MATCHED_V12_DPI_V1';lane='S';status='COMPLETE'
+        executionMode='FOCUSED_LIVE_CAPTURE'
+        evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+        officialParityEvidence=$false
+        backendTurns=0;g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
+        images=@(foreach ($scene in Get-CapMatchedFocusedSceneNames) {
+            @{phase='after';scene=$scene;captureMode='PRINTWINDOW';observedState=@{
+                readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}}
+        })
+        realRestarts=@()
+    } | ConvertTo-Json -Depth 35 | ConvertFrom-Json -DateKind String
+    Assert-CapMatchedManifest -Manifest $focused -Job $focusedJob
+    $focusedBase=$focused | ConvertTo-Json -Depth 35
+    foreach ($case in @('missing-focused','extra-focused','wrong-classification','parity-overclaim','unexpected-restart')) {
+        $changed=$focusedBase | ConvertFrom-Json -DateKind String
+        switch ($case) {
+            'missing-focused' {$changed.images=@($changed.images[1..10])}
+            'extra-focused' {$changed.images+= $changed.images[0]}
+            'wrong-classification' {$changed.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'}
+            'parity-overclaim' {$changed.officialParityEvidence=$true}
+            'unexpected-restart' {$changed.realRestarts=@(@{phase='after';evidence=(New-CapRestartTestEvidence)})}
+        }
+        $null=Assert-CapRejects {Assert-CapMatchedManifest -Manifest $changed -Job $focusedJob} 'Matched manifest'
+    }
+    return @{positive=2;negative=11;images=36;realRestarts=2;focusedImages=11;focusedRestarts=0
+        evidence='SIMULATED_MANIFEST_NOT_CAPTURE'}
 }
 
 function Invoke-CapDContracts {

@@ -27,7 +27,8 @@ including all eight S groups and the unchanged fourteen-subcase G group once.
 The historical standalone Lane S totals below describe its own delta, not the
 current combined-tree qualification. A later C8 preparation must re-pin merged
 tooling and rerun its exact declared qualification count before preflight and
-a separately granted capture window. No subset or skipped-scene support is added.
+a separately granted capture window. The focused mode below is a distinct,
+non-C8R current-source capture and cannot satisfy that qualification.
 
 ## Scene-bound seed receipts
 
@@ -203,6 +204,48 @@ resampling. Such review may support observed layout/state/action findings, but
 not physical input, local-console compositor equivalence, native local glyph
 or antialiasing fidelity, focus outside the observed RDP session, or automatic
 row validation. Unmatched scenes remain logical-geometry-only or unassessable.
+
+### Focused current-source matched capture
+
+`FOCUSED_LIVE_CAPTURE` runs an exact validated subset through the same
+`Invoke-CapMatchedScenes` implementation used by the full matched adapter. It
+does not copy scene setup, UIA assertions, provider ownership, image capture, or
+cleanup into a wrapper. The only admitted plan is the after/current-source F2
+terminal-chrome set:
+
+`agent-unknown`, `backend-idle`, `goal-needs-you`, `loop-running`,
+`two-agent-selected`, `two-shell-selected`, `split-right-focused`,
+`many-first`, `overflow-last`, `hover-close`, and `last-guard`.
+
+The mode is permanently classified
+`F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2` with
+`officialParityEvidence=false`. Missing, extra, duplicate, reordered, foreign,
+or pre-restart scenes refuse. It still requires the exact 185-case real-zmx
+preflight, a clean current source head/tree, hash-bound current binaries, PMv2
+physical admission, raw unresampled geometry, individual image privacy review,
+the numbered process journal, and zero-survivor release.
+
+Prepare a fresh short root only after the source and controls are committed and
+the 185-case report exists:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Prepare-FocusedUiCapture.ps1 `
+  -Repository $PWD -OwnedRoot C:\f7 `
+  -GraphCodeBinary graphcode-windows\zig-out\bin\graphcode-windows.exe `
+  -ZmxBinary $env:GRAPHCODE_ZMX_ROOT\zig-out\bin\zmx.exe `
+  -DaemonRuntimeRoot C:\k8\runtime `
+  -BackendFixtureBinary C:\k8\runtime\copilot.exe `
+  -OfflinePeerSource C:\k8\inputs\offline-peer-source.ps1 `
+  -PreflightReport C:\fresh-preflight\report.json
+```
+
+Use the returned paths and hashes with `Invoke-UiCapture.ps1
+-ExecutionMode FOCUSED_LIVE_CAPTURE`, including
+`-FocusedAuthorizationPath`/`-FocusedAuthorizationSha256` and the normal exact
+job, fixture-mapping, and preflight arguments. Preparation creates no process
+or image. The supervisor imports the canonical controls before binding and
+validating every prelaunch path; it never dot-sources the worker into a
+path-owning wrapper scope.
 
 Matched S seed receipts use the initialized `Roots.Root\zmx-seed.json`, not a
 path rebuilt from the diagnostic phase label. B and D retain their existing
