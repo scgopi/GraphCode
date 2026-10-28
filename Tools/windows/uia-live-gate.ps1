@@ -36,6 +36,7 @@ public static class GraphCodeUiaGateState {
   public static string NamePropertySourceAutomationId;
   public static string FocusSourceAutomationId;
   public static string SelectionSourceAutomationId;
+  public static string SelectionSourceRuntimeId;
   public static string TogglePropertySourceAutomationId;
   public static readonly AutomationEventHandler LiveHandler = HandleLive;
   public static readonly AutomationPropertyChangedEventHandler NamePropertyHandler = HandleNameProperty;
@@ -66,17 +67,26 @@ public static class GraphCodeUiaGateState {
   }
   private static void HandleSelected(object sender, AutomationEventArgs eventArgs) {
     var element = sender as AutomationElement;
-    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    if (element != null) {
+      SelectionSourceAutomationId = element.Current.AutomationId;
+      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
+    }
     SelectedEvents++;
   }
   private static void HandleAdded(object sender, AutomationEventArgs eventArgs) {
     var element = sender as AutomationElement;
-    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    if (element != null) {
+      SelectionSourceAutomationId = element.Current.AutomationId;
+      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
+    }
     AddedEvents++;
   }
   private static void HandleRemoved(object sender, AutomationEventArgs eventArgs) {
     var element = sender as AutomationElement;
-    if (element != null) SelectionSourceAutomationId = element.Current.AutomationId;
+    if (element != null) {
+      SelectionSourceAutomationId = element.Current.AutomationId;
+      SelectionSourceRuntimeId = String.Join(",", element.GetRuntimeId());
+    }
     RemovedEvents++;
   }
   private static void HandleToggleProperty(object sender, AutomationPropertyChangedEventArgs eventArgs) {
@@ -2667,6 +2677,24 @@ function Get-WorkspaceTabState([object[]] $Elements) {
       selected = [bool]$selection.Current.IsSelected
     }
   })
+}
+
+function Get-UiaSelectionEventDecision(
+  [int] $Count,
+  [AllowNull()][string] $SourceAutomationId,
+  [AllowNull()][string] $SourceRuntimeId,
+  [string] $ExpectedAutomationId,
+  [string] $ExpectedRuntimeId
+) {
+  if ($Count -eq 0) { return [pscustomobject]@{ ready=$false; failure='zero-events' } }
+  if ($Count -ne 1) { return [pscustomobject]@{ ready=$false; failure='duplicate-events' } }
+  if ($SourceAutomationId -cne $ExpectedAutomationId) {
+    return [pscustomobject]@{ ready=$false; failure='wrong-automation-id' }
+  }
+  if ($SourceRuntimeId -cne $ExpectedRuntimeId) {
+    return [pscustomobject]@{ ready=$false; failure='wrong-runtime-id' }
+  }
+  return [pscustomobject]@{ ready=$true; failure=$null }
 }
 
 function Get-DynamicProjectCardSnapshotDecision(
@@ -8234,46 +8262,91 @@ try {
   $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureUnsafeName })[0]
   $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
   Require (($null -ne $safeRow) -and ($null -ne $unsafeRow) -and ($null -ne $safeFocusRow)) "missing fixture worktree rows"
+  # Selection from earlier navigation is valid but makes Select() idempotent. Clear it
+  # before subscribing, then reacquire the live dynamic-provider generation so the
+  # exact-once assertion binds the transition it initiates rather than stale state.
+  $safeRow.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  ).RemoveFromSelection()
+  for ($index = 0; $index -lt 20 -and
+      $selection.Current.GetSelection().Count -ne 0; $index++) {
+    Start-Sleep -Milliseconds 50
+  }
+  Require ($selection.Current.GetSelection().Count -eq 0) `
+    "safe fixture row could not establish an empty selection before event subscription"
+  $worktrees = Find-FragmentById $root "worktrees" $rawWalker
+  Require ($null -ne $worktrees) "Worktrees disappeared before selection event subscription"
+  $rawRows = @(Assert-FragmentLinks $worktrees $rawWalker $initialRowIds "RawView Worktrees event subscription")
+  $controlRows = @(Assert-FragmentLinks $worktrees $controlWalker $initialRowIds "ControlView Worktrees event subscription")
+  $selection = $worktrees.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern)
+  $safeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
+  $unsafeRow = @($rawRows | Where-Object { $_.Current.Name -eq $fixtureUnsafeName })[0]
+  $safeFocusRow = @($controlRows | Where-Object { $_.Current.Name -eq $fixtureSafeName })[0]
+  Require (($null -ne $safeRow) -and ($null -ne $unsafeRow) -and ($null -ne $safeFocusRow)) `
+    "fixture worktree rows disappeared before selection event subscription"
   $safeRowId = $safeRow.Current.AutomationId
   $safeRowRuntimeId = Get-RuntimeIdentity $safeRow
   $safeSelection = $safeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
   $unsafeSelection = $unsafeRow.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+  Require ((-not $safeSelection.Current.IsSelected) -and
+           ($selection.Current.GetSelection().Count -eq 0)) `
+    "selection event subscription did not bind an empty stable provider generation"
   [GraphCodeUiaGateState]::SelectedEvents = 0
   [GraphCodeUiaGateState]::AddedEvents = 0
   [GraphCodeUiaGateState]::RemovedEvents = 0
   [GraphCodeUiaGateState]::SelectionSourceAutomationId = $null
+  [GraphCodeUiaGateState]::SelectionSourceRuntimeId = $null
   $selectedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementSelectedEvent
   $addedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementAddedToSelectionEvent
   $removedEvent = [System.Windows.Automation.SelectionItemPattern]::ElementRemovedFromSelectionEvent
   $selectedHandler = [GraphCodeUiaGateState]::SelectedHandler
   $addedHandler = [GraphCodeUiaGateState]::AddedHandler
   $removedHandler = [GraphCodeUiaGateState]::RemovedHandler
+  $selectionEventRow = $safeRow
   [System.Windows.Automation.Automation]::AddAutomationEventHandler(
-    $selectedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $selectedHandler
+    $selectedEvent, $selectionEventRow, [System.Windows.Automation.TreeScope]::Element, $selectedHandler
   )
   [System.Windows.Automation.Automation]::AddAutomationEventHandler(
-    $addedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $addedHandler
+    $addedEvent, $selectionEventRow, [System.Windows.Automation.TreeScope]::Element, $addedHandler
   )
   [System.Windows.Automation.Automation]::AddAutomationEventHandler(
-    $removedEvent, $safeRow, [System.Windows.Automation.TreeScope]::Element, $removedHandler
+    $removedEvent, $selectionEventRow, [System.Windows.Automation.TreeScope]::Element, $removedHandler
   )
   try {
     $selectionEventStartedUtc = [DateTime]::UtcNow
+    $selectionEventDeadlineUtc = $selectionEventStartedUtc.AddMilliseconds(1000)
     $safeSelection.Select()
-    for ($index = 0; $index -lt 20 -and [GraphCodeUiaGateState]::SelectedEvents -lt 1; $index++) {
+    while ([DateTime]::UtcNow -lt $selectionEventDeadlineUtc -and
+        [GraphCodeUiaGateState]::SelectedEvents -lt 1) {
       Start-Sleep -Milliseconds 50
     }
+    if ([GraphCodeUiaGateState]::SelectedEvents -ge 1) {
+      $drainDeadline = [DateTime]::UtcNow.AddMilliseconds(150)
+      if ($drainDeadline -gt $selectionEventDeadlineUtc) {
+        $drainDeadline = $selectionEventDeadlineUtc
+      }
+      while ([DateTime]::UtcNow -lt $drainDeadline) { Start-Sleep -Milliseconds 25 }
+    }
     $selectedOnTime = [GraphCodeUiaGateState]::SelectedEvents
-    if ($selectedOnTime -ne 1) {
+    $selectedDecision = Get-UiaSelectionEventDecision $selectedOnTime `
+      ([GraphCodeUiaGateState]::SelectionSourceAutomationId) `
+      ([GraphCodeUiaGateState]::SelectionSourceRuntimeId) $safeRowId $safeRowRuntimeId
+    if (-not $selectedDecision.ready) {
       Write-UiaLateEventAttribution "ElementSelected after Select" $selectionEventStartedUtc 1000 `
         { [GraphCodeUiaGateState]::SelectedEvents -ge 1 } $process.MainWindowHandle
     }
-    Require (($safeSelection.Current.IsSelected) -and
-             ($selectedOnTime -eq 1)) "Select did not raise ElementSelected exactly once"
-    $safeSelection.Select()
-    Start-Sleep -Milliseconds 150
-    $selectedAfterRepeat = [GraphCodeUiaGateState]::SelectedEvents
-    Require ($selectedAfterRepeat -eq 1) "idempotent Select raised a duplicate event"
+    Write-Host ("UIA_SELECTION_EVENT_DECISION=" + ([ordered]@{
+      count=$selectedOnTime
+      sourceAutomationId=[GraphCodeUiaGateState]::SelectionSourceAutomationId
+      sourceRuntimeId=[GraphCodeUiaGateState]::SelectionSourceRuntimeId
+      expectedAutomationId=$safeRowId
+      expectedRuntimeId=$safeRowRuntimeId
+      ready=[bool]$selectedDecision.ready
+      failure=[string]$selectedDecision.failure
+    } | ConvertTo-Json -Compress))
+    Require $selectedDecision.ready `
+      "Select ElementSelected contract failed: $($selectedDecision.failure)"
+    $selectedAfterStableDrain = [GraphCodeUiaGateState]::SelectedEvents
     $unsafeRejected = $false
     try { $unsafeSelection.Select() } catch { $unsafeRejected = $true }
     Require $unsafeRejected "unsafe SelectionItem.Select was accepted"
@@ -8344,9 +8417,9 @@ try {
     Require ($removedOnTime -eq 3) "App mouse selection did not raise ElementRemovedFromSelection"
     Require ([GraphCodeUiaGateState]::SelectionSourceAutomationId -eq $safeRowId) "selection event source identity changed"
   } finally {
-    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($selectedEvent, $safeRow, $selectedHandler)
-    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($addedEvent, $safeRow, $addedHandler)
-    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($removedEvent, $safeRow, $removedHandler)
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($selectedEvent, $selectionEventRow, $selectedHandler)
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($addedEvent, $selectionEventRow, $addedHandler)
+    [System.Windows.Automation.Automation]::RemoveAutomationEventHandler($removedEvent, $selectionEventRow, $removedHandler)
   }
   $selectionEventEvidence = @{
     selected = [GraphCodeUiaGateState]::SelectedEvents
@@ -8355,7 +8428,7 @@ try {
     source = [GraphCodeUiaGateState]::SelectionSourceAutomationId
   }
   $repeatedSelectionEvidence = [ordered]@{
-    selectedAfterRepeatSelect = $selectedAfterRepeat
+    selectedAfterStableDrain = $selectedAfterStableDrain
     removedAfterRepeatRemove = $removedAfterRepeat
     addedAfterRepeatAdd = $addedAfterRepeat
   }

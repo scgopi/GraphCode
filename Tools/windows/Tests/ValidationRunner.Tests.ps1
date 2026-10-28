@@ -14,7 +14,8 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
             "Test-UpdateBannerClickTarget",
             "Get-DynamicProjectCardSnapshotDecision",
             "Get-ConnectorDragSnapshotDecision",
-            "Get-WorkspaceTabMountDecision"
+            "Get-WorkspaceTabMountDecision",
+            "Get-UiaSelectionEventDecision"
           ))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
@@ -81,6 +82,26 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
         @($initialTab) @($case.after) @($case.mounted) @($case.first) @($case.second)
       Assert-MultiCase (-not $decision.ready -and $decision.failure -ceq $case.failure) `
         "permanent $($case.name) returned '$($decision.failure)'"
+      return $decision.failure
+    }
+  }
+  Invoke-MultiCase "selection event accepts exactly one stable owned source" {
+    $decision = Get-UiaSelectionEventDecision 1 "worktree-row-safe" "42,7,9" `
+      "worktree-row-safe" "42,7,9"
+    Assert-MultiCase $decision.ready "exact stable selection event was rejected"
+    return "One event, exact automation id, exact runtime id"
+  }
+  foreach ($case in @(
+      @{name="zero";count=0;id="worktree-row-safe";runtime="42,7,9";failure="zero-events"},
+      @{name="duplicate";count=2;id="worktree-row-safe";runtime="42,7,9";failure="duplicate-events"},
+      @{name="wrong-element";count=1;id="worktree-row-foreign";runtime="42,7,9";failure="wrong-automation-id"},
+      @{name="wrong-generation";count=1;id="worktree-row-safe";runtime="42,7,10";failure="wrong-runtime-id"}
+    )) {
+    Invoke-MultiCase "selection event refuses $($case.name)" -Negative {
+      $decision = Get-UiaSelectionEventDecision $case.count $case.id $case.runtime `
+        "worktree-row-safe" "42,7,9"
+      Assert-MultiCase (-not $decision.ready -and $decision.failure -ceq $case.failure) `
+        "selection $($case.name) returned '$($decision.failure)'"
       return $decision.failure
     }
   }
@@ -4688,7 +4709,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "sketch/custody modal: \$title"' -or
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "multi-project observation: \$surface"' -or
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "gate failure: \$failureStep"' -or
-      $uiaLiveGateSource -notmatch 'Write-UiaLateEventAttribution "ElementSelected after Select"') {
+      $uiaLiveGateSource -notmatch 'Write-UiaLateEventAttribution "ElementSelected after Select"' -or
+      $uiaLiveGateSource -notmatch '(?s)RemoveFromSelection\(\).*?GetSelection\(\)\.Count -eq 0.*?RawView Worktrees event subscription.*?SelectionSourceRuntimeId = \$null.*?\$selectionEventRow = \$safeRow.*?AddAutomationEventHandler\(.*?\$selectionEventDeadlineUtc.*?Get-UiaSelectionEventDecision \$selectedOnTime.*?\$safeRowId \$safeRowRuntimeId.*?Require \$selectedDecision\.ready.*?\$selectedAfterStableDrain.*?RemoveAutomationEventHandler\(\$selectedEvent, \$selectionEventRow') {
     throw "RED: UIA wait timeouts are not attributed to step, deadline, foreground owner, shell windows, and a shell-only capture"
   }
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
