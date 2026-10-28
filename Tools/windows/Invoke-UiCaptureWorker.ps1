@@ -103,6 +103,16 @@ function Test-CapMatchedDpiAdapter {
         $job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1'
 }
 
+function Get-CapWorkerExpectedImageCount {
+    if ($transitionRehearsal) {return 0L}
+    if (Test-CapMatchedAdapter) {
+        return [long]($matchedCapturePlan.phases.Count*($matchedCapturePlan.sceneNames.Count+
+            $(if ($matchedCapturePlan.includeRestart) {1} else {0})))
+    }
+    if ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {return 20L}
+    return 10L
+}
+
 function Write-CapJsonAtomic {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Value)
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
@@ -2566,10 +2576,7 @@ try {
         elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
         else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    $expectedImages=if ($transitionRehearsal) {0} elseif (Test-CapMatchedAdapter) {
-        $matchedCapturePlan.phases.Count*($matchedCapturePlan.sceneNames.Count+
-            $(if ($matchedCapturePlan.includeRestart) {1} else {0}))
-    } elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedImages=Get-CapWorkerExpectedImageCount
     $expectedSeeds=if (Test-CapMatchedAdapter) {
         $matchedCapturePlan.phases.Count*@($matchedCapturePlan.sceneNames | Where-Object {$_ -cmatch '^s-tabs-'}).Count
     } elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
@@ -2660,7 +2667,7 @@ try {
             ($transitionRehearsal -and $images.Count -eq 0 -and $checkpoints.Count -eq 36 -and
                 $zmxSeedReceipts.Count -eq 22 -and $realRestarts.Count -eq 2 -and $phaseTransitions.Count -eq 1) -or
             (-not $rehearsal -and -not $transitionRehearsal -and
-                $images.Count -eq $(if (Test-CapMatchedAdapter) {36} else {10})))) {
+                $images.Count -eq (Get-CapWorkerExpectedImageCount)))) {
             'COMPLETE'
         } else { 'FAILED' }
         try {

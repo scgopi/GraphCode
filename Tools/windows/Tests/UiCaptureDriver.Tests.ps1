@@ -2987,6 +2987,8 @@ function Invoke-CapMatchedContracts {
             $supervisorSource.Contains('Assert-CapFocusedPrelaunchPaths') -and
             $workerSource.Contains('function Read-CapMatchedChromeControls') -and
             $workerSource.Contains('Read-CapMatchedChromeControls -AppRun $app') -and
+            $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
+            $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
             $prepareSource.Contains("evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'") -and
             $prepareSource.Contains('expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString(''o'')') -and
             $prepareSource.Contains('$null=New-Item -ItemType Directory -Path $destinationProjectRoot') -and
@@ -3021,6 +3023,7 @@ function Invoke-CapMatchedContracts {
             budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
             names=$names;focused=$plan;focusedMutations=$focusedMutations
             prelaunchPaths=(Invoke-CapFocusedPrelaunchPathContract)
+            expectedImageCounts=(Invoke-CapFocusedExpectedImageCountContract)
             routing=(Invoke-CapMatchedSceneRoutingContract)}
     }
     Invoke-CapTest 'matched tab observations preserve exact owned IDs parents selection and close bounds' {
@@ -4347,6 +4350,29 @@ function Invoke-CapFocusedPrelaunchPathContract {
     }
     return @{validated=@($proof.PSObject.Properties.Name);mutations=@('null','outside','missing')
         initializationOrder='WORKER_DEFINITIONS_FIRST_PATH_BINDING_SECOND'}
+}
+
+function Invoke-CapFocusedExpectedImageCountContract {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-CapWorkerExpectedImageCount'},$true)
+    Assert-CapTest ($null -ne $function) 'Focused expected-image count helper is missing.'
+    & {
+        param($Definition)
+        . ([scriptblock]::Create($Definition))
+        $transitionRehearsal=$false
+        $job=[pscustomobject]@{sceneAdapter='S_MATCHED_V12_DPI_V1'}
+        $matchedCapturePlan=[pscustomobject]@{phases=@('after');sceneNames=@(1..11);includeRestart=$false}
+        function Test-CapMatchedAdapter {return $true}
+        $focused=Get-CapWorkerExpectedImageCount
+        $matchedCapturePlan=[pscustomobject]@{phases=@('before','after');sceneNames=@(1..17);includeRestart=$true}
+        $full=Get-CapWorkerExpectedImageCount
+        $transitionRehearsal=$true
+        $transition=Get-CapWorkerExpectedImageCount
+        Assert-CapTest ($focused -eq 11 -and $full -eq 36 -and $transition -eq 0) `
+            'Worker terminal status image counts drifted from focused/full/rehearsal plans.'
+        [pscustomobject]@{focused=$focused;full=$full;transition=$transition}
+    } $function.Extent.Text
 }
 
 function Invoke-CapMatchedRestartRouteContract {
