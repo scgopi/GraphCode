@@ -12,11 +12,9 @@ $script:CapTraceFailures = [Collections.Generic.List[object]]::new()
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
 
-# Only the required FindTopLevel/PostCommand fragments, not the executable live gate.
-# Tools/windows/uia-live-gate.ps1, first Add-Type, FSL-1.1-MIT:
-# SHA256 7455148BDCB64A03914812DC415B39EB300293D8970502C1BDFD110044C30795.
-# Extracted GraphCodeUiaGateState.cs:
-# SHA256 C2514CECBC2637202D6DAE639DF33C77901EB69ADBEDD8CB795C37C8BF92B162.
+# Only the required top-level, command, keyboard and foreground fragments, not
+# the executable live gate. These stay aligned with the first Add-Type in
+# Tools/windows/uia-live-gate.ps1 through focused contracts below.
 $helperSource = @'
 using System;
 using System.Runtime.InteropServices;
@@ -29,6 +27,8 @@ public static class GraphCodeUiaGateState {
   private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
   [DllImport("user32.dll")]
   private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("user32.dll")]
+  private static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   private static extern int GetClassName(IntPtr window, StringBuilder className, int capacity);
   public static IntPtr FindTopLevel(string className, uint processId) {
@@ -47,6 +47,13 @@ public static class GraphCodeUiaGateState {
   }
   public static bool PostCommand(IntPtr window, uint command) {
     return PostMessage(window, 0x0111, (UIntPtr)command, IntPtr.Zero);
+  }
+  public static bool PostKeyboard(IntPtr window, uint key) {
+    return PostMessage(window, 0x0100, (UIntPtr)key, IntPtr.Zero) &&
+      PostMessage(window, 0x0101, (UIntPtr)key, IntPtr.Zero);
+  }
+  public static bool IsForegroundWindow(IntPtr window) {
+    return window != IntPtr.Zero && GetForegroundWindow() == window;
   }
   public static bool PostHover(IntPtr window, int x, int y) {
     return PostMessage(window, 0x0200, UIntPtr.Zero, (IntPtr)((y << 16) | (x & 0xffff)));

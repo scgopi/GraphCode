@@ -716,6 +716,7 @@ function Assert-CapRejects {
                 'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
                 'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
                 'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
+                'GraphCodeUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
                 'GraphCodeUiaGateState|GetClassName|user32.dll|GetClassNameW',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
                 'CapNative|NtQueryInformationProcess|ntdll.dll|NtQueryInformationProcess',
@@ -751,7 +752,7 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 36 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static36 export contract differs.'
+            Assert-CapTest ($actual.Count -eq 37 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static37 export contract differs.'
             return @{ subcases = 36; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
@@ -3003,6 +3004,8 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('Read-CapMatchedChromeControls -AppRun $app') -and
             $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
             $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
+            $workerSource.Contains('function Wait-CapMatchedWireMode') -and
+            $workerSource.Contains('[GraphCodeUiaGateState]::PostKeyboard') -and
             $workerSource.Contains("-Action 'attention-action'") -and
             $workerSource.Contains("fixtureIsolation='ONE_SCENE_ONE_DISPOSABLE_PHASE_ROOT'") -and
             $prepareSource.Contains("[switch]`$PlanOnly") -and
@@ -3045,6 +3048,7 @@ function Invoke-CapMatchedContracts {
             names=$names;focused=$plan;postFixFocused=$postFixPlan;focusedMutations=$focusedMutations
             prelaunchPaths=(Invoke-CapFocusedPrelaunchPathContract)
             expectedImageCounts=(Invoke-CapFocusedExpectedImageCountContract)
+            wireCancellation=(Invoke-CapMatchedWireCancellationContract)
             routing=(Invoke-CapMatchedSceneRoutingContract)}
     }
     Invoke-CapTest 'matched tab observations preserve exact owned IDs parents selection and close bounds' {
@@ -4223,6 +4227,11 @@ function Invoke-CapMatchedSceneRoutingContract {
             }
             return $rows.ToArray()
         }
+        function Wait-CapMatchedWireMode {
+            param($AppRun,$DeadlineUtc)
+            if (-not $model.wireArmed) {throw 'Wire mode was not armed before cancellation.'}
+            return (New-CapMockElement 'status' 'Choose a target loop to wire this entry' 4242 @(0,880,1200,900))
+        }
         function Send-CapMatchedEscape {param($AppRun) $model.wireArmed=$false;return $true}
         function Read-CapMatchedRows {
             param($AppRun)
@@ -4363,6 +4372,88 @@ function Invoke-CapMatchedSceneRoutingContract {
             manyFirstSelections=$manySelections;unavailableFailure=$unavailable
             evidence='ACTUAL_WORKER_FUNCTION_SIMULATED_DEPENDENCIES_NO_GUI_NO_PROVIDER_NO_IMAGES'}
     } $selectionFunction.Extent.Text $function.Extent.Text
+}
+
+function Invoke-CapMatchedWireCancellationContract {
+    $ast=[Management.Automation.Language.Parser]::ParseFile($workerPath,[ref]$null,[ref]$null)
+    $waitFunction=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Wait-CapMatchedWireMode'},$true)
+    $cancelFunction=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Send-CapMatchedEscape'},$true)
+    Assert-CapTest ($null -ne $waitFunction -and $null -ne $cancelFunction) `
+        'Canonical matched Wire cancellation helpers are missing.'
+    & {
+        param($WaitDefinition,$CancelDefinition)
+        . ([scriptblock]::Create($WaitDefinition))
+        . ([scriptblock]::Create($CancelDefinition))
+        function Assert-CapWorkerDeadline {param($Label)}
+        $app=[pscustomobject]@{
+            Window=[IntPtr]123
+            Run=[pscustomobject]@{Identity=[pscustomobject]@{Pid=4242}}
+        }
+        $script:clock=[DateTime]::new(2026,10,28,12,0,0,[DateTimeKind]::Utc)
+        $script:polls=0
+        $status=Wait-CapMatchedWireMode -AppRun $app -DeadlineUtc $script:clock.AddSeconds(1) `
+            -StatusProbe {
+                param($AppRun)
+                $script:polls++
+                if ($script:polls -ge 2) {
+                    return [pscustomobject]@{Current=[pscustomobject]@{
+                        Name='Choose a target loop to wire this entry';AutomationId='status'
+                    }}
+                }
+                return $null
+            } -NowProvider {
+                $script:clock=$script:clock.AddMilliseconds(10)
+                return $script:clock
+            } -SleepAction {param($Milliseconds)}
+        Assert-CapTest ($status.Current.Name -ceq 'Choose a target loop to wire this entry' -and
+            $script:polls -eq 2) 'Wire-mode wait did not observe the exact armed state.'
+
+        $script:timeoutClock=[DateTime]::new(2026,10,28,12,0,0,[DateTimeKind]::Utc)
+        $timeout=Assert-CapRejects {
+            Wait-CapMatchedWireMode -AppRun $app -DeadlineUtc $script:timeoutClock.AddMilliseconds(20) `
+                -StatusProbe {param($AppRun) $null} -NowProvider {
+                    $script:timeoutClock=$script:timeoutClock.AddMilliseconds(10)
+                    return $script:timeoutClock
+                } -SleepAction {param($Milliseconds)}
+        } 'Wire mode status did not appear before the action deadline'
+
+        $script:sent=0
+        $positive=Send-CapMatchedEscape -AppRun $app `
+            -ForegroundProbe {param($Window) $true} `
+            -DialogProbe {param($ProcessId) [IntPtr]::Zero} `
+            -KeyboardSender {param($Window,$Key) $script:sent++;return $true}
+        Assert-CapTest ($positive -and $script:sent -eq 1) `
+            'Wire cancellation did not use the canonical Escape sender exactly once.'
+        $wrongFocus=Assert-CapRejects {
+            Send-CapMatchedEscape -AppRun $app `
+                -ForegroundProbe {param($Window) $false} `
+                -DialogProbe {param($ProcessId) [IntPtr]::Zero} `
+                -KeyboardSender {param($Window,$Key) $true}
+        } 'foreground'
+        $dialog=Assert-CapRejects {
+            Send-CapMatchedEscape -AppRun $app `
+                -ForegroundProbe {param($Window) $true} `
+                -DialogProbe {param($ProcessId) [IntPtr]321} `
+                -KeyboardSender {param($Window,$Key) $true}
+        } 'dialog'
+        $rejected=Assert-CapRejects {
+            Send-CapMatchedEscape -AppRun $app `
+                -ForegroundProbe {param($Window) $true} `
+                -DialogProbe {param($ProcessId) [IntPtr]::Zero} `
+                -KeyboardSender {param($Window,$Key) $false}
+        } 'Escape'
+        return [pscustomobject]@{
+            positive=$positive
+            statusPolls=$script:polls
+            timeout=$timeout
+            wrongFocus=$wrongFocus
+            dialog=$dialog
+            rejected=$rejected
+            evidence='ACTUAL_WORKER_FUNCTIONS_SIMULATED_WINDOW_STATE_NO_GUI'
+        }
+    } $waitFunction.Extent.Text $cancelFunction.Extent.Text
 }
 
 function Invoke-CapFocusedPrelaunchPathContract {

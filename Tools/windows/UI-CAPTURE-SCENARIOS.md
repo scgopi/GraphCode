@@ -233,6 +233,9 @@ use separate disposable phase roots: the unselected scene arms and cancels
 the controls to disappear with the same card identity retained. The selected
 cycle scene invokes the stable `Inspect` action, returns through `Show in
 Graph`, and requires the same card, action, reason, and selected identities.
+Wire cancellation uses the same native key-down/key-up `PostKeyboard` route as
+the live UIA gate, after a bounded exact-status wait, and refuses a non-foreground
+shell or an owned native dialog before injecting Escape.
 This is bounded review evidence, not an automatic parity-ledger promotion.
 
 Both profiles require the exact 185-case real-zmx

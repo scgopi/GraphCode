@@ -716,9 +716,92 @@ function Invoke-CapSceneAction {
     Assert-CapWorkerDeadline "after action $Action"
 }
 
+function Wait-CapMatchedWireMode {
+    param(
+        [Parameter(Mandatory)]$AppRun,
+        [Parameter(Mandatory)][DateTime]$DeadlineUtc,
+        [scriptblock]$StatusProbe,
+        [scriptblock]$NowProvider,
+        [scriptblock]$SleepAction
+    )
+    if (-not $StatusProbe -and -not $NowProvider -and -not $SleepAction) {
+        return Wait-CapAutomationElement -Window $AppRun.Window `
+            -ProcessIdentity $AppRun.Run.Identity `
+            -Name 'Choose a target loop to wire this entry' -AutomationId 'status' `
+            -DeadlineUtc $DeadlineUtc `
+            -BeforePoll {Assert-CapWorkerDeadline 'Wire mode status'} `
+            -FindElement {
+                param([ref]$Snapshot)
+                Find-CapAutomationElement -RootHandle $AppRun.Window `
+                    -ProcessIdentity $AppRun.Run.Identity `
+                    -ExpectedProcessId $AppRun.Run.Identity.Pid `
+                    -Name 'Choose a target loop to wire this entry' -AutomationId 'status' `
+                    -RefusalSnapshot $Snapshot
+            }
+    }
+    $now={
+        if ($NowProvider) {return & $NowProvider}
+        return [DateTime]::UtcNow
+    }
+    $sleep={
+        param([int]$Milliseconds)
+        if ($SleepAction) {& $SleepAction $Milliseconds;return}
+        Start-Sleep -Milliseconds $Milliseconds
+    }
+    while ((& $now) -lt $DeadlineUtc) {
+        Assert-CapWorkerDeadline 'Wire mode status'
+        $status=if ($StatusProbe) {
+            & $StatusProbe $AppRun
+        } else {
+            Find-CapAutomationElement -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
+                -ExpectedProcessId $AppRun.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' `
+                -AutomationId 'status'
+        }
+        if ($null -ne $status -and
+            $status.Current.Name -ceq 'Choose a target loop to wire this entry' -and
+            $status.Current.AutomationId -ceq 'status') {
+            return $status
+        }
+        & $sleep 50
+    }
+    throw 'Wire mode status did not appear before the action deadline.'
+}
+
 function Send-CapMatchedEscape {
-    param([Parameter(Mandatory)]$AppRun)
-    return [GraphCodeUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
+    param(
+        [Parameter(Mandatory)]$AppRun,
+        [scriptblock]$ForegroundProbe,
+        [scriptblock]$DialogProbe,
+        [scriptblock]$KeyboardSender
+    )
+    if (-not $ForegroundProbe -and -not $DialogProbe -and -not $KeyboardSender) {
+        $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    }
+    $foreground=if ($ForegroundProbe) {
+        [bool](& $ForegroundProbe $AppRun.Window)
+    } else {
+        [GraphCodeUiaGateState]::IsForegroundWindow($AppRun.Window)
+    }
+    if (-not $foreground) {
+        throw 'Wire cancellation requires the owned GraphCode shell foreground.'
+    }
+    $dialog=if ($DialogProbe) {
+        [IntPtr](& $DialogProbe $AppRun.Run.Identity.Pid)
+    } else {
+        [GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+    }
+    if ($dialog -ne [IntPtr]::Zero) {
+        throw 'Wire cancellation refuses to inject Escape while an owned native dialog is present.'
+    }
+    $sent=if ($KeyboardSender) {
+        [bool](& $KeyboardSender $AppRun.Window 0x1B)
+    } else {
+        [GraphCodeUiaGateState]::PostKeyboard($AppRun.Window,0x1B)
+    }
+    if (-not $sent) {
+        throw 'Wire cancellation Escape injection was rejected.'
+    }
+    return $true
 }
 
 function Measure-CapSceneZoom {
@@ -2249,10 +2332,8 @@ function Invoke-CapMatchedScenes {
                     $markReceipt=$null
                     if ($runWire) {
                         $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $recovery.wireIdentity
-                        $wireStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
-                            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' `
-                            -AutomationId 'status'
-                        if ($null -eq $wireStatus) {throw "Wire it up did not expose its armed result for $scene."}
+                        $wireStatus=Wait-CapMatchedWireMode -AppRun $app `
+                            -DeadlineUtc (Get-CapActionDeadline -WorkerDeadlineUtc $leaseDeadlineUtc)
                         if (-not (Send-CapMatchedEscape -AppRun $app)) {
                             throw "Wire it up could not be cancelled after matched evidence for $scene."
                         }
