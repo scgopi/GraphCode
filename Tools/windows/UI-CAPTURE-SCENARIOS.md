@@ -236,7 +236,6 @@ pwsh -NoProfile -File Tools\windows\Prepare-FocusedUiCapture.ps1 `
   -DaemonRuntimeRoot C:\k8\runtime `
   -BackendFixtureBinary C:\k8\runtime\copilot.exe `
   -OfflinePeerSource C:\k8\inputs\offline-peer-source.ps1 `
-  -PreparedFixtureRoot C:\k8\fixtures `
   -PreflightReport C:\fresh-preflight\report.json
 ```
 

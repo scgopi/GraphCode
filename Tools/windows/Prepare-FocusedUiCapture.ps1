@@ -6,7 +6,6 @@ param(
     [Parameter(Mandatory)][string]$DaemonRuntimeRoot,
     [Parameter(Mandatory)][string]$BackendFixtureBinary,
     [Parameter(Mandatory)][string]$OfflinePeerSource,
-    [Parameter(Mandatory)][string]$PreparedFixtureRoot,
     [Parameter(Mandatory)][string]$PreflightReport,
     [ValidateRange(3,30)][long]$AuthorizationMinutes = 20
 )
@@ -29,7 +28,7 @@ $workerPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCaptureWorker.ps1'
 $supervisorPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCapture.ps1'
 foreach ($path in @($modulePath,$workerPath,$supervisorPath,$GraphCodeBinary,$ZmxBinary,
     (Join-Path $DaemonRuntimeRoot 'graphcoded.exe'),$BackendFixtureBinary,$OfflinePeerSource,
-    (Join-Path $PreparedFixtureRoot 'projects'),$PreflightReport)) {
+    $PreflightReport)) {
     if (-not (Test-Path -LiteralPath $path)) {throw "Focused capture input is missing: $path"}
 }
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
@@ -44,7 +43,6 @@ $null=Copy-Item -LiteralPath $GraphCodeBinary -Destination (Join-Path $inputs 'g
 $null=Copy-Item -LiteralPath $ZmxBinary -Destination (Join-Path $runtime 'zmx.exe')
 $null=Copy-Item -LiteralPath $BackendFixtureBinary -Destination (Join-Path $runtime 'copilot.exe')
 $null=Copy-Item -LiteralPath $OfflinePeerSource -Destination (Join-Path $inputs 'offline-peer-source.ps1')
-$null=Copy-Item -LiteralPath (Join-Path $PreparedFixtureRoot 'projects') -Destination $fixtures -Recurse
 foreach ($file in Get-ChildItem -LiteralPath $DaemonRuntimeRoot -File) {
     if ($file.Name -cin @('zmx.exe','copilot.exe')) {continue}
     $null=Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $runtime $file.Name)
@@ -54,6 +52,7 @@ $copiedFixtureSource=Join-Path $inputs 'fixture-source.json'
 $null=Copy-Item -LiteralPath $fixtureSource -Destination $copiedFixtureSource
 $fixturePath=Join-Path $fixtures 'fixture.json'
 $destinationProjectRoot=Join-Path $fixtures 'projects'
+$null=New-Item -ItemType Directory -Path $destinationProjectRoot
 $fixtureText=[IO.File]::ReadAllText($copiedFixtureSource).Replace(
     'C:\\fixture',(($destinationProjectRoot | ConvertTo-Json -Compress).Trim('"')))
 [IO.File]::WriteAllText($fixturePath,$fixtureText,[Text.UTF8Encoding]::new($false))

@@ -2988,7 +2988,9 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('function Read-CapMatchedChromeControls') -and
             $workerSource.Contains('Read-CapMatchedChromeControls -AppRun $app') -and
             $prepareSource.Contains("evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'") -and
-            $prepareSource.Contains('expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString(''o'')')) `
+            $prepareSource.Contains('expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString(''o'')') -and
+            $prepareSource.Contains('$null=New-Item -ItemType Directory -Path $destinationProjectRoot') -and
+            -not $prepareSource.Contains("Join-Path `$PreparedFixtureRoot 'projects'")) `
             'Focused supervisor, worker chrome reader or checked-in preparation entry point is not wired.'
         $focusedMutations=@('missing','extra','wrong-scene','wrong-phase','wrong-classification','parity-overclaim')
         foreach ($mutation in $focusedMutations) {
