@@ -150,6 +150,7 @@ $jobPath=Join-Path $root 'job.json'
 [IO.File]::WriteAllText($jobPath,($job | ConvertTo-Json -Depth 40),[Text.UTF8Encoding]::new($false))
 $jobHash=(Get-FileHash -LiteralPath $jobPath -Algorithm SHA256).Hash
 $now=[DateTimeOffset]::UtcNow
+$granted=$now.AddSeconds(-1)
 $authorization=[ordered]@{
     schemaVersion=1L
     authorizationId=[guid]::NewGuid().ToString()
@@ -173,8 +174,8 @@ $authorization=[ordered]@{
     afterBinarySha256=$binaryHash
     sceneNames=@(Get-CapMatchedFocusedSceneNames)
     phases=@('after')
-    grantedUtc=$now.AddSeconds(-1).ToString('o')
-    expiresUtc=$now.AddMinutes($AuthorizationMinutes).ToString('o')
+    grantedUtc=$granted.ToString('o')
+    expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString('o')
     maxMinutes=$AuthorizationMinutes
 }
 $authorizationPath=Join-Path $root 'focused-authorization.json'
