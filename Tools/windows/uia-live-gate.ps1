@@ -5355,6 +5355,14 @@ function Get-MultiProjectClippedRectangle([double[]] $rect, [double[]] $canvas) 
   return ,$clipped
 }
 
+function Get-MultiProjectCardActivationRectangle([double[]] $card) {
+  if ($card.Count -ne 4 -or $card[2] -le $card[0] -or $card[3] -le $card[1]) {
+    throw "MULTIPROJECT_BOUNDS: positive card rectangle required for activation"
+  }
+  $height = $card[3] - $card[1]
+  return ,@($card[0], $card[1], $card[2], ($card[1] + [Math]::Max(1, $height * 0.25)))
+}
+
 function Get-MultiProjectPeerCounts($peer) {
   return [ordered]@{
     receivedCount = $peer.receivedCount; requestCount = $peer.requestCount
@@ -6021,7 +6029,8 @@ function Invoke-MultiProjectRenamePhase {
     Invoke-MultiProjectControl "actual-size"
     $overview = Wait-MultiProjectObservation "overview"
     $row = @($overview.owners | Where-Object { $_.projectPath -ceq $owner.path })[0]
-    $click = Click-MultiProjectRectangle $row.card.bounds $overview.canvasBounds
+    $activation = Get-MultiProjectCardActivationRectangle $row.card.bounds
+    $click = Click-MultiProjectRectangle $activation $overview.canvasBounds
     $postedFallback = $false
     try {
       $workspace = Wait-MultiProjectObservation "workspace" $owner 10
@@ -6033,6 +6042,7 @@ function Invoke-MultiProjectRenamePhase {
       $workspace = Wait-MultiProjectObservation "workspace" $owner
     }
     $navigation.Add([ordered]@{ action = "shown overview loop"
+      sourceGeometry = [ordered]@{ card = $row.card.bounds; activation = $activation }
       input = [ordered]@{ native = $click; postedFallback = $postedFallback }; result = $workspace })
     return $workspace
   }

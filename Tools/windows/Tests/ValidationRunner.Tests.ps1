@@ -3760,6 +3760,43 @@ try {
   if ($permanentFailure -cne 'MULTIPROJECT_WORKSPACE_MARKERS: exact owned loop bar and toolbar did not publish before the deadline') {
     throw "RED: permanent or unknown workspace-marker absence no longer fails closed"
   }
+  $cardActivation = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Get-MultiProjectCardActivationRectangle'
+  }, $true)
+  if ($null -eq $cardActivation) {
+    throw "RED: multi-project loop activation lacks a recovery-control-safe card target"
+  }
+  . ([scriptblock]::Create($cardActivation.Extent.Text))
+  [double[]]$activation = Get-MultiProjectCardActivationRectangle @(0.0, 0.0, 250.0, 96.0)
+  if (($activation -join ',') -cne '0,0,250,24') {
+    throw "RED: card activation target does not retain the source-sized title strip"
+  }
+  foreach ($recovery in @(
+      @(11.0, 31.0, 84.0, 51.0),
+      @(90.0, 31.0, 176.0, 51.0))) {
+    $overlaps = $activation[0] -lt $recovery[2] -and $activation[2] -gt $recovery[0] -and
+      $activation[1] -lt $recovery[3] -and $activation[3] -gt $recovery[1]
+    if ($overlaps) {
+      throw "RED: multi-project card activation still lands on an unwired recovery control"
+    }
+  }
+  $invalidActivation = $null
+  try { $null = Get-MultiProjectCardActivationRectangle @(0.0, 0.0, 0.0, 96.0) }
+  catch { $invalidActivation = $_.Exception.Message }
+  if ($invalidActivation -cne 'MULTIPROJECT_BOUNDS: positive card rectangle required for activation') {
+    throw "RED: invalid multi-project card activation bounds no longer fail closed"
+  }
+  $openLoop = $uiaAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+      $node.Name -ceq 'Open-MultiProjectLoop'
+  }, $true)
+  if ($null -eq $openLoop -or
+      -not $openLoop.Extent.Text.Contains('Get-MultiProjectCardActivationRectangle $row.card.bounds')) {
+    throw "RED: live multi-project loop navigation still clicks the whole card rectangle"
+  }
   $designTokensSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\DesignTokens.zig") -Raw
   $laneLayoutSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\LaneLayout.zig") -Raw
   $graphCanvasSource = Get-Content (Join-Path $repoRoot "graphcode-windows\src\GraphCanvas.zig") -Raw
