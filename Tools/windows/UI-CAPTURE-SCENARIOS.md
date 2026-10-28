@@ -210,23 +210,38 @@ row validation. Unmatched scenes remain logical-geometry-only or unassessable.
 `FOCUSED_LIVE_CAPTURE` runs an exact validated subset through the same
 `Invoke-CapMatchedScenes` implementation used by the full matched adapter. It
 does not copy scene setup, UIA assertions, provider ownership, image capture, or
-cleanup into a wrapper. The only admitted plan is the after/current-source F2
-terminal-chrome set:
+cleanup into a wrapper. The original admitted plan is the after/current-source
+F2 terminal-chrome set when `FocusedProfile=TerminalChrome`; the additional
+post-fix card plan is defined below:
 
 `agent-unknown`, `backend-idle`, `goal-needs-you`, `loop-running`,
 `two-agent-selected`, `two-shell-selected`, `split-right-focused`,
 `many-first`, `overflow-last`, `hover-close`, and `last-guard`.
 
-The mode is permanently classified
+That profile is permanently classified
 `F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2` with
 `officialParityEvidence=false`. Missing, extra, duplicate, reordered, foreign,
-or pre-restart scenes refuse. It still requires the exact 185-case real-zmx
+or pre-restart scenes refuse.
+
+`FocusedProfile=PostFixCards` admits exactly
+`s-goal-unwired-unselected`, `s-goal-unwired-selected`,
+`s-main-cycle-unselected`, and `s-main-cycle-selected`, classified
+`POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1` with
+`officialParityEvidence=false`. The unwired scenes capture before mutation and
+use separate disposable phase roots: the unselected scene arms and cancels
+`Wire it up`, while the selected scene invokes `Mark as entry` and requires
+the controls to disappear with the same card identity retained. The selected
+cycle scene invokes the stable `Inspect` action, returns through `Show in
+Graph`, and requires the same card, action, reason, and selected identities.
+This is bounded review evidence, not an automatic parity-ledger promotion.
+
+Both profiles require the exact 185-case real-zmx
 preflight, a clean current source head/tree, hash-bound current binaries, PMv2
 physical admission, raw unresampled geometry, individual image privacy review,
 the numbered process journal, and zero-survivor release.
 
-Prepare a fresh short root only after the source and controls are committed and
-the 185-case report exists:
+For the post-fix card profile, first prepare a fresh short root without granting
+PNG authority:
 
 ```powershell
 pwsh -NoProfile -File Tools\windows\Prepare-FocusedUiCapture.ps1 `
@@ -236,10 +251,25 @@ pwsh -NoProfile -File Tools\windows\Prepare-FocusedUiCapture.ps1 `
   -DaemonRuntimeRoot C:\k8\runtime `
   -BackendFixtureBinary C:\k8\runtime\copilot.exe `
   -OfflinePeerSource C:\k8\inputs\offline-peer-source.ps1 `
-  -PreflightReport C:\fresh-preflight\report.json
+  -PreflightReport C:\fresh-preflight\report.json `
+  -FocusedProfile PostFixCards -PlanOnly
 ```
 
-Use the returned paths and hashes with `Invoke-UiCapture.ps1
+The returned `focused-plan.json` proves the exact roster,
+source/control/binary/provider/fixture hashes, PMv2 geometry, authorization
+ceiling, cleanup expectations, zero launches, and zero PNGs. Review it, then
+grant the single bounded authorization:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Authorize-FocusedUiCapture.ps1 `
+  -Repository $PWD -OwnedRoot C:\f7 `
+  -FocusedPlanPath C:\f7\focused-plan.json `
+  -FocusedPlanSha256 ACTUAL_64_HEX_SHA256
+```
+
+The existing one-step terminal preparation remains available by omitting
+`-PlanOnly` and using the default `TerminalChrome` profile. Use the returned
+paths and hashes with `Invoke-UiCapture.ps1
 -ExecutionMode FOCUSED_LIVE_CAPTURE`, including
 `-FocusedAuthorizationPath`/`-FocusedAuthorizationSha256` and the normal exact
 job, fixture-mapping, and preflight arguments. Preparation creates no process

@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory)][string]$BackendFixtureBinary,
     [Parameter(Mandatory)][string]$OfflinePeerSource,
     [Parameter(Mandatory)][string]$PreflightReport,
+    [ValidateSet('TerminalChrome','PostFixCards')][string]$FocusedProfile = 'TerminalChrome',
+    [switch]$PlanOnly,
     [ValidateRange(3,30)][long]$AuthorizationMinutes = 20
 )
 $ErrorActionPreference='Stop'
@@ -32,6 +34,33 @@ foreach ($path in @($modulePath,$workerPath,$supervisorPath,$GraphCodeBinary,$Zm
     if (-not (Test-Path -LiteralPath $path)) {throw "Focused capture input is missing: $path"}
 }
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
+$focusedScenes=@(Get-CapMatchedFocusedSceneNames -Profile $FocusedProfile)
+$focusedClassification=Get-CapMatchedFocusedClassification -Profile $FocusedProfile
+$moduleHash=(Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash
+$workerHash=(Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash
+$supervisorHash=(Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash
+$preflight=Get-Content -LiteralPath $PreflightReport -Raw | ConvertFrom-Json -DateKind String
+$requiredRealZmxCases=@(
+    'real zmx job lifecycle through actual command with target normal',
+    'real zmx job lifecycle through actual command with target nonzero',
+    'real zmx job lifecycle through actual command with target timeout'
+)
+if ($preflight.suite -cne 'UiCaptureDriver' -or $preflight.executed -ne 185 -or
+    $preflight.passed -ne 185 -or $preflight.failed -ne 0 -or $preflight.skipped -ne 0 -or
+    $preflight.mode -cne 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL' -or
+    $preflight.gui -cne 'NotExecuted' -or $preflight.images -ne 0 -or
+    $preflight.backendTurns -ne 0 -or $preflight.cases.Count -ne 185 -or
+    @($preflight.cases | Where-Object {$_.passed -cne $true}).Count -ne 0 -or
+    $preflight.controls.moduleSha256 -ne $moduleHash -or
+    $preflight.controls.workerSha256 -ne $workerHash -or
+    $preflight.controls.supervisorSha256 -ne $supervisorHash) {
+    throw 'Focused capture preparation requires the exact green 185-case no-desktop preflight for the current controls.'
+}
+foreach ($caseName in $requiredRealZmxCases) {
+    if (@($preflight.cases | Where-Object name -CEQ $caseName).Count -ne 1) {
+        throw "Focused capture preflight omitted or duplicated required case: $caseName"
+    }
+}
 
 $inputs=Join-Path $root 'inputs'
 $runtime=Join-Path $root 'runtime'
@@ -83,6 +112,14 @@ $daemonHash=(Get-FileHash -LiteralPath (Join-Path $runtime 'graphcoded.exe') -Al
 $backendHash=(Get-FileHash -LiteralPath (Join-Path $runtime 'copilot.exe') -Algorithm SHA256).Hash
 $backendSourceHash=(Get-FileHash -LiteralPath $backendSourcePath -Algorithm SHA256).Hash
 $peerHash=(Get-FileHash -LiteralPath (Join-Path $inputs 'offline-peer-source.ps1') -Algorithm SHA256).Hash
+foreach ($caseName in $requiredRealZmxCases) {
+    $case=@($preflight.cases | Where-Object name -CEQ $caseName)[0]
+    if ($case.detail.evidenceMode -cne 'EXECUTED_CURRENT_REAL_ZMX' -or
+        $case.detail.providerCommit -cne '785b3fd15dcafd1882b495c831a10f98c201b908' -or
+        $case.detail.zmxSha256 -ne $zmxHash) {
+        throw "Focused capture preflight real-zmx evidence differs for: $caseName"
+    }
+}
 
 $scenes=@(Get-CapMatchedSceneNames | ForEach-Object {
     [ordered]@{name=$_;naturalWidthBeforeAfter=@(250L,250L)}
@@ -99,7 +136,7 @@ $identity=[ordered]@{
 $job=[ordered]@{
     executionMode='FOCUSED_LIVE_CAPTURE'
     desktopAuthorized=$true
-    evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+    evidenceClassification=$focusedClassification
     lane='S'
     sceneAdapter='S_MATCHED_V12_DPI_V1'
     head=$head
@@ -109,9 +146,10 @@ $job=[ordered]@{
     authority=[ordered]@{centralCaptureLeaseGrantedByThisArtifact=$false;sWorkerMayLaunchGui=$false}
     focusedCapture=[ordered]@{
         schemaVersion=1L
+        profile=$FocusedProfile
         phases=@('after')
-        sceneNames=@(Get-CapMatchedFocusedSceneNames)
-        evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+        sceneNames=$focusedScenes
+        evidenceClassification=$focusedClassification
         officialParityEvidence=$false
     }
     captureContract=[ordered]@{
@@ -148,6 +186,98 @@ $job=[ordered]@{
 $jobPath=Join-Path $root 'job.json'
 [IO.File]::WriteAllText($jobPath,($job | ConvertTo-Json -Depth 40),[Text.UTF8Encoding]::new($false))
 $jobHash=(Get-FileHash -LiteralPath $jobPath -Algorithm SHA256).Hash
+$planPath=Join-Path $root 'focused-plan.json'
+$plan=[ordered]@{
+    schemaVersion=1L
+    status='PREPARED_NO_AUTHORITY'
+    preparedUtc=[DateTimeOffset]::UtcNow.ToString('o')
+    ownedRoot=$root
+    repository=$repositoryRoot
+    sourceHead=$head
+    sourceTree=$tree
+    profile=$FocusedProfile
+    evidenceClassification=$focusedClassification
+    officialParityEvidence=$false
+    phases=@('after')
+    sceneNames=$focusedScenes
+    sceneCount=[long]$focusedScenes.Count
+    jobPath=$jobPath
+    jobSha256=$jobHash
+    modulePath=$modulePath
+    moduleSha256=$moduleHash
+    workerPath=$workerPath
+    workerSha256=$workerHash
+    supervisorPath=$supervisorPath
+    supervisorSha256=$supervisorHash
+    preflightReceiptPath=$preflightPath
+    preflightReceiptSha256=(Get-FileHash -LiteralPath $preflightPath -Algorithm SHA256).Hash
+    preflight=[ordered]@{
+        executed=185L;passed=185L;failed=0L;skipped=0L
+        gui='NotExecuted';images=0L;backendTurns=0L
+        requiredRealZmxCases=$requiredRealZmxCases
+    }
+    fixture=[ordered]@{
+        canonicalSourcePath=$copiedFixtureSource
+        canonicalSourceSha256=$fixtureSourceHash
+        rewrittenPath=$fixturePath
+        rewrittenSha256=$fixtureHash
+        mappingPath=$mappingPath
+        mappingSha256=$mappingHash
+        graphs=1L
+        topLevelNodes=8L
+        syntheticMatchedData=$true
+    }
+    binaries=[ordered]@{
+        graphCodePath=(Join-Path $inputs 'graphcode-after.exe');graphCodeSha256=$binaryHash
+        zmxPath=(Join-Path $runtime 'zmx.exe');zmxSha256=$zmxHash
+        daemonPath=(Join-Path $runtime 'graphcoded.exe');daemonSha256=$daemonHash
+        backendFixturePath=(Join-Path $runtime 'copilot.exe');backendFixtureSha256=$backendHash
+        offlinePeerPath=(Join-Path $inputs 'offline-peer-source.ps1');offlinePeerSha256=$peerHash
+    }
+    geometry=$job.captureContract
+    authorizationBounds=[ordered]@{
+        status='NOT_GRANTED'
+        requestedMaxMinutes=$AuthorizationMinutes
+        cleanupReserveSeconds=90L
+        minimumRemainingMinutesAtLaunch=1L
+    }
+    cleanupExpectations=[ordered]@{
+        kernelExitAndEofRequired=$true
+        pendingLaunchesExpected=0L
+        ownedProcessSurvivorsExpected=0L
+        cleanupFailuresExpected=0L
+        independentZeroProcessCheckRequired=$true
+    }
+    pngArtifacts=0L
+    processLaunches=0L
+}
+[IO.File]::WriteAllText($planPath,($plan | ConvertTo-Json -Depth 40),[Text.UTF8Encoding]::new($false))
+$planHash=(Get-FileHash -LiteralPath $planPath -Algorithm SHA256).Hash
+if (@(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.png').Count -ne 0) {
+    throw 'Focused plan preparation created an unauthorized PNG.'
+}
+if ($PlanOnly) {
+    [ordered]@{
+        ownedRoot=$root
+        status='PREPARED_NO_AUTHORITY'
+        focusedPlanPath=$planPath
+        focusedPlanSha256=$planHash
+        jobPath=$jobPath
+        jobSha256=$jobHash
+        fixtureMappingSha256=$mappingHash
+        preflightReceiptPath=$preflightPath
+        preflightReceiptSha256=$plan.preflightReceiptSha256
+        outputDirectory=Join-Path $root 'outputs'
+        sourceHead=$head
+        sourceTree=$tree
+        profile=$FocusedProfile
+        sceneNames=$focusedScenes
+        evidenceClassification=$focusedClassification
+        pngArtifacts=0L
+        processLaunches=0L
+    } | ConvertTo-Json -Depth 10
+    return
+}
 $now=[DateTimeOffset]::UtcNow
 $granted=$now.AddSeconds(-1)
 $authorization=[ordered]@{
@@ -155,7 +285,7 @@ $authorization=[ordered]@{
     authorizationId=[guid]::NewGuid().ToString()
     status='AUTHORIZED'
     authorizedAction='focused-matched-capture'
-    evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+    evidenceClassification=$focusedClassification
     officialParityEvidence=$false
     desktopAuthorized=$true
     captureEvidenceAuthorized=$true
@@ -164,14 +294,15 @@ $authorization=[ordered]@{
     head=$head
     sourceTree=$tree
     jobManifestSha256=$jobHash
-    moduleSha256=(Get-FileHash -LiteralPath $modulePath -Algorithm SHA256).Hash
-    workerSha256=(Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash
-    supervisorSha256=(Get-FileHash -LiteralPath $supervisorPath -Algorithm SHA256).Hash
+    moduleSha256=$moduleHash
+    workerSha256=$workerHash
+    supervisorSha256=$supervisorHash
     preflightReceiptSha256=(Get-FileHash -LiteralPath $preflightPath -Algorithm SHA256).Hash
     fixtureMappingSha256=$mappingHash
     beforeBinarySha256=$binaryHash
     afterBinarySha256=$binaryHash
-    sceneNames=@(Get-CapMatchedFocusedSceneNames)
+    profile=$FocusedProfile
+    sceneNames=$focusedScenes
     phases=@('after')
     grantedUtc=$granted.ToString('o')
     expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString('o')
@@ -188,10 +319,15 @@ $result=[ordered]@{
     preflightReceiptSha256=$authorization.preflightReceiptSha256
     focusedAuthorizationPath=$authorizationPath
     focusedAuthorizationSha256=(Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256).Hash
+    focusedPlanPath=$planPath
+    focusedPlanSha256=$planHash
     outputDirectory=Join-Path $root 'outputs'
     sourceHead=$head
     sourceTree=$tree
     binarySha256=$binaryHash
     zmxSha256=$zmxHash
+    profile=$FocusedProfile
+    sceneNames=$focusedScenes
+    evidenceClassification=$focusedClassification
 }
 $result | ConvertTo-Json -Depth 10

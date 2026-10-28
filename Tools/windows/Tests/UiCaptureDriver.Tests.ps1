@@ -2977,11 +2977,25 @@ function Invoke-CapMatchedContracts {
         $plan=Get-CapMatchedCapturePlan -Job $focused
         Assert-CapTest ($plan.phases.Count -eq 1 -and $plan.phases[0] -ceq 'after' -and
             $plan.sceneNames.Count -eq 11 -and $plan.includeRestart -eq $false -and
+            $plan.profile -ceq 'TerminalChrome' -and
             $plan.evidenceClassification -ceq 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2') `
             'Focused matched plan did not preserve the exact after-only F2 inventory.'
+        $postFix=$focused | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
+        $postFix.focusedCapture | Add-Member -NotePropertyName profile -NotePropertyValue 'PostFixCards'
+        $postFix.focusedCapture.sceneNames=@(Get-CapMatchedFocusedSceneNames -Profile PostFixCards)
+        $postFix.focusedCapture.evidenceClassification=
+            Get-CapMatchedFocusedClassification -Profile PostFixCards
+        $postFixPlan=Get-CapMatchedCapturePlan -Job $postFix
+        Assert-CapTest ($postFixPlan.profile -ceq 'PostFixCards' -and
+            $postFixPlan.sceneNames.Count -eq 4 -and
+            ($postFixPlan.sceneNames -join ',') -ceq
+                's-goal-unwired-unselected,s-goal-unwired-selected,s-main-cycle-unselected,s-main-cycle-selected' -and
+            $postFixPlan.evidenceClassification -ceq 'POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1') `
+            'Post-fix card plan did not preserve the exact after-only four-scene inventory.'
         $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
         $workerSource=[IO.File]::ReadAllText($workerPath)
         $prepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-FocusedUiCapture.ps1'))
+        $authorizeSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Authorize-FocusedUiCapture.ps1'))
         Assert-CapTest ($supervisorSource.Contains("'FOCUSED_LIVE_CAPTURE'") -and
             $supervisorSource.Contains('FocusedAuthorizationPath') -and
             $supervisorSource.Contains('Assert-CapFocusedPrelaunchPaths') -and
@@ -2989,12 +3003,18 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('Read-CapMatchedChromeControls -AppRun $app') -and
             $workerSource.Contains('function Get-CapWorkerExpectedImageCount') -and
             $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
-            $prepareSource.Contains("evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'") -and
+            $workerSource.Contains("-Action 'attention-action'") -and
+            $workerSource.Contains("fixtureIsolation='ONE_SCENE_ONE_DISPOSABLE_PHASE_ROOT'") -and
+            $prepareSource.Contains("[switch]`$PlanOnly") -and
+            $prepareSource.Contains("status='PREPARED_NO_AUTHORITY'") -and
+            $authorizeSource.Contains("pngArtifacts -ne 0") -and
+            $authorizeSource.Contains("Get-CapMatchedCapturePlan -Job `$job") -and
             $prepareSource.Contains('expiresUtc=$granted.AddMinutes($AuthorizationMinutes).ToString(''o'')') -and
             $prepareSource.Contains('$null=New-Item -ItemType Directory -Path $destinationProjectRoot') -and
             -not $prepareSource.Contains("Join-Path `$PreparedFixtureRoot 'projects'")) `
             'Focused supervisor, worker chrome reader or checked-in preparation entry point is not wired.'
-        $focusedMutations=@('missing','extra','wrong-scene','wrong-phase','wrong-classification','parity-overclaim')
+        $focusedMutations=@('missing','extra','wrong-scene','wrong-phase','wrong-classification',
+            'parity-overclaim','wrong-profile')
         foreach ($mutation in $focusedMutations) {
             $changed=$focused | ConvertTo-Json -Depth 30 | ConvertFrom-Json -DateKind String
             switch ($mutation) {
@@ -3004,6 +3024,7 @@ function Invoke-CapMatchedContracts {
                 'wrong-phase' {$changed.focusedCapture.phases=@('before')}
                 'wrong-classification' {$changed.focusedCapture.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'}
                 'parity-overclaim' {$changed.focusedCapture.officialParityEvidence=$true}
+                'wrong-profile' {$changed.focusedCapture | Add-Member -NotePropertyName profile -NotePropertyValue 'Foreign'}
             }
             $null=Assert-CapRejects {Get-CapMatchedCapturePlan -Job $changed} 'Focused matched capture'
         }
@@ -3019,9 +3040,9 @@ function Invoke-CapMatchedContracts {
             $changed.scenes=@($changed.scenes | Where-Object name -CNE $name)
             $null=Assert-CapRejects {Assert-CapSceneContract -Job $changed} 'Matched scene'
         }
-        return @{positive=4;negative=($names.Count+1+$focusedMutations.Count)
+        return @{positive=5;negative=($names.Count+1+$focusedMutations.Count)
             budgetAcceptedSeconds=@(810,1710);budgetRefusedSeconds=1711
-            names=$names;focused=$plan;focusedMutations=$focusedMutations
+            names=$names;focused=$plan;postFixFocused=$postFixPlan;focusedMutations=$focusedMutations
             prelaunchPaths=(Invoke-CapFocusedPrelaunchPathContract)
             expectedImageCounts=(Invoke-CapFocusedExpectedImageCountContract)
             routing=(Invoke-CapMatchedSceneRoutingContract)}
@@ -4119,6 +4140,7 @@ function Invoke-CapMatchedSceneRoutingContract {
         $captured=[Collections.Generic.List[object]]::new()
         $seeded=[Collections.Generic.List[string]]::new()
         $focusedCapture=$false
+        $matchedCapturePlan=[pscustomobject]@{profile='TerminalChrome'}
         $model=[pscustomobject]@{total=1;selected=0;node=$null;removed=$false;restart=0;hover=0;freezeVisibility=$false
             wireArmed=$false;marked=$false
             deadlineFailure=$false;captureFailure=$false;appCleanup=0;seedCleanup=0;peerCleanup=0;chromeReads=0
@@ -4153,6 +4175,7 @@ function Invoke-CapMatchedSceneRoutingContract {
                 }
                 'wire-node' {$model.wireArmed=$true}
                 'mark-entry' {$model.marked=$true}
+                'attention-action' {}
             }
         }
         function New-CapMockElement([string]$Id,[string]$Name,[int]$ProcessId,[double[]]$Bounds) {
@@ -4204,11 +4227,21 @@ function Invoke-CapMatchedSceneRoutingContract {
         function Read-CapMatchedRows {
             param($AppRun)
             if ($scene -cnotmatch '^s-tabs-') {
-                return @($fixture.graphs[0].nodes | ForEach-Object {
+                $rows=@($fixture.graphs[0].nodes | ForEach-Object {
                     [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId ("project-card:"+$fixture.graphs[0].project.path+":"+$_.id));Name=$_.title;ProcessId=4242L
                         ParentAutomationId='graph';Selected=($_.id -ceq $model.node.id);IsEnabled=$true;IsOffscreen=$false
                         Bounds=@(250,100,500,196)}
                 })
+                if ($scene -cmatch '^s-main-cycle-') {
+                    $nodeId=@($fixture.states | Where-Object scene -CEQ $scene)[0].nodeId
+                    $rows+= [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId ("attention-action:"+$fixture.graphs[0].project.path+":"+$nodeId))
+                        Name='Inspect';ProcessId=4242L;ParentAutomationId='graph';Selected=$false;IsEnabled=$true
+                        IsOffscreen=$false;Bounds=@(412,151,478,168)}
+                    $rows+= [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId ("cycle-reason:"+$fixture.graphs[0].project.path+":"+$nodeId))
+                        Name='cycle · no entry point';ProcessId=4242L;ParentAutomationId='graph';Selected=$false;IsEnabled=$true
+                        IsOffscreen=$false;Bounds=@(261,175,478,188)}
+                }
+                return $rows
             }
             $visible=@(Get-MockVisibleIndexes)
             $count=$visible.Count
@@ -4270,6 +4303,7 @@ function Invoke-CapMatchedSceneRoutingContract {
         Assert-CapTest ($legacyControls.Count -eq 0) `
             'Legacy wrapper mismatch no longer reproduces: matched rows unexpectedly returned chrome controls.'
         $focusedCapture=$true
+        $matchedCapturePlan=[pscustomobject]@{profile='TerminalChrome'}
         Invoke-CapMatchedScenes -Phase 'after' -SceneNames $focusedScenes -SkipRestart
         Assert-CapTest ($captured.Count -eq 11 -and $seeded.Count -eq 11 -and $model.restart -eq 0 -and
             $model.chromeReads -eq 11 -and
@@ -4280,7 +4314,24 @@ function Invoke-CapMatchedSceneRoutingContract {
         $focusedRestartCount=$model.restart;$focusedHoverCount=$model.hover
         $many=@($captured | Where-Object scene -CEQ 's-tabs-many-first')[0]
         $manySelections=@($model.selections | Where-Object {$_ -cmatch '^s-tabs-many-first:'})
+        $captured.Clear();$seeded.Clear();$model.restart=0;$model.hover=0
+        $matchedCapturePlan=[pscustomobject]@{profile='PostFixCards'}
+        $postFixScenes=@(Get-CapMatchedFocusedSceneNames -Profile PostFixCards)
+        Invoke-CapMatchedScenes -Phase 'after' -SceneNames $postFixScenes -SkipRestart
+        $wireScene=@($captured | Where-Object scene -CEQ 's-goal-unwired-unselected')[0]
+        $markScene=@($captured | Where-Object scene -CEQ 's-goal-unwired-selected')[0]
+        $cycleScene=@($captured | Where-Object scene -CEQ 's-main-cycle-selected')[0]
+        Assert-CapTest ($captured.Count -eq 4 -and $seeded.Count -eq 0 -and
+            $wireScene.observation.recoveryRoutes.wire.mutation -ceq 'NONE_ARMED_THEN_CANCELLED' -and
+            $null -eq $wireScene.observation.recoveryRoutes.markEntry -and
+            $markScene.observation.recoveryRoutes.markEntry.mutation -ceq 'DECLARED_ENTRY_ADDED' -and
+            $null -eq $markScene.observation.recoveryRoutes.wire -and
+            $cycleScene.observation.cycleRoute.identitiesStable -cne $false -and
+            $cycleScene.observation.cycleRoute.returnAction -ceq 'Show in Graph') `
+            'Post-fix focused executor did not split disposable unwired routes or preserve cycle identities.'
+        $postFixSceneCount=$captured.Count
         $captured.Clear();$seeded.Clear();$model.appCleanup=0;$model.seedCleanup=0;$model.peerCleanup=0
+        $matchedCapturePlan=[pscustomobject]@{profile='TerminalChrome'}
         $model.captureFailure=$true
         $cleanupFailure=Assert-CapRejects {
             Invoke-CapMatchedScenes -Phase 'after' -SceneNames $focusedScenes -SkipRestart
@@ -4306,6 +4357,7 @@ function Invoke-CapMatchedSceneRoutingContract {
         } 'remained genuinely unavailable after exact overflow bridge 4'
         return @{scenes=$focusedSceneCount;seedDispatches=$focusedSeedCount
             realRestartDispatches=$focusedRestartCount;hoverDispatches=$focusedHoverCount
+            postFixScenes=$postFixSceneCount
             legacyExpectedControls=3;legacyObservedControls=$legacyControls.Count
             cleanupFailure=$cleanupFailure;deadlineFailure=$deadlineFailure
             manyFirstSelections=$manySelections;unavailableFailure=$unavailable
@@ -4365,13 +4417,16 @@ function Invoke-CapFocusedExpectedImageCountContract {
         $matchedCapturePlan=[pscustomobject]@{phases=@('after');sceneNames=@(1..11);includeRestart=$false}
         function Test-CapMatchedAdapter {return $true}
         $focused=Get-CapWorkerExpectedImageCount
+        $matchedCapturePlan=[pscustomobject]@{phases=@('after');sceneNames=@(1..4);includeRestart=$false}
+        $postFixFocused=Get-CapWorkerExpectedImageCount
         $matchedCapturePlan=[pscustomobject]@{phases=@('before','after');sceneNames=@(1..17);includeRestart=$true}
         $full=Get-CapWorkerExpectedImageCount
         $transitionRehearsal=$true
         $transition=Get-CapWorkerExpectedImageCount
-        Assert-CapTest ($focused -eq 11 -and $full -eq 36 -and $transition -eq 0) `
+        Assert-CapTest ($focused -eq 11 -and $postFixFocused -eq 4 -and
+            $full -eq 36 -and $transition -eq 0) `
             'Worker terminal status image counts drifted from focused/full/rehearsal plans.'
-        [pscustomobject]@{focused=$focused;full=$full;transition=$transition}
+        [pscustomobject]@{focused=$focused;postFixFocused=$postFixFocused;full=$full;transition=$transition}
     } $function.Extent.Text
 }
 
@@ -4646,7 +4701,26 @@ function Invoke-CapMatchedManifestContract {
         }
         $null=Assert-CapRejects {Assert-CapMatchedManifest -Manifest $changed -Job $focusedJob} 'Matched manifest'
     }
-    return @{positive=2;negative=11;images=36;realRestarts=2;focusedImages=11;focusedRestarts=0
+    $postFixJob=$focusedJob | ConvertTo-Json -Depth 35 | ConvertFrom-Json -DateKind String
+    $postFixJob.focusedCapture | Add-Member -NotePropertyName profile -NotePropertyValue 'PostFixCards'
+    $postFixJob.focusedCapture.sceneNames=@(Get-CapMatchedFocusedSceneNames -Profile PostFixCards)
+    $postFixJob.focusedCapture.evidenceClassification=
+        Get-CapMatchedFocusedClassification -Profile PostFixCards
+    $postFix=@{
+        sceneAdapter='S_MATCHED_V12_DPI_V1';lane='S';status='COMPLETE'
+        executionMode='FOCUSED_LIVE_CAPTURE'
+        evidenceClassification='POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1'
+        officialParityEvidence=$false
+        backendTurns=0;g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
+        images=@(foreach ($scene in Get-CapMatchedFocusedSceneNames -Profile PostFixCards) {
+            @{phase='after';scene=$scene;captureMode='PRINTWINDOW';observedState=@{
+                readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'}}
+        })
+        realRestarts=@()
+    } | ConvertTo-Json -Depth 35 | ConvertFrom-Json -DateKind String
+    Assert-CapMatchedManifest -Manifest $postFix -Job $postFixJob
+    return @{positive=3;negative=11;images=36;realRestarts=2;focusedImages=11
+        postFixFocusedImages=4;focusedRestarts=0
         evidence='SIMULATED_MANIFEST_NOT_CAPTURE'}
 }
 

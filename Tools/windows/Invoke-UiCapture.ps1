@@ -61,6 +61,7 @@ $authorizationPath = $null
 $authorizationHash = $null
 $authorityId = $null
 $authorityHash = $null
+$focusedPlan = $null
 $authorityPath = $null
 $deadlineUtc = [DateTime]::MinValue
 $jobHash = $null
@@ -1242,8 +1243,9 @@ try {
         $fixtureMappingHashExpected = $job.fixture.mappingSha256
     }
     if ($focusedCapture) {
+        $focusedPlan=Get-CapMatchedCapturePlan -Job $job
         if ($job.executionMode -cne $ExecutionMode -or $job.desktopAuthorized -cne $true -or
-            $job.evidenceClassification -cne 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2') {
+            $job.evidenceClassification -cne $focusedPlan.evidenceClassification) {
             throw 'Expected an explicitly authorized focused matched capture job.'
         }
         $preflightHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $preflightPath).Hash
@@ -1599,7 +1601,7 @@ try {
             evidenceClassification = if ($transitionRehearsal) {
                 'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
             } elseif ($focusedCapture) {
-                'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+                $focusedPlan.evidenceClassification
             } else { $null }
             officialParityEvidence = if ($focusedCapture) {$false} else {$null}
             authorityId = $authorityId
