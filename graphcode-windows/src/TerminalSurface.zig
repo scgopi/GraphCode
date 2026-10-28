@@ -163,29 +163,32 @@ fn paneBounds(
     origin_y: i32,
     width: i32,
     height: i32,
+    dpi: u32,
     direction: WorkspaceLayout.Direction,
     position: usize,
     pane_count: usize,
 ) c.winghostty_rect {
-    if (width <= 0 or height <= Tokens.tab_bar_height + Tokens.pane_header_height or
+    const tab_bar_height = Dpi.scale(Tokens.tab_bar_height, dpi);
+    const pane_header_height = Dpi.scale(Tokens.pane_header_height, dpi);
+    if (width <= 0 or height <= tab_bar_height + pane_header_height or
         pane_count == 0 or position >= pane_count)
     {
         return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
     }
     const horizontal = direction == .horizontal;
-    const available_height = height - Tokens.tab_bar_height;
+    const available_height = height - tab_bar_height;
     const span = if (horizontal) width else available_height;
     const first = @divTrunc(@as(i64, span) * @as(i64, @intCast(position)), @as(i64, @intCast(pane_count)));
     const next = @divTrunc(@as(i64, span) * @as(i64, @intCast(position + 1)), @as(i64, @intCast(pane_count)));
     const pane_width = if (horizontal) next - first else width;
     // LoopWorkspaceView.swift:318-331 puts a header inside each split-tree leaf,
     // including vertically stacked panes, rather than reserving one per tab.
-    const pane_height = (if (horizontal) available_height else next - first) - Tokens.pane_header_height;
+    const pane_height = (if (horizontal) available_height else next - first) - pane_header_height;
     if (pane_width <= 0 or pane_height <= 0)
         return .{ .x = origin_x, .y = origin_y, .width = 0, .height = 0 };
     return .{
         .x = origin_x + if (horizontal) @as(i32, @intCast(first)) else 0,
-        .y = origin_y + Tokens.tab_bar_height + Tokens.pane_header_height + if (horizontal) @as(i32, 0) else @as(i32, @intCast(first)),
+        .y = origin_y + tab_bar_height + pane_header_height + if (horizontal) @as(i32, 0) else @as(i32, @intCast(first)),
         .width = @intCast(pane_width),
         .height = @intCast(pane_height),
     };
@@ -252,10 +255,10 @@ pub fn chromeActionForIndex(index: usize) ?ChromeAction {
     };
 }
 
-fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i32) ?ChromeAction {
+fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, dpi: u32, x: i32, y: i32) ?ChromeAction {
     if (x < origin_x or x >= origin_x + width) return null;
     for (0..3) |index| {
-        const bounds = chromeControlBounds(origin_x, origin_y, width, index);
+        const bounds = chromeControlBounds(origin_x, origin_y, width, dpi, index);
         if (x >= bounds.left and x < bounds.right and y >= bounds.top and y < bounds.bottom) {
             return chromeActionForIndex(index);
         }
@@ -263,21 +266,30 @@ fn chromeActionForBounds(origin_x: i32, origin_y: i32, width: i32, x: i32, y: i3
     return null;
 }
 
-pub fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, index: usize) c.RECT {
-    const left = @max(origin_x, origin_x + width - 220) + @as(i32, @intCast(index)) * 72;
-    return .{ .left = left, .top = origin_y + 3, .right = left + 68, .bottom = origin_y + Tokens.tab_bar_height - 3 };
+pub fn chromeControlBounds(origin_x: i32, origin_y: i32, width: i32, dpi: u32, index: usize) c.RECT {
+    const inset = Dpi.scale(Tokens.tab_bar_inset, dpi);
+    const control_width = Dpi.scale(Tokens.tab_control_width, dpi);
+    const control_height = Dpi.scale(Tokens.tab_control_height, dpi);
+    const gap = Dpi.scale(Tokens.tab_control_gap, dpi);
+    const group_width = control_width * 3 + gap * 2;
+    const group_left = @max(origin_x, origin_x + width - inset - group_width);
+    const left = group_left + @as(i32, @intCast(index)) * (control_width + gap);
+    const top = origin_y + Dpi.scale(Tokens.tab_bar_vertical_padding, dpi);
+    return .{ .left = left, .top = top, .right = left + control_width, .bottom = top + control_height };
 }
 
 /// Legacy fixed geometry; live chrome and UIA use Workspace.visibleTabBounds.
 pub fn tabBounds(origin_x: i32, origin_y: i32, index: usize) c.RECT {
-    const left = origin_x + @as(i32, @intCast(index)) * 120;
-    return .{ .left = left, .top = origin_y + 4, .right = left + 112, .bottom = origin_y + Tokens.tab_bar_height - 4 };
+    const left = origin_x + Tokens.tab_bar_inset +
+        @as(i32, @intCast(index)) * (Tokens.tab_min_width + Tokens.tab_gap);
+    const top = origin_y + Tokens.tab_bar_vertical_padding;
+    return .{ .left = left, .top = top, .right = left + Tokens.tab_min_width, .bottom = top + Tokens.tab_pill_height };
 }
 
 fn tabActionForBounds(origin_x: i32, origin_y: i32, index: usize, x: i32, y: i32) ?TabAction {
     const bounds = tabBounds(origin_x, origin_y, index);
     if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom) return null;
-    if (x >= bounds.right - 24) return .close;
+    if (x >= bounds.right - Tokens.tab_control_width) return .close;
     return .select;
 }
 
@@ -377,6 +389,8 @@ pub const Surface = struct {
     last_resize_size: ?GridSize = null,
     attempted_resize_size: ?GridSize = null,
     pending_resize_size: ?GridSize = null,
+    resize_retry_count: u8 = 0,
+    resize_retry_due_ms: i64 = 0,
     // Counts batches whose cell, accessibility, and redraw publication calls all succeeded.
     output_events: usize = 0,
     output_result: TerminalOutputResult = .{},
@@ -449,6 +463,11 @@ pub const Surface = struct {
         self.input_bytes = 0;
         self.output_events = 0;
         self.output_result = .{};
+        self.last_resize_size = null;
+        self.attempted_resize_size = null;
+        self.pending_resize_size = null;
+        self.resize_retry_count = 0;
+        self.resize_retry_due_ms = 0;
     }
 
     /// Forgets every selection of this surface, the mouse's and the accessibility layer's.
@@ -2176,15 +2195,16 @@ pub const Workspace = struct {
             self.layout_origin_x,
             self.layout_origin_y,
             self.layout_width,
+            self.dpi,
             x,
             y,
         );
     }
 
     pub fn tabActionAt(self: *const Workspace, x: i32, y: i32) ?struct { index: usize, action: TabAction } {
-        if (y < self.layout_origin_y or y >= self.layout_origin_y + Tokens.tab_bar_height) return null;
-        const controls_left = self.chromeControlsLeft();
-        if (x < self.layout_origin_x or x >= controls_left) return null;
+        if (y < self.layout_origin_y or y >= self.layout_origin_y + Dpi.scale(Tokens.tab_bar_height, self.dpi)) return null;
+        const tabs_right = self.tabsRight();
+        if (x < self.layout_origin_x or x >= tabs_right) return null;
         for (0..self.layout.tabs.items.len) |index| {
             const bounds = self.visibleTabBounds(index) orelse continue;
             if (x < bounds.left or x >= bounds.right or y < bounds.top or y >= bounds.bottom) continue;
@@ -2202,16 +2222,29 @@ pub const Workspace = struct {
     }
 
     fn chromeControlsLeft(self: *const Workspace) i32 {
-        return @max(self.layout_origin_x, self.layout_origin_x + self.layout_width - 220);
+        return chromeControlBounds(
+            self.layout_origin_x,
+            self.layout_origin_y,
+            self.layout_width,
+            self.dpi,
+            0,
+        ).left;
+    }
+
+    fn tabsRight(self: *const Workspace) i32 {
+        return @max(
+            self.layout_origin_x,
+            self.chromeControlsLeft() - Dpi.scale(Tokens.tab_controls_gap, self.dpi),
+        );
     }
 
     pub fn visibleTabBounds(self: *const Workspace, index: usize) ?c.RECT {
         if (self.collapsed or index >= self.layout.tabs.items.len) return null;
-        const inset = Dpi.scale(8, self.dpi);
-        const gap = Dpi.scale(4, self.dpi);
-        const available = self.chromeControlsLeft() - self.layout_origin_x - 2 * inset;
+        const inset = Dpi.scale(Tokens.tab_bar_inset, self.dpi);
+        const gap = Dpi.scale(Tokens.tab_gap, self.dpi);
+        const available = self.tabsRight() - self.layout_origin_x - 2 * inset;
         if (available <= 0) return null;
-        const capacity: usize = @intCast(@max(1, @divTrunc(available + gap, Dpi.scale(92, self.dpi) + gap)));
+        const capacity: usize = @intCast(@max(1, @divTrunc(available + gap, Dpi.scale(Tokens.tab_min_width, self.dpi) + gap)));
         const count = @min(self.layout.tabs.items.len, capacity);
         const selected = @min(self.layout.selected_tab, self.layout.tabs.items.len - 1);
         const first = if (selected >= count) selected - count + 1 else 0;
@@ -2221,13 +2254,14 @@ pub const Workspace = struct {
         const content = available - gap * (visible_count - 1);
         const left = self.layout_origin_x + inset + @divTrunc(content * position, visible_count) + gap * position;
         const right = self.layout_origin_x + inset + @divTrunc(content * (position + 1), visible_count) + gap * position;
-        return .{ .left = left, .top = self.layout_origin_y + 4, .right = right, .bottom = self.layout_origin_y + Tokens.tab_bar_height - 4 };
+        const top = self.layout_origin_y + Dpi.scale(Tokens.tab_bar_vertical_padding, self.dpi);
+        return .{ .left = left, .top = top, .right = right, .bottom = top + Dpi.scale(Tokens.tab_pill_height, self.dpi) };
     }
 
     pub fn tabCloseBounds(self: *const Workspace, index: usize) ?c.RECT {
         const bounds = self.visibleTabBounds(index) orelse return null;
         if (bounds.right - bounds.left < Dpi.scale(40, self.dpi)) return null;
-        return .{ .left = @max(bounds.left, bounds.right - Dpi.scale(24, self.dpi)), .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
+        return .{ .left = @max(bounds.left, bounds.right - Dpi.scale(Tokens.tab_control_width, self.dpi)), .top = bounds.top, .right = bounds.right, .bottom = bounds.bottom };
     }
 
     pub fn tabChrome(self: *const Workspace, index: usize) ?TabChrome {
@@ -2252,13 +2286,20 @@ pub const Workspace = struct {
         const has_agent = for (tab.panes.items) |pane| {
             if (pane.launches_agent) break true;
         } else false;
-        if (has_agent and self.agent_tab_state != .quiet and chrome.title.right - chrome.title.left >= 16) {
-            chrome.indicator = .{ .left = chrome.title.left, .top = bounds.top + 8, .right = chrome.title.left + 5, .bottom = bounds.top + 13 };
-            chrome.title.left += 11;
+        if (has_agent and self.agent_tab_state != .quiet and chrome.title.right - chrome.title.left >= Dpi.scale(16, self.dpi)) {
+            const indicator_size = Dpi.scale(5, self.dpi);
+            const indicator_top = @divTrunc(bounds.top + bounds.bottom - indicator_size, 2);
+            chrome.indicator = .{
+                .left = chrome.title.left,
+                .top = indicator_top,
+                .right = chrome.title.left + indicator_size,
+                .bottom = indicator_top + indicator_size,
+            };
+            chrome.title.left += Dpi.scale(11, self.dpi);
         }
-        if (has_agent and self.agent_tab_state == .asks and chrome.title.right - chrome.title.left >= 80) {
-            chrome.asks = .{ .left = chrome.title.right - 26, .top = bounds.top, .right = chrome.title.right, .bottom = bounds.bottom };
-            chrome.title.right -= 32;
+        if (has_agent and self.agent_tab_state == .asks and chrome.title.right - chrome.title.left >= Dpi.scale(80, self.dpi)) {
+            chrome.asks = .{ .left = chrome.title.right - Dpi.scale(26, self.dpi), .top = bounds.top, .right = chrome.title.right, .bottom = bounds.bottom };
+            chrome.title.right -= Dpi.scale(32, self.dpi);
         }
         return chrome;
     }
@@ -2273,6 +2314,7 @@ pub const Workspace = struct {
             self.layout_origin_y,
             self.layout_width,
             self.layout_height,
+            self.dpi,
             tab.split_direction,
             position,
             tab.panes.items.len,
@@ -2281,7 +2323,7 @@ pub const Workspace = struct {
         return .{
             .bounds = .{
                 .left = bounds.x,
-                .top = bounds.y - Tokens.pane_header_height,
+                .top = bounds.y - Dpi.scale(Tokens.pane_header_height, self.dpi),
                 .right = bounds.x + @as(i32, @intCast(bounds.width)),
                 .bottom = bounds.y,
             },
@@ -2310,43 +2352,44 @@ pub const Workspace = struct {
             .left = self.layout_origin_x,
             .top = self.layout_origin_y,
             .right = self.layout_origin_x + self.layout_width,
-            .bottom = self.layout_origin_y + Tokens.tab_bar_height,
+            .bottom = self.layout_origin_y + Dpi.scale(Tokens.tab_bar_height, self.dpi),
         };
+        const hairline = Dpi.scale(1, self.dpi);
 
         fillRect(hdc, tab_bar, Tokens.workspace_rail);
         // Theme.tabBarGloss painted over the strip, lit from above; approximated as a
         // vertical GradientFill (see Tokens.tab_bar_gloss_top/_bottom).
         GdiGradient.fillVertical(hdc, tab_bar, Tokens.tab_bar_gloss_top, Tokens.tab_bar_gloss_bottom);
         // Theme.tabBarHighlight -- the one-point specular line along the strip's top edge.
-        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.top, .right = tab_bar.right, .bottom = tab_bar.top + 1 }, Tokens.tab_bar_highlight);
+        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.top, .right = tab_bar.right, .bottom = tab_bar.top + hairline }, Tokens.tab_bar_highlight);
         for (self.layout.tabs.items, 0..) |_, index| {
             const chrome = self.tabChrome(index) orelse continue;
             const bounds = chrome.bounds;
             const style = tabChromeStyle(index == self.layout.selected_tab);
-            if (style.background) |background| fillRoundedRect(hdc, bounds, background, 6, null);
+            if (style.background) |background| fillRoundedRectForDpi(hdc, bounds, background, Dpi.scale(6, self.dpi), null, self.dpi);
             if (chrome.indicator) |indicator| {
                 const color: u32 = if (self.agent_tab_state == .running) 0x00FF840A else 0x000A9FFF;
-                paintChromeDot(hdc, indicator, color, style.background orelse Tokens.tab_bar_gloss_bottom, self.agent_tab_state == .needs_you);
+                paintChromeDotForDpi(hdc, indicator, color, style.background orelse Tokens.tab_bar_gloss_bottom, self.agent_tab_state == .needs_you, self.dpi);
             }
-            if (chrome.asks) |asks| drawChromeText(hdc, "asks", asks, 9.5, .card_mono, 0x000A9FFF);
-            if (chrome.title.right > chrome.title.left) drawChromeText(hdc, self.tabTitle(index).?, chrome.title, 12, style.font, style.ink);
-            if (chrome.show_close) drawChromeText(hdc, "x", .{
-                .left = @max(bounds.left, bounds.right - 17),
+            if (chrome.asks) |asks| drawChromeTextForDpi(hdc, "asks", asks, 9.5, .card_mono, 0x000A9FFF, self.dpi);
+            if (chrome.title.right > chrome.title.left) drawChromeTextForDpi(hdc, self.tabTitle(index).?, chrome.title, 12, style.font, style.ink, self.dpi);
+            if (chrome.show_close) drawChromeTextForDpi(hdc, "x", .{
+                .left = @max(bounds.left, bounds.right - Dpi.scale(17, self.dpi)),
                 .top = bounds.top,
-                .right = bounds.right - 5,
+                .right = bounds.right - Dpi.scale(5, self.dpi),
                 .bottom = bounds.bottom,
-            }, 10, .semibold, 0x00999999);
-            if (chrome.shortcut) |value| drawChromeText(hdc, value, chrome.trailing.?, 10, .card_mono, 0x007E7E85);
+            }, 10, .semibold, 0x00999999, self.dpi);
+            if (chrome.shortcut) |value| drawChromeTextForDpi(hdc, value, chrome.trailing.?, 10, .card_mono, 0x007E7E85, self.dpi);
         }
-        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.bottom - 1, .right = tab_bar.right, .bottom = tab_bar.bottom }, Tokens.tab_bar_shadow_line);
+        fillRect(hdc, .{ .left = tab_bar.left, .top = tab_bar.bottom - hairline, .right = tab_bar.right, .bottom = tab_bar.bottom }, Tokens.tab_bar_shadow_line);
         for (0..3) |index| {
-            const bounds = chromeControlBounds(self.layout_origin_x, self.layout_origin_y, self.layout_width, index);
-            fillRoundedRect(hdc, bounds, Tokens.control_gloss_bottom, 5, Tokens.control_border);
-            paintChromeGlyph(hdc, bounds, chromeGlyph(index));
+            const bounds = chromeControlBounds(self.layout_origin_x, self.layout_origin_y, self.layout_width, self.dpi, index);
+            fillRoundedRectForDpi(hdc, bounds, Tokens.control_gloss_bottom, Dpi.scale(5, self.dpi), Tokens.control_border, self.dpi);
+            paintChromeGlyph(hdc, bounds, chromeGlyph(index), self.dpi);
         }
         const selected = self.layout.selectedConst() orelse return;
         for (selected.panes.items, 0..) |_, position|
-            if (self.paneHeaderChrome(position)) |header| paintPaneHeader(hdc, header);
+            if (self.paneHeaderChrome(position)) |header| paintPaneHeader(hdc, header, self.dpi);
     }
 
     pub fn paintLoopBar(
@@ -2580,6 +2623,7 @@ pub const Workspace = struct {
                     self.layout_origin_y,
                     self.layout_width,
                     self.layout_height,
+                    self.dpi,
                     selected.split_direction,
                     position,
                     pane_count,
@@ -2642,6 +2686,7 @@ pub const Workspace = struct {
                 self.layout_origin_y,
                 self.layout_width,
                 self.layout_height,
+                self.dpi,
                 tab.split_direction,
                 position,
                 tab.panes.items.len,
@@ -2657,6 +2702,7 @@ pub const Workspace = struct {
             self.layout_origin_y,
             self.layout_width,
             self.layout_height,
+            self.dpi,
             .horizontal,
             0,
             1,
@@ -2673,6 +2719,7 @@ pub const Workspace = struct {
             self.layout_origin_y,
             self.layout_width,
             self.layout_height,
+            self.dpi,
             direction,
             position,
             count,
@@ -2968,6 +3015,7 @@ pub const Workspace = struct {
     pub fn destroySurface(self: *Workspace, index: usize) void {
         if (index >= self.surfaces.len) return;
         const slot = &self.surfaces[index];
+        if (self.resizeTargetsSurface(index)) self.stopResizeChild();
         slot.destroying = true;
         self.releaseDeliveredMouse(index);
         self.waitAttach(index);
@@ -2986,6 +3034,14 @@ pub const Workspace = struct {
             slot.project_path = &.{};
         }
         self.resetSessionState(index);
+    }
+
+    fn resizeTargetsSurface(self: *const Workspace, index: usize) bool {
+        if (index >= self.surfaces.len) return false;
+        if (self.resize_child_surface == index) return true;
+        const session = self.surfaces[index].session_name;
+        return session.len != 0 and self.resize_child_session.len != 0 and
+            std.mem.eql(u8, session, self.resize_child_session);
     }
 
     /// The part of a surface's teardown that runs while its attach is still alive: drops the
@@ -3275,16 +3331,33 @@ pub const Workspace = struct {
             if (c.GetExitCodeProcess(child.id, &exit_code) == 0) {
                 _ = child.kill() catch {};
                 _ = child.wait() catch {};
-                self.finishResizeControl(false, "terminal PTY resize status unavailable");
+                self.finishResizeControl(false, false, "terminal PTY resize status unavailable");
             } else if (exit_code != c.STILL_ACTIVE) {
+                const stderr = if (child.stderr) |stream|
+                    stream.readToEndAlloc(self.allocator, 4096) catch &.{}
+                else
+                    &.{};
+                defer if (stderr.len != 0) self.allocator.free(stderr);
                 _ = child.wait() catch {};
-                self.finishResizeControl(exit_code == 0, "terminal PTY resize command failed");
+                if (exit_code != 0) {
+                    const size = self.resize_child_size orelse GridSize{ .cols = 0, .rows = 0 };
+                    std.log.err(
+                        "terminal PTY resize failed session={s} cols={d} rows={d} exit={d} stderr={s}",
+                        .{ self.resize_child_session, size.cols, size.rows, exit_code, stderr },
+                    );
+                }
+                const retryable = exit_code != 0 and
+                    (std.mem.indexOf(u8, stderr, "ConnectionRefused") != null or
+                        std.mem.indexOf(u8, stderr, "FILE_NOT_FOUND") != null);
+                self.finishResizeControl(exit_code == 0, retryable, "terminal PTY resize command failed");
             }
         }
         if (self.resize_child != null) return;
+        const now_ms = std.time.milliTimestamp();
         for (&self.surfaces, 0..) |*slot, index| {
             const size = slot.pending_resize_size orelse continue;
             if (slot.attach == null or slot.surface == null) continue;
+            if (now_ms < slot.resize_retry_due_ms) continue;
             var args: [4][]const u8 = undefined;
             var size_buffer: [16]u8 = undefined;
             var session_buffer: [ZmxSession.prefix.len + 128]u8 = undefined;
@@ -3324,7 +3397,7 @@ pub const Workspace = struct {
         }
     }
 
-    fn finishResizeControl(self: *Workspace, succeeded: bool, failure_message: []const u8) void {
+    fn finishResizeControl(self: *Workspace, succeeded: bool, retryable: bool, failure_message: []const u8) void {
         const index = self.resize_child_surface orelse max_surfaces;
         const size = self.resize_child_size;
         if (index < self.surfaces.len and size != null and
@@ -3337,8 +3410,17 @@ pub const Workspace = struct {
             if (succeeded) {
                 slot.last_resize_size = size;
                 slot.attempted_resize_size = null;
+                slot.resize_retry_count = 0;
+                slot.resize_retry_due_ms = 0;
+            } else if (retryable and slot.surface != null and !slot.destroying and
+                slot.resize_retry_count < 5)
+            {
+                slot.resize_retry_count += 1;
+                slot.resize_retry_due_ms = std.time.milliTimestamp() + 100;
+                slot.pending_resize_size = size;
             } else {
                 slot.attempted_resize_size = size;
+                slot.resize_retry_due_ms = 0;
                 self.setInputError(failure_message);
             }
         } else if (!succeeded) {
@@ -7462,12 +7544,20 @@ fn nativeRect(bounds: LoopBarLayout.Rect) c.RECT {
 }
 
 fn fillRoundedRect(hdc: c.HDC, bounds: c.RECT, color: u32, radius: i32, border: ?u32) void {
+    fillRoundedRectWithPenWidth(hdc, bounds, color, radius, border, 1);
+}
+
+fn fillRoundedRectForDpi(hdc: c.HDC, bounds: c.RECT, color: u32, radius: i32, border: ?u32, dpi: u32) void {
+    fillRoundedRectWithPenWidth(hdc, bounds, color, radius, border, Dpi.scale(1, dpi));
+}
+
+fn fillRoundedRectWithPenWidth(hdc: c.HDC, bounds: c.RECT, color: u32, radius: i32, border: ?u32, pen_width: i32) void {
     const brush = c.CreateSolidBrush(color) orelse {
         std.log.warn("Unable to create workspace chrome brush", .{});
         return;
     };
     defer _ = c.DeleteObject(brush);
-    const pen = c.CreatePen(c.PS_SOLID, 1, border orelse color) orelse {
+    const pen = c.CreatePen(c.PS_SOLID, pen_width, border orelse color) orelse {
         std.log.warn("Unable to create workspace chrome pen", .{});
         return;
     };
@@ -7507,8 +7597,8 @@ fn chromeLine(hdc: c.HDC, x1: i32, y1: i32, x2: i32, y2: i32) void {
         std.log.warn("Unable to paint workspace chrome glyph", .{});
 }
 
-fn paintChromeGlyph(hdc: c.HDC, bounds: c.RECT, glyph: ChromeGlyph) void {
-    const pen = c.CreatePen(c.PS_SOLID, 1, 0x00D8D8D8) orelse {
+fn paintChromeGlyph(hdc: c.HDC, bounds: c.RECT, glyph: ChromeGlyph, dpi: u32) void {
+    const pen = c.CreatePen(c.PS_SOLID, Dpi.scale(1, dpi), 0x00D8D8D8) orelse {
         std.log.warn("Unable to create workspace glyph pen", .{});
         return;
     };
@@ -7521,16 +7611,24 @@ fn paintChromeGlyph(hdc: c.HDC, bounds: c.RECT, glyph: ChromeGlyph) void {
     const y = @divTrunc(bounds.top + bounds.bottom, 2);
     switch (glyph) {
         .new_tab => {
-            chromeLine(hdc, x - 5, y, x + 6, y);
-            chromeLine(hdc, x, y - 5, x, y + 6);
+            chromeLine(hdc, x - Dpi.scale(5, dpi), y, x + Dpi.scale(6, dpi), y);
+            chromeLine(hdc, x, y - Dpi.scale(5, dpi), x, y + Dpi.scale(6, dpi));
         },
         .split_right, .split_down => {
-            if (c.RoundRect(hdc, x - 7, y - 5, x + 8, y + 6, 3, 3) == 0)
+            if (c.RoundRect(
+                hdc,
+                x - Dpi.scale(7, dpi),
+                y - Dpi.scale(5, dpi),
+                x + Dpi.scale(8, dpi),
+                y + Dpi.scale(6, dpi),
+                Dpi.scale(3, dpi),
+                Dpi.scale(3, dpi),
+            ) == 0)
                 std.log.warn("Unable to paint workspace split glyph", .{});
             if (glyph == .split_right)
-                chromeLine(hdc, x, y - 5, x, y + 6)
+                chromeLine(hdc, x, y - Dpi.scale(5, dpi), x, y + Dpi.scale(6, dpi))
             else
-                chromeLine(hdc, x - 7, y, x + 8, y);
+                chromeLine(hdc, x - Dpi.scale(7, dpi), y, x + Dpi.scale(8, dpi), y);
         },
     }
 }
@@ -7543,50 +7641,63 @@ const PaneHeaderChrome = struct {
 };
 const pane_focus_hint = "Ctrl+Shift+] to focus";
 
-fn paintPaneHeader(hdc: c.HDC, header: PaneHeaderChrome) void {
+fn paintPaneHeader(hdc: c.HDC, header: PaneHeaderChrome, dpi: u32) void {
     const bounds = header.bounds;
     const background = blendChromeColor(if (header.focused) Tokens.pane_focus_tint else 0x00FFFFFF, Tokens.window_tone, if (header.focused) 10 else 3);
     fillRect(hdc, bounds, background);
-    if (bounds.right - bounds.left < 24) return;
-    paintChromeDot(hdc, .{ .left = bounds.left + 8, .top = bounds.top + 8, .right = bounds.left + 13, .bottom = bounds.top + 13 }, if (header.focused) Tokens.pane_focus_tint else blendChromeColor(0x00FFFFFF, background, 30), background, false);
-    drawChromeText(hdc, header.title, .{
-        .left = bounds.left + 19,
+    if (bounds.right - bounds.left < Dpi.scale(24, dpi)) return;
+    paintChromeDotForDpi(hdc, .{
+        .left = bounds.left + Dpi.scale(8, dpi),
+        .top = bounds.top + Dpi.scale(8, dpi),
+        .right = bounds.left + Dpi.scale(13, dpi),
+        .bottom = bounds.top + Dpi.scale(13, dpi),
+    }, if (header.focused) Tokens.pane_focus_tint else blendChromeColor(0x00FFFFFF, background, 30), background, false, dpi);
+    drawChromeTextForDpi(hdc, header.title, .{
+        .left = bounds.left + Dpi.scale(19, dpi),
         .top = bounds.top,
-        .right = @min(bounds.left + 62, bounds.right - 8),
+        .right = @min(bounds.left + Dpi.scale(62, dpi), bounds.right - Dpi.scale(8, dpi)),
         .bottom = bounds.bottom,
-    }, 10.5, .semibold, if (header.focused) blendChromeColor(0x00FFC58C, background, 90) else blendChromeColor(0x00FFFFFF, background, 45));
+    }, 10.5, .semibold, if (header.focused) blendChromeColor(0x00FFC58C, background, 90) else blendChromeColor(0x00FFFFFF, background, 45), dpi);
     if (header.focused) {
-        drawChromeText(hdc, "focused", .{
-            .left = bounds.left + 65,
+        drawChromeTextForDpi(hdc, "focused", .{
+            .left = bounds.left + Dpi.scale(65, dpi),
             .top = bounds.top,
-            .right = @min(bounds.left + 122, bounds.right - 8),
+            .right = @min(bounds.left + Dpi.scale(122, dpi), bounds.right - Dpi.scale(8, dpi)),
             .bottom = bounds.bottom,
-        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35));
-        if (header.detail.len != 0 and bounds.right - bounds.left >= 180) {
-            drawChromeText(hdc, header.detail, .{
-                .left = @max(bounds.left + 128, bounds.right - 128),
+        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
+        if (header.detail.len != 0 and bounds.right - bounds.left >= Dpi.scale(180, dpi)) {
+            drawChromeTextForDpi(hdc, header.detail, .{
+                .left = @max(bounds.left + Dpi.scale(128, dpi), bounds.right - Dpi.scale(128, dpi)),
                 .top = bounds.top,
-                .right = bounds.right - 8,
+                .right = bounds.right - Dpi.scale(8, dpi),
                 .bottom = bounds.bottom,
-            }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35));
+            }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
         }
-    } else if (bounds.right - bounds.left >= 240) {
-        drawChromeText(hdc, pane_focus_hint, .{
-            .left = bounds.right - 144,
+    } else if (bounds.right - bounds.left >= Dpi.scale(240, dpi)) {
+        drawChromeTextForDpi(hdc, pane_focus_hint, .{
+            .left = bounds.right - Dpi.scale(144, dpi),
             .top = bounds.top,
-            .right = bounds.right - 8,
+            .right = bounds.right - Dpi.scale(8, dpi),
             .bottom = bounds.bottom,
-        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35));
+        }, 9.5, .card_mono, blendChromeColor(0x00FFFFFF, background, 35), dpi);
     }
 }
 
 fn paintChromeDot(hdc: c.HDC, bounds: c.RECT, tint: u32, background: u32, hollow: bool) void {
+    paintChromeDotWithPenWidth(hdc, bounds, tint, background, hollow, 1);
+}
+
+fn paintChromeDotForDpi(hdc: c.HDC, bounds: c.RECT, tint: u32, background: u32, hollow: bool, dpi: u32) void {
+    paintChromeDotWithPenWidth(hdc, bounds, tint, background, hollow, Dpi.scale(1, dpi));
+}
+
+fn paintChromeDotWithPenWidth(hdc: c.HDC, bounds: c.RECT, tint: u32, background: u32, hollow: bool, pen_width: i32) void {
     const brush = c.CreateSolidBrush(if (hollow) background else tint) orelse {
         std.log.warn("Unable to create workspace indicator brush", .{});
         return;
     };
     defer _ = c.DeleteObject(brush);
-    const pen = c.CreatePen(c.PS_SOLID, 1, tint) orelse {
+    const pen = c.CreatePen(c.PS_SOLID, pen_width, tint) orelse {
         std.log.warn("Unable to create workspace indicator pen", .{});
         return;
     };
@@ -7606,6 +7717,11 @@ fn selectChromeFont(hdc: c.HDC, size: f32, style: AppFont.Style) !c.HGDIOBJ {
     return c.SelectObject(hdc, font) orelse error.WorkspaceFontSelectionFailed;
 }
 
+fn selectChromeFontForDpi(hdc: c.HDC, size: f32, style: AppFont.Style, dpi: u32) !c.HGDIOBJ {
+    const font = AppFont.getStyleForDpi(size, style, dpi) orelse return error.WorkspaceFontUnavailable;
+    return c.SelectObject(hdc, font) orelse error.WorkspaceFontSelectionFailed;
+}
+
 fn chromeTextWidth(hdc: c.HDC, text: []const u8, size: f32, style: AppFont.Style) !i32 {
     const wide = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text);
     defer std.heap.page_allocator.free(wide);
@@ -7618,6 +7734,14 @@ fn chromeTextWidth(hdc: c.HDC, text: []const u8, size: f32, style: AppFont.Style
 }
 
 fn drawChromeText(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32) void {
+    drawChromeTextWithFont(hdc, text, bounds, size, style, color, Dpi.base_dpi);
+}
+
+fn drawChromeTextForDpi(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, dpi: u32) void {
+    drawChromeTextWithFont(hdc, text, bounds, size, style, color, dpi);
+}
+
+fn drawChromeTextWithFont(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style: AppFont.Style, color: u32, dpi: u32) void {
     if (text.len == 0 or bounds.right <= bounds.left or bounds.bottom <= bounds.top) return;
     const wide = std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, text) catch |err| {
         std.log.warn("Unable to prepare workspace text: {s}", .{@errorName(err)});
@@ -7628,7 +7752,7 @@ fn drawChromeText(hdc: c.HDC, text: []const u8, bounds: c.RECT, size: f32, style
         std.log.warn("Workspace text exceeds native text length", .{});
         return;
     };
-    const old_font = selectChromeFont(hdc, size, style) catch |err| {
+    const old_font = selectChromeFontForDpi(hdc, size, style, dpi) catch |err| {
         std.log.warn("Unable to select workspace text font: {s}", .{@errorName(err)});
         return;
     };
@@ -7963,11 +8087,21 @@ test "bounded input write rejects an invalid attach without blocking" {
 }
 
 test "workspace chrome actions occupy distinct visible buttons" {
-    try std.testing.expectEqual(ChromeAction.split_right, chromeActionForBounds(220, 34, 800, 804, 44).?);
-    try std.testing.expectEqual(ChromeAction.split_down, chromeActionForBounds(220, 34, 800, 876, 44).?);
-    try std.testing.expectEqual(ChromeAction.new_tab, chromeActionForBounds(220, 34, 800, 948, 44).?);
-    try std.testing.expect(chromeActionForBounds(220, 34, 800, 868, 44) == null);
-    try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, 700, 44));
+    for ([_]ChromeAction{ .split_right, .split_down, .new_tab }, 0..) |expected, index| {
+        const bounds = chromeControlBounds(220, 34, 800, Dpi.base_dpi, index);
+        try std.testing.expectEqual(
+            expected,
+            chromeActionForBounds(
+                220,
+                34,
+                800,
+                Dpi.base_dpi,
+                @divTrunc(bounds.left + bounds.right, 2),
+                @divTrunc(bounds.top + bounds.bottom, 2),
+            ).?,
+        );
+    }
+    try std.testing.expectEqual(@as(?ChromeAction, null), chromeActionForBounds(220, 34, 800, Dpi.base_dpi, 700, 44));
 }
 
 test "workspace chrome hidden partial tabs have no hit target" {
@@ -7983,7 +8117,7 @@ test "workspace chrome hidden partial tabs have no hit target" {
         .project_key = &.{},
         .layout_origin_x = 220,
         .layout_origin_y = 80,
-        .layout_width = 420,
+        .layout_width = 220,
     };
     defer workspace.layout.deinit();
     try workspace.layout.addTab("agent", true);
@@ -8000,7 +8134,7 @@ test "workspace chrome vertical splits reserve a header above every terminal" {
     for ([_]usize{ 2, 3, 4 }) |count| {
         var previous_bottom: i32 = 20 + Tokens.tab_bar_height;
         for (0..count) |position| {
-            const bounds = paneBounds(10, 20, 801, 401, .vertical, position, count);
+            const bounds = paneBounds(10, 20, 801, 401, Dpi.base_dpi, .vertical, position, count);
             try std.testing.expect(bounds.width > 0 and bounds.height > 0);
             try std.testing.expectEqual(previous_bottom, bounds.y - Tokens.pane_header_height);
             previous_bottom = bounds.y + @as(i32, @intCast(bounds.height));
@@ -8042,6 +8176,79 @@ test "workspace chrome selected tab is the only filled semibold pill" {
     try std.testing.expect(chrome_text_format & c.DT_NOPREFIX != 0);
     try std.testing.expect(chrome_text_format & c.DT_END_ELLIPSIS != 0);
     try std.testing.expect(chrome_text_format & c.DT_VCENTER != 0);
+}
+
+test "workspace terminal chrome keeps mac logical density at every DPI and expands twelve tabs at 1508" {
+    const allocator = std.testing.allocator;
+    for ([_]u32{ 192, 144, 96 }) |dpi| {
+        var workspace = Workspace{
+            .parent = null,
+            .allocator = allocator,
+            .zmx_path = &.{},
+            .cwd = &.{},
+            .input_queue = .{ .allocator = allocator },
+            .layout = try WorkspaceLayout.Layout.init(allocator, "chrome-density"),
+            .layout_path = &.{},
+            .project_key = &.{},
+            .layout_origin_x = Dpi.scale(Tokens.sidebar_width, dpi),
+            .layout_origin_y = Dpi.scale(Tokens.header_height + Tokens.loop_bar_height, dpi),
+            .layout_width = Dpi.scale(1440 - Tokens.sidebar_width, dpi),
+            .layout_height = Dpi.scale(700, dpi),
+            .dpi = dpi,
+        };
+        defer workspace.layout.deinit();
+        for (0..12) |index| {
+            var id: [32]u8 = undefined;
+            try workspace.layout.addTab(try std.fmt.bufPrint(&id, "shell-{d}", .{index}), false);
+        }
+
+        try workspace.layout.selectTab(0);
+        const first = workspace.visibleTabBounds(0).?;
+        try std.testing.expectEqual(Dpi.scale(25, dpi), first.bottom - first.top);
+        try std.testing.expectEqual(Dpi.scale(24, dpi), workspace.tabCloseBounds(0).?.right - workspace.tabCloseBounds(0).?.left);
+        try std.testing.expectEqual(Dpi.scale(22, dpi), workspace.paneHeaderChrome(0).?.bounds.bottom - workspace.paneHeaderChrome(0).?.bounds.top);
+        const control = chromeControlBounds(
+            workspace.layout_origin_x,
+            workspace.layout_origin_y,
+            workspace.layout_width,
+            dpi,
+            0,
+        );
+        try std.testing.expectEqual(Dpi.scale(24, dpi), control.right - control.left);
+        try std.testing.expectEqual(Dpi.scale(22, dpi), control.bottom - control.top);
+        const pane = paneBounds(
+            workspace.layout_origin_x,
+            workspace.layout_origin_y,
+            workspace.layout_width,
+            workspace.layout_height,
+            dpi,
+            .horizontal,
+            0,
+            1,
+        );
+        try std.testing.expectEqual(
+            Dpi.scale(Tokens.tab_bar_height + Tokens.pane_header_height, dpi),
+            pane.y - workspace.layout_origin_y,
+        );
+        try std.testing.expectEqual(
+            @as(u32, @intCast(workspace.layout_height - Dpi.scale(Tokens.tab_bar_height + Tokens.pane_header_height, dpi))),
+            pane.height,
+        );
+        try std.testing.expect(workspace.tabActionAt(first.left, workspace.layout_origin_y + Dpi.scale(Tokens.tab_bar_height, dpi)) == null);
+
+        var visible_at_1440: usize = 0;
+        for (0..workspace.tabCount()) |index| {
+            if (workspace.visibleTabBounds(index) != null) visible_at_1440 += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 11), visible_at_1440);
+
+        workspace.layout_width = Dpi.scale(1508 - Tokens.sidebar_width, dpi);
+        var visible_at_1508: usize = 0;
+        for (0..workspace.tabCount()) |index| {
+            if (workspace.visibleTabBounds(index) != null) visible_at_1508 += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 12), visible_at_1508);
+    }
 }
 
 test "lane 9 tab pills share available content width rather than a fixed 112 pixels" {
@@ -8195,7 +8402,7 @@ test "lane 9 tab content shortcut close and overflow geometry agree at narrow an
                 try workspace.layout.selectTab(selected);
                 const selected_bounds = workspace.visibleTabBounds(selected);
                 if (selected_bounds == null) {
-                    try std.testing.expect(workspace.chromeControlsLeft() - workspace.layout_origin_x <= 2 * Dpi.scale(8, dpi));
+                    try std.testing.expect(workspace.tabsRight() - workspace.layout_origin_x <= 2 * Dpi.scale(Tokens.tab_bar_inset, dpi));
                     continue;
                 }
                 var visible: usize = 0;
@@ -8249,12 +8456,12 @@ test "lane 9 tab content shortcut close and overflow geometry agree at narrow an
 
 test "workspace chrome split glyphs retain their existing action columns" {
     for ([_]ChromeGlyph{ .split_right, .split_down, .new_tab }, 0..) |glyph, index| {
-        const bounds = chromeControlBounds(220, 80, 800, index);
+        const bounds = chromeControlBounds(220, 80, 800, Dpi.base_dpi, index);
         try std.testing.expectEqual(glyph, chromeGlyph(index));
-        const action = chromeActionForBounds(220, 80, 800, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2)).?;
+        const action = chromeActionForBounds(220, 80, 800, Dpi.base_dpi, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2)).?;
         try std.testing.expectEqualStrings(@tagName(glyph), @tagName(action));
     }
-    try std.testing.expect(chromeActionForBounds(220, 80, 100, 400, 90) == null);
+    try std.testing.expect(chromeActionForBounds(220, 80, 100, Dpi.base_dpi, 400, 90) == null);
 }
 
 test "issue 772 workspace chrome matches mac control order and focused backend identity" {
@@ -8282,10 +8489,10 @@ test "issue 772 workspace chrome matches mac control order and focused backend i
     workspace.layout.selected().?.focused_pane = 0;
 
     for ([_]ChromeAction{ .split_right, .split_down, .new_tab }, 0..) |expected, index| {
-        const bounds = chromeControlBounds(220, 80, 800, index);
+        const bounds = chromeControlBounds(220, 80, 800, workspace.dpi, index);
         try std.testing.expectEqual(
             expected,
-            chromeActionForBounds(220, 80, 800, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2)).?,
+            chromeActionForBounds(220, 80, 800, workspace.dpi, @divTrunc(bounds.left + bounds.right, 2), @divTrunc(bounds.top + bounds.bottom, 2)).?,
         );
     }
     const agent = workspace.paneHeaderChrome(0).?;
@@ -8323,7 +8530,7 @@ test "workspace chrome pane headers follow selected layout and focus instead of 
     try std.testing.expectEqual(@as(i32, 620), left.bounds.right);
     try std.testing.expectEqual(left.bounds.right, right.bounds.left);
     try std.testing.expectEqual(@as(i32, 1021), right.bounds.right);
-    try std.testing.expectEqual(@as(i32, 110), left.bounds.top);
+    try std.testing.expectEqual(@as(i32, 117), left.bounds.top);
     try std.testing.expectEqual(@as(i32, Tokens.pane_header_height), left.bounds.bottom - left.bounds.top);
     try std.testing.expect(workspace.paneHeaderChrome(2) == null);
     try workspace.layout.selectTab(0);
@@ -8488,24 +8695,24 @@ test "pane attach and resize commands carry geometry outside terminal input" {
 }
 
 test "pane bounds partition available area without losing remainder pixels" {
-    const left = paneBounds(10, 20, 801, 400, .horizontal, 0, 2);
-    const right = paneBounds(10, 20, 801, 400, .horizontal, 1, 2);
+    const left = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 0, 2);
+    const right = paneBounds(10, 20, 801, 400, Dpi.base_dpi, .horizontal, 1, 2);
     try std.testing.expectEqual(@as(i32, 10), left.x);
     try std.testing.expectEqual(@as(u32, 400), left.width);
     try std.testing.expectEqual(@as(i32, 410), right.x);
     try std.testing.expectEqual(@as(u32, 401), right.width);
-    try std.testing.expectEqual(@as(u32, 348), left.height);
-    try std.testing.expectEqual(@as(u32, 348), right.height);
+    try std.testing.expectEqual(@as(u32, 341), left.height);
+    try std.testing.expectEqual(@as(u32, 341), right.height);
 }
 
 test "pane bounds ignore zero or unavailable client geometry" {
-    const bounds = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    const bounds = paneBounds(0, 0, 0, 0, Dpi.base_dpi, .horizontal, 0, 1);
     try std.testing.expectEqual(@as(u32, 0), bounds.width);
     try std.testing.expectEqual(@as(u32, 0), bounds.height);
-    const no_width = paneBounds(0, 0, 0, 400, .horizontal, 0, 1);
+    const no_width = paneBounds(0, 0, 0, 400, Dpi.base_dpi, .horizontal, 0, 1);
     try std.testing.expectEqual(@as(u32, 0), no_width.width);
     try std.testing.expectEqual(@as(u32, 0), no_width.height);
-    const no_height = paneBounds(0, 0, 480, 0, .horizontal, 0, 1);
+    const no_height = paneBounds(0, 0, 480, 0, Dpi.base_dpi, .horizontal, 0, 1);
     try std.testing.expectEqual(@as(u32, 0), no_height.width);
     try std.testing.expectEqual(@as(u32, 0), no_height.height);
     const no_client_area = paneBounds(
@@ -8513,6 +8720,7 @@ test "pane bounds ignore zero or unavailable client geometry" {
         0,
         480,
         Tokens.tab_bar_height + Tokens.pane_header_height,
+        Dpi.base_dpi,
         .horizontal,
         0,
         1,
@@ -8526,7 +8734,7 @@ test "zero pane geometry leaves the grid and backend resize queue unchanged" {
     defer workspace.layout.deinit();
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
-    const bounds = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    const bounds = paneBounds(0, 0, 0, 0, Dpi.base_dpi, .horizontal, 0, 1);
     workspace.syncPaneGrid(0, bounds, Workspace.resizeSurfaceGridState);
 
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
@@ -8538,7 +8746,7 @@ test "minimize and restore to the same pane size does not queue a resize" {
     defer workspace.layout.deinit();
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
-    const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    const minimized = paneBounds(0, 0, 0, 0, Dpi.base_dpi, .horizontal, 0, 1);
     workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
@@ -8548,6 +8756,7 @@ test "minimize and restore to the same pane size does not queue a resize" {
         0,
         960,
         Tokens.tab_bar_height + Tokens.pane_header_height + 640,
+        Dpi.base_dpi,
         .horizontal,
         0,
         1,
@@ -8563,7 +8772,7 @@ test "minimize and restore to a new pane size queues one resize for the new grid
     defer workspace.layout.deinit();
     defer std.testing.allocator.free(workspace.surfaces[0].cells);
 
-    const minimized = paneBounds(0, 0, 0, 0, .horizontal, 0, 1);
+    const minimized = paneBounds(0, 0, 0, 0, Dpi.base_dpi, .horizontal, 0, 1);
     workspace.syncPaneGrid(0, minimized, Workspace.resizeSurfaceGridState);
     try std.testing.expectEqual(default_grid, workspace.surfaces[0].grid);
     try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
@@ -8573,6 +8782,7 @@ test "minimize and restore to a new pane size queues one resize for the new grid
         0,
         800,
         Tokens.tab_bar_height + Tokens.pane_header_height + 320,
+        Dpi.base_dpi,
         .horizontal,
         0,
         1,
@@ -8649,9 +8859,63 @@ test "pane resize requests coalesce, deduplicate and suppress failed retries" {
     try std.testing.expectEqual(@as(usize, 0), workspace.input_queue.count);
 }
 
+test "surface teardown cancels only its owned PTY resize and preserves later status" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.surfaces[0].session_name = try allocator.dupe(u8, "session-a");
+    workspace.surfaces[1].session_name = try allocator.dupe(u8, "session-b");
+    defer allocator.free(workspace.surfaces[1].session_name);
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = .{ .cols = 120, .rows = 32 };
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+
+    try std.testing.expect(workspace.resizeTargetsSurface(0));
+    try std.testing.expect(!workspace.resizeTargetsSurface(1));
+    try std.testing.expect(!workspace.resizeTargetsSurface(workspace.surfaces.len));
+
+    workspace.destroySurface(0);
+
+    try std.testing.expect(workspace.resize_child == null);
+    try std.testing.expect(workspace.resize_child_surface == null);
+    try std.testing.expect(workspace.resize_child_size == null);
+    try std.testing.expectEqualStrings("", workspace.resize_child_session);
+    try std.testing.expect(workspace.inputStatus("Project relocation is unavailable") == null);
+}
+
+test "PTY resize retries a not-yet-published zmx endpoint and surfaces exhaustion" {
+    const allocator = std.testing.allocator;
+    var workspace = try minimalWorkspaceForOptionsTest(allocator);
+    defer workspace.layout.deinit();
+    workspace.surfaces[0].session_name = try allocator.dupe(u8, "session-a");
+    defer allocator.free(workspace.surfaces[0].session_name);
+    workspace.surfaces[0].surface = @ptrFromInt(1);
+    defer workspace.surfaces[0].surface = null;
+    const size = GridSize{ .cols = 50, .rows = 10 };
+
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = size;
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+    workspace.finishResizeControl(false, true, "terminal PTY resize command failed");
+
+    try std.testing.expectEqual(size, workspace.surfaces[0].pending_resize_size.?);
+    try std.testing.expectEqual(@as(u8, 1), workspace.surfaces[0].resize_retry_count);
+    try std.testing.expect(workspace.surfaces[0].resize_retry_due_ms > 0);
+    try std.testing.expect(workspace.inputStatus("Project relocation is unavailable") == null);
+
+    workspace.surfaces[0].resize_retry_count = 5;
+    workspace.resize_child_surface = 0;
+    workspace.resize_child_size = size;
+    workspace.resize_child_session = try allocator.dupe(u8, "session-a");
+    workspace.finishResizeControl(false, true, "terminal PTY resize command failed");
+
+    try std.testing.expectEqualStrings("terminal PTY resize command failed", workspace.inputStatus("").?);
+    try std.testing.expect(workspace.surfaces[0].pending_resize_size == null);
+}
+
 test "workspace tab chrome separates selection and close affordances" {
     try std.testing.expectEqual(TabAction.select, tabActionForBounds(220, 34, 0, 228, 42).?);
-    try std.testing.expectEqual(TabAction.close, tabActionForBounds(220, 34, 0, 320, 42).?);
+    try std.testing.expectEqual(TabAction.close, tabActionForBounds(220, 34, 0, 319, 42).?);
     try std.testing.expect(tabActionForBounds(220, 34, 0, 340, 42) == null);
 }
 

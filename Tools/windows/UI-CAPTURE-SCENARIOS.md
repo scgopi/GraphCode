@@ -374,6 +374,12 @@ observed UI state, not a `selected` property invented on the daemon's node.
 | `s-tabs-last-guard` | One selected tab; the exact visible close row is retained, while the phase's source-bound `Workspace.canCloseTab()` contract proves that one tab cannot close. Dynamic UIA rows report enabled independently of that product guard, and capture does not attempt the close. |
 | `s-restart-confirmed` | Existing Restart session UIA route against an actual isolated daemon, with same-connection protocol and new owned-attach evidence described below. |
 
+Every matched tab observation records each visible tab's owned UIA bounds in
+physical pixels and the corresponding logical width and height normalized by
+the job's declared DPI. This preserves each baseline phase's observed geometry
+while allowing a corrected DPI192 phase to report its native
+50-physical/25-logical pill without resampling either image.
+
 The adapter requests eighteen scenes for each before/after phase: **36 original
 images**, **22 cmd-only seed lifecycles**, and **two real-daemon Restart scenes**.
 The live transition rehearsal executes the same order and transitions but emits

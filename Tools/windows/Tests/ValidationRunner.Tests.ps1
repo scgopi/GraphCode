@@ -13,7 +13,9 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
             "Test-RetryableUiaError",
             "Test-UpdateBannerClickTarget",
             "Get-DynamicProjectCardSnapshotDecision",
-            "Get-ConnectorDragSnapshotDecision"
+            "Get-ConnectorDragSnapshotDecision",
+            "Get-WorkspaceTabMountDecision",
+            "Get-UiaSelectionEventDecision"
           ))
       }, $true)) { . ([scriptblock]::Create($definition.Extent.Text)) }
   }
@@ -41,6 +43,67 @@ function Test-MultiProjectProtocolContracts([string] $stubSource, [string] $gate
       return $_.Exception.Message
     }
     throw "RED: multi-project expected actual $prefix rejection"
+  }
+  $tab = {
+    param([string] $id, [string] $name, [bool] $selected)
+    return [ordered]@{ automationId = $id; name = $name; selected = $selected }
+  }
+  $initialTab = & $tab "workspace-tab-initial" "Goal" $true
+  $newTab = & $tab "workspace-tab-new" "Shell" $true
+  $initialUnselected = & $tab "workspace-tab-initial" "Goal" $false
+  $newUnselected = & $tab "workspace-tab-new" "Shell" $false
+  Invoke-MultiCase "DPI192 narrow New Tab overflow still proves both mounted stable tabs" {
+    $decision = Get-WorkspaceTabMountDecision `
+      @($initialTab) @($newTab) @($initialUnselected, $newTab) `
+      @($initialTab, $newUnselected) @($initialUnselected, $newTab)
+    Assert-MultiCase ($decision.ready -and $decision.overflowObserved -and
+      $decision.initialId -ceq "workspace-tab-initial" -and
+      $decision.newId -ceq "workspace-tab-new") "narrow mounted-tab round trip was rejected"
+    return "One visible Shell at expanded DPI192 width, then stable Goal/Shell identities after bounded panel collapse and both selection round trips"
+  }
+  Invoke-MultiCase "wide New Tab roster proves the same mounted stable tabs without overflow" {
+    $decision = Get-WorkspaceTabMountDecision `
+      @($initialTab) @($initialUnselected, $newTab) @($initialUnselected, $newTab) `
+      @($initialTab, $newUnselected) @($initialUnselected, $newTab)
+    Assert-MultiCase ($decision.ready -and -not $decision.overflowObserved) `
+      "wide mounted-tab round trip was rejected"
+    return "Two visible tabs before collapse retain the same stable identities and selected roles"
+  }
+  foreach ($case in @(
+      @{ name = "same-id"; after = @(& $tab "workspace-tab-initial" "Shell" $true); mounted = @($initialUnselected, $newTab); first = @($initialTab, $newUnselected); second = @($initialUnselected, $newTab); failure = "new-tab" },
+      @{ name = "missing-mounted-initial"; after = @($newTab); mounted = @($newTab); first = @($initialTab, $newUnselected); second = @($initialUnselected, $newTab); failure = "mounted-pair" },
+      @{ name = "renamed-mounted-initial"; after = @($newTab); mounted = @((& $tab "workspace-tab-initial" "Agent" $false), $newTab); first = @($initialTab, $newUnselected); second = @($initialUnselected, $newTab); failure = "mounted-pair" },
+      @{ name = "initial-switch-did-not-select"; after = @($newTab); mounted = @($initialUnselected, $newTab); first = @($initialUnselected, $newTab); second = @($initialUnselected, $newTab); failure = "initial-switch" },
+      @{ name = "new-switch-changed-id"; after = @($newTab); mounted = @($initialUnselected, $newTab); first = @($initialTab, $newUnselected); second = @($initialUnselected, (& $tab "workspace-tab-replaced" "Shell" $true)); failure = "new-switch" },
+      @{ name = "duplicate-mounted-selection"; after = @($newTab); mounted = @($initialTab, $newTab); first = @($initialTab, $newUnselected); second = @($initialUnselected, $newTab); failure = "mounted-pair" }
+    )) {
+    Invoke-MultiCase "mounted tab refuses permanent $($case.name)" -Negative {
+      $decision = Get-WorkspaceTabMountDecision `
+        @($initialTab) @($case.after) @($case.mounted) @($case.first) @($case.second)
+      Assert-MultiCase (-not $decision.ready -and $decision.failure -ceq $case.failure) `
+        "permanent $($case.name) returned '$($decision.failure)'"
+      return $decision.failure
+    }
+  }
+  Invoke-MultiCase "selection event accepts exactly one stable owned source" {
+    $decision = Get-UiaSelectionEventDecision 1 "worktree-row-safe" "42,7,9" `
+      "worktree-row-safe" "42,7,9"
+    Assert-MultiCase $decision.ready "exact stable selection event was rejected"
+    return "One event, exact automation id, exact runtime id"
+  }
+  foreach ($case in @(
+      @{name="zero";count=0;id="worktree-row-safe";runtime="42,7,9";failure="zero-events"},
+      @{name="duplicate";count=2;id="worktree-row-safe";runtime="42,7,9";failure="duplicate-events"},
+      @{name="wrong-element";count=1;id="worktree-row-foreign";runtime="42,7,9";failure="wrong-automation-id"},
+      @{name="wrong-generation";count=1;id="worktree-row-safe";runtime="42,7,10";failure="wrong-runtime-id"}
+    )) {
+    Invoke-MultiCase "selection event refuses $($case.name)" -Negative {
+      $decision = Get-UiaSelectionEventDecision $case.count $case.id $case.runtime `
+        "worktree-row-safe" "42,7,9"
+      Assert-MultiCase (-not $decision.ready -and $decision.failure -ceq $case.failure) `
+        "selection $($case.name) returned '$($decision.failure)'"
+      return $decision.failure
+    }
   }
   Invoke-MultiCase "compact overview narrow client retains the Mac lane and requires real pan" {
     $geometry = Get-MultiProjectLaneGeometry @(220,34,1028,900) @(382,134,632,230)
@@ -4646,7 +4709,8 @@ Start-Sleep -Seconds 60
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "sketch/custody modal: \$title"' -or
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "multi-project observation: \$surface"' -or
       $uiaLiveGateSource -notmatch 'Write-UiaWaitAttribution "gate failure: \$failureStep"' -or
-      $uiaLiveGateSource -notmatch 'Write-UiaLateEventAttribution "ElementSelected after Select"') {
+      $uiaLiveGateSource -notmatch 'Write-UiaLateEventAttribution "ElementSelected after Select"' -or
+      $uiaLiveGateSource -notmatch '(?s)RemoveFromSelection\(\).*?GetSelection\(\)\.Count -eq 0.*?RawView Worktrees event subscription.*?SelectionSourceRuntimeId = \$null.*?\$selectionEventRow = \$safeRow.*?AddAutomationEventHandler\(.*?\$selectionEventDeadlineUtc.*?Get-UiaSelectionEventDecision \$selectedOnTime.*?\$safeRowId \$safeRowRuntimeId.*?Require \$selectedDecision\.ready.*?\$selectedAfterStableDrain.*?RemoveAutomationEventHandler\(\$selectedEvent, \$selectionEventRow') {
     throw "RED: UIA wait timeouts are not attributed to step, deadline, foreground owner, shell windows, and a shell-only capture"
   }
   if ($stubDaemonSource -notmatch '\$frame\.command\.graphCommand\.command\.createNode\._0' -or
