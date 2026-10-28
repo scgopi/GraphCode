@@ -12,6 +12,8 @@ $root = [IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
 $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $rehearsal = $false
 $transitionRehearsal = $false
+$focusedCapture = $false
+$matchedCapturePlan = $null
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $rehearsalActions = [Collections.Generic.List[object]]::new()
 $peerScript = Join-Path $root 'inputs\offline-peer-source.ps1'
@@ -258,7 +260,27 @@ function Assert-CapAcceptedInputs {
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
     Assert-CapSceneContract -Job $job
-    if ($transitionRehearsal) {
+    if ($focusedCapture) {
+        $plan=Get-CapMatchedCapturePlan -Job $job
+        if ($lease.status -cne 'AUTHORIZED' -or
+            $lease.authorizedAction -cne 'focused-matched-capture' -or
+            $lease.evidenceClassification -cne $plan.evidenceClassification -or
+            -not $lease.desktopAuthorized -or -not $lease.captureEvidenceAuthorized -or
+            -not $lease.pngAuthorized -or $lease.officialParityEvidence -cne $false -or
+            ($lease.sceneNames -join ',') -cne ($plan.sceneNames -join ',') -or
+            ($lease.phases -join ',') -cne ($plan.phases -join ',')) {
+            throw 'Focused matched capture lacks exact non-parity desktop and PNG authority.'
+        }
+        if ($lease.authorizationId -ne (Get-CapWorkerAuthorityId) -or
+            $lease.head -ne $job.head -or $lease.sourceTree -ne $job.captureTree -or
+            $lease.jobManifestSha256 -ne $jobHash -or $lease.moduleSha256 -ne $moduleHash -or
+            $lease.workerSha256 -ne $workerHash -or
+            $lease.supervisorSha256 -ne $auth.supervisorSha256 -or
+            $lease.preflightReceiptSha256 -ne $auth.preflightReceiptSha256 -or
+            $lease.fixtureMappingSha256 -ne $auth.fixtureMappingSha256) {
+            throw 'Focused authorization hashes do not bind the exact current job and controls.'
+        }
+    } elseif ($transitionRehearsal) {
         if (-not $job.authority.liveTransitionRehearsalApproved -or
             $job.authority.captureEvidenceAuthorized -or $job.authority.pngAuthorized -or
             $lease.status -cne 'AUTHORIZED' -or $lease.authorizedAction -cne 'live-transition-rehearsal' -or
@@ -881,7 +903,10 @@ function Save-CapSceneImage {
         if ($isSDpi) {
             $geometry=$AppRun.Placement
             $record | Add-Member -NotePropertyMembers @{
-                evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
+                evidenceClassification=$(if ($focusedCapture) {
+                    $matchedCapturePlan.evidenceClassification
+                } else { 'C8R_RDP_DPI192_QUALIFIED' })
+                officialParityEvidence=$(if ($focusedCapture) {$false} else {$true})
                 geometrySchemaVersion=3L
                 geometryDerivation=$geometry.GeometryDerivation
                 logicalClientWH=@($geometry.LogicalClientWH)
@@ -918,15 +943,20 @@ function New-CapManifest {
         status = $Status
         executionMode = if ($mockSceneRun) { 'OFFLINE_MOCK_ONLY' }
             elseif ($rehearsal) { 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL' }
-            elseif ($transitionRehearsal) { 'LIVE_TRANSITION_REHEARSAL' } else { 'LIVE_CAPTURE' }
+            elseif ($transitionRehearsal) { 'LIVE_TRANSITION_REHEARSAL' }
+            elseif ($focusedCapture) { 'FOCUSED_LIVE_CAPTURE' } else { 'LIVE_CAPTURE' }
         evidenceClassification = if ($transitionRehearsal) {
             'LIVE_TRANSITION_REHEARSAL_NOT_CAPTURE_EVIDENCE'
+        } elseif ($focusedCapture) {
+            $matchedCapturePlan.evidenceClassification
         } elseif (Test-CapMatchedDpiAdapter) { 'C8R_RDP_DPI192_QUALIFIED' } else { $null }
+        officialParityEvidence = if ($focusedCapture) {$false} else {$null}
         authorityId = Get-CapWorkerAuthorityId
         authoritySha256 = if ($auth.PSObject.Properties['authoritySha256']) {$auth.authoritySha256} else {$leaseHash}
-        leaseId = if ($transitionRehearsal) { $null } else { $auth.leaseId }
-        leaseReceiptSha256 = if ($transitionRehearsal) { $null } else { $leaseHash }
+        leaseId = if ($transitionRehearsal -or $focusedCapture) { $null } else { $auth.leaseId }
+        leaseReceiptSha256 = if ($transitionRehearsal -or $focusedCapture) { $null } else { $leaseHash }
         rehearsalAuthorizationSha256 = if ($transitionRehearsal) { $authorityHash } else { $null }
+        focusedAuthorizationSha256 = if ($focusedCapture) {$authorityHash} else {$null}
         jobManifestSha256 = $jobHash
         moduleSha256 = $moduleHash
         workerSha256 = $workerHash
@@ -970,11 +1000,13 @@ function New-CapManifest {
             @{name='saved-Agent-Split-role-labels';status='NotExecuted';reason='Production listing prunes absent panes; only two chat seeds authorized'})
     }
     if (Test-CapMatchedAdapter) {
-        $result.sceneAdapter=$job.sceneAdapter;$result.lane='S';$result.requiredSceneNames=@(Get-CapMatchedSceneNames)
+        $result.sceneAdapter=$job.sceneAdapter;$result.lane='S'
+        $result.requiredSceneNames=@($matchedCapturePlan.sceneNames)
         $result.g11Qualification='ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED'
         $result.backendTurns=0;$result.realRestarts=@($realRestarts)
         if ((Test-CapMatchedDpiAdapter) -and -not $transitionRehearsal) {
-            $result.evidenceClassification='C8R_RDP_DPI192_QUALIFIED'
+            $result.evidenceClassification=$matchedCapturePlan.evidenceClassification
+            $result.officialParityEvidence=$matchedCapturePlan.officialParityEvidence
             $result.geometrySchemaVersion=3L
             $result.logicalClientWH=@($job.captureContract.logicalClientWH)
             $result.expectedWindowDpi=[long]$job.captureContract.expectedWindowDpi
@@ -1742,6 +1774,35 @@ function Read-CapMatchedRows {
     })
 }
 
+function Read-CapMatchedChromeControls {
+    param($AppRun,[long]$ExpectedDpi,[long]$DpiBase)
+    $null=Assert-CapRootProcess -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity
+    $graph=Find-CapAutomationElement -RootHandle $AppRun.Window -ProcessIdentity $AppRun.Run.Identity `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+    $rows=@(Get-CapDirectChildren -Parent $graph | Where-Object {
+        $_.Current.AutomationId -cmatch '^workspace-(?:split-right|split-down|new-tab)-'
+    } | ForEach-Object {
+        $current=$_.Current
+        $parent=[Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($_)
+        $invoke=$null
+        $invokable=$_.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern,[ref]$invoke)
+        [pscustomobject]@{
+            AutomationId=[string]$current.AutomationId
+            Name=[string]$current.Name
+            ProcessId=[long]$current.ProcessId
+            ParentAutomationId=[string]$parent.Current.AutomationId
+            ControlType=[string]$current.ControlType.ProgrammaticName.Replace('ControlType.','')
+            Invokable=[bool]$invokable
+            IsEnabled=[bool]$current.IsEnabled
+            IsOffscreen=[bool]$current.IsOffscreen
+            Bounds=@($current.BoundingRectangle.Left,$current.BoundingRectangle.Top,
+                $current.BoundingRectangle.Right,$current.BoundingRectangle.Bottom)
+        }
+    })
+    return @(Get-CapMatchedChromeControlObservation -Rows $rows `
+        -ExpectedProcessId $AppRun.Run.Identity.Pid -ExpectedDpi $ExpectedDpi -DpiBase $DpiBase)
+}
+
 function Invoke-CapMatchedTabSelection {
     param(
         [Parameter(Mandatory)]$AppRun,
@@ -2034,14 +2095,23 @@ function Invoke-CapMatchedRestartCapture {
 }
 
 function Invoke-CapMatchedScenes {
-    param([string]$Phase)
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter()][string[]]$SceneNames = @((Get-CapMatchedSceneNames)[0..16]),
+        [switch]$SkipRestart
+    )
+    $allowed=@((Get-CapMatchedSceneNames)[0..16])
+    if ($SceneNames.Count -lt 1 -or @($SceneNames | Sort-Object -Unique).Count -ne $SceneNames.Count -or
+        @($SceneNames | Where-Object {$_ -cnotin $allowed}).Count -ne 0) {
+        throw 'Matched scene execution requested a missing, duplicate or foreign scene.'
+    }
     $fixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
     $null=Assert-CapMatchedFixture -Fixture $fixture -ProjectRoot (Join-Path $root 'fixtures\projects')
     $expectedDpiProperty=$job.captureContract.PSObject.Properties['expectedWindowDpi']
     $dpiBaseProperty=$job.captureContract.PSObject.Properties['dpiBase']
     $tabExpectedDpi=if ($expectedDpiProperty) {[long]$expectedDpiProperty.Value} else {[long]$job.captureContract.dpi}
     $tabDpiBase=if ($dpiBaseProperty) {[long]$dpiBaseProperty.Value} else {96L}
-    foreach ($scene in @((Get-CapMatchedSceneNames)[0..16])) {
+    foreach ($scene in $SceneNames) {
         Assert-CapWorkerDeadline "matched scene $scene"
         if ([DateTime]::UtcNow -ge $leaseDeadlineUtc.AddSeconds(-90)) {throw 'Matched scenes reached the required cleanup reserve.'}
         $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\$scene")
@@ -2222,6 +2292,9 @@ function Invoke-CapMatchedScenes {
                     -TotalTabs $total -SelectedTab $selected -AgentTitle $title `
                     -SourceCommit $job.binaries.$Phase.source `
                     -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
+                $chromeControls=if ($focusedCapture) {
+                    @(Read-CapMatchedChromeControls -AppRun $app -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase)
+                } else {@()}
                 if ($scene -ceq 's-tabs-hover-close') {
                     $tab=@($tabs.visible | Where-Object index -EQ 1)[0]
                     Set-CapMatchedTabHover -AppRun $app -Bounds $tab.bounds
@@ -2231,6 +2304,7 @@ function Invoke-CapMatchedScenes {
                 if (@($panes | Where-Object focused).Count -ne 1) {throw 'Matched selected pane did not acquire the reported UIA focus.'}
                 $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
                     tabs=$tabs;panes=$panes;nodeId=$node.id;nodeState=$node.state
+                    chromeControls=$chromeControls
                     tabSelection=$tabSelection
                     hover=if ($scene -ceq 's-tabs-hover-close') {'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'} else {'NOT_REQUESTED'}}
                 Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $null -Phase $Phase
@@ -2242,7 +2316,7 @@ function Invoke-CapMatchedScenes {
             Close-CapPeer -PeerRun $peer -Label $pipe
         }
     }
-    Invoke-CapMatchedRestartCapture -Phase $Phase -Fixture $fixture
+    if (-not $SkipRestart) {Invoke-CapMatchedRestartCapture -Phase $Phase -Fixture $fixture}
 }
 
 function Set-CapMatchedTabHover {
@@ -2297,11 +2371,13 @@ try {
     }
     $auth = Get-Content -LiteralPath $AuthorizationPath -Raw | ConvertFrom-Json -DateKind String
     if ($auth.ownedRoot -ine $root -or
-        $auth.executionMode -notin @('LIVE_CAPTURE', 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL', 'LIVE_TRANSITION_REHEARSAL')) {
+        $auth.executionMode -notin @('LIVE_CAPTURE','FOCUSED_LIVE_CAPTURE',
+            'NO_DESKTOP_REAL_LAUNCH_REHEARSAL','LIVE_TRANSITION_REHEARSAL')) {
         throw 'Worker root or execution mode differs from supervisor authorization.'
     }
     $rehearsal = $auth.executionMode -ceq 'NO_DESKTOP_REAL_LAUNCH_REHEARSAL'
     $transitionRehearsal = $auth.executionMode -ceq 'LIVE_TRANSITION_REHEARSAL'
+    $focusedCapture = $auth.executionMode -ceq 'FOCUSED_LIVE_CAPTURE'
     # Hash the exact source bytes before importing or compiling the native declarations.
     $moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $modulePath).Hash
     $workerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash
@@ -2351,7 +2427,7 @@ try {
         $lease.fixtureMappingSha256 -ne $auth.fixtureMappingSha256) {
         throw 'Worker lease does not bind its exact owned-root fixture mapping.'
     }
-    $authorityId = if ($transitionRehearsal) {$lease.authorizationId} else {$lease.leaseId}
+    $authorityId = if ($transitionRehearsal -or $focusedCapture) {$lease.authorizationId} else {$lease.leaseId}
     if ($authorityId -ne (Get-CapWorkerAuthorityId) -or $lease.jobManifestSha256 -ne $jobHash -or
         $lease.moduleSha256 -ne $moduleHash -or $lease.workerSha256 -ne $workerHash -or
         $lease.supervisorSha256 -ne $supervisorHash) {
@@ -2384,13 +2460,32 @@ try {
     $journalState = New-CapJournalState -Root $root -Directory $journalPath `
         -Binding $journalBinding -DeadlineUtc $leaseExpiresUtc
     Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
-    if (-not $transitionRehearsal -and (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission'])) {
+    if ($focusedCapture) {
+        $identity=Assert-CapFocusedJobIdentity -Root $root -Job $job -Authorization $lease -JobSha256 $jobHash
+        if (($identity | ConvertTo-Json -Depth 15 -Compress) -cne
+            ($auth.jobIdentity | ConvertTo-Json -Depth 15 -Compress)) {
+            throw 'Worker recomputed focused job identity differs from supervisor authorization.'
+        }
+    } elseif (-not $transitionRehearsal -and (-not $rehearsal -or $null -ne $job.PSObject.Properties['admission'])) {
         $identity = Assert-CapJobIdentity -Root $root -Job $job -Lease $lease -JobSha256 $jobHash -OfflineTestData:$rehearsal
         if (($identity | ConvertTo-Json -Depth 15 -Compress) -cne ($auth.jobIdentity | ConvertTo-Json -Depth 15 -Compress)) {
             throw 'Worker recomputed job identity differs from supervisor authorization.'
         }
     }
-    if ($rehearsal) {
+    if ($focusedCapture) {
+        if ($job.executionMode -cne 'FOCUSED_LIVE_CAPTURE') {
+            throw 'Focused job execution mode differs from its authorization.'
+        }
+        Assert-CapAcceptedInputs
+        $zmxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'runtime\zmx.exe')).Hash
+        $beforeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-before.exe')).Hash
+        $afterHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'inputs\graphcode-after.exe')).Hash
+        if ($zmxHash -ne $job.binaries.offlineZmx.sha256 -or
+            $beforeHash -ne $job.binaries.before.sha256 -or $afterHash -ne $job.binaries.after.sha256) {
+            throw 'Focused executable hashes differ from the frozen current-source job.'
+        }
+        $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
+    } elseif ($rehearsal) {
         if ($lease.status -cne 'REHEARSAL_ONLY' -or $lease.desktopAuthorized -ne $false -or
             $lease.authorizedAction -cne 'no-desktop-real-launch-rehearsal' -or
             $job.executionMode -cne $auth.executionMode -or $job.desktopAuthorized -ne $false) {
@@ -2437,6 +2532,9 @@ try {
     }
     $fixtureHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $fixturePath).Hash
     }
+    if (Test-CapMatchedAdapter) {
+        $matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job
+    }
     if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
         throw "Supervisor did not pre-create the authorized output directory: $outputDirectory"
     }
@@ -2457,15 +2555,24 @@ try {
         $matchedFixture=Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json -DateKind String
         Initialize-CapMatchedWorktrees -Fixture $matchedFixture
     }
-    foreach ($phase in @('before', 'after')) {
+    $capturePhases=if (Test-CapMatchedAdapter) {@($matchedCapturePlan.phases)} else {@('before','after')}
+    foreach ($phase in $capturePhases) {
         Assert-CapWorkerDeadline "starting phase $phase"
         if ($transitionRehearsal -and $phase -ceq 'after') { Save-CapPhaseTransition }
-        if (Test-CapMatchedAdapter) {Invoke-CapMatchedScenes -Phase $phase}
+        if (Test-CapMatchedAdapter) {
+            Invoke-CapMatchedScenes -Phase $phase -SceneNames $matchedCapturePlan.sceneNames `
+                -SkipRestart:(-not $matchedCapturePlan.includeRestart)
+        }
         elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {Invoke-CapDScenes -Phase $phase}
         else {Invoke-CapNormalScenes -Phase $phase;Invoke-CapActionsScene -Phase $phase}
     }
-    $expectedImages=if ($transitionRehearsal) {0} elseif (Test-CapMatchedAdapter) {36} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
-    $expectedSeeds=if (Test-CapMatchedAdapter) {22} elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
+    $expectedImages=if ($transitionRehearsal) {0} elseif (Test-CapMatchedAdapter) {
+        $matchedCapturePlan.phases.Count*($matchedCapturePlan.sceneNames.Count+
+            $(if ($matchedCapturePlan.includeRestart) {1} else {0}))
+    } elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {20} else {10}
+    $expectedSeeds=if (Test-CapMatchedAdapter) {
+        $matchedCapturePlan.phases.Count*@($matchedCapturePlan.sceneNames | Where-Object {$_ -cmatch '^s-tabs-'}).Count
+    } elseif ($job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {4} else {2}
     if ($images.Count -ne $expectedImages) { throw "Expected $expectedImages images across before/after; captured $($images.Count)." }
     if ($transitionRehearsal) {
         Assert-CapNoPngArtifacts

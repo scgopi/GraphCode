@@ -2124,7 +2124,8 @@ function Assert-CapMatchedDpiImage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Image,
-        [Parameter(Mandatory)]$Contract
+        [Parameter(Mandatory)]$Contract,
+        [Parameter()][string]$ExpectedEvidenceClassification = 'C8R_RDP_DPI192_QUALIFIED'
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
@@ -2142,7 +2143,7 @@ function Assert-CapMatchedDpiImage {
         throw 'DPI-parametric matched image phase identity differs.'
     }
     $identity = $Contract.windowIdentities.($Image.phase)
-    if ($Image.evidenceClassification -cne 'C8R_RDP_DPI192_QUALIFIED' -or
+    if ($Image.evidenceClassification -cne $ExpectedEvidenceClassification -or
         $Image.geometrySchemaVersion -ne 3 -or $Image.geometryDerivation -cne 'AdjustWindowRectExForDpi' -or
         ($Image.logicalClientWH -join ',') -cne ($Contract.logicalClientWH -join ',') -or
         ($Image.physicalClientBounds -join ',') -cne
@@ -3599,6 +3600,74 @@ function Get-CapMatchedSceneNames {
         's-tabs-last-guard','s-restart-confirmed')
 }
 
+function Get-CapMatchedFocusedSceneNames {
+    return @('s-tabs-agent-unknown','s-tabs-backend-idle','s-tabs-goal-needs-you','s-tabs-loop-running',
+        's-tabs-two-agent-selected','s-tabs-two-shell-selected','s-tabs-split-right-focused',
+        's-tabs-many-first','s-tabs-overflow-last','s-tabs-hover-close','s-tabs-last-guard')
+}
+
+function Get-CapMatchedCapturePlan {
+    param([Parameter(Mandatory)]$Job)
+    if (-not $Job.PSObject.Properties['focusedCapture']) {
+        return [pscustomobject]@{
+            phases=@('before','after')
+            sceneNames=@((Get-CapMatchedSceneNames)[0..16])
+            includeRestart=$true
+            executionMode='LIVE_CAPTURE'
+            evidenceClassification=$(if ($Job.sceneAdapter -ceq 'S_MATCHED_V12_DPI_V1') {
+                'C8R_RDP_DPI192_QUALIFIED'
+            } else { $null })
+            officialParityEvidence=$null
+        }
+    }
+    $focused=$Job.focusedCapture
+    Assert-CapDataRecord $focused @{schemaVersion=[long];phases=[array];sceneNames=[array]
+        evidenceClassification=[string];officialParityEvidence=[bool]} 'Focused matched capture'
+    $expected=Get-CapMatchedFocusedSceneNames
+    if ($focused.schemaVersion -ne 1 -or ($focused.phases -join ',') -cne 'after' -or
+        ($focused.sceneNames -join ',') -cne ($expected -join ',') -or
+        @($focused.sceneNames | Sort-Object -Unique).Count -ne $expected.Count -or
+        $focused.evidenceClassification -cne 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2' -or
+        $focused.officialParityEvidence -cne $false -or
+        $Job.sceneAdapter -cne 'S_MATCHED_V12_DPI_V1') {
+        throw 'Focused matched capture phases, scenes, classification or non-parity status differ.'
+    }
+    return [pscustomobject]@{
+        phases=@('after')
+        sceneNames=@($expected)
+        includeRestart=$false
+        executionMode='FOCUSED_LIVE_CAPTURE'
+        evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+        officialParityEvidence=$false
+    }
+}
+
+function Assert-CapFocusedPrelaunchPaths {
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)]$Paths)
+    Assert-CapDataRecord $Paths @{outputDirectory=[string];runDirectory=[string]
+        processJournalPath=[string];authorizationPath=[string];jobPath=[string]
+        preflightPath=[string];authorityPath=[string]} 'Focused prelaunch paths'
+    $resolved=[ordered]@{}
+    foreach ($name in @('outputDirectory','runDirectory','processJournalPath','authorizationPath',
+        'jobPath','preflightPath','authorityPath')) {
+        $path=[string]$Paths.$name
+        if ([string]::IsNullOrWhiteSpace($path)) {throw "Focused prelaunch path is null: $name."}
+        try {$resolved[$name]=Assert-CapArtifactPath -Root $Root -Path $path}
+        catch {throw "Focused prelaunch path is invalid: $name. $($_.Exception.Message)"}
+    }
+    foreach ($name in @('outputDirectory','runDirectory','processJournalPath')) {
+        if (-not (Test-Path -LiteralPath $resolved[$name] -PathType Container)) {
+            throw "Focused prelaunch directory is missing: $name."
+        }
+    }
+    foreach ($name in @('authorizationPath','jobPath','preflightPath','authorityPath')) {
+        if (-not (Test-Path -LiteralPath $resolved[$name] -PathType Leaf)) {
+            throw "Focused prelaunch file is missing: $name."
+        }
+    }
+    return [pscustomobject]$resolved
+}
+
 function Assert-CapMatchedFixture {
     param([Parameter(Mandatory)]$Fixture,[Parameter(Mandatory)][string]$ProjectRoot)
     Assert-CapDataRecord $Fixture @{schemaVersion=[long];sceneAdapter=[string];macSource=[string]
@@ -3763,6 +3832,57 @@ function Get-CapMatchedTabObservation {
         geometryContract='OWNED_UIA_PHYSICAL_BOUNDS_NORMALIZED_BY_DECLARED_DPI'
         closeGuardContract='WORKSPACE_CAN_CLOSE_TAB_GT_ONE_NOT_UIA_ISENABLED'
         evidenceMode='OWNED_UIA_STATE_NOT_GLYPHS_OR_VISUAL_PARITY';hover='VISUAL_ONLY_NOT_EXPOSED_BY_UIA'}
+}
+
+function Get-CapMatchedChromeControlObservation {
+    param([Parameter(Mandatory)][object[]]$Rows,[Parameter(Mandatory)][int]$ExpectedProcessId,
+        [Parameter(Mandatory)][long]$ExpectedDpi,[Parameter(Mandatory)][long]$DpiBase)
+    if ($ExpectedDpi -le 0 -or $DpiBase -le 0) {
+        throw 'Matched chrome controls require a positive DPI geometry contract.'
+    }
+    $expectedWidth=[long][Math]::Truncate((24L*$ExpectedDpi+[Math]::Truncate($DpiBase/2))/$DpiBase)
+    $expectedHeight=[long][Math]::Truncate((22L*$ExpectedDpi+[Math]::Truncate($DpiBase/2))/$DpiBase)
+    $specs=@(
+        [pscustomobject]@{identity='workspace-split-right:control';name='Split Right'},
+        [pscustomobject]@{identity='workspace-split-down:control';name='Split Down'},
+        [pscustomobject]@{identity='workspace-new-tab:control';name='New Tab'}
+    )
+    $expectedIds=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($spec in $specs) {$null=$expectedIds.Add((Get-CapMatchedAutomationId $spec.identity))}
+    if ($Rows.Count -ne 3 -or @($Rows | Where-Object {-not $expectedIds.Contains($_.AutomationId)}).Count) {
+        throw 'Matched chrome controls require exactly Split Right, Split Down and New Tab.'
+    }
+    $observed=[Collections.Generic.List[object]]::new()
+    foreach ($spec in $specs) {
+        $id=Get-CapMatchedAutomationId $spec.identity
+        $matches=@($Rows | Where-Object AutomationId -CEQ $id)
+        if ($matches.Count -ne 1) {throw 'Matched chrome controls contain a missing or duplicate stable identity.'}
+        $row=$matches[0]
+        if ($row.Name -cne $spec.name -or $row.ProcessId -isnot [long] -or
+            $row.ProcessId -ne $ExpectedProcessId -or $row.ParentAutomationId -cne 'graph' -or
+            $row.ControlType -cne 'Button' -or $row.Invokable -isnot [bool] -or -not $row.Invokable -or
+            $row.IsEnabled -isnot [bool] -or -not $row.IsEnabled -or
+            $row.IsOffscreen -isnot [bool] -or $row.IsOffscreen -or
+            $row.Bounds -isnot [array] -or $row.Bounds.Count -ne 4) {
+            throw 'Matched chrome control identity, owner, type or visibility differs.'
+        }
+        $width=[long]$row.Bounds[2]-[long]$row.Bounds[0]
+        $height=[long]$row.Bounds[3]-[long]$row.Bounds[1]
+        if ($width -ne $expectedWidth -or $height -ne $expectedHeight) {
+            throw 'Matched chrome control DPI-scaled 24x22 logical geometry differs.'
+        }
+        $observed.Add([pscustomobject]@{automationId=$id;name=$spec.name;bounds=@($row.Bounds)
+            physicalWidth=$width;physicalHeight=$height
+            logicalWidth=[Math]::Round($width*$DpiBase/$ExpectedDpi,3)
+            logicalHeight=[Math]::Round($height*$DpiBase/$ExpectedDpi,3)
+            controlType='Button';invokable=$true})
+    }
+    for ($i=1;$i -lt $observed.Count;$i++) {
+        if ($observed[$i].bounds[0] -le $observed[$i-1].bounds[2]) {
+            throw 'Matched chrome controls overlap or are out of order.'
+        }
+    }
+    return @($observed.ToArray())
 }
 
 function Assert-CapRestartEvidence {
@@ -3981,16 +4101,32 @@ function Read-CapRestartTranscript {
 
 function Assert-CapMatchedManifest {
     param([Parameter(Mandatory)]$Manifest,[Parameter(Mandatory)]$Job)
-    $expected=@(foreach ($phase in @('before','after')) {foreach ($scene in Get-CapMatchedSceneNames) {"${phase}:$scene"}})
+    $plan=Get-CapMatchedCapturePlan -Job $Job
+    $manifestClassification=if ($Manifest.PSObject.Properties['evidenceClassification']) {
+        $Manifest.evidenceClassification
+    } else {$null}
+    $manifestOfficial=if ($Manifest.PSObject.Properties['officialParityEvidence']) {
+        $Manifest.officialParityEvidence
+    } else {$null}
+    $expected=@(foreach ($phase in $plan.phases) {
+        foreach ($scene in $plan.sceneNames) {"${phase}:$scene"}
+        if ($plan.includeRestart) {"${phase}:s-restart-confirmed"}
+    })
     $actual=@($Manifest.images | ForEach-Object {"$($_.phase):$($_.scene)"})
     if ($Job.sceneAdapter -cnotin @('S_MATCHED_V12_V1','S_MATCHED_V12_DPI_V1') -or
         $Manifest.sceneAdapter -cne $Job.sceneAdapter -or $Manifest.lane -cne 'S' -or
-        $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne 'LIVE_CAPTURE' -or
-        $actual.Count -ne 36 -or @($actual | Sort-Object -Unique).Count -ne 36 -or
+        $Manifest.status -cne 'COMPLETE' -or $Manifest.executionMode -cne $plan.executionMode -or
+        ($null -ne $plan.officialParityEvidence -and
+            ($manifestClassification -cne $plan.evidenceClassification -or
+                $manifestOfficial -cne $plan.officialParityEvidence)) -or
+        $actual.Count -ne $expected.Count -or @($actual | Sort-Object -Unique).Count -ne $expected.Count -or
         (($actual | Sort-Object) -join ',') -cne (($expected | Sort-Object) -join ',') -or
         $Manifest.g11Qualification -cne 'ASSESSABLE_SOURCE_CAPABILITY_NOT_RUNTIME_VALIDATED' -or
-        $Manifest.backendTurns -ne 0 -or $Manifest.realRestarts.Count -ne 2) {throw 'Matched manifest inventory or evidence qualification differs.'}
-    foreach ($phase in @('before','after')) {
+        $Manifest.backendTurns -ne 0 -or
+        $Manifest.realRestarts.Count -ne $(if ($plan.includeRestart) {$plan.phases.Count} else {0})) {
+        throw 'Matched manifest inventory or evidence qualification differs.'
+    }
+    foreach ($phase in $(if ($plan.includeRestart) {$plan.phases} else {@()})) {
         $restarts=@($Manifest.realRestarts | Where-Object phase -CEQ $phase)
         if ($restarts.Count -ne 1) {throw 'Matched manifest must retain one real restart per phase.'}
         $null=Assert-CapRestartEvidence -Evidence $restarts[0].evidence -ExpectedDaemonSha256 $Job.binaries.daemon.sha256
@@ -4066,7 +4202,12 @@ function Assert-CapSceneContract {
                 throw "DPI-parametric $phase source window identity differs."
             }
         }
-        if ($contract.windowIdentities.before.sourceCommit -cne 'a8b09434fe41a61030fd290f7d065ec6d0db8005' -or
+        if ($Job.PSObject.Properties['focusedCapture']) {
+            if ($contract.windowIdentities.before.sourceCommit -cne $Job.head -or
+                $contract.windowIdentities.after.sourceCommit -cne $Job.head) {
+                throw 'Focused DPI-parametric current-source window identity differs.'
+            }
+        } elseif ($contract.windowIdentities.before.sourceCommit -cne 'a8b09434fe41a61030fd290f7d065ec6d0db8005' -or
             $contract.windowIdentities.before.sourceCommit -ceq $contract.windowIdentities.after.sourceCommit) {
             throw 'DPI-parametric historical baseline window identity differs.'
         }
@@ -4095,6 +4236,7 @@ function Assert-CapSceneContract {
         if ($Job.binaries.backendFixture.sourceSha256 -ne $sourceHash) {
             throw 'DPI-parametric matched scene requires its canonical harmless backend source hash.'
         }
+        $null=Get-CapMatchedCapturePlan -Job $Job
         return
     }
     if ($Job.lane -ceq 'S' -and $Job.sceneAdapter -ceq 'S_MATCHED_V12_V1') {
@@ -4127,6 +4269,7 @@ function Assert-CapSceneContract {
         $sourceHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
             [Text.UTF8Encoding]::new($false).GetBytes((Get-CapMatchedBackendSource))))
         if ($Job.binaries.backendFixture.sourceSha256 -ne $sourceHash) {throw 'Matched scene requires its canonical harmless backend source hash.'}
+        $null=Get-CapMatchedCapturePlan -Job $Job
         return
     }
     if ($Job.lane -ceq 'D' -and $Job.sceneAdapter -ceq 'D_QUICK_CHAT_V1') {
@@ -4633,6 +4776,60 @@ function Assert-CapSourceArchive {
         if (-not $expected.Contains($relative)) { throw "Untracked fresh source input: $relative" }
     }
     return [pscustomobject]@{ tree = $tree; files = $expected.Count; gitlinks = @($gitlinks) }
+}
+
+function Assert-CapFocusedJobIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)]$Job,
+        [Parameter(Mandatory)]$Authorization,[Parameter(Mandatory)][string]$JobSha256)
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    Assert-CapDataRecord $Job @{lane=[string];head=[string];base=[string];captureTree=[string]
+        sourceRepository=[string];binaries=[pscustomobject]} 'Focused job identity'
+    Assert-CapDataRecord $Authorization @{authorizationId=[string];lane=[string];head=[string]
+        sourceTree=[string];jobManifestSha256=[string];beforeBinarySha256=[string]
+        afterBinarySha256=[string]} 'Focused authorization identity'
+    $plan=Get-CapMatchedCapturePlan -Job $Job
+    if ($plan.executionMode -cne 'FOCUSED_LIVE_CAPTURE' -or
+        $Authorization.lane -cne $Job.lane -or $Authorization.head -cne $Job.head -or
+        $Authorization.sourceTree -cne $Job.captureTree -or
+        $Authorization.jobManifestSha256 -ne $JobSha256 -or $Job.base -cne $Job.head) {
+        throw 'Focused authorization does not bind the exact current source job.'
+    }
+    $repository=[IO.Path]::GetFullPath($Job.sourceRepository)
+    if (-not [IO.Path]::IsPathFullyQualified($Job.sourceRepository) -or
+        $Job.sourceRepository -notmatch '^[A-Za-z]:\\' -or $Job.sourceRepository.Substring(2).Contains(':') -or
+        $Job.sourceRepository -match '(^|\\)\.\.?($|\\)') {
+        throw 'Focused source repository must be an explicit safe local path.'
+    }
+    $ancestor=$repository
+    while ($ancestor) {
+        if ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw 'Focused source repository has a reparse-point ancestor.'
+        }
+        $ancestor=Split-Path -Parent $ancestor
+    }
+    if ([string](Invoke-CapAdmissionGit $repository @('rev-parse','HEAD')) -cne $Job.head -or
+        [string](Invoke-CapAdmissionGit $repository @('rev-parse','HEAD^{tree}')) -cne $Job.captureTree -or
+        @(Invoke-CapAdmissionGit $repository @('status','--porcelain','--untracked-files=all')).Count -ne 0) {
+        throw 'Focused source repository is not clean at the exact source head and tree.'
+    }
+    foreach ($phase in @('before','after')) {
+        $binary=$Job.binaries.$phase
+        Assert-CapDataRecord $binary @{path=[string];sha256=[string];source=[string]
+            binaryBuiltAtSource=[string]} "Focused $phase binary"
+        $path=Assert-CapArtifactPath -Root $Root -Path $binary.path
+        if ($binary.source -cne $Job.head -or $binary.binaryBuiltAtSource -cne $Job.head -or
+            $binary.sha256 -cnotmatch '^[A-Fa-f0-9]{64}$' -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $binary.sha256 -or
+            $Authorization."${phase}BinarySha256" -ne $binary.sha256) {
+            throw "Focused $phase binary does not bind the exact current source head."
+        }
+    }
+    return [pscustomobject]@{
+        head=$Job.head;tree=$Job.captureTree;lane=$Job.lane;sourceRepository=$repository
+        phases=@($plan.phases);scenes=@($plan.sceneNames)
+        attestation='FOCUSED_CURRENT_CLEAN_SOURCE_AND_HASH_BOUND_BINARIES'
+    }
 }
 
 function Assert-CapJobIdentity {
@@ -5739,8 +5936,11 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
-    'Get-CapMatchedSceneNames','Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
-    'Get-CapMatchedVisibleTabIndexes','Get-CapMatchedTabObservation','Assert-CapRestartEvidence','Initialize-CapMatchedProxy',
+    'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedCapturePlan',
+    'Assert-CapFocusedPrelaunchPaths',
+    'Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
+    'Get-CapMatchedVisibleTabIndexes','Get-CapMatchedTabObservation','Get-CapMatchedChromeControlObservation',
+    'Assert-CapRestartEvidence','Initialize-CapMatchedProxy',
     'Read-CapRestartTranscript','Assert-CapMatchedManifest','Get-CapMatchedBackendSource',
     'Get-CapDSceneNames',
     'Assert-CapDFixture',
@@ -5776,7 +5976,7 @@ Export-ModuleMember -Function @(
     'Assert-CapFixtureMapping',
     'Read-CapBoundJson',
     'Assert-CapDataRecord',
-    'Assert-CapJobIdentity',
+    'Assert-CapJobIdentity','Assert-CapFocusedJobIdentity',
     'Assert-CapSceneContract',
     'Assert-CapDescendantLifetime',
     'Test-CapGraphAppRootRole',
