@@ -1024,7 +1024,7 @@ function Get-CapActionSpec {
         [Parameter(Mandatory)][ValidateSet('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
             'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
             'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
-            'wire-node','mark-entry')][string]$Action,
+            'wire-node','mark-entry','attention-action')][string]$Action,
         [string]$Name,
         [string]$SubjectId
     )
@@ -1080,6 +1080,13 @@ function Get-CapActionSpec {
             }
             return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId $SubjectId)
                 AutomationIdPrefix=$null;Name='Mark as entry';CommandId=$null}
+        }
+        'attention-action' {
+            if ($SubjectId -cnotmatch '^attention-action:.+:[0-9A-Fa-f-]{36}$') {
+                throw 'Inspect requires its exact stable attention control identity.'
+            }
+            return [pscustomobject]@{AutomationId=(Get-CapMatchedAutomationId $SubjectId)
+                AutomationIdPrefix=$null;Name='Inspect';CommandId=$null}
         }
         'open-loop' {
             if ([string]::IsNullOrWhiteSpace($Name)) { throw 'open-loop requires a loop name.' }
@@ -1776,7 +1783,7 @@ function Invoke-CapAction {
     if ($Action -notin @('actual-size', 'open-project', 'overview-destination', 'open-loop', 'file-exit',
         'quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
         'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
-        'wire-node','mark-entry')) {
+        'wire-node','mark-entry','attention-action')) {
         throw "Unsupported capture action '$Action'."
     }
     if ($WindowProcessResolver -and -not $Invoker) { throw 'A custom HWND resolver is allowed only with the action mock.' }
@@ -1817,7 +1824,7 @@ function Invoke-CapAction {
     $null = Assert-CapUiaProcessIds -ExpectedProcessId $ProcessIdentity.Pid -ObservedProcessIds @([int]$current.ProcessId)
     if ($Action -in @('quick-chats-destination','open-quick-chat','workspace-show-graph','workspace-toggle-panel',
         'workspace-restart-session','workspace-new-tab','workspace-split-right','workspace-select-tab','workspace-close-tab',
-        'wire-node','mark-entry')) {
+        'wire-node','mark-entry','attention-action')) {
         if (-not $current.IsEnabled) { throw 'D action target is disabled.' }
         if ($current.ControlType -ne [System.Windows.Automation.ControlType]::Button -and
             $current.ControlType -ne [System.Windows.Automation.ControlType]::ListItem) { throw 'D action target has an unexpected control type.' }
@@ -3601,9 +3608,26 @@ function Get-CapMatchedSceneNames {
 }
 
 function Get-CapMatchedFocusedSceneNames {
+    param(
+        [ValidateSet('TerminalChrome','PostFixCards')]
+        [string]$Profile = 'TerminalChrome'
+    )
+    if ($Profile -ceq 'PostFixCards') {
+        return @('s-goal-unwired-unselected','s-goal-unwired-selected',
+            's-main-cycle-unselected','s-main-cycle-selected')
+    }
     return @('s-tabs-agent-unknown','s-tabs-backend-idle','s-tabs-goal-needs-you','s-tabs-loop-running',
         's-tabs-two-agent-selected','s-tabs-two-shell-selected','s-tabs-split-right-focused',
         's-tabs-many-first','s-tabs-overflow-last','s-tabs-hover-close','s-tabs-last-guard')
+}
+
+function Get-CapMatchedFocusedClassification {
+    param(
+        [ValidateSet('TerminalChrome','PostFixCards')]
+        [string]$Profile = 'TerminalChrome'
+    )
+    if ($Profile -ceq 'PostFixCards') { return 'POSTFIX_CARD_PARITY_FOCUSED_VALIDATION_V1' }
+    return 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
 }
 
 function Get-CapMatchedCapturePlan {
@@ -3623,11 +3647,17 @@ function Get-CapMatchedCapturePlan {
     $focused=$Job.focusedCapture
     Assert-CapDataRecord $focused @{schemaVersion=[long];phases=[array];sceneNames=[array]
         evidenceClassification=[string];officialParityEvidence=[bool]} 'Focused matched capture'
-    $expected=Get-CapMatchedFocusedSceneNames
+    $profileProperty=$focused.PSObject.Properties['profile']
+    $profile=if ($profileProperty) {[string]$profileProperty.Value} else {'TerminalChrome'}
+    if ($profile -cnotin @('TerminalChrome','PostFixCards')) {
+        throw 'Focused matched capture profile differs.'
+    }
+    $expected=Get-CapMatchedFocusedSceneNames -Profile $profile
+    $classification=Get-CapMatchedFocusedClassification -Profile $profile
     if ($focused.schemaVersion -ne 1 -or ($focused.phases -join ',') -cne 'after' -or
         ($focused.sceneNames -join ',') -cne ($expected -join ',') -or
         @($focused.sceneNames | Sort-Object -Unique).Count -ne $expected.Count -or
-        $focused.evidenceClassification -cne 'F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2' -or
+        $focused.evidenceClassification -cne $classification -or
         $focused.officialParityEvidence -cne $false -or
         $Job.sceneAdapter -cne 'S_MATCHED_V12_DPI_V1') {
         throw 'Focused matched capture phases, scenes, classification or non-parity status differ.'
@@ -3637,7 +3667,8 @@ function Get-CapMatchedCapturePlan {
         sceneNames=@($expected)
         includeRestart=$false
         executionMode='FOCUSED_LIVE_CAPTURE'
-        evidenceClassification='F2_TERMINAL_CHROME_FOCUSED_VALIDATION_V2'
+        profile=$profile
+        evidenceClassification=$classification
         officialParityEvidence=$false
     }
 }
@@ -5936,7 +5967,8 @@ function Assert-CapNoWorkerTransientArtifacts {
 }
 
 Export-ModuleMember -Function @(
-    'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedCapturePlan',
+    'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
+    'Get-CapMatchedCapturePlan',
     'Assert-CapFocusedPrelaunchPaths',
     'Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
     'Get-CapMatchedVisibleTabIndexes','Get-CapMatchedTabObservation','Get-CapMatchedChromeControlObservation',

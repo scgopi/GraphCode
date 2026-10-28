@@ -2161,6 +2161,9 @@ function Invoke-CapMatchedScenes {
                 $app.SObservation=[pscustomobject]@{readSucceeded=$true;evidenceMode='OWNED_UIA_READ_NOT_VISUAL_PARITY'
                     fixtureState=$state[0];card=$card[0];wireState='HASH_BOUND_STATIC_PEER_NOT_LIVE_BACKEND'}
                 $recovery=$null
+                $cycleRoute=$null
+                $postFixCardFocused=$focusedCapture -and
+                    $matchedCapturePlan.profile -ceq 'PostFixCards'
                 if ($scene -cmatch '^s-goal-unwired-') {
                     $wireIdentity="wire-node:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
                     $markIdentity="mark-entry:$($fixture.graphs[0].project.path):$($state[0].nodeId)"
@@ -2235,41 +2238,87 @@ function Invoke-CapMatchedScenes {
                                 controlType='Text';invokable=$false;bounds=@($reasonBounds.Left,$reasonBounds.Top,
                                     $reasonBounds.Right,$reasonBounds.Bottom)}
                             selected=[bool]$state[0].selected;cardIdentity=$card[0].AutomationId})
+                    $cycleRoute=[pscustomobject]@{actionIdentity=$actionIdentity;actionAutomationId=$actionId
+                        reasonAutomationId=$reasonId;cardAutomationId=$cardId;cardName=$card[0].Name}
                 }
                 Save-CapSceneImage -AppRun $app -SceneName $scene -ZoomEvidence $zoom -Phase $Phase
                 if ($null -ne $recovery) {
-                    $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $recovery.wireIdentity
-                    $wireStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
-                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' `
-                        -AutomationId 'status'
-                    if ($null -eq $wireStatus) {throw "Wire it up did not expose its armed result for $scene."}
-                    if (-not (Send-CapMatchedEscape -AppRun $app)) {
-                        throw "Wire it up could not be cancelled after matched evidence for $scene."
+                    $runWire=-not $postFixCardFocused -or $scene -ceq 's-goal-unwired-unselected'
+                    $runMark=-not $postFixCardFocused -or $scene -ceq 's-goal-unwired-selected'
+                    $wireReceipt=$null
+                    $markReceipt=$null
+                    if ($runWire) {
+                        $null=Invoke-CapSceneAction -AppRun $app -Action 'wire-node' -SubjectId $recovery.wireIdentity
+                        $wireStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Choose a target loop to wire this entry' `
+                            -AutomationId 'status'
+                        if ($null -eq $wireStatus) {throw "Wire it up did not expose its armed result for $scene."}
+                        if (-not (Send-CapMatchedEscape -AppRun $app)) {
+                            throw "Wire it up could not be cancelled after matched evidence for $scene."
+                        }
+                        Start-Sleep -Milliseconds 100
+                        $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                        $wireAfter=@(Get-CapDirectChildren -Parent $graph)
+                        if (@($wireAfter | Where-Object {$_.Current.AutomationId -ceq $recovery.wireAutomationId}).Count -ne 1) {
+                            throw "Wire it up cancellation did not preserve the unwired control for $scene."
+                        }
+                        $wireReceipt=[pscustomobject]@{automationId=$recovery.wireAutomationId
+                            result='Choose a target loop to wire this entry';cancelledWith='Escape'
+                            mutation='NONE_ARMED_THEN_CANCELLED';controlPreserved=$true}
                     }
-                    Start-Sleep -Milliseconds 100
-                    $null=Invoke-CapSceneAction -AppRun $app -Action 'mark-entry' -SubjectId $recovery.markIdentity
-                    $entryStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
-                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Marked as an entry for this session' `
-                        -AutomationId 'status'
-                    if ($null -eq $entryStatus) {throw "Mark as entry did not expose its result for $scene."}
-                    $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
-                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
-                    $after=@(Get-CapDirectChildren -Parent $graph)
-                    if (@($after | Where-Object {$_.Current.AutomationId -cin @(
-                        $recovery.wireAutomationId,$recovery.markAutomationId)}).Count -ne 0) {
-                        throw "Mark as entry left stale unwired controls for $scene."
-                    }
-                    $cardAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $cardId -and
-                        $_.Current.Name -ceq $card[0].Name})
-                    if ($cardAfter.Count -ne 1 -or $cardAfter[0].Current.ProcessId -ne $app.Run.Identity.Pid) {
-                        throw "Mark as entry did not preserve the owned Goal card for $scene."
+                    if ($runMark) {
+                        $null=Invoke-CapSceneAction -AppRun $app -Action 'mark-entry' -SubjectId $recovery.markIdentity
+                        $entryStatus=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Marked as an entry for this session' `
+                            -AutomationId 'status'
+                        if ($null -eq $entryStatus) {throw "Mark as entry did not expose its result for $scene."}
+                        $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                            -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                        $after=@(Get-CapDirectChildren -Parent $graph)
+                        if (@($after | Where-Object {$_.Current.AutomationId -cin @(
+                            $recovery.wireAutomationId,$recovery.markAutomationId)}).Count -ne 0) {
+                            throw "Mark as entry left stale unwired controls for $scene."
+                        }
+                        $cardAfter=@($after | Where-Object {$_.Current.AutomationId -ceq $cardId -and
+                            $_.Current.Name -ceq $card[0].Name})
+                        if ($cardAfter.Count -ne 1 -or $cardAfter[0].Current.ProcessId -ne $app.Run.Identity.Pid) {
+                            throw "Mark as entry did not preserve the owned Goal card for $scene."
+                        }
+                        $markReceipt=[pscustomobject]@{automationId=$recovery.markAutomationId
+                            result='Marked as an entry for this session';mutation='DECLARED_ENTRY_ADDED'
+                            controlsRemoved=$true;cardPreserved=$cardAfter[0].Current.AutomationId
+                            graphReadback='UNWIRED_CONTROLS_ABSENT_SAME_CARD_IDENTITY_PRESENT'}
                     }
                     $app.SObservation | Add-Member -NotePropertyName recoveryRoutes -NotePropertyValue `
-                        ([pscustomobject]@{wire=[pscustomobject]@{automationId=$recovery.wireAutomationId
-                                result='Choose a target loop to wire this entry';cancelledWith='Escape'}
-                            markEntry=[pscustomobject]@{automationId=$recovery.markAutomationId
-                                result='Marked as an entry for this session';controlsRemoved=$true
-                                cardPreserved=$cardAfter[0].Current.AutomationId}})
+                        ([pscustomobject]@{fixtureIsolation='ONE_SCENE_ONE_DISPOSABLE_PHASE_ROOT'
+                            wire=$wireReceipt;markEntry=$markReceipt})
+                }
+                if ($postFixCardFocused -and $scene -ceq 's-main-cycle-selected') {
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'attention-action' `
+                        -SubjectId $cycleRoute.actionIdentity
+                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-show-graph'
+                    $rowsAfter=@(Read-CapMatchedRows -AppRun $app)
+                    $cardAfter=@($rowsAfter | Where-Object {$_.AutomationId -ceq $cycleRoute.cardAutomationId -and
+                        $_.Name -ceq $cycleRoute.cardName})
+                    $graph=Find-CapAutomationElement -RootHandle $app.Window -ProcessIdentity $app.Run.Identity `
+                        -ExpectedProcessId $app.Run.Identity.Pid -Name 'Graph' -AutomationId 'graph'
+                    $childrenAfter=@(Get-CapDirectChildren -Parent $graph)
+                    $inspectAfter=@($childrenAfter | Where-Object {
+                        $_.Current.AutomationId -ceq $cycleRoute.actionAutomationId -and
+                        $_.Current.Name -ceq 'Inspect'})
+                    $reasonAfter=@($childrenAfter | Where-Object {
+                        $_.Current.AutomationId -ceq $cycleRoute.reasonAutomationId -and
+                        $_.Current.Name -ceq 'cycle · no entry point'})
+                    if ($cardAfter.Count -ne 1 -or $cardAfter[0].Selected -cne $true -or
+                        $inspectAfter.Count -ne 1 -or $reasonAfter.Count -ne 1) {
+                        throw 'Selected cycle Inspect/Show in Graph route did not preserve stable card, action and reason identities.'
+                    }
+                    $app.SObservation | Add-Member -NotePropertyName cycleRoute -NotePropertyValue `
+                        ([pscustomobject]@{inspectAutomationId=$cycleRoute.actionAutomationId
+                            returnAction='Show in Graph';cardAutomationId=$cycleRoute.cardAutomationId
+                            reasonAutomationId=$cycleRoute.reasonAutomationId;selectedAfterReturn=$true
+                            identitiesStable=$true})
                 }
             } else {
                 $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
