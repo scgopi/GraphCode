@@ -128,6 +128,18 @@ $dryRunLauncher=$null
 $dryRunProof=$null
 try {
     Assert-CapWorkerDeadline 'action entry'
+    $boundWindows=@(Assert-CapActionWindowContext)
+    $windowPreflight=@(foreach ($binding in $boundWindows) {
+        foreach ($scene in $binding.sceneNames) {
+            $identity=Get-CapWorkerWindowIdentity -Phase $binding.actionPhase -SceneName $scene
+            $geometry=Get-CapMatchedWindowGeometry -Phase $binding.actionPhase -SceneName $scene
+            [pscustomobject]@{
+                actionPhase=$binding.actionPhase;capturePhase=$binding.capturePhase
+                sceneName=$scene;actionIds=@($binding.actionIds);identity=$identity;geometry=$geometry
+                validation='NONNULL_SOURCE_BOUND_IDENTITY_BEFORE_LAUNCH'
+            }
+        }
+    })
     if ($DryRun) {
         # Exercise the real custody gate with a harmless child, never a product/provider image.
         $dryRunLauncher=Start-CapJobLauncher -Root $root -OutputDirectory $outputDirectory `
@@ -148,12 +160,15 @@ try {
             target=$target
             productLaunches=0L
             providerLaunches=0L
-            windowIdentityValidation='REQUIRES_PRODUCT_WINDOW_NOT_EXECUTED'
+            windowIdentityValidation='SOURCE_PHASE_BINDINGS_VALIDATED_BEFORE_LAUNCH_RUNTIME_WINDOW_NOT_EXECUTED'
+            windowBindings=$windowPreflight
+            toolingSourceHead=$head
+            captureSourceHead=$job.head
             geometry=$null
             preconditionsEvaluated=$true
         }
         if (-not (Test-CapMatchedDpiAdapter)) {throw 'Action dry run requires the production matched DPI contract.'}
-        $dryRunProof.geometry=Get-CapMatchedWindowGeometry -Phase 'after'
+        $dryRunProof.geometry=$windowPreflight[0].geometry
     } else {
         $matchedFixture=Get-Content $fixturePath -Raw | ConvertFrom-Json -DateKind String
         Initialize-CapMatchedWorktrees -Fixture $matchedFixture
@@ -276,7 +291,9 @@ $release=[ordered]@{
     schemaVersion=1L
     status=$(if ($manifest.status -ceq 'COMPLETE') {'RELEASED_ZERO_SURVIVORS'}
         elseif ($independent.Count -eq 0) {'FAILED_ZERO_SURVIVORS'} else {'CLEANUP_UNPROVEN'})
-    cleanupState=$(if ($independent.Count -eq 0 -and $cleanupFailures.Count -eq 0) {
+    cleanupState=$(if ($runs.Count -eq 0 -and $independent.Count -eq 0 -and $cleanupFailures.Count -eq 0) {
+        'NO_PROCESS_LAUNCHES'
+    } elseif ($independent.Count -eq 0 -and $cleanupFailures.Count -eq 0) {
         'HELD_EXIT_AND_EOF_PROVEN'
     } else {'UNPROVEN'})
     group=$plan.group

@@ -122,11 +122,55 @@ function Open-CapActionAuthorization {
     }
 }
 
+function Assert-CapActionWindowContext {
+    $held=Open-CapActionAuthorization -Path $authorizationPath -Sha256 $authorizationSha256 `
+        -Expected $authorization -DryRun:($authorization.status -ceq 'DRY_RUN_NO_AUTHORITY')
+    try {
+        if ($runDirectory -cne $held.Record.runDirectory -or
+            $plan.group -cne $held.Record.group -or
+            $plan.sourceHead -cne $held.Record.sourceHead -or
+            $plan.sourceTree -cne $held.Record.sourceTree -or
+            ($held.Record.status -ceq 'AUTHORIZED' -and $job.head -cne $plan.sourceHead)) {
+            throw 'Action window binding run/authority/source/plan/job differs.'
+        }
+        foreach ($inputBinding in @(
+            @($planPath,$held.Record.actionPlanSha256,$plan),
+            @($plan.jobPath,$held.Record.jobSha256,$job)
+        )) {
+            $record=Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{
+                path=$inputBinding[0];sha256=$inputBinding[1]})
+            if (-not [Text.Json.Nodes.JsonNode]::DeepEquals(
+                [Text.Json.Nodes.JsonNode]::Parse(($record|ConvertTo-Json -Depth 50 -Compress)),
+                [Text.Json.Nodes.JsonNode]::Parse(($inputBinding[2]|ConvertTo-Json -Depth 50 -Compress)))) {
+                throw 'Action window binding in-memory plan/job differs from bound bytes.'
+            }
+        }
+        return @(Assert-CapActionWindowBindings -Job $job -Plan $plan)
+    } finally {$held.Pin.Dispose()}
+}
+
+function Get-CapWorkerWindowIdentity {
+    param([Parameter(Mandatory)][string]$Phase,[string]$SceneName='')
+    if ($actionSupplementMode) {
+        $bindings=@(Assert-CapActionWindowContext)
+        $matches=@($bindings | Where-Object {
+            $_.actionPhase -ceq $Phase -and $SceneName -cin $_.sceneNames
+        })
+        if ($matches.Count -ne 1) {throw "Unknown or foreign action phase/scene window binding: $Phase/$SceneName"}
+        return $matches[0].identity
+    }
+    if ($Phase -cnotin @('before','after')) {throw "Unknown capture window identity phase: $Phase"}
+    $contract=$job.captureContract
+    $identity=$contract.windowIdentities.$Phase
+    if ($null -eq $identity) {throw "Capture window identity is missing: $Phase"}
+    return $identity
+}
+
 function Get-CapMatchedWindowGeometry {
-    param([Parameter(Mandatory)][string]$Phase)
+    param([Parameter(Mandatory)][string]$Phase,[string]$SceneName='')
+    $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
     $area=Get-CapPrimaryPhysicalWorkArea
     $contract = $job.captureContract
-    $identity = $contract.windowIdentities.$Phase
     return Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
         -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
         -WindowStyle ([long]$identity.windowStyleForAdjustment) `
@@ -1322,10 +1366,15 @@ function Start-CapGraphCodeApp {
         [Parameter(Mandatory)][string]$Phase,
         [Parameter(Mandatory)][string]$PipeName,
         [Parameter(Mandatory)][string]$SessionPrefix,
+        [string]$SceneName='',
         [switch]$ActionsFixture
     )
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
 
+    if ($actionSupplementMode) {
+        $null=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
+        $null=Get-CapMatchedWindowGeometry -Phase $Phase -SceneName $SceneName
+    }
     $binaryKey = if ($Phase -eq 'before') { 'graphcode-before.exe' } else { 'graphcode-after.exe' }
     $binaryPath = if ($rehearsal) { Assert-CapOwnedPath $job.rehearsalTarget.path }
         else { Join-Path $root "inputs\$binaryKey" }
@@ -1399,9 +1448,9 @@ function Start-CapGraphCodeApp {
     } elseif (Test-CapMatchedDpiAdapter) {
         $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
         $contract=$job.captureContract
-        $identity=$contract.windowIdentities.$Phase
+        $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
         $null=Assert-CapDpiWindowIdentity -Metrics $beforeMetrics -Identity $identity -Initial
-        $geometry=Get-CapMatchedWindowGeometry -Phase $Phase
+        $geometry=Get-CapMatchedWindowGeometry -Phase $Phase -SceneName $SceneName
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
             -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
             -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
@@ -1412,7 +1461,7 @@ function Start-CapGraphCodeApp {
     $metrics = Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
     if (Test-CapMatchedDpiAdapter) {
         $geometry=$appRun.Placement
-        $identity=$job.captureContract.windowIdentities.$Phase
+        $identity=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName
         $null=Assert-CapDpiWindowIdentity -Metrics $metrics -Identity $identity `
             -ExpectedOuterBounds @($geometry.OuterBounds)
     } elseif ($metrics.Dpi -ne 96) {
@@ -2397,6 +2446,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
 function Invoke-CapWireCompletionSupplement {
     param([Parameter(Mandatory)][string]$StubDaemonPath)
     $phase='wire-completion'
+    $null=Get-CapWorkerWindowIdentity -Phase $phase -SceneName 's-goal-unwired-unselected'
     $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory $phase)
     $projectRoot=Join-Path $root 'fixtures\wire-project'
     $null=New-Item -ItemType Directory -Path $projectRoot -Force
@@ -2414,7 +2464,8 @@ function Invoke-CapWireCompletionSupplement {
             '-ApplyGraphCommands','-StubProjectPath',$projectRoot
         ) -WorkingDirectory $roots.Peer -Role 'wire-supplement-stub'
         $runs.Add($stub)
-        $app=Start-CapGraphCodeApp -Roots $roots -Phase $phase -PipeName $pipe -SessionPrefix 'wire-supplement'
+        $app=Start-CapGraphCodeApp -Roots $roots -Phase $phase -PipeName $pipe -SessionPrefix 'wire-supplement' `
+            -SceneName 's-goal-unwired-unselected'
         $app | Add-Member -NotePropertyMembers @{
             SActions=[Collections.Generic.List[object]]::new()
             SObservation=$null
@@ -2770,6 +2821,11 @@ function Invoke-CapMatchedScenes {
     $tabExpectedDpi=if ($expectedDpiProperty) {[long]$expectedDpiProperty.Value} else {[long]$job.captureContract.dpi}
     $tabDpiBase=if ($dpiBaseProperty) {[long]$dpiBaseProperty.Value} else {96L}
     foreach ($scene in $SceneNames) {
+        $sceneBinding=@{}
+        if ($ActionSupplement) {
+            $null=Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $scene
+            $sceneBinding.SceneName=$scene
+        }
         Assert-CapWorkerDeadline "matched scene $scene"
         if ([DateTime]::UtcNow -ge $leaseDeadlineUtc.AddSeconds(-90)) {throw 'Matched scenes reached the required cleanup reserve.'}
         $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\$scene")
@@ -2802,7 +2858,7 @@ function Invoke-CapMatchedScenes {
                     Start-CapOfflineSeed -Roots $roots -Phase "$Phase-$scene" -SessionName "graphcode-$($node.id)"
                 }
             }
-            $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $pipe -SessionPrefix "s-$Phase"
+            $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $pipe -SessionPrefix "s-$Phase" @sceneBinding
             $app | Add-Member -NotePropertyMembers @{SActions=[Collections.Generic.List[object]]::new();SObservation=$null}
             $null=Invoke-CapSceneAction -AppRun $app -Action 'open-project' -Name 'Matched'
             if (-not $workspace) {

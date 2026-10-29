@@ -71,13 +71,29 @@ This still requires an unchanged clean, hash-bound action plan. It creates only
 `dry-run-output`; it never creates `action-authorization.json` or grants PNG,
 product, or provider authority. It uses a contained harmless `pwsh` child to
 exercise the actual launcher release with the action-owned numbered journal.
+Before any launcher is created, the entry resolves every explicit
+`actionWindowBindings` phase/scene through the same worker resolver used by
+app startup and geometry. `wire-completion` binds W1's unwired scene to the
+`after` capture identity; terminal phases bind their declared scenes/actions
+to that identity separately. There is no unknown-phase or missing-key fallback.
+The hash-bound plan carries the source-derived identity, and each resolution
+revalidates plan/job bytes, in-memory snapshots, source/binary identity, group,
+scene/action inventory, held authorization, run and deadline. Startup's initial
+and placed window guards reacquire through this resolver.
+
 The shared physical-work-area and `AdjustWindowRectExForDpi` preconditions run
-without a product window. Actual window identity/metrics, native actions, and
+without a product window. The dry-run manifest records each nonnull resolved
+identity and geometry before the harmless launcher release. A no-authority dry
+run may inspect a hash-bound historical job, recording its capture source
+separately from current tooling source; an authorized product run requires both
+sources to match. Actual runtime window identity/metrics, native actions, and
 product behavior are explicitly not evaluated.
 
 `dry-run-output\action-manifest.json` and `action-release.json` preserve both
 success and setup refusal, including the primary exception, terminal numbered
-journal and positive held-job-empty/launcher-EOF cleanup. A failed precondition
+journal and, when a harmless launcher was started, positive held-job-empty/
+launcher-EOF cleanup. A binding/geometry refusal now occurs before any launcher.
+A failed precondition
 is a bounded tooling/setup blocker, never permission to retry a product action.
 No prior W1 setup exception is reconstructed by this dry run.
 
@@ -87,6 +103,14 @@ authority/deadline/replacement negatives). `ValidationRunner.Tests.ps1` requires
 all 18 with zero skips, in addition to the unchanged **182 default / 185
 real-zmx** UiCaptureDriver baseline. The new cases are not omitted or used to
 replace baseline cases.
+
+`Tests\ActionWindowIdentity.Tests.ps1` adds **57 separately counted contracts**
+for every action group's explicit phases/scenes, missing/foreign/mismatched
+bindings, source/hash/run/authority/deadline/replacement failures, actual
+production startup refusal before launch, and initial/placed identity guard
+drift with modeled metrics. Its accepted startup intercepts the launcher without
+starting a process; it is not native-window evidence. ValidationRunner requires
+all 57 with zero skips, alongside the 18 import and unchanged 182/185 baseline.
 
 ## Live transition rehearsal
 
