@@ -118,13 +118,18 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     $null=New-Item -ItemType Directory -Path (Join-Path $owned 'fixtures'),(Join-Path $owned 'inputs')
     $fixtureHashValue=Write-ImportJson (Join-Path $owned 'fixtures\fixture.json') @{}
     $jobFile=Join-Path $owned 'job.json'
-    $adjusted=[CapNative]::AdjustWindowRectForDpi(320,240,13565952L,$false,0L,96)
-    $jobValue=@{sceneAdapter='S_MATCHED_V12_DPI_V1';captureContract=@{
-        logicalClientWH=@(320L,240L);expectedWindowDpi=96L;windowIdentities=@{after=@{
-            windowStyleForAdjustment=13565952L;windowExStyleForAdjustment=0L;hasMenu=$false
-            expectedAdjustedOuterWH=$(if ($scenario -ceq 'accepted') {@($adjusted[4],$adjusted[5])} else {@(1L,1L)})
-        }}
+    $windowIdentity=Get-CapGraphCodeWindowIdentity `
+        -SourceText ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures\c8r-window-after.zig'))) `
+        -SourceCommit $fixtureHead -ExpectedDpi 96 -LogicalClientWH @(320,240)
+    if ($scenario -ceq 'setup-refusal') {$windowIdentity.expectedAdjustedOuterWH=@(1L,1L)}
+    $jobValue=@{sceneAdapter='S_MATCHED_V12_DPI_V1';head=$fixtureHead
+        binaries=@{after=@{source=$fixtureHead;binaryBuiltAtSource=$fixtureHead}}
+        captureContract=@{
+        logicalClientWH=@(320L,240L);expectedWindowDpi=96L
+        windowIdentities=@{before=$windowIdentity;after=$windowIdentity}
     }}
+    $jobValue=$jobValue|ConvertTo-Json -Depth 30|ConvertFrom-Json -DateKind String
+    $windowBindings=@(Get-CapActionWindowBindings -Job $jobValue -Group FinalBoundedActions)
     $jobDigest=Write-ImportJson $jobFile $jobValue
     $preflightFile=Join-Path $owned 'preflight.json'
     $preflightDigest=Write-ImportJson $preflightFile @{status='FILE_ONLY_TEST_NOT_LIVE_PREFLIGHT'}
@@ -133,6 +138,8 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     $actionPlan=[ordered]@{
         status='PREPARED_NO_AUTHORITY';pngArtifacts=0L;processLaunches=0L
         sourceHead=$fixtureHead;sourceTree=$fixtureTree;group='FinalBoundedActions'
+        expectedScenes=@($windowBindings|ForEach-Object {$_.sceneNames})
+        actionWindowBindings=$windowBindings
         moduleSha256=(Get-FileHash (Join-Path $fixtureTools 'UiCaptureDriver.psm1')).Hash
         workerSha256=(Get-FileHash (Join-Path $fixtureTools 'Invoke-UiCaptureWorker.ps1')).Hash
         stubDaemonSha256=(Get-FileHash (Join-Path $fixtureTools 'Stub-Daemon.ps1')).Hash
@@ -157,6 +164,20 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     $manifest=Get-Content $manifestFile -Raw | ConvertFrom-Json -DateKind String
     $release=Get-Content (Join-Path $owned 'dry-run-output\action-release.json') -Raw | ConvertFrom-Json -DateKind String
     $launchSpecs=@(Get-ChildItem (Join-Path $owned 'dry-run-output') -File -Filter '*-launch.json')
+    if ($scenario -ceq 'setup-refusal') {
+        Assert-ImportCase ($entryExit -ne 0 -and $manifest.status -ceq 'FAILED' -and
+            $release.status -ceq 'FAILED_ZERO_SURVIVORS' -and $manifest.failures.Count -eq 1 -and
+            $release.cleanupState -ceq 'NO_PROCESS_LAUNCHES' -and
+            $manifest.failures[0].Contains('adjusted outer size differs') -and
+            ($entryOutput -join "`n").Contains('adjusted outer size differs') -and
+            $launchSpecs.Count -eq 0 -and $manifest.processJournal.Count -eq 0 -and
+            $manifest.receiptCount -eq 0 -and $manifest.providerReceipts.Count -eq 0 -and
+            $manifest.cleanupFailures.Count -eq 0 -and $manifest.independentSurvivors.Count -eq 0 -and
+            $manifest.pngCount -eq 0) 'Primary prelaunch setup refusal was masked or launched a process.'
+        $results.Add(@{name="production entry $scenario";passed=$true;manifestPath=$manifestFile
+            manifestSha256=(Get-FileHash $manifestFile).Hash;publications=$manifest.numberedJournal.published.Count})
+        continue
+    }
     Assert-ImportCase ($launchSpecs.Count -eq 1) 'Dry run must have exactly one harmless target specification.'
     $launchSpec=Get-Content $launchSpecs[0].FullName -Raw | ConvertFrom-Json -DateKind String
     Assert-ImportCase ($launchSpec.filePath -ieq (Join-Path $PSHOME 'pwsh.exe') -and
@@ -170,6 +191,14 @@ foreach ($scenario in @('accepted','setup-refusal')) {
     Assert-ImportCase ($manifest.executionMode -ceq 'DRY_RUN_NO_AUTHORITY' -and
         $manifest.dryRun.preconditionsEvaluated -and $manifest.dryRun.productLaunches -eq 0 -and
         $manifest.dryRun.providerLaunches -eq 0 -and $manifest.receiptCount -eq 0 -and
+        $manifest.dryRun.windowBindings.Count -eq 6 -and
+        $manifest.dryRun.windowBindings[0].actionPhase -ceq 'wire-completion' -and
+        $manifest.dryRun.windowBindings[0].capturePhase -ceq 'after' -and
+        $null -ne $manifest.dryRun.windowBindings[0].identity -and
+        @($manifest.dryRun.windowBindings | Where-Object {
+            $_.validation -cne 'NONNULL_SOURCE_BOUND_IDENTITY_BEFORE_LAUNCH' -or
+            $null -eq $_.identity -or $_.identity.sourceCommit -cne $fixtureHead
+        }).Count -eq 0 -and
         $manifest.providerReceipts.Count -eq 0 -and $manifest.pngCount -eq 0 -and
         $manifest.cleanupFailures.Count -eq 0 -and $manifest.independentSurvivors.Count -eq 0 -and
         $manifest.cleanup.Count -eq 1 -and $manifest.cleanup[0].jobActive0 -and
@@ -188,11 +217,6 @@ foreach ($scenario in @('accepted','setup-refusal')) {
         Assert-ImportCase ($entryExit -eq 0 -and $manifest.status -ceq 'COMPLETE' -and
             $release.status -ceq 'RELEASED_ZERO_SURVIVORS' -and
             $manifest.dryRun.geometry.GeometryDerivation -ceq 'AdjustWindowRectExForDpi') "Dry-run failed: $entryOutput"
-    } else {
-        Assert-ImportCase ($entryExit -ne 0 -and $manifest.status -ceq 'FAILED' -and
-            $release.status -ceq 'FAILED_ZERO_SURVIVORS' -and $manifest.failures.Count -eq 1 -and
-            $manifest.failures[0].Contains('adjusted outer size differs') -and
-            ($entryOutput -join "`n").Contains('adjusted outer size differs')) 'Primary setup refusal was masked.'
     }
     $results.Add(@{name="production entry $scenario";passed=$true;manifestPath=$manifestFile
         manifestSha256=(Get-FileHash $manifestFile).Hash;publications=$manifest.numberedJournal.published.Count})

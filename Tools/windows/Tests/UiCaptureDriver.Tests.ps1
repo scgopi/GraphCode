@@ -3261,6 +3261,7 @@ function Invoke-CapMatchedDpiContracts {
         $workerSource=[IO.File]::ReadAllText($workerPath)
         $supervisorSource=[IO.File]::ReadAllText($supervisorPath)
         Assert-CapTest ($workerSource.Contains('$identity=$contract.windowIdentities.$Phase') -and
+            $workerSource.Contains('Get-CapWorkerWindowIdentity -Phase $Phase -SceneName $SceneName') -and
             $workerSource.Contains('$area=Get-CapPrimaryPhysicalWorkArea') -and
             $supervisorSource.Contains('foreach ($phase in @($contract.phases))')) `
             'Worker/supervisor phase-specific physical identity consumers differ.'

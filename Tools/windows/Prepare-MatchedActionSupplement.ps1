@@ -161,6 +161,12 @@ foreach ($scene in $expectedScenes) {
 }
 $stubPath=Join-Path $repositoryRoot 'Tools\windows\Stub-Daemon.ps1'
 $actionRunnerPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-MatchedActionSupplement.ps1'
+Import-Module (Join-Path $repositoryRoot 'Tools\windows\UiCaptureDriver.psm1') -Force -WarningAction SilentlyContinue
+if ((Get-FileHash -LiteralPath $focused.jobPath -Algorithm SHA256).Hash -cne $focused.jobSha256) {
+    throw 'Action window binding job hash mismatch.'
+}
+$actionJob=Get-Content -LiteralPath $focused.jobPath -Raw | ConvertFrom-Json -DateKind String
+$actionWindowBindings=@(Get-CapActionWindowBindings -Job $actionJob -Group $Group)
 $plan=[ordered]@{
     schemaVersion=1L
     status='PREPARED_NO_AUTHORITY'
@@ -189,6 +195,7 @@ $plan=[ordered]@{
     existingSceneManifestPath=$sceneManifestPath
     existingSceneManifestSha256=$ExistingSceneManifestSha256.ToUpperInvariant()
     expectedScenes=$expectedScenes
+    actionWindowBindings=$actionWindowBindings
     imageBindings=$bindings
     expectedReceiptCount=[long]$expectedScenes.Count
     qualifiedAuthority=$(if ($Group -ceq 'FinalBoundedActions') {

@@ -6062,6 +6062,18 @@ if ($actionImportSummary.executed -ne 18 -or $actionImportSummary.passed -ne 18 
     $actionImportSummary.failed -ne 0 -or $actionImportSummary.skipped -ne 0) {
   throw "RED: action import requires all 18 contracts without skips"
 }
+$actionBindingOutput = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionWindowIdentity.Tests.ps1"))
+$actionBindingOutput | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) {throw "RED: action window binding contract child failed"}
+$actionBindingSummaries=@($actionBindingOutput | Where-Object {
+    $_ -is [string] -and $_.StartsWith('{"suite":"ActionWindowIdentity",')
+  })
+if ($actionBindingSummaries.Count -ne 1) {throw "RED: action binding structured count missing or duplicated"}
+$actionBindingSummary=ConvertFrom-Json $actionBindingSummaries[0]
+if ($actionBindingSummary.executed -ne 57 -or $actionBindingSummary.passed -ne 57 -or
+    $actionBindingSummary.failed -ne 0 -or $actionBindingSummary.skipped -ne 0) {
+  throw "RED: action window binding requires all 57 contracts without skips"
+}
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))
 $agentCommandSummary = "Invoke-AgentCommand.Tests.ps1: PASS; executed=6; cases=argument-stream-marker,zero-arguments,existing-console,existing-marker,parse-failure,child-nonzero"

@@ -3769,6 +3769,73 @@ function Get-CapMatchedCapturePlan {
     }
 }
 
+function Get-CapActionWindowBindings {
+    param([Parameter(Mandatory)]$Job,
+        [Parameter(Mandatory)][ValidateSet('WireCompletion','TerminalActions','FinalBoundedActions',IgnoreCase=$false)][string]$Group)
+    if ($Job.sceneAdapter -cne 'S_MATCHED_V12_DPI_V1') {
+        throw 'Action window binding requires the matched DPI adapter.'
+    }
+    $property=$Job.captureContract.windowIdentities.PSObject.Properties['after']
+    if (-not $property -or $null -eq $property.Value) {throw 'Action capture phase identity is missing: after.'}
+    $identity=$property.Value
+    Assert-CapDataRecord $identity @{
+        sourceContract=[string];sourceCommit=[string];expectedWindowDpi=[long];requestedOuterWH=[array]
+        expectedInitialClientWH=[array];expectedInitialOuterWH=[array]
+        expectedPhysicalClientWH=[array];expectedAdjustedOuterWH=[array]
+        windowStyleForAdjustment=[long];windowExStyleForAdjustment=[long];expectedRuntimeWindowStyle=[long]
+        expectedRuntimeWindowExStyle=[long];hasMenu=[bool];geometryDerivation=[string]
+    } 'Action source window identity'
+    if ($identity.sourceContract -cne 'GRAPHCODE_MAIN_WINDOW_V1' -or
+        $identity.sourceCommit -cnotmatch '^[a-f0-9]{40}$' -or
+        $identity.sourceCommit -cne $Job.head -or
+        $identity.sourceCommit -cne $Job.binaries.after.source -or
+        $identity.sourceCommit -cne $Job.binaries.after.binaryBuiltAtSource -or
+        $identity.expectedWindowDpi -ne $Job.captureContract.expectedWindowDpi) {
+        throw 'Action source window identity differs from the capture job/binary.'
+    }
+    $specifications=@()
+    if ($Group -cin @('WireCompletion','FinalBoundedActions')) {
+        $specifications+= [pscustomobject]@{actionPhase='wire-completion'
+            sceneNames=@('s-goal-unwired-unselected');actionIds=@('W1')}
+    }
+    if ($Group -ceq 'FinalBoundedActions') {
+        $specifications+= [pscustomobject]@{actionPhase='after'
+            sceneNames=@('s-tabs-two-agent-selected','s-tabs-split-right-focused','s-tabs-last-guard',
+                's-tabs-many-first','s-tabs-hover-close');actionIds=@('W2','W3','W4','W5','W6')}
+    } elseif ($Group -ceq 'TerminalActions') {
+        $specifications+= [pscustomobject]@{actionPhase='after'
+            sceneNames=@(Get-CapMatchedFocusedSceneNames -Profile TerminalChrome)
+            actionIds=@('terminal-actions')}
+    }
+    foreach ($specification in $specifications) {
+        [pscustomobject][ordered]@{
+            actionPhase=$specification.actionPhase
+            capturePhase='after'
+            sceneNames=@($specification.sceneNames)
+            actionIds=@($specification.actionIds)
+            sourceCommit=$identity.sourceCommit
+            identity=$identity
+        }
+    }
+}
+
+function Assert-CapActionWindowBindings {
+    param([Parameter(Mandatory)]$Job,[Parameter(Mandatory)]$Plan)
+    $expected=@(Get-CapActionWindowBindings -Job $Job -Group $Plan.group)
+    $property=$Plan.PSObject.Properties['actionWindowBindings']
+    if (-not $property -or $null -eq $property.Value -or
+        -not [Text.Json.Nodes.JsonNode]::DeepEquals(
+            [Text.Json.Nodes.JsonNode]::Parse((ConvertTo-Json -InputObject @($property.Value) -Depth 30 -Compress)),
+            [Text.Json.Nodes.JsonNode]::Parse((ConvertTo-Json -InputObject $expected -Depth 30 -Compress)))) {
+        throw 'Action phase/capture phase/scene/action/source window binding differs.'
+    }
+    $scenes=@($expected | ForEach-Object {$_.sceneNames})
+    if (($Plan.expectedScenes -join ',') -cne ($scenes -join ',')) {
+        throw 'Action window binding scene inventory differs.'
+    }
+    return $expected
+}
+
 function Assert-CapFocusedPrelaunchPaths {
     param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)]$Paths)
     Assert-CapDataRecord $Paths @{outputDirectory=[string];runDirectory=[string]
@@ -6087,6 +6154,7 @@ function Assert-CapNoWorkerTransientArtifacts {
 Export-ModuleMember -Function @(
     'Get-CapMatchedSceneNames','Get-CapMatchedFocusedSceneNames','Get-CapMatchedFocusedClassification',
     'Get-CapMatchedCapturePlan',
+    'Get-CapActionWindowBindings','Assert-CapActionWindowBindings',
     'Assert-CapFocusedPrelaunchPaths',
     'Assert-CapMatchedFixture','Get-CapMatchedAutomationId',
     'Get-CapMatchedVisibleTabIndexes','Get-CapMatchedTabObservation','Get-CapMatchedChromeControlObservation',
