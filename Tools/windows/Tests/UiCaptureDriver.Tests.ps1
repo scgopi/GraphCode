@@ -714,6 +714,8 @@ function Assert-CapRejects {
         Invoke-CapTest 'journal native bindings match the exact job-ownership declaration contract' {
             $expected = @(
                 'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
+                'GraphCodeUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
+                'GraphCodeUiaGateState|SendKeyInputs|user32.dll|SendInput',
                 'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
                 'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
                 'GraphCodeUiaGateState|GetForegroundWindow|user32.dll|GetForegroundWindow',
@@ -752,7 +754,7 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 37 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static37 export contract differs.'
+            Assert-CapTest ($actual.Count -eq 39 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static39 export contract differs.'
             return @{ subcases = 36; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
@@ -2997,6 +2999,9 @@ function Invoke-CapMatchedContracts {
         $workerSource=[IO.File]::ReadAllText($workerPath)
         $prepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-FocusedUiCapture.ps1'))
         $authorizeSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Authorize-FocusedUiCapture.ps1'))
+        $actionPrepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-MatchedActionSupplement.ps1'))
+        $actionInvokeSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Invoke-MatchedActionSupplement.ps1'))
+        $splitDown=Get-CapActionSpec -Action 'workspace-split-down'
         Assert-CapTest ($supervisorSource.Contains("'FOCUSED_LIVE_CAPTURE'") -and
             $supervisorSource.Contains('FocusedAuthorizationPath') -and
             $supervisorSource.Contains('Assert-CapFocusedPrelaunchPaths') -and
@@ -3006,6 +3011,15 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('$images.Count -eq (Get-CapWorkerExpectedImageCount)') -and
             $workerSource.Contains('function Wait-CapMatchedWireMode') -and
             $workerSource.Contains('[GraphCodeUiaGateState]::PostKeyboard') -and
+            $workerSource.Contains('function Invoke-CapMatchedTerminalSceneSupplement') -and
+            $workerSource.Contains('function Invoke-CapWireCompletionSupplement') -and
+            $workerSource.Contains('NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_OUTPUT') -and
+            $actionPrepareSource.Contains("status='PREPARED_NO_AUTHORITY'") -and
+            $actionPrepareSource.Contains("pngArtifacts=0L") -and
+            $actionInvokeSource.Contains('-DefinitionsOnly') -and
+            $actionInvokeSource.Contains("'RELEASED_ZERO_SURVIVORS'") -and
+            $splitDown.Name -ceq 'Split Down' -and
+            $splitDown.AutomationId -ceq (Get-CapMatchedAutomationId 'workspace-split-down:control') -and
             $workerSource.Contains("-Action 'attention-action'") -and
             $workerSource.Contains("fixtureIsolation='ONE_SCENE_ONE_DISPOSABLE_PHASE_ROOT'") -and
             $prepareSource.Contains("[switch]`$PlanOnly") -and
