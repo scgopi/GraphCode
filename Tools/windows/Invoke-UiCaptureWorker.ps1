@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$OwnedRoot,
-    [Parameter()][string]$AuthorizationPath,
-    [Parameter()][string]$AuthorizationSha256,
+    [Parameter()][Alias('AuthorizationPath')][string]$WorkerEntryAuthorizationPath,
+    [Parameter()][Alias('AuthorizationSha256')][string]$WorkerEntryAuthorizationSha256,
     [switch]$AwaitSupervisorGate,
     [Parameter()][switch]$DefinitionsOnly
 )
@@ -82,6 +82,58 @@ function Get-CapWorkerAuthorityId {
         return [string]$auth.leaseId
     }
     throw 'Worker authority identity is missing.'
+}
+
+function Open-CapActionAuthorization {
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Path,
+        [Parameter(Mandatory)][string]$Sha256,
+        [Parameter(Mandatory)]$Expected,
+        [switch]$DryRun
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Action authorization path is null or empty.' }
+    $fullPath = Assert-CapArtifactPath -Root $root -Path $Path
+    if ($fullPath -ine $Expected.authorizationPath) { throw 'Action authorization path differs from this run.' }
+    # Deny replacement/writes until manifest and release publication have finished.
+    $pin = [IO.File]::Open($fullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $record = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{path=$fullPath;sha256=$Sha256})
+        foreach ($name in @('authorizationId','ownedRoot','authorizationPath','runDirectory',
+            'processJournalPath','actionPlanSha256','jobSha256','moduleSha256','workerSha256',
+            'actionRunnerSha256','sourceHead','sourceTree','group','grantedUtc','expiresUtc','maxMinutes','pngAuthorized')) {
+            if (-not $record.PSObject.Properties[$name] -or
+                [string]$record.$name -cne [string]$Expected.$name) {
+                throw "Action authorization binding differs: $name"
+            }
+        }
+        $expectedStatus = if ($DryRun) {'DRY_RUN_NO_AUTHORITY'} else {'AUTHORIZED'}
+        $expectedAction = if ($DryRun) {'no-product-import-dry-run'} else {'matched-action-supplement'}
+        if ($record.status -cne $expectedStatus -or $record.authorizedAction -cne $expectedAction -or
+            ($DryRun -and $record.pngAuthorized -ne $false)) {
+            throw 'Action authorization authority differs.'
+        }
+        $window = Get-CapLeaseWindow -GrantedUtc $record.grantedUtc -ExpiresUtc $record.expiresUtc `
+            -MaximumMinutes ([double]$record.maxMinutes) -NowUtc ([DateTime]::UtcNow)
+        if ([DateTime]::UtcNow -ge $window.WorkerDeadlineUtc) { throw 'Action authorization worker deadline expired.' }
+        return [pscustomobject]@{Record=$record;Pin=$pin;Sha256=$Sha256;Window=$window}
+    } catch {
+        $pin.Dispose()
+        throw
+    }
+}
+
+function Get-CapMatchedWindowGeometry {
+    param([Parameter(Mandatory)][string]$Phase)
+    $area=Get-CapPrimaryPhysicalWorkArea
+    $contract = $job.captureContract
+    $identity = $contract.windowIdentities.$Phase
+    return Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
+        -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
+        -WindowStyle ([long]$identity.windowStyleForAdjustment) `
+        -WindowExStyle ([long]$identity.windowExStyleForAdjustment) `
+        -HasMenu ([bool]$identity.hasMenu) `
+        -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom) `
+        -ExpectedAdjustedOuterWH @($identity.expectedAdjustedOuterWH)
 }
 
 function ConvertTo-CapWorkerImagePath {
@@ -1345,18 +1397,11 @@ function Start-CapGraphCodeApp {
         $appRun | Add-Member -NotePropertyName Placement -NotePropertyValue $placement
         $appRun | Add-Member -NotePropertyName Roots -NotePropertyValue $Roots
     } elseif (Test-CapMatchedDpiAdapter) {
-        $area=Get-CapPrimaryPhysicalWorkArea
         $beforeMetrics=Get-CapWindowMetrics -Window $window -ProcessIdentity $run.Identity
         $contract=$job.captureContract
         $identity=$contract.windowIdentities.$Phase
         $null=Assert-CapDpiWindowIdentity -Metrics $beforeMetrics -Identity $identity -Initial
-        $geometry=Get-CapDpiGeometry -LogicalClientWH @($contract.logicalClientWH) `
-            -ExpectedDpi ([uint32]$contract.expectedWindowDpi) `
-            -WindowStyle ([long]$identity.windowStyleForAdjustment) `
-            -WindowExStyle ([long]$identity.windowExStyleForAdjustment) `
-            -HasMenu ([bool]$identity.hasMenu) `
-            -WorkArea @($area.Left,$area.Top,$area.Right,$area.Bottom) `
-            -ExpectedAdjustedOuterWH @($identity.expectedAdjustedOuterWH)
+        $geometry=Get-CapMatchedWindowGeometry -Phase $Phase
         Set-CapWindowPosition -Window $window -ProcessIdentity $run.Identity `
             -X $geometry.OuterBounds[0] -Y $geometry.OuterBounds[1] `
             -Width $geometry.OuterWH[0] -Height $geometry.OuterWH[1]
@@ -3067,21 +3112,21 @@ function Invoke-CapRealSeedRehearsal {
 if ($DefinitionsOnly) { return }
 
 try {
-    if (-not $AuthorizationPath -or -not $AuthorizationSha256) {
+    if (-not $WorkerEntryAuthorizationPath -or -not $WorkerEntryAuthorizationSha256) {
         throw 'Live capture requires the supervisor-bound authorization path and hash.'
     }
-    $authorizationFullPath = [IO.Path]::GetFullPath($AuthorizationPath)
+    $authorizationFullPath = [IO.Path]::GetFullPath($WorkerEntryAuthorizationPath)
     if (-not $authorizationFullPath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Worker authorization path escaped its explicit owned root.'
     }
-    if (-not (Test-Path -LiteralPath $AuthorizationPath -PathType Leaf)) {
-        throw "Supervisor run authorization is missing: $AuthorizationPath"
+    if (-not (Test-Path -LiteralPath $WorkerEntryAuthorizationPath -PathType Leaf)) {
+        throw "Supervisor run authorization is missing: $WorkerEntryAuthorizationPath"
     }
-    $actualAuthorizationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $AuthorizationPath).Hash
-    if ($actualAuthorizationHash -ne $AuthorizationSha256) {
+    $actualAuthorizationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $WorkerEntryAuthorizationPath).Hash
+    if ($actualAuthorizationHash -ne $WorkerEntryAuthorizationSha256) {
         throw 'Supervisor run authorization hash mismatch.'
     }
-    $auth = Get-Content -LiteralPath $AuthorizationPath -Raw | ConvertFrom-Json -DateKind String
+    $auth = Get-Content -LiteralPath $WorkerEntryAuthorizationPath -Raw | ConvertFrom-Json -DateKind String
     if ($auth.ownedRoot -ine $root -or
         $auth.executionMode -notin @('LIVE_CAPTURE','FOCUSED_LIVE_CAPTURE',
             'NO_DESKTOP_REAL_LAUNCH_REHEARSAL','LIVE_TRANSITION_REHEARSAL')) {
@@ -3101,7 +3146,7 @@ try {
     [CapProcessJob]::ClearStandardHandleInheritance()
     if (-not $AwaitSupervisorGate) { throw 'Worker requires the assigned supervisor job gate.' }
     $gate = [Console]::In.ReadLineAsync()
-    if (-not $gate.Wait(30000) -or $gate.Result -cne $AuthorizationSha256) {
+    if (-not $gate.Wait(30000) -or $gate.Result -cne $WorkerEntryAuthorizationSha256) {
         throw 'Supervisor job gate was not released.'
     }
     $safeWorkerOutput = Assert-CapArtifactPath -Root $root -Path $auth.outputDirectory
@@ -3130,7 +3175,7 @@ try {
         $leaseHash -ne $auth.authoritySha256) {
         throw 'A reviewed capture control or authorization input changed after supervisor launch.'
     }
-    if ($AuthorizationPath -ine $auth.authorizationPath) {
+    if ($WorkerEntryAuthorizationPath -ine $auth.authorizationPath) {
         throw 'Worker command-line authorization does not match the supervisor-bound record.'
     }
     $job = Read-CapBoundJson -Root $root -Reference ([pscustomobject]@{ path = $jobPath; sha256 = $jobHash })

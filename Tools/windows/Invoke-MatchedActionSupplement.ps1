@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory)][string]$Repository,
     [Parameter(Mandatory)][string]$OwnedRoot,
     [Parameter(Mandatory)][string]$ActionPlanPath,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ActionPlanSha256
+    [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ActionPlanSha256,
+    [switch]$DryRun
 )
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath($OwnedRoot).TrimEnd('\')
@@ -44,11 +45,18 @@ foreach ($binding in @(
     }
 }
 $granted=[DateTimeOffset]::UtcNow.AddSeconds(-1)
+$actionRunDirectory=Join-Path $root ($(if ($DryRun) {'dry-run-runs\'} else {'action-runs\'}) +
+    [guid]::NewGuid().ToString('N'))
+$authorizationPath=Join-Path $root $(if ($DryRun) {'dry-run-binding.json'} else {'action-authorization.json'})
 $authorization=[ordered]@{
     schemaVersion=1L
     authorizationId=[guid]::NewGuid().ToString()
-    status='AUTHORIZED'
-    authorizedAction='matched-action-supplement'
+    status=$(if ($DryRun) {'DRY_RUN_NO_AUTHORITY'} else {'AUTHORIZED'})
+    authorizedAction=$(if ($DryRun) {'no-product-import-dry-run'} else {'matched-action-supplement'})
+    ownedRoot=$root
+    authorizationPath=$authorizationPath
+    runDirectory=$actionRunDirectory
+    processJournalPath=(Join-Path $actionRunDirectory 'process-journal')
     group=$plan.group
     sourceHead=$head
     sourceTree=$tree
@@ -64,22 +72,26 @@ $authorization=[ordered]@{
         [long]$plan.authorizationBounds.requestedMaxMinutes).ToString('o')
     maxMinutes=[long]$plan.authorizationBounds.requestedMaxMinutes
 }
-if ($plan.group -ceq 'FinalBoundedActions') {$authorization.pngAuthorized=$true}
-$authorizationPath=Join-Path $root 'action-authorization.json'
+if (-not $DryRun -and $plan.group -ceq 'FinalBoundedActions') {$authorization.pngAuthorized=$true}
 if (Test-Path $authorizationPath) {throw 'Action supplement authorization already consumed.'}
 [IO.File]::WriteAllText($authorizationPath,($authorization|ConvertTo-Json -Depth 20),
     [Text.UTF8Encoding]::new($false))
-$output=Join-Path $root 'action-output'
+$authorizationSha256=(Get-FileHash -LiteralPath $authorizationPath -Algorithm SHA256).Hash
+$output=Join-Path $root $(if ($DryRun) {'dry-run-output'} else {'action-output'})
 if (Test-Path $output) {throw 'Action supplement output already exists.'}
 $null=New-Item -ItemType Directory -Path $output
 
 Import-Module $modulePath -Force -WarningAction SilentlyContinue
 . $workerPath -OwnedRoot $root -DefinitionsOnly
+$authorizationHandle=Open-CapActionAuthorization -Path $authorizationPath -Sha256 $authorizationSha256 `
+    -Expected ([pscustomobject]$authorization) -DryRun:$DryRun
+$selfProcess=$null
+try {
 $job=Get-Content $plan.jobPath -Raw | ConvertFrom-Json -DateKind String
-$matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job
+if (-not $DryRun) {$matchedCapturePlan=Get-CapMatchedCapturePlan -Job $job}
 $fixturePath=Join-Path $root 'fixtures\fixture.json'
 $peerScript=Join-Path $root 'inputs\offline-peer-source.ps1'
-$runDirectory=Join-Path $root ('action-runs\' + [guid]::NewGuid().ToString('N'))
+$runDirectory=$actionRunDirectory
 $null=New-Item -ItemType Directory -Path $runDirectory
 $journalPath=Join-Path $runDirectory 'process-journal'
 $null=New-Item -ItemType Directory -Path $journalPath
@@ -87,9 +99,7 @@ $outputDirectory=$output
 $workerLog=Join-Path $output 'action-worker.log'
 [IO.File]::WriteAllText($workerLog,'',[Text.UTF8Encoding]::new($false))
 Set-CapTracePath -Path (Join-Path $output 'action-calls.jsonl')
-$leaseWindow=Get-CapLeaseWindow -GrantedUtc $authorization.grantedUtc `
-    -ExpiresUtc $authorization.expiresUtc -MaximumMinutes ([double]$authorization.maxMinutes) `
-    -NowUtc ([DateTime]::UtcNow)
+$leaseWindow=$authorizationHandle.Window
 $leaseDeadlineUtc=$leaseWindow.WorkerDeadlineUtc
 $focusedCapture=$true
 $actionSupplementMode=$true
@@ -114,10 +124,43 @@ Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
 $startedUtc=[DateTime]::UtcNow
 $primaryFailure=$null
 $independent=@()
+$dryRunLauncher=$null
+$dryRunProof=$null
 try {
-    $matchedFixture=Get-Content $fixturePath -Raw | ConvertFrom-Json -DateKind String
-    Initialize-CapMatchedWorktrees -Fixture $matchedFixture
-    if ($plan.group -ceq 'TerminalActions') {
+    Assert-CapWorkerDeadline 'action entry'
+    if ($DryRun) {
+        # Exercise the real custody gate with a harmless child, never a product/provider image.
+        $dryRunLauncher=Start-CapJobLauncher -Root $root -OutputDirectory $outputDirectory `
+            -FilePath (Join-Path $PSHOME 'pwsh.exe') `
+            -ArgumentList @('-NoProfile','-NonInteractive','-Command','exit 0') `
+            -WorkingDirectory $root -Role 'import-dry-run-launcher' `
+            -Environment @{TEMP=$runDirectory;TMP=$runDirectory}
+        $runs.Add($dryRunLauncher)
+        Write-CapProcessJournal -Identity $dryRunLauncher.Identity -Phase 'dry-run'
+        $releaseSequence=$journalState.Sequence
+        $target=Release-CapJobLauncher -Run $dryRunLauncher -JournalState $journalState
+        $dryRunProof=[ordered]@{
+            authorizationPath=$authorizationPath
+            authorizationSha256=$authorizationSha256
+            journalDirectory=$journalState.Directory
+            journalBinding=$journalState.Binding
+            releaseSequence=$releaseSequence
+            target=$target
+            productLaunches=0L
+            providerLaunches=0L
+            windowIdentityValidation='REQUIRES_PRODUCT_WINDOW_NOT_EXECUTED'
+            geometry=$null
+            preconditionsEvaluated=$true
+        }
+        if (-not (Test-CapMatchedDpiAdapter)) {throw 'Action dry run requires the production matched DPI contract.'}
+        $dryRunProof.geometry=Get-CapMatchedWindowGeometry -Phase 'after'
+    } else {
+        $matchedFixture=Get-Content $fixturePath -Raw | ConvertFrom-Json -DateKind String
+        Initialize-CapMatchedWorktrees -Fixture $matchedFixture
+    }
+    if ($DryRun) {
+        Assert-CapWorkerDeadline 'dry-run preconditions evaluated'
+    } elseif ($plan.group -ceq 'TerminalActions') {
         $bindings=@{}
         foreach ($property in $plan.imageBindings.PSObject.Properties) {
             $bindings[$property.Name]=[string]$property.Value
@@ -160,6 +203,10 @@ try {
 } catch {
     $primaryFailure=$_
 } finally {
+    if ($dryRunLauncher) {
+        try {$null=Close-CapMatchedJob -Run $dryRunLauncher -Phase 'dry-run'}
+        catch {$cleanupFailures.Add("Dry-run launcher cleanup failed: $($_.Exception.Message)")}
+    }
     foreach ($appRun in @($applicationRuns | Sort-Object {$_.Run.StartedUtc} -Descending)) {
         if (-not $appRun.CleanupComplete) {
             try {Close-CapGraphCodeApp -AppRun $appRun}
@@ -199,7 +246,9 @@ $manifest=[ordered]@{
     sourceHead=$head
     sourceTree=$tree
     actionPlanSha256=$ActionPlanSha256.ToUpperInvariant()
-    authorizationSha256=(Get-FileHash $authorizationPath -Algorithm SHA256).Hash
+    authorizationSha256=$authorizationHandle.Sha256
+    executionMode=$(if ($DryRun) {'DRY_RUN_NO_AUTHORITY'} else {'MATCHED_ACTION_SUPPLEMENT'})
+    dryRun=$dryRunProof
     startedUtc=$startedUtc.ToString('o')
     finishedUtc=[DateTime]::UtcNow.ToString('o')
     imageBindings=$plan.imageBindings
@@ -217,7 +266,7 @@ $manifest=[ordered]@{
     cleanup=@($cleanupReceipts)
     cleanupFailures=@($cleanupFailures)
     independentSurvivors=@($independent)
-    failures=$(if ($primaryFailure) {@($primaryFailure.Exception.Message)} else {@()})
+    failures=@(if ($primaryFailure) {$primaryFailure.Exception.Message})
     pngCount=[long]@(Get-ChildItem $root -Recurse -File -Filter '*.png').Count
 }
 $manifestPath=Join-Path $output 'action-manifest.json'
@@ -245,7 +294,7 @@ $releasePath=Join-Path $output 'action-release.json'
 if ($manifest.status -cne 'COMPLETE' -or $release.status -cne 'RELEASED_ZERO_SURVIVORS') {
     throw "Action supplement failed: $($manifest.failures -join '; ') cleanup=$($cleanupFailures -join '; ') survivors=$($independent.Count)"
 }
-if ($manifest.pngCount -ne [long]$plan.maximumResultPngs) {
+if ($manifest.pngCount -ne $(if ($DryRun) {0L} else {[long]$plan.maximumResultPngs})) {
     throw "Action supplement result image count differs: expected=$($plan.maximumResultPngs) actual=$($manifest.pngCount)"
 }
 [ordered]@{
@@ -259,3 +308,7 @@ if ($manifest.pngCount -ne [long]$plan.maximumResultPngs) {
     cleanupState=$release.cleanupState
     pngCount=$manifest.pngCount
 } | ConvertTo-Json -Depth 10
+} finally {
+    $authorizationHandle.Pin.Dispose()
+    if ($selfProcess) {$selfProcess.Dispose()}
+}

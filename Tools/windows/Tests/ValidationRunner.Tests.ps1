@@ -6050,6 +6050,18 @@ foreach ($name in $matchedGroups) {
     throw "RED: matched capture group must pass exactly once: $name"
   }
 }
+$actionImportOutput = @(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionWorkerImport.Tests.ps1"))
+$actionImportOutput | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) { throw "RED: action worker import contract child failed" }
+$actionImportSummaries = @($actionImportOutput | Where-Object {
+    $_ -is [string] -and $_.StartsWith('{"suite":"ActionWorkerImport",')
+  })
+if ($actionImportSummaries.Count -ne 1) { throw "RED: action import structured count missing or duplicated" }
+$actionImportSummary = ConvertFrom-Json $actionImportSummaries[0]
+if ($actionImportSummary.executed -ne 18 -or $actionImportSummary.passed -ne 18 -or
+    $actionImportSummary.failed -ne 0 -or $actionImportSummary.skipped -ne 0) {
+  throw "RED: action import requires all 18 contracts without skips"
+}
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))
 $agentCommandSummary = "Invoke-AgentCommand.Tests.ps1: PASS; executed=6; cases=argument-stream-marker,zero-arguments,existing-console,existing-marker,parse-failure,child-nonzero"
