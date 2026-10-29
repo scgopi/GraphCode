@@ -39,6 +39,7 @@ $checkpoints = [Collections.Generic.List[object]]::new()
 $phaseTransitions = [Collections.Generic.List[object]]::new()
 $runs = [Collections.Generic.List[object]]::new()
 $seedRuns = [Collections.Generic.List[object]]::new()
+$actionSeedRuns = [Collections.Generic.List[object]]::new()
 $applicationRuns = [Collections.Generic.List[object]]::new()
 $realRestarts = [Collections.Generic.List[object]]::new()
 $actionSupplementReceipts = [Collections.Generic.List[object]]::new()
@@ -176,17 +177,24 @@ function Write-CapProcessJournal {
         }
     }
     if ($index -ge 0) { $journalEntries[$index] = $entry } else { $journalEntries.Add($entry) }
-    if (-not $actionSupplementMode) {
-        Write-CapWorkerJournalSnapshot -Kind 'Progress'
-    }
+    Write-CapWorkerJournalSnapshot -Kind 'Progress'
 }
 
 function Write-CapWorkerJournalSnapshot {
     param([ValidateSet('Bootstrap','Progress','Terminal')][string]$Kind,
         [string]$Outcome = 'CAPTURING')
-    if ($actionSupplementMode) {return}
     if ($null -eq $journalState) { throw 'Worker journal was not initialized before publication.' }
-    $progressManifest=if ($transitionRehearsal) {
+    $progressManifest=if ($actionSupplementMode) {
+        [pscustomobject][ordered]@{
+            schemaVersion=1L
+            executionMode='MATCHED_ACTION_SUPPLEMENT'
+            evidenceClassification='BOUNDED_ACTION_EVIDENCE_NOT_STATIC_CAPTURE'
+            status=$Outcome
+            actionReceiptCount=[long]$actionSupplementReceipts.Count
+            providerReceiptCount=[long]$zmxSeedReceipts.Count
+            captures=0L
+        }
+    } elseif ($transitionRehearsal) {
         [pscustomobject][ordered]@{
             schemaVersion=1L
             executionMode='LIVE_TRANSITION_REHEARSAL'
@@ -532,6 +540,130 @@ function Start-CapOfflineSeed {
         $arguments[4] -cne '/Q' -or $arguments[5] -cne '/K' -or
         $arguments[6] -cne 'echo Offline card fixture - no backend')) {
         throw 'The B job does not contain the exact seven-argument offline cmd-only zmx seed.'
+    }
+
+    function Install-CapQualifiedActionTopology {
+        param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)]$Topology)
+        if ((Get-FileHash -LiteralPath $Topology.preparedLayoutPath -Algorithm SHA256).Hash -cne
+            [string]$Topology.preparedLayoutSha256) {
+            throw "Prepared qualified layout changed: $($Topology.scene)"
+        }
+        $layoutPath=Join-Path $Roots.Root "$($Topology.loop).json"
+        Copy-Item -LiteralPath $Topology.preparedLayoutPath -Destination $layoutPath
+        $sessionRoot=Join-Path $Roots.Root 'shell-sessions'
+        $null=New-Item -ItemType Directory -Path $sessionRoot -Force
+        foreach ($session in @($Topology.sessions | Where-Object {-not $_.agent})) {
+            $source=Join-Path $Topology.shellSessionsPath $session.name
+            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne
+                [string]$session.preparedSha256) {
+                throw "Prepared shell-session identity changed: $($session.name)"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $sessionRoot $session.name)
+        }
+        return [pscustomobject]@{
+            layoutPath=$layoutPath
+            layoutSha256=(Get-FileHash -LiteralPath $layoutPath -Algorithm SHA256).Hash
+            sourceLayoutSha256=$Topology.sourceLayoutSha256
+            sessionCount=[long]$Topology.sessions.Count
+            shellSessionCount=[long]@($Topology.sessions | Where-Object {-not $_.agent}).Count
+        }
+    }
+
+    function Start-CapMatchedActionSeeds {
+        param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)][string]$Phase,
+            [Parameter(Mandatory)]$Topology)
+        $sessions=@($Topology.sessions | ForEach-Object {[string]$_.name})
+        if ($sessions.Count -lt 1 -or @($sessions | Sort-Object -Unique).Count -ne $sessions.Count) {
+            throw 'Qualified action topology has missing or duplicate sessions.'
+        }
+        $manifestPath=Join-Path $Roots.Peer 'action-seed-sessions.json'
+        $manifest=[pscustomobject]@{schemaVersion=1L;sessions=$sessions}
+        $manifestReference=Write-CapImmutableJson -Root $root -Path $manifestPath -Value $manifest
+        $zmxPath=Join-Path $root 'runtime\zmx.exe'
+        $zmxRoot=Assert-CapOwnedPath $Roots.Zmx
+        $working=Assert-CapOwnedPath (Join-Path $Roots.Peer 'action-seed-cwd')
+        $null=New-Item -ItemType Directory -Path $working -Force
+        $run=Start-CapJobLauncher -Root $root -OutputDirectory $working `
+            -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
+                '-NoProfile','-NonInteractive','-File',$actionSeedHelperPath,
+                '-ZmxPath',$zmxPath,'-SessionManifestPath',$manifestPath
+            ) -WorkingDirectory $working -Role 'matched-action-seed-launcher' -Environment @{
+                ZMX_DIR=$zmxRoot
+                TEMP=$Roots.Temp
+                TMP=$Roots.Temp
+                USERPROFILE=$Roots.Profile
+            }
+        $run | Add-Member -NotePropertyMembers @{
+            Phase=$Phase
+            SessionNames=$sessions
+            SessionManifestSha256=$manifestReference.sha256
+            ActionSeedGroup=$true
+            Descendants=@()
+            SeedReceipt=$null
+        }
+        $runs.Add($run)
+        $actionSeedRuns.Add($run)
+        Write-CapProcessJournal -Identity $run.Identity -Phase $Phase
+        $target=Release-CapJobLauncher -Run $run -JournalState $journalState
+        $deadline=[DateTime]::UtcNow.AddSeconds(30)
+        if ($deadline -gt $leaseDeadlineUtc) {$deadline=$leaseDeadlineUtc}
+        $exit=Wait-CapJobTarget -Run $run -DeadlineUtc $deadline
+        if ($exit.exitCode -ne 0) {throw "Qualified action seed helper failed for $Phase."}
+        $cmdPath=Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        $zmxPath=ConvertTo-CapWorkerImagePath $zmxPath
+        $readyDeadline=[DateTime]::UtcNow.AddSeconds(15)
+        if ($readyDeadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$readyDeadline=$leaseDeadlineUtc.AddSeconds(-90)}
+        $tree=@();$daemons=@();$cmdPeers=@()
+        do {
+            $tree=@(Get-CapJobMembers -Run $run)
+            foreach ($identity in $tree) {
+                if ($identity.ExpectedImagePath -ieq $zmxPath) {$identity.Role='zmx-daemon'}
+                elseif ($identity.ExpectedImagePath -ieq $cmdPath) {$identity.Role='offline-cmd-peer'}
+            }
+            $daemons=@($tree | Where-Object Role -eq 'zmx-daemon')
+            $cmdPeers=@($tree | Where-Object Role -eq 'offline-cmd-peer')
+            if ($daemons.Count -ge 1 -and $cmdPeers.Count -eq $sessions.Count) {break}
+            Assert-CapWorkerDeadline "qualified action seed readiness $Phase"
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $readyDeadline)
+        if ($daemons.Count -lt 1 -or $cmdPeers.Count -ne $sessions.Count) {
+            throw "Qualified action seeds differ: sessions=$($sessions.Count) daemon=$($daemons.Count) cmd=$($cmdPeers.Count)."
+        }
+        foreach ($identity in $tree) {
+            Write-CapProcessJournal -Identity $identity -Phase $Phase
+            if (-not @($descendantIdentities | Where-Object {
+                $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
+            }).Count) {$descendantIdentities.Add($identity)}
+        }
+        $run.Descendants=@($tree)
+        $receipt=[pscustomobject]@{
+            phase=$Phase
+            sessions=$sessions
+            sessionCount=[long]$sessions.Count
+            launcherPid=[long]$run.Identity.Pid
+            launcherCreationFileTimeUtc=[long]$run.Identity.CreationFileTimeUtc
+            targetPid=[long]$target.pid
+            targetCreationFileTimeUtc=[long]$target.creationFileTimeUtc
+            jobId=$run.JobId
+            daemonCount=[long]$daemons.Count
+            cmdCount=[long]$cmdPeers.Count
+            sessionManifestSha256=$manifestReference.sha256
+            cleanupStatus='PENDING'
+            outputProof=$null
+        }
+        $run.SeedReceipt=$receipt
+        $zmxSeedReceipts.Add($receipt)
+        return $run
+    }
+
+    function Close-CapMatchedActionSeeds {
+        param([Parameter(Mandatory)]$SeedRun)
+        if ($SeedRun.CleanupComplete) {return $SeedRun.OutputProof}
+        $proof=Close-CapJobLauncher -Run $SeedRun
+        $SeedRun.SeedReceipt.cleanupStatus='CLOSED'
+        $SeedRun.SeedReceipt.outputProof=$proof
+        $cleanupReceipts.Add($proof)
+        return $proof
     }
     $seedReceiptRoot = if ($isS) { $Roots.Root } else { Join-Path $runDirectory "phases\$Phase\normal" }
     $seedReceiptPath = Assert-CapOwnedPath (Join-Path $seedReceiptRoot 'zmx-seed.json')
@@ -2011,7 +2143,9 @@ function Get-CapMatchedProviderTopology {
         }
     })
     return [pscustomobject]@{
-        seedSession=$SeedRun.SessionName
+        seedSessions=$(if ($SeedRun.PSObject.Properties['SessionNames']) {
+            @($SeedRun.SessionNames)
+        } else {@($SeedRun.SessionName)})
         seedJobId=$SeedRun.JobId
         mountedProviders=$providers
         providerCount=[long]$providers.Count
@@ -2019,7 +2153,8 @@ function Get-CapMatchedProviderTopology {
 }
 
 function Invoke-CapMatchedTerminalInputChallenge {
-    param($AppRun,[int]$ExpectedPaneCount,[int]$FocusedIndex=0)
+    param($AppRun,[int]$ExpectedPaneCount,[int]$FocusedIndex=0,
+        [Parameter(Mandatory)][string]$FocusLabel)
     $panes=@(Get-CapMatchedPaneElements -AppRun $AppRun -ExpectedCount $ExpectedPaneCount)
     if ($FocusedIndex -lt 0 -or $FocusedIndex -ge $panes.Count) {
         throw 'Terminal input challenge focus index is outside the owned pane topology.'
@@ -2034,37 +2169,42 @@ function Invoke-CapMatchedTerminalInputChallenge {
     $pattern=[Windows.Automation.TextPattern]$pane.GetCurrentPattern(
         [Windows.Automation.TextPattern]::Pattern)
     $before=[string]$pattern.DocumentRange.GetText(-1)
-    $marker='GC_SUPPLEMENT_INPUT_OK'
-    $command="echo $marker"
+    $nonce=[guid]::NewGuid().ToString('N').Substring(0,12)
+    $prefix="GC_${nonce}_"
+    $expectedArithmetic=323L
+    $command="powershell.exe -NoProfile -NonInteractive -Command `"`$v=17*19;Write-Output ('$prefix'+`$PID+'_'+`$v)`""
     $characters=[GraphCodeUiaGateState]::SendUnicodeText($command)
     $enter=[GraphCodeUiaGateState]::SendKeyInput(0x0D,1)
     if ($characters -ne $command.Length -or $enter -ne 1) {
         throw 'Terminal input challenge native SendInput count differs.'
     }
-    $after=$null;$occurrences=0
+    $after=$null;$match=$null
     $deadline=[DateTime]::UtcNow.AddSeconds(5)
     if ($deadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$deadline=$leaseDeadlineUtc.AddSeconds(-90)}
     do {
         $after=[string]$pattern.DocumentRange.GetText(-1)
-        $occurrences=[regex]::Matches($after,[regex]::Escape($marker)).Count
-        if ($occurrences -ge 2) {break}
+        $match=[regex]::Match($after,[regex]::Escape($prefix)+'(?<pid>[0-9]+)_(?<value>[0-9]+)')
+        if ($match.Success) {break}
         Assert-CapWorkerDeadline 'terminal native input output';Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
-    if ($occurrences -lt 2) {
-        throw 'Terminal input challenge did not observe both the shell command and shell-produced output.'
+    if (-not $match.Success -or [long]$match.Groups['pid'].Value -le 0 -or
+        [long]$match.Groups['value'].Value -ne $expectedArithmetic) {
+        throw 'Terminal input challenge did not observe shell-computed nonce PID and arithmetic output.'
     }
     return [pscustomobject]@{
-        marker=$marker
+        focus=$FocusLabel
+        nonce=$nonce
+        shellPid=[long]$match.Groups['pid'].Value
+        arithmetic=[long]$match.Groups['value'].Value
         paneAutomationId=$pane.Current.AutomationId
         paneNativeWindowHandle=[long]$pane.Current.NativeWindowHandle
         focused=$true
         foreground=$true
         unicodeCharacters=[long]$characters
         enterEvents=1L
-        markerOccurrences=[long]$occurrences
         beforeTextLength=[long]$before.Length
         afterTextLength=[long]$after.Length
-        evidence='NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_OUTPUT'
+        evidence='NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_COMPUTED_NONCE_PID_ARITHMETIC'
     }
 }
 
@@ -2072,6 +2212,7 @@ function Invoke-CapMatchedTerminalSceneSupplement {
     param($AppRun,[string]$Scene,$SeedRun,[int]$TotalTabs,[int]$SelectedTab,[string]$AgentTitle)
     $receipt=[ordered]@{
         scene=$Scene
+        actionIds=@()
         imageBindingSha256=$null
         actions=[Collections.Generic.List[object]]::new()
         topologyBefore=$null
@@ -2092,72 +2233,112 @@ function Invoke-CapMatchedTerminalSceneSupplement {
     }
     $receipt.topologyBefore=& $observeTabs $TotalTabs $SelectedTab
     switch ($Scene) {
-        's-tabs-backend-idle' {
-            $receipt.nativeInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun -ExpectedPaneCount 1
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-new-tab'
-            $TotalTabs=2;$SelectedTab=1
-            $receipt.actions.Add([pscustomobject]@{action='New Tab';result='MOUNTED_SELECTED_SHELL'})
-        }
-        's-tabs-goal-needs-you' {
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-split-down'
-            $receipt.panes=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 2 -FocusedIndex 1)
-            $receipt.actions.Add([pscustomobject]@{action='Split Down';paneCount=2;focusedPane=1})
-        }
         's-tabs-two-agent-selected' {
+            $receipt.actionIds=@('W4')
+            $agentInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun `
+                -ExpectedPaneCount 1 -FocusedIndex 0 -FocusLabel 'agent'
             $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
-            $alternate=& $observeTabs 2 1
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '0' -Name $AgentTitle
-            $restored=& $observeTabs 2 0
-            $receipt.actions.Add([pscustomobject]@{action='Alternate tab selection';alternate=$alternate;restored=$restored})
-        }
-        's-tabs-two-shell-selected' {
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '0' -Name 'Shell'
-            $alternate=& $observeTabs 2 0
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
-            $restored=& $observeTabs 2 1
-            $receipt.actions.Add([pscustomobject]@{action='Alternate tab selection';alternate=$alternate;restored=$restored})
+            $SelectedTab=1
+            $shellTopology=& $observeTabs 2 1
+            $shellInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun `
+                -ExpectedPaneCount 1 -FocusedIndex 0 -FocusLabel 'alternate-shell'
+            $receipt.nativeInput=[pscustomobject]@{agent=$agentInput;shell=$shellInput}
+            $receipt.actions.Add([pscustomobject]@{
+                action='Explicit agent focus then alternate Shell focus'
+                shellTopology=$shellTopology
+            })
         }
         's-tabs-split-right-focused' {
+            $receipt.actionIds=@('W2','W4')
             $before=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 2 -FocusedIndex 1)
+            $rightInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun `
+                -ExpectedPaneCount 2 -FocusedIndex 1 -FocusLabel 'right-pane'
             $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-split-down'
             $after=@(Read-CapMatchedPanes -AppRun $AppRun -ExpectedCount 3 -FocusedIndex 2)
+            $downInput=Invoke-CapMatchedTerminalInputChallenge -AppRun $AppRun `
+                -ExpectedPaneCount 3 -FocusedIndex 2 -FocusLabel 'down-pane'
             $receipt.panes=$after
-            $receipt.actions.Add([pscustomobject]@{action='Split Right then Split Down';before=$before;after=$after})
+            $receipt.nativeInput=[pscustomobject]@{right=$rightInput;down=$downInput}
+            $receipt.actions.Add([pscustomobject]@{action='Split Down';before=$before;after=$after
+                initialTopology='PERSISTED_QUALIFIED_SPLIT_RIGHT'})
         }
         's-tabs-many-first' {
+            $receipt.actionIds=@('W5')
             $roundTrip=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
                 -SelectedTab 0 -TargetIndex 11 -AgentTitle $AgentTitle `
                 -SourceCommit $job.binaries.after.source `
                 -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
                 -DpiBase ([long]$job.captureContract.dpiBase)
-            $receipt.actions.Add([pscustomobject]@{action='Many-first overflow selection';receipt=$roundTrip})
+            $receipt.actions.Add([pscustomobject]@{action='Existing offscreen last selection';receipt=$roundTrip})
             $SelectedTab=11
         }
-        's-tabs-overflow-last' {
-            $toFirst=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
-                -SelectedTab 11 -TargetIndex 0 -AgentTitle $AgentTitle `
-                -SourceCommit $job.binaries.after.source `
-                -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
-                -DpiBase ([long]$job.captureContract.dpiBase)
-            $back=Invoke-CapMatchedTabSelection -AppRun $AppRun -TotalTabs 12 `
-                -SelectedTab 0 -TargetIndex 11 -AgentTitle $AgentTitle `
-                -SourceCommit $job.binaries.after.source `
-                -ExpectedDpi ([long]$job.captureContract.expectedWindowDpi) `
-                -DpiBase ([long]$job.captureContract.dpiBase)
-            $receipt.actions.Add([pscustomobject]@{action='Overflow-last round trip';toFirst=$toFirst;back=$back})
-        }
         's-tabs-hover-close' {
-            $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '1'
-            $TotalTabs=1;$SelectedTab=0
-            $receipt.actions.Add([pscustomobject]@{action='Per-tab hover close';closedIndex=1;remaining=1})
+            $receipt.actionIds=@('W6')
+            $alternate=@($receipt.topologyBefore.visible | Where-Object index -EQ 1)
+            if ($alternate.Count -ne 1 -or $alternate[0].closeBounds.Count -ne 4) {
+                throw 'Real pointer hover lacks the exact alternate close target.'
+            }
+            $bounds=@($alternate[0].closeBounds)
+            $x=[int](($bounds[0]+$bounds[2])/2)
+            $y=[int](($bounds[1]+$bounds[3])/2)
+            $pointer=@([GraphCodeUiaGateState]::MovePointerScreen($x,$y))
+            Start-Sleep -Milliseconds 250
+            if ($pointer.Count -ne 4 -or $pointer[0] -ne $x -or $pointer[1] -ne $y -or
+                $pointer[3] -ne $AppRun.Run.Identity.Pid) {
+                throw 'Native pointer did not land on the owned alternate close target.'
+            }
+            $afterHover=& $observeTabs 2 0
+            $hovered=@($afterHover.visible | Where-Object index -EQ 1)
+            if ($hovered.Count -ne 1 -or $hovered[0].closeBounds.Count -ne 4) {
+                throw 'Native pointer hover did not retain the owned close affordance.'
+            }
+            Save-CapSceneImage -AppRun $AppRun -SceneName 's-tabs-hover-close-action-result' `
+                -ZoomEvidence $null -Phase 'action-result'
+            $receipt.actions.Add([pscustomobject]@{
+                action='Real native pointer hover'
+                targetBounds=$bounds
+                requestedPoint=@($x,$y)
+                actualPoint=@($pointer[0],$pointer[1])
+                targetWindowHandle=[long]$pointer[2]
+                targetProcessId=[long]$pointer[3]
+                resultingCloseBounds=@($hovered[0].closeBounds)
+                resultImage='action-result-s-tabs-hover-close-action-result.png'
+            })
         }
         's-tabs-last-guard' {
+            $receipt.actionIds=@('W3')
             $before=& $observeTabs 1 0
             $null=Invoke-CapSceneAction -AppRun $AppRun -Action 'workspace-close-tab' -SubjectId '0'
+            Start-Sleep -Milliseconds 250
+            $form=[GraphCodeUiaGateState]::FindTopLevel('GraphCodeNativeForm',[uint32]$AppRun.Run.Identity.Pid)
+            $result='REFUSED_TAB_RETAINED'
+            $confirmation=$null
+            if ($form -ne [IntPtr]::Zero) {
+                $formElement=[Windows.Automation.AutomationElement]::FromHandle($form)
+                $cancelCondition=[Windows.Automation.AndCondition]::new(
+                    [Windows.Automation.PropertyCondition]::new(
+                        [Windows.Automation.AutomationElement]::ControlTypeProperty,
+                        [Windows.Automation.ControlType]::Button),
+                    [Windows.Automation.PropertyCondition]::new(
+                        [Windows.Automation.AutomationElement]::NameProperty,'Cancel'))
+                $cancel=$formElement.FindFirst([Windows.Automation.TreeScope]::Descendants,$cancelCondition)
+                if ($null -eq $cancel -or -not $cancel.Current.IsEnabled) {
+                    throw 'Final-tab destructive confirmation omitted its enabled Cancel action.'
+                }
+                $confirmation=[pscustomobject]@{
+                    windowHandle=[long]$form.ToInt64()
+                    name=$formElement.Current.Name
+                    cancelName=$cancel.Current.Name
+                }
+                $cancel.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+                $result='CONFIRMATION_CANCELLED_TAB_RETAINED'
+                Start-Sleep -Milliseconds 100
+            }
             $after=& $observeTabs 1 0
             $receipt.actualFinalTabCloseResult=[pscustomobject]@{
                 attempted=$true
-                result='REFUSED_TAB_RETAINED'
+                result=$result
+                confirmation=$confirmation
                 before=$before
                 after=$after
             }
@@ -2547,6 +2728,14 @@ function Invoke-CapMatchedScenes {
         Assert-CapWorkerDeadline "matched scene $scene"
         if ([DateTime]::UtcNow -ge $leaseDeadlineUtc.AddSeconds(-90)) {throw 'Matched scenes reached the required cleanup reserve.'}
         $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\$Phase\$scene")
+        $qualifiedTopology=$null
+        $qualifiedInstall=$null
+        if ($ActionSupplement -and $plan.group -ceq 'FinalBoundedActions') {
+            $qualified=@($plan.qualifiedAuthority.topologies | Where-Object scene -CEQ $scene)
+            if ($qualified.Count -ne 1) {throw "Final bounded action topology missing or duplicated: $scene"}
+            $qualifiedTopology=$qualified[0]
+            $qualifiedInstall=Install-CapQualifiedActionTopology -Roots $roots -Topology $qualifiedTopology
+        }
         $pipe="gc-s-$([guid]::NewGuid().ToString('N'))"
         $peer=Start-CapOfflinePeer -Roots $roots -PipeName $pipe -Phase "$Phase-$scene"
         $app=$null;$seed=$null;$supplementReceipt=$null
@@ -2562,7 +2751,11 @@ function Invoke-CapMatchedScenes {
             }
             if ($workspace) {
                 $node=$fixture.graphs[0].nodes[$nodeIndex]
-                $seed=Start-CapOfflineSeed -Roots $roots -Phase "$Phase-$scene" -SessionName "graphcode-$($node.id)"
+                $seed=if ($qualifiedTopology) {
+                    Start-CapMatchedActionSeeds -Roots $roots -Phase "$Phase-$scene" -Topology $qualifiedTopology
+                } else {
+                    Start-CapOfflineSeed -Roots $roots -Phase "$Phase-$scene" -SessionName "graphcode-$($node.id)"
+                }
             }
             $app=Start-CapGraphCodeApp -Roots $roots -Phase $Phase -PipeName $pipe -SessionPrefix "s-$Phase"
             $app | Add-Member -NotePropertyMembers @{SActions=[Collections.Generic.List[object]]::new();SObservation=$null}
@@ -2742,30 +2935,36 @@ function Invoke-CapMatchedScenes {
                 }
             } else {
                 $null=Invoke-CapSceneAction -AppRun $app -Action 'open-loop' -Name $node.title
-                $total=1;$selected=0;$title=switch ($nodeIndex) {0 {'Goal'};6 {'Loop'};7 {'Agent'};default {'Copilot CLI'}}
+                $title=switch ($nodeIndex) {0 {'Goal'};6 {'Loop'};7 {'Agent'};default {'Copilot CLI'}}
                 $tabSelection=$null
-                $newTabs=if ($scene -cin @('s-tabs-many-first','s-tabs-overflow-last')) {11}
-                    elseif ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {2}
-                    elseif ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close')) {1} else {0}
-                for ($i=0;$i -lt $newTabs;$i++) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-new-tab';$total++;$selected=$total-1}
-                if ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {
-                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-close-tab' -SubjectId '0'
-                    $total=2;$selected=0;$title='Shell'
-                    $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
-                    $selected=1
-                }
-                if ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close','s-tabs-many-first')) {
-                    if ($total -eq 12) {
-                        $tabSelection=Invoke-CapMatchedTabSelection -AppRun $app -TotalTabs $total `
-                            -SelectedTab $selected -TargetIndex 0 -AgentTitle $title `
-                            -SourceCommit $job.binaries.$Phase.source `
-                            -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
-                    } else {
-                        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '0' -Name $title
+                if ($qualifiedTopology) {
+                    $total=[int]$qualifiedTopology.expectedTabs
+                    $selected=[int]$qualifiedTopology.expectedSelected
+                } else {
+                    $total=1;$selected=0
+                    $newTabs=if ($scene -cin @('s-tabs-many-first','s-tabs-overflow-last')) {11}
+                        elseif ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {2}
+                        elseif ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close')) {1} else {0}
+                    for ($i=0;$i -lt $newTabs;$i++) {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-new-tab';$total++;$selected=$total-1}
+                    if ($scene -cin @('s-tabs-two-shell-selected','s-tabs-split-right-focused')) {
+                        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-close-tab' -SubjectId '0'
+                        $total=2;$selected=0;$title='Shell'
+                        $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '1' -Name 'Shell'
+                        $selected=1
                     }
-                    $selected=0
+                    if ($scene -cin @('s-tabs-two-agent-selected','s-tabs-hover-close','s-tabs-many-first')) {
+                        if ($total -eq 12) {
+                            $tabSelection=Invoke-CapMatchedTabSelection -AppRun $app -TotalTabs $total `
+                                -SelectedTab $selected -TargetIndex 0 -AgentTitle $title `
+                                -SourceCommit $job.binaries.$Phase.source `
+                                -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase
+                        } else {
+                            $null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-select-tab' -SubjectId '0' -Name $title
+                        }
+                        $selected=0
+                    }
+                    if ($scene -ceq 's-tabs-split-right-focused') {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-split-right'}
                 }
-                if ($scene -ceq 's-tabs-split-right-focused') {$null=Invoke-CapSceneAction -AppRun $app -Action 'workspace-split-right'}
                 $rows=@(Read-CapMatchedRows -AppRun $app)
                 $tabs=Get-CapMatchedTabObservation -Rows $rows -ExpectedProcessId $app.Run.Identity.Pid `
                     -TotalTabs $total -SelectedTab $selected -AgentTitle $title `
@@ -2774,7 +2973,7 @@ function Invoke-CapMatchedScenes {
                 $chromeControls=if ($focusedCapture) {
                     @(Read-CapMatchedChromeControls -AppRun $app -ExpectedDpi $tabExpectedDpi -DpiBase $tabDpiBase)
                 } else {@()}
-                if ($scene -ceq 's-tabs-hover-close') {
+                if ($scene -ceq 's-tabs-hover-close' -and -not $qualifiedTopology) {
                     $tab=@($tabs.visible | Where-Object index -EQ 1)[0]
                     Set-CapMatchedTabHover -AppRun $app -Bounds $tab.bounds
                 }
@@ -2785,7 +2984,10 @@ function Invoke-CapMatchedScenes {
                     tabs=$tabs;panes=$panes;nodeId=$node.id;nodeState=$node.state
                     chromeControls=$chromeControls
                     tabSelection=$tabSelection
-                    hover=if ($scene -ceq 's-tabs-hover-close') {'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'} else {'NOT_REQUESTED'}}
+                    qualifiedTopology=$qualifiedInstall
+                    hover=if ($scene -ceq 's-tabs-hover-close' -and -not $qualifiedTopology) {
+                        'POSTED_WM_MOUSEMOVE_NOT_PHYSICAL_POINTER'
+                    } else {'NOT_REQUESTED'}}
                 if ($ActionSupplement) {
                     if (-not $ImageBindings.ContainsKey($scene) -or
                         [string]$ImageBindings[$scene] -cnotmatch '^[A-Fa-f0-9]{64}$') {
@@ -2814,7 +3016,13 @@ function Invoke-CapMatchedScenes {
             }
         } finally {
             if ($app) {Close-CapGraphCodeApp -AppRun $app}
-            if ($seed) {Close-CapOfflineSeed -SeedRun $seed}
+            if ($seed) {
+                if ($seed.PSObject.Properties['ActionSeedGroup']) {
+                    Close-CapMatchedActionSeeds -SeedRun $seed
+                } else {
+                    Close-CapOfflineSeed -SeedRun $seed
+                }
+            }
             Close-CapPeer -PeerRun $peer -Label $pipe
         }
     }

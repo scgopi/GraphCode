@@ -715,6 +715,9 @@ function Assert-CapRejects {
             $expected = @(
                 'GraphCodeUiaGateState|PostMessage|user32.dll|PostMessageA',
                 'GraphCodeUiaGateState|ScreenToClient|user32.dll|ScreenToClient',
+                'GraphCodeUiaGateState|SetCursorPos|user32.dll|SetCursorPos',
+                'GraphCodeUiaGateState|GetCursorPos|user32.dll|GetCursorPos',
+                'GraphCodeUiaGateState|WindowFromPoint|user32.dll|WindowFromPoint',
                 'GraphCodeUiaGateState|SendKeyInputs|user32.dll|SendInput',
                 'GraphCodeUiaGateState|EnumWindows|user32.dll|EnumWindows',
                 'GraphCodeUiaGateState|GetWindowThreadProcessId|user32.dll|GetWindowThreadProcessId',
@@ -754,8 +757,8 @@ function Assert-CapRejects {
                 'CapProcessJob|SetHandleInformation|kernel32.dll|SetHandleInformation'
             )
             $actual = @(Test-CapNativeBindings | ForEach-Object { "$($_.Type)|$($_.Method)|$($_.Library)|$($_.EntryPoint)" })
-            Assert-CapTest ($actual.Count -eq 39 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static39 export contract differs.'
-            return @{ subcases = 36; evidence = 'API export resolution only, no native window or GUI action.' }
+            Assert-CapTest ($actual.Count -eq 42 -and @(Compare-Object $expected $actual).Count -eq 0) 'Exact static42 export contract differs.'
+            return @{ subcases = 39; evidence = 'API export resolution only, no native window or GUI action.' }
         }
         Invoke-CapTest 'legacy mutable seed journal proof is refused and exact numbered terminal proof is accepted' {
             $f = New-JournalTerminalFixture 'seed-reference'
@@ -3001,6 +3004,7 @@ function Invoke-CapMatchedContracts {
         $authorizeSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Authorize-FocusedUiCapture.ps1'))
         $actionPrepareSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Prepare-MatchedActionSupplement.ps1'))
         $actionInvokeSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Invoke-MatchedActionSupplement.ps1'))
+        $actionSeedSource=[IO.File]::ReadAllText((Join-Path $driverDirectory 'Start-MatchedActionSessions.ps1'))
         $splitDown=Get-CapActionSpec -Action 'workspace-split-down'
         Assert-CapTest ($supervisorSource.Contains("'FOCUSED_LIVE_CAPTURE'") -and
             $supervisorSource.Contains('FocusedAuthorizationPath') -and
@@ -3013,14 +3017,22 @@ function Invoke-CapMatchedContracts {
             $workerSource.Contains('[GraphCodeUiaGateState]::PostKeyboard') -and
             $workerSource.Contains('function Invoke-CapMatchedTerminalSceneSupplement') -and
             $workerSource.Contains('function Invoke-CapWireCompletionSupplement') -and
-            $workerSource.Contains('NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_OUTPUT') -and
+            $workerSource.Contains('NATIVE_SENDINPUT_TO_FOCUSED_LOCAL_CONSOLE_WITH_SHELL_COMPUTED_NONCE_PID_ARITHMETIC') -and
             $actionPrepareSource.Contains("status='PREPARED_NO_AUTHORITY'") -and
+            $actionPrepareSource.Contains('actionRunnerSha256=') -and
+            $actionPrepareSource.Contains("'FinalBoundedActions'") -and
+            $actionPrepareSource.Contains('qualifiedAuthority=') -and
             $actionPrepareSource.Contains("pngArtifacts=0L") -and
             $actionInvokeSource.Contains('-DefinitionsOnly') -and
             $actionInvokeSource.Contains('$actionSupplementMode=$true') -and
+            $actionInvokeSource.Contains('$journalState=New-CapJournalState') -and
+            $actionInvokeSource.Contains("Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'") -and
+            $actionInvokeSource.Contains("Write-CapWorkerJournalSnapshot -Kind 'Terminal'") -and
+            $workerSource.Contains("'s-tabs-hover-close-action-result'") -and
+            $actionSeedSource.Contains('Pinned zmx failed to seed matched action session') -and
             $actionInvokeSource.Contains("'RELEASED_ZERO_SURVIVORS'") -and
-            $workerSource.Contains('if (-not $actionSupplementMode)') -and
-            $workerSource.Contains('if ($actionSupplementMode) {return}') -and
+            -not $workerSource.Contains('if (-not $actionSupplementMode)') -and
+            -not $workerSource.Contains('if ($actionSupplementMode) {return}') -and
             $splitDown.Name -ceq 'Split Down' -and
             $splitDown.AutomationId -ceq (Get-CapMatchedAutomationId 'workspace-split-down:control') -and
             $workerSource.Contains("-Action 'attention-action'") -and
@@ -4622,7 +4634,8 @@ function Invoke-CapLiveTransitionRehearsalManifestContract {
         'Final journal still treats contained-job members as dependent on advisory parent metadata.'
     Assert-CapTest ($workerSource.Contains('checkpointCount') -and
         $workerSource.Contains('captures = if ($transitionRehearsal) { 0L }')) 'Worker manifest does not seal checkpoint and zero-capture counts.'
-    Assert-CapTest ($workerSource.Contains('$progressManifest=if ($transitionRehearsal)') -and
+    Assert-CapTest ($workerSource.Contains('$progressManifest=if ($actionSupplementMode)') -and
+        $workerSource.Contains('} elseif ($transitionRehearsal) {') -and
         $workerSource.Contains('phaseTransitionCount=[long]$phaseTransitions.Count') -and
         $workerSource.Contains('$transitionRehearsal -and $images.Count -eq 0 -and $checkpoints.Count -eq 36')) `
         'Transition journal progress or final completion still depends on the full image manifest.'
@@ -5155,9 +5168,29 @@ function Invoke-CapJobOwnershipContract {
         $gatedMembers = @([CapProcessJob]::Members($run.Job))
         Assert-CapTest ($gatedMembers.Count -eq 1 -and $gatedMembers[0] -eq $run.Identity.Pid -and
             [CapProcessJob]::Contains($run.Job, $run.Identity.Process.Handle)) 'Gated job does not contain exactly the held launcher.'
+        $null = Assert-CapRejects {
+            Release-CapJobLauncher -Run $run -JournalState $null
+        } 'valid numbered journal state'
+        $null = Assert-CapRejects {
+            Release-CapJobLauncher -Run $run -JournalState ([pscustomobject]@{
+                Sequence = 1L
+                Directory = ''
+            })
+        } 'valid numbered journal state'
+        Assert-CapTest (-not $run.GateReleased -and -not [IO.File]::Exists($run.TargetReceiptPath) -and
+            [CapProcessJob]::Contains($run.Job, $run.Identity.Process.Handle)) `
+            'Invalid action journal state released or displaced the contained launcher.'
+        $wrongEntry = [pscustomobject]@{ pid = [long]$run.Identity.Pid
+            creationFileTimeUtc = [long]$run.Identity.CreationFileTimeUtc; jobId = 'foreign' }
+        $null = Publish-CapJournalSnapshot $context.State Bootstrap ([pscustomobject]@{ entries = @($wrongEntry) })
+        $null = Assert-CapRejects {
+            Release-CapJobLauncher -Run $run -JournalState $context.State
+        } 'does not bind the assigned launcher generation/job'
+        Assert-CapTest (-not $run.GateReleased -and -not [IO.File]::Exists($run.TargetReceiptPath)) `
+            'Foreign action journal publication released the contained launcher.'
         $entry = [pscustomobject]@{ pid = [long]$run.Identity.Pid
             creationFileTimeUtc = [long]$run.Identity.CreationFileTimeUtc; jobId = $run.JobId }
-        $null = Publish-CapJournalSnapshot $context.State Bootstrap ([pscustomobject]@{ entries = @($entry) })
+        $null = Publish-CapJournalSnapshot $context.State Progress ([pscustomobject]@{ entries = @($entry) })
         $targetReceipt = Release-CapJobLauncher -Run $run -JournalState $context.State
         Assert-CapTest ($targetReceipt.expectedImagePath -ieq $target.executable -and
             $targetReceipt.creationFileTimeUtc -gt 0) 'Normal target launch receipt is missing.'
