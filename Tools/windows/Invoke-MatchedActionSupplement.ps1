@@ -84,6 +84,7 @@ $leaseWindow=Get-CapLeaseWindow -GrantedUtc $authorization.grantedUtc `
     -NowUtc ([DateTime]::UtcNow)
 $leaseDeadlineUtc=$leaseWindow.WorkerDeadlineUtc
 $focusedCapture=$true
+$actionSupplementMode=$true
 $rehearsal=$false
 $transitionRehearsal=$false
 $fixtureHash=(Get-FileHash $fixturePath -Algorithm SHA256).Hash
@@ -147,6 +148,7 @@ $manifest=[ordered]@{
     receipts=@($actionSupplementReceipts)
     receiptCount=[long]$actionSupplementReceipts.Count
     providerReceipts=@($zmxSeedReceipts)
+    processJournal=@($journalEntries)
     cleanup=@($cleanupReceipts)
     cleanupFailures=@($cleanupFailures)
     independentSurvivors=@($independent)
