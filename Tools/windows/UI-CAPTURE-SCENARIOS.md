@@ -47,6 +47,47 @@ contract, making current registration **182 default / 185 with
 zero skips, the ten existing matched/S2 identities once, and all four DPI
 identities once. Historical reports retain their original denominators.
 
+## Action worker import and no-product dry run
+
+The action runner imports the production worker definitions into its scope.
+Worker entry authorization parameters have private names (with the original
+command-line aliases) so importing definitions cannot reset the caller's
+authorization path or hash. Action authorization is hash-bound to its exact
+owned path, run, numbered journal, authority ID, source, controls, and deadline;
+the record is held read-only against writes/replacement through final publication.
+The cleanup reserve remains 90 seconds.
+
+Before granting an action run, invoke the production entry with `-DryRun`:
+
+```powershell
+pwsh -NoProfile -File Tools\windows\Invoke-MatchedActionSupplement.ps1 `
+  -Repository D:\owned\GraphCode -OwnedRoot D:\owned\action-check `
+  -ActionPlanPath D:\owned\action-check\action-plan.json `
+  -ActionPlanSha256 ACTUAL_64_HEX_SHA256 -DryRun
+```
+
+This still requires an unchanged clean, hash-bound action plan. It creates only
+`dry-run-binding.json` (`DRY_RUN_NO_AUTHORITY`), `dry-run-runs`, and
+`dry-run-output`; it never creates `action-authorization.json` or grants PNG,
+product, or provider authority. It uses a contained harmless `pwsh` child to
+exercise the actual launcher release with the action-owned numbered journal.
+The shared physical-work-area and `AdjustWindowRectExForDpi` preconditions run
+without a product window. Actual window identity/metrics, native actions, and
+product behavior are explicitly not evaluated.
+
+`dry-run-output\action-manifest.json` and `action-release.json` preserve both
+success and setup refusal, including the primary exception, terminal numbered
+journal and positive held-job-empty/launcher-EOF cleanup. A failed precondition
+is a bounded tooling/setup blocker, never permission to retry a product action.
+No prior W1 setup exception is reconstructed by this dry run.
+
+`Tests\ActionWorkerImport.Tests.ps1` adds **18 separately counted contracts**
+(including two actual production-entry dry runs and null/reset/path/hash/run/
+authority/deadline/replacement negatives). `ValidationRunner.Tests.ps1` requires
+all 18 with zero skips, in addition to the unchanged **182 default / 185
+real-zmx** UiCaptureDriver baseline. The new cases are not omitted or used to
+replace baseline cases.
+
 ## Live transition rehearsal
 
 `LIVE_TRANSITION_REHEARSAL` is a no-lease, non-evidence mode for exercising the
