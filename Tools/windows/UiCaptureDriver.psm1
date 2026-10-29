@@ -5167,6 +5167,24 @@ function ConvertTo-CapUtcInstant {
     }
 }
 
+function ConvertTo-CapUtcDateTime {
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Value,
+        [Parameter(Mandatory)][string]$Field
+    )
+    Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+
+    if ($null -eq $Value) { throw "$Field is required." }
+    if ($Value -is [DateTime]) {
+        if ($Value.Kind -ne [DateTimeKind]::Utc) {
+            throw "$Field must be an explicitly UTC DateTime."
+        }
+        return $Value
+    }
+    if ($Value -is [DateTimeOffset]) { return $Value.UtcDateTime }
+    throw "$Field must be a UTC DateTime or DateTimeOffset."
+}
+
 function Get-CapLeaseWindow {
     [CmdletBinding()]
     param(
@@ -5322,8 +5340,12 @@ function Assert-CapJournalBinding {
 function New-CapJournalState {
     [CmdletBinding()]
     param([string]$Root, [string]$Directory, [Parameter(Mandatory)]$Binding,
-        [Parameter(Mandatory)][DateTime]$DeadlineUtc, [string]$ObservationPath = '')
+        [Parameter(Mandatory)][AllowNull()]$DeadlineUtc, [string]$ObservationPath = '')
     Write-CapTrace -Command $MyInvocation.MyCommand.Name -Parameters $PSBoundParameters
+    $normalizedDeadline = ConvertTo-CapUtcDateTime -Value $DeadlineUtc -Field 'Journal deadline'
+    if ($normalizedDeadline -le [DateTime]::UtcNow) {
+        throw (New-CapJournalFailure 'JournalExpired' 'Journal deadline reached before state initialization.')
+    }
     $directoryPath = Assert-CapArtifactPath -Root $Root -Path $Directory
     if (-not ([IO.File]::GetAttributes($directoryPath) -band [IO.FileAttributes]::Directory)) {
         throw 'Journal requires an existing dedicated directory.'
@@ -5334,7 +5356,7 @@ function New-CapJournalState {
     Assert-CapJournalBinding $Binding $Binding
     return [pscustomobject]@{
         Root = [IO.Path]::GetFullPath($Root); Directory = $directoryPath; Binding = $Binding
-        DeadlineUtc = $DeadlineUtc; ObservationPath = $ObservationPath
+        DeadlineUtc = $normalizedDeadline; ObservationPath = $ObservationPath
         HighestObserved = 0L; LastApplied = 0L; Sequence = 0L; PreviousHash = ('0' * 64)
         Published = [Collections.Generic.List[object]]::new()
         Accepted = [Collections.Generic.Dictionary[long,string]]::new()

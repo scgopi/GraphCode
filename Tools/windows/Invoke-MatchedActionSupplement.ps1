@@ -109,7 +109,7 @@ $journalBinding=New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirecto
     -ModuleSha256 $moduleHash -WorkerSha256 $workerHash `
     -SupervisorSha256 $supervisorHash -Identity $selfIdentity
 $journalState=New-CapJournalState -Root $root -Directory $journalPath `
-    -Binding $journalBinding -DeadlineUtc $leaseWindow.ExpiresUtc.UtcDateTime
+    -Binding $journalBinding -DeadlineUtc $leaseWindow.ExpiresUtc
 Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
 $startedUtc=[DateTime]::UtcNow
 $primaryFailure=$null

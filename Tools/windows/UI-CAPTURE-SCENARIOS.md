@@ -113,6 +113,11 @@ publication is written only after held cleanup and stream EOF collection, and
 the sanitized action manifest retains its binding, publication chain and
 terminal hash without changing the static-capture inventory.
 
+Journal state creation normalizes an accepted `DateTimeOffset` to its UTC
+instant and accepts `DateTime` only when its `Kind` is explicitly UTC. Null,
+local/unspecified `DateTime`, foreign types and already-expired deadlines fail
+before any numbered publication or launcher release.
+
 The focused contract reproduces the C8R terminal scale with exactly 679 process
 entries and a numbered terminal larger than 1.48 MB, then injects more than one
 second of post-copy validation. It also retains explicit refusals for a copy

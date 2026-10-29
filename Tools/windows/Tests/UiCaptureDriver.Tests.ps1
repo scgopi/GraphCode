@@ -542,7 +542,35 @@ function Assert-CapRejects {
             $path = Join-Path $c.State.Directory $reference.name
             $null = Assert-CapRejects { Write-CapImmutableJson -Root $c.Root -Path $path -Value @{ invalid = $true } } 'SequenceConflict'
             Assert-CapTest ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ceq $reference.sha256) 'Collision changed prior bytes.'
-            return @{ subcases = 1; priorBytesUnchanged = $true; retainedStagingFault = $true }
+            $newState = {
+                param([string]$Name, $Deadline)
+                $directory = Join-Path $c.Root $Name
+                $null = New-Item -ItemType Directory -Path $directory
+                New-CapJournalState -Root $c.Root -Directory $directory -Binding $c.Binding -DeadlineUtc $Deadline
+            }
+            $deadlineNow = [DateTime]::UtcNow
+            $lease = Get-CapLeaseWindow -GrantedUtc $deadlineNow.AddMinutes(-1).ToString('o') `
+                -ExpiresUtc $deadlineNow.AddMinutes(10).ToString('o') -MaximumMinutes 15 `
+                -NowUtc $deadlineNow
+            $dateTimeState = & $newState 'datetime' $lease.ExpiresUtc
+            $offsetDeadline = ([DateTimeOffset]$lease.ExpiresUtc).ToOffset([TimeSpan]::FromHours(7))
+            $offsetState = & $newState 'offset' $offsetDeadline
+            Assert-CapTest ($dateTimeState.DeadlineUtc.Kind -eq [DateTimeKind]::Utc -and
+                $offsetState.DeadlineUtc.Kind -eq [DateTimeKind]::Utc -and
+                $offsetState.DeadlineUtc -eq $dateTimeState.DeadlineUtc) `
+                'Journal deadline boundary did not preserve DateTime and DateTimeOffset UTC instants.'
+            $null = Assert-CapRejects { & $newState 'null' $null } 'Journal deadline is required'
+            foreach ($kind in @([DateTimeKind]::Local,[DateTimeKind]::Unspecified)) {
+                $null = Assert-CapRejects {
+                    & $newState "kind-$kind" ([DateTime]::SpecifyKind($lease.ExpiresUtc,$kind))
+                } 'explicitly UTC'
+            }
+            $null = Assert-CapRejects {
+                & $newState 'expired' ([DateTime]::UtcNow.AddSeconds(-1))
+            } 'JournalExpired'
+            return @{ subcases = 6; priorBytesUnchanged = $true; retainedStagingFault = $true
+                dateTimeUtc = $dateTimeState.DeadlineUtc; dateTimeOffsetUtc = $offsetState.DeadlineUtc
+                nullRefused = $true; nonUtcKindsRefused = 2; hardDeadlineRefused = $true }
         }
         Invoke-CapTest 'numbered journal reader retries only transient Open failures within count and deadline' {
             $progress = Invoke-JournalConcurrentContract -Name 'retry-to2' -LockedFirst -Publications 2
@@ -3026,6 +3054,8 @@ function Invoke-CapMatchedContracts {
             $actionInvokeSource.Contains('-DefinitionsOnly') -and
             $actionInvokeSource.Contains('$actionSupplementMode=$true') -and
             $actionInvokeSource.Contains('$journalState=New-CapJournalState') -and
+            $actionInvokeSource.Contains('-DeadlineUtc $leaseWindow.ExpiresUtc') -and
+            -not $actionInvokeSource.Contains('$leaseWindow.ExpiresUtc.UtcDateTime') -and
             $actionInvokeSource.Contains("Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'") -and
             $actionInvokeSource.Contains("Write-CapWorkerJournalSnapshot -Kind 'Terminal'") -and
             $workerSource.Contains("'s-tabs-hover-close-action-result'") -and
