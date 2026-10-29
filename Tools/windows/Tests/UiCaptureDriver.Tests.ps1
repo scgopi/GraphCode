@@ -3017,7 +3017,10 @@ function Invoke-CapMatchedContracts {
             $actionPrepareSource.Contains("status='PREPARED_NO_AUTHORITY'") -and
             $actionPrepareSource.Contains("pngArtifacts=0L") -and
             $actionInvokeSource.Contains('-DefinitionsOnly') -and
+            $actionInvokeSource.Contains('$actionSupplementMode=$true') -and
             $actionInvokeSource.Contains("'RELEASED_ZERO_SURVIVORS'") -and
+            $workerSource.Contains('if (-not $actionSupplementMode)') -and
+            $workerSource.Contains('if ($actionSupplementMode) {return}') -and
             $splitDown.Name -ceq 'Split Down' -and
             $splitDown.AutomationId -ceq (Get-CapMatchedAutomationId 'workspace-split-down:control') -and
             $workerSource.Contains("-Action 'attention-action'") -and

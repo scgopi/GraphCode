@@ -13,6 +13,7 @@ $modulePath = Join-Path $PSScriptRoot 'UiCaptureDriver.psm1'
 $rehearsal = $false
 $transitionRehearsal = $false
 $focusedCapture = $false
+$actionSupplementMode = $false
 $matchedCapturePlan = $null
 $rehearsalLaunches = [Collections.Generic.List[object]]::new()
 $rehearsalActions = [Collections.Generic.List[object]]::new()
@@ -175,12 +176,15 @@ function Write-CapProcessJournal {
         }
     }
     if ($index -ge 0) { $journalEntries[$index] = $entry } else { $journalEntries.Add($entry) }
-    Write-CapWorkerJournalSnapshot -Kind 'Progress'
+    if (-not $actionSupplementMode) {
+        Write-CapWorkerJournalSnapshot -Kind 'Progress'
+    }
 }
 
 function Write-CapWorkerJournalSnapshot {
     param([ValidateSet('Bootstrap','Progress','Terminal')][string]$Kind,
         [string]$Outcome = 'CAPTURING')
+    if ($actionSupplementMode) {return}
     if ($null -eq $journalState) { throw 'Worker journal was not initialized before publication.' }
     $progressManifest=if ($transitionRehearsal) {
         [pscustomobject][ordered]@{
