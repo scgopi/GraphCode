@@ -6074,6 +6074,18 @@ if ($actionBindingSummary.executed -ne 57 -or $actionBindingSummary.passed -ne 5
     $actionBindingSummary.failed -ne 0 -or $actionBindingSummary.skipped -ne 0) {
   throw "RED: action window binding requires all 57 contracts without skips"
 }
+$actionTopologyOutput=@(& $pwsh -NoProfile -File (Join-Path $PSScriptRoot "ActionTopologyImport.Tests.ps1"))
+$actionTopologyOutput | ForEach-Object {Write-Host $_}
+if ($LASTEXITCODE -ne 0) {throw "RED: action topology import contract child failed"}
+$actionTopologySummaries=@($actionTopologyOutput | Where-Object {
+    $_ -is [string] -and $_.StartsWith('{"suite":"ActionTopologyImport",')
+  })
+if ($actionTopologySummaries.Count -ne 1) {throw "RED: action topology structured count missing or duplicated"}
+$actionTopologySummary=ConvertFrom-Json $actionTopologySummaries[0]
+if ($actionTopologySummary.executed -ne 16 -or $actionTopologySummary.passed -ne 16 -or
+    $actionTopologySummary.failed -ne 0 -or $actionTopologySummary.skipped -ne 0) {
+  throw "RED: action topology import requires all 16 contracts without skips"
+}
 $agentCommandOutput = @(& $pwsh -NoProfile -File (
     Join-Path $PSScriptRoot "Invoke-AgentCommand.Tests.ps1"))
 $agentCommandSummary = "Invoke-AgentCommand.Tests.ps1: PASS; executed=6; cases=argument-stream-marker,zero-arguments,existing-console,existing-marker,parse-failure,child-nonzero"

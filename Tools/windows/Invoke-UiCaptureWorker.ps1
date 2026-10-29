@@ -611,6 +611,140 @@ function Start-CapOfflinePeer {
     return $run
 }
 
+function Install-CapQualifiedActionTopology {
+    param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)]$Topology)
+    if ((Get-FileHash -LiteralPath $Topology.preparedLayoutPath -Algorithm SHA256).Hash -cne
+        [string]$Topology.preparedLayoutSha256) {
+        throw "Prepared qualified layout changed: $($Topology.scene)"
+    }
+    $layoutPath=Join-Path $Roots.Root "$($Topology.loop).json"
+    Copy-Item -LiteralPath $Topology.preparedLayoutPath -Destination $layoutPath
+    $sessionRoot=Join-Path $Roots.Root 'shell-sessions'
+    $null=New-Item -ItemType Directory -Path $sessionRoot -Force
+    foreach ($session in @($Topology.sessions | Where-Object {-not $_.agent})) {
+        $source=Join-Path $Topology.shellSessionsPath $session.name
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne
+            [string]$session.preparedSha256) {
+            throw "Prepared shell-session identity changed: $($session.name)"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $sessionRoot $session.name)
+    }
+    return [pscustomobject]@{
+        layoutPath=$layoutPath
+        layoutSha256=(Get-FileHash -LiteralPath $layoutPath -Algorithm SHA256).Hash
+        sourceLayoutSha256=$Topology.sourceLayoutSha256
+        sessionCount=[long]$Topology.sessions.Count
+        shellSessionCount=[long]@($Topology.sessions | Where-Object {-not $_.agent}).Count
+    }
+}
+
+function Start-CapMatchedActionSeeds {
+    param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)]$Topology,[switch]$PrepareOnly)
+    $sessions=@($Topology.sessions | ForEach-Object {[string]$_.name})
+    if ($sessions.Count -lt 1 -or @($sessions | Sort-Object -Unique).Count -ne $sessions.Count) {
+        throw 'Qualified action topology has missing or duplicate sessions.'
+    }
+    $manifestPath=Join-Path $Roots.Peer 'action-seed-sessions.json'
+    $manifest=[pscustomobject]@{schemaVersion=1L;sessions=$sessions}
+    $manifestReference=Write-CapImmutableJson -Root $root -Path $manifestPath -Value $manifest
+    $zmxPath=Join-Path $root 'runtime\zmx.exe'
+    $zmxRoot=Assert-CapOwnedPath $Roots.Zmx
+    $working=Assert-CapOwnedPath (Join-Path $Roots.Peer 'action-seed-cwd')
+    $null=New-Item -ItemType Directory -Path $working -Force
+    $seedArguments=@(
+        '-NoProfile','-NonInteractive','-File',$actionSeedHelperPath,
+        '-ZmxPath',$zmxPath,'-SessionManifestPath',$manifestPath
+    )
+    if ($PrepareOnly) {
+        return [pscustomobject]@{
+            status='PREPARED_NO_LAUNCH';phase=$Phase
+            sessionManifestPath=$manifestPath;sessionManifest=$manifestReference
+            filePath=(Join-Path $PSHOME 'pwsh.exe');argumentList=$seedArguments
+            workingDirectory=$working;zmxDirectory=$zmxRoot
+        }
+    }
+    $run=Start-CapJobLauncher -Root $root -OutputDirectory $working `
+        -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList $seedArguments `
+        -WorkingDirectory $working -Role 'matched-action-seed-launcher' -Environment @{
+            ZMX_DIR=$zmxRoot
+            TEMP=$Roots.Temp
+            TMP=$Roots.Temp
+            USERPROFILE=$Roots.Profile
+        }
+    $run | Add-Member -NotePropertyMembers @{
+        Phase=$Phase
+        SessionNames=$sessions
+        SessionManifestSha256=$manifestReference.sha256
+        ActionSeedGroup=$true
+        Descendants=@()
+        SeedReceipt=$null
+    }
+    $runs.Add($run)
+    $actionSeedRuns.Add($run)
+    Write-CapProcessJournal -Identity $run.Identity -Phase $Phase
+    $target=Release-CapJobLauncher -Run $run -JournalState $journalState
+    $deadline=[DateTime]::UtcNow.AddSeconds(30)
+    if ($deadline -gt $leaseDeadlineUtc) {$deadline=$leaseDeadlineUtc}
+    $exit=Wait-CapJobTarget -Run $run -DeadlineUtc $deadline
+    if ($exit.exitCode -ne 0) {throw "Qualified action seed helper failed for $Phase."}
+    $cmdPath=Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    $zmxPath=ConvertTo-CapWorkerImagePath $zmxPath
+    $readyDeadline=[DateTime]::UtcNow.AddSeconds(15)
+    if ($readyDeadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$readyDeadline=$leaseDeadlineUtc.AddSeconds(-90)}
+    $tree=@();$daemons=@();$cmdPeers=@()
+    do {
+        $tree=@(Get-CapJobMembers -Run $run)
+        foreach ($identity in $tree) {
+            if ($identity.ExpectedImagePath -ieq $zmxPath) {$identity.Role='zmx-daemon'}
+            elseif ($identity.ExpectedImagePath -ieq $cmdPath) {$identity.Role='offline-cmd-peer'}
+        }
+        $daemons=@($tree | Where-Object Role -eq 'zmx-daemon')
+        $cmdPeers=@($tree | Where-Object Role -eq 'offline-cmd-peer')
+        if ($daemons.Count -ge 1 -and $cmdPeers.Count -eq $sessions.Count) {break}
+        Assert-CapWorkerDeadline "qualified action seed readiness $Phase"
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $readyDeadline)
+    if ($daemons.Count -lt 1 -or $cmdPeers.Count -ne $sessions.Count) {
+        throw "Qualified action seeds differ: sessions=$($sessions.Count) daemon=$($daemons.Count) cmd=$($cmdPeers.Count)."
+    }
+    foreach ($identity in $tree) {
+        Write-CapProcessJournal -Identity $identity -Phase $Phase
+        if (-not @($descendantIdentities | Where-Object {
+            $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
+        }).Count) {$descendantIdentities.Add($identity)}
+    }
+    $run.Descendants=@($tree)
+    $receipt=[pscustomobject]@{
+        phase=$Phase
+        sessions=$sessions
+        sessionCount=[long]$sessions.Count
+        launcherPid=[long]$run.Identity.Pid
+        launcherCreationFileTimeUtc=[long]$run.Identity.CreationFileTimeUtc
+        targetPid=[long]$target.pid
+        targetCreationFileTimeUtc=[long]$target.creationFileTimeUtc
+        jobId=$run.JobId
+        daemonCount=[long]$daemons.Count
+        cmdCount=[long]$cmdPeers.Count
+        sessionManifestSha256=$manifestReference.sha256
+        cleanupStatus='PENDING'
+        outputProof=$null
+    }
+    $run.SeedReceipt=$receipt
+    $zmxSeedReceipts.Add($receipt)
+    return $run
+}
+
+function Close-CapMatchedActionSeeds {
+    param([Parameter(Mandatory)]$SeedRun)
+    if ($SeedRun.CleanupComplete) {return $SeedRun.OutputProof}
+    $proof=Close-CapJobLauncher -Run $SeedRun
+    $SeedRun.SeedReceipt.cleanupStatus='CLOSED'
+    $SeedRun.SeedReceipt.outputProof=$proof
+    $cleanupReceipts.Add($proof)
+    return $proof
+}
+
 function Start-CapOfflineSeed {
     param(
         [Parameter(Mandatory)]$Roots,
@@ -636,130 +770,6 @@ function Start-CapOfflineSeed {
         $arguments[4] -cne '/Q' -or $arguments[5] -cne '/K' -or
         $arguments[6] -cne 'echo Offline card fixture - no backend')) {
         throw 'The B job does not contain the exact seven-argument offline cmd-only zmx seed.'
-    }
-
-    function Install-CapQualifiedActionTopology {
-        param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)]$Topology)
-        if ((Get-FileHash -LiteralPath $Topology.preparedLayoutPath -Algorithm SHA256).Hash -cne
-            [string]$Topology.preparedLayoutSha256) {
-            throw "Prepared qualified layout changed: $($Topology.scene)"
-        }
-        $layoutPath=Join-Path $Roots.Root "$($Topology.loop).json"
-        Copy-Item -LiteralPath $Topology.preparedLayoutPath -Destination $layoutPath
-        $sessionRoot=Join-Path $Roots.Root 'shell-sessions'
-        $null=New-Item -ItemType Directory -Path $sessionRoot -Force
-        foreach ($session in @($Topology.sessions | Where-Object {-not $_.agent})) {
-            $source=Join-Path $Topology.shellSessionsPath $session.name
-            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne
-                [string]$session.preparedSha256) {
-                throw "Prepared shell-session identity changed: $($session.name)"
-            }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $sessionRoot $session.name)
-        }
-        return [pscustomobject]@{
-            layoutPath=$layoutPath
-            layoutSha256=(Get-FileHash -LiteralPath $layoutPath -Algorithm SHA256).Hash
-            sourceLayoutSha256=$Topology.sourceLayoutSha256
-            sessionCount=[long]$Topology.sessions.Count
-            shellSessionCount=[long]@($Topology.sessions | Where-Object {-not $_.agent}).Count
-        }
-    }
-
-    function Start-CapMatchedActionSeeds {
-        param([Parameter(Mandatory)]$Roots,[Parameter(Mandatory)][string]$Phase,
-            [Parameter(Mandatory)]$Topology)
-        $sessions=@($Topology.sessions | ForEach-Object {[string]$_.name})
-        if ($sessions.Count -lt 1 -or @($sessions | Sort-Object -Unique).Count -ne $sessions.Count) {
-            throw 'Qualified action topology has missing or duplicate sessions.'
-        }
-        $manifestPath=Join-Path $Roots.Peer 'action-seed-sessions.json'
-        $manifest=[pscustomobject]@{schemaVersion=1L;sessions=$sessions}
-        $manifestReference=Write-CapImmutableJson -Root $root -Path $manifestPath -Value $manifest
-        $zmxPath=Join-Path $root 'runtime\zmx.exe'
-        $zmxRoot=Assert-CapOwnedPath $Roots.Zmx
-        $working=Assert-CapOwnedPath (Join-Path $Roots.Peer 'action-seed-cwd')
-        $null=New-Item -ItemType Directory -Path $working -Force
-        $run=Start-CapJobLauncher -Root $root -OutputDirectory $working `
-            -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @(
-                '-NoProfile','-NonInteractive','-File',$actionSeedHelperPath,
-                '-ZmxPath',$zmxPath,'-SessionManifestPath',$manifestPath
-            ) -WorkingDirectory $working -Role 'matched-action-seed-launcher' -Environment @{
-                ZMX_DIR=$zmxRoot
-                TEMP=$Roots.Temp
-                TMP=$Roots.Temp
-                USERPROFILE=$Roots.Profile
-            }
-        $run | Add-Member -NotePropertyMembers @{
-            Phase=$Phase
-            SessionNames=$sessions
-            SessionManifestSha256=$manifestReference.sha256
-            ActionSeedGroup=$true
-            Descendants=@()
-            SeedReceipt=$null
-        }
-        $runs.Add($run)
-        $actionSeedRuns.Add($run)
-        Write-CapProcessJournal -Identity $run.Identity -Phase $Phase
-        $target=Release-CapJobLauncher -Run $run -JournalState $journalState
-        $deadline=[DateTime]::UtcNow.AddSeconds(30)
-        if ($deadline -gt $leaseDeadlineUtc) {$deadline=$leaseDeadlineUtc}
-        $exit=Wait-CapJobTarget -Run $run -DeadlineUtc $deadline
-        if ($exit.exitCode -ne 0) {throw "Qualified action seed helper failed for $Phase."}
-        $cmdPath=Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
-        $zmxPath=ConvertTo-CapWorkerImagePath $zmxPath
-        $readyDeadline=[DateTime]::UtcNow.AddSeconds(15)
-        if ($readyDeadline -gt $leaseDeadlineUtc.AddSeconds(-90)) {$readyDeadline=$leaseDeadlineUtc.AddSeconds(-90)}
-        $tree=@();$daemons=@();$cmdPeers=@()
-        do {
-            $tree=@(Get-CapJobMembers -Run $run)
-            foreach ($identity in $tree) {
-                if ($identity.ExpectedImagePath -ieq $zmxPath) {$identity.Role='zmx-daemon'}
-                elseif ($identity.ExpectedImagePath -ieq $cmdPath) {$identity.Role='offline-cmd-peer'}
-            }
-            $daemons=@($tree | Where-Object Role -eq 'zmx-daemon')
-            $cmdPeers=@($tree | Where-Object Role -eq 'offline-cmd-peer')
-            if ($daemons.Count -ge 1 -and $cmdPeers.Count -eq $sessions.Count) {break}
-            Assert-CapWorkerDeadline "qualified action seed readiness $Phase"
-            Start-Sleep -Milliseconds 100
-        } while ([DateTime]::UtcNow -lt $readyDeadline)
-        if ($daemons.Count -lt 1 -or $cmdPeers.Count -ne $sessions.Count) {
-            throw "Qualified action seeds differ: sessions=$($sessions.Count) daemon=$($daemons.Count) cmd=$($cmdPeers.Count)."
-        }
-        foreach ($identity in $tree) {
-            Write-CapProcessJournal -Identity $identity -Phase $Phase
-            if (-not @($descendantIdentities | Where-Object {
-                $_.Pid -eq $identity.Pid -and $_.CreationFileTimeUtc -eq $identity.CreationFileTimeUtc
-            }).Count) {$descendantIdentities.Add($identity)}
-        }
-        $run.Descendants=@($tree)
-        $receipt=[pscustomobject]@{
-            phase=$Phase
-            sessions=$sessions
-            sessionCount=[long]$sessions.Count
-            launcherPid=[long]$run.Identity.Pid
-            launcherCreationFileTimeUtc=[long]$run.Identity.CreationFileTimeUtc
-            targetPid=[long]$target.pid
-            targetCreationFileTimeUtc=[long]$target.creationFileTimeUtc
-            jobId=$run.JobId
-            daemonCount=[long]$daemons.Count
-            cmdCount=[long]$cmdPeers.Count
-            sessionManifestSha256=$manifestReference.sha256
-            cleanupStatus='PENDING'
-            outputProof=$null
-        }
-        $run.SeedReceipt=$receipt
-        $zmxSeedReceipts.Add($receipt)
-        return $run
-    }
-
-    function Close-CapMatchedActionSeeds {
-        param([Parameter(Mandatory)]$SeedRun)
-        if ($SeedRun.CleanupComplete) {return $SeedRun.OutputProof}
-        $proof=Close-CapJobLauncher -Run $SeedRun
-        $SeedRun.SeedReceipt.cleanupStatus='CLOSED'
-        $SeedRun.SeedReceipt.outputProof=$proof
-        $cleanupReceipts.Add($proof)
-        return $proof
     }
     $seedReceiptRoot = if ($isS) { $Roots.Root } else { Join-Path $runDirectory "phases\$Phase\normal" }
     $seedReceiptPath = Assert-CapOwnedPath (Join-Path $seedReceiptRoot 'zmx-seed.json')

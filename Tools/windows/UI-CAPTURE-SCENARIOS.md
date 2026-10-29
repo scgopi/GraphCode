@@ -67,8 +67,9 @@ pwsh -NoProfile -File Tools\windows\Invoke-MatchedActionSupplement.ps1 `
 ```
 
 This still requires an unchanged clean, hash-bound action plan. It creates only
-`dry-run-binding.json` (`DRY_RUN_NO_AUTHORITY`), `dry-run-runs`, and
-`dry-run-output`; it never creates `action-authorization.json` or grants PNG,
+`dry-run-binding.json` (`DRY_RUN_NO_AUTHORITY`), `dry-run-runs`,
+`dry-run-output`, and private empty zmx state directories for qualified seed
+preparation; it never creates `action-authorization.json` or grants PNG,
 product, or provider authority. It uses a contained harmless `pwsh` child to
 exercise the actual launcher release with the action-owned numbered journal.
 Before any launcher is created, the entry resolves every explicit
@@ -93,6 +94,15 @@ product behavior are explicitly not evaluated.
 success and setup refusal, including the primary exception, terminal numbered
 journal and, when a harmless launcher was started, positive held-job-empty/
 launcher-EOF cleanup. A binding/geometry refusal now occurs before any launcher.
+A dry run also requires all three top-level qualified topology/seed lifecycle
+helpers to be available through the production `DefinitionsOnly` import. When
+the plan carries qualified topologies, it installs each bound terminal scene's
+exact prepared layout and shell-session bytes into its isolated phase root and
+calls the shared seed helper with `-PrepareOnly`. This publishes the immutable
+session manifest and records the actual seed invocation, but returns
+`PREPARED_NO_LAUNCH` before creating a seed launcher, readiness proof, or provider
+receipt. The default helper path retains the existing launch, custody, readiness,
+journal, and cleanup behavior; prepare-only output is not provider evidence.
 A failed precondition
 is a bounded tooling/setup blocker, never permission to retry a product action.
 No prior W1 setup exception is reconstructed by this dry run.
@@ -111,6 +121,15 @@ production startup refusal before launch, and initial/placed identity guard
 drift with modeled metrics. Its accepted startup intercepts the launcher without
 starting a process; it is not native-window evidence. ValidationRunner requires
 all 57 with zero skips, alongside the 18 import and unchanged 182/185 baseline.
+
+`Tests\ActionTopologyImport.Tests.ps1` adds **16 separately counted contracts**
+for production import, lexical top-level scope, exact topology copies, layout/
+session hash refusals, missing layouts, prepare-only manifests and invocation,
+default launcher reachability (intercepted without a process), invalid session
+inventories, and cleanup/idempotence with modeled launcher output. The 18 import
+contracts also exercise all five qualified topology/seed preparation paths
+through the unmodified production entry dry run. ValidationRunner requires all
+16 with zero skips without replacing the existing suites or baseline cases.
 
 ## Live transition rehearsal
 

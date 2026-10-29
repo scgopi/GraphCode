@@ -141,6 +141,25 @@ try {
         }
     })
     if ($DryRun) {
+        $helperAvailability=@(foreach ($name in @(
+            'Install-CapQualifiedActionTopology','Start-CapMatchedActionSeeds','Close-CapMatchedActionSeeds'
+        )) {
+            $command=Get-Command $name -CommandType Function -ErrorAction Stop
+            [pscustomobject]@{name=$command.Name;available=$true}
+        })
+        $topologyPreparation=@(if ($plan.PSObject.Properties['qualifiedAuthority'] -and $plan.qualifiedAuthority) {
+            foreach ($scene in @($boundWindows | Where-Object actionPhase -CNE 'wire-completion' |
+                ForEach-Object {$_.sceneNames})) {
+                $qualified=@($plan.qualifiedAuthority.topologies | Where-Object scene -CEQ $scene)
+                if ($qualified.Count -ne 1) {throw "Final bounded action topology missing or duplicated: $scene"}
+                Assert-CapWorkerDeadline "dry-run topology $scene"
+                $roots=Initialize-CapPhaseRoot -PhaseRoot (Join-Path $runDirectory "phases\after\$scene")
+                $installed=Install-CapQualifiedActionTopology -Roots $roots -Topology $qualified[0]
+                $seedPlan=Start-CapMatchedActionSeeds -Roots $roots -Phase "after-$scene" `
+                    -Topology $qualified[0] -PrepareOnly
+                [pscustomobject]@{scene=$scene;installed=$installed;seedPlan=$seedPlan}
+            }
+        })
         # Exercise the real custody gate with a harmless child, never a product/provider image.
         $dryRunLauncher=Start-CapJobLauncher -Root $root -OutputDirectory $outputDirectory `
             -FilePath (Join-Path $PSHOME 'pwsh.exe') `
@@ -162,6 +181,8 @@ try {
             providerLaunches=0L
             windowIdentityValidation='SOURCE_PHASE_BINDINGS_VALIDATED_BEFORE_LAUNCH_RUNTIME_WINDOW_NOT_EXECUTED'
             windowBindings=$windowPreflight
+            helperAvailability=$helperAvailability
+            topologyPreparation=$topologyPreparation
             toolingSourceHead=$head
             captureSourceHead=$job.head
             geometry=$null
