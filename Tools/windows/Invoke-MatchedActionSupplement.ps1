@@ -26,10 +26,14 @@ if ($head -cne $plan.sourceHead -or $tree -cne $plan.sourceTree -or
 $modulePath=Join-Path $repositoryRoot 'Tools\windows\UiCaptureDriver.psm1'
 $workerPath=Join-Path $repositoryRoot 'Tools\windows\Invoke-UiCaptureWorker.ps1'
 $stubPath=Join-Path $repositoryRoot 'Tools\windows\Stub-Daemon.ps1'
+$actionRunnerPath=$PSCommandPath
+$actionSeedHelperPath=Join-Path $repositoryRoot 'Tools\windows\Start-MatchedActionSessions.ps1'
 foreach ($binding in @(
     @($modulePath,$plan.moduleSha256),
     @($workerPath,$plan.workerSha256),
     @($stubPath,$plan.stubDaemonSha256),
+    @($actionRunnerPath,$plan.actionRunnerSha256),
+    @($actionSeedHelperPath,$plan.actionSeedHelperSha256),
     @($plan.jobPath,$plan.jobSha256),
     @($plan.preflightReceiptPath,$plan.preflightReceiptSha256),
     @($plan.existingSceneManifestPath,$plan.existingSceneManifestSha256)
@@ -51,6 +55,7 @@ $authorization=[ordered]@{
     actionPlanSha256=$ActionPlanSha256.ToUpperInvariant()
     moduleSha256=$plan.moduleSha256
     workerSha256=$plan.workerSha256
+    actionRunnerSha256=$plan.actionRunnerSha256
     jobSha256=$plan.jobSha256
     preflightReceiptSha256=$plan.preflightReceiptSha256
     pngAuthorized=$false
@@ -59,6 +64,7 @@ $authorization=[ordered]@{
         [long]$plan.authorizationBounds.requestedMaxMinutes).ToString('o')
     maxMinutes=[long]$plan.authorizationBounds.requestedMaxMinutes
 }
+if ($plan.group -ceq 'FinalBoundedActions') {$authorization.pngAuthorized=$true}
 $authorizationPath=Join-Path $root 'action-authorization.json'
 if (Test-Path $authorizationPath) {throw 'Action supplement authorization already consumed.'}
 [IO.File]::WriteAllText($authorizationPath,($authorization|ConvertTo-Json -Depth 20),
@@ -75,6 +81,8 @@ $fixturePath=Join-Path $root 'fixtures\fixture.json'
 $peerScript=Join-Path $root 'inputs\offline-peer-source.ps1'
 $runDirectory=Join-Path $root ('action-runs\' + [guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $runDirectory
+$journalPath=Join-Path $runDirectory 'process-journal'
+$null=New-Item -ItemType Directory -Path $journalPath
 $outputDirectory=$output
 $workerLog=Join-Path $output 'action-worker.log'
 [IO.File]::WriteAllText($workerLog,'',[Text.UTF8Encoding]::new($false))
@@ -90,6 +98,19 @@ $transitionRehearsal=$false
 $fixtureHash=(Get-FileHash $fixturePath -Algorithm SHA256).Hash
 $fixtureSourceHash=$plan.fixture.canonicalSourceSha256
 $fixtureMappingHash=$plan.fixture.mappingSha256
+$moduleHash=$plan.moduleSha256
+$workerHash=$plan.workerSha256
+$supervisorHash=$plan.actionRunnerSha256
+$selfProcess=[Diagnostics.Process]::GetCurrentProcess()
+$selfIdentity=Get-CapProcessIdentity -Process $selfProcess `
+    -ExpectedImagePath $selfProcess.MainModule.FileName -Role 'matched-action-runner'
+$journalBinding=New-CapJournalBinding -RunId ([IO.Path]::GetFileName($runDirectory)) `
+    -LeaseId $authorization.authorizationId -JobSha256 $plan.jobSha256 `
+    -ModuleSha256 $moduleHash -WorkerSha256 $workerHash `
+    -SupervisorSha256 $supervisorHash -Identity $selfIdentity
+$journalState=New-CapJournalState -Root $root -Directory $journalPath `
+    -Binding $journalBinding -DeadlineUtc $leaseWindow.ExpiresUtc.UtcDateTime
+Write-CapWorkerJournalSnapshot -Kind 'Bootstrap'
 $startedUtc=[DateTime]::UtcNow
 $primaryFailure=$null
 $independent=@()
@@ -107,11 +128,34 @@ try {
             $zmxSeedReceipts.Count -ne [long]$plan.expectedReceiptCount) {
             throw 'Terminal action supplement receipt or provider count differs.'
         }
-    } else {
+    } elseif ($plan.group -ceq 'WireCompletion') {
         $receipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
+        $receipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
         $receipt | Add-Member -NotePropertyName imageBindingSha256 `
             -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
         $actionSupplementReceipts.Add($receipt)
+    } else {
+        $wireReceipt=Invoke-CapWireCompletionSupplement -StubDaemonPath $stubPath
+        $wireReceipt | Add-Member -NotePropertyName actionIds -NotePropertyValue @('W1')
+        $wireReceipt | Add-Member -NotePropertyName imageBindingSha256 `
+            -NotePropertyValue ([string]$plan.imageBindings.'s-goal-unwired-unselected')
+        $actionSupplementReceipts.Add($wireReceipt)
+        $bindings=@{}
+        foreach ($property in $plan.imageBindings.PSObject.Properties) {
+            $bindings[$property.Name]=[string]$property.Value
+        }
+        $terminalScenes=@(
+            's-tabs-two-agent-selected',
+            's-tabs-split-right-focused',
+            's-tabs-last-guard',
+            's-tabs-many-first',
+            's-tabs-hover-close'
+        )
+        Invoke-CapMatchedScenes -Phase 'after' -SceneNames $terminalScenes `
+            -SkipRestart -ActionSupplement -ImageBindings $bindings
+        if ($actionSupplementReceipts.Count -ne 6 -or $zmxSeedReceipts.Count -ne 5) {
+            throw 'Final bounded action or provider receipt count differs.'
+        }
     }
 } catch {
     $primaryFailure=$_
@@ -128,10 +172,24 @@ try {
             catch {$cleanupFailures.Add("Final seed cleanup failed: $($_.Exception.Message)")}
         }
     }
+    foreach ($seedRun in @($actionSeedRuns)) {
+        if (-not $seedRun.CleanupComplete) {
+            try {Close-CapMatchedActionSeeds -SeedRun $seedRun}
+            catch {$cleanupFailures.Add("Final action-seed cleanup failed: $($_.Exception.Message)")}
+        }
+    }
     $independent=@(Get-CimInstance Win32_Process | Where-Object {
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root + '\',
             [StringComparison]::OrdinalIgnoreCase)
     } | Select-Object ProcessId,Name,ExecutablePath)
+}
+$terminalOutcome=if (-not $primaryFailure -and $cleanupFailures.Count -eq 0 -and
+    $independent.Count -eq 0) {'COMPLETE'} else {'FAILED'}
+try {
+    Write-CapWorkerJournalSnapshot -Kind 'Terminal' -Outcome $terminalOutcome
+} catch {
+    if (-not $primaryFailure) {$primaryFailure=$_}
+    else {$cleanupFailures.Add("Final action journal publication failed: $($_.Exception.Message)")}
 }
 $manifest=[ordered]@{
     schemaVersion=1L
@@ -148,7 +206,14 @@ $manifest=[ordered]@{
     receipts=@($actionSupplementReceipts)
     receiptCount=[long]$actionSupplementReceipts.Count
     providerReceipts=@($zmxSeedReceipts)
+    resultImages=@($images)
     processJournal=@($journalEntries)
+    numberedJournal=[ordered]@{
+        binding=$journalState.Binding
+        directory=$journalPath
+        terminal=$journalState.Terminal
+        published=@($journalState.Published.ToArray())
+    }
     cleanup=@($cleanupReceipts)
     cleanupFailures=@($cleanupFailures)
     independentSurvivors=@($independent)
@@ -168,6 +233,8 @@ $release=[ordered]@{
     group=$plan.group
     manifestSha256=(Get-FileHash $manifestPath -Algorithm SHA256).Hash
     receiptCount=[long]$actionSupplementReceipts.Count
+    journalPublicationCount=[long]$journalState.Published.Count
+    journalTerminalSha256=$(if ($journalState.Terminal) {$journalState.Terminal.sha256} else {$null})
     cleanupFailures=[long]$cleanupFailures.Count
     independentSurvivors=[long]$independent.Count
     releasedUtc=[DateTime]::UtcNow.ToString('o')
@@ -177,6 +244,9 @@ $releasePath=Join-Path $output 'action-release.json'
     [Text.UTF8Encoding]::new($false))
 if ($manifest.status -cne 'COMPLETE' -or $release.status -cne 'RELEASED_ZERO_SURVIVORS') {
     throw "Action supplement failed: $($manifest.failures -join '; ') cleanup=$($cleanupFailures -join '; ') survivors=$($independent.Count)"
+}
+if ($manifest.pngCount -ne [long]$plan.maximumResultPngs) {
+    throw "Action supplement result image count differs: expected=$($plan.maximumResultPngs) actual=$($manifest.pngCount)"
 }
 [ordered]@{
     group=$plan.group

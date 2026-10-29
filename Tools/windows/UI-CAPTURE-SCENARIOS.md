@@ -105,6 +105,14 @@ same accumulated I/O clock with only its remaining budget, so post-copy CPU time
 cannot create a false `JournalUnavailable` and cannot grant another second of
 I/O.
 
+Action-only supplements use their own dedicated numbered-journal directory and
+binding before any contained launcher gate can release. Each launcher
+registration publishes the exact held generation and job ID; null, unpublished,
+foreign or empty-path states refuse before target launch. The action terminal
+publication is written only after held cleanup and stream EOF collection, and
+the sanitized action manifest retains its binding, publication chain and
+terminal hash without changing the static-capture inventory.
+
 The focused contract reproduces the C8R terminal scale with exactly 679 process
 entries and a numbered terminal larger than 1.48 MB, then injects more than one
 second of post-copy validation. It also retains explicit refusals for a copy

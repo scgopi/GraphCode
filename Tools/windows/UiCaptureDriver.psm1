@@ -38,6 +38,12 @@ public static class GraphCodeUiaGateState {
   private static extern bool PostMessage(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam);
   [DllImport("user32.dll", SetLastError = true)]
   private static extern bool ScreenToClient(IntPtr window, ref Point point);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll", SetLastError = true)]
+  private static extern bool GetCursorPos(out Point point);
+  [DllImport("user32.dll")]
+  private static extern IntPtr WindowFromPoint(Point point);
   [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
   private static extern uint SendKeyInputs(uint count, KeyInputRecord[] inputs, int size);
   private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
@@ -80,6 +86,15 @@ public static class GraphCodeUiaGateState {
     return PostMessage(window, 0x0200, UIntPtr.Zero, packed) &&
       PostMessage(window, 0x0201, (UIntPtr)1, packed) &&
       PostMessage(window, 0x0202, UIntPtr.Zero, packed);
+  }
+  public static long[] MovePointerScreen(int screenX, int screenY) {
+    if (!SetCursorPos(screenX, screenY)) return new long[0];
+    Point actual;
+    if (!GetCursorPos(out actual)) return new long[0];
+    IntPtr target = WindowFromPoint(actual);
+    uint processId;
+    GetWindowThreadProcessId(target, out processId);
+    return new long[] { actual.X, actual.Y, target.ToInt64(), processId };
   }
   public static int SendUnicodeText(string text) {
     if (String.IsNullOrEmpty(text)) return 0;
@@ -741,9 +756,21 @@ function Start-CapJobLauncher {
 
 function Release-CapJobLauncher {
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Run, [Parameter(Mandatory)]$JournalState)
+    param([Parameter(Mandatory)]$Run, [Parameter(Mandatory)][AllowNull()]$JournalState)
     if ($Run.GateReleased -or $Run.CleanupComplete -or
         -not [CapProcessJob]::Contains($Run.Job, $Run.Identity.Process.Handle)) { throw 'Invalid contained launcher gate state.' }
+    if ($null -eq $JournalState -or
+        $null -eq $JournalState.PSObject.Properties['Sequence'] -or
+        $null -eq $JournalState.PSObject.Properties['Root'] -or
+        $null -eq $JournalState.PSObject.Properties['Directory'] -or
+        $null -eq $JournalState.PSObject.Properties['Binding'] -or
+        $null -eq $JournalState.PSObject.Properties['DeadlineUtc'] -or
+        [string]::IsNullOrWhiteSpace([string]$JournalState.Root) -or
+        [string]::IsNullOrWhiteSpace([string]$JournalState.Directory) -or
+        -not [IO.Path]::IsPathFullyQualified([string]$JournalState.Root) -or
+        -not [IO.Path]::IsPathFullyQualified([string]$JournalState.Directory)) {
+        throw 'Launcher requires a valid numbered journal state before gate release.'
+    }
     if ($JournalState.Sequence -lt 1) { throw 'Launcher requires an immutable journal publication before gate release.' }
     $snapshot = Read-CapJournalObject $JournalState $JournalState.Sequence (New-CapJournalTransaction $JournalState)
     $entries = @($snapshot.Payload.data.entries | Where-Object {
