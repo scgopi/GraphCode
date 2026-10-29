@@ -152,6 +152,26 @@ foreach ($scenario in @('accepted','setup-refusal')) {
         fixture=@{canonicalSourceSha256=$fixtureHashValue;mappingSha256=$fixtureHashValue}
         imageBindings=@{};maximumResultPngs=1L
     }
+    $topologies=@(foreach ($scene in @($windowBindings | Where-Object actionPhase -CNE 'wire-completion' |
+        ForEach-Object {$_.sceneNames})) {
+        $inputDirectory=Join-Path $owned "inputs\$scene"
+        $sessionDirectory=Join-Path $inputDirectory 'shell-sessions'
+        $null=New-Item -ItemType Directory -Path $sessionDirectory -Force
+        $layoutFile=Join-Path $inputDirectory 'layout.json'
+        $layoutDigest=Write-ImportJson $layoutFile @{schemaVersion=2L;scene=$scene}
+        $sessionName='graphcode-11111111-1111-4111-8111-000000000001'
+        $sessionFile=Join-Path $sessionDirectory $sessionName
+        [IO.File]::WriteAllText($sessionFile,'11111111-1111-4111-8111-000000000001',
+            [Text.UTF8Encoding]::new($false))
+        [pscustomobject]@{
+            scene=$scene;loop='11111111-1111-4111-8111-000000000001'
+            sourceLayoutSha256=$layoutDigest;preparedLayoutPath=$layoutFile;preparedLayoutSha256=$layoutDigest
+            shellSessionsPath=$sessionDirectory
+            sessions=@([pscustomobject]@{name=$sessionName;agent=$false
+                preparedSha256=(Get-FileHash $sessionFile).Hash})
+        }
+    })
+    $actionPlan.qualifiedAuthority=@{topologies=$topologies}
     $planFile=Join-Path $owned 'action-plan.json'
     $planDigest=Write-ImportJson $planFile $actionPlan
     $entryOutput=@(& (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File `
@@ -208,6 +228,19 @@ foreach ($scenario in @('accepted','setup-refusal')) {
         $manifest.dryRun.releaseSequence -ge 2 -and $release.journalPublicationCount -ge 3 -and
         $release.manifestSha256 -ceq (Get-FileHash $manifestFile).Hash -and
         -not (Test-Path (Join-Path $owned 'action-authorization.json'))) 'Dry-run custody/no-authority/cleanup evidence differs.'
+    Assert-ImportCase ($manifest.dryRun.helperAvailability.Count -eq 3 -and
+        @($manifest.dryRun.helperAvailability | Where-Object available -NE $true).Count -eq 0 -and
+        $manifest.dryRun.topologyPreparation.Count -eq 5) 'Production dry run omitted imported helpers or qualified topology preparation.'
+    foreach ($prepared in $manifest.dryRun.topologyPreparation) {
+        $source=@($topologies | Where-Object scene -CEQ $prepared.scene)
+        $seedManifest=Get-Content $prepared.seedPlan.sessionManifestPath -Raw | ConvertFrom-Json -DateKind String
+        Assert-ImportCase ($source.Count -eq 1 -and $prepared.seedPlan.status -ceq 'PREPARED_NO_LAUNCH' -and
+            $prepared.installed.layoutSha256 -ceq $source[0].preparedLayoutSha256 -and
+            (Get-FileHash $prepared.installed.layoutPath).Hash -ceq $source[0].preparedLayoutSha256 -and
+            $prepared.seedPlan.sessionManifest.sha256 -ceq (Get-FileHash $prepared.seedPlan.sessionManifestPath).Hash -and
+            ($seedManifest.sessions -join '|') -ceq ($source[0].sessions.name -join '|')) `
+            'Production dry run changed qualified topology or seed manifest bytes.'
+    }
     $binding=Get-Content (Join-Path $owned 'dry-run-binding.json') -Raw | ConvertFrom-Json -DateKind String
     Assert-ImportCase ($binding.status -ceq 'DRY_RUN_NO_AUTHORITY' -and
         $binding.pngAuthorized -eq $false -and $binding.authorizationPath -ceq $manifest.dryRun.authorizationPath -and
